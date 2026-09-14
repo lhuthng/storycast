@@ -2,6 +2,7 @@
 
 mod api;
 mod state;
+mod tui;
 
 use bm_core::{config::Settings, Layout};
 use bm_proto::Machine;
@@ -44,16 +45,58 @@ enum Cmd {
         /// SSH port.
         #[arg(long, default_value = "22")]
         port: u16,
-    /// SSH key path.
-    #[arg(long)]
-    key: Option<String>,
-    /// Inductor API port (for post-provision registration).
-    #[arg(long, default_value = "8901")]
-    api_port: u16,
-    /// Rebuild even when already configured.
-    #[arg(long)]
-    force: bool,
+        /// SSH key path.
+        #[arg(long)]
+        key: Option<String>,
+        /// Inductor API port (for post-provision registration).
+        #[arg(long, default_value = "8901")]
+        api_port: u16,
+        /// Rebuild even when already configured.
+        #[arg(long)]
+        force: bool,
     },
+    /// Live cluster dashboard (talks to a running inductor API).
+    Tui {
+        /// Inductor API base URL.
+        #[arg(long, default_value = "http://127.0.0.1:8901")]
+        api: String,
+    },
+}
+
+/// Blocking provision run shared by the CLI and the TUI background task.
+/// Returns the log lines for display.
+pub fn provision_machine(
+    layout: &Layout,
+    addr: &str,
+    user: &str,
+    port: u16,
+    key: Option<String>,
+    force: bool,
+) -> Vec<String> {
+    use bm_core::provision::{provision, Ssh};
+    let mut log = Vec::new();
+    let probe_ssh = Ssh {
+        target: format!("{user}@{addr}"),
+        port,
+        key: key.clone(),
+        local: matches!(addr, "127.0.0.1" | "localhost" | "::1"),
+    };
+    let pre = probe_ssh.probe();
+    log.push(format!("[{addr}] {}", pre.summary()));
+    let binary = match agent_binary_for(pre.arch.as_str(), layout) {
+        Ok(b) => b,
+        Err(e) => {
+            log.push(format!("[{addr}] {e}"));
+            return log;
+        }
+    };
+    log.push(format!("[{addr}] agent binary: {}", binary.display()));
+    let mut m = Machine::new(addr, user, port, key, "worker");
+    m.tts_url = Some("http://127.0.0.1:8818".into());
+    let (_after, mut flow) =
+        provision(&m, &layout.root, &binary, env!("CARGO_PKG_VERSION"), force);
+    log.append(&mut flow);
+    log
 }
 
 fn check_bins() -> anyhow::Result<()> {
@@ -118,22 +161,13 @@ async fn cmd_provision(
     api_port: u16,
     force: bool,
 ) -> anyhow::Result<()> {
-    // Quick arch probe to select the right agent binary before the full run.
-    let probe_ssh = bm_core::provision::Ssh {
-        target: format!("{user}@{addr}"),
-        port,
-        key: key.clone(),
-        local: matches!(addr.as_str(), "127.0.0.1" | "localhost" | "::1"),
-    };
-    let pre = probe_ssh.probe();
-    println!("[{}] {}", addr, pre.summary());
-    let binary = agent_binary_for(pre.arch.as_str(), &layout)?;
-    println!("[{}] agent binary: {}", addr, binary.display());
-    let mut m = Machine::new(&addr, &user, port, key, "worker");
+    // The blocking SSH/rsync flow runs off the async runtime; registration
+    // afterwards needs the live API client.
+    let mut m = Machine::new(&addr, &user, port, key.clone(), "worker");
     m.tts_url = Some("http://127.0.0.1:8818".into());
-    let (_after, log) = tokio::task::spawn_blocking({
-        let (m, layout, binary) = (m.clone(), layout.clone(), binary.clone());
-        move || bm_core::provision::provision(&m, &layout.root, &binary, env!("CARGO_PKG_VERSION"), force)
+    let log = tokio::task::spawn_blocking({
+        let (layout, addr, user) = (layout.clone(), addr.clone(), user.clone());
+        move || provision_machine(&layout, &addr, &user, port, key, force)
     })
     .await?;
     for line in &log {
@@ -183,5 +217,6 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Provision { addr, user, port, key, api_port, force } => {
             cmd_provision(layout, addr, user, port, key, api_port, force).await
         }
+        Cmd::Tui { api } => tui::run(&api, layout).await,
     }
 }
