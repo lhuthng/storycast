@@ -241,6 +241,13 @@ pub struct Complete {
     #[serde(default)]
     pub detail: String,
     pub duration_secs: f64,
+    /// Digest stage: `{new_characters, new_aliases, roster, speakers}` for the
+    /// inductor to merge as the single bible writer.
+    #[serde(default)]
+    pub bible_delta: Option<serde_json::Value>,
+    /// Render stage: how many TTS units actually ran (cache hits excluded).
+    #[serde(default)]
+    pub units: u64,
 }
 
 /// A worker asking for work.

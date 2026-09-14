@@ -26,10 +26,6 @@ impl Tts {
         }
     }
 
-    pub fn base(&self) -> &str {
-        &self.base
-    }
-
     pub async fn health(&self) -> bool {
         match self
             .http
@@ -58,6 +54,20 @@ impl Tts {
                 _ => None,
             })
             .collect())
+    }
+
+    /// Accent policy + roster + default cast. The sidecar is the authority;
+    /// `bm_core::voices` is the offline fallback.
+    pub async fn policy(&self) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .get(format!("{}/policy", self.base))
+            .send()
+            .await
+            .with_context(|| format!("GET {}/policy", self.base))?;
+        resp.json()
+            .await
+            .context("parsing /policy")
     }
 
     /// Render one utterance to WAV bytes at the engine's native sample rate.
