@@ -1,0 +1,14 @@
+.env
+data/
+output/
+__pycache__/
+*.pyc
+.venv/
+
+# OS noise
+.DS_Store
+
+# Rust build output
+rust/target/
+**/target/
+

@@ -1,0 +1,22 @@
+{
+  "_note": "First matching rule wins (ordered specific -> general). bed=null means dry voice. Levels are linear gains before ducking.",
+  "rules": [
+    {"match": ["storm", "thunder"], "bed": "rain-storm.mp3", "level": 0.22, "reverb": null},
+    {"match": ["rain"], "bed": "rain-light.mp3", "level": 0.18, "reverb": null},
+    {"match": ["night", "evening", "sunset", "dusk"], "bed": "night-crickets.mp3", "level": 0.15, "reverb": null},
+    {"match": ["market", "stall", "shopfront", "street", "road", "corner"], "bed": "market-crowd.mp3", "level": 0.16, "reverb": null},
+    {"match": ["forge", "fire", "kitchen", "hearth"], "bed": "fire-crackle.mp3", "level": 0.14, "reverb": null},
+    {"match": ["mountain", "peak", "gate", "summit", "cliff"], "bed": "mountain-wind.mp3", "level": 0.16, "reverb": null},
+    {"match": ["forest", "woods", "garden", "grove"], "bed": "forest-birds.mp3", "level": 0.14, "reverb": null},
+    {"match": ["cave", "grotto", "cellar", "cavern"], "bed": "cave-drip.mp3", "level": 0.18, "reverb": "cave"},
+    {"match": ["hall", "sect", "temple", "shrine", "palace"], "bed": null, "level": 0.0, "reverb": "hall"},
+    {"match": ["courtyard", "house", "home", "shop", "room", "dining"], "bed": "fire-crackle.mp3", "level": 0.08, "reverb": null}
+  ],
+  "default": {"bed": null, "level": 0.0, "reverb": null},
+  "reverb_presets": {
+    "hall": "aecho=0.8:0.65:40|60:0.35|0.25",
+    "cave": "aecho=0.8:0.55:120|200:0.5|0.4"
+  },
+  "duck": {"threshold": 0.02, "ratio": 6.0, "attack": 20, "release": 400},
+  "xfade_s": 2.0
+}

@@ -1,0 +1,13 @@
+{
+  "_note": "One entry per file in assets/ambience/. All Pixabay Content License unless noted. Fill url when known.",
+  "files": {
+    "night-crickets.mp3": {"url": "https://pixabay.com/sound-effects/nature-night-ambience-17064", "author": "freesound_community", "license": "Pixabay Content License"},
+    "market-crowd.mp3": {"url": null, "author": "freesound_community (crowd-16932)", "license": "Pixabay Content License"},
+    "mountain-wind.mp3": {"url": null, "author": "freesound_community (mirador-montbau-53134)", "license": "Pixabay Content License"},
+    "rain-light.mp3": {"url": null, "author": "freesound_community (rain-light-6704)", "license": "Pixabay Content License"},
+    "rain-storm.mp3": {"url": null, "author": "masterandmargarita (rain-with-thunderstorm-420333)", "license": "Pixabay Content License"},
+    "fire-crackle.mp3": {"url": null, "author": "dragon-studio (fire-crackling-427410)", "license": "Pixabay Content License"},
+    "forest-birds.mp3": {"url": null, "author": "freesound_community (birds-19624)", "license": "Pixabay Content License"},
+    "cave-drip.mp3": {"url": null, "author": "dragon-studio (droplets-in-a-cave-482871)", "license": "Pixabay Content License"}
+  }
+}

@@ -1,0 +1,18 @@
+[project]
+name = "beyond-myriads-converter"
+version = "0.1.0"
+description = "Convert Vietnamese web-novel chapters into multi-voice audio via Gemini"
+requires-python = ">=3.10"
+dependencies = [
+  "google-genai>=1.0.0",
+  "beautifulsoup4>=4.12",
+  "python-dotenv>=1.0",
+  "vieneu==3.6.4",  # pinned: preset roster varies by version
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

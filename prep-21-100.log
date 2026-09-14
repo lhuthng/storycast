@@ -1,0 +1,253 @@
+===== prepare chapter 21 =====
+saved 5199 chars -> data/chapters/ch21.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   grammar fixes: 1
+segments=64 roster=['Narrator', 'Dịch Phong', 'Thanh Sơn lão tổ', 'Chu Vân', 'Phệ Thiên Yêu Lang'] -> data/script-21.json
+===== prepare chapter 22 =====
+saved 5209 chars -> data/chapters/ch22.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=67 roster=['Narrator', 'Dịch Phong', 'Chung Thanh', 'Thanh Sơn lão tổ', 'Tam trưởng lão'] -> data/script-22.json
+===== prepare chapter 23 =====
+saved 6214 chars -> data/chapters/ch23.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=83 roster=['Thanh Sơn lão tổ', 'Narrator', 'Mọi người', 'Đại trưởng lão', 'Tam trưởng lão', 'Vũ Kiệt', 'Bành Anh'] -> data/script-23.json
+===== prepare chapter 24 =====
+saved 6103 chars -> data/chapters/ch24.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   grammar fixes: 1
+segments=77 roster=['Narrator', 'Vu Vũ Kiệt', 'Bành Anh', 'Dịch Phong', 'Chung Thanh', 'Ngô lão đầu'] -> data/script-24.json
+===== prepare chapter 25 =====
+saved 4304 chars -> data/chapters/ch25.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=42 roster=['Narrator', 'Dịch Phong', 'Ngô lão đầu'] -> data/script-25.json
+===== prepare chapter 26 =====
+saved 3823 chars -> data/chapters/ch26.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   grammar fixes: 1
+segments=19 roster=['Narrator', 'Ngô lão đầu'] -> data/script-26.json
+===== prepare chapter 27 =====
+saved 5210 chars -> data/chapters/ch27.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   grammar fixes: 1
+segments=60 roster=['Narrator', 'Dịch Phong', 'Ngô lão đầu'] -> data/script-27.json
+===== prepare chapter 28 =====
+saved 5457 chars -> data/chapters/ch28.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=65 roster=['Narrator', 'Ngô lão đầu', 'Dịch Phong'] -> data/script-28.json
+===== prepare chapter 29 =====
+saved 6131 chars -> data/chapters/ch29.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=49 roster=['Dịch Phong', 'Gã sai vặt', 'Thanh Sơn lão tổ', 'Huyền Vũ lão tổ', 'Narrator'] -> data/script-29.json
+===== prepare chapter 30 =====
+saved 7258 chars -> data/chapters/ch30.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=74 roster=['Narrator', 'Mọi người', 'Huyền Vũ lão tổ', 'Thanh Sơn lão tổ', 'Dịch Phong', 'Mao Lâm', 'Mao Doãn Nhi'] -> data/script-30.json
+===== prepare chapter 31 =====
+saved 7169 chars -> data/chapters/ch31.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=90 roster=['Narrator', 'Mao Lâm', 'Dịch Phong', 'Mao Doãn Nhi', 'Lạc Lan Tuyết'] -> data/script-31.json
+===== prepare chapter 32 =====
+saved 4795 chars -> data/chapters/ch32.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=39 roster=['Narrator', 'Doãn Hùng', 'Lạc Lan Tuyết', 'Quản gia', 'Dịch Phong', 'Doãn Lạc Ly'] -> data/script-32.json
+===== prepare chapter 33 =====
+saved 6837 chars -> data/chapters/ch33.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=85 roster=['Narrator', 'Thanh Sơn lão tổ', 'Lạc Lan Tuyết', 'Chung Thanh', 'Dịch Phong', 'Chu Vân'] -> data/script-33.json
+===== prepare chapter 34 =====
+saved 6218 chars -> data/chapters/ch34.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=72 roster=['Narrator', 'Mao Lâm', 'Thành viên thương hội', 'Mao Doãn Nhi', 'Mậu Mậu'] -> data/script-34.json
+===== prepare chapter 35 =====
+saved 4071 chars -> data/chapters/ch35.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=51 roster=['Narrator', 'Mậu Mậu', 'Bạch Phiêu Phiêu', 'Dịch Phong'] -> data/script-35.json
+===== prepare chapter 36 =====
+saved 4539 chars -> data/chapters/ch36.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=40 roster=['Narrator', 'Mậu Mậu', 'Mao Doãn Nhi', 'Dịch Phong', 'Cô nương'] -> data/script-36.json
+===== prepare chapter 37 =====
+saved 4517 chars -> data/chapters/ch37.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   grammar fixes: 2
+segments=73 roster=['Narrator', 'Dịch Phong', 'Bạch Phiêu Phiêu', 'Mậu Mậu'] -> data/script-37.json
+===== prepare chapter 38 =====
+saved 4057 chars -> data/chapters/ch38.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=50 roster=['Narrator', 'Bạch Phiêu Phiêu', 'Dịch Phong', 'Mậu Mậu'] -> data/script-38.json
+===== prepare chapter 39 =====
+saved 6238 chars -> data/chapters/ch39.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   grammar fixes: 1
+segments=70 roster=['Narrator', 'Bạch Phiêu Phiêu', 'Mậu Mậu', 'Dịch Phong', 'Quản gia', 'Mao Lâm'] -> data/script-39.json
+===== prepare chapter 40 =====
+saved 4193 chars -> data/chapters/ch40.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=56 roster=['Narrator', 'Dịch Phong', 'Mao Lâm'] -> data/script-40.json
+===== prepare chapter 41 =====
+saved 5039 chars -> data/chapters/ch41.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=62 roster=['Narrator', 'Dịch Phong', 'Mao Lâm', 'Thành viên thương hội', 'Mao Doãn Nhi'] -> data/script-41.json
+===== prepare chapter 42 =====
+saved 5675 chars -> data/chapters/ch42.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=75 roster=['Narrator', 'Huyền Vũ lão tổ', 'Yêu Linh Nhi', 'Vũ Kiệt', 'Vô Trần', 'Mọi người'] -> data/script-42.json
+===== prepare chapter 43 =====
+saved 4699 chars -> data/chapters/ch43.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=60 roster=['Narrator', 'Huyền Vũ lão tổ', 'Yêu Linh Nhi', 'Tịnh Vô Phong', 'Vô Trần', 'Người dân', 'Dịch Phong', 'Chung Thanh'] -> data/script-43.json
+===== prepare chapter 44 =====
+saved 4634 chars -> data/chapters/ch44.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   grammar fixes: 1
+segments=48 roster=['Narrator', 'Vô Trần', 'Dịch Phong', 'Chung Thanh', 'Yêu Linh Nhi', 'Huyền Vũ lão tổ', 'Tịnh Vô Phong'] -> data/script-44.json
+===== prepare chapter 45 =====
+saved 5617 chars -> data/chapters/ch45.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=64 roster=['Narrator', 'Tịnh Vô Phong', 'Chung Thanh', 'Dịch Phong', 'Thành viên thương hội', 'Doãn Hùng', 'Quản gia', 'Bành Anh', 'Vũ Kiệt'] -> data/script-45.json
+===== prepare chapter 46 =====
+saved 4036 chars -> data/chapters/ch46.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=46 roster=['Narrator', 'Doãn Lạc Ly', 'Lạc Lan Tuyết', 'Vũ Kiệt'] -> data/script-46.json
+===== prepare chapter 47 =====
+saved 4582 chars -> data/chapters/ch47.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   bible +Phương trưởng lão (elderly male, stern administrative tone) [47]
+   bible alias 'Lạc Lan đại nhân' -> Lạc Lan Tuyết [47]
+segments=52 roster=['Narrator', 'Lạc Lan Tuyết', 'Dịch Phong', 'Doãn Lạc Ly', 'Bành Anh'] -> data/script-47.json
+===== prepare chapter 48 =====
+saved 4835 chars -> data/chapters/ch48.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=47 roster=['Narrator', 'Tịnh Vô Phong', 'Tiểu thương', 'Phệ Thiên Yêu Lang', 'Doãn Hùng', 'Lạc Lan Tuyết'] -> data/script-48.json
+===== prepare chapter 49 =====
+saved 4585 chars -> data/chapters/ch49.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=50 roster=['Narrator', 'Yêu Linh Nhi', 'Huyền Vũ lão tổ', 'Dịch Phong', 'Chung Thanh'] -> data/script-49.json
+===== prepare chapter 50 =====
+saved 5491 chars -> data/chapters/ch50.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   grammar fixes: 1
+   bible alias 'Vô Trần sư huynh' -> Vô Trần [50]
+   bible alias 'Vô Phong sư huynh' -> Tịnh Vô Phong [50]
+segments=55 roster=['Narrator', 'Dịch Phong', 'Yêu Linh Nhi', 'Huyền Vũ lão tổ'] -> data/script-50.json
+===== prepare chapter 51 =====
+saved 3562 chars -> data/chapters/ch51.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=43 roster=['Narrator', 'Huyền Vũ lão tổ', 'Yêu Linh Nhi', 'Mọi người'] -> data/script-51.json
+===== prepare chapter 52 =====
+saved 5758 chars -> data/chapters/ch52.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=74 roster=['Narrator', 'Yêu Linh Nhi', 'Huyền Vũ lão tổ', 'Dịch Phong', 'Chung Thanh'] -> data/script-52.json
+===== prepare chapter 53 =====
+saved 6216 chars -> data/chapters/ch53.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   bible +Tử sĩ (adult male, nervous cautious tone with scheming confidence) [53]
+segments=64 roster=['Narrator', 'Huyền Vũ lão tổ', 'Yêu Linh Nhi', 'Tử sĩ', 'Dịch Phong', 'Chung Thanh'] -> data/script-53.json
+===== prepare chapter 54 =====
+saved 4253 chars -> data/chapters/ch54.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   grammar fixes: 1
+   bible +Lão già gầy (elderly male, thin wheezy skeptical tone) [54]
+segments=55 roster=['Narrator', 'Dịch Phong', 'Ngô lão đầu', 'Lão già gầy'] -> data/script-54.json
+===== prepare chapter 55 =====
+saved 7636 chars -> data/chapters/ch55.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   bible +Ba lão đầu (elderly male, reverent chorus-like tone with nervous excitement) [55]
+segments=74 roster=['Narrator', 'Dịch Phong', 'Chung Thanh', 'Ngô lão đầu', 'Ba lão đầu'] -> data/script-55.json
+===== prepare chapter 56 =====
+saved 4611 chars -> data/chapters/ch56.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   WARN: atmosphere looks Vietnamese, expected English
+   bible alias 'Từ Khôn' -> Tử sĩ [56]
+segments=39 roster=['Narrator', 'Yêu Linh Nhi', 'Huyền Vũ lão tổ', 'Tử sĩ', 'Mọi người'] -> data/script-56.json
+===== prepare chapter 57 =====
+saved 4834 chars -> data/chapters/ch57.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   WARN: fix source not found in chapter: 'sau đó bị kéo ngược trở về giữa không trung.\n\n"'
+   grammar fixes: 1
+   bible +Lý Mạc Trắc (elderly male, cold calculating tone with measured menace) [57]
+   bible +Sở Sư Cuồng (elderly male, wild savage tone with manic arrogance) [57]
+   bible +Tôn Gia Cát (elderly male, thin sinister tone with quiet menace) [57]
+segments=49 roster=['Narrator', 'Huyền Vũ lão tổ', 'Yêu Linh Nhi'] -> data/script-57.json
+===== prepare chapter 58 =====
+saved 6034 chars -> data/chapters/ch58.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   bible alias 'Sở Cuồng sư' -> Sở Sư Cuồng [58]
+   bible alias 'Sở Cuồng' -> Sở Sư Cuồng [58]
+segments=53 roster=['Narrator', 'Huyền Vũ lão tổ', 'Ngô lão đầu', 'Lý Mạc Trắc', 'Sở Sư Cuồng', 'Dịch Phong'] -> data/script-58.json
+===== prepare chapter 59 =====
+saved 6287 chars -> data/chapters/ch59.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=78 roster=['Narrator', 'Dịch Phong', 'Ngô lão đầu', 'Huyền Vũ lão tổ', 'Tôn Gia Cát'] -> data/script-59.json
+===== prepare chapter 60 =====
+saved 3809 chars -> data/chapters/ch60.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=45 roster=['Narrator', 'Huyền Vũ lão tổ', 'Tử sĩ', 'Mọi người'] -> data/script-60.json
+===== prepare chapter 61 =====
+saved 3643 chars -> data/chapters/ch61.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=43 roster=['Narrator', 'Huyền Vũ lão tổ', 'Yêu Linh Nhi'] -> data/script-61.json
+===== prepare chapter 62 =====
+saved 5963 chars -> data/chapters/ch62.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=67 roster=['Narrator', 'Huyền Vũ lão tổ', 'Yêu Linh Nhi', 'Thanh Sơn lão tổ', 'Tam trưởng lão', 'Vũ Kiệt'] -> data/script-62.json
+===== prepare chapter 63 =====
+saved 5203 chars -> data/chapters/ch63.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+digest invalid (Expecting ',' delimiter: line 1 column 24352 (char 24351)); asking model to repair once
+segments=57 roster=['Narrator', 'Phệ Thiên Yêu Lang', 'Doãn Hùng', 'Lạc Lan Tuyết', 'Yêu Linh Nhi', 'Mao Lâm', 'Mao Doãn Nhi'] -> data/script-63.json
+===== prepare chapter 64 =====
+saved 4790 chars -> data/chapters/ch64.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   WARN: atmosphere looks Vietnamese, expected English
+segments=57 roster=['Narrator', 'Yêu Linh Nhi', 'Mọi người', 'Mao Doãn Nhi', 'Dịch Phong', 'Bành Anh'] -> data/script-64.json
+===== prepare chapter 65 =====
+saved 4733 chars -> data/chapters/ch65.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=63 roster=['Narrator', 'Dịch Phong', 'Bành Anh', 'Mao Doãn Nhi', 'Mọi người'] -> data/script-65.json
+===== prepare chapter 66 =====
+saved 5323 chars -> data/chapters/ch66.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   grammar fixes: 1
+segments=61 roster=['Narrator', 'Bành Anh', 'Yêu Linh Nhi', 'Mọi người', 'Mao Doãn Nhi'] -> data/script-66.json
+===== prepare chapter 67 =====
+saved 8850 chars -> data/chapters/ch67.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   bible alias 'Doãn Nhi cô nương' -> Mao Doãn Nhi [67]
+   bible alias 'Vũ Kiệt ca ca' -> Vũ Kiệt [67]
+segments=116 roster=['Narrator', 'Bành Anh', 'Yêu Linh Nhi', 'Dịch Phong', 'Mao Doãn Nhi', 'Mọi người', 'Vũ Kiệt'] -> data/script-67.json
+===== prepare chapter 68 =====
+saved 5177 chars -> data/chapters/ch68.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   grammar fixes: 1
+segments=49 roster=['Narrator', 'Bành Anh', 'Dịch Phong', 'Phệ Thiên Yêu Lang', 'Chung Thanh', 'Huyền Vũ lão tổ', 'Mao Lâm', 'Mao Doãn Nhi'] -> data/script-68.json
+===== prepare chapter 69 =====
+saved 5644 chars -> data/chapters/ch69.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=68 roster=['Narrator', 'Chung Thanh', 'Yêu Linh Nhi', 'Phệ Thiên Yêu Lang'] -> data/script-69.json
+===== prepare chapter 70 =====
+saved 6652 chars -> data/chapters/ch70.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   WARN: atmosphere looks Vietnamese, expected English
+   bible +Hạ Vương Hiên (adult male, chatty boastful tone with friendly swagger) [70]
+   bible +Nhuế Hiểu Vũ (adult female, soft polite graceful tone) [70]
+segments=68 roster=['Narrator', 'Yêu Linh Nhi', 'Chung Thanh', 'Phệ Thiên Yêu Lang', 'Dịch Phong', 'Hạ Vương Hiên', 'Nhuế Hiểu Vũ'] -> data/script-70.json
+===== prepare chapter 71 =====
+saved 4366 chars -> data/chapters/ch71.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=48 roster=['Narrator', 'Hạ Vương Hiên', 'Dịch Phong', 'Mao Doãn Nhi', 'Yêu Linh Nhi', 'Người dân'] -> data/script-71.json
+===== prepare chapter 72 =====
+saved 3996 chars -> data/chapters/ch72.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+   bible alias 'Linh Nhi' -> Yêu Linh Nhi [72]
+segments=47 roster=['Dịch Phong', 'Yêu Linh Nhi', 'Mao Doãn Nhi', 'Narrator'] -> data/script-72.json
+===== prepare chapter 73 =====
+saved 4199 chars -> data/chapters/ch73.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=46 roster=['Narrator', 'Huyền Vũ lão tổ', 'Mọi người', 'Mao Lâm', 'Thành viên thương hội', 'Hạ Vương Hiên', 'Dịch Phong', 'Mao Doãn Nhi'] -> data/script-73.json
+===== prepare chapter 74 =====
+saved 4620 chars -> data/chapters/ch74.txt
+digest via opencode (opencode/muse-spark-1.3-contributor-free)
+segments=47 roster=['Narrator', 'Dịch Phong', 'Mao Doãn Nhi', 'Yêu Linh Nhi'] -> data/script-74.json
+===== prepare chapter 75 =====
+saved 4507 chars -> data/chapters/ch75.txt
