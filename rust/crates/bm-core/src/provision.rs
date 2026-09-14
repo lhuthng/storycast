@@ -231,7 +231,13 @@ echo "probe=done"
         }
         args.push("-e".into());
         args.push(self.rsync_e());
-        args.push(src.to_string_lossy().to_string());
+        // Directories sync their CONTENTS (trailing slash). Without it rsync
+        // nests: bm-worker/assets/assets — the exact bug this comment prevents.
+        let mut src_s = src.to_string_lossy().to_string();
+        if src.is_dir() && !src_s.ends_with('/') {
+            src_s.push('/');
+        }
+        args.push(src_s);
         args.push(dst);
         let out = Command::new("rsync")
             .args(&args)
@@ -338,6 +344,15 @@ echo "probe=done"
         let py = repo_root.join("python");
         if py.exists() {
             self.rsync_push(&py, "python", false)?;
+        }
+        // Voice assignments travel with sources (additive only — a worker's
+        // segment cache is keyed by voice, so clobbering mid-render would
+        // strand it; the voices op is the writer, this is just transport).
+        for rel in ["data/cast-vieneu.json", "data/cast.json"] {
+            let src = repo_root.join(rel);
+            if src.exists() {
+                self.rsync_push(&src, rel, false)?;
+            }
         }
         Ok(())
     }
@@ -456,14 +471,14 @@ npm i -g --prefix "$HOME/.local" opencode-ai >/dev/null 2>&1 && echo "OPENCODE-O
     pub fn start_tts(&self) -> Result<String> {
         let script = format!(
             r#"D="$HOME/{d}/python"
-if curl -s --max-time 3 http://127.0.0.1:{port}/health >/dev/null 2>&1; then
+if curl -s -o /dev/null --max-time 3 http://127.0.0.1:{port}/health >/dev/null 2>&1; then
   echo "TTS-ALREADY-UP"; exit 0
 fi
 cd "$D" || exit 5
 nohup "$D/.venv/bin/python" tts_server.py --port {port} --bind 0.0.0.0 > "$HOME/{d}/tts.log" 2>&1 &
 echo $! > "$HOME/{d}/tts.pid"
 sleep 3
-curl -s --max-time 10 http://127.0.0.1:{port}/health || echo "TTS-STARTING"
+curl -s -o /dev/null --max-time 10 http://127.0.0.1:{port}/health >/dev/null 2>&1 && echo "TTS-STARTED" || echo "TTS-STARTING (model loading)"
 "#,
             d = REMOTE_DIR,
             port = TTS_PORT
@@ -532,9 +547,15 @@ pub fn provision(
     }
     if probe.configured(agent_version) && !force {
         log.push(format!(
-            "[{}] already configured (agent {} + python) — skipping distribution",
+            "[{}] already configured (agent {} + python) — syncing sources only",
             m.id, agent_version
         ));
+        // Sources still sync: cast/asset/prompt updates must reach workers
+        // without a venv rebuild. Cheap rsync deltas when nothing changed.
+        match ssh.install_sources(repo_root) {
+            Ok(()) => log.push(format!("[{}] sources in sync", m.id)),
+            Err(e) => log.push(format!("[{}] source sync failed: {e}", m.id)),
+        }
     } else {
         if let Err(e) = ssh.ensure_root() {
             log.push(format!("[{}] ensure_root failed: {e}", m.id));
