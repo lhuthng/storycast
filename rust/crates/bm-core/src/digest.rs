@@ -1,0 +1,998 @@
+//! Stage 2 — digest a chapter into `script-NN.json`.
+//!
+//! Ported from `analyze.py`. Two behavioural changes are forced by running
+//! across a cluster:
+//!
+//! 1. The worker never writes the authoritative bible. It receives a snapshot
+//!    in its task offer, uses it to build the prompt, and returns a *delta*
+//!    (new characters, new aliases, who spoke) which the inductor merges as the
+//!    single writer. Concurrent digests therefore cannot clobber each other.
+//! 2. The snapshot is mirrored to the worker's local `data/bible.json` so the
+//!    cast assigner can still read voice hints.
+
+use crate::config::Settings;
+use crate::paths::Layout;
+use crate::util::{atomic_write, head_chars, squeeze_ws};
+use anyhow::{anyhow, Context, Result};
+use serde_json::{json, Value};
+use std::path::Path;
+use std::time::Duration;
+
+/// Surface forms that may NEVER join the bible: pronouns, generic nouns, verb phrases.
+const ALIAS_STOP: [&str; 18] = [
+    "hắn", "nàng", "ta", "ngươi", "y", "huynh", "đệ", "tỷ", "muội", "phàm nhân", "con", "người",
+    "tên", "tiểu", "lão", "tiểu tử", "narrator", "người dẫn chuyện",
+];
+
+/// Vietnamese letters carrying a diacritic — the tell-tale of un-translated text.
+const VI_DIACRITICS: &str = "àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ";
+
+/// The gender/age prefixes a `voice_hint` is allowed to start with.
+const VOICE_HEADS: [&str; 6] = [
+    "adult male",
+    "adult female",
+    "boy",
+    "girl",
+    "elderly male",
+    "elderly female",
+];
+
+/// Why a generation attempt failed.
+#[derive(Debug)]
+pub enum GenError {
+    /// The provider asked us to slow down. Retry after a delay.
+    RateLimited(String),
+    /// Anything else — do not retry, the prompt or the credentials are wrong.
+    Fatal(anyhow::Error),
+}
+
+impl std::fmt::Display for GenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GenError::RateLimited(m) => write!(f, "rate limited: {m}"),
+            GenError::Fatal(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// What a digest produces: the per-chapter script plus the bible delta.
+#[derive(Debug, Clone)]
+pub struct DigestOutcome {
+    pub script: Value,
+    /// `{new_characters, new_aliases, roster, speakers}` — merged by the inductor.
+    pub delta: Value,
+    pub segments: usize,
+    pub log: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// bible
+// ---------------------------------------------------------------------------
+
+pub fn load_bible(path: &Path) -> Value {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .filter(|v| v.get("characters").is_some())
+        .unwrap_or_else(|| json!({"characters": []}))
+}
+
+pub fn save_bible(bible: &Value, path: &Path) -> Result<()> {
+    atomic_write(path, &serde_json::to_string_pretty(bible)?)
+}
+
+/// Lean context for the prompt: identity only, no chapter baggage.
+pub fn bible_context(bible: &Value) -> String {
+    let lean: Vec<Value> = bible
+        .get("characters")
+        .and_then(|c| c.as_array())
+        .map(|chars| {
+            chars
+                .iter()
+                .map(|c| {
+                    json!({
+                        "name": c.get("name"),
+                        "personality": c.get("personality"),
+                        "voice_hint": c.get("voice_hint"),
+                        "proper_aliases": c.get("proper_aliases"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::to_string(&lean).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn alias_owner(form: &str, owner: &str, bible: &Value) -> Option<String> {
+    bible
+        .get("characters")
+        .and_then(|c| c.as_array())
+        .and_then(|chars| {
+            chars.iter().find_map(|c| {
+                let name = c.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let owns = c
+                    .get("proper_aliases")
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.iter().any(|x| x.as_str() == Some(form)))
+                    .unwrap_or(false);
+                if name != owner && owns {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+/// Proper-name forms may join the bible; pronouns/generics stay chapter-local.
+fn promotable(form: &str, owner: &str, bible: &Value, log: &mut Vec<String>) -> Option<String> {
+    let f = form.trim();
+    if f.is_empty() || ALIAS_STOP.contains(&f.to_lowercase().as_str()) || f.chars().count() < 2 {
+        return None;
+    }
+    if let Some(conflict) = alias_owner(f, owner, bible) {
+        log.push(format!(
+            "   bible: reject alias {f:?} for {owner} (owned by {conflict})"
+        ));
+        return None;
+    }
+    Some(f.to_string())
+}
+
+/// Fold a digest's new-character/alias findings into the shared bible.
+pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String> {
+    let mut log = Vec::new();
+
+    let existing: Vec<String> = bible
+        .get("characters")
+        .and_then(|c| c.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| c.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let new_chars = data
+        .get("new_characters")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    for nc in &new_chars {
+        let name = nc
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if name.is_empty() || existing.contains(&name) {
+            continue;
+        }
+        // The name itself always joins (ownership veto only): a character must be
+        // findable by its own name even when the digest emits a stopword/pronoun.
+        // Extra aliases go through the full promotable check as before.
+        let mut aliases: Vec<String> = Vec::new();
+        if let Some(conflict) = alias_owner(&name, &name, bible) {
+            log.push(format!(
+                "   bible: reject name {name:?} (owned by {conflict})"
+            ));
+        } else {
+            aliases.push(name.clone());
+        }
+        if let Some(extra) = nc.get("proper_aliases").and_then(|a| a.as_array()) {
+            for x in extra.iter().filter_map(|x| x.as_str()) {
+                if let Some(ok) = promotable(x, &name, bible, &mut log) {
+                    if !aliases.contains(&ok) {
+                        aliases.push(ok);
+                    }
+                }
+            }
+        }
+        let hint = nc
+            .get("voice_hint")
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .to_string();
+        let entry = json!({
+            "name": name,
+            "personality": nc.get("personality").cloned().unwrap_or(json!("")),
+            "voice_hint": hint,
+            "proper_aliases": aliases,
+            "first_seen": chapter,
+            "chapters_seen": [],
+        });
+        log.push(format!("   bible +{name} ({hint}) [{chapter}]"));
+        if let Some(arr) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) {
+            arr.push(entry);
+        }
+    }
+
+    if let Some(map) = data.get("new_aliases").and_then(|a| a.as_object()) {
+        for (owner, forms) in map {
+            let owns_character = bible
+                .get("characters")
+                .and_then(|c| c.as_array())
+                .map(|a| {
+                    a.iter()
+                        .any(|c| c.get("name").and_then(|n| n.as_str()) == Some(owner.as_str()))
+                })
+                .unwrap_or(false);
+            if !owns_character {
+                continue;
+            }
+            let Some(list) = forms.as_array() else { continue };
+            for form in list {
+                let Some(form) = form.as_str() else { continue };
+                if let Some(ok) = promotable(form, owner, bible, &mut log) {
+                    if let Some(arr) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) {
+                        for c in arr.iter_mut() {
+                            if c.get("name").and_then(|n| n.as_str()) == Some(owner.as_str()) {
+                                let aliases = c
+                                    .get_mut("proper_aliases")
+                                    .and_then(|a| a.as_array_mut());
+                                if let Some(aliases) = aliases {
+                                    if !aliases.iter().any(|x| x.as_str() == Some(ok.as_str())) {
+                                        aliases.push(json!(ok));
+                                        log.push(format!(
+                                            "   bible alias {ok:?} -> {owner} [{chapter}]"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Mark everyone who appeared in this chapter.
+    let mut spoke: Vec<String> = data
+        .get("roster")
+        .and_then(|r| r.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(segs) = data.get("segments").and_then(|s| s.as_array()) {
+        for s in segs {
+            if let Some(sp) = s.get("speaker").and_then(|v| v.as_str()) {
+                if !spoke.iter().any(|x| x == sp) {
+                    spoke.push(sp.to_string());
+                }
+            }
+        }
+    }
+    if let Some(chars) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) {
+        for c in chars.iter_mut() {
+            let name = c.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+            if spoke.contains(&name) {
+                let seen = c.get_mut("chapters_seen").and_then(|v| v.as_array_mut());
+                if let Some(seen) = seen {
+                    if !seen.iter().any(|x| x.as_str() == Some(chapter)) {
+                        seen.push(json!(chapter));
+                    }
+                }
+            }
+        }
+    }
+
+    log
+}
+
+// ---------------------------------------------------------------------------
+// validation
+// ---------------------------------------------------------------------------
+
+fn split_voice_head(hint: &str) -> String {
+    hint.split([',', ':', '-', '–'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase()
+}
+
+pub fn validate(data: &Value, bible: &Value) -> Result<()> {
+    if !data.is_object() {
+        anyhow::bail!("top-level must be a JSON object");
+    }
+    let segments = data
+        .get("segments")
+        .and_then(|s| s.as_array())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("no segments"))?;
+
+    let mut names: Vec<String> = data
+        .get("roster")
+        .and_then(|r| r.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.push("Narrator".to_string());
+    let mut known = names.clone();
+    if let Some(chars) = bible.get("characters").and_then(|c| c.as_array()) {
+        for c in chars {
+            if let Some(n) = c.get("name").and_then(|n| n.as_str()) {
+                known.push(n.to_string());
+            }
+        }
+    }
+
+    for (i, s) in segments.iter().enumerate() {
+        let speaker = s.get("speaker").and_then(|v| v.as_str()).unwrap_or("");
+        if !names.iter().any(|n| n == speaker) {
+            anyhow::bail!("segment {i}: unknown speaker {speaker:?}");
+        }
+        if s.get("text").and_then(|t| t.as_str()).unwrap_or("").is_empty() {
+            anyhow::bail!("segment {i}: empty text");
+        }
+        let direction = s.get("direction").and_then(|d| d.as_str()).unwrap_or("");
+        if !direction.starts_with("Say ") {
+            anyhow::bail!("segment {i}: direction must start with 'Say '");
+        }
+    }
+
+    if let Some(mentions) = data.get("mentions").and_then(|m| m.as_object()) {
+        for (form, owner) in mentions {
+            let owner = owner.as_str().unwrap_or("");
+            if !known.iter().any(|k| k == owner) {
+                anyhow::bail!("mention {form:?} -> unknown {owner:?}");
+            }
+        }
+    }
+
+    if let Some(ncs) = data.get("new_characters").and_then(|c| c.as_array()) {
+        for nc in ncs {
+            if nc.get("name").and_then(|n| n.as_str()).unwrap_or("").is_empty() {
+                anyhow::bail!("new_character without name");
+            }
+            let hint = nc.get("voice_hint").and_then(|h| h.as_str()).unwrap_or("");
+            let head = split_voice_head(hint);
+            if !VOICE_HEADS.contains(&head.as_str()) {
+                anyhow::bail!(
+                    "new_character {}: voice_hint must start with gender/age",
+                    nc.get("name").and_then(|n| n.as_str()).unwrap_or("?")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn has_diacritic(word: &str) -> bool {
+    word.chars().any(|c| VI_DIACRITICS.contains(c))
+}
+
+/// EN policy is trust-based; flag obvious violations for the review gate.
+pub fn warn_vietnamese(data: &Value, bible: &Value) -> Vec<String> {
+    let mut skip: Vec<String> = ["dich", "lac", "doan", "thanh", "nguyen", "tran", "ngo", "phong", "tuyet", "ly"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if let Some(chars) = bible.get("characters").and_then(|c| c.as_array()) {
+        for c in chars {
+            if let Some(name) = c.get("name").and_then(|n| n.as_str()) {
+                skip.extend(name.to_lowercase().split_whitespace().map(String::from));
+            }
+            if let Some(aliases) = c.get("proper_aliases").and_then(|a| a.as_array()) {
+                skip.extend(
+                    aliases
+                        .iter()
+                        .filter_map(|a| a.as_str())
+                        .map(|a| a.to_lowercase()),
+                );
+            }
+        }
+    }
+
+    let looks_vi = |s: &str| -> bool {
+        s.split(|c: char| !c.is_alphabetic())
+            .filter(|w| !w.is_empty())
+            .any(|w| has_diacritic(w) && !skip.iter().any(|s| s == &w.to_lowercase()))
+    };
+
+    let mut warns = Vec::new();
+    if let Some(ncs) = data.get("new_characters").and_then(|c| c.as_array()) {
+        for nc in ncs {
+            let name = nc.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+            for key in ["personality", "voice_hint"] {
+                let v = nc.get(key).and_then(|x| x.as_str()).unwrap_or("");
+                if looks_vi(v) {
+                    warns.push(format!(
+                        "   WARN: {name}.{key} looks Vietnamese, expected English"
+                    ));
+                }
+            }
+        }
+    }
+    let atmosphere = data.get("atmosphere").and_then(|a| a.as_str()).unwrap_or("");
+    if looks_vi(atmosphere) {
+        warns.push("   WARN: atmosphere looks Vietnamese, expected English".to_string());
+    }
+    warns
+}
+
+// ---------------------------------------------------------------------------
+// generation backends
+// ---------------------------------------------------------------------------
+
+/// Pull a delay out of a provider error body: `retry in 53.2s` or `"retryDelay": "53s"`.
+pub fn parse_retry_delay(s: &str) -> Option<f64> {
+    if let Some(idx) = s.find("retry in ") {
+        let tail = &s[idx + "retry in ".len()..];
+        let num: String = tail
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        if let Ok(v) = num.parse::<f64>() {
+            return Some(v);
+        }
+    }
+    if let Some(idx) = s.find("retryDelay") {
+        let tail = &s[idx..];
+        let num: String = tail
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        if let Ok(v) = num.parse::<f64>() {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn extract_json_object(text: &str) -> Result<String> {
+    let start = text
+        .find('{')
+        .ok_or_else(|| anyhow!("no JSON object in output: {:?}", head_chars(text, 200)))?;
+    let end = text
+        .rfind('}')
+        .ok_or_else(|| anyhow!("no closing brace in output: {:?}", head_chars(text, 200)))?;
+    if end <= start {
+        anyhow::bail!("malformed JSON span in output: {:?}", head_chars(text, 200));
+    }
+    Ok(text[start..=end].to_string())
+}
+
+async fn generate_opencode(prompt: &str, settings: &Settings) -> Result<String, GenError> {
+    let full = format!(
+        "Do not use any tools. Answer with the requested output and nothing else.\n\n{prompt}"
+    );
+    let out = tokio::process::Command::new("opencode")
+        .args(["run", "-m", &settings.opencode_model, &full])
+        .output()
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                GenError::Fatal(anyhow!("opencode CLI not found — install it first"))
+            } else {
+                GenError::Fatal(anyhow!(e).context("running opencode"))
+            }
+        })?;
+    if !out.status.success() {
+        return Err(GenError::Fatal(anyhow!(
+            "opencode run failed: {}",
+            head_chars(&String::from_utf8_lossy(&out.stderr), 500)
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    extract_json_object(&stdout).map_err(GenError::Fatal)
+}
+
+async fn generate_ollama(prompt: &str, settings: &Settings) -> Result<String, GenError> {
+    let body = json!({
+        "model": settings.local_model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": false,
+        "format": "json",
+        "options": {"temperature": 0, "num_ctx": 16384},
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(1800))
+        .build()
+        .map_err(|e| GenError::Fatal(anyhow!(e)))?;
+    let resp = client
+        .post(format!("{}/api/chat", settings.ollama_url))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            GenError::Fatal(anyhow!(
+                "cannot reach Ollama at {} ({e}); run: ollama serve",
+                settings.ollama_url
+            ))
+        })?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(GenError::Fatal(anyhow!(
+            "ollama error {status}: {}",
+            head_chars(&text, 300)
+        )));
+    }
+    let v: Value = serde_json::from_str(&text).map_err(|e| GenError::Fatal(anyhow!(e)))?;
+    v.pointer("/message/content")
+        .and_then(|c| c.as_str())
+        .map(String::from)
+        .ok_or_else(|| GenError::Fatal(anyhow!("ollama response had no message.content")))
+}
+
+async fn generate_openrouter(prompt: &str, settings: &Settings) -> Result<String, GenError> {
+    let key = std::env::var("OPENROUTER_API_KEY")
+        .map_err(|_| GenError::Fatal(anyhow!("OPENROUTER_API_KEY missing — add it to .env")))?;
+    let body = json!({
+        "model": settings.openrouter_model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 16384,
+        "response_format": {"type": "json_object"},
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .build()
+        .map_err(|e| GenError::Fatal(anyhow!(e)))?;
+    let resp = client
+        .post("https://openrouter.ai/api/v1/chat/completions")
+        .header("Authorization", format!("Bearer {key}"))
+        .header("HTTP-Referer", "https://github.com/beyond-myriads-converter")
+        .header("X-Title", "beyond-myriads-converter")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| GenError::Fatal(anyhow!("cannot reach OpenRouter ({e})")))?;
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<f64>().ok());
+    let text = resp.text().await.unwrap_or_default();
+    if status.as_u16() == 429 {
+        let delay = retry_after.map(|d| d + 2.0).unwrap_or(60.0);
+        return Err(GenError::RateLimited(format!(
+            "retry in {delay}s: {}",
+            head_chars(&text, 200)
+        )));
+    }
+    if !status.is_success() {
+        return Err(GenError::Fatal(anyhow!(
+            "OpenRouter error {status}: {}",
+            head_chars(&text, 200)
+        )));
+    }
+    let v: Value = serde_json::from_str(&text).map_err(|e| GenError::Fatal(anyhow!(e)))?;
+    v.pointer("/choices/0/message/content")
+        .and_then(|c| c.as_str())
+        .map(String::from)
+        .ok_or_else(|| GenError::Fatal(anyhow!("OpenRouter response had no content")))
+}
+
+/// Gemini text model over REST, with the same 6-attempt pacing the Python SDK
+/// path used (the SDK's own retry reused a closed http client, hence the manual loop).
+async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<String, GenError> {
+    let key = std::env::var("GEMINI_API_KEY")
+        .map_err(|_| GenError::Fatal(anyhow!("GEMINI_API_KEY missing — copy .env.example to .env")))?;
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+        settings.analyze_model, key
+    );
+    let body = json!({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 16384},
+    });
+    let client = reqwest::Client::new();
+    let mut last: Option<String> = None;
+    for attempt in 0..6 {
+        let resp = client.post(&url).json(&body).send().await;
+        let (status, text) = match resp {
+            Ok(r) => {
+                let status = r.status();
+                (status, r.text().await.unwrap_or_default())
+            }
+            Err(e) => {
+                last = Some(format!("transport error: {e}"));
+                continue;
+            }
+        };
+        if status.is_success() {
+            let v: Value = serde_json::from_str(&text)
+                .map_err(|e| GenError::Fatal(anyhow!(e).context("gemini response not JSON")))?;
+            return v
+                .pointer("/candidates/0/content/parts/0/text")
+                .and_then(|t| t.as_str())
+                .map(String::from)
+                .ok_or_else(|| {
+                    GenError::Fatal(anyhow!(
+                        "gemini response had no text part: {}",
+                        head_chars(&text, 300)
+                    ))
+                });
+        }
+        if text.contains("PerDay") {
+            return Err(GenError::Fatal(anyhow!(
+                "text-model day quota exhausted — resume remaining chapters tomorrow"
+            )));
+        }
+        if status.as_u16() == 429 {
+            let wait = parse_retry_delay(&text).map(|d| d + 2.0).unwrap_or(30.0);
+            last = Some(format!("429, retry in {wait:.0}s"));
+            eprintln!(
+                "analyze attempt {}/6 rate-limited, sleeping {:.0}s",
+                attempt + 1,
+                wait
+            );
+            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+            continue;
+        }
+        return Err(GenError::Fatal(anyhow!(
+            "gemini error {status}: {}",
+            head_chars(&text, 300)
+        )));
+    }
+    Err(GenError::Fatal(anyhow!(
+        "gemini still rate-limited after 6 attempts: {}",
+        last.unwrap_or_default()
+    )))
+}
+
+/// One generation attempt against the configured backend.
+pub async fn generate(prompt: &str, analyzer: &str, settings: &Settings) -> Result<String, GenError> {
+    match analyzer {
+        "local" => generate_ollama(prompt, settings).await,
+        "openrouter" => generate_openrouter(prompt, settings).await,
+        "opencode" => generate_opencode(prompt, settings).await,
+        "gemini" => generate_gemini(prompt, settings).await,
+        other => Err(GenError::Fatal(anyhow!(
+            "unknown analyzer {other:?} (expected opencode | openrouter | local | gemini)"
+        ))),
+    }
+}
+
+fn strip_fences(raw: &str) -> &str {
+    let s = raw.trim();
+    let s = s.strip_prefix("```json").unwrap_or(s);
+    let s = s.strip_suffix("```").unwrap_or(s);
+    s.trim()
+}
+
+// ---------------------------------------------------------------------------
+// the stage entry point
+// ---------------------------------------------------------------------------
+
+pub fn build_prompt(layout: &Layout, bible: &Value, chapter_text: &str) -> Result<String> {
+    let template = std::fs::read_to_string(layout.prompt())
+        .with_context(|| format!("reading prompt template {}", layout.prompt().display()))?;
+    Ok(template
+        .replace("{bible_json}", &bible_context(bible))
+        .replace("{chapter_text}", chapter_text))
+}
+
+/// Digest one chapter. `bible` is the inductor's snapshot; the returned delta is
+/// merged by the inductor, never here.
+pub async fn digest_chapter(
+    layout: &Layout,
+    n: u32,
+    bible: &Value,
+    settings: &Settings,
+    analyzer: &str,
+    progress: &mut (dyn FnMut(f32, String) + Send),
+) -> Result<DigestOutcome> {
+    let chapter_path = layout.chapter_txt(n);
+    let text = std::fs::read_to_string(&chapter_path)
+        .with_context(|| format!("reading {}", chapter_path.display()))?;
+    let prompt = build_prompt(layout, bible, &text)?;
+
+    progress(0.10, format!("digest ch{n} via {analyzer}"));
+    let mut raw: Option<String> = None;
+    let mut last_rl = String::new();
+    for attempt in 0..6 {
+        match generate(&prompt, analyzer, settings).await {
+            Ok(t) => {
+                raw = Some(t);
+                break;
+            }
+            Err(GenError::RateLimited(msg)) => {
+                let wait = parse_retry_delay(&msg)
+                    .unwrap_or_else(|| (30.0 * 2f64.powi(attempt)).min(300.0));
+                progress(
+                    (0.10 + 0.05 * attempt as f32).min(0.30),
+                    format!("rate-limited, sleeping {wait:.0}s"),
+                );
+                tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                last_rl = msg;
+            }
+            Err(GenError::Fatal(e)) => return Err(e),
+        }
+    }
+    let mut raw = raw.ok_or_else(|| {
+        anyhow!("analyzer {analyzer} still rate-limited after retries: {last_rl}")
+    })?;
+
+    progress(0.60, "validating digest".to_string());
+    let parsed = parse_and_validate(&raw, bible);
+    let data = match parsed {
+        Ok(d) => d,
+        Err(e) => {
+            progress(0.65, "invalid JSON, asking for one repair".to_string());
+            let repair = format!(
+                "{prompt}\n\nYour last output was invalid: {e}. Return ONLY the corrected JSON object."
+            );
+            let second = match generate(&repair, analyzer, settings).await {
+                Ok(t) => t,
+                Err(GenError::RateLimited(m)) => {
+                    anyhow::bail!("repair attempt rate-limited: {m}")
+                }
+                Err(GenError::Fatal(e2)) => return Err(e2),
+            };
+            raw = second;
+            match parse_and_validate(&raw, bible) {
+                Ok(d) => d,
+                Err(e2) => {
+                    let dump = layout.data().join(".last-analyze-raw.json");
+                    let _ = atomic_write(&dump, &raw);
+                    anyhow::bail!(
+                        "digest invalid ({e2}); raw saved to {}",
+                        dump.display()
+                    );
+                }
+            }
+        }
+    };
+
+    let mut log = Vec::new();
+    let warnings = warn_vietnamese(&data, bible);
+
+    // Grammar fixes must reference text that is actually in the chapter.
+    let fixes = data
+        .get("fixes")
+        .and_then(|f| f.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for fx in &fixes {
+        let before = fx.get("before").and_then(|b| b.as_str()).unwrap_or("");
+        let after = fx.get("after").and_then(|a| a.as_str()).unwrap_or("");
+        if before.is_empty() || after.is_empty() {
+            anyhow::bail!("fix needs before+after: {fx}");
+        }
+        if !text.contains(before) {
+            log.push(format!(
+                "   WARN: fix source not found in chapter: {:?}",
+                head_chars(before, 60)
+            ));
+        }
+    }
+    if !fixes.is_empty() {
+        log.push(format!("   grammar fixes: {}", fixes.len()));
+    }
+
+    let segments = data
+        .get("segments")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let script = json!({
+        "atmosphere": data.get("atmosphere").cloned().unwrap_or(json!("")),
+        "roster": data.get("roster").cloned().unwrap_or(json!([])),
+        "mentions": data.get("mentions").cloned().unwrap_or(json!({})),
+        "segments": segments,
+        "fixes": fixes,
+    });
+
+    let script_path = layout.script(n);
+    atomic_write(&script_path, &serde_json::to_string_pretty(&script)?)?;
+
+    let delta = json!({
+        "new_characters": data.get("new_characters").cloned().unwrap_or(json!([])),
+        "new_aliases": data.get("new_aliases").cloned().unwrap_or(json!({})),
+        "roster": data.get("roster").cloned().unwrap_or(json!([])),
+        "segments": script.get("segments").cloned().unwrap_or(json!([])),
+    });
+
+    progress(1.0, format!("digest ch{n} done"));
+    log.push(format!(
+        "segments={} roster={} -> {}",
+        script
+            .get("segments")
+            .and_then(|s| s.as_array())
+            .map(|s| s.len())
+            .unwrap_or(0),
+        squeeze_ws(
+            &script
+                .get("roster")
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "[]".into())
+        ),
+        script_path.display()
+    ));
+
+    Ok(DigestOutcome {
+        segments: script
+            .get("segments")
+            .and_then(|s| s.as_array())
+            .map(|s| s.len())
+            .unwrap_or(0),
+        script,
+        delta,
+        log,
+        warnings,
+    })
+}
+
+fn parse_and_validate(raw: &str, bible: &Value) -> Result<Value> {
+    let cleaned = strip_fences(raw);
+    let data: Value = serde_json::from_str(cleaned).context("not valid JSON")?;
+    validate(&data, bible)?;
+    Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bible_with(name: &str, aliases: &[&str]) -> Value {
+        json!({"characters": [{
+            "name": name,
+            "personality": "x",
+            "voice_hint": "adult male",
+            "proper_aliases": aliases,
+            "first_seen": "01",
+            "chapters_seen": []
+        }]})
+    }
+
+    #[test]
+    fn retry_delay_parses_both_provider_shapes() {
+        assert_eq!(parse_retry_delay("... retry in 53.262507263s"), Some(53.262507263));
+        assert_eq!(parse_retry_delay(r#"{"retryDelay": "53s"}"#), Some(53.0));
+        assert_eq!(parse_retry_delay("no hint here"), None);
+    }
+
+    #[test]
+    fn fences_are_stripped() {
+        assert_eq!(strip_fences("```json\n{\"a\":1}\n```"), "{\"a\":1}");
+        assert_eq!(strip_fences("{\"a\":1}"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn json_object_is_extracted_from_surrounding_prose() {
+        let t = "Sure! Here you go:\n{\"a\": 1}\nHope that helps.";
+        assert_eq!(extract_json_object(t).unwrap(), "{\"a\": 1}");
+        assert!(extract_json_object("no braces").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_a_speaker_outside_the_roster() {
+        let data = json!({
+            "segments": [{"speaker": "Ghost", "text": "hi", "direction": "Say calm in Vietnamese: hi"}],
+            "roster": ["Narrator"]
+        });
+        let err = validate(&data, &json!({"characters": []})).unwrap_err();
+        assert!(err.to_string().contains("unknown speaker"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_a_bad_direction_and_a_bad_voice_hint() {
+        let bad_dir = json!({
+            "segments": [{"speaker": "Narrator", "text": "hi", "direction": "narrate"}],
+            "roster": ["Narrator"]
+        });
+        assert!(validate(&bad_dir, &json!({"characters": []})).is_err());
+
+        let bad_hint = json!({
+            "segments": [{"speaker": "Narrator", "text": "hi", "direction": "Say calm in Vietnamese: hi"}],
+            "roster": ["Narrator"],
+            "new_characters": [{"name": "X", "voice_hint": "mysterious"}]
+        });
+        let err = validate(&bad_hint, &json!({"characters": []})).unwrap_err();
+        assert!(err.to_string().contains("gender/age"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_a_well_formed_digest() {
+        let data = json!({
+            "atmosphere": "A market at dawn.",
+            "roster": ["Narrator", "Dịch Phong"],
+            "mentions": {"hắn": "Dịch Phong"},
+            "new_characters": [{"name": "Lão Trần", "voice_hint": "elderly male, gruff"}],
+            "segments": [{"speaker": "Narrator", "text": "Trời sáng.", "direction": "Say calm in Vietnamese: Trời sáng."}]
+        });
+        validate(&data, &json!({"characters": []})).unwrap();
+    }
+
+    #[test]
+    fn merge_bible_adds_characters_and_refuses_duplicates() {
+        let mut bible = json!({"characters": []});
+        let data = json!({
+            "new_characters": [{"name": "Lão Trần", "personality": "gruff", "voice_hint": "elderly male", "proper_aliases": ["Trần lão"]}],
+            "roster": ["Lão Trần"],
+            "segments": [{"speaker": "Lão Trần"}]
+        });
+        let log = merge_bible(&mut bible, &data, "07");
+        assert_eq!(bible["characters"].as_array().unwrap().len(), 1);
+        assert_eq!(bible["characters"][0]["first_seen"], "07");
+        assert_eq!(bible["characters"][0]["chapters_seen"], json!(["07"]));
+        assert!(log.iter().any(|l| l.contains("bible +Lão Trần")));
+
+        // second time: no duplicate
+        merge_bible(&mut bible, &data, "08");
+        assert_eq!(bible["characters"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_bible_never_promotes_pronouns() {
+        let mut bible = json!({"characters": []});
+        let data = json!({
+            "new_characters": [{"name": "Hắn", "voice_hint": "adult male", "proper_aliases": ["y", "phàm nhân"]}],
+            "roster": [],
+            "segments": []
+        });
+        merge_bible(&mut bible, &data, "01");
+        let aliases = bible["characters"][0]["proper_aliases"].as_array().unwrap();
+        assert_eq!(aliases.len(), 1, "only the name itself: {aliases:?}");
+        assert_eq!(aliases[0], "Hắn");
+    }
+
+    #[test]
+    fn merge_bible_rejects_an_alias_owned_by_another_character() {
+        let mut bible = bible_with("A", &["Tuyết"]);
+        let data = json!({
+            "new_characters": [{"name": "B", "voice_hint": "adult female", "proper_aliases": ["Tuyết"]}],
+            "roster": [],
+            "segments": []
+        });
+        let log = merge_bible(&mut bible, &data, "02");
+        assert!(log.iter().any(|l| l.contains("reject alias")), "{log:?}");
+        let b = bible["characters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "B")
+            .unwrap();
+        assert_eq!(b["proper_aliases"], json!(["B"]));
+    }
+
+    #[test]
+    fn vietnamese_leak_detection_ignores_known_names() {
+        let bible = bible_with("Lạc Lan Tuyết", &["Tuyết"]);
+        let data = json!({
+            "atmosphere": "A cold morning in the courtyard.",
+            "new_characters": [{"name": "Lạc Lan Tuyết", "personality": "lạnh lùng", "voice_hint": "adult female"}]
+        });
+        let warns = warn_vietnamese(&data, &bible);
+        assert!(
+            warns.iter().any(|w| w.contains("personality")),
+            "expected a personality warning: {warns:?}"
+        );
+        // the name itself must not trip the detector
+        assert!(
+            !warns.iter().any(|w| w.contains("atmosphere")),
+            "English atmosphere flagged: {warns:?}"
+        );
+    }
+
+    #[test]
+    fn bible_context_is_identity_only() {
+        let bible = json!({"characters": [{
+            "name": "A", "personality": "p", "voice_hint": "adult male",
+            "proper_aliases": ["B"], "first_seen": "01", "chapters_seen": ["01"]
+        }]});
+        let ctx = bible_context(&bible);
+        assert!(ctx.contains("\"name\":\"A\""));
+        assert!(!ctx.contains("chapters_seen"), "context leaked chapter baggage: {ctx}");
+    }
+
+    #[test]
+    fn load_bible_defaults_when_missing_or_corrupt() {
+        let missing = load_bible(Path::new("/nonexistent/bible.json"));
+        assert_eq!(missing, json!({"characters": []}));
+    }
+}

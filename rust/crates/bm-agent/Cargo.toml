@@ -1,0 +1,21 @@
+[package]
+name = "bm-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Worker agent: pull tasks from the inductor, run one pipeline stage, report progress"
+
+[[bin]]
+name = "bm-agent"
+path = "src/main.rs"
+
+[dependencies]
+bm-proto = { workspace = true }
+bm-core = { workspace = true }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+clap = { workspace = true }
