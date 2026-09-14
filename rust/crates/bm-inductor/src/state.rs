@@ -514,12 +514,18 @@ impl Inner {
             .chain(&policy.neutral)
             .any(|n| n == &voice);
         let in_use = cast.values().any(|v| v == &voice);
+        // Pool samples are vetted at adding (`roster add-sample` / TUI `A`),
+        // the same trust clones get at enrolment — so a fresh sample is
+        // assignable before anything speaks with it. Without this a new sample
+        // could be rolled automatically but never picked by hand.
+        let pooled = bm_core::pool::load_pool(&self.layout.root.join("voice-pool.json"))
+            .contains_key(&voice);
         let admitted = if policy.allowed.is_empty() {
             true
         } else if declared {
             policy.allowed.iter().any(|a| a == &voice)
         } else {
-            in_use
+            in_use || pooled
         };
         if !admitted {
             anyhow::bail!(
@@ -803,6 +809,32 @@ mod tests {
         std::fs::write(layout.roster(), "{ this is not json").unwrap();
         let err = inner.op_swap_voice("A", "Đức Trí").unwrap_err().to_string();
         assert!(err.contains("parsing"), "{err}");
+    }
+
+    #[test]
+    fn swap_admits_a_fresh_pool_sample_but_nothing_else_undeclared() {
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::create_dir_all(layout.bm_state()).unwrap();
+        // Narrow the policy so the trust rule actually bites: without this the
+        // shipped catalogue admits everything and the test proves nothing.
+        std::fs::write(
+            layout.roster(),
+            r#"{"version":1,"engines":{"vieneu":{"policy":{"excluded_accents":["Northern"]}}}}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+        std::fs::write(
+            layout.root.join("voice-pool.json"),
+            r#"{"young-female-1": {"file": "refs/young-female-1.mp3", "tags": ["young", "female"]}}"#,
+        )
+        .unwrap();
+
+        // Pooled samples are vetted at adding: assignable with nobody on them.
+        assert!(inner.op_swap_voice("A", "young-female-1").is_ok());
+        // Anything else undeclared still needs a prior assignment to be trusted.
+        let err = inner.op_swap_voice("A", "Chưa Từng Có").unwrap_err().to_string();
+        assert!(err.contains("neither an admitted preset"), "{err}");
     }
 
     #[test]

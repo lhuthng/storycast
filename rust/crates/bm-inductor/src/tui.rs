@@ -244,6 +244,7 @@ enum Conn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextKind {
     AddMachine,
+    AddSample,
     Translate,
     CrawlTemplate,
 }
@@ -452,6 +453,13 @@ enum Job {
         api: String,
         http: reqwest::Client,
         m: Machine,
+    },
+    /// Local file work: copy a clip into `refs/`, tag it from its filename,
+    /// register it in the pool and in `voices.json`. Needs no inductor.
+    AddSample {
+        layout_root: std::path::PathBuf,
+        path: String,
+        name: Option<String>,
     },
     /// Deregister a machine. Idempotent, so it needs no confirmation beyond
     /// the one the operator already gave.
@@ -1645,6 +1653,7 @@ fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         ("t  translate", "enqueue crawl + digest for a chapter range"),
         ("c  crawl-setup", "save the URL template, then probe-crawl one chapter"),
         ("v  voices", "re-read the roster, enforce the accent policy, refill gaps"),
+        ("A  add-sample", "pool a clip from refs/ — tags come from the filename"),
         ("s  swap-voice", "repoint one character — destructive, see below"),
         ("S  cast", "every speaker × voice, flagging shared voices and policy problems"),
         ("e  eta", "estimate the remaining wall-clock time"),
@@ -1664,6 +1673,7 @@ fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         "Every voice is listed with gender, accent, language and style, plus whether",
         "it is already in use and whether the accent policy permits it.",
         "Tab auditions the highlighted voice into data/previews/<voice>.wav.",
+        "Pooled samples show their tags (pool: young, female) — type one to filter.",
         "Enter advances or applies; Esc goes back one step.",
     ] {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
@@ -2397,6 +2407,18 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
             }
             let _ = tx.send(Ev::Done(DoneKind::Other));
         }
+        Job::AddSample { layout_root, path, name } => {
+            match bm_core::pool::add_sample(&layout_root, std::path::Path::new(&path), None, name) {
+                Ok(lines) => {
+                    for l in lines {
+                        send(Level::Ok, l);
+                    }
+                    send(Level::Info, "pool updated — press R to reload the roster".into());
+                }
+                Err(e) => send(Level::Error, format!("add-sample {path}: {e:#}")),
+            }
+            let _ = tx.send(Ev::Done(DoneKind::Other));
+        }
         Job::DropMachine { api, http, addr } => {
             let url = format!("{api}/api/machines?addr={}", urlencode(&addr));
             let (level, text) = match http.delete(&url).send().await {
@@ -2476,6 +2498,20 @@ fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, String> {
                 http: app.http.clone(),
                 m,
             })
+        }
+        TextKind::AddSample => {
+            // `refs/trien-chieu.mp3 as Triển Chiêu`: the voice answers to the
+            // given name, the tags still come from the filename.
+            let (path, name) = match prompt.buf.rsplit_once(" as ") {
+                Some((p, n)) if !p.trim().is_empty() && !n.trim().is_empty() => {
+                    (p.trim().to_string(), Some(n.trim().to_string()))
+                }
+                _ => (prompt.buf.trim().to_string(), None),
+            };
+            if path.is_empty() {
+                return Err("path is empty — point at a clip, e.g. ~/dl/young-female-4.mp3".into());
+            }
+            Ok(Job::AddSample { layout_root: app.layout_root.clone(), path, name })
         }
         TextKind::Translate => {
             let mut it = prompt.buf.split_whitespace();
@@ -2685,7 +2721,12 @@ async fn handle_key(
             KeyCode::Char(c) if !alt => p.insert(c),
             _ => {}
         }
-        app.screen = Screen::Text(p);
+        // Write back the edited prompt — unless an arm above already closed it
+        // (Esc / successful submit). Doing this unconditionally re-opened the
+        // prompt on every close.
+        if matches!(app.screen, Screen::Text(_)) {
+            app.screen = Screen::Text(p);
+        }
         return false;
     }
 
@@ -2966,6 +3007,14 @@ async fn handle_key(
                 TextKind::AddMachine,
                 "Add machine",
                 "IP or hostname of the box to onboard, e.g. 192.168.2.7",
+                "",
+            ));
+        }
+        KeyCode::Char('A') => {
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::AddSample,
+                "Add sample voice to the pool",
+                "clip path — tags come from the filename; append `as Name` to rename",
                 "",
             ));
         }
@@ -3341,6 +3390,53 @@ mod tests {
         assert!(submit_text(&mut app, &p).is_ok());
         let p = TextPrompt::new(TextKind::CrawlTemplate, "t", "h", "   ");
         assert!(submit_text(&mut app, &p).unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn add_sample_rejects_an_empty_path() {
+        let mut app = App::new("http://x");
+        let p = TextPrompt::new(TextKind::AddSample, "t", "h", "  ");
+        assert!(submit_text(&mut app, &p).unwrap_err().contains("empty"));
+        let p = TextPrompt::new(TextKind::AddSample, "t", "h", "~/dl/young-female-4.mp3");
+        assert!(matches!(submit_text(&mut app, &p), Ok(Job::AddSample { .. })));
+    }
+
+    #[test]
+    fn add_sample_splits_an_as_rename_off_the_path() {
+        let mut app = App::new("http://x");
+        let p = TextPrompt::new(TextKind::AddSample, "t", "h", "refs/trien-chieu.mp3 as Triển Chiêu");
+        match submit_text(&mut app, &p) {
+            Ok(Job::AddSample { path, name, .. }) => {
+                assert_eq!(path, "refs/trien-chieu.mp3");
+                assert_eq!(name.as_deref(), Some("Triển Chiêu"));
+            }
+            other => panic!("expected an add-sample job, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn text_prompt_closes_on_submit_or_esc_but_stays_open_on_error() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        // Esc closes without dispatching.
+        let mut app = App::new("http://x");
+        app.screen = Screen::Text(TextPrompt::new(TextKind::AddSample, "t", "h", "x.mp3"));
+        handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Normal), "Esc must close the prompt");
+        assert!(job_rx.try_recv().is_err(), "a cancelled prompt dispatches nothing");
+
+        // A good submit closes and dispatches exactly one job.
+        app.screen = Screen::Text(TextPrompt::new(TextKind::AddSample, "t", "h", "x.mp3"));
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Normal), "submit must close the prompt");
+        assert!(job_rx.try_recv().is_ok());
+
+        // A bad submit keeps the prompt (and its text) open.
+        app.screen = Screen::Text(TextPrompt::new(TextKind::AddSample, "t", "h", "   "));
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Text(_)), "an error must keep the prompt open");
     }
 
     #[test]

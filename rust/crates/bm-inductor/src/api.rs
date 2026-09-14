@@ -376,6 +376,26 @@ async fn build_roster(
             voices.push(clone);
         }
     }
+    // The sample pool rides the same list: a pooled sample shows its tags where
+    // the style was, so the picker filter (`young`) finds it — and a sample the
+    // registry names but nothing enrolled yet still shows, as vetted-at-adding
+    // like any clone (the render fails loudly if it never gets enrolled).
+    for (name, entry) in bm_core::pool::load_pool(&layout.root.join("voice-pool.json")) {
+        let style = format!("pool: {}", entry.tags.join(", "));
+        match voices.iter_mut().find(|v| v.name == name) {
+            Some(v) => v.style = style,
+            None => voices.push(VoiceInfo {
+                key: String::new(),
+                name,
+                gender: "unknown".into(),
+                accent: "unknown".into(),
+                language: "vi-VN".into(),
+                style,
+                enrolled: true,
+                allowed: true,
+            }),
+        }
+    }
     // Assignable voices first, then by gender then name: a stable order means
     // the picker's cursor does not jump between refreshes.
     voices.sort_by(|a, b| {
