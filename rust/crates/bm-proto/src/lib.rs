@@ -1,0 +1,402 @@
+//! Wire types shared by the inductor (orchestrator) and the worker agents.
+//!
+//! Everything here is plain data plus a few pure helpers, so both binaries can
+//! depend on it without dragging in a runtime.
+
+use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Current wall-clock time in whole seconds since the Unix epoch.
+pub fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The four pipeline stages. TTS is deliberately *not* a stage of its own: it is
+/// a service the `Render` stage calls into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stage {
+    /// Fetch a chapter URL and clean it into plain text.
+    Crawl,
+    /// Digest chapter text into `script-NN.json` and merge the shared bible.
+    Digest,
+    /// Render per-segment audio through the TTS sidecar.
+    Render,
+    /// Assemble cached segments into the final `Ch.N - Title.mp3`.
+    Merge,
+}
+
+impl Stage {
+    pub const ALL: [Stage; 4] = [Stage::Crawl, Stage::Digest, Stage::Render, Stage::Merge];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stage::Crawl => "crawl",
+            Stage::Digest => "digest",
+            Stage::Render => "render",
+            Stage::Merge => "merge",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Stage> {
+        Stage::ALL.into_iter().find(|st| st.as_str() == s)
+    }
+
+    /// Stages that must be `Done` before this one may be assigned.
+    pub fn upstream(self) -> &'static [Stage] {
+        match self {
+            Stage::Crawl => &[],
+            Stage::Digest => &[Stage::Crawl],
+            Stage::Render => &[Stage::Crawl, Stage::Digest],
+            Stage::Merge => &[Stage::Crawl, Stage::Digest, Stage::Render],
+        }
+    }
+
+    /// Whether a stage needs the Python TTS sidecar to be reachable.
+    pub fn needs_tts(self) -> bool {
+        matches!(self, Stage::Render)
+    }
+}
+
+impl std::fmt::Display for Stage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskState {
+    Pending,
+    Assigned,
+    Running,
+    Done,
+    Failed,
+    /// Too many strikes: parked so it stops starving healthy chapters.
+    Shelved,
+}
+
+impl TaskState {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, TaskState::Done | TaskState::Shelved)
+    }
+}
+
+/// One (chapter, stage) unit of work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Task {
+    pub chapter: u32,
+    pub stage: Stage,
+    pub state: TaskState,
+    pub attempts: u32,
+    pub assigned_to: Option<String>,
+    /// Unix seconds. When the lease expires the task returns to the pool
+    /// *without* a strike — silence is not failure.
+    pub lease_until: Option<u64>,
+    pub detail: String,
+    pub updated: u64,
+    /// Machine that must run this task. Set on `Merge` so the segments never
+    /// cross the network: merge runs wherever the render happened.
+    #[serde(default)]
+    pub affinity: Option<String>,
+}
+
+impl Task {
+    pub fn id(&self) -> String {
+        format!("{}:{}", self.stage, self.chapter)
+    }
+
+    pub fn new(chapter: u32, stage: Stage) -> Self {
+        Task {
+            chapter,
+            stage,
+            state: TaskState::Pending,
+            attempts: 0,
+            assigned_to: None,
+            lease_until: None,
+            detail: String::new(),
+            updated: now_secs(),
+            affinity: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MachineState {
+    Unknown,
+    Probing,
+    /// Probed and found already provisioned — nothing to distribute.
+    Configured,
+    Provisioning,
+    Online,
+    Offline,
+    Error,
+}
+
+impl MachineState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MachineState::Unknown => "unknown",
+            MachineState::Probing => "probing",
+            MachineState::Configured => "configured",
+            MachineState::Provisioning => "provisioning",
+            MachineState::Online => "online",
+            MachineState::Offline => "offline",
+            MachineState::Error => "error",
+        }
+    }
+}
+
+/// A machine the inductor knows how to reach. Machines are added by address.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Machine {
+    pub id: String,
+    pub addr: String,
+    pub ssh_user: String,
+    pub ssh_port: u16,
+    #[serde(default)]
+    pub ssh_key: Option<String>,
+    /// `worker`, `tts`, or `both`.
+    pub role: String,
+    pub state: MachineState,
+    pub last_seen: u64,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub tts_url: Option<String>,
+    /// Human-readable note: probe output, error, provision result.
+    pub note: String,
+}
+
+impl Machine {
+    pub fn new(addr: &str, ssh_user: &str, ssh_port: u16, ssh_key: Option<String>, role: &str) -> Self {
+        Machine {
+            id: addr.to_string(),
+            addr: addr.to_string(),
+            ssh_user: ssh_user.to_string(),
+            ssh_port,
+            ssh_key,
+            role: role.to_string(),
+            state: MachineState::Unknown,
+            last_seen: 0,
+            capabilities: Vec::new(),
+            tts_url: None,
+            note: String::new(),
+        }
+    }
+
+    /// `user@host` for ssh/rsync.
+    pub fn ssh_target(&self) -> String {
+        format!("{}@{}", self.ssh_user, self.addr)
+    }
+}
+
+/// Sent by an agent once on startup (and again on reconnect).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Register {
+    pub worker_id: String,
+    pub addr: String,
+    pub hostname: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub tts_url: Option<String>,
+    pub version: String,
+}
+
+/// Sent every few seconds while an agent is alive. This is the real-time
+/// visibility channel the TUI renders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Heartbeat {
+    pub worker_id: String,
+    pub addr: String,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub stage: Option<Stage>,
+    #[serde(default)]
+    pub chapter: Option<u32>,
+    /// 0.0..=1.0 within the current task.
+    pub progress: f32,
+    /// What the worker is doing right now, e.g. "digest ch42 via opencode".
+    pub activity: String,
+    #[serde(default)]
+    pub eta_secs: Option<u64>,
+    pub ts: u64,
+    /// Machine identity reported by the agent, for the TUI's machine column.
+    #[serde(default)]
+    pub hostname: String,
+}
+
+/// Sent when a task finishes (successfully or not).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Complete {
+    pub worker_id: String,
+    pub task_id: String,
+    pub ok: bool,
+    #[serde(default)]
+    pub detail: String,
+    pub duration_secs: f64,
+}
+
+/// A worker asking for work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRequest {
+    pub worker_id: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// The inductor's answer: either a task or "nothing for you".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskOffer {
+    pub task_id: String,
+    pub chapter: u32,
+    pub stage: Stage,
+    /// Absolute path to the repo root the worker should operate in.
+    pub root: String,
+    /// Where to fetch the chapter from (crawl stage).
+    #[serde(default)]
+    pub url: Option<String>,
+    /// TTS sidecar base URL (render stage).
+    #[serde(default)]
+    pub tts_url: Option<String>,
+    pub engine: String,
+    #[serde(default)]
+    pub model_order: Vec<String>,
+    /// Current bible snapshot. The worker uses it to build the prompt and
+    /// mirrors it locally so the cast assigner can read voice hints; it never
+    /// writes the authoritative copy back.
+    #[serde(default)]
+    pub bible: Option<serde_json::Value>,
+    /// Final-mix settings for the merge stage.
+    #[serde(default)]
+    pub gap_ms: u32,
+    #[serde(default = "default_speed")]
+    pub speed: f64,
+    #[serde(default)]
+    pub ambience: bool,
+}
+
+fn default_speed() -> f64 {
+    1.0
+}
+
+/// The five operator-facing operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[derive(Default)]
+pub enum Op {
+    /// Enqueue digest tasks for a chapter range — "proceed with translations".
+    Translate,
+    /// Persist the URL template and probe one crawl — "set up link crawling".
+    CrawlSetup,
+    /// Read the sidecar roster, apply the accent policy, write the cast.
+    Voices,
+    /// Repoint one character's voice and invalidate only its cached segments.
+    SwapVoice,
+    /// Estimate wall-clock time for the remaining range.
+    #[default]
+    Eta,
+}
+
+impl Op {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Op::Translate => "translate",
+            Op::CrawlSetup => "crawl-setup",
+            Op::Voices => "voices",
+            Op::SwapVoice => "swap-voice",
+            Op::Eta => "eta",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Op> {
+        [
+            Op::Translate,
+            Op::CrawlSetup,
+            Op::Voices,
+            Op::SwapVoice,
+            Op::Eta,
+        ]
+        .into_iter()
+        .find(|o| o.as_str() == s)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpRequest {
+    pub op: Op,
+    #[serde(default)]
+    pub start: Option<u32>,
+    #[serde(default)]
+    pub count: Option<u32>,
+    #[serde(default)]
+    pub url_template: Option<String>,
+    #[serde(default)]
+    pub engine: Option<String>,
+    #[serde(default)]
+    pub character: Option<String>,
+    #[serde(default)]
+    pub voice: Option<String>,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpResult {
+    pub ok: bool,
+    pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_roundtrips_through_strings() {
+        for st in Stage::ALL {
+            assert_eq!(Stage::parse(st.as_str()), Some(st));
+        }
+        assert_eq!(Stage::parse("nope"), None);
+    }
+
+    #[test]
+    fn upstream_chain_is_a_prefix_of_all() {
+        for st in Stage::ALL {
+            let idx = Stage::ALL.iter().position(|s| *s == st).unwrap();
+            assert_eq!(st.upstream(), &Stage::ALL[..idx]);
+        }
+    }
+
+    #[test]
+    fn only_render_needs_tts() {
+        assert!(Stage::Render.needs_tts());
+        assert!(!Stage::Crawl.needs_tts());
+        assert!(!Stage::Merge.needs_tts());
+    }
+
+    #[test]
+    fn task_ids_are_stable_and_unique_per_stage() {
+        let a = Task::new(7, Stage::Render);
+        let b = Task::new(7, Stage::Merge);
+        assert_eq!(a.id(), "render:7");
+        assert_ne!(a.id(), b.id());
+    }
+
+    #[test]
+    fn ssh_target_joins_user_and_addr() {
+        let m = Machine::new("10.0.0.5", "pi", 22, None, "worker");
+        assert_eq!(m.ssh_target(), "pi@10.0.0.5");
+    }
+
+    #[test]
+    fn ops_roundtrip_through_kebab_case() {
+        for op in [Op::Translate, Op::CrawlSetup, Op::Voices, Op::SwapVoice, Op::Eta] {
+            assert_eq!(Op::parse(op.as_str()), Some(op));
+        }
+    }
+}
