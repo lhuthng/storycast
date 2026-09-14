@@ -248,6 +248,17 @@ pub struct Complete {
     /// Render stage: how many TTS units actually ran (cache hits excluded).
     #[serde(default)]
     pub units: u64,
+    /// Digest stage: the full script, so the inductor holds the artifact and
+    /// can hand it to whichever machine renders.
+    #[serde(default)]
+    pub script: Option<serde_json::Value>,
+    /// Crawl stage: the cleaned chapter text, for the same reason.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Merge stage: the final mp3, base64. Small enough for LAN; this is how
+    /// a remote merge's product comes home without shared storage.
+    #[serde(default)]
+    pub mp3_b64: Option<String>,
 }
 
 /// A worker asking for work.
@@ -280,6 +291,13 @@ pub struct TaskOffer {
     /// writes the authoritative copy back.
     #[serde(default)]
     pub bible: Option<serde_json::Value>,
+    /// Render/merge stages: the script JSON inline, so any machine can run
+    /// them without shared storage.
+    #[serde(default)]
+    pub script: Option<serde_json::Value>,
+    /// Digest stage: the chapter text inline, for the same reason.
+    #[serde(default)]
+    pub text: Option<String>,
     /// Final-mix settings for the merge stage.
     #[serde(default)]
     pub gap_ms: u32,

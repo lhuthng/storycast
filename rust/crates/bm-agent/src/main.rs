@@ -156,7 +156,7 @@ impl Sidecar {
 // stages (blocking work runs in spawn_blocking; heartbeats stay live)
 // ---------------------------------------------------------------------------
 
-async fn run_crawl(layout: &Layout, n: u32, url: &str, shared: &Shared) -> Result<u64> {
+async fn run_crawl(layout: &Layout, n: u32, url: &str, shared: &Shared) -> Result<(u64, String)> {
     set_progress(shared, 0.05, format!("fetch ch{n}"));
     let text = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
@@ -175,7 +175,7 @@ async fn run_crawl(layout: &Layout, n: u32, url: &str, shared: &Shared) -> Resul
     let dest = layout.chapter_txt(n);
     bm_core::atomic_write(&dest, &cleaned)?;
     set_progress(shared, 1.0, format!("crawled ch{n} ({} chars)", cleaned.len()));
-    Ok(1)
+    Ok((1, cleaned))
 }
 
 async fn run_digest(
@@ -186,7 +186,7 @@ async fn run_digest(
     analyzer: &str,
     shared: &Shared,
     merge_local: bool,
-) -> Result<Value> {
+) -> Result<(Value, Value)> {
     let layout = layout.clone();
     let layout2 = layout.clone();
     let bible = bible.clone();
@@ -219,7 +219,8 @@ async fn run_digest(
         bm_core::digest::save_bible(&local, &layout.bible())?;
     }
     set_progress(shared, 1.0, format!("digest ch{n} done ({} segments)", outcome.segments));
-    Ok(outcome.delta)
+    let script: Value = serde_json::from_str(&std::fs::read_to_string(layout.script(n))?)?;
+    Ok((outcome.delta, script))
 }
 
 async fn run_render(
@@ -238,7 +239,10 @@ async fn run_render(
     let policy = bm_core::voices::policy_for(engine);
     let cast = bm_core::cast::load_cast(&script_path, &cast_path, &layout.bible(), &policy, true)?;
     let local = engine == "vieneu";
-    let units = bm_core::assemble::plan_render(&segments, &cast, &seg_dir, local)?;
+    let planned = bm_core::assemble::drop_headline(&segments);
+    let first = planned.first().map(|s| s.get("text").and_then(|t| t.as_str()).unwrap_or("")).unwrap_or("");
+    let title = bm_core::assemble::title_speech(layout, n, &cast, first);
+    let units = bm_core::assemble::plan_render(planned, &cast, &seg_dir, local, title.as_ref())?;
     let todo: Vec<_> = units
         .into_iter()
         .filter(|u| {
@@ -383,31 +387,51 @@ async fn run_offer(
     offer: &TaskOffer,
     shared: &Shared,
     sidecar: &mut Sidecar,
-) -> Result<(bool, String, Option<Value>, u64)> {
+) -> Result<TaskResult> {
     use bm_proto::Stage::*;
     let n = offer.chapter;
+    // The offer is authoritative: materialize its artifacts first so any
+    // machine can run any stage without shared storage.
+    if let Some(text) = &offer.text {
+        bm_core::atomic_write(&layout.chapter_txt(n), text)?;
+    }
+    if let Some(script) = &offer.script {
+        bm_core::atomic_write(&layout.script(n), &serde_json::to_string_pretty(script)?)?;
+    }
     match offer.stage {
         Crawl => {
             let url = offer.url.clone().unwrap_or_else(|| settings.chapter_url(n));
-            let units = run_crawl(layout, n, &url, shared).await?;
-            Ok((true, format!("crawled ch{n}"), None, units))
+            let (units, text) = run_crawl(layout, n, &url, shared).await?;
+            Ok(TaskResult { ok: true, detail: format!("crawled ch{n}"), delta: None, units, script: None, text: Some(text), mp3_b64: None })
         }
         Digest => {
             let bible = offer.bible.clone().unwrap_or(json!({"characters": []}));
-            let delta = run_digest(layout, n, &bible, settings, "opencode", shared, false).await?;
-            Ok((true, format!("digest ch{n}"), Some(delta), 1))
+            let (delta, script) = run_digest(layout, n, &bible, settings, "opencode", shared, false).await?;
+            Ok(TaskResult { ok: true, detail: format!("digest ch{n}"), delta: Some(delta), units: 1, script: Some(script), text: None, mp3_b64: None })
         }
         Render => {
             sidecar.ensure(layout).await?;
             let units = run_render(layout, n, &offer.engine, &sidecar.tts(), shared).await?;
             sidecar.stop(); // per-task lifecycle: RSS returns to the OS here
-            Ok((true, format!("render ch{n} ({units} calls)"), None, units))
+            Ok(TaskResult { ok: true, detail: format!("render ch{n} ({units} calls)"), delta: None, units, script: None, text: None, mp3_b64: None })
         }
         Merge => {
             let path = run_merge(layout, n, &offer.engine, offer.gap_ms, offer.speed, offer.ambience, shared).await?;
-            Ok((true, format!("merge ch{n} -> {path}"), None, 1))
+            let mp3 = std::fs::read(&path).ok().map(|b| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &b));
+            Ok(TaskResult { ok: true, detail: format!("merge ch{n} -> {path}"), delta: None, units: 1, script: None, text: None, mp3_b64: mp3 })
         }
     }
+}
+
+#[derive(Debug)]
+struct TaskResult {
+    ok: bool,
+    detail: String,
+    delta: Option<Value>,
+    units: u64,
+    script: Option<Value>,
+    text: Option<String>,
+    mp3_b64: Option<String>,
 }
 
 async fn worker_loop(
@@ -465,21 +489,28 @@ async fn worker_loop(
         };
         set_task(&shared, &offer);
         let t0 = Instant::now();
-        let (ok, detail, delta, units) = match run_offer(&layout, &settings, &offer, &shared, &mut sidecar).await {
-            Ok(v) => v,
-            Err(e) => (false, format!("{} ch{} failed: {e:#}", offer.stage, offer.chapter), None, 0),
+        let res = match run_offer(&layout, &settings, &offer, &shared, &mut sidecar).await {
+            Ok(r) => r,
+            Err(e) => TaskResult {
+                ok: false,
+                detail: format!("{} ch{} failed: {e:#}", offer.stage, offer.chapter),
+                delta: None, units: 0, script: None, text: None, mp3_b64: None,
+            },
         };
-        println!("[{}] {}", if ok { "ok" } else { "FAIL" }, detail);
+        println!("[{}] {}", if res.ok { "ok" } else { "FAIL" }, res.detail);
         let _ = http
             .post(format!("{inductor}/api/complete"))
             .json(&Complete {
                 worker_id: worker_id.clone(),
                 task_id: offer.task_id.clone(),
-                ok,
-                detail,
+                ok: res.ok,
+                detail: res.detail,
                 duration_secs: t0.elapsed().as_secs_f64(),
-                bible_delta: delta,
-                units,
+                bible_delta: res.delta,
+                units: res.units,
+                script: res.script,
+                text: res.text,
+                mp3_b64: res.mp3_b64,
             })
             .send()
             .await;

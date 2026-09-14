@@ -176,6 +176,26 @@ fn seg_text(seg: &Value) -> &str {
     seg.get("text").and_then(|t| t.as_str()).unwrap_or("")
 }
 
+/// True when a segment is an embedded chapter headline ("Chương 12: ...").
+/// ASCII-prefix scan only — safe on UTF-8 text.
+pub fn is_headline(text: &str) -> bool {
+    let rest = match text.trim_start().strip_prefix("Chương") {
+        Some(r) => r,
+        None => return false,
+    };
+    rest.trim_start().chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+}
+
+/// Drop an embedded headline so it never plans twice: the synthetic title run
+/// (see [`TitleSpeech`]) replaces it everywhere. Idempotent — every planning
+/// entry point applies it to raw input, so all of them always agree.
+pub fn drop_headline(segments: &[Value]) -> &[Value] {
+    match segments.first() {
+        Some(s) if is_headline(seg_text(s)) => &segments[1..],
+        _ => segments,
+    }
+}
+
 /// Filenames the renderer is expected to produce. Shared by the renderer, the
 /// completeness check and the merger so they can never disagree.
 pub fn expected_wavs(
@@ -183,8 +203,13 @@ pub fn expected_wavs(
     cast: &Cast,
     seg_dir: &Path,
     local: bool,
+    title: Option<&TitleSpeech>,
 ) -> Result<Vec<PathBuf>> {
+    let segments = drop_headline(segments);
     let mut out = Vec::new();
+    if let Some(t) = title {
+        out.push(seg_dir.join(format!("title_{}.wav", t.voice)));
+    }
     if local {
         for run in runs(segments) {
             let a = run.idx[0];
@@ -310,6 +335,61 @@ pub fn run_text(segments: &[Value], idx: &[usize]) -> String {
         .join(" ")
 }
 
+/// The spoken chapter headline ("Chương 46, <title>", Narrator). Digests
+/// routinely drop the headline and concatenation would glue it to the first
+/// line with no pause — so the headline is its own leading run with its own
+/// cache file (`title_<voice>.wav`, never colliding with numeric tags) and
+/// the normal inter-turn gap after it.
+pub struct TitleSpeech {
+    pub voice: String,
+    pub text: String,
+}
+
+pub fn title_speech(
+    layout: &crate::Layout,
+    n: u32,
+    cast: &Cast,
+    first_text: &str,
+) -> Option<TitleSpeech> {
+    let title = layout.chapter_title(n);
+    if title.is_empty() || title == format!("Chapter {n}") {
+        return None; // no chapter text on disk — nothing truthful to say
+    }
+    // The planned first line already carries the headline (a second embedded
+    // headline, or narration quoting the title): don't speak it twice.
+    // Callers pass post-drop text; is_headline matches drop_headline exactly.
+    if first_text.contains(title.as_str()) || is_headline(first_text) {
+        return None;
+    }
+    let voice = cast.get("Narrator")?.clone();
+    Some(TitleSpeech { voice, text: format!("Chương {n}, {title}") })
+}
+
+/// Same, when only the script path is known (merge path): the chapter number
+/// comes from `script-NN.json`, the title from the sibling chapter text.
+pub fn title_speech_for_script(script_path: &Path, cast: &Cast, segments: &[Value]) -> Option<TitleSpeech> {
+    let stem = script_path.file_stem()?.to_str()?;
+    let n: u32 = stem.strip_prefix("script-")?.parse().ok()?;
+    let data_dir = script_path.parent()?;
+    let layout = crate::Layout::new(data_dir.parent()?);
+    let planned = drop_headline(segments);
+    let first = planned.first().map(seg_text).unwrap_or("");
+    title_speech(&layout, n, cast, first)
+}
+
+fn title_unit(seg_dir: &Path, title: &TitleSpeech) -> RenderUnit {
+    RenderUnit {
+        tag: "title".to_string(),
+        dest: seg_dir.join(format!("title_{}.wav", title.voice)),
+        speaker: "Narrator".to_string(),
+        voice: title.voice.clone(),
+        text: title.text.clone(),
+        temperature: 0.80,
+        silence_p: 0.15,
+        indices: Vec::new(),
+    }
+}
+
 /// Decide what to render, without rendering it. The agent turns each unit into
 /// one call to the TTS sidecar.
 pub fn plan_render(
@@ -317,8 +397,13 @@ pub fn plan_render(
     cast: &Cast,
     seg_dir: &Path,
     local: bool,
+    title: Option<&TitleSpeech>,
 ) -> Result<Vec<RenderUnit>> {
+    let segments = drop_headline(segments);
     let mut units = Vec::new();
+    if let Some(t) = title {
+        units.push(title_unit(seg_dir, t));
+    }
     if local {
         for run in runs(segments) {
             let voice = cast
@@ -394,7 +479,8 @@ pub fn segments_complete(
         return false;
     };
     let local = engine == "vieneu";
-    let Ok(wavs) = expected_wavs(segments, &cast, seg_dir, local) else {
+    let title = title_speech_for_script(script_path, &cast, segments);
+    let Ok(wavs) = expected_wavs(segments, &cast, seg_dir, local, title.as_ref()) else {
         return false;
     };
     wavs.iter()
@@ -497,8 +583,9 @@ pub fn assemble(
         .cloned()
         .unwrap_or_default();
     let local = engine == "vieneu";
+    let title = title_speech_for_script(script_path, &cast, &segments);
 
-    let wavs = expected_wavs(&segments, &cast, seg_dir, local)?;
+    let wavs = expected_wavs(&segments, &cast, seg_dir, local, title.as_ref())?;
     let missing: Vec<String> = wavs
         .iter()
         .filter(|w| !w.metadata().map(|m| m.len() > 1000).unwrap_or(false))
@@ -520,7 +607,7 @@ pub fn assemble(
     let mut out_path = out.to_path_buf();
 
     if ambience {
-        let scenes = if local {
+        let mut scenes = if local {
             crate::ambience::run_scenes(&segments, &runs(&segments))
         } else {
             segments
@@ -528,6 +615,11 @@ pub fn assemble(
                 .map(|s| s.get("scene").and_then(|v| v.as_str()).unwrap_or("").to_string())
                 .collect()
         };
+        if title.is_some() {
+            // The headline run leads the wav list; keep scenes aligned with
+            // a dry span so ambience never slides onto the wrong turn.
+            scenes.insert(0, String::new());
+        }
         let amb_out = out_path.with_file_name(format!(
             "{}-amb.{}",
             out_path.file_stem().unwrap_or_default().to_string_lossy(),
@@ -677,10 +769,10 @@ mod tests {
         let mut cast = Cast::new();
         cast.insert("A".into(), "Đức Trí".into());
         cast.insert("B".into(), "Adam".into());
-        let local = expected_wavs(&segs, &cast, Path::new("segs"), true).unwrap();
+        let local = expected_wavs(&segs, &cast, Path::new("segs"), true, None).unwrap();
         assert!(local[0].ends_with("0000-0001_Đức Trí.wav"), "{:?}", local[0]);
         assert!(local[1].ends_with("0002_Adam.wav"), "{:?}", local[1]);
-        let cloud = expected_wavs(&segs, &cast, Path::new("segs"), false).unwrap();
+        let cloud = expected_wavs(&segs, &cast, Path::new("segs"), false, None).unwrap();
         assert!(cloud[0].ends_with("0000_Đức Trí.wav"));
         assert_eq!(cloud.len(), 3);
     }
@@ -688,7 +780,7 @@ mod tests {
     #[test]
     fn expected_wavs_errors_on_an_uncast_speaker() {
         let segs = vec![json!({"speaker": "Nobody", "text": "1"})];
-        let err = expected_wavs(&segs, &Cast::new(), Path::new("s"), true).unwrap_err();
+        let err = expected_wavs(&segs, &Cast::new(), Path::new("s"), true, None).unwrap_err();
         assert!(err.to_string().contains("no voice for"), "{err}");
     }
 
@@ -715,14 +807,119 @@ mod tests {
         ];
         let mut cast = Cast::new();
         cast.insert("A".into(), "Đức Trí".into());
-        let local = plan_render(&segs, &cast, Path::new("s"), true).unwrap();
+        let local = plan_render(&segs, &cast, Path::new("s"), true, None).unwrap();
         assert_eq!(local.len(), 1);
         assert_eq!(local[0].tag, "0000-0001");
         assert_eq!(local[0].text, "one two");
         assert_eq!(local[0].temperature, take_for_mood("calm").0);
 
-        let cloud = plan_render(&segs, &cast, Path::new("s"), false).unwrap();
+        let cloud = plan_render(&segs, &cast, Path::new("s"), false, None).unwrap();
         assert_eq!(cloud.len(), 2);
+    }
+
+    fn titled_layout(tag: &str, headline: &str) -> (PathBuf, crate::Layout) {
+        let d = tmpdir(&format!("title-{tag}"));
+        let l = crate::Layout::new(&d);
+        std::fs::create_dir_all(l.chapters()).unwrap();
+        std::fs::write(l.chapter_txt(7), format!("{headline}\n\nbody\n")).unwrap();
+        (d, l)
+    }
+
+    #[test]
+    fn headline_gets_its_own_leading_run_and_cache_file() {
+        let (_d, l) = titled_layout("t", "Chương 7: Kiếm khí xung thiên. . .");
+        let mut cast = Cast::new();
+        cast.insert("Narrator".into(), "Đức Trí".into());
+        cast.insert("A".into(), "Adam".into());
+        let segs = vec![json!({"speaker": "A", "text": "mở đầu"})];
+        let first = "mở đầu";
+        let title = title_speech(&l, 7, &cast, first).unwrap();
+        assert_eq!(title.text, "Chương 7, Kiếm khí xung thiên");
+        assert_eq!(title.voice, "Đức Trí");
+        let units = plan_render(&segs, &cast, Path::new("s"), true, Some(&title)).unwrap();
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].tag, "title");
+        assert!(units[0].dest.ends_with("title_Đức Trí.wav"), "{:?}", units[0].dest);
+        assert_eq!(units[1].tag, "0000");
+        let wavs = expected_wavs(&segs, &cast, Path::new("s"), true, Some(&title)).unwrap();
+        assert_eq!(wavs.len(), 2);
+        assert!(wavs[0].ends_with("title_Đức Trí.wav"));
+    }
+
+    #[test]
+    fn headline_skipped_when_the_digest_kept_its_own() {
+        let (_d, l) = titled_layout("t", "Chương 7: Kiếm khí xung thiên");
+        let mut cast = Cast::new();
+        cast.insert("Narrator".into(), "Đức Trí".into());
+        assert!(title_speech(&l, 7, &cast, "Kiếm khí xung thiên vang lên").is_none());
+        // A quoted chapter number is dialogue, not a headline: title still spoken.
+        assert!(title_speech(&l, 7, &cast, "\"Chương 7\" ai đó nói").is_some());
+    }
+
+    #[test]
+    fn headline_skipped_without_chapter_text() {
+        let d = tmpdir("title-missing");
+        let l = crate::Layout::new(&d);
+        let mut cast = Cast::new();
+        cast.insert("Narrator".into(), "Đức Trí".into());
+        assert!(title_speech(&l, 7, &cast, "mở đầu").is_none());
+    }
+
+    #[test]
+    fn drop_headline_only_cuts_a_leading_chapter_heading() {
+        let hl = || json!({"speaker": "Narrator", "text": "Chương 7: Kiếm khí xung thiên"});
+        let body = || json!({"speaker": "A", "text": "mở đầu"});
+        assert_eq!(drop_headline(&[hl(), body()]).len(), 1);
+        assert_eq!(drop_headline(&[body(), hl()]).len(), 2); // headline later: kept
+        assert_eq!(drop_headline(&[]).len(), 0);
+        assert!(is_headline("  Chương 12: x"));
+        assert!(!is_headline("Chương pháp này rất hay")); // no digits: content
+        assert!(!is_headline("mở đầu"));
+    }
+
+    #[test]
+    fn kept_headline_never_speaks_twice() {
+        let (_d, l) = titled_layout("t2", "Chương 7: Kiếm khí xung thiên");
+        let mut cast = Cast::new();
+        cast.insert("Narrator".into(), "Đức Trí".into());
+        cast.insert("A".into(), "Adam".into());
+        // Digest kept "Chương 7: ..." as its first segment.
+        let segs = vec![
+            json!({"speaker": "Narrator", "text": "Chương 7: Kiếm khí xung thiên"}),
+            json!({"speaker": "A", "text": "mở đầu"}),
+        ];
+        let planned = drop_headline(&segs);
+        assert_eq!(planned.len(), 1);
+        let first = planned[0].get("text").and_then(|t| t.as_str()).unwrap();
+        let title = title_speech(&l, 7, &cast, first).unwrap();
+        let units = plan_render(planned, &cast, Path::new("s"), true, Some(&title)).unwrap();
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].tag, "title");
+        assert_eq!(units[0].text, "Chương 7, Kiếm khí xung thiên");
+        // The embedded raw headline appears in no unit.
+        assert!(!units.iter().any(|u| u.text.contains("Chương 7:")));
+        let wavs = expected_wavs(&segs, &cast, Path::new("s"), true, Some(&title)).unwrap();
+        assert_eq!(wavs.len(), 2);
+        assert!(wavs[0].ends_with("title_Đức Trí.wav"));
+    }
+
+    #[test]
+    fn stripped_and_kept_scripts_plan_the_same_runs() {
+        let (_d, l) = titled_layout("t3", "Chương 7: Kiếm khí xung thiên");
+        let mut cast = Cast::new();
+        cast.insert("Narrator".into(), "Đức Trí".into());
+        cast.insert("A".into(), "Adam".into());
+        let body = vec![json!({"speaker": "A", "text": "mở đầu"})];
+        let first = "mở đầu";
+        let title = title_speech(&l, 7, &cast, first).unwrap();
+        let a = plan_render(&body, &cast, Path::new("s"), true, Some(&title)).unwrap();
+        let mut kept = vec![json!({"speaker": "Narrator", "text": "Chương 7: x"})];
+        kept.extend(body.clone());
+        let b = plan_render(&kept, &cast, Path::new("s"), true, Some(&title)).unwrap();
+        assert_eq!(
+            a.iter().map(|u| u.tag.clone()).collect::<Vec<_>>(),
+            b.iter().map(|u| u.tag.clone()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
