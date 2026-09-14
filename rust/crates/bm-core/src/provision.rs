@@ -21,6 +21,71 @@ pub const REMOTE_DIR: &str = "bm-worker";
 /// Port the Python TTS sidecar listens on.
 pub const TTS_PORT: u16 = 8818;
 
+/// One linked machine: how to reach a box plus everything `provision` needs to
+/// prepare it, stored in `.bm/machines.json` (see `Layout::machines`) so it is
+/// local-only by construction. A name, not an address, is the handle —
+/// addresses change, the box does not.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkedBox {
+    pub name: String,
+    pub addr: String,
+    #[serde(default = "default_ssh_user")]
+    pub user: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default = "default_role")]
+    pub role: String,
+}
+
+fn default_ssh_user() -> String {
+    "thang".into()
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+fn default_role() -> String {
+    "worker".into()
+}
+
+impl LinkedBox {
+    /// The runtime machine `provision` and the scheduler speak.
+    pub fn machine(&self) -> Machine {
+        let mut m = Machine::new(&self.addr, &self.user, self.port, self.key.clone(), &self.role);
+        m.tts_url = Some(format!("http://127.0.0.1:{TTS_PORT}"));
+        m
+    }
+}
+
+/// Read the linked boxes, or an empty list when nothing is linked yet. A
+/// missing file is not an error — it just means `link` has never run.
+pub fn load_boxes(path: &Path) -> Vec<LinkedBox> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Insert or replace one box by name. Writes are atomic; the file stays valid
+/// if the process dies mid-save.
+pub fn save_box(path: &Path, bxo: &LinkedBox) -> Result<()> {
+    let mut boxes = load_boxes(path);
+    if let Some(slot) = boxes.iter_mut().find(|b| b.name == bxo.name) {
+        *slot = bxo.clone();
+    } else {
+        boxes.push(bxo.clone());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    crate::atomic_write(path, &serde_json::to_string_pretty(&boxes)?)?;
+    Ok(())
+}
+
 /// What a probe found on a machine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Probe {
@@ -391,8 +456,16 @@ echo "PYTHON-OK (fresh venv)"
     /// inside the venv, so a venv rebuild vaporizes it — this step re-enrolls
     /// whatever the probe did not find. Skips the model load entirely when
     /// everything is already enrolled.
+    ///
+    /// `voices.json` and `refs/` are personal and git-ignored (see
+    /// `.gitignore`), so a fresh clone legitimately has neither. Absence means
+    /// "this machine has no clones", not "provisioning failed" — and there is
+    /// nothing to enroll without the reference clips anyway.
     pub fn ensure_voices(&self, repo_root: &Path) -> Result<String> {
         let manifest_src = repo_root.join("voices.json");
+        if !manifest_src.exists() {
+            return Ok("VOICES-OK (no voices.json — no clones to enroll)".to_string());
+        }
         let manifest: std::collections::HashMap<String, String> =
             serde_json::from_str(&std::fs::read_to_string(&manifest_src).with_context(|| {
                 format!("reading {}", manifest_src.display())
@@ -680,8 +753,57 @@ mod tests {
     }
 
     #[test]
-    fn ssh_args_include_port_and_key_only_when_set() {
-        let m = Machine::new("10.0.0.5", "pi", 2222, Some("/k/id".into()), "worker");
+    fn a_missing_voices_manifest_is_not_a_failure() {
+        // `voices.json` and `refs/` are personal and git-ignored, so a fresh
+        // clone has neither. Provisioning must read that as "no clones" rather
+        // than as a failure — and it must decide that without reaching for ssh.
+        // The target below is TEST-NET-1, so any attempt to connect fails.
+        let ssh = Ssh {
+            target: "nobody@192.0.2.1".into(),
+            port: 22,
+            key: None,
+            local: false,
+        };
+        let empty = std::env::temp_dir().join("bm-provision-no-voices");
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).unwrap();
+
+        let out = ssh
+            .ensure_voices(&empty)
+            .expect("a missing manifest is a valid state, not an error");
+        assert!(out.contains("no voices.json"), "got: {out}");
+    }
+
+    #[test]
+    fn linked_boxes_round_trip_and_upsert_by_name() {
+        let dir = std::env::temp_dir().join("bm-provision-boxes");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("machines.json");
+        assert!(super::load_boxes(&path).is_empty(), "missing file, not an error");
+
+        let bxo = super::LinkedBox {
+            name: "box-1".into(),
+            addr: "192.168.2.2".into(),
+            user: "thang".into(),
+            port: 22,
+            key: Some("/k/id".into()),
+            role: "worker".into(),
+        };
+        super::save_box(&path, &bxo).unwrap();
+        let again = super::LinkedBox { addr: "10.0.0.9".into(), ..bxo.clone() };
+        super::save_box(&path, &again).unwrap();
+
+        let boxes = super::load_boxes(&path);
+        assert_eq!(boxes.len(), 1, "same name replaces, never duplicates");
+        assert_eq!(boxes[0].addr, "10.0.0.9");
+
+        let m = boxes[0].machine();
+        assert_eq!(m.ssh_target(), "thang@10.0.0.9");
+        assert_eq!(m.tts_url.as_deref(), Some("http://127.0.0.1:8818"));
+    }
+
+    #[test]
+    fn ssh_args_include_port_and_key_only_when_set() {        let m = Machine::new("10.0.0.5", "pi", 2222, Some("/k/id".into()), "worker");
         let ssh = Ssh::for_machine(&m);
         let args = ssh.ssh_args();
         assert!(args.contains(&"-p".to_string()));

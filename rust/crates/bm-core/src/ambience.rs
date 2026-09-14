@@ -262,12 +262,19 @@ fn join_beds(slices: &[(PathBuf, Span)], out: &Path, total: f64) -> Result<()> {
 
 /// Mix per-scene beds + room reverb under the voice track.
 /// `scenes` aligns with `wavs`.
+///
+/// `work` is a directory the caller owns, used for the per-span slices this
+/// pass needs. It is created on demand and never cleaned up here, so pass a
+/// throwaway path — the merge passes its per-chapter scratch directory.
+/// Deriving it from `out.parent()` instead used to scatter `.amb_tmp` wherever
+/// the output happened to live.
 pub fn apply_ambience(
     voice_wav: &Path,
     scenes: &[String],
     wavs: &[PathBuf],
     gap_ms: u32,
     out: &Path,
+    work: &Path,
     assets: &Path,
 ) -> Result<PathBuf> {
     let cfg = load_map(&assets.join("scene-map.json"))?;
@@ -297,10 +304,7 @@ pub fn apply_ambience(
         return Ok(voice_wav.to_path_buf());
     }
 
-    let work = out
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".amb_tmp");
+    let work = work.join("amb");
     std::fs::create_dir_all(&work)?;
 
     // 1. voice track with per-scene reverb

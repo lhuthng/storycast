@@ -1,6 +1,0 @@
-{
- "_note": "Clone voices enrolled on every worker during provisioning. Re-enrolled automatically when missing (e.g. after a venv rebuild wipes the voice store). Reference clips live in refs/.",
- "Nobita": "refs/nobita.wav",
- "Shizuka": "refs/shizuka.wav",
- "Suneo": "refs/suneo.wav"
-}

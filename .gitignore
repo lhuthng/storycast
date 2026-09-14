@@ -9,6 +9,20 @@ __pycache__/
 *.log
 .venv/
 
+# Working documents: audits, proposals, plans, notes. They describe a moment in
+# the code's life rather than the code itself, and are regenerated on demand —
+# so they live in one ignored directory instead of being pattern-matched by
+# name, which would risk catching a document that should be tracked. None of
+# them is a build input.
+/.docs/
+
+# Personal voice data. `voices.default.json` (the shipped catalogue) IS tracked;
+# these two are the machine-local half — the clones enrolled on this machine and
+# the reference clips they were built from. A fresh clone simply has no clones,
+# which is a valid state (see `enrolled_voices` / `ensure_voices`).
+/voices.json
+/refs/
+
 # OS noise
 .DS_Store
 

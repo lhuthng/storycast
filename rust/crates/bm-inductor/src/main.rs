@@ -1,6 +1,7 @@
 //! Inductor: control API + scheduler. Workers report facts; this decides.
 
 mod api;
+mod roster;
 mod state;
 mod tui;
 
@@ -36,9 +37,12 @@ enum Cmd {
     },
     /// Onboard one machine by address: probe, push what's missing, verify.
     Provision {
-        /// Machine address (IP or hostname).
+        /// Linked box name (from `link`); skips retyping addr/user/key.
         #[arg(long)]
-        addr: String,
+        r#box: Option<String>,
+        /// Machine address (IP or hostname). Required unless --box is given.
+        #[arg(long)]
+        addr: Option<String>,
         /// SSH user.
         #[arg(long, default_value = "thang")]
         user: String,
@@ -60,6 +64,50 @@ enum Cmd {
         /// Inductor API base URL.
         #[arg(long, default_value = "http://127.0.0.1:8901")]
         api: String,
+        /// Print one plain-text snapshot and exit instead of drawing the
+        /// dashboard. Needs no terminal, so it works with screen readers,
+        /// `watch(1)` and shell pipelines.
+        #[arg(long)]
+        once: bool,
+    },
+    /// Voice roster maintenance. Local only — touches no worker.
+    Roster {
+        #[command(subcommand)]
+        cmd: RosterCmd,
+    },
+    /// Link a machine by name: remembers how to reach it so `provision --box`
+    /// needs no flags. Writes `.bm/machines.json`, which is ignored.
+    Link {
+        /// Short handle, e.g. `box-1`.
+        #[arg(long)]
+        name: String,
+        /// Machine address (IP or hostname).
+        #[arg(long)]
+        addr: String,
+        /// SSH user.
+        #[arg(long, default_value = "thang")]
+        user: String,
+        /// SSH port.
+        #[arg(long, default_value = "22")]
+        port: u16,
+        /// SSH key path.
+        #[arg(long)]
+        key: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RosterCmd {
+    /// Rewrite the cast files to store catalogue keys instead of display names,
+    /// keeping a `.bak` of each.
+    ///
+    /// Not a prerequisite for anything: the reader accepts both forms and the
+    /// writer keys the file on its next save. This does it now, and shows what
+    /// changed.
+    MigrateCast {
+        /// Report what would change and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -200,6 +248,47 @@ async fn cmd_provision(
     Ok(())
 }
 
+/// Report a `migrate-cast` run: what changed, what could not, and where the
+/// backup went.
+fn cmd_roster_migrate_cast(layout: &Layout, dry_run: bool) -> anyhow::Result<()> {
+    let runs = roster::migrate_cast(layout, dry_run)?;
+    if runs.is_empty() {
+        println!("no cast files under {}", layout.data().display());
+        return Ok(());
+    }
+    for r in runs {
+        let outcome = if r.written {
+            ", rewritten"
+        } else if dry_run {
+            " [dry run]"
+        } else if r.changed.is_empty() {
+            ", already keyed"
+        } else {
+            ", unchanged"
+        };
+        println!(
+            "{} ({}) — {} entries, {} keyed{}",
+            r.path.display(),
+            r.engine,
+            r.entries,
+            r.keyed,
+            outcome
+        );
+        for (character, old, new) in &r.changed {
+            println!("  {character}: {old} -> {new}");
+        }
+        // Never silent: an entry with no key is a clone, or a voice the
+        // catalogue has dropped, and the operator is the one who can tell which.
+        for line in &r.unmigratable {
+            println!("  no catalogue key, left as a name: {line}");
+        }
+        if r.written {
+            println!("  backup: {}", r.backup().display());
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -209,14 +298,71 @@ async fn main() -> anyhow::Result<()> {
     };
     bm_core::config::load_dotenv(&layout.root.join(".env"));
     let settings = Settings::load(&layout.settings());
-    check_bins()?;
+    // `roster` is local JSON work: requiring ssh/rsync/ffmpeg to rewrite a cast
+    // file would make it unusable on exactly the machine that needs it.
+    if !matches!(&cli.cmd, Cmd::Roster { .. }) {
+        check_bins()?;
+    }
     match cli.cmd {
         Cmd::Serve { port, bind, start, count } => {
             cmd_serve(layout, settings, port, &bind, start, count).await
         }
-        Cmd::Provision { addr, user, port, key, api_port, force } => {
+        Cmd::Provision { r#box, addr, user, port, key, api_port, force } => {
+            // A linked box fills every flag it stored; explicit flags win for
+            // the rest. Neither is an error until both are missing an address.
+            let linked = r#box
+                .as_deref()
+                .map(|name| {
+                    bm_core::provision::load_boxes(&layout.machines())
+                        .into_iter()
+                        .find(|b| b.name == name)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "no linked box {name:?} (see `link --help`)"
+                            )
+                        })
+                })
+                .transpose()?;
+            let addr = addr
+                .or_else(|| linked.as_ref().map(|b| b.addr.clone()))
+                .ok_or_else(|| anyhow::anyhow!("provision needs --box or --addr"))?;
+            // clap's defaults must not shadow a linked value: only an
+            // explicitly passed flag wins over the box.
+            let user = if user != "thang" {
+                user
+            } else {
+                linked.as_ref().map(|b| b.user.clone()).unwrap_or(user)
+            };
+            let port = if port != 22 {
+                port
+            } else {
+                linked.as_ref().map(|b| b.port).unwrap_or(port)
+            };
+            let key = key.or_else(|| linked.as_ref().and_then(|b| b.key.clone()));
             cmd_provision(layout, addr, user, port, key, api_port, force).await
         }
-        Cmd::Tui { api } => tui::run(&api, layout).await,
+        Cmd::Link { name, addr, user, port, key } => {
+            let bxo = bm_core::provision::LinkedBox {
+                name: name.clone(),
+                addr,
+                user,
+                port,
+                key,
+                role: "worker".into(),
+            };
+            bm_core::provision::save_box(&layout.machines(), &bxo)?;
+            println!("linked {name} -> {}", layout.machines().display());
+            Ok(())
+        }
+        Cmd::Tui { api, once } => {
+            if once {
+                tui::snapshot(&api).await
+            } else {
+                tui::run(&api, layout).await
+            }
+        }
+        Cmd::Roster { cmd } => match cmd {
+            RosterCmd::MigrateCast { dry_run } => cmd_roster_migrate_cast(&layout, dry_run),
+        },
     }
 }

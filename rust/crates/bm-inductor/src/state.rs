@@ -483,28 +483,54 @@ impl Inner {
     /// Other characters keep their cache; affected chapters re-render + merge.
     pub fn op_swap_voice(&mut self, character: &str, voice: &str) -> anyhow::Result<String> {
         let engine = self.settings.engine.clone();
-        let policy = bm_core::voices::policy_for(&engine);
+        // The operator's own roster, not the shipped default: this is the gate
+        // that decides what may be assigned on this machine.
+        let policy = bm_core::voices::effective_policy(&self.layout.roster(), &engine)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let cast_path = self.layout.cast(&engine);
-        let mut cast = bm_core::cast::read_cast(&cast_path);
+        // Accept either form: the picker sends display names today, but a key is
+        // the stable identifier and both have to work.
+        let voice = bm_core::voices::resolve_voice_name(&engine, voice);
+        let mut cast = bm_core::cast::read_cast(&engine, &cast_path);
         let old = cast.get(character).cloned().unwrap_or_default();
-        // Offline trust rule (mirrors the agent gate): Central/South presets
-        // or a voice already assigned somewhere (an enrolled clone in use).
-        let allowed: std::collections::HashSet<&str> = policy
-            .allowed
+        // Trust rule (mirrors the agent gate):
+        //   * an admitted preset, or
+        //   * a voice the catalogue does not declare at all — an enrolled clone —
+        //     that is already assigned somewhere.
+        //
+        // An empty `allowed` is "no restriction", not "nothing allowed": the same
+        // reading `violations()` and `voice_from_label` use. Treating it as
+        // "nothing is allowed" would make the picker refuse every voice on a
+        // default install, which has no local roster.
+        //
+        // The clone escape hatch is keyed on "not declared" rather than "not in
+        // the allow-list". Keyed on the allow-list it would also let a *declared*
+        // preset that the operator excluded back in, simply because it was
+        // already assigned — which is how an exclusion quietly stops applying.
+        let declared = policy
+            .male
             .iter()
-            .map(|s| s.as_str())
-            .collect();
-        let in_use: Vec<String> = cast.values().cloned().collect();
-        if !allowed.contains(voice) && !in_use.iter().any(|v| v == voice) {
+            .chain(&policy.female)
+            .chain(&policy.neutral)
+            .any(|n| n == &voice);
+        let in_use = cast.values().any(|v| v == &voice);
+        let admitted = if policy.allowed.is_empty() {
+            true
+        } else if declared {
+            policy.allowed.iter().any(|a| a == &voice)
+        } else {
+            in_use
+        };
+        if !admitted {
             anyhow::bail!(
-                "voice {voice:?} is neither a Central/South preset nor currently assigned"
+                "voice {voice:?} is neither an admitted preset nor currently assigned"
             );
         }
         if old == voice {
             return Ok(format!("{character} already speaks as {voice} — nothing to do"));
         }
-        cast.insert(character.to_string(), voice.to_string());
-        bm_core::write_json(&cast_path, &cast)?;
+        cast.insert(character.to_string(), voice.clone());
+        bm_core::cast::write_cast(&engine, &cast_path, &cast)?;
         // Surgical invalidation: only this speaker's run files (+ the headline
         // file when the Narrator itself moves), only where scripts exist.
         let mut chapters: Vec<u32> = Vec::new();
@@ -619,6 +645,82 @@ impl Inner {
         }
         out
     }
+
+    /// The cast exactly as the cast file holds it.
+    pub fn cast_snapshot(&self) -> std::collections::BTreeMap<String, String> {
+        bm_core::cast::read_cast(&self.settings.engine, &self.layout.cast(&self.settings.engine))
+    }
+
+    /// Every speaker the inductor can name: the operator's cast, the cast file,
+    /// the bible, and every script's roster and segments.
+    ///
+    /// This is the voice picker's first step — without it the operator has to
+    /// recall exact Vietnamese character names from memory. The shipped
+    /// catalogue carries no character names, so the seed is the operator's own
+    /// roster; a malformed one seeds nothing, which is a missing convenience
+    /// rather than a broken gate.
+    pub fn known_characters(&self) -> Vec<String> {
+        use std::collections::BTreeSet;
+        let engine = self.settings.engine.clone();
+        let mut set: BTreeSet<String> = BTreeSet::new();
+        let (effective, _) =
+            bm_core::voices::effective_engine_lenient(&self.layout.roster(), &engine);
+        for (name, _) in &effective.to_policy(&engine).default_cast {
+            set.insert(name.clone());
+        }
+        for name in self.cast_snapshot().keys() {
+            set.insert(name.clone());
+        }
+        let bible = bm_core::digest::load_bible(&self.layout.bible());
+        if let Some(chars) = bible.get("characters").and_then(|c| c.as_array()) {
+            for c in chars {
+                if let Some(n) = c.get("name").and_then(|n| n.as_str()) {
+                    if !n.is_empty() {
+                        set.insert(n.to_string());
+                    }
+                }
+            }
+        }
+        let mut scripts: Vec<std::path::PathBuf> = std::fs::read_dir(self.layout.data())
+            .map(|rd| {
+                rd.filter_map(|e| e.ok().map(|x| x.path()))
+                    .filter(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.starts_with("script-") && n.ends_with(".json"))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        scripts.sort();
+        for sp in scripts {
+            let Ok(data) = bm_core::read_json::<Value>(&sp) else {
+                continue;
+            };
+            if let Some(roster) = data.get("roster").and_then(|r| r.as_array()) {
+                for n in roster.iter().filter_map(|v| v.as_str()) {
+                    if !n.is_empty() {
+                        set.insert(n.to_string());
+                    }
+                }
+            }
+            if let Some(segs) = data.get("segments").and_then(|s| s.as_array()) {
+                for s in segs {
+                    if let Some(sp) = s.get("speaker").and_then(|v| v.as_str()) {
+                        if !sp.is_empty() {
+                            set.insert(sp.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        // `Narrator` is the one speaker that always exists; it leads the list.
+        set.remove("Narrator");
+        let mut out: Vec<String> = std::iter::once("Narrator".to_string()).collect();
+        out.extend(set);
+        out
+    }
 }
 
 #[cfg(test)]
@@ -659,19 +761,48 @@ mod tests {
         assert!(!layout.final_mp3(1).exists(), "stale product goes away");
         assert_eq!(inner.tasks["render:1"].state, TaskState::Pending);
         assert_eq!(inner.tasks["merge:1"].state, TaskState::Pending);
-        let cast: std::collections::HashMap<String, String> =
-            bm_core::read_json(&layout.cast("vieneu")).unwrap();
+        // The swap's *meaning* is checked through the reader (which resolves
+        // keys back to names), and the stored form is checked directly — the
+        // file persists keys now, so both assertions matter.
+        let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
         assert_eq!(cast["A"], "Minh Triết");
         assert_eq!(cast["B"], "Adam", "untouched speakers survive");
+        let disk: std::collections::HashMap<String, String> =
+            bm_core::read_json(&layout.cast("vieneu")).unwrap();
+        assert_eq!(disk["A"], "minh-triet", "persisted as a key, not a name");
+        assert_eq!(disk["B"], "adam");
     }
 
     #[test]
-    fn swap_rejects_unknown_voices_and_noops_identical() {
+    fn swap_admits_anything_until_the_operator_narrows_it() {
         let (_d, mut inner) = fixture();
-        std::fs::write(inner.layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
-        assert!(inner.op_swap_voice("A", "Bắc Giang").is_err());
-        let msg = inner.op_swap_voice("A", "Đức Trí").unwrap();
-        assert!(msg.contains("nothing to do"), "{msg}");
+        let layout = inner.layout.clone();
+        std::fs::create_dir_all(layout.bm_state()).unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+
+        // No local roster, so the shipped catalogue applies — and it restricts
+        // nothing. A Northern preset that the old hardcoded Central/South policy
+        // refused is assignable, which is the whole point of the split.
+        assert!(inner.op_swap_voice("A", "Minh Đức").is_ok());
+
+        // Narrow it the way an operator would, and the same voice is refused.
+        std::fs::write(
+            layout.roster(),
+            r#"{"version":1,"engines":{"vieneu":{"policy":{"excluded_accents":["Northern"]}}}}"#,
+        )
+        .unwrap();
+        let err = inner.op_swap_voice("A", "Minh Đức").unwrap_err().to_string();
+        assert!(err.contains("neither an admitted preset"), "{err}");
+
+        // An admitted voice still swaps.
+        let msg = inner.op_swap_voice("A", "Quang Sơn").unwrap();
+        assert!(msg.contains("->"), "{msg}");
+
+        // A malformed roster is refused outright rather than silently ignored:
+        // falling back to the catalogue would re-admit every excluded voice.
+        std::fs::write(layout.roster(), "{ this is not json").unwrap();
+        let err = inner.op_swap_voice("A", "Đức Trí").unwrap_err().to_string();
+        assert!(err.contains("parsing"), "{err}");
     }
 
     #[test]

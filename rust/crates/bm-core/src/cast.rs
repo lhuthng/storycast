@@ -25,12 +25,61 @@ fn strings(v: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Read a cast file, or an empty map when it does not exist yet.
-pub fn read_cast(path: &Path) -> Cast {
+/// Read a cast file, resolving every value to a display name.
+///
+/// The file may hold catalogue **keys** or display **names**: keys are what the
+/// writer emits, and the form that survives a voice being renamed; names are
+/// what an un-migrated file holds. Resolving both here is what lets the rest of
+/// the pipeline keep speaking names while the persisted form stays stable — and
+/// it makes the migration optional rather than a gate that must fire before
+/// anything else may run.
+pub fn read_cast(engine: &str, path: &Path) -> Cast {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str::<Cast>(&t).ok())
+        .map(|cast| {
+            cast.into_iter()
+                .map(|(character, voice)| {
+                    (character, crate::voices::resolve_voice_name(engine, &voice))
+                })
+                .collect()
+        })
         .unwrap_or_default()
+}
+
+/// The on-disk form of a cast: catalogue keys where a voice has one, the display
+/// name otherwise.
+///
+/// Writing keys is what makes the file survive a rename. A voice the catalogue
+/// does not declare — an enrolled clone, until stage 3 gives it a key — is
+/// written as its name, which still resolves on read, so an assignment is never
+/// lost to the migration.
+fn cast_for_disk(engine: &str, cast: &Cast) -> Cast {
+    cast.iter()
+        .map(|(character, voice)| {
+            let value =
+                crate::voices::key_for_name(engine, voice).unwrap_or_else(|| voice.clone());
+            (character.clone(), value)
+        })
+        .collect()
+}
+
+/// Write a cast in its on-disk form: catalogue keys where a voice has one.
+///
+/// The only sanctioned way to persist a cast. A caller that serialises the map
+/// itself writes display names, which silently reverts the file to the fragile
+/// form — so writes go through here, and `cast_for_disk` stays private.
+pub fn write_cast(engine: &str, path: &Path, cast: &Cast) -> Result<()> {
+    write_json(path, &cast_for_disk(engine, cast))
+}
+
+/// The on-disk form of a cast without writing it.
+///
+/// Exposed so tooling can show what a write *would* produce — `roster
+/// migrate-cast --dry-run` needs exactly this, and computing it a second way
+/// would be a second chance to disagree with the writer.
+pub fn cast_on_disk(engine: &str, cast: &Cast) -> Cast {
+    cast_for_disk(engine, cast)
 }
 
 /// Resolve the full cast for a chapter, assigning any missing speaker.
@@ -106,12 +155,10 @@ pub fn load_cast(
 
     // --- merge defaults, then the on-disk cast -------------------------------
     let mut cast: Cast = policy.default_cast.iter().cloned().collect();
-    if let Ok(text) = std::fs::read_to_string(cast_path) {
-        if let Ok(on_disk) = serde_json::from_str::<Cast>(&text) {
-            for (k, v) in on_disk {
-                cast.insert(k, v);
-            }
-        }
+    // `read_cast` resolves keys *and* names, so a migrated, half-migrated or
+    // untouched file all arrive here as display names.
+    for (character, voice) in read_cast(&policy.engine, cast_path) {
+        cast.insert(character, voice);
     }
 
     // --- assign the gaps -----------------------------------------------------
@@ -148,7 +195,8 @@ pub fn load_cast(
     }
 
     if save {
-        write_json(cast_path, &cast)?;
+        // Persist keys, not names — a renamed voice must not orphan the cast.
+        write_cast(&policy.engine, cast_path, &cast)?;
     }
     Ok(cast)
 }
@@ -191,10 +239,12 @@ mod tests {
         assert!(cast.contains_key("Narrator"));
         assert!(cast.contains_key("New Guy"));
         assert!(cast_path.exists(), "save=true must persist");
+        // The shipped policy restricts nothing, so the invariant is "no
+        // violations" rather than "the name appears in an allow-list".
         let p = vieneu_policy();
-        for v in cast.values() {
-            assert!(p.allowed.contains(v), "voice {v} violates the accent policy");
-        }
+        let pairs: Vec<(String, String)> =
+            cast.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        assert!(p.violations(&pairs, &[]).is_empty());
     }
 
     #[test]
@@ -258,5 +308,105 @@ mod tests {
             "expected a female preset, got {:?}",
             cast.get("Cô Bé")
         );
+    }
+
+    // --- stage 2: the cast file stores keys, the reader accepts both --------
+
+    fn on_disk(path: &Path) -> BTreeMap<String, String> {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_name_based_cast_reads_and_is_rewritten_as_keys() {
+        // The un-migrated form. Reading must resolve names, and the next write
+        // must key the file — otherwise the rename-fragility never goes away and
+        // the migration is something an operator has to remember forever.
+        let d = tmpdir("migrate-on-write");
+        let script = d.join("script-01.json");
+        std::fs::write(&script, r#"{"roster":["Narrator"],"segments":[]}"#).unwrap();
+        let cast_path = d.join("cast-vieneu.json");
+        std::fs::write(&cast_path, r#"{"Narrator":"Đức Trí"}"#).unwrap();
+
+        let cast = load_cast(&script, &cast_path, &d.join("bible.json"), &vieneu_policy(), true)
+            .unwrap();
+        assert_eq!(
+            cast.get("Narrator").unwrap(),
+            "Đức Trí",
+            "in memory the pipeline still speaks names"
+        );
+        assert_eq!(
+            on_disk(&cast_path).get("Narrator").unwrap(),
+            "duc-tri",
+            "on disk it is a key, so a rename cannot orphan the assignment"
+        );
+    }
+
+    #[test]
+    fn a_key_based_cast_reads_back_as_names_and_does_not_churn() {
+        let d = tmpdir("from-keys");
+        let script = d.join("script-01.json");
+        std::fs::write(
+            &script,
+            r#"{"roster":["Narrator","Dịch Phong"],"segments":[]}"#,
+        )
+        .unwrap();
+        let cast_path = d.join("cast-vieneu.json");
+        std::fs::write(&cast_path, r#"{"Narrator":"duc-tri","Dịch Phong":"thai-son"}"#).unwrap();
+
+        let cast = load_cast(&script, &cast_path, &d.join("bible.json"), &vieneu_policy(), true)
+            .unwrap();
+        assert_eq!(cast.get("Narrator").unwrap(), "Đức Trí");
+        assert_eq!(cast.get("Dịch Phong").unwrap(), "Thái Sơn");
+        // Keys in, keys out: re-writing a migrated file is a no-op in shape.
+        let disk = on_disk(&cast_path);
+        assert_eq!(disk.get("Narrator").unwrap(), "duc-tri");
+        assert_eq!(disk.get("Dịch Phong").unwrap(), "thai-son");
+    }
+
+    #[test]
+    fn a_clone_without_a_key_keeps_its_name_on_disk() {
+        // Clones have no catalogue key until stage 3, so the assignment is
+        // written as a name — and must still resolve on the way back in.
+        let d = tmpdir("clone-name");
+        let script = d.join("script-01.json");
+        std::fs::write(&script, r#"{"roster":["Suneo"],"segments":[]}"#).unwrap();
+        let cast_path = d.join("cast-vieneu.json");
+        std::fs::write(&cast_path, r#"{"Suneo":"Suneo"}"#).unwrap();
+
+        let cast = load_cast(&script, &cast_path, &d.join("bible.json"), &vieneu_policy(), true)
+            .unwrap();
+        assert_eq!(cast.get("Suneo").unwrap(), "Suneo");
+        assert_eq!(on_disk(&cast_path).get("Suneo").unwrap(), "Suneo");
+    }
+
+    #[test]
+    fn a_half_migrated_cast_works() {
+        // The property the whole design rests on: a file with one keyed entry and
+        // one named entry renders, so the migration can be interrupted.
+        let d = tmpdir("half-migrated");
+        let script = d.join("script-01.json");
+        std::fs::write(
+            &script,
+            r#"{"roster":["Narrator","Dịch Phong"],"segments":[]}"#,
+        )
+        .unwrap();
+        let cast_path = d.join("cast-vieneu.json");
+        std::fs::write(&cast_path, r#"{"Narrator":"duc-tri","Dịch Phong":"Thái Sơn"}"#).unwrap();
+
+        let cast = load_cast(&script, &cast_path, &d.join("bible.json"), &vieneu_policy(), false)
+            .unwrap();
+        assert_eq!(cast.get("Narrator").unwrap(), "Đức Trí");
+        assert_eq!(cast.get("Dịch Phong").unwrap(), "Thái Sơn");
+    }
+
+    #[test]
+    fn an_unknown_voice_is_preserved_rather_than_silently_reassigned() {
+        // The cast overview has to be able to flag this; substituting a valid
+        // voice would hide a real problem behind a plausible render.
+        let d = tmpdir("unknown");
+        let cast_path = d.join("cast-vieneu.json");
+        std::fs::write(&cast_path, r#"{"Narrator":"Đã Biến Mất"}"#).unwrap();
+        let cast = read_cast("vieneu", &cast_path);
+        assert_eq!(cast.get("Narrator").unwrap(), "Đã Biến Mất");
     }
 }
