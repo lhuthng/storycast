@@ -75,6 +75,8 @@ Then start an agent there pointing at the inductor:
 
 TUI keys: `a` add machine · `p` provision selected · `P` force re-provision ·
 `d` drop · `i` inspect · `r` refresh · `?` help · `C` colour · `q` quit.
+`A` pools a sample clip: tags come from the filename
+(`young-female-4.mp3` → young, female).
 `bm-inductor tui --api http://127.0.0.1:8901`.
 
 `s` (swap voice) opens a two-step picker instead of a blind prompt: pick the
@@ -192,6 +194,7 @@ The personal voice data is ignored too:
 |---|---|
 | `voices.default.json` | **tracked** — the shipped catalogue |
 | `voices.json` | clones enrolled on this machine, and the clips they came from |
+| `voice-pool.json` | which of those clones are pooled samples, and their tags |
 | `refs/*.wav` | the reference clips — the *input* to enrolment |
 
 The last two are the trade: a fresh clone has no clones, and cannot rebuild them
@@ -199,6 +202,24 @@ from git alone, because the reference clips are the input rather than a build
 artifact. Copy them from a machine that has them. Provisioning treats their
 absence as a valid state (`VOICES-OK (no voices.json — no clones to enroll)`)
 rather than a failure.
+
+## Sample pool: tag-matched voices
+
+Each bible character carries `tags` (`young old male female strong weak …`,
+free-form). Each pooled clip is tagged the same way — the filename suggests
+them, the registry decides:
+
+```bash
+./rust/target/debug/bm-inductor roster add-sample refs/young-female-4.mp3
+# pool: young-female-4 [young, female] · voices.json mapped for next provision
+```
+
+A sample voices a character when they share at least one tag and clash on
+none (`young+male` never gets `young-female-1`). New tagged characters roll
+the least-used compatible sample automatically; `v` (voices) never overwrites
+an assignment, and `s` swaps one as before. Pooled samples show as
+`pool: young, female` in the picker, so typing a tag filters them. Untagged
+characters (and an empty pool) fall back to the preset pools exactly as before.
 
 ## How scheduling works
 

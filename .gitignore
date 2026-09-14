@@ -17,10 +17,12 @@ __pycache__/
 /.docs/
 
 # Personal voice data. `voices.default.json` (the shipped catalogue) IS tracked;
-# these two are the machine-local half — the clones enrolled on this machine and
-# the reference clips they were built from. A fresh clone simply has no clones,
-# which is a valid state (see `enrolled_voices` / `ensure_voices`).
+# these three are the machine-local half — the clones enrolled on this machine,
+# the sample pool tagged from their filenames, and the reference clips both are
+# built from. A fresh clone simply has no clones, which is a valid state
+# (see `enrolled_voices` / `ensure_voices`).
 /voices.json
+/voice-pool.json
 /refs/
 
 # OS noise

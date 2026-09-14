@@ -109,6 +109,21 @@ enum RosterCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Add a sample clip to the voice pool: copies it under `refs/`, takes its
+    /// tags from the filename (`young-female-4.mp3` → young, female), registers
+    /// it in `voice-pool.json` and maps it in `voices.json` so the next
+    /// provision enrolls it on workers.
+    AddSample {
+        /// Clip to add (mp3/wav/m4a/ogg/flac).
+        path: std::path::PathBuf,
+        /// Override the filename tags: `--tags young,female`.
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+        /// Voice name to register under (default: the file stem).
+        /// `refs/narrator.mp3 --name Narrator` voices as `Narrator`.
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 /// Blocking provision run shared by the CLI and the TUI background task.
@@ -248,6 +263,20 @@ async fn cmd_provision(
     Ok(())
 }
 
+/// Add one clip to the sample pool, reporting what the filename suggested.
+fn cmd_roster_add_sample(
+    layout: &Layout,
+    path: &std::path::Path,
+    tags: Vec<String>,
+    name: Option<String>,
+) -> anyhow::Result<()> {
+    let tags = if tags.is_empty() { None } else { Some(tags) };
+    for line in bm_core::pool::add_sample(&layout.root, path, tags, name)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
 /// Report a `migrate-cast` run: what changed, what could not, and where the
 /// backup went.
 fn cmd_roster_migrate_cast(layout: &Layout, dry_run: bool) -> anyhow::Result<()> {
@@ -363,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Roster { cmd } => match cmd {
             RosterCmd::MigrateCast { dry_run } => cmd_roster_migrate_cast(&layout, dry_run),
+            RosterCmd::AddSample { path, tags, name } => cmd_roster_add_sample(&layout, &path, tags, name),
         },
     }
 }

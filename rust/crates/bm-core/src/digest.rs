@@ -95,6 +95,7 @@ pub fn bible_context(bible: &Value) -> String {
                         "name": c.get("name"),
                         "personality": c.get("personality"),
                         "voice_hint": c.get("voice_hint"),
+                        "tags": c.get("tags").cloned().unwrap_or(json!([])),
                         "proper_aliases": c.get("proper_aliases"),
                     })
                 })
@@ -199,6 +200,7 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
             "name": name,
             "personality": nc.get("personality").cloned().unwrap_or(json!("")),
             "voice_hint": hint,
+            "tags": normalise_tags(nc.get("tags")),
             "proper_aliases": aliases,
             "first_seen": chapter,
             "chapters_seen": [],
@@ -296,6 +298,32 @@ fn split_voice_head(hint: &str) -> String {
         .to_lowercase()
 }
 
+/// Tags for one bible character entry: its `tags` field, or the voice_hint for
+/// entries written before tags existed — so the pool works without re-digesting
+/// the whole book.
+pub fn tags_of(entry: &Value) -> Vec<String> {
+    let tags = normalise_tags(entry.get("tags"));
+    if tags.is_empty() {
+        let hint = entry.get("voice_hint").and_then(|h| h.as_str()).unwrap_or("");
+        crate::pool::tags_from_hint(hint)
+    } else {
+        tags
+    }
+}
+
+/// Lowercase, deduped tags for a bible entry. Anything goes — the pool matches
+/// by equality — but each tag must be a non-empty token, not a sentence.
+fn normalise_tags(v: Option<&Value>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in v.and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+        let t = t.as_str().unwrap_or("").trim().to_lowercase();
+        if !t.is_empty() && !t.contains(char::is_whitespace) && !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
 pub fn validate(data: &Value, bible: &Value) -> Result<()> {
     if !data.is_object() {
         anyhow::bail!("top-level must be a JSON object");
@@ -360,6 +388,24 @@ pub fn validate(data: &Value, bible: &Value) -> Result<()> {
                     "new_character {}: voice_hint must start with gender/age",
                     nc.get("name").and_then(|n| n.as_str()).unwrap_or("?")
                 );
+            }
+            // Tags are what the sample pool rolls on; without them a character
+            // can only ever draw preset voices. `[]` is valid (the ageless),
+            // a missing key or a sentence is not.
+            let Some(tags) = nc.get("tags").and_then(|t| t.as_array()) else {
+                anyhow::bail!(
+                    "new_character {}: missing tags array",
+                    nc.get("name").and_then(|n| n.as_str()).unwrap_or("?")
+                );
+            };
+            for t in tags {
+                let s = t.as_str().unwrap_or("");
+                if s.trim().is_empty() || s.contains(char::is_whitespace) {
+                    anyhow::bail!(
+                        "new_character {}: tags must be single tokens, got {t:?}",
+                        nc.get("name").and_then(|n| n.as_str()).unwrap_or("?")
+                    );
+                }
             }
         }
     }
@@ -902,10 +948,52 @@ mod tests {
             "atmosphere": "A market at dawn.",
             "roster": ["Narrator", "Dịch Phong"],
             "mentions": {"hắn": "Dịch Phong"},
-            "new_characters": [{"name": "Lão Trần", "voice_hint": "elderly male, gruff"}],
+            "new_characters": [{"name": "Lão Trần", "voice_hint": "elderly male, gruff", "tags": ["old", "male"]}],
             "segments": [{"speaker": "Narrator", "text": "Trời sáng.", "direction": "Say calm in Vietnamese: Trời sáng."}]
         });
         validate(&data, &json!({"characters": []})).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_a_missing_or_sloppy_tags_array() {
+        let base = || {
+            json!({
+                "segments": [{"speaker": "Narrator", "text": "hi", "direction": "Say calm in Vietnamese: hi"}],
+                "roster": ["Narrator"],
+            })
+        };
+        // Missing key entirely.
+        let mut no_tags = base();
+        no_tags["new_characters"] =
+            json!([{"name": "X", "voice_hint": "adult male, gruff"}]);
+        assert!(validate(&no_tags, &json!({"characters": []})).is_err());
+
+        // A sentence is not a tag.
+        let mut sloppy = base();
+        sloppy["new_characters"] =
+            json!([{"name": "X", "voice_hint": "adult male, gruff", "tags": ["old man"]}]);
+        let err = validate(&sloppy, &json!({"characters": []})).unwrap_err();
+        assert!(err.to_string().contains("single tokens"), "{err}");
+
+        // `[]` is the honest answer for the ageless — and it validates.
+        let mut ageless = base();
+        ageless["new_characters"] =
+            json!([{"name": "X", "voice_hint": "elderly male, flat", "tags": []}]);
+        validate(&ageless, &json!({"characters": []})).unwrap();
+    }
+
+    #[test]
+    fn merge_bible_keeps_normalised_tags() {
+        let mut bible = json!({"characters": []});
+        let data = json!({
+            "new_characters": [{"name": "Lão Trần", "personality": "gruff",
+                "voice_hint": "elderly male", "tags": ["Old", "MALE", "old"],
+                "proper_aliases": []}],
+            "roster": ["Lão Trần"],
+            "segments": []
+        });
+        merge_bible(&mut bible, &data, "07");
+        assert_eq!(bible["characters"][0]["tags"], json!(["old", "male"]));
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub mod crawl;
 pub mod digest;
 pub mod eta;
 pub mod paths;
+pub mod pool;
 pub mod provision;
 pub mod util;
 pub mod voices;
