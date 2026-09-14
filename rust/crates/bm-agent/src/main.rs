@@ -112,8 +112,10 @@ impl Sidecar {
     }
 
     /// Ensure the sidecar answers, starting it if needed. Idempotent.
+    /// Verifies `/policy`, not just `/health`: a stale server from a previous
+    /// deploy answers health but lacks the endpoints renders depend on.
     async fn ensure(&mut self, layout: &Layout) -> Result<()> {
-        if self.tts().health().await {
+        if self.serving_current().await {
             return Ok(());
         }
         self.stop();
@@ -133,7 +135,7 @@ impl Sidecar {
             .with_context(|| format!("spawning TTS sidecar via {}", py.display()))?;
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            if self.tts().health().await {
+            if self.serving_current().await {
                 self.child = Some(child);
                 return Ok(());
             }
@@ -143,6 +145,18 @@ impl Sidecar {
         }
         let _ = child.kill().await;
         anyhow::bail!("TTS sidecar never answered /health")
+    }
+
+    /// Health plus capability: the server must serve the policy endpoint
+    /// this agent was built against.
+    async fn serving_current(&self) -> bool {
+        if !self.tts().health().await {
+            return false;
+        }
+        match self.tts().policy().await {
+            Ok(p) => p.get("allowed_voices").and_then(|v| v.as_array()).is_some(),
+            Err(_) => false,
+        }
     }
 
     fn stop(&mut self) {
@@ -464,7 +478,20 @@ async fn worker_loop(
         tts_url: Some(tts_url.clone()),
         version: VERSION.into(),
     };
-    http.post(format!("{inductor}/api/register")).json(&reg).send().await?;
+    // The inductor may not be up yet (or the network may flap): retry
+    // registration forever instead of dying on the first failure.
+    loop {
+        match http.post(format!("{inductor}/api/register")).json(&reg).send().await {
+            Ok(r) if r.status().is_success() => break,
+            Ok(r) => {
+                set_progress(&shared, 0.0, format!("register refused: {}", r.status()));
+            }
+            Err(e) => {
+                set_progress(&shared, 0.0, format!("inductor unreachable, retrying: {e}"));
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
     println!("registered as {worker_id}, pulling tasks");
     let mut sidecar = Sidecar::new(&tts_url);
     loop {
@@ -498,22 +525,33 @@ async fn worker_loop(
             },
         };
         println!("[{}] {}", if res.ok { "ok" } else { "FAIL" }, res.detail);
-        let _ = http
-            .post(format!("{inductor}/api/complete"))
-            .json(&Complete {
-                worker_id: worker_id.clone(),
-                task_id: offer.task_id.clone(),
-                ok: res.ok,
-                detail: res.detail,
-                duration_secs: t0.elapsed().as_secs_f64(),
-                bible_delta: res.delta,
-                units: res.units,
-                script: res.script,
-                text: res.text,
-                mp3_b64: res.mp3_b64,
-            })
-            .send()
-            .await;
+        // Reports must land: a lost merge report strands a finished mp3 on
+        // this machine until the lease expires. Retry, then move on.
+        let report = Complete {
+            worker_id: worker_id.clone(),
+            task_id: offer.task_id.clone(),
+            ok: res.ok,
+            detail: res.detail,
+            duration_secs: t0.elapsed().as_secs_f64(),
+            bible_delta: res.delta,
+            units: res.units,
+            script: res.script,
+            text: res.text,
+            mp3_b64: res.mp3_b64,
+        };
+        for attempt in 1..=3 {
+            match http
+                .post(format!("{inductor}/api/complete"))
+                .json(&report)
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => break,
+                Ok(r) => println!("[WARN] complete report refused ({}), retry {attempt}/3", r.status()),
+                Err(e) => println!("[WARN] complete report lost, retry {attempt}/3: {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
         clear_task(&shared);
     }
 }
