@@ -26,7 +26,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const SIDECAR_PORT: u16 = 8818;
 
 #[derive(Parser)]
-#[command(name = "bm-agent", about = "Pipeline worker: run stages, report progress")]
+#[command(name = "bm-agent", version, about = "Pipeline worker: run stages, report progress")]
 struct Cli {
     /// Repo root (discovered via prompts/analyze.txt when omitted).
     #[arg(long)]

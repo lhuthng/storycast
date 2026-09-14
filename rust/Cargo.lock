@@ -165,6 +165,7 @@ dependencies = [
  "bm-core",
  "bm-proto",
  "clap",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

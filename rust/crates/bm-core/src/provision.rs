@@ -29,10 +29,14 @@ pub struct Probe {
     pub nproc: u32,
     pub mem_mb: u64,
     pub disk_free_mb: u64,
+    pub arch: String,
     /// Version string reported by the installed agent, if any.
     pub agent_version: Option<String>,
     /// A usable Python interpreter with the TTS deps installed.
     pub python_present: bool,
+    /// Enrolled clone-voice names parsed from the voice store (no model load).
+    #[serde(default)]
+    pub voices: Vec<String>,
     pub tts_up: bool,
     pub note: String,
 }
@@ -52,12 +56,14 @@ impl Probe {
             return format!("unreachable: {}", self.note);
         }
         format!(
-            "{} · {} cpu · {} MB ram · agent={} · python={} · tts={}",
+            "{} · {} cpu · {} MB ram · {} · agent={} · python={} · voices={} · tts={}",
             self.hostname,
             self.nproc,
             self.mem_mb,
+            self.arch,
             self.agent_version.as_deref().unwrap_or("absent"),
             if self.python_present { "yes" } else { "no" },
+            if self.voices.is_empty() { "-".into() } else { self.voices.join(",") },
             if self.tts_up { "up" } else { "down" },
         )
     }
@@ -134,11 +140,12 @@ impl Ssh {
     pub fn probe(&self) -> Probe {
         let script = format!(
             r#"echo "hostname=$(hostname 2>/dev/null || echo unknown)"
+echo "arch=$(uname -m 2>/dev/null || echo unknown)"
 echo "nproc=$(nproc 2>/dev/null || echo 0)"
 echo "mem_mb=$(awk '/MemTotal/{{printf "%d", $2/1024}}' /proc/meminfo 2>/dev/null || echo 0)"
 echo "disk_mb=$(df -Pm "$HOME" 2>/dev/null | awk 'NR==2{{print $4}}' || echo 0)"
 if [ -x "$HOME/{dir}/bm-agent" ]; then
-  echo "agent=$("$HOME/{dir}/bm-agent" --version 2>/dev/null || echo unknown)"
+  echo "agent=$("$HOME/{dir}/bm-agent" --version 2>/dev/null | awk '{{print $NF}}' || echo unknown)"
 else
   echo "agent=absent"
 fi
@@ -147,6 +154,7 @@ if [ -x "$HOME/{dir}/python/.venv/bin/python" ]; then
 else
   echo "python=absent"
 fi
+echo "voices=$(for f in $HOME/{dir}/python/.venv/lib/*/site-packages/vieneu/assets/voices_v3_turbo.json; do [ -f "$f" ] && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(chr(31).join(d.get('presets', d).keys()))" "$f"; done 2>/dev/null)"
 if command -v curl >/dev/null 2>&1 && curl -s --max-time 3 http://127.0.0.1:{port}/health >/dev/null 2>&1; then
   echo "tts=up"
 else
@@ -176,11 +184,22 @@ echo "probe=done"
                     let v = v.trim();
                     match k.trim() {
                         "hostname" => probe.hostname = v.to_string(),
+                        "arch" => probe.arch = v.to_string(),
                         "nproc" => probe.nproc = v.parse().unwrap_or(0),
                         "mem_mb" => probe.mem_mb = v.parse().unwrap_or(0),
                         "disk_mb" => probe.disk_free_mb = v.parse().unwrap_or(0),
                         "agent" if v != "absent" => probe.agent_version = Some(v.to_string()),
                         "python" => probe.python_present = v == "present",
+                        "voices" => {
+                            // Names contain spaces ("Minh Triết") — the probe
+                            // joins them with \x1f, never whitespace.
+                            probe.voices = v
+                                .split('\u{1f}')
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string)
+                                .collect()
+                        }
                         "tts" => probe.tts_up = v == "up",
                         _ => {}
                     }
@@ -353,6 +372,86 @@ echo "PYTHON-OK (fresh venv)"
         Ok(stdout.trim().to_string())
     }
 
+    /// Enroll the clone voices from `voices.json`. The voice store lives
+    /// inside the venv, so a venv rebuild vaporizes it — this step re-enrolls
+    /// whatever the probe did not find. Skips the model load entirely when
+    /// everything is already enrolled.
+    pub fn ensure_voices(&self, repo_root: &Path) -> Result<String> {
+        let manifest_src = repo_root.join("voices.json");
+        let manifest: std::collections::HashMap<String, String> =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_src).with_context(|| {
+                format!("reading {}", manifest_src.display())
+            })?)
+            .context("parsing voices.json (name -> refs/*.wav)")?;
+        self.rsync_push(&repo_root.join("refs"), "refs", false)?;
+        self.rsync_push(&manifest_src, "voices.json", false)?;
+        let want: Vec<String> = {
+            let mut w: Vec<String> = manifest
+                .keys()
+                .filter(|k| !k.starts_with('_')) // skip "_note" metadata keys
+                .cloned()
+                .collect();
+            w.sort();
+            w
+        };
+        let script = format!(
+            r#"set -e
+D="$HOME/{d}"
+V="$D/python/.venv/bin/python"
+STORE=$(ls $D/python/.venv/lib/*/site-packages/vieneu/assets/voices_v3_turbo.json 2>/dev/null | head -n 1)
+[ -n "$STORE" ] || {{ echo "voice store not found (venv broken?)" >&2; exit 6; }}
+HAVE=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(chr(31).join(d.get('presets', d).keys()))" "$STORE")
+HAVE_SP=" $(echo "$HAVE" | tr '\037' ' ') "
+MISSING=""
+for name in {want}; do
+  case "$HAVE_SP" in *" $name "*) ;; *) MISSING="$MISSING $name";; esac
+done
+MISSING=$(echo "$MISSING" | sed 's/^ *//')
+if [ -z "$MISSING" ]; then echo "VOICES-OK (already enrolled)"; exit 0; fi
+echo "enrolling:$MISSING"
+cd "$D"
+PYTHONPATH="$D/python" "$V" -c "
+import json
+import tts_vieneu as vn
+manifest = json.load(open('voices.json'))
+tts = vn.engine()
+for line in '''$MISSING'''.split():
+    name = line.strip()
+    if not name:
+        continue
+    tts.add_voice(name, manifest[name])
+    print('enrolled', name, flush=True)
+tts.save_voices()
+"
+echo "VOICES-OK (enrolled:$MISSING)"
+"#,
+            d = REMOTE_DIR,
+            want = want.join(" ")
+        );
+        let (code, stdout, stderr) = self.run(&script, 1800)?;
+        if code != 0 {
+            anyhow::bail!(
+                "voice enrollment failed (exit {code}): {}",
+                crate::util::head_chars(stderr.trim(), 300)
+            );
+        }
+        Ok(stdout.trim().to_string())
+    }
+
+    /// Best-effort opencode install for the digest lane. Auth stays manual
+    /// (browser login); without it remote digests fail loudly, never silently.
+    pub fn ensure_opencode(&self) -> Result<String> {
+        let script = r#"command -v opencode >/dev/null 2>&1 && { echo "OPENCODE-OK (present)"; exit 0; }
+command -v npm >/dev/null 2>&1 || { echo "OPENCODE-SKIP (npm missing; install node first)"; exit 0; }
+mkdir -p "$HOME/.local"
+npm i -g --prefix "$HOME/.local" opencode-ai >/dev/null 2>&1 && echo "OPENCODE-OK (installed)" || echo "OPENCODE-SKIP (npm install failed)""#;
+        let (code, stdout, stderr) = self.run(script, 600)?;
+        if code != 0 {
+            anyhow::bail!("opencode check failed: {}", stderr.trim());
+        }
+        Ok(stdout.trim().to_string())
+    }
+
     /// Start the TTS sidecar detached, unless it is already answering.
     pub fn start_tts(&self) -> Result<String> {
         let script = format!(
@@ -433,45 +532,61 @@ pub fn provision(
     }
     if probe.configured(agent_version) && !force {
         log.push(format!(
-            "[{}] already configured (agent {} + python) — nothing to distribute",
+            "[{}] already configured (agent {} + python) — skipping distribution",
             m.id, agent_version
         ));
-        return (probe, log);
-    }
-
-    if let Err(e) = ssh.ensure_root() {
-        log.push(format!("[{}] ensure_root failed: {e}", m.id));
-        return (probe, log);
-    }
-    log.push(format!("[{}] worker root ready (~/{REMOTE_DIR})", m.id));
-
-    match ssh.install_agent(agent_binary) {
-        Ok(v) => log.push(format!("[{}] agent installed, reports version {v}", m.id)),
-        Err(e) => {
-            log.push(format!("[{}] agent install failed: {e}", m.id));
+    } else {
+        if let Err(e) = ssh.ensure_root() {
+            log.push(format!("[{}] ensure_root failed: {e}", m.id));
             return (probe, log);
         }
-    }
+        log.push(format!("[{}] worker root ready (~/{REMOTE_DIR})", m.id));
 
-    match ssh.install_sources(repo_root) {
-        Ok(()) => log.push(format!("[{}] prompts/assets/refs/python distributed", m.id)),
-        Err(e) => log.push(format!("[{}] source distribution failed: {e}", m.id)),
-    }
-
-    if !probe.python_present || force {
-        log.push(format!(
-            "[{}] installing TTS venv (slow: downloads ~1.7 GB of weights on first use)",
-            m.id
-        ));
-        match ssh.ensure_python(force) {
-            Ok(v) => log.push(format!("[{}] {v}", m.id)),
+        match ssh.install_agent(agent_binary) {
+            Ok(v) => log.push(format!("[{}] agent installed, reports version {v}", m.id)),
             Err(e) => {
-                log.push(format!("[{}] python provisioning failed: {e}", m.id));
+                log.push(format!("[{}] agent install failed: {e}", m.id));
                 return (probe, log);
             }
         }
-    } else {
-        log.push(format!("[{}] TTS venv already present — skipped", m.id));
+
+        match ssh.install_sources(repo_root) {
+            Ok(()) => log.push(format!("[{}] prompts/assets/refs/python distributed", m.id)),
+            Err(e) => log.push(format!("[{}] source distribution failed: {e}", m.id)),
+        }
+
+        if !probe.python_present || force {
+            log.push(format!(
+                "[{}] installing TTS venv (slow: downloads ~1.7 GB of weights on first use)",
+                m.id
+            ));
+            match ssh.ensure_python(force) {
+                Ok(v) => log.push(format!("[{}] {v}", m.id)),
+                Err(e) => {
+                    log.push(format!("[{}] python provisioning failed: {e}", m.id));
+                    return (probe, log);
+                }
+            }
+        } else {
+            log.push(format!("[{}] TTS venv already present — skipped", m.id));
+        }
+    }
+
+    // Voice enrollment runs on every provision, configured or not: the store
+    // lives inside the venv and any rebuild vaporizes it. Cheap no-op when
+    // everything is already enrolled.
+    match ssh.ensure_voices(repo_root) {
+        Ok(v) => {
+            for line in v.lines() {
+                log.push(format!("[{}] {line}", m.id));
+            }
+        }
+        Err(e) => log.push(format!("[{}] voice enrollment failed: {e}", m.id)),
+    }
+
+    match ssh.ensure_opencode() {
+        Ok(v) => log.push(format!("[{}] {v}", m.id)),
+        Err(e) => log.push(format!("[{}] opencode check failed: {e}", m.id)),
     }
 
     match ssh.start_tts() {

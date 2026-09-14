@@ -59,7 +59,7 @@ impl Default for Settings {
                 "gemini-2.5-pro-preview-tts".into(),
                 "gemini-2.5-flash-preview-tts".into(),
             ],
-            control_port: 8787,
+            control_port: 8901,
             advertise: "127.0.0.1".into(),
         }
     }

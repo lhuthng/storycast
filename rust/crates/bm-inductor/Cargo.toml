@@ -20,3 +20,4 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
 base64 = { workspace = true }
+reqwest = { workspace = true }
