@@ -3,7 +3,8 @@ resolver = "2"
 members = [
     "crates/bm-proto",
     "crates/bm-core",
-    # M2/M3 re-add: "crates/bm-agent", "crates/bm-inductor",
+    "crates/bm-agent",
+    # M3 re-add: "crates/bm-inductor",
 ]
 
 [workspace.package]

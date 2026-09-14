@@ -50,6 +50,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if self.path == "/voices":
             return self._json(vn.engine().list_preset_voices())
+        if self.path == "/policy":
+            # Offline authority for accent policy + roster so Rust never
+            # duplicates TTS knowledge (fallback lives in bm-core/voices.rs).
+            return self._json({
+                "engine": "vieneu",
+                "sample_rate": vn.SAMPLE_RATE,
+                "male_voices": vn.MALE_VOICES,
+                "female_voices": vn.FEMALE_VOICES,
+                "allowed_voices": sorted(set(vn.MALE_VOICES) | set(vn.FEMALE_VOICES)),
+                "default_cast": vn.DEFAULT_CAST,
+            })
         return self._json({"error": "unknown path"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
