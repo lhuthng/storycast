@@ -363,6 +363,16 @@ impl Inner {
                     t.lease_until = None;
                     t.updated = now_secs();
                 }
+                // Throughput ledger: every completion feeds the ETA model.
+                // Render units are TTS calls; other stages count 1 per chapter.
+                let units = if stage == Stage::Render { c.units.max(1) } else { 1 };
+                let _ = bm_core::eta::record(
+                    &self.layout.stats(),
+                    stage,
+                    units,
+                    c.duration_secs,
+                    &c.worker_id,
+                );
                 self.save();
             }
             Outcome::Failed => {
@@ -413,9 +423,175 @@ impl Inner {
         out
     }
 
+    /// ETA for the remaining range, from measured throughput divided by
+    /// live workers (heartbeat within the last 90s).
+    pub fn op_eta(&self, start: u32, count: u32) -> String {
+        let in_range = |t: &Task| t.chapter >= start && t.chapter < start + count;
+        let pending = |stage: Stage| {
+            self.tasks
+                .values()
+                .filter(|t| t.stage == stage && in_range(t) && !t.state.is_terminal())
+                .count() as u64
+        };
+        let workers = self
+            .beats
+            .values()
+            .filter(|b| now_secs().saturating_sub(b.ts) < 90)
+            .count()
+            .max(1) as u64;
+        // Render is estimated in TTS calls, not chapters: scale by the median
+        // calls-per-render seen so far (40 before anything measured).
+        let mut units_per_render: Vec<u64> = bm_core::eta::read_stats(&self.layout.stats())
+            .into_iter()
+            .filter(|r| r.stage == "render")
+            .map(|r| r.units.max(1))
+            .collect();
+        units_per_render.sort_unstable();
+        let med_units = units_per_render
+            .get(units_per_render.len() / 2)
+            .copied()
+            .unwrap_or(40);
+        let remaining = [
+            (Stage::Crawl, pending(Stage::Crawl)),
+            (Stage::Digest, pending(Stage::Digest)),
+            (Stage::Render, pending(Stage::Render) * med_units),
+            (Stage::Merge, pending(Stage::Merge)),
+        ];
+        let etas = bm_core::eta::estimate_job(&self.layout.stats(), &remaining, workers);
+        let total: u64 = etas.iter().map(|e| e.secs).sum();
+        let mut parts: Vec<String> = etas
+            .iter()
+            .map(|e| {
+                format!(
+                    "{} {}{}",
+                    e.stage,
+                    bm_core::eta::human(e.secs),
+                    if e.estimated_from_fallback { " (guess)" } else { "" }
+                )
+            })
+            .collect();
+        parts.push(format!("total {}", bm_core::eta::human(total)));
+        format!(
+            "ch{start}..{} over {workers} worker{}: {}",
+            start + count - 1,
+            if workers == 1 { "" } else { "s" },
+            parts.join(" · ")
+        )
+    }
+
+    /// Repoint one character's voice and invalidate only its cached segments.
+    /// Other characters keep their cache; affected chapters re-render + merge.
+    pub fn op_swap_voice(&mut self, character: &str, voice: &str) -> anyhow::Result<String> {
+        let engine = self.settings.engine.clone();
+        let policy = bm_core::voices::policy_for(&engine);
+        let cast_path = self.layout.cast(&engine);
+        let mut cast = bm_core::cast::read_cast(&cast_path);
+        let old = cast.get(character).cloned().unwrap_or_default();
+        // Offline trust rule (mirrors the agent gate): Central/South presets
+        // or a voice already assigned somewhere (an enrolled clone in use).
+        let allowed: std::collections::HashSet<&str> = policy
+            .allowed
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        let in_use: Vec<String> = cast.values().cloned().collect();
+        if !allowed.contains(voice) && !in_use.iter().any(|v| v == voice) {
+            anyhow::bail!(
+                "voice {voice:?} is neither a Central/South preset nor currently assigned"
+            );
+        }
+        if old == voice {
+            return Ok(format!("{character} already speaks as {voice} — nothing to do"));
+        }
+        cast.insert(character.to_string(), voice.to_string());
+        bm_core::write_json(&cast_path, &cast)?;
+        // Surgical invalidation: only this speaker's run files (+ the headline
+        // file when the Narrator itself moves), only where scripts exist.
+        let mut chapters: Vec<u32> = Vec::new();
+        let mut files = 0u32;
+        let mut scripts: Vec<std::path::PathBuf> = std::fs::read_dir(self.layout.data())?
+            .filter_map(|e| e.ok().map(|x| x.path()))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("script-") && n.ends_with(".json"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        scripts.sort();
+        for sp in scripts {
+            let n: u32 = sp
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_prefix("script-"))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let data: Value = bm_core::read_json(&sp).unwrap_or(Value::Null);
+            let segments = data.get("segments").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+            let planned = bm_core::assemble::drop_headline(&segments);
+            let seg_dir = self.layout.seg_dir(&engine, n);
+            let local = engine == "vieneu";
+            let mut touched = false;
+            for run in bm_core::assemble::runs(planned) {
+                if run.speaker != character {
+                    continue;
+                }
+                // Filenames embed the OLD voice — exactly the stale set:
+                // run tags locally, per-line files on the cloud path.
+                let names: Vec<String> = if local {
+                    let (a, b) = (run.idx[0], run.idx[run.idx.len() - 1]);
+                    let tag = if a == b { format!("{a:04}") } else { format!("{a:04}-{b:04}") };
+                    vec![format!("{tag}_{old}.wav")]
+                } else {
+                    run.idx.iter().map(|i| format!("{i:04}_{old}.wav")).collect()
+                };
+                for name in names {
+                    let stale = seg_dir.join(&name);
+                    if stale.is_file() {
+                        let _ = std::fs::remove_file(&stale);
+                        files += 1;
+                        touched = true;
+                    }
+                }
+            }
+            if character == "Narrator" {
+                let stale = seg_dir.join(format!("title_{old}.wav"));
+                if stale.is_file() {
+                    let _ = std::fs::remove_file(&stale);
+                    files += 1;
+                    touched = true;
+                }
+            }
+            if touched {
+                chapters.push(n);
+                // Stale product goes away; render+merge requeue fresh.
+                let _ = std::fs::remove_file(self.layout.final_mp3(n));
+                for stage in [Stage::Render, Stage::Merge] {
+                    let key = format!("{stage}:{n}");
+                    if let Some(t) = self.tasks.get_mut(&key) {
+                        t.state = TaskState::Pending;
+                        t.attempts = 0;
+                        t.assigned_to = None;
+                        t.lease_until = None;
+                        t.updated = now_secs();
+                    } else {
+                        let mut t = Task::new(n, stage);
+                        t.updated = now_secs();
+                        self.tasks.insert(key, t);
+                    }
+                }
+            }
+        }
+        self.save();
+        Ok(format!(
+            "{character}: {old} -> {voice}; invalidated {files} segment files across {} chapters ({:?}); re-render queued",
+            chapters.len(),
+            chapters.iter().take(8).collect::<Vec<_>>(),
+        ))
+    }
+
     /// Enqueue crawl+digest for chapters missing scripts (idempotent).
-    pub fn enqueue_translate(&mut self, start: u32, count: u32) -> (usize, usize) {
-        let (mut crawls, mut digests) = (0, 0);
+    pub fn enqueue_translate(&mut self, start: u32, count: u32) -> (usize, usize) {        let (mut crawls, mut digests) = (0, 0);
         for n in start..start + count {
             if !self.layout.chapter_txt(n).is_file() {
                 let t = self.ensure_task(n, Stage::Crawl);
@@ -442,5 +618,67 @@ impl Inner {
             *e.entry(k).or_default() += 1;
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bm_core::config::Settings;
+
+    fn fixture() -> (tempfile::TempDir, Inner) {
+        let d = tempfile::tempdir().unwrap();
+        let layout = Layout::new(d.path());
+        std::fs::create_dir_all(layout.data()).unwrap();
+        std::fs::create_dir_all(layout.output()).unwrap();
+        std::fs::write(layout.bible(), r#"{"characters":[]}"#).unwrap();
+        let inner = Inner::new(layout, Settings::default());
+        (d, inner)
+    }
+
+    #[test]
+    fn swap_invalidates_only_the_characters_files() {
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(1),
+            r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"A","text":"y"},{"speaker":"B","text":"z"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam","Narrator":"Đức Trí"}"#).unwrap();
+        let seg = layout.seg_dir("vieneu", 1);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000-0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(seg.join("0002_Adam.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(layout.final_mp3(1), vec![0u8; 2000]).unwrap();
+
+        let msg = inner.op_swap_voice("A", "Minh Triết").unwrap();
+        assert!(msg.contains("Đức Trí -> Minh Triết"), "{msg}");
+        assert!(!seg.join("0000-0001_Đức Trí.wav").exists(), "stale run file must go");
+        assert!(seg.join("0002_Adam.wav").exists(), "other voices keep cache");
+        assert!(!layout.final_mp3(1).exists(), "stale product goes away");
+        assert_eq!(inner.tasks["render:1"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["merge:1"].state, TaskState::Pending);
+        let cast: std::collections::HashMap<String, String> =
+            bm_core::read_json(&layout.cast("vieneu")).unwrap();
+        assert_eq!(cast["A"], "Minh Triết");
+        assert_eq!(cast["B"], "Adam", "untouched speakers survive");
+    }
+
+    #[test]
+    fn swap_rejects_unknown_voices_and_noops_identical() {
+        let (_d, mut inner) = fixture();
+        std::fs::write(inner.layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+        assert!(inner.op_swap_voice("A", "Bắc Giang").is_err());
+        let msg = inner.op_swap_voice("A", "Đức Trí").unwrap();
+        assert!(msg.contains("nothing to do"), "{msg}");
+    }
+
+    #[test]
+    fn eta_reports_a_total_even_with_no_measurements() {
+        let (_d, inner) = fixture();
+        let msg = inner.op_eta(1, 10);
+        assert!(msg.contains("total"), "{msg}");
+        assert!(msg.contains("(guess)"), "{msg}");
     }
 }

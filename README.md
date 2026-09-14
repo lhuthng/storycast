@@ -1,98 +1,116 @@
 # beyond-myriads-converter
 
-Vietnamese web-novel chapter → multi-voice audio via Gemini (AI Studio key).
+Vietnamese web-novel chapters → multi-voice audiobooks, distributed across a
+cluster of machines. One orchestrator ("inductor") schedules work; worker
+agents pull tasks, report progress, and push results back. TTS runs in a
+Python sidecar; everything else is Rust + Tokio.
 
-## Setup
-
-```sh
-cp .env.example .env   # add GEMINI_API_KEY
-uv sync
+```
+inductor (Rust) ──assign (workers pull)──▶ bm-agent × N (Rust)
+     ▲                      │ heartbeat: progress · activity · ETA
+     │                      ▼
+     │              Python TTS sidecar ──/infer── (VieNeu voices)
+     └──────── complete (ok/fail + artifacts: scripts, mp3s, bible deltas)
+data/ · output/ · refs/          (per-machine work dirs; mp3s come home)
 ```
 
-## Use
+## Prereqs
 
-```sh
-# one chapter, end to end
-uv run python main.py run --url "https://storya.click/truyen/.../chuong-1"
-# or from a file
-uv run python main.py run --file my-chapter.txt
-# cheap voice test: first 5 lines only
-uv run python main.py run --url ... --limit 5
-# hear every cast voice before a full render (check gender/fit by ear)
-uv run python main.py preview   # -> output/voice-preview/*.mp3
-# sub-steps: ingest | analyze | synth | check | voices
-uv run python main.py synth --dry-run   # no API: tests concat/plumbing
+- Rust toolchain (`rustup`), `ffmpeg`, `ssh`, `rsync`, `curl`
+- Python 3.12 + a venv with the sidecar deps (`python/requirements.txt`)
+- `opencode` CLI with access to a free model (digest lane; auth is per-machine)
+- Voice reference clips in `refs/` + their names in `voices.json`
+
+## Quickstart (solo, one machine)
+
+```bash
+cargo build --workspace --manifest-path rust/Cargo.toml
+# 1. sidecar (the agent manages this itself per render task; manual form:)
+./.venv/bin/python python/tts_server.py --port 8818
+# 2. orchestrator
+./rust/target/debug/bm-inductor serve --start 1 --count 100
+# 3. worker (another shell)
+./rust/target/debug/bm-agent worker --inductor http://127.0.0.1:8901
+# 4. enqueue + watch
+curl -X POST localhost:8901/api/op -H 'Content-Type: application/json' \
+  -d '{"op":"translate","start":1,"count":100}'
+./rust/target/debug/bm-inductor tui
 ```
 
-## Batch: 10 chapters at once
+Output lands in `output/Ch.N - Title.mp3`. Every chapter opens with its spoken
+headline (`Chương N, <title>`) followed by the standard inter-turn pause.
 
-```sh
-uv run python main.py batch --start 11 --count 10 \
-  --url-template "https://storya.click/truyen/nguoi-tren-van-nguoi/chuong-{n}" \
-  --engine vieneu --speed 1.5
+## Adding a machine by IP
+
+```bash
+# cross-compile the agent once (ring needs a C cross-compiler: zig)
+cargo install cargo-zigbuild && uv tool install ziglang
+cargo zigbuild --target x86_64-unknown-linux-gnu -p bm-agent
+# onboard: probe → push what's missing → verify (skips configured boxes)
+./rust/target/debug/bm-inductor provision --addr 192.168.2.2 --user thang --key ~/.ssh/key
 ```
 
-One shared `bible.json` (auto-grows) and one shared cast per engine; per-chapter
-scripts (`script-11.json`), segment caches, and outputs (`ch11-vieneu.mp3`).
-Failures log per chapter and the batch continues; `--skip-ingest` / `--skip-analyze`
-resume partial runs; `--dry-run` rehearses paths for free.
+Provisioning is idempotent: configured machines get a sources sync + voice
+check only. The venv build (~1.7 GB of weights) runs only when missing.
+Enrolled clone voices live in the venv — `voices.json` re-enrolls whatever is
+missing on every provision, so a venv rebuild never silently loses the cast.
+`opencode` is installed best-effort; its login stays manual (browser).
 
-## Data model: bible + chapters
+Then start an agent there pointing at the inductor:
 
-- `data/bible.json` — global character identity (EN personality/voice_hint,
-  proper-name aliases only). The digest reads it as context and auto-merges
-  new proper names with a log line.
-- `data/script-NN.json` — per chapter: EN atmosphere, `roster`, chapter-local
-  `mentions` (pronouns like hắn/ta stay here, never global), and per-speech
-  `segments` (Vietnamese text, EN mood).
-- `data/cast[-vieneu].json` — voice assignment per engine, shared across chapters.
-
-## Remote TTS worker (run the model on another machine)
-
-On the GPU box (same repo checkout, model auto-downloads on first run):
-
-```sh
-uv run python tts_server.py --port 8818   # LAN only, no auth — or SSH-tunnel it
+```bash
+./bm-agent worker --inductor http://<inductor-lan-ip>:8901 --addr <its-ip>
 ```
 
-On this machine, add `--tts-host http://gpu-box:8818` (or `TTS_HOST=...`) to any
-`synth`/`preview`/`batch` command — every TTS call renders remotely, everything
-else (digest, concat, ambience, cache) stays local. Verify with
-`TTS_HOST=... uv run python main.py voices`.
+## The five operations (TUI keys or `POST /api/op`)
 
-Custom enrolled voices (Suneo, Nobita…) live in the **worker's** voice store:
-copy `refs/*.wav` over and enroll once per name there (see `tts_server.py` header).
-`clone` always enrolls locally by design.
+| Key | Op | What it does |
+|---|---|---|
+| `t` | translate | Enqueue crawl+digest for a range (`start count`). Idempotent. |
+| `c` | crawl-setup | Persist the URL template; probe-crawl one chapter, report selector health. |
+| `v` | voices | Read the sidecar roster, enforce the Central/South accent policy on the cast (enrolled clones always pass), refill gaps. Cast ships to workers on next provision. |
+| `s` | swap-voice | Repoint one character (`character voice`); deletes **only** that speaker's cached segment files, drops stale mp3s, requeues render+merge. Everyone else keeps cache. |
+| `e` | eta | Remaining work per stage from measured throughput ÷ live workers (`(guess)` = fallback, no data yet). |
 
-## Local TTS (VieNeu, no quota, Central/South voices only)
+TUI: `a` add machine · `p` provision selected · `r` refresh · `q` quit.
+`bm-inductor tui --api http://127.0.0.1:8901`.
 
-```sh
-uv pip install vieneu   # torch-free CPU build; ~1.7GB weights on first run
-uv run python main.py voices                       # roster vs accent policy
-uv run python main.py preview --engine vieneu      # 5 samples, verify by ear
-uv run python main.py synth --engine vieneu --out output/ch01-vieneu.wav
-```
+## How scheduling works
 
-`--engine` (or `TTS_ENGINE`) switches voices. The chapter digest defaults to
-OpenCode's free model (`--analyzer opencode`, 1 call/chapter, no API key needed);
-alternatives: `--analyzer openrouter` (needs `OPENROUTER_API_KEY`),
-`--analyzer local` (needs `ollama serve` + model), `--analyzer gemini`.
-Cast files and segment caches are per-engine
-(`cast-vieneu.json`, `segments-vieneu/`), so swapping voices never poisons cache.
-Edit `data/cast-vieneu.json` to recast — only changed voices re-render.
+- Workers pull; the inductor is the only decider (eligibility, leases, strikes).
+- Leases expire back to the pool with **no strike** — silence is not failure.
+- 3 reported failures shelve a chapter; the rest flow around it.
+- Merge runs where the segments are (affinity) — segment caches never cross
+  the network. Only scripts (~30 KB) go out, mp3s (~5 MB) come home.
+- Ledger (`.bm/ledger.json`) persists assignments + strikes; startup
+  reconciles from artifacts on disk, so restarts resume.
+- Digest workers return bible deltas; the inductor merges as the single
+  writer. Scripts hold content only — headlines are never segments.
 
-## Gemini cloud voices (quota-aware chain)
+## Troubleshooting (earned the hard way)
 
-```sh
-uv run python main.py synth --limit 5   # grouped calls via 3.1-flash -> 2.5-pro -> 2.5-flash
-```
-
-Free tier = 3 req/min, 10 req/day **per model**. `tts_router.py` tracks spend in
-`data/quota.json`, paces requests, and falls over on 429s (day-exhaustion skips
-the model; minute-limits sleep and retry). To stretch quota, lines are grouped
-by (voice, mood) into single calls and cut back apart on silence
-(`output/render-*.jsonl` logs every call: engine, model, split result, fallback
-reason). If all cloud models are capped, remaining lines render locally and the
-log says so.
-
-Edit `data/cast.json` to change voices. Output: `output/ch01.wav` (+`.mp3` if ffmpeg installed).
+- **Render fails `non Central/South voice` for a valid voice** — stale
+  sidecar: an old server answers `/health` but lacks `/policy`. The agent's
+  currency check restarts it automatically; `curl localhost:8818/policy`
+  tells the truth.
+- **Tasks shelved after infra trouble** (dead box, stale binary): shelving
+  counts *reported* failures. Fix the cause, reset the task to pending in
+  `.bm/ledger.json` (or delete the entry — reconcile recreates it), restart.
+- **Merge stuck `assigned` + worker idle** — affinity points at a machine the
+  scheduler can't map (workers map was empty). Heartbeats now reheal the map;
+  check `affinity` vs `workers` in `/api/state`.
+- **mp3 exists but render re-queues** — the segment cache no longer matches
+  the script (re-digest shifted run boundaries). By design: content changed,
+  audio rebuilds. Never hand-edit scripts without purging that chapter's
+  `data/audio/segments-*/` dir.
+- **Reports vanish for big mp3s** — axum's default 2 MB body cap 413s them;
+  this repo disables the limit (LAN-only API). If you re-enable auth/limits,
+  raise it past 10 MB.
+- **Nested `assets/assets` (or `refs/refs`) on a worker** — rsync directory
+  semantics: sources must sync *contents* (trailing slash). Fixed in
+  `rsync_push`; blow away the nesting if you see it.
+- **Fresh box digests fail on auth** — `opencode auth login` needs a browser
+  on that machine. Provisioning installs the CLI; login stays yours.
+- **Sidecar RSS climbs across chapters** — by design it can't: agents start
+  the sidecar per render task and stop it after. A single chapter peaks
+  ~3–5 GB transient (model + buffers), then the OS reclaims all of it.
