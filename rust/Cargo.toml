@@ -4,7 +4,7 @@ members = [
     "crates/bm-proto",
     "crates/bm-core",
     "crates/bm-agent",
-    # M3 re-add: "crates/bm-inductor",
+    "crates/bm-inductor",
 ]
 
 [workspace.package]
@@ -21,6 +21,7 @@ bm-core = { path = "crates/bm-core" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

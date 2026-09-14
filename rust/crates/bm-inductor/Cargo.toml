@@ -1,12 +1,12 @@
 [package]
-name = "bm-agent"
+name = "bm-inductor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Worker agent: pull tasks from the inductor, run one pipeline stage, report progress"
+description = "Cluster orchestrator: control API, scheduler, provisioner, TUI driver"
 
 [[bin]]
-name = "bm-agent"
+name = "bm-inductor"
 path = "src/main.rs"
 
 [dependencies]
@@ -17,6 +17,6 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
-reqwest = { workspace = true }
+axum = { workspace = true }
 clap = { workspace = true }
 base64 = { workspace = true }
