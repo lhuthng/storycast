@@ -39,6 +39,10 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
 
 async fn heartbeat(State(st): State<Shared>, Json(h): Json<Heartbeat>) -> impl IntoResponse {
     let mut inner = st.lock().await;
+    // Refresh the worker→machine mapping on every beat: it heals itself
+    // across inductor restarts (the persisted ledger may predate it).
+    inner.workers.insert(h.worker_id.clone(), h.addr.clone());
+    inner.save();
     let addr = inner.workers.get(&h.worker_id).cloned();
     if let Some(addr) = addr {
         if let Some(m) = inner.machines.get_mut(&addr) {
@@ -121,6 +125,8 @@ pub fn router(st: Shared) -> Router {
         .route("/api/machines", delete(drop_machine))
         .route("/api/op", post(op))
         .route("/api/state", get(state))
+        // Merge reports carry base64 mp3s (~7MB); the 2MB default would 413 them.
+        .layer(axum::extract::DefaultBodyLimit::disable())
         .with_state(st)
 }
 

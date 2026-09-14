@@ -48,7 +48,8 @@ impl Inner {
 
     pub fn save(&self) {
         let doc = json!({"tasks": self.tasks.values().collect::<Vec<_>>(),
-                         "machines": self.machines.values().collect::<Vec<_>>()});
+                         "machines": self.machines.values().collect::<Vec<_>>(),
+                         "workers": self.workers});
         let _ = bm_core::write_json(&self.ledger_path(), &doc);
     }
 
@@ -69,6 +70,16 @@ impl Inner {
             for m in ms {
                 if let Ok(mac) = serde_json::from_value::<Machine>(m.clone()) {
                     self.machines.insert(mac.addr.clone(), mac);
+                }
+            }
+        }
+        // Worker identity survives restarts: without it, completions filed
+        // while the map is cold get attributed to the wrong machine (and
+        // merge affinity strands tasks on machines that never rendered).
+        if let Some(w) = doc.get("workers").and_then(|w| w.as_object()) {
+            for (k, v) in w {
+                if let Some(addr) = v.as_str() {
+                    self.workers.insert(k.clone(), addr.to_string());
                 }
             }
         }
@@ -100,9 +111,12 @@ impl Inner {
                 );
             let has_mp3 = mp3.is_file();
             // Ground truth upgrades pending stages; assignments are verified below.
+            // Every stage gets a task object whether or not its artifacts exist
+            // yet — a missing object is indistinguishable from "no work".
             for (stage, done) in [
                 (Stage::Crawl, has_txt),
                 (Stage::Digest, has_script),
+                (Stage::Render, segs_done),
                 (Stage::Merge, has_mp3),
             ] {
                 let t = self
@@ -112,17 +126,11 @@ impl Inner {
                 if done && t.state == TaskState::Pending {
                     t.state = TaskState::Done;
                     t.updated = now_secs();
-                }
-            }
-            if segs_done {
-                let t = self
-                    .tasks
-                    .entry(format!("render:{n}"))
-                    .or_insert_with(|| Task::new(n, Stage::Render));
-                if t.state == TaskState::Pending {
-                    t.state = TaskState::Done;
-                    t.updated = now_secs();
-                    t.affinity = Some("127.0.0.1".into());
+                    // Locally complete segments merge locally (remote renders
+                    // set their own affinity when they report).
+                    if stage == Stage::Render && t.affinity.is_none() {
+                        t.affinity = Some("127.0.0.1".into());
+                    }
                 }
             }
             // Assignments from a dead run: verify artifacts; unverified keeps
