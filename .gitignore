@@ -3,6 +3,10 @@ data/
 output/
 __pycache__/
 *.pyc
+
+# Inductor state, run logs
+.bm/
+*.log
 .venv/
 
 # OS noise

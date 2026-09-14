@@ -1,11 +1,10 @@
 [project]
-name = "beyond-myriads-converter"
-version = "0.1.0"
-description = "Convert Vietnamese web-novel chapters into multi-voice audio via Gemini"
+name = "beyond-myriads-tts"
+version = "0.2.0"
+description = "TTS sidecar for beyond-myriads-converter: VieNeu (local) + Gemini (cloud) voice rendering"
 requires-python = ">=3.10"
 dependencies = [
   "google-genai>=1.0.0",
-  "beautifulsoup4>=4.12",
   "python-dotenv>=1.0",
   "vieneu==3.6.4",  # pinned: preset roster varies by version
 ]
