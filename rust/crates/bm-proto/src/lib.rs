@@ -311,12 +311,62 @@ fn default_speed() -> f64 {
     1.0
 }
 
-/// The five operator-facing operations.
+/// One selectable voice plus the metadata an operator needs to choose it.
+///
+/// `gender`/`accent`/`style` come from the sidecar's SDK labels when it
+/// answers; `bm-core::voices` carries a smaller offline table for when it does
+/// not. `language` is the language the pipeline *speaks*, which is the novel's
+/// language — not the voice's full multilingual capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceInfo {
+    /// ASCII slug identity, `^[a-z0-9][a-z0-9-]*$`. Stable across a rename,
+    /// unlike `name` — which is why the cast file stores this rather than the
+    /// display name. Empty when the catalogue does not declare the voice: an
+    /// enrolled clone before `roster add` gives it a key, or a payload from an
+    /// older inductor that never learned about keys at all.
+    #[serde(default)]
+    pub key: String,
+    pub name: String,
+    /// `male` | `female` | `neutral` | `unknown`.
+    pub gender: String,
+    /// `Northern` | `Central` | `South` | `Central/South` | `unknown`.
+    pub accent: String,
+    /// BCP-47-ish tag, e.g. `vi-VN`.
+    pub language: String,
+    /// Free text from the roster label, e.g. `kể chuyện`.
+    pub style: String,
+    /// An operator-enrolled clone rather than a shipped preset.
+    #[serde(default)]
+    pub enrolled: bool,
+    /// Passes the engine's accent policy (clones are vetted at enrolment).
+    #[serde(default)]
+    pub allowed: bool,
+}
+
+/// Everything the voice picker needs in one round trip: the roster, the
+/// current cast, and the speakers the inductor knows about.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Roster {
+    pub engine: String,
+    /// `live` when the TTS sidecar answered, `offline` when this is the
+    /// bundled fallback table. The UI shows this so nobody trusts a guess.
+    pub source: String,
+    pub voices: Vec<VoiceInfo>,
+    /// character -> voice, exactly as the cast file holds it.
+    pub cast: std::collections::BTreeMap<String, String>,
+    /// Every speaker seen in the cast, the bible or any script — the picker's
+    /// first step. Sorted, `Narrator` first.
+    pub characters: Vec<String>,
+    /// One line describing the active accent policy, for the picker header.
+    pub policy_note: String,
+}
+
+/// The operator-facing operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[derive(Default)]
 pub enum Op {
-    /// Enqueue digest tasks for a chapter range — "proceed with translations".
+    /// Enqueue crawl + digest tasks for a chapter range.
     Translate,
     /// Persist the URL template and probe one crawl — "set up link crawling".
     CrawlSetup,
@@ -324,6 +374,9 @@ pub enum Op {
     Voices,
     /// Repoint one character's voice and invalidate only its cached segments.
     SwapVoice,
+    /// Render a short sample of one voice so it can be auditioned before it is
+    /// assigned. Writes `data/previews/<voice>.wav` and reports the path.
+    PreviewVoice,
     /// Estimate wall-clock time for the remaining range.
     #[default]
     Eta,
@@ -336,6 +389,7 @@ impl Op {
             Op::CrawlSetup => "crawl-setup",
             Op::Voices => "voices",
             Op::SwapVoice => "swap-voice",
+            Op::PreviewVoice => "preview-voice",
             Op::Eta => "eta",
         }
     }
@@ -346,6 +400,7 @@ impl Op {
             Op::CrawlSetup,
             Op::Voices,
             Op::SwapVoice,
+            Op::PreviewVoice,
             Op::Eta,
         ]
         .into_iter()
@@ -420,8 +475,36 @@ mod tests {
 
     #[test]
     fn ops_roundtrip_through_kebab_case() {
-        for op in [Op::Translate, Op::CrawlSetup, Op::Voices, Op::SwapVoice, Op::Eta] {
+        for op in [
+            Op::Translate,
+            Op::CrawlSetup,
+            Op::Voices,
+            Op::SwapVoice,
+            Op::PreviewVoice,
+            Op::Eta,
+        ] {
             assert_eq!(Op::parse(op.as_str()), Some(op));
         }
+        assert_eq!(Op::parse("nope"), None);
+    }
+
+    #[test]
+    fn roster_deserialises_with_optional_flags_absent() {
+        // The picker must survive a payload from an older inductor that never
+        // learned about `enrolled`/`allowed`.
+        let r: Roster = serde_json::from_str(
+            r#"{"engine":"vieneu","source":"offline","voices":[
+                 {"name":"Đức Trí","gender":"male","accent":"Central/South",
+                  "language":"vi-VN","style":"đọc truyện"}],
+               "cast":{"Narrator":"Đức Trí"},"characters":["Narrator"],
+               "policy_note":"Central/South only"}"#,
+        )
+        .unwrap();
+        assert_eq!(r.voices[0].name, "Đức Trí");
+        assert!(!r.voices[0].enrolled);
+        // A payload from an inductor that predates `key` must still parse, and
+        // must not invent one — an empty key means "not a catalogue voice".
+        assert_eq!(r.voices[0].key, "");
+        assert_eq!(r.cast["Narrator"], "Đức Trí");
     }
 }

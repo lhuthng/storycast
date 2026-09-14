@@ -314,16 +314,28 @@ async fn run_merge(
     shared: &Shared,
 ) -> Result<String> {
     set_progress(shared, 0.1, format!("merge ch{n}"));
-    let tmp = layout.output().join(format!(".ch{n:02}-agent.wav"));
-    let params = (layout.clone(), n, engine.to_string(), gap_ms, speed, ambience, tmp);
+    // Everything the merge writes goes into one per-chapter scratch directory
+    // under `.bm/`, never into `output/`. `assemble` hands back the mp3 (or a
+    // wav when ffmpeg is missing) and `publish` renames it out to `output/`,
+    // after which the whole scratch directory can go.
+    let scratch = layout.scratch_ch(n);
+    let params = (
+        layout.clone(),
+        n,
+        engine.to_string(),
+        gap_ms,
+        speed,
+        ambience,
+        scratch.clone(),
+    );
     let assembled = tokio::task::spawn_blocking(move || {
-        let (layout, n, engine, gap_ms, speed, ambience, tmp) = params;
+        let (layout, n, engine, gap_ms, speed, ambience, scratch) = params;
         bm_core::assemble::assemble(
             &layout.script(n),
             &layout.cast(&engine),
             &layout.bible(),
             &layout.seg_dir(&engine, n),
-            &tmp,
+            &scratch,
             gap_ms,
             ambience,
             speed,
@@ -333,12 +345,10 @@ async fn run_merge(
     })
     .await??;
     let final_path = bm_core::assemble::publish(&assembled, layout, n)?;
-    // Drop the intermediate wavs; the mp3 is the product.
-    for p in [assembled] {
-        if p.extension().map(|e| e != "mp3").unwrap_or(true) {
-            let _ = std::fs::remove_file(&p);
-        }
-    }
+    // The product is out of scratch now, so the directory goes. Deliberately
+    // left behind when anything above failed: a failed merge's scratch is the
+    // only evidence it leaves, and `bm-inductor gc` sweeps stale ones.
+    let _ = std::fs::remove_dir_all(&scratch);
     set_progress(shared, 1.0, format!("merge ch{n} done"));
     Ok(final_path.display().to_string())
 }

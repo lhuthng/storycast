@@ -558,6 +558,11 @@ fn run_ffmpeg(args: &[&str]) -> Result<()> {
 
 /// Assemble cached segments into the chapter deliverable.
 ///
+/// `scratch` is a directory the caller owns and may delete afterwards. Every
+/// intermediate — the concat, the ambience pass, the tempo pass — is written
+/// there, and only the returned file is meant to survive. Pass
+/// `Layout::scratch_ch(n)` so intermediates never land in `output/`.
+///
 /// Returns the mp3 when ffmpeg is available, otherwise the wav.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble(
@@ -565,7 +570,7 @@ pub fn assemble(
     cast_path: &Path,
     bible_path: &Path,
     seg_dir: &Path,
-    out: &Path,
+    scratch: &Path,
     gap_ms: u32,
     ambience: bool,
     speed: f64,
@@ -600,11 +605,10 @@ pub fn assemble(
         );
     }
 
-    if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    concat_wavs(&wavs, out, gap_ms)?;
-    let mut out_path = out.to_path_buf();
+    std::fs::create_dir_all(scratch)
+        .with_context(|| format!("creating scratch {}", scratch.display()))?;
+    let mut out_path = scratch.join("mix.wav");
+    concat_wavs(&wavs, &out_path, gap_ms)?;
 
     if ambience {
         let mut scenes = if local {
@@ -620,22 +624,16 @@ pub fn assemble(
             // a dry span so ambience never slides onto the wrong turn.
             scenes.insert(0, String::new());
         }
-        let amb_out = out_path.with_file_name(format!(
-            "{}-amb.{}",
-            out_path.file_stem().unwrap_or_default().to_string_lossy(),
-            out_path.extension().unwrap_or_default().to_string_lossy()
-        ));
-        out_path = crate::ambience::apply_ambience(&out_path, &scenes, &wavs, gap_ms, &amb_out, assets)?;
+        let amb_out = scratch.join("mix-amb.wav");
+        out_path = crate::ambience::apply_ambience(
+            &out_path, &scenes, &wavs, gap_ms, &amb_out, scratch, assets,
+        )?;
     }
 
     if (speed - 1.0).abs() > f64::EPSILON {
-        let sped = out_path.with_file_name(format!(
-            "{}x{speed}{}",
-            out_path.file_stem().unwrap_or_default().to_string_lossy(),
-            out_path
-                .extension()
-                .map(|e| format!(".{}", e.to_string_lossy()))
-                .unwrap_or_default()
+        let sped = scratch.join(format!(
+            "{}-x{speed}.wav",
+            out_path.file_stem().unwrap_or_default().to_string_lossy()
         ));
         run_ffmpeg(&[
             "-y",
@@ -848,7 +846,11 @@ mod tests {
 
     #[test]
     fn headline_skipped_when_the_digest_kept_its_own() {
-        let (_d, l) = titled_layout("t", "Chương 7: Kiếm khí xung thiên");
+        // Its own tag: `tmpdir` does `remove_dir_all` first, and tests run in
+        // parallel threads, so sharing a tag with the test above let one delete
+        // the other's chapter file mid-read — which surfaced as an unrelated
+        // `title_speech(..).unwrap()` on None.
+        let (_d, l) = titled_layout("t4", "Chương 7: Kiếm khí xung thiên");
         let mut cast = Cast::new();
         cast.insert("Narrator".into(), "Đức Trí".into());
         assert!(title_speech(&l, 7, &cast, "Kiếm khí xung thiên vang lên").is_none());

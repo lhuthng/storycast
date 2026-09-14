@@ -1,0 +1,10 @@
+# TTS sidecar dependencies — the ONLY place a model runs.
+#
+# Installed by the inductor's provisioner on every worker machine:
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+#
+# `vieneu` is pinned: the preset voice roster varies between versions, and the
+# Central/South accent policy in tts_vieneu.py is written against 3.6.4.
+google-genai>=1.0.0
+python-dotenv>=1.0
+vieneu==3.6.4

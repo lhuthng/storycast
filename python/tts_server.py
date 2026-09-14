@@ -21,6 +21,75 @@ from pathlib import Path
 
 import tts_vieneu as vn
 
+# Auditioning line for /preview. Fixed on purpose: a voice sample is only
+# comparable to another voice sample if both say the same thing.
+PREVIEW_TEXT = "Xin chào, đây là giọng đọc thử của bộ truyện."
+
+
+def _split_label(label: str) -> "tuple[str, list[str]]":
+    """`"Thái Sơn — Nam · Trung · Kể chuyện"` -> name + fields.
+
+    Enrolled clones carry a bare label (no separator); that is exactly how the
+    SDK distinguishes them from shipped presets.
+    """
+    for sep in ("—", "–", " - "):
+        if sep in label:
+            name, _, rest = label.partition(sep)
+            return name.strip(), [f.strip() for f in rest.split("·") if f.strip()]
+    return label.strip(), []
+
+
+def _gender(field: str) -> str:
+    # Female first: "female" contains "male". Bare "nu" is deliberately not
+    # matched — it would make "neutral" report as female.
+    f = field.lower()
+    if "female" in f or "nữ" in f:
+        return "female"
+    if "male" in f or "nam" in f:
+        return "male"
+    if "neutral" in f or "trung tính" in f:
+        return "neutral"
+    return "unknown"
+
+
+def _accent(field: str) -> str:
+    # Fields are positional, which is the only way to read "Nam": it means
+    # *male* in the gender slot and *South* in the accent slot.
+    f = field.lower()
+    if "bắc" in f or "bac" in f:
+        return "Northern"
+    if "trung" in f:
+        return "Central"
+    if "nam" in f:
+        return "South"
+    return "unknown"
+
+
+def roster() -> "list[dict]":
+    """Structured roster: every voice with the metadata an operator picks by."""
+    out = []
+    for label, vid in vn.engine().list_preset_voices():
+        name, fields = _split_label(label)
+        name = name or vid
+        enrolled = label == vid
+        gender = _gender(fields[0]) if fields else "unknown"
+        if len(fields) > 1:
+            accent = _accent(fields[1])
+        else:
+            # No label to read: fall back to the policy guarantee, which is a
+            # true statement about every preset this engine may use.
+            accent = "unknown" if enrolled else "Central/South"
+        out.append({
+            "name": name,
+            "gender": gender,
+            "accent": accent,
+            "language": "vi-VN",
+            "style": " · ".join(fields[2:]) if len(fields) > 2 else "",
+            "enrolled": enrolled,
+            "allowed": enrolled or name in vn.ALLOWED_VOICES,
+        })
+    return out
+
 
 def _wav_bytes(pcm: "object") -> bytes:
     import numpy as np
@@ -50,6 +119,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if self.path == "/voices":
             return self._json(vn.engine().list_preset_voices())
+        if self.path == "/roster":
+            # Structured form of /voices: name + gender + accent + style +
+            # language, so a client never has to parse SDK label strings.
+            try:
+                return self._json(roster())
+            except Exception as e:  # noqa: BLE001 — report, don't kill the worker
+                return self._json({"error": str(e)[:300]}, 500)
         if self.path == "/policy":
             # Offline authority for accent policy + roster so Rust never
             # duplicates TTS knowledge (fallback lives in bm-core/voices.rs).
@@ -63,23 +139,38 @@ class Handler(BaseHTTPRequestHandler):
             })
         return self._json({"error": "unknown path"}, 404)
 
+    def _read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length", 0))
+        return json.loads(self.rfile.read(length) or b"{}")
+
+    def _send_wav(self, body: bytes, voice: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(body)))
+        # Lets a client name the file without guessing from the request.
+        self.send_header("X-Voice", voice)
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/infer":
+        if self.path not in ("/infer", "/preview"):
             return self._json({"error": "unknown path"}, 404)
         try:
-            req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            req = self._read_json()
+            voice = req.get("voice")
+            # /preview always speaks the same line, so two samples are
+            # actually comparable. /infer takes the caller's text.
+            text = req.get("text") or (PREVIEW_TEXT if self.path == "/preview" else None)
+            if not text:
+                return self._json({"error": "text is required"}, 400)
             tts = vn.engine()
-            audio = tts.infer(req["text"], voice=req.get("voice"),
+            audio = tts.infer(text, voice=voice,
                               temperature=float(req.get("temperature", 0.8)),
                               silence_p=float(req.get("silence_p", 0.15)))
             body = _wav_bytes(audio)
         except Exception as e:  # noqa: BLE001 — report, don't kill the worker
             return self._json({"error": str(e)[:300]}, 500)
-        self.send_response(200)
-        self.send_header("Content-Type", "audio/wav")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_wav(body, voice or "")
 
     def log_message(self, *a) -> None:
         pass  # quiet; use --verbose here if you ever need access logs

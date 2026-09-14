@@ -1,0 +1,72 @@
+{
+  "_note": "The shipped voice catalogue: every preset the pipeline may assign, its metadata, and the accent policy. Committed on purpose — a fresh clone with no local config must still render, so the roster cannot live only in the ignored .bm/. This file is PUBLIC, so it states no preference: every preset is declared, no accent is excluded, and no character is pre-cast. An operator narrows it and seeds their cast in .bm/voices.json, which is ignored. See .docs/VOICE_CONFIG_PROPOSAL.md.",
+  "version": 1,
+  "engines": {
+    "vieneu": {
+      "label": "VieNeu-TTS v3 Turbo — local, 48 kHz",
+      "sample_rate": 48000,
+      "policy": {
+        "allowed_accents": [],
+        "excluded_accents": [],
+        "note": "No restriction — all 23 presets are declared and assignable. A regional preference belongs to the operator, not the catalogue: put e.g. \"excluded_accents\": [\"Northern\"] in .bm/voices.json. An unknown-gender character falls back to the male pool (the store declares no neutral preset).",
+        "excluded": []
+      },
+      "voices": [
+        { "key": "minh-duc", "name": "Minh Đức", "gender": "male", "accent": "Northern", "style": "tin tức" },
+        { "key": "pham-tuyen", "name": "Phạm Tuyên", "gender": "male", "accent": "Northern", "style": "tự nhiên" },
+        { "key": "thai-son", "name": "Thái Sơn", "gender": "male", "accent": "South", "style": "kể chuyện" },
+        { "key": "xuan-vinh", "name": "Xuân Vĩnh", "gender": "male", "accent": "Northern", "style": "tự nhiên" },
+        { "key": "thanh-binh", "name": "Thanh Bình", "gender": "male", "accent": "Northern", "style": "kể chuyện" },
+        { "key": "truc-ly", "name": "Trúc Ly", "gender": "female", "accent": "Northern", "style": "tự nhiên" },
+        { "key": "ngoc-linh", "name": "Ngọc Linh", "gender": "female", "accent": "Northern", "style": "kể chuyện" },
+        { "key": "doan-trang", "name": "Đoan Trang", "gender": "female", "accent": "Northern", "style": "tự nhiên" },
+        { "key": "mai-anh", "name": "Mai Anh", "gender": "female", "accent": "Northern", "style": "tin tức" },
+        { "key": "thuc-doan", "name": "Thục Đoan", "gender": "female", "accent": "South", "style": "kể chuyện" },
+        { "key": "minh-triet", "name": "Minh Triết", "gender": "male", "accent": "South", "style": "tin tức" },
+        { "key": "thuy-dung", "name": "Thùy Dung", "gender": "female", "accent": "South", "style": "tin tức" },
+        { "key": "quang-son", "name": "Quang Sơn", "gender": "male", "accent": "Central", "style": "tự nhiên" },
+        { "key": "ngoc-tran", "name": "Ngọc Trân", "gender": "female", "accent": "Central", "style": "tự nhiên" },
+        { "key": "my-duyen", "name": "Mỹ Duyên", "gender": "female", "accent": "South", "style": "đọc truyện" },
+        { "key": "quynh-anh", "name": "Quỳnh Anh", "gender": "female", "accent": "Northern", "style": "đọc truyện" },
+        { "key": "duc-tri", "name": "Đức Trí", "gender": "male", "accent": "South", "style": "đọc truyện" },
+        { "key": "kim-thanh", "name": "Kim Thanh", "gender": "female", "accent": "South", "style": "đọc truyện" },
+        { "key": "ngoc-huyen", "name": "Ngọc Huyền", "gender": "female", "accent": "Northern", "style": "tự nhiên" },
+        { "key": "adam", "name": "Adam", "gender": "male", "accent": "South", "style": "tự nhiên" },
+        { "key": "manh-dung", "name": "Mạnh Dũng", "gender": "male", "accent": "Northern", "style": "tự nhiên" },
+        { "key": "minh-quan", "name": "Minh Quân", "gender": "male", "accent": "Northern", "style": "tự nhiên" },
+        { "key": "anh-khoi", "name": "Anh Khôi", "gender": "male", "accent": "Northern", "style": "kể chuyện" }
+      ],
+      "default_cast": {}
+    },
+    "gemini": {
+      "label": "Gemini prebuilt TTS — cloud",
+      "sample_rate": 24000,
+      "policy": {
+        "allowed_accents": [],
+        "excluded_accents": [],
+        "note": "No restriction — cloud prebuilt voices, any of the roster is assignable. Google's labels do not encode a region, so there is nothing to exclude by accent here.",
+        "excluded": []
+      },
+      "voices": [
+        { "key": "orus", "name": "Orus", "gender": "male", "accent": "unknown", "style": "" },
+        { "key": "charon", "name": "Charon", "gender": "male", "accent": "unknown", "style": "" },
+        { "key": "fenrir", "name": "Fenrir", "gender": "male", "accent": "unknown", "style": "" },
+        { "key": "algenib", "name": "Algenib", "gender": "male", "accent": "unknown", "style": "" },
+        { "key": "gacrux", "name": "Gacrux", "gender": "male", "accent": "unknown", "style": "" },
+        { "key": "alnilam", "name": "Alnilam", "gender": "male", "accent": "unknown", "style": "" },
+        { "key": "vindemiatrix", "name": "Vindemiatrix", "gender": "female", "accent": "unknown", "style": "" },
+        { "key": "leda", "name": "Leda", "gender": "female", "accent": "unknown", "style": "" },
+        { "key": "aoede", "name": "Aoede", "gender": "female", "accent": "unknown", "style": "" },
+        { "key": "callirrhoe", "name": "Callirrhoe", "gender": "female", "accent": "unknown", "style": "" },
+        { "key": "despina", "name": "Despina", "gender": "female", "accent": "unknown", "style": "" },
+        { "key": "sulafat", "name": "Sulafat", "gender": "female", "accent": "unknown", "style": "" },
+        { "key": "achernar", "name": "Achernar", "gender": "female", "accent": "unknown", "style": "" },
+        { "key": "schedar", "name": "Schedar", "gender": "neutral", "accent": "unknown", "style": "" },
+        { "key": "puck", "name": "Puck", "gender": "neutral", "accent": "unknown", "style": "" },
+        { "key": "erinome", "name": "Erinome", "gender": "neutral", "accent": "unknown", "style": "" },
+        { "key": "rasalgethi", "name": "Rasalgethi", "gender": "neutral", "accent": "unknown", "style": "" }
+      ],
+      "default_cast": {}
+    }
+  }
+}
