@@ -20,6 +20,7 @@ TASK: return STRICT JSON only (no markdown, no commentary) with this shape:
 
 RULES:
 1. Split on speaker turns: every quoted dialogue run + surrounding narration become separate segments, in original order. Never merge two speakers into one segment.
+   Never emit the chapter headline ("Chương N: ...") as a segment, glued or otherwise — the pipeline speaks it separately. Start segments at the first real content line.
 2. Attribute quotes via dialogue tags and context (noi, hoi, quat, day do, cam than, tu an ui...). Pronouns han/nang + nearby names/titles resolve to that character. Tag every segment with its scene; consecutive segments in one place/time share one label.
 3. mentions records EVERY surface form used for a speaker in this chapter (pronouns han/nang/ta, titles ty ty, descriptive phrases) — it is chapter-local context, never global identity.
 4. new_characters / new_aliases are for PROPER NAMES ONLY (real names, stable unambiguous titles). Never propose pronouns, generic nouns (pham nhan, con...), or verb phrases there — those belong in mentions.
