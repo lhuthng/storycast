@@ -388,6 +388,9 @@ pub enum Op {
     /// Estimate wall-clock time for the remaining range.
     #[default]
     Eta,
+    /// Requeue tasks stranded on dead workers (no live beat). Unsticks
+    /// chapters after a kill without waiting out leases.
+    Requeue,
 }
 
 impl Op {
@@ -399,6 +402,7 @@ impl Op {
             Op::SwapVoice => "swap-voice",
             Op::PreviewVoice => "preview-voice",
             Op::Eta => "eta",
+            Op::Requeue => "requeue",
         }
     }
 
@@ -410,6 +414,7 @@ impl Op {
             Op::SwapVoice,
             Op::PreviewVoice,
             Op::Eta,
+            Op::Requeue,
         ]
         .into_iter()
         .find(|o| o.as_str() == s)
@@ -490,6 +495,7 @@ mod tests {
             Op::SwapVoice,
             Op::PreviewVoice,
             Op::Eta,
+            Op::Requeue,
         ] {
             assert_eq!(Op::parse(op.as_str()), Some(op));
         }

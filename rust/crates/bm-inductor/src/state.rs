@@ -28,6 +28,10 @@ pub struct Inner {
     pub machines: HashMap<String, Machine>,
     pub workers: HashMap<String, String>,
     pub beats: HashMap<String, bm_proto::Heartbeat>,
+    /// Boot time: the orphan pass in `reap` stays quiet for the first 120s
+    /// so a reboot never mistakes still-grinding workers (whose beats arrive
+    /// within seconds) for dead ones.
+    pub started_at: u64,
 }
 
 impl Inner {
@@ -39,6 +43,7 @@ impl Inner {
             machines: HashMap::new(),
             workers: HashMap::new(),
             beats: HashMap::new(),
+            started_at: now_secs(),
         }
     }
 
@@ -402,8 +407,9 @@ impl Inner {
             .entry(format!("{stage}:{chapter}"))
             .or_insert_with(|| Task::new(chapter, stage))
     }
-
-    /// Expired leases return to the pool with no strike. Returns their ids.
+    /// Expired leases return to the pool with no strike. So do tasks stranded
+    /// on dead workers (no live beat) — automatically, every 10s, with no
+    /// keypress and no lease wait. Returns their ids.
     pub fn reap(&mut self) -> Vec<String> {
         let now = now_secs();
         let mut out = Vec::new();
@@ -411,17 +417,86 @@ impl Inner {
             if matches!(t.state, TaskState::Assigned | TaskState::Running)
                 && t.lease_until.map(|l| l < now).unwrap_or(false)
             {
-                t.state = TaskState::Pending;
-                t.assigned_to = None;
-                t.lease_until = None;
-                t.updated = now;
+                Self::release(t, now, "lease expired");
                 out.push(t.id());
+            }
+        }
+        // Orphan pass: assigned to a worker with no live beat (90s, the same
+        // window the ETA calls live). Workers beat every 2s, so a live one is
+        // never caught here — and the boot grace in `started_at` means a
+        // reboot never mistakes grinding workers for dead ones either.
+        if now.saturating_sub(self.started_at) > 120 {
+            let live: std::collections::HashSet<&str> = self
+                .beats
+                .values()
+                .filter(|b| now.saturating_sub(b.ts) < 90)
+                .map(|b| b.worker_id.as_str())
+                .collect();
+            for t in self.tasks.values_mut() {
+                if !matches!(t.state, TaskState::Assigned | TaskState::Running) {
+                    continue;
+                }
+                let orphan = match &t.assigned_to {
+                    None => true,
+                    Some(w) => !live.contains(w.as_str()),
+                };
+                if orphan && !out.contains(&t.id()) {
+                    Self::release(t, now, "worker gone");
+                    out.push(t.id());
+                }
             }
         }
         if !out.is_empty() {
             self.save();
         }
         out
+    }
+
+    /// Return one task to the pool. Attempts are kept — this unsticks, it
+    /// does not forgive strikes.
+    fn release(t: &mut Task, now: u64, why: &str) {
+        t.state = TaskState::Pending;
+        t.assigned_to = None;
+        t.lease_until = None;
+        t.detail = format!("requeued: {why}");
+        t.updated = now;
+    }
+
+    /// Manual trigger for the same orphan logic `reap` runs automatically:
+    /// requeue assignments with no live beat. Live workers' tasks are
+    /// untouched. Attempts are kept.
+    pub fn op_requeue_orphans(&mut self) -> String {
+        let now = now_secs();
+        let live: std::collections::HashSet<&str> = self
+            .beats
+            .values()
+            .filter(|b| now.saturating_sub(b.ts) < 90)
+            .map(|b| b.worker_id.as_str())
+            .collect();
+        let mut back = Vec::new();
+        for t in self.tasks.values_mut() {
+            if !matches!(t.state, TaskState::Assigned | TaskState::Running) {
+                continue;
+            }
+            let orphan = match &t.assigned_to {
+                None => true,
+                Some(w) => !live.contains(w.as_str()),
+            };
+            if orphan {
+                Self::release(t, now, "worker gone");
+                back.push(t.id());
+            }
+        }
+        back.sort();
+        if back.is_empty() {
+            return "no orphaned tasks — every assignment has a live worker".into();
+        }
+        self.save();
+        format!(
+            "requeued {} orphaned task(s): {}",
+            back.len(),
+            back.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+        )
     }
 
     /// ETA for the remaining range, from measured throughput divided by
@@ -482,7 +557,45 @@ impl Inner {
 
     /// Repoint one character's voice and invalidate only its cached segments.
     /// Other characters keep their cache; affected chapters re-render + merge.
+    /// Refused while workers are mid-play: swapping then mixes voices and
+    /// marks stale mp3s done. Only *fresh* evidence counts (30s) — stale
+    /// beats and ghost assignments are the reaper's job, and an offline Inner
+    /// (empty beats, e.g. swapping while the inductor is down) always passes.
     pub fn op_swap_voice(&mut self, character: &str, voice: &str) -> anyhow::Result<String> {
+        let now = now_secs();
+        let fresh = |ts: u64| now.saturating_sub(ts) < 30;
+        let mut busy: Vec<String> = Vec::new();
+        for t in self.tasks.values() {
+            if !matches!(t.state, TaskState::Assigned | TaskState::Running) {
+                continue;
+            }
+            let live_holder = t
+                .assigned_to
+                .as_deref()
+                .and_then(|w| self.beats.get(w))
+                .map(|b| fresh(b.ts))
+                .unwrap_or(false);
+            if live_holder {
+                busy.push(format!("{} on {}", t.id(), t.assigned_to.as_deref().unwrap_or("?")));
+            }
+        }
+        for (w, b) in &self.beats {
+            if fresh(b.ts) {
+                if let Some(tid) = &b.task_id {
+                    let s = format!("{tid} on {w}");
+                    if !busy.contains(&s) {
+                        busy.push(s);
+                    }
+                }
+            }
+        }
+        if !busy.is_empty() {
+            busy.sort();
+            anyhow::bail!(
+                "workers mid-play ({}) — X stops everything, then swap",
+                busy.iter().take(4).cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
         let engine = self.settings.engine.clone();
         // The operator's own roster, not the shipped default: this is the gate
         // that decides what may be assigned on this machine.
@@ -849,6 +962,56 @@ mod tests {
         assert!(err.contains("neither an admitted preset"), "{err}");
     }
 
+    fn busy_inner() -> (tempfile::TempDir, Inner) {
+        // One chapter mid-render on w1: assigned task + fresh beat with task.
+        let (d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+        let mut t = Task::new(1, Stage::Render);
+        t.state = TaskState::Assigned;
+        t.assigned_to = Some("w1".into());
+        t.lease_until = Some(now_secs() + 5000);
+        inner.tasks.insert("render:1".into(), t);
+        inner.beats.insert(
+            "w1".into(),
+            bm_proto::Heartbeat {
+                worker_id: "w1".into(),
+                addr: "127.0.0.1".into(),
+                task_id: Some("render:1".into()),
+                stage: Some(Stage::Render),
+                chapter: Some(1),
+                progress: 0.5,
+                activity: "render".into(),
+                eta_secs: None,
+                ts: now_secs(),
+                hostname: "box".into(),
+            },
+        );
+        (d, inner)
+    }
+
+    #[test]
+    fn swap_refuses_while_workers_are_mid_play() {
+        let (_d, mut inner) = busy_inner();
+        let err = inner.op_swap_voice("A", "Quang Sơn").unwrap_err().to_string();
+        assert!(err.contains("mid-play") && err.contains("render:1"), "{err}");
+        assert!(err.contains('X'), "names the way out: {err}");
+    }
+
+    #[test]
+    fn swap_proceeds_on_stale_or_idle_evidence() {
+        let (_d, mut inner) = busy_inner();
+        // Stale beats + ghost assignment: the reaper's business, not a block.
+        for b in inner.beats.values_mut() {
+            b.ts = now_secs().saturating_sub(3600);
+            b.task_id = None;
+        }
+        for t in inner.tasks.values_mut() {
+            t.assigned_to = Some("ghost".into());
+        }
+        assert!(inner.op_swap_voice("A", "Quang Sơn").is_ok());
+    }
+
     #[test]
     fn enqueue_seeds_crawl_done_so_the_digest_is_offerable() {
         // Empty boot (B reconciles nothing) + text on disk + no script: the
@@ -896,5 +1059,86 @@ mod tests {
         let msg = inner.op_eta(1, 10);
         assert!(msg.contains("total"), "{msg}");
         assert!(msg.contains("(guess)"), "{msg}");
+    }
+
+    #[test]
+    fn reap_frees_dead_workers_tasks_but_not_after_a_reboot() {
+        let (_d, mut inner) = fixture();
+        let now = now_secs();
+        let mut t = Task::new(2, Stage::Digest);
+        t.state = TaskState::Assigned;
+        t.assigned_to = Some("ghost".into());
+        t.lease_until = Some(now + 5000);
+        inner.tasks.insert("digest:2".into(), t);
+
+        // Fresh boot: beats haven't arrived yet — hands off.
+        assert!(inner.reap().is_empty(), "boot grace must hold");
+        assert_eq!(inner.tasks["digest:2"].state, TaskState::Assigned);
+
+        // Long after boot with still no beat: the worker is gone, free it.
+        inner.started_at = now.saturating_sub(1000);
+        let freed = inner.reap();
+        assert_eq!(freed, vec!["digest:2".to_string()]);
+        assert_eq!(inner.tasks["digest:2"].state, TaskState::Pending);
+
+        // A live beat protects the assignment again.
+        let mut t = Task::new(3, Stage::Digest);
+        t.state = TaskState::Assigned;
+        t.assigned_to = Some("w-live".into());
+        t.lease_until = Some(now + 5000);
+        inner.tasks.insert("digest:3".into(), t);
+        inner.beats.insert(
+            "w-live".into(),
+            bm_proto::Heartbeat {
+                worker_id: "w-live".into(),
+                addr: "127.0.0.1".into(),
+                task_id: Some("digest:3".into()),
+                stage: Some(Stage::Digest),
+                chapter: Some(3),
+                progress: 0.5,
+                activity: "digest".into(),
+                eta_secs: None,
+                ts: now_secs(),
+                hostname: "box".into(),
+            },
+        );
+        assert!(inner.reap().is_empty(), "live worker untouched");
+    }
+
+    #[test]
+    fn requeue_orphans_frees_dead_workers_tasks_only() {
+        let (_d, mut inner) = fixture();
+        let now = now_secs();
+        // Ghost-held task, live-held task, and an unassigned one.
+        for (id, ch, who) in [("digest:2", 2, "ghost"), ("digest:3", 3, "w-live")] {
+            let mut t = Task::new(ch, Stage::Digest);
+            t.state = TaskState::Assigned;
+            t.assigned_to = Some(who.into());
+            t.lease_until = Some(now + 5000);
+            inner.tasks.insert(id.into(), t);
+        }
+        inner.tasks.insert("digest:4".into(), Task::new(4, Stage::Digest));
+        inner.beats.insert(
+            "w-live".into(),
+            bm_proto::Heartbeat {
+                worker_id: "w-live".into(),
+                addr: "127.0.0.1".into(),
+                task_id: Some("digest:3".into()),
+                stage: Some(Stage::Digest),
+                chapter: Some(3),
+                progress: 0.5,
+                activity: "digest".into(),
+                eta_secs: None,
+                ts: now,
+                hostname: "box".into(),
+            },
+        );
+        let msg = inner.op_requeue_orphans();
+        assert!(msg.contains("digest:2"), "{msg}");
+        assert!(!msg.contains("digest:3"), "live worker untouched: {msg}");
+        assert_eq!(inner.tasks["digest:2"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["digest:2"].attempts, 0, "strikes untouched (none here)");
+        assert_eq!(inner.tasks["digest:3"].state, TaskState::Assigned);
+        assert!(inner.op_requeue_orphans().contains("no orphaned"), "second run is a no-op");
     }
 }

@@ -154,6 +154,10 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             let (start, count) = (req.start.unwrap_or(1), req.count.unwrap_or(1));
             Json(OpResult { ok: true, message: inner.op_eta(start, count) })
         }
+        bm_proto::Op::Requeue => {
+            let mut inner = st.lock().await;
+            Json(OpResult { ok: true, message: inner.op_requeue_orphans() })
+        }
     }
 }
 
@@ -306,6 +310,61 @@ async fn roster(State(st): State<Shared>) -> Json<Roster> {
         )
     };
     Json(build_roster(&layout, &engine, characters, cast).await)
+}
+
+/// Roster with no scheduler: a throwaway Inner over the files on disk. The
+/// TUI uses this when the inductor is down (X stops it) so picking voices
+/// never needs the control plane. Sidecar-dependent parts degrade exactly as
+/// they do for a live inductor with a dead sidecar.
+pub(crate) async fn offline_roster(layout_root: &std::path::Path) -> Roster {
+    let layout = bm_core::Layout::new(layout_root);
+    let settings = bm_core::config::Settings::load(&layout.settings());
+    let engine = settings.engine.clone();
+    let mut inner = Inner::new(layout.clone(), settings);
+    inner.load_ledger();
+    let characters = inner.known_characters();
+    let cast = inner.cast_snapshot();
+    build_roster(&layout, &engine, characters, cast).await
+}
+
+/// Swap with no scheduler: the same `op_swap_voice` against a throwaway
+/// Inner, which persists cast + ledger itself. Two locks before touching
+/// anything: the inductor API must be down (its scheduler owns these files
+/// while it answers), and no local worker may be alive (a mid-render worker
+/// keeps rendering the old cast). Remote strays are the operator's
+/// responsibility — the supported flow is X (which sweeps them), then swap.
+pub(crate) async fn offline_swap(
+    api: &str,
+    layout_root: &std::path::Path,
+    character: &str,
+    voice: &str,
+) -> Result<String, String> {
+    if super::backend::inductor_up(api).await {
+        return Err("inductor is back — swap normally (this path is for inductor-down only)".into());
+    }
+    if super::backend::local_workers_alive() {
+        return Err("local workers still running — X first, then swap".into());
+    }
+    offline_swap_apply(layout_root, character, voice)
+}
+
+/// The file mutation itself, minus the guards: throwaway Inner over disk
+/// files, same `op_swap_voice` the live path runs (which persists cast +
+/// ledger itself). Split out so tests can run it without a scheduler, a
+/// network, or a worker-shaped hole in the room.
+fn offline_swap_apply(
+    layout_root: &std::path::Path,
+    character: &str,
+    voice: &str,
+) -> Result<String, String> {
+    let layout = bm_core::Layout::new(layout_root);
+    let settings = bm_core::config::Settings::load(&layout.settings());
+    let mut inner = Inner::new(layout, settings);
+    inner.load_ledger();
+    inner
+        .op_swap_voice(character, voice)
+        .map(|m| format!("{m} [offline — inductor was down]"))
+        .map_err(|e| e.to_string())
 }
 
 /// Build the client used for every TTS-sidecar call.
@@ -526,3 +585,57 @@ pub fn router(st: Shared) -> Router {
 // Silence the unused-import warning until M6 operations need TaskRequest.
 #[allow(dead_code)]
 fn _task_req_is_part_of_the_protocol(_r: TaskRequest) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        let layout = bm_core::Layout::new(d.path());
+        std::fs::create_dir_all(layout.data()).unwrap();
+        std::fs::create_dir_all(layout.output()).unwrap();
+        std::fs::write(layout.bible(), r#"{"characters":[]}"#).unwrap();
+        d
+    }
+
+    #[tokio::test]
+    async fn offline_roster_reads_cast_and_speakers_from_disk() {
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+        std::fs::write(
+            layout.script(1),
+            r#"{"roster":["A"],"segments":[{"speaker":"A","text":"x"}]}"#,
+        )
+        .unwrap();
+        let r = offline_roster(d.path()).await;
+        assert_eq!(r.cast.get("A").map(|s| s.as_str()), Some("Đức Trí"));
+        assert!(r.characters.contains(&"A".to_string()), "{:?}", r.characters);
+        assert!(!r.voices.is_empty(), "catalogue fallback lists voices");
+    }
+
+    #[test]
+    fn offline_swap_applies_the_same_invalidation_as_live() {
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        std::fs::write(
+            layout.script(1),
+            r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"B","text":"z"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
+        let seg = layout.seg_dir("vieneu", 1);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(seg.join("0001_Adam.wav"), vec![0u8; 2000]).unwrap();
+
+        let msg = offline_swap_apply(d.path(), "A", "Minh Triết").expect("offline swap");
+        assert!(msg.contains("Đức Trí -> Minh Triết"), "{msg}");
+        assert!(msg.contains("offline"), "{msg}");
+        assert!(!seg.join("0000_Đức Trí.wav").exists(), "stale run file must go");
+        assert!(seg.join("0001_Adam.wav").exists(), "other voices keep cache");
+        let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
+        assert_eq!(cast["A"], "Minh Triết");
+    }
+}

@@ -1,10 +1,7 @@
 """Local TTS via VieNeu-TTS v3 Turbo (48 kHz, torch-free ONNX on CPU).
 
-Accent policy: Central/South presets ONLY — Northern voices are excluded.
+No accent policy: every preset the engine ships is renderable.
 Roster source: tts.list_preset_voices() labels "Giới tính · Vùng · Phong cách".
-
-NOTE: Xuân Vĩnh is deliberately omitted — the SDK labels it Bắc while the
-model card and forks call it Southern. Unanimous voices only below.
 """
 from __future__ import annotations
 
@@ -40,16 +37,6 @@ def engine():
 
         _tts = Vieneu()  # int8 CPU default; auto-downloads weights on first run
     return _tts
-
-
-def assert_allowed(cast: dict) -> None:
-    # Built-in presets carry "Name — Giới tính · Vùng · ..." labels; user-enrolled
-    # clones have bare labels (voice==label), so accept those while still blocking
-    # Northern presets.
-    customs = {v for label, v in engine().list_preset_voices() if label == v}
-    bad = {k: v for k, v in cast.items() if v not in ALLOWED_VOICES and v not in customs}
-    if bad:
-        raise SystemExit(f"non Central/South voice in cast (policy): {bad}")
 
 
 def synth_to_wav(text: str, voice: str, dest: Path, temperature: float = 0.8,
