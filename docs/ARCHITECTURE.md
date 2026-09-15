@@ -55,7 +55,7 @@ worker re-registers and pulls again.
   clean the chapter body. `POST /api/op {"op":"crawl-setup"}` saves the template
   and probe-crawls one chapter, so a bad selector fails loudly *before* you
   enqueue a range.
-* **digest** (`digest.rs`) — one LLM call per chapter: the prompt
+* **digest** (`digest/`) — one LLM call per chapter: the prompt
   (`prompts/analyze.txt`) + the bible + the chapter text in; strict JSON out
   (`segments`, `roster`, `new_characters`, `aliases`, `fixes`). The inductor is
   the **single writer** of `data/bible.json` and the cast files — workers send
@@ -69,7 +69,7 @@ worker re-registers and pulls again.
   `data/audio/segments-<engine>-NN/`, so a retry resumes mid-chapter instead
   of starting over. The report's `units` counts real TTS calls (cache hits
   excluded), which feeds the ETA model.
-* **merge** (`assemble.rs`, `ambience.rs`) — concatenates segments with
+* **merge** (`assemble/`, `ambience.rs`) — concatenates segments with
   `gap_ms` pauses and optional ambience beds keyed by the script's `scene`
   labels, and writes `output/Ch.N - Title.mp3`. A merge task carries
   **affinity**: it runs on the machine that rendered the chapter, because that
@@ -88,7 +88,7 @@ worker re-registers and pulls again.
 | `POST /api/op` | Operator ops: `translate`, `crawl-setup`, `voices`, `swap-voice`, `preview-voice`, `eta`, `requeue`, `retry`, `retry-task` |
 
 Every state change the scheduler makes also appends an **event** to an
-in-memory ring buffer (`bm-inductor/src/state.rs`): completions with duration,
+in-memory ring buffer (`bm-inductor/src/state/`): completions with duration,
 failures **with the worker's own error text**, lease expiries, orphan
 requeues, and operator actions. `/api/state` exposes it and the TUI folds it
 into the Events pane, deduplicating by monotonic id — which is how a digest
@@ -97,7 +97,7 @@ stuck row.
 
 ## 4. Provisioning, and why second runs are fast
 
-`bm-core/src/provision.rs` onboards a machine over plain `ssh`/`rsync` — no SSH
+`bm-core/src/provision/` onboards a machine over plain `ssh`/`rsync` — no SSH
 library, so your `~/.ssh/config` and keys are reused and every command is
 visible in the TUI log:
 
@@ -121,7 +121,7 @@ provision-gated start, so "started" always means "ready".
 
 ## 5. Voices: three layers
 
-1. **Catalogue** — voices built into the engine (`voices.rs`), each with
+1. **Catalogue** — voices built into the engine (`voices/`), each with
    gender/accent/language/style metadata and a stable *key*.
 2. **Pool** — your clips (`voice-pool.json`), tagged from filenames or by hand
    (`roster add-sample`); enrolled into the engine's voice store on every
@@ -133,7 +133,31 @@ provision-gated start, so "started" always means "ready".
    `voice_hint` and the pool's tags. `s` repoints one speaker, `S` shows the
    whole cast with health verdicts, `v` re-reads the roster and refills gaps.
 
-## 6. The TUI (bm-inductor/src/tui.rs)
+## 6. The TUI (bm-inductor/src/tui/)
+
+The dashboard is a module, not a file. `tui.rs` is the module root — it holds
+the entry points (`run`, `run_loop`, `snapshot`) and the `mod` declarations. The
+rest splits two ways: the shared machinery by *kind* of code, then the two
+per-screen concerns — key handling and drawing — one file per screen:
+
+```
+tui.rs        entry points + module wiring
+tui/layout.rs tier constants, column widths, size_class — and the
+              `const _: () = assert!(...)` guards that prove they fit
+tui/screen.rs the modal state machine (Screen, Picker, Confirm, TextPrompt…)
+tui/app.rs    App and its state transitions
+tui/style.rs  colours, glyphs, cell/line formatting
+tui/model.rs  pure view-model helpers (folding, filtering, sorting, rollups)
+tui/jobs.rs   background jobs (Job, run_job) — one sequential worker
+tui/input.rs  the modal key chain, in order, then normal::normal_key
+tui/input/    one file per modal block
+tui/draw.rs   the tier dispatch and the overlay match
+tui/draw/     one file per pane or overlay
+tui/tests.rs  every test
+```
+
+To follow a key press: `input.rs` → `input/<screen>.rs` → `jobs.rs` →
+`app.rs` → `draw.rs` → `draw/<pane>.rs`.
 
 * **Non-blocking by construction** — HTTP polling lives in a background Tokio
   task that ships `Ev::State` over an MPSC channel; the draw loop only drains a
