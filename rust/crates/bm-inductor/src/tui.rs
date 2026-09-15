@@ -13,7 +13,7 @@
 //!   state that says what to do next.
 
 use bm_core::Layout;
-use bm_proto::{Heartbeat, Machine, Op, OpRequest, Roster, Task, TaskState, VoiceInfo};
+use bm_proto::{Heartbeat, Machine, Op, OpRequest, Roster, Stage, Task, TaskState, VoiceInfo};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -96,12 +96,12 @@ const COMPACT_FOOTER_H: u16 = 4;
 /// The compact tier gets shorter labels because it has 76 columns to work with;
 /// every key is described in full on the help screen, which `?` opens.
 const KEYS_FULL: [&str; 2] = [
-    "a add · p provision · d drop · i inspect · t translate · c crawl-setup",
+    "a add · p provision · d drop · i inspect · t translate · c crawl-setup · u retry · K tasks",
     "P force · v voices · s swap-voice · S cast · e eta · r refresh · ? help · C colour · q quit",
 ];
 const KEYS_COMPACT: [&str; 2] = [
-    "a add · p prov · d drop · i info · t translate · c crawl",
-    "v voices · s swap · S cast · e eta · r refresh · ? help · q quit",
+    "a add · p prov · d drop · i info · t translate · c crawl · u retry",
+    "v voices · s swap · S cast · e eta · r refresh · ? help · K tasks · q quit",
 ];
 
 /// Compact-tier column widths. The full tier has slack and keeps its widths
@@ -227,6 +227,19 @@ fn stamp(d: Duration) -> String {
         format!("+{}h{:02}m", s / 3600, (s % 3600) / 60)
     } else {
         format!("+{:02}:{:02}", s / 60, s % 60)
+    }
+}
+
+/// Map an inductor event level onto the pane's severity.
+///
+/// Anything unrecognised reads as info rather than as an error: a newer inductor
+/// with a level this build has never heard of must not paint the log red.
+fn level_from_str(s: &str) -> Level {
+    match s {
+        "ok" => Level::Ok,
+        "warn" => Level::Warn,
+        "error" => Level::Error,
+        _ => Level::Info,
     }
 }
 
@@ -434,6 +447,39 @@ impl CastView {
     }
 }
 
+/// The Tasks screen: the whole ledger, navigable and filterable.
+///
+/// The dashboard's Tasks pane is a roll-up — counts per stage. It answers "is
+/// anything wrong" but never "which chapter, and why". This screen answers the
+/// second question, which is the one that actually blocks an operator: a
+/// shelved digest is a row you can open, read, and re-queue from here.
+#[derive(Debug, Clone)]
+struct TasksView {
+    cursor: usize,
+    scroll: usize,
+    filter: String,
+}
+
+impl TasksView {
+    fn new() -> Self {
+        TasksView { cursor: 0, scroll: 0, filter: String::new() }
+    }
+}
+
+/// One task's page, keyed by `(stage, chapter)`.
+///
+/// Deliberately a key and not a `Task` snapshot: the current task is looked up
+/// on every draw, so re-queueing from here updates the page you are looking at
+/// instead of leaving a stale copy on screen. `list` is the Tasks view this page
+/// was opened from, so Esc returns to the same row under the same filter.
+#[derive(Debug, Clone)]
+struct TaskDetail {
+    stage: Stage,
+    chapter: u32,
+    scroll: usize,
+    list: TasksView,
+}
+
 #[derive(Debug, Clone)]
 enum Screen {
     Normal,
@@ -441,6 +487,10 @@ enum Screen {
     Text(TextPrompt),
     Pick(Picker),
     Cast(CastView),
+    /// Every task, with the failures readable and re-queueable in place.
+    Tasks(TasksView),
+    /// One task in full: `detail`, attempts, assignee, lease.
+    TaskDetail(TaskDetail),
     /// System overview: backend, config, voices, tasks — Enter launches.
     Run,
     Confirm(Confirm),
@@ -515,7 +565,14 @@ enum Job {
 
 #[derive(Debug)]
 enum DoneKind {
-    Op { op: Op, ok: bool, voice: Option<String> },
+    Op {
+        op: Op,
+        /// The in-flight key this job was dispatched under, so completion frees
+        /// exactly that slot (two retries of different chapters can coexist).
+        key: String,
+        ok: bool,
+        voice: Option<String>,
+    },
     /// Pool changed under the roster: reload it (only if one is showing).
     ReloadRoster,
     Other,
@@ -525,6 +582,10 @@ enum Ev {
     Log(LogLine),
     Roster(Result<Roster, String>),
     Done(DoneKind),
+    /// A `/api/state` snapshot from the background poller. Carrying the payload
+    /// (not the parsed structs) keeps the parse on the UI task, where the
+    /// ordering/sort fixes already live.
+    State(Result<serde_json::Value, String>),
     /// The backend a `B` job started is up enough to take work: enqueue this.
     BackendLive { start: u32, count: u32 },
 }
@@ -553,8 +614,14 @@ struct App {
     roster_loading: bool,
     roster_error: Option<String>,
     /// Jobs in flight, for the "working…" indicator and duplicate suppression.
+    /// One key per op *instance* (see `op_key`), so retrying chapter 3 does not
+    /// block retrying chapter 4 — but pressing the same key twice does.
     pending: usize,
-    inflight: Vec<Op>,
+    inflight: Vec<String>,
+    /// Highest scheduler event id already folded into `events`. `None` until the
+    /// first snapshot arrives, so the inductor's own history is shown once on
+    /// startup and never duplicated afterwards.
+    last_event_id: Option<u64>,
     /// A chapter range to enqueue once the inductor answers. Set when `B`
     /// starts a backend: the backend boots in the background, and the job
     /// follows on the first live refresh — so one keypress runs chapters,
@@ -589,6 +656,7 @@ impl App {
             roster_error: None,
             pending: 0,
             inflight: Vec::new(),
+            last_event_id: None,
             pending_enqueue: None,
             colour: true,
             status: LogLine {
@@ -701,54 +769,101 @@ impl App {
         self.machines.iter().find(|m| m.addr == addr)
     }
 
+    /// One blocking snapshot. Only the startup path and the `r` key use this;
+    /// the steady state is the background poller in `run_loop`, so a slow
+    /// inductor can never freeze the drawing loop.
     async fn refresh(&mut self, http: &reqwest::Client) {
-        let url = format!("{}/api/state", self.api);
-        let outcome = match http.get(&url).send().await {
-            Ok(r) => match r.json::<serde_json::Value>().await {
-                Ok(v) => Ok(v),
-                Err(e) => Err(format!("bad state payload: {e}")),
-            },
-            Err(e) => Err(format!("inductor unreachable at {}: {e}", self.api)),
-        };
+        let outcome = fetch_state(http, &self.api).await;
         match outcome {
-            Ok(v) => {
-                let mut machines: Vec<Machine> =
-                    serde_json::from_value(v.get("machines").cloned().unwrap_or_default())
-                        .unwrap_or_default();
-                let mut beats: Vec<Heartbeat> =
-                    serde_json::from_value(v.get("beats").cloned().unwrap_or_default())
-                        .unwrap_or_default();
-                let mut tasks: Vec<Task> =
-                    serde_json::from_value(v.get("tasks").cloned().unwrap_or_default())
-                        .unwrap_or_default();
-                // The API serialises HashMaps, whose iteration order is not
-                // stable. Without sorting, every refresh reshuffles the rows
-                // and the cursor silently lands on a different machine.
-                machines.sort_by(|a, b| a.addr.cmp(&b.addr));
-                beats.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
-                tasks.sort_by_key(|t| (t.chapter, t.stage));
-                self.machines = machines;
-                self.beats = beats;
-                self.tasks = tasks;
-                self.counts = v.get("counts").cloned().unwrap_or_default();
-                self.settings = v.get("settings").cloned();
-                if self.selected >= self.machines.len() {
-                    self.selected = self.machines.len().saturating_sub(1);
-                }
-                self.refreshed = Some(Instant::now());
-                if self.conn != Conn::Up {
-                    if matches!(self.conn, Conn::Down(_)) {
-                        self.log_at(Level::Ok, "inductor reachable again");
-                    }
-                    self.conn = Conn::Up;
-                }
+            Ok(v) => self.apply_state(v),
+            Err(e) => self.state_failed(e),
+        }
+    }
+
+    /// Fold one `/api/state` payload into the screen.
+    fn apply_state(&mut self, v: serde_json::Value) {
+        let mut machines: Vec<Machine> =
+            serde_json::from_value(v.get("machines").cloned().unwrap_or_default())
+                .unwrap_or_default();
+        let mut beats: Vec<Heartbeat> =
+            serde_json::from_value(v.get("beats").cloned().unwrap_or_default())
+                .unwrap_or_default();
+        let mut tasks: Vec<Task> =
+            serde_json::from_value(v.get("tasks").cloned().unwrap_or_default())
+                .unwrap_or_default();
+        // The API serialises HashMaps, whose iteration order is not
+        // stable. Without sorting, every refresh reshuffles the rows
+        // and the cursor silently lands on a different machine.
+        machines.sort_by(|a, b| a.addr.cmp(&b.addr));
+        beats.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
+        tasks.sort_by_key(|t| (t.chapter, t.stage));
+        self.machines = machines;
+        self.beats = beats;
+        self.tasks = tasks;
+        self.counts = v.get("counts").cloned().unwrap_or_default();
+        self.settings = v.get("settings").cloned();
+        self.ingest_events(v.get("events"));
+        if self.selected >= self.machines.len() {
+            self.selected = self.machines.len().saturating_sub(1);
+        }
+        self.refreshed = Some(Instant::now());
+        if self.conn != Conn::Up {
+            if matches!(self.conn, Conn::Down(_)) {
+                self.log_at(Level::Ok, "inductor reachable again");
             }
-            Err(e) => {
-                if self.conn != Conn::Down(e.clone()) {
-                    self.log_at(Level::Error, e.clone());
-                }
-                self.conn = Conn::Down(e);
+            self.conn = Conn::Up;
+        }
+    }
+
+    /// Record a failed poll. The message is only logged on the *transition* into
+    /// being down: a dead inductor would otherwise fill the pane with the same
+    /// line every 800 ms.
+    fn state_failed(&mut self, e: String) {
+        if self.conn != Conn::Down(e.clone()) {
+            self.log_at(Level::Error, e.clone());
+        }
+        self.conn = Conn::Down(e);
+    }
+
+    /// Append scheduler events the inductor has not shown us yet.
+    ///
+    /// Task failures, successes, lease expiries and operator actions all arrive
+    /// here, which is what makes a worker's digest failure visible in the TUI at
+    /// all: the worker only reports to the inductor, and this is the bridge.
+    fn ingest_events(&mut self, events: Option<&serde_json::Value>) {
+        let Some(list) = events.and_then(|v| v.as_array()) else {
+            return;
+        };
+        let mut fresh: Vec<crate::state::EventRecord> = Vec::new();
+        for item in list {
+            match serde_json::from_value::<crate::state::EventRecord>(item.clone()) {
+                Ok(rec) => fresh.push(rec),
+                Err(_) => continue,
             }
+        }
+        let newest = fresh.iter().map(|e| e.id).max();
+        // A restarted inductor begins its ids at 0 again. Without this reset the
+        // new history would look "old" and be swallowed forever.
+        if let (Some(newest), Some(last)) = (newest, self.last_event_id) {
+            if newest < last {
+                self.last_event_id = None;
+                self.log_at(Level::Info, "inductor restarted — event stream reset");
+            }
+        }
+        for rec in fresh {
+            if self.last_event_id.map(|last| rec.id <= last).unwrap_or(false) {
+                continue;
+            }
+            self.last_event_id = Some(rec.id);
+            // The record's own `ts` is epoch seconds on the inductor's clock;
+            // the pane stamps offsets from *this* TUI's start, so it is mapped
+            // through the moment of arrival — the same rule background log lines
+            // follow (see run_loop).
+            self.push_log(LogLine {
+                level: level_from_str(&rec.level),
+                at: self.started.elapsed(),
+                text: rec.text,
+            });
         }
     }
 
@@ -781,10 +896,15 @@ impl App {
                 self.pending_enqueue = Some((start, count));
                 self.log_at(Level::Info, format!("ch{start}×{count} will enqueue once live"));
             }
+            // A poller snapshot, applied the moment it arrives: nothing here
+            // waits on the network, which is what keeps the drawing loop moving
+            // even when the inductor is slow to answer.
+            Ev::State(Ok(v)) => self.apply_state(v),
+            Ev::State(Err(e)) => self.state_failed(e),
             Ev::Done(kind) => {
                 self.pending = self.pending.saturating_sub(1);
-                if let DoneKind::Op { op, ok, voice } = kind {
-                    self.inflight.retain(|o| *o != op);
+                if let DoneKind::Op { op, key, ok, voice } = kind {
+                    self.inflight.retain(|k| *k != key);
                     if let Screen::Pick(p) = &mut self.screen {
                         p.previewing = None;
                         if op == Op::PreviewVoice && ok {
@@ -1356,6 +1476,8 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Screen::Run => draw_run(f, app),
         Screen::Confirm(c) => draw_confirm(f, app, &c),
         Screen::Machine(addr) => draw_machine_info(f, app, &addr),
+        Screen::Tasks(v) => draw_tasks_screen(f, app, &v),
+        Screen::TaskDetail(d) => draw_task_detail(f, app, &d),
         _ => {}
     }
 }
@@ -1596,12 +1718,397 @@ fn draw_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
     shelved.dedup();
     if !shelved.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!("shelved: {}", shelved.join(" ")),
+            format!("shelved: {} — press K to open the list, u to retry", shelved.join(" ")),
             app.style(Color::Red),
         )));
     }
 
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Tasks matching the filter, in the ledger's own order (chapter, then stage).
+///
+/// A filter term matches if it appears in the task id (`digest:3`), the stage
+/// name, the state name, or the chapter number. Substring rather than prefix, so
+/// `shel`, `shelv` and `shelved` all work; the hint line says so, because a
+/// filter nobody can predict is a filter nobody uses.
+fn filtered_tasks<'a>(tasks: &'a [Task], filter: &str) -> Vec<&'a Task> {
+    let f = filter.trim().to_lowercase();
+    tasks
+        .iter()
+        .filter(|t| {
+            if f.is_empty() {
+                return true;
+            }
+            let id = t.id().to_lowercase();
+            let chapter = t.chapter.to_string();
+            id.contains(&f)
+                || t.stage.as_str().contains(&f)
+                || t.state.as_str().contains(&f)
+                || chapter.contains(&f)
+        })
+        .collect()
+}
+
+/// `(state, count)` in `TaskState::ALL` order, zeroes skipped.
+fn task_state_counts(tasks: &[Task]) -> Vec<(TaskState, usize)> {
+    TaskState::ALL
+        .into_iter()
+        .map(|s| (s, tasks.iter().filter(|t| t.state == s).count()))
+        .filter(|(_, n)| *n > 0)
+        .collect()
+}
+
+/// How long ago a task last changed, in seconds. The ledger stores epoch seconds.
+fn age_secs(updated: u64) -> u64 {
+    bm_proto::now_secs().saturating_sub(updated)
+}
+
+/// Dispatch a selective re-queue for one task.
+///
+/// `force` also drops the artifact the stage would otherwise be judged complete
+/// by — the difference between "offer it again" and "run it again".
+fn retry_task(
+    app: &mut App,
+    job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
+    http: &reqwest::Client,
+    task: &Task,
+    force: bool,
+) {
+    let req = OpRequest {
+        op: Op::RetryTask,
+        stage: Some(task.stage),
+        chapter: Some(task.chapter),
+        force: Some(force),
+        ..Default::default()
+    };
+    if app.inflight.contains(&op_key(&req)) {
+        app.set_status(Level::Warn, format!("{} is already being requeued", task.id()));
+        return;
+    }
+    let id = task.id();
+    dispatch_op(app, job_tx, http, req);
+    // The list stays open: watching the row leave Shelved *is* the confirmation.
+    app.set_status(
+        Level::Ok,
+        if force {
+            format!("{id} requeued, force — stale output cleared")
+        } else {
+            format!("{id} requeued — watch its state")
+        },
+    );
+}
+
+/// The Tasks overlay: every task, its state, and the reason it is where it is.
+fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksView) {
+    // Like the cast overview: full screen on the compact tier, a wide panel
+    // otherwise. A ledger table squeezed into 76 columns loses the detail
+    // column, which is the one thing this screen exists to show.
+    let compact = size_class(f.area().width, f.area().height) == Size::Compact;
+    let area = if compact {
+        f.area()
+    } else {
+        centered_padded(f.area(), 116, 28, 2)
+    };
+    f.render_widget(Clear, area);
+
+    let all = &app.tasks;
+    let shown = filtered_tasks(all, &view.filter);
+    let shelved = all.iter().filter(|t| t.state == TaskState::Shelved).count();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.style(if shelved > 0 { Color::Red } else { Color::Cyan }))
+        .title(if shelved > 0 {
+            format!("Tasks — {shelved} shelved · Esc or q to close")
+        } else {
+            "Tasks — Esc or q to close".to_string()
+        });
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 5 {
+        return;
+    }
+
+    let rows = RLayout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // counts
+            Constraint::Length(1), // filter
+            Constraint::Min(1),    // table
+            Constraint::Length(2), // hints
+        ])
+        .split(inner);
+
+    // Counts first: "is anything wrong" before "which chapter".
+    let mut summary = vec![Span::styled(
+        format!("{} tasks", all.len()),
+        app.style_bold(Color::White),
+    )];
+    for (state, n) in task_state_counts(all) {
+        summary.push(Span::styled(
+            format!("  ·  {n} {}", state.as_str()),
+            app.style(state_color(state.as_str())),
+        ));
+    }
+    if view.filter.trim().is_empty() {
+        summary.push(Span::styled(
+            format!("  ·  {} shown", shown.len()),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(summary)), rows[0]);
+
+    // The filter line is always present, like the cast screen's, so an active
+    // filter can never be invisible.
+    let filter_line = if view.filter.trim().is_empty() {
+        Line::from(Span::styled(
+            "filter: (type a stage, state or chapter — e.g. shelved, digest, 42)",
+            Style::default().fg(Color::DarkGray),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled("filter: ", app.style(Color::Cyan)),
+            Span::raw(view.filter.clone()),
+            Span::styled("_", app.style(Color::Cyan)),
+        ])
+    };
+    f.render_widget(Paragraph::new(filter_line), rows[1]);
+
+    if all.is_empty() {
+        f.render_widget(
+            empty_body(vec![
+                "no tasks in the ledger yet".into(),
+                "press t to enqueue a chapter range".into(),
+            ]),
+            rows[2],
+        );
+    } else if shown.is_empty() {
+        f.render_widget(
+            empty_body(vec![
+                format!("no task matches “{}”", view.filter.trim()),
+                "Backspace widens the filter · Ctrl-U clears it".into(),
+            ]),
+            rows[2],
+        );
+    } else {
+        let height = rows[2].height.saturating_sub(2) as usize;
+        let cursor = view.cursor.min(shown.len() - 1);
+        let mut scroll = view.scroll;
+        clamp_scroll(cursor, &mut scroll, shown.len(), height);
+        let (start, end) = (scroll, (scroll + height).min(shown.len()));
+        let colour = app.colour;
+
+        let (widths, header): (Vec<Constraint>, Vec<&str>) = if compact {
+            (
+                vec![
+                    Constraint::Length(4),  // ch
+                    Constraint::Length(6),  // stage
+                    Constraint::Length(9),  // state
+                    Constraint::Length(3),  // att
+                    Constraint::Length(11), // worker
+                    Constraint::Length(6),  // age
+                    Constraint::Min(8),     // detail
+                ],
+                vec!["ch", "stage", "state", "att", "worker", "age", "detail"],
+            )
+        } else {
+            (
+                vec![
+                    Constraint::Length(5),
+                    Constraint::Length(8),
+                    Constraint::Length(10),
+                    Constraint::Length(4),
+                    Constraint::Length(14),
+                    Constraint::Length(8),
+                    Constraint::Min(20),
+                ],
+                vec!["ch", "stage", "state", "att", "worker", "updated", "detail (why)"],
+            )
+        };
+
+        let table_rows: Vec<Row> = shown[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let idx = start + i;
+                let mark = if idx == cursor { "▸" } else { " " };
+                let cells = vec![
+                    cell(format!("{mark}{}", t.chapter)),
+                    cell(t.stage.as_str().to_string()),
+                    state_cell(colour, t.state.as_str()),
+                    cell(t.attempts.to_string()),
+                    cell(t.assigned_to.clone().unwrap_or_else(|| "—".into())),
+                    cell(format!("{}s", age_secs(t.updated))),
+                    cell(why_label(&t.detail)),
+                ];
+                // Rank by urgency: an actionable failure outranks a running
+                // task, which outranks finished history.
+                let mut row = match t.state {
+                    TaskState::Shelved | TaskState::Failed => {
+                        Row::new(cells).style(style_bold_of(colour, Color::Red))
+                    }
+                    TaskState::Assigned | TaskState::Running => {
+                        Row::new(cells).style(style_of(colour, Color::Yellow))
+                    }
+                    TaskState::Done => {
+                        Row::new(cells).style(Style::default().fg(Color::DarkGray))
+                    }
+                    TaskState::Pending => Row::new(cells),
+                };
+                if idx == cursor {
+                    row = row.style(Style::default().add_modifier(Modifier::REVERSED));
+                }
+                row
+            })
+            .collect();
+
+        let table = Table::new(table_rows, widths)
+            .header(Row::new(header).style(style_bold_of(colour, Color::Gray)))
+            .block(Block::default().borders(Borders::TOP).title(format!(
+                "Tasks — {} of {} shown",
+                shown.len(),
+                all.len()
+            )));
+        f.render_widget(table, rows[2]);
+    }
+
+    // The hint names the keys that exist, in the order an operator needs them.
+    let dim = Style::default().fg(Color::DarkGray);
+    let hint = if shown.is_empty() {
+        vec![
+            Line::from(Span::styled("Esc or q closes", dim)),
+            Line::from(Span::styled("Backspace widens · Ctrl-U clears the filter", dim)),
+        ]
+    } else {
+        let t = &shown[view.cursor.min(shown.len() - 1)];
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{}  {}", t.id(), t.state.as_str()),
+                    app.style_bold(state_color(t.state.as_str())),
+                ),
+                Span::styled("  ·  Enter details  ·  u retry  ·  F force re-run", dim),
+            ]),
+            Line::from(Span::styled(
+                "j/k or ↑/↓ move · PgUp/PgDn page · type to filter · Backspace widens · Esc/q close",
+                dim,
+            )),
+        ]
+    };
+    f.render_widget(Paragraph::new(hint), rows[3]);
+}
+
+/// The detail's first line, for the table's last column. A full error is a
+/// paragraph; the table points at it and Enter shows it in full.
+fn why_label(detail: &str) -> String {
+    let first = detail.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    if first.is_empty() {
+        return "—".into();
+    }
+    bm_core::util::head_chars(first.trim(), 120)
+}
+
+/// One task in full: everything the ledger knows, `detail` first among them.
+fn draw_task_detail(f: &mut ratatui::Frame, app: &App, view: &TaskDetail) {
+    let area = centered_padded(f.area(), 92, 22, 2);
+    f.render_widget(Clear, area);
+
+    let id = format!("{}:{}", view.stage, view.chapter);
+    let found = app
+        .tasks
+        .iter()
+        .find(|t| t.stage == view.stage && t.chapter == view.chapter);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.style(Color::Cyan))
+        .title(format!("Task {id} — Esc back · u retry · F force re-run · q dashboard"));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let Some(t) = found else {
+        f.render_widget(
+            empty_body(vec![
+                format!("task {id} is no longer in the ledger"),
+                "it may have left the loaded range — Esc goes back".into(),
+            ]),
+            inner,
+        );
+        return;
+    };
+
+    let kv = |k: &str, v: String| {
+        Line::from(vec![
+            Span::styled(format!("  {k:<12}"), app.style(Color::Cyan)),
+            Span::raw(v),
+        ])
+    };
+    let lease = match t.lease_until {
+        None => "—".to_string(),
+        Some(l) => {
+            let now = bm_proto::now_secs();
+            if l > now {
+                format!("{}s left", l - now)
+            } else {
+                format!("expired {}s ago", now - l)
+            }
+        }
+    };
+    let mut lines = vec![
+        kv("chapter", t.chapter.to_string()),
+        kv("stage", t.stage.as_str().to_string()),
+        Line::from(vec![
+            Span::styled("  state       ", app.style(Color::Cyan)),
+            Span::styled(
+                t.state.as_str().to_string(),
+                app.style_bold(state_color(t.state.as_str())),
+            ),
+        ]),
+        kv("attempts", format!("{} of 3 before it is shelved", t.attempts)),
+        kv("worker", t.assigned_to.clone().unwrap_or_else(|| "—".into())),
+        kv("lease", lease),
+        kv("affinity", t.affinity.clone().unwrap_or_else(|| "—".into())),
+        kv("updated", format!("{}s ago", age_secs(t.updated))),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  why (task.detail — what the worker reported)",
+            app.style_bold(Color::White),
+        )),
+    ];
+    if t.detail.trim().is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  — nothing recorded: this task has not run yet",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let colour = match t.state {
+            TaskState::Shelved | TaskState::Failed => Color::Red,
+            _ => Color::Gray,
+        };
+        for l in t.detail.lines() {
+            lines.push(Line::from(Span::styled(format!("  {l}"), app.style(colour))));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        match t.state {
+            TaskState::Shelved => {
+                "  u re-queues it with the strikes forgiven; F also clears its partial output"
+            }
+            TaskState::Done => "  F runs it again from scratch, clearing what made it look done",
+            _ => "  u re-queues it now; F also clears its partial output",
+        },
+        app.style(Color::Yellow),
+    )));
+
+    // Wrapped, and scrollable: a worker's reason can be a stack trace, and a
+    // detail clipped at the pane edge is the bug this screen exists to fix.
+    f.render_widget(
+        Paragraph::new(lines)
+            .scroll((view.scroll as u16, 0))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
 fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -1646,7 +2153,15 @@ fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         "Events".to_string()
     };
     let block = block.title(title);
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    // Wrapped, not clipped: a worker's failure reason is the one line in this
+    // pane that must be readable end to end, and it is always the longest. The
+    // scroll math above counts ledger lines, so a wrapped line occupies more
+    // rows than `events_scroll` accounts for — the title says how far back the
+    // list is scrolled, which stays truthful either way.
+    f.render_widget(
+        Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact: bool) {
@@ -1671,6 +2186,19 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact: bool) {
         spans.push(Span::styled(
             format!("   ⏳ {} job(s) running", app.pending),
             app.style(Color::Yellow),
+        ));
+    }
+    // Parked work is invisible in the panes' counts, so it is called out where
+    // the eye already is — with the key that opens the list that can free it.
+    let shelved = app
+        .tasks
+        .iter()
+        .filter(|t| t.state == TaskState::Shelved)
+        .count();
+    if shelved > 0 {
+        spans.push(Span::styled(
+            format!("   ✗ {shelved} shelved — K tasks"),
+            app.style_bold(Color::Red),
         ));
     }
     match &app.conn {
@@ -1740,6 +2268,7 @@ fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
     section(&mut lines, "Navigation");
     for (k, v) in [
         ("↑ ↓  k j", "move the machine cursor"),
+        ("K", "task ledger: every task, its failure detail, and a re-queue key"),
         ("PgUp PgDn", "scroll the event log   (G returns to newest)"),
         ("r", "refresh now"),
         ("?", "this help"),
@@ -1785,6 +2314,8 @@ fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
     section(&mut lines, "Pipeline operations");
     for (k, v) in [
         ("t  translate", "enqueue crawl + digest for a chapter range"),
+        ("u  retry", "requeue every shelved task — strikes reset. In the K list it applies to the highlighted row only"),
+        ("K  tasks", "the ledger: filter, Enter for the full failure reason, u retry, F force re-run"),
         ("c  crawl-setup", "save the URL template, then probe-crawl one chapter"),
         ("v  voices", "re-read the roster, enforce the accent policy, refill gaps"),
         ("A  add-sample", "pool a clip — tags from the filename, enrolled locally"),
@@ -2689,24 +3220,31 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
                 ms
             };
             send(Level::Info, format!("provisioning {} machine(s) before start…", targets.len()));
-            let mut results: Vec<(String, bool)> = Vec::new();
+            // Every box provisions at once: the flows are independent ssh/rsync
+            // sessions, and a five-box cluster used to take five times as long
+            // as its slowest machine. Results are collected by address below, so
+            // the report keeps the registry's order however the joins land.
+            let mut set = tokio::task::JoinSet::new();
             for m in &targets {
                 let (layout_root, m) = (layout_root.clone(), m.clone());
                 let addr = m.addr.clone();
-                let out = tokio::task::spawn_blocking(move || {
+                set.spawn_blocking(move || {
                     let layout = bm_core::Layout::new(&layout_root);
-                    crate::provision_machine(
+                    let out = crate::provision_machine(
                         &layout,
                         &m.addr,
                         &m.ssh_user,
                         m.ssh_port,
                         m.ssh_key.clone(),
                         false,
-                    )
-                })
-                .await;
-                match out {
-                    Ok((ready, lines)) => {
+                    );
+                    (addr, out)
+                });
+            }
+            let mut results: Vec<(String, bool)> = Vec::new();
+            while let Some(joined) = set.join_next().await {
+                match joined {
+                    Ok((addr, (ready, lines))) => {
                         for l in lines {
                             send(Level::Info, l);
                         }
@@ -2714,10 +3252,11 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
                     }
                     Err(e) => {
                         send(Level::Error, format!("provision task failed: {e}"));
-                        results.push((addr.clone(), false));
+                        results.push((String::from("unknown"), false));
                     }
                 }
             }
+            results.sort_by(|a, b| a.0.cmp(&b.0));
             if let Err(veto) = crate::backend::provision_verdict(&results) {
                 send(Level::Error, veto);
                 let _ = tx.send(Ev::Done(DoneKind::Other));
@@ -2836,6 +3375,7 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
             let name = req.op.as_str().to_string();
             let voice = req.voice.clone();
             let op = req.op;
+            let key = op_key(&req);
             let character = req.character.clone();
             let ok = match http.post(format!("{api}/api/op")).json(&req).send().await {
                 Ok(r) => match r.json::<bm_proto::OpResult>().await {
@@ -2877,7 +3417,7 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
                     }
                 }
             };
-            let _ = tx.send(Ev::Done(DoneKind::Op { op, ok, voice }));
+            let _ = tx.send(Ev::Done(DoneKind::Op { op, key, ok, voice }));
         }
         Job::LoadRoster { api, http, layout_root } => {
             let res = match http.get(format!("{api}/api/roster")).send().await {
@@ -3140,13 +3680,46 @@ fn dispatch_op(
     http: &reqwest::Client,
     req: OpRequest,
 ) {
-    let op = req.op;
-    if app.inflight.contains(&op) {
-        app.set_status(Level::Warn, format!("{} is already running", op.as_str()));
+    let key = op_key(&req);
+    if app.inflight.contains(&key) {
+        app.set_status(Level::Warn, format!("{} is already running", req.op.as_str()));
         return;
     }
-    app.inflight.push(op);
+    app.inflight.push(key);
     dispatch(app, job_tx, op_job(app, http, req));
+}
+
+/// Identity of one op *instance*.
+///
+/// Keyed by what the op acts on, not just by its name: retrying digest:3 and
+/// digest:4 are two different jobs and must not suppress each other, while a
+/// second press of the same key is still refused as a duplicate.
+fn op_key(req: &OpRequest) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        req.op.as_str(),
+        req.stage.map(Stage::as_str).unwrap_or("-"),
+        req.chapter
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "-".into()),
+        req.force.unwrap_or(false),
+    )
+}
+
+/// Fetch `/api/state` once.
+///
+/// Free-standing so the background poller can use it without holding the UI
+/// state — the whole point of the poller is that the drawing loop never waits
+/// on this call.
+async fn fetch_state(http: &reqwest::Client, api: &str) -> Result<serde_json::Value, String> {
+    let url = format!("{}/api/state", api.trim_end_matches('/'));
+    match http.get(&url).send().await {
+        Ok(r) => r
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| format!("bad state payload: {e}")),
+        Err(e) => Err(format!("inductor unreachable at {api}: {e}")),
+    }
 }
 
 async fn handle_key(
@@ -3547,6 +4120,140 @@ async fn handle_key(
         return false;
     }
 
+    // The task ledger. This is the only screen where a failure can be *read*
+    // (Enter) and *fixed* (u/F) without leaving the TUI, so it is worth its own
+    // key block rather than another Normal-mode binding.
+    if let Screen::Tasks(view) = app.screen.clone() {
+        let mut v = view;
+        let shown = filtered_tasks(&app.tasks, &v.filter);
+        let last = shown.len().saturating_sub(1);
+        // The highlighted task, cloned out here so the borrow of `app.tasks` ends
+        // before any arm needs `&mut app` to dispatch. Every action below goes
+        // through this value, so an index that points at the wrong row can never
+        // re-queue the wrong chapter — the one mistake this screen must not make.
+        let selected: Option<Task> = shown.get(v.cursor.min(last)).map(|t| (*t).clone());
+        match key.code {
+            // Esc and q both close. `q` is safe to bind here because no filter
+            // term in the vocabulary contains it.
+            KeyCode::Esc | KeyCode::Char('q') => app.screen = Screen::Normal,
+            KeyCode::Up | KeyCode::Char('k') => {
+                v.cursor = v.cursor.saturating_sub(1);
+                app.screen = Screen::Tasks(v);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                v.cursor = (v.cursor + 1).min(last);
+                app.screen = Screen::Tasks(v);
+            }
+            KeyCode::PageUp => {
+                v.cursor = v.cursor.saturating_sub(8);
+                app.screen = Screen::Tasks(v);
+            }
+            KeyCode::PageDown => {
+                v.cursor = (v.cursor + 8).min(last);
+                app.screen = Screen::Tasks(v);
+            }
+            KeyCode::Home => {
+                v.cursor = 0;
+                app.screen = Screen::Tasks(v);
+            }
+            KeyCode::End => {
+                v.cursor = last;
+                app.screen = Screen::Tasks(v);
+            }
+            KeyCode::Enter => match &selected {
+                Some(t) => {
+                    let page = TaskDetail {
+                        stage: t.stage,
+                        chapter: t.chapter,
+                        scroll: 0,
+                        list: v,
+                    };
+                    app.screen = Screen::TaskDetail(page);
+                }
+                None => app.set_status(Level::Warn, "no task selected"),
+            },
+            // Ctrl-U clears the filter, so a Ctrl chord must never be read as a
+            // plain `u` — that would re-queue a task while clearing the filter.
+            KeyCode::Char(c) if ctrl && c == 'u' => {
+                v.filter.clear();
+                v.cursor = 0;
+                v.scroll = 0;
+                app.screen = Screen::Tasks(v);
+            }
+            KeyCode::Char(_) if ctrl => {}
+            KeyCode::Char('u') | KeyCode::Char('F') => {
+                let force = matches!(key.code, KeyCode::Char('F'));
+                match &selected {
+                    Some(t) => retry_task(app, job_tx, http, t, force),
+                    None => app.set_status(Level::Warn, "no task selected"),
+                }
+            }
+            KeyCode::Backspace => {
+                v.filter.pop();
+                v.cursor = 0;
+                v.scroll = 0;
+                app.screen = Screen::Tasks(v);
+            }
+            KeyCode::Char(c) if !alt => {
+                v.filter.push(c);
+                v.cursor = 0;
+                v.scroll = 0;
+                app.screen = Screen::Tasks(v);
+            }
+            _ => {}
+        }
+        return false;
+    }
+
+    // One task, in full. Reached from the list, so Esc goes back to it.
+    if let Screen::TaskDetail(view) = app.screen.clone() {
+        let mut v = view.clone();
+        let task = app
+            .tasks
+            .iter()
+            .find(|t| t.stage == v.stage && t.chapter == v.chapter)
+            .cloned();
+        match key.code {
+            KeyCode::Esc => app.screen = Screen::Tasks(v.list),
+            KeyCode::Char('q') => app.screen = Screen::Normal,
+            KeyCode::Up | KeyCode::Char('k') => {
+                v.scroll = v.scroll.saturating_sub(1);
+                app.screen = Screen::TaskDetail(v);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                v.scroll += 1;
+                app.screen = Screen::TaskDetail(v);
+            }
+            KeyCode::PageUp => {
+                v.scroll = v.scroll.saturating_sub(8);
+                app.screen = Screen::TaskDetail(v);
+            }
+            KeyCode::PageDown => {
+                v.scroll += 8;
+                app.screen = Screen::TaskDetail(v);
+            }
+            KeyCode::Home => {
+                v.scroll = 0;
+                app.screen = Screen::TaskDetail(v);
+            }
+            KeyCode::Char('u') | KeyCode::Char('F') if !ctrl => {
+                let force = matches!(key.code, KeyCode::Char('F'));
+                match &task {
+                    Some(t) => {
+                        let t = t.clone();
+                        retry_task(app, job_tx, http, &t, force);
+                        // Stay on the page: the state field above updates in
+                        // place, which is the proof the retry landed.
+                        app.screen = Screen::TaskDetail(v);
+                    }
+                    None => app.set_status(Level::Warn, "that task is no longer in the ledger"),
+                }
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     // System overview: a preview of everything, modelled on the cast screen.
     // No filter here, so letters are free for actions.
     if let Screen::Run = app.screen {
@@ -3757,6 +4464,9 @@ async fn handle_key(
         KeyCode::Char('e') => {
             dispatch_op(app, job_tx, http, OpRequest { op: Op::Eta, ..Default::default() });
         }
+        KeyCode::Char('u') => {
+            dispatch_op(app, job_tx, http, OpRequest { op: Op::Retry, ..Default::default() });
+        }
         KeyCode::Char('B') => {
             // Backend on: every registered machine provisions first, and the
             // backend spawns only when all of them report ready. The range
@@ -3783,6 +4493,11 @@ async fn handle_key(
             if app.roster.is_none() {
                 app.load_roster(job_tx, http);
             }
+        }
+        // The task ledger. Capital K so the lowercase `k` can stay "move up" —
+        // and so it reads as the sibling of `R` (run screen) and `S` (cast).
+        KeyCode::Char('K') => {
+            app.screen = Screen::Tasks(TasksView::new());
         }
         KeyCode::Char('X') => {
             let mut remotes: Vec<String> = app
@@ -3862,14 +4577,39 @@ async fn run_loop(
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    // Two senders, two owners: the job worker keeps one, the poller the other.
+    // `rx` stays on the UI task, which drains both.
+    let job_tx_ev = tx.clone();
     // Background worker: jobs run one at a time. Provisioning in particular
     // must not run concurrently — the flows fight over ssh.
     tokio::spawn(async move {
         while let Some(job) = job_rx.recv().await {
-            run_job(job, tx.clone()).await;
+            run_job(job, job_tx_ev.clone()).await;
         }
     });
 
+    // State poller: `/api/state` is fetched off the UI task and delivered over
+    // the same channel as everything else. Polling inline used to freeze the
+    // whole interface for as long as the request took — up to the client's 15s
+    // timeout on a stalled network — with no repaint and no key handling in
+    // between. Now a slow inductor just means the events pane goes quiet.
+    let poll_http = http.clone();
+    let poll_api = app.api.clone();
+    let poll_tx = tx.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_millis(REFRESH_TICKS * 200));
+        loop {
+            ticker.tick().await;
+            // The first tick fires immediately, so the dashboard fills without
+            // waiting for a full period.
+            if poll_tx.send(Ev::State(fetch_state(&poll_http, &poll_api).await)).is_err() {
+                return; // the UI is gone
+            }
+        }
+    });
+
+    // One blocking fetch before the first draw, so the opening frame shows the
+    // cluster rather than an empty shell. Failures are already tolerated.
     app.refresh(&http).await;
     loop {
         terminal.draw(|f| draw(f, &mut app))?;
@@ -3904,24 +4644,21 @@ async fn run_loop(
             }
         }
         app.tick += 1;
-        if app.tick.is_multiple_of(REFRESH_TICKS) {
-            app.refresh(&http).await;
-            // A `B` start asked for work: fire it on the first live refresh,
-            // when there is finally an inductor to hear it.
-            if app.conn == Conn::Up {
-                if let Some((start, count)) = app.pending_enqueue.take() {
-                    dispatch_op(
-                        &mut app,
-                        &job_tx,
-                        &http,
-                        OpRequest {
-                            op: Op::Translate,
-                            start: Some(start),
-                            count: Some(count),
-                            ..Default::default()
-                        },
-                    );
-                }
+        // A `B` start asked for work: fire it once the poller reports the
+        // inductor is up, and only then.
+        if app.conn == Conn::Up {
+            if let Some((start, count)) = app.pending_enqueue.take() {
+                dispatch_op(
+                    &mut app,
+                    &job_tx,
+                    &http,
+                    OpRequest {
+                        op: Op::Translate,
+                        start: Some(start),
+                        count: Some(count),
+                        ..Default::default()
+                    },
+                );
             }
         }
     }
@@ -4274,6 +5011,22 @@ mod tests {
         assert!(app.pending_enqueue.is_none());
         app.apply(Ev::BackendLive { start: 1, count: 1 });
         assert_eq!(app.pending_enqueue, Some((1, 1)));
+    }
+
+    #[tokio::test]
+    async fn retry_key_dispatches_the_retry_op_once() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut app = App::new("http://x");
+        handle_key(&mut app, key(KeyCode::Char('u')), &http, &job_tx).await;
+        match job_rx.try_recv() {
+            Ok(Job::Op { req, .. }) => assert_eq!(req.op, Op::Retry),
+            other => panic!("expected a retry op, got {other:?}"),
+        }
+        // A second press while one is in flight is refused, not queued twice.
+        handle_key(&mut app, key(KeyCode::Char('u')), &http, &job_tx).await;
+        assert!(job_rx.try_recv().is_err(), "duplicate retry must be refused");
     }
 
     #[test]
@@ -4811,5 +5564,315 @@ mod tests {
         app.screen = Screen::Cast(CastView::new());
         let text = render_text(&mut app, 120, 32);
         assert!(text.contains("roster not loaded — press R"), "{text}");
+    }
+
+    /// A small ledger: a shelved digest carrying a real failure reason, a
+    /// render mid-flight, and a finished crawl. Sorted as a snapshot would be.
+    fn tasks_app() -> App {
+        let mut app = App::new("http://127.0.0.1:8901");
+        let mut shelved = Task::new(3, Stage::Digest);
+        shelved.state = TaskState::Shelved;
+        shelved.attempts = 3;
+        shelved.assigned_to = Some("w2".into());
+        shelved.detail =
+            "opencode exited 1: model 'claude' unavailable\nsecond line of the report".into();
+        let mut running = Task::new(3, Stage::Render);
+        running.state = TaskState::Running;
+        running.assigned_to = Some("w1".into());
+        running.lease_until = Some(bm_proto::now_secs() + 120);
+        running.detail = "rendering segment 12/40".into();
+        let mut done = Task::new(4, Stage::Crawl);
+        done.state = TaskState::Done;
+        done.detail = "ok".into();
+        app.tasks = vec![shelved, running, done];
+        app.tasks.sort_by_key(|t| (t.chapter, t.stage));
+        app
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[tokio::test]
+    async fn the_tasks_screen_shows_every_task_and_the_failure_reason() {
+        let mut app = tasks_app();
+        app.screen = Screen::Tasks(TasksView::new());
+        let text = render_text(&mut app, 140, 44);
+        assert!(text.contains("3 tasks"), "{text}");
+        assert!(text.contains("1 shelved"), "{text}");
+        assert!(text.contains("digest:3"), "the offending task is named:\n{text}");
+        assert!(text.contains("crawl"), "finished work is still listed:\n{text}");
+        assert!(
+            text.contains("opencode exited 1"),
+            "the detail column carries the reason:\n{text}"
+        );
+        assert!(text.contains("u retry  ·  F force re-run"), "{text}");
+        assert!(text.contains("w2"), "the worker that failed:\n{text}");
+    }
+
+    #[test]
+    fn filtering_the_ledger_matches_stage_state_and_chapter() {
+        let app = tasks_app();
+        let all = &app.tasks;
+        assert_eq!(filtered_tasks(all, "").len(), 3, "no filter, everything");
+        assert_eq!(filtered_tasks(all, "   ").len(), 3, "whitespace is not a filter");
+        assert_eq!(filtered_tasks(all, "shelved").len(), 1);
+        assert_eq!(filtered_tasks(all, "  SHELVED ").len(), 1, "case and space insensitive");
+        assert_eq!(filtered_tasks(all, "render")[0].chapter, 3);
+        assert_eq!(filtered_tasks(all, "digest:3").len(), 1);
+        assert_eq!(filtered_tasks(all, "4").len(), 1, "a chapter number matches");
+        assert!(filtered_tasks(all, "merge").is_empty());
+        assert!(
+            filtered_tasks(all, "shel").len() == 1,
+            "a partial state name still matches"
+        );
+    }
+
+    #[test]
+    fn an_empty_ledger_says_what_to_do_instead_of_drawing_nothing() {
+        let mut app = App::new("http://127.0.0.1:8901");
+        app.screen = Screen::Tasks(TasksView::new());
+        let text = render_text(&mut app, 140, 44);
+        assert!(text.contains("no tasks in the ledger yet"), "{text}");
+        assert!(text.contains("press t to enqueue"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn k_opens_the_ledger_and_esc_closes_it() {
+        let http = reqwest::Client::new();
+        let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = tasks_app();
+        handle_key(&mut app, key(KeyCode::Char('K')), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Tasks(_)), "{:?}", app.screen);
+        let text = render_text(&mut app, 140, 44);
+        assert!(text.contains("Tasks —"), "the overlay is open:\n{text}");
+
+        handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+    }
+
+    #[test]
+    fn the_footer_names_the_ledger_when_work_is_shelved() {
+        let mut app = tasks_app();
+        // Wide enough that the footer is not clipped: the point is that the
+        // count and the key are *there*, not that they survive an 80-column
+        // terminal (the compact tier keeps them, minus the em-dash detail).
+        let text = render_text(&mut app, 200, 44);
+        assert!(text.contains("1 shelved — K tasks"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn enter_opens_the_task_page_and_shows_the_whole_reason() {
+        let http = reqwest::Client::new();
+        let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = tasks_app();
+        app.screen = Screen::Tasks(TasksView::new());
+
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+        match &app.screen {
+            Screen::TaskDetail(d) => assert_eq!((d.stage, d.chapter), (Stage::Digest, 3)),
+            other => panic!("expected the detail page, got {other:?}"),
+        }
+
+        let text = render_text(&mut app, 140, 44);
+        assert!(
+            text.contains("opencode exited 1: model 'claude' unavailable"),
+            "the first line of the reason:\n{text}"
+        );
+        assert!(
+            text.contains("second line of the report"),
+            "the *rest* of the reason, which the pane never showed:\n{text}"
+        );
+        assert!(text.contains("3 of 3 before it is shelved"), "{text}");
+        assert!(text.contains("w2"), "the worker that failed:\n{text}");
+        assert!(text.contains("lease"), "the lease is on the page:\n{text}");
+
+        // Esc returns to the list — and to the same view of it.
+        handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Tasks(_)), "{:?}", app.screen);
+    }
+
+    #[tokio::test]
+    async fn retry_from_the_list_targets_the_highlighted_task_only() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = tasks_app();
+        app.screen = Screen::Tasks(TasksView::new());
+
+        // Type "shelved": letters filter, they never act.
+        for c in "shelved".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c)), &http, &job_tx).await;
+        }
+        match &app.screen {
+            Screen::Tasks(v) => assert_eq!(v.filter, "shelved"),
+            other => panic!("typing must filter, got {other:?}"),
+        }
+        assert!(job_rx.try_recv().is_err(), "a filter keystroke must not dispatch");
+
+        handle_key(&mut app, key(KeyCode::Char('u')), &http, &job_tx).await;
+        match job_rx.try_recv() {
+            Ok(Job::Op { req, .. }) => {
+                assert_eq!(req.op, Op::RetryTask);
+                assert_eq!(req.stage, Some(Stage::Digest));
+                assert_eq!(req.chapter, Some(3), "the filtered row, not the visible one");
+                assert_eq!(req.force, Some(false));
+            }
+            other => panic!("expected a retry-task op, got {other:?}"),
+        }
+        assert_eq!(app.tasks.len(), 3, "the ledger is untouched locally");
+        assert!(app.status.text.contains("digest:3 requeued"), "{}", app.status.text);
+
+        // F is a different job (force), so the duplicate guard lets it through.
+        handle_key(&mut app, key(KeyCode::Char('F')), &http, &job_tx).await;
+        match job_rx.try_recv() {
+            Ok(Job::Op { req, .. }) => {
+                assert_eq!(req.force, Some(true), "F asks for a forced re-run");
+                assert_eq!(req.chapter, Some(3));
+            }
+            other => panic!("expected a forced retry-task op, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ctrl_u_clears_the_filter_and_never_requeues() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = tasks_app();
+        app.screen = Screen::Tasks(TasksView::new());
+        for c in "render".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c)), &http, &job_tx).await;
+        }
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            &http,
+            &job_tx,
+        )
+        .await;
+        match &app.screen {
+            Screen::Tasks(v) => assert!(v.filter.is_empty(), "Ctrl-U clears the filter"),
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            job_rx.try_recv().is_err(),
+            "Ctrl-U must not be read as a plain `u` — that would re-queue a task"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_from_the_detail_page_stays_on_the_page() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = tasks_app();
+        app.screen = Screen::TaskDetail(TaskDetail {
+            stage: Stage::Digest,
+            chapter: 3,
+            scroll: 0,
+            list: TasksView::new(),
+        });
+        handle_key(&mut app, key(KeyCode::Char('u')), &http, &job_tx).await;
+        match job_rx.try_recv() {
+            Ok(Job::Op { req, .. }) => assert_eq!(
+                (req.op, req.stage, req.chapter),
+                (Op::RetryTask, Some(Stage::Digest), Some(3))
+            ),
+            other => panic!("expected a retry-task op, got {other:?}"),
+        }
+        assert!(
+            matches!(app.screen, Screen::TaskDetail(_)),
+            "the page stays open so the state field can be watched changing: {:?}",
+            app.screen
+        );
+        // The wake-up keys are on the page's own title, since this is where the
+        // reason was read.
+        let text = render_text(&mut app, 140, 44);
+        assert!(text.contains("F force re-run"), "{text}");
+        assert!(text.contains("Task digest:3"), "{text}");
+    }
+
+    #[test]
+    fn two_retries_of_different_chapters_do_not_suppress_each_other() {
+        // The in-flight guard is keyed by what the op acts on: a blanket
+        // per-op guard would silently refuse the second retry.
+        let a = OpRequest {
+            op: Op::RetryTask,
+            stage: Some(Stage::Digest),
+            chapter: Some(3),
+            ..Default::default()
+        };
+        let b = OpRequest { chapter: Some(4), ..a.clone() };
+        assert_ne!(op_key(&a), op_key(&b));
+        assert_eq!(op_key(&a), op_key(&a.clone()), "the same job twice is a duplicate");
+        let forced = OpRequest { force: Some(true), ..a.clone() };
+        assert_ne!(op_key(&a), op_key(&forced), "force is a different job");
+    }
+
+    #[test]
+    fn scheduler_events_reach_the_pane_exactly_once() {
+        let mut app = App::new("http://x");
+        let snapshot = serde_json::json!({
+            "tasks": [], "machines": [], "beats": [],
+            "events": [
+                {"id": 0, "ts": 1, "level": "error",
+                 "text": "[w2] digest:3 FAILED (shelved — press u to retry): opencode exited 1"},
+                {"id": 1, "ts": 2, "level": "ok", "text": "[w1] render:2 done in 4.2s"},
+            ],
+        });
+        app.apply_state(snapshot.clone());
+        assert!(app.events.iter().any(|l| l.text.contains("digest:3 FAILED")), "{:?}", app.events);
+        assert!(app.events.iter().any(|l| l.text.contains("done in 4.2s")));
+        // Levels ride along, so a failure reads as a failure.
+        assert!(app
+            .events
+            .iter()
+            .any(|l| l.level == Level::Error && l.text.contains("FAILED")));
+
+        // The poller resends the whole buffer every 800 ms: nothing may repeat.
+        app.apply_state(snapshot.clone());
+        app.apply_state(snapshot);
+        assert_eq!(
+            app.events.iter().filter(|l| l.text.contains("FAILED")).count(),
+            1,
+            "a repeated snapshot must not duplicate the log: {:?}",
+            app.events
+        );
+
+        // Only a new id appends.
+        app.apply_state(serde_json::json!({
+            "events": [{"id": 2, "ts": 3, "level": "warn",
+                        "text": "lease expired — requeued 1: render:3"}],
+        }));
+        assert!(app.events.iter().any(|l| l.text.contains("lease expired")));
+        assert_eq!(app.events.iter().filter(|l| l.text.contains("FAILED")).count(), 1);
+
+        // A snapshot without the key (an older inductor) must not panic or clear.
+        let before = app.events.len();
+        app.apply_state(serde_json::json!({ "tasks": [] }));
+        assert_eq!(app.events.len(), before);
+    }
+
+    #[test]
+    fn a_restarted_inductor_resets_the_event_cursor() {
+        let mut app = App::new("http://x");
+        app.apply_state(serde_json::json!({
+            "events": [{"id": 7, "ts": 1, "level": "ok", "text": "seven"}],
+        }));
+        // A fresh inductor counts from zero again; without the reset its whole
+        // history would look older than the last id we saw and be dropped.
+        app.apply_state(serde_json::json!({
+            "events": [
+                {"id": 0, "ts": 2, "level": "info", "text": "after restart"},
+                {"id": 1, "ts": 3, "level": "ok", "text": "and again"},
+            ],
+        }));
+        assert!(app.events.iter().any(|l| l.text.contains("after restart")), "{:?}", app.events);
+        assert!(app.events.iter().any(|l| l.text.contains("and again")));
+        assert!(app.events.iter().any(|l| l.text.contains("event stream reset")));
+    }
+
+    #[test]
+    fn both_key_lines_advertise_the_task_list() {
+        assert!(KEYS_FULL.iter().any(|k| k.contains("K tasks")), "{KEYS_FULL:?}");
+        assert!(KEYS_COMPACT.iter().any(|k| k.contains("K tasks")), "{KEYS_COMPACT:?}");
     }
 }

@@ -12,6 +12,7 @@
 use anyhow::{Context, Result};
 use bm_proto::Machine;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::process::Command;
 
@@ -86,6 +87,35 @@ pub fn save_box(path: &Path, bxo: &LinkedBox) -> Result<()> {
     Ok(())
 }
 
+/// Manifest stamp recorded on a target machine to detect whether sources/voices changed.
+///
+/// Written to `~/{REMOTE_DIR}/.provision_stamp.json` at the end of every
+/// provision, and read back by the *next* probe. When both hashes still match,
+/// the slow work is skipped: `ensure_voices` (which boots Python and imports
+/// PyTorch) and the redundant source sync. A stale or missing stamp is never an
+/// error — it just means the full path runs, which is what it did before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProvisionStamp {
+    pub agent_version: String,
+    pub sources_hash: String,
+    pub voices_hash: String,
+}
+
+impl ProvisionStamp {
+    /// Whether the voices enrolled on this box still match the ones we would
+    /// push. A mismatch means `ensure_voices` must run — that is the step that
+    /// costs seconds, so it is the one worth skipping.
+    pub fn voices_in_sync(&self, want: &ProvisionStamp) -> bool {
+        self.voices_hash == want.voices_hash
+    }
+
+    /// Whether the worker's sources (prompts, requirements, casts, assets, and
+    /// the agent build itself) still match ours.
+    pub fn sources_in_sync(&self, want: &ProvisionStamp) -> bool {
+        self.sources_hash == want.sources_hash && self.agent_version == want.agent_version
+    }
+}
+
 /// What a probe found on a machine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Probe {
@@ -104,6 +134,9 @@ pub struct Probe {
     pub voices: Vec<String>,
     pub tts_up: bool,
     pub note: String,
+    /// Manifest stamp found on the remote box from the previous provision, if any.
+    #[serde(default)]
+    pub stamp: Option<ProvisionStamp>,
 }
 
 impl Probe {
@@ -227,6 +260,9 @@ else
   echo "python=absent"
 fi
 echo "voices=$(for f in $HOME/{dir}/python/.venv/lib/*/site-packages/vieneu/assets/voices_v3_turbo.json; do [ -f "$f" ] && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(chr(31).join(d.get('presets', d).keys()))" "$f"; done 2>/dev/null)"
+if [ -f "$HOME/{dir}/.provision_stamp.json" ]; then
+  echo "stamp=$(tr '\n' ' ' < "$HOME/{dir}/.provision_stamp.json" 2>/dev/null)"
+fi
 if command -v curl >/dev/null 2>&1 && curl -s --max-time 3 http://127.0.0.1:{port}/health >/dev/null 2>&1; then
   echo "tts=up"
 else
@@ -271,6 +307,9 @@ echo "probe=done"
                                 .filter(|s| !s.is_empty())
                                 .map(str::to_string)
                                 .collect()
+                        }
+                        "stamp" => {
+                            probe.stamp = parse_stamp(v);
                         }
                         "tts" => probe.tts_up = v == "up",
                         _ => {}
@@ -586,6 +625,33 @@ echo stopped"#,
         let _ = self.run(&script, 30)?;
         Ok(())
     }
+
+    /// The stamp this box wrote at the end of its last provision, if any.
+    ///
+    /// `probe` already reads it inside its single ssh round trip, so provisioning
+    /// never pays for a second connection. This exists for callers that want the
+    /// stamp *without* a full probe (and for the tests that pin the round-trip
+    /// behaviour): a truncated or absent file reads as `None`, never as an error.
+    pub fn read_provision_stamp(&self) -> Option<ProvisionStamp> {
+        let script = format!("cat \"$HOME/{d}/.provision_stamp.json\"", d = REMOTE_DIR);
+        match self.run(&script, 10) {
+            Ok((0, stdout, _)) => parse_stamp(&stdout),
+            _ => None,
+        }
+    }
+
+    pub fn write_provision_stamp(&self, stamp: &ProvisionStamp) -> Result<()> {
+        let json = serde_json::to_string(stamp)?;
+        let script = format!(
+            "mkdir -p $HOME/{d} && cat > $HOME/{d}/.provision_stamp.json << 'EOF'\n{json}\nEOF\n",
+            d = REMOTE_DIR
+        );
+        let (code, _, stderr) = self.run(&script, 10)?;
+        if code != 0 {
+            anyhow::bail!("failed to write provision stamp: {}", stderr.trim());
+        }
+        Ok(())
+    }
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
@@ -602,10 +668,124 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
             }
             copy_dir(&from, &to)?;
         } else {
+            // Skip copy if destination file exists and has identical size & mtime
+            if to.is_file() {
+                if let (Ok(m_from), Ok(m_to)) = (from.metadata(), to.metadata()) {
+                    if m_from.len() == m_to.len() {
+                        if let (Ok(t_from), Ok(t_to)) = (m_from.modified(), m_to.modified()) {
+                            if t_from == t_to {
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
             std::fs::copy(&from, &to)?;
         }
     }
     Ok(())
+}
+
+/// Compute manifest stamp for detecting changes to sources and clone voices.
+///
+/// Two SHA-256 digests, each over a canonical (sorted, newline-joined) view of
+/// its inputs, so the same inputs produce the same hex string on any machine:
+///
+/// * `sources_hash` — `prompts/` by signature, plus the *content* of the small
+///   manifests the worker must match exactly (`requirements.txt`, the cast
+///   files, the scene map), plus the agent version so a rebuild redeploys.
+/// * `voices_hash` — `voices.json` by content (a rename with identical clips
+///   must re-enroll) and `refs/` by signature only: those clips are megabytes,
+///   and reading them would cost more than the enrollment we are avoiding.
+pub fn compute_provision_stamp(repo_root: &Path, agent_version: &str) -> ProvisionStamp {
+    let mut sources = Sha256::new();
+    sources.update(agent_version.as_bytes());
+    sources.update([0]);
+    sources.update(signature_of_dir(&repo_root.join("prompts")).as_bytes());
+    for rel in [
+        "python/requirements.txt",
+        "data/cast-vieneu.json",
+        "data/cast.json",
+        "assets/scene-map.json",
+    ] {
+        let p = repo_root.join(rel);
+        if let Ok(bytes) = std::fs::read(&p) {
+            sources.update(rel.as_bytes());
+            sources.update([0]);
+            sources.update(&bytes);
+            sources.update([0]);
+        }
+    }
+
+    let mut voices = Sha256::new();
+    if let Ok(bytes) = std::fs::read(repo_root.join("voices.json")) {
+        voices.update(&bytes);
+    }
+    voices.update([0]);
+    voices.update(signature_of_dir(&repo_root.join("refs")).as_bytes());
+
+    ProvisionStamp {
+        agent_version: agent_version.to_string(),
+        sources_hash: hex_digest(sources.finalize()),
+        voices_hash: hex_digest(voices.finalize()),
+    }
+}
+
+/// Hex-encode a digest by hand: the repo takes no hex dependency for one call.
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    let mut out = String::with_capacity(bytes.as_ref().len() * 2);
+    for b in bytes.as_ref() {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+/// A cheap, deterministic signature for a directory tree: sorted names plus
+/// each file's length and mtime, recursively. Contents are never read — this
+/// runs over `refs/`, where a single clip is megabytes and mtime+size is
+/// exactly the test `copy_dir` and rsync already use to decide "unchanged".
+fn signature_of_dir(dir: &Path) -> String {
+    const SKIP: [&str; 3] = [".venv", "__pycache__", "target"];
+    let mut out = String::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    let mut paths: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+    paths.sort();
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if SKIP.contains(&name.as_str()) {
+            continue;
+        }
+        let (Ok(meta), Ok(rel)) = (path.metadata(), path.strip_prefix(dir)) else {
+            continue;
+        };
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if meta.is_dir() {
+            out.push_str(&format!("d {} {}\n", rel.display(), mtime));
+            out.push_str(&signature_of_dir(&path));
+        } else {
+            out.push_str(&format!("f {} {} {}\n", rel.display(), meta.len(), mtime));
+        }
+    }
+    out
+}
+
+/// Parse a stamp payload.
+///
+/// The probe reads the file inside its own ssh round trip (one connection, not
+/// two) and hands the text here; `read_provision_stamp` fetches it on its own.
+/// Both go through this so they can never disagree.
+fn parse_stamp(text: &str) -> Option<ProvisionStamp> {
+    serde_json::from_str(text).ok()
 }
 
 /// Full onboarding for one machine: probe, then push only what is missing.
@@ -617,27 +797,50 @@ pub fn provision(
     agent_binary: &Path,
     agent_version: &str,
     force: bool,
+    initial_probe: Option<Probe>,
 ) -> (Probe, Vec<String>) {
     let ssh = Ssh::for_machine(m);
     let mut log = Vec::new();
 
-    log.push(format!("[{}] probing {}", m.id, ssh.target));
-    let probe = ssh.probe();
-    log.push(format!("[{}] {}", m.id, probe.summary()));
+    let probe = match initial_probe {
+        Some(p) => {
+            log.push(format!("[{}] {}", m.id, p.summary()));
+            p
+        }
+        None => {
+            log.push(format!("[{}] probing {}", m.id, ssh.target));
+            let p = ssh.probe();
+            log.push(format!("[{}] {}", m.id, p.summary()));
+            p
+        }
+    };
     if !probe.reachable {
         log.push(format!("[{}] unreachable — aborting provision", m.id));
         return (probe, log);
     }
+
+    let local_stamp = compute_provision_stamp(repo_root, agent_version);
+    let remote_stamp = probe.stamp.as_ref();
+
+    let sources_match = !force
+        && remote_stamp.map(|s| s.sources_in_sync(&local_stamp)).unwrap_or(false);
+    let voices_match = !force
+        && remote_stamp.map(|s| s.voices_in_sync(&local_stamp)).unwrap_or(false);
+
     if probe.configured(agent_version) && !force {
         log.push(format!(
-            "[{}] already configured (agent {} + python) — syncing sources only",
+            "[{}] already configured (agent {} + python)",
             m.id, agent_version
         ));
-        // Sources still sync: cast/asset/prompt updates must reach workers
-        // without a venv rebuild. Cheap rsync deltas when nothing changed.
-        match ssh.install_sources(repo_root) {
-            Ok(()) => log.push(format!("[{}] sources in sync", m.id)),
-            Err(e) => log.push(format!("[{}] source sync failed: {e}", m.id)),
+        if sources_match {
+            log.push(format!("[{}] sources in sync (cache match)", m.id));
+        } else {
+            // Sources still sync: cast/asset/prompt updates must reach workers
+            // without a venv rebuild. Cheap rsync deltas when nothing changed.
+            match ssh.install_sources(repo_root) {
+                Ok(()) => log.push(format!("[{}] sources in sync", m.id)),
+                Err(e) => log.push(format!("[{}] source sync failed: {e}", m.id)),
+            }
         }
     } else {
         if let Err(e) = ssh.ensure_root() {
@@ -654,9 +857,13 @@ pub fn provision(
             }
         }
 
-        match ssh.install_sources(repo_root) {
-            Ok(()) => log.push(format!("[{}] prompts/assets/refs/python distributed", m.id)),
-            Err(e) => log.push(format!("[{}] source distribution failed: {e}", m.id)),
+        if sources_match {
+            log.push(format!("[{}] prompts/assets/refs/python in sync (cache match)", m.id));
+        } else {
+            match ssh.install_sources(repo_root) {
+                Ok(()) => log.push(format!("[{}] prompts/assets/refs/python distributed", m.id)),
+                Err(e) => log.push(format!("[{}] source distribution failed: {e}", m.id)),
+            }
         }
 
         if !probe.python_present || force {
@@ -676,16 +883,18 @@ pub fn provision(
         }
     }
 
-    // Voice enrollment runs on every provision, configured or not: the store
-    // lives inside the venv and any rebuild vaporizes it. Cheap no-op when
-    // everything is already enrolled.
-    match ssh.ensure_voices(repo_root) {
-        Ok(v) => {
-            for line in v.lines() {
-                log.push(format!("[{}] {line}", m.id));
+    // Voice enrollment runs only when voices changed, or on first venv build / force.
+    if voices_match && probe.python_present {
+        log.push(format!("[{}] clone voices in sync (cache match, skipped PyTorch init)", m.id));
+    } else {
+        match ssh.ensure_voices(repo_root) {
+            Ok(v) => {
+                for line in v.lines() {
+                    log.push(format!("[{}] {line}", m.id));
+                }
             }
+            Err(e) => log.push(format!("[{}] voice enrollment failed: {e}", m.id)),
         }
-        Err(e) => log.push(format!("[{}] voice enrollment failed: {e}", m.id)),
     }
 
     match ssh.ensure_opencode() {
@@ -697,6 +906,9 @@ pub fn provision(
         Ok(v) => log.push(format!("[{}] tts: {v}", m.id)),
         Err(e) => log.push(format!("[{}] could not start tts: {e}", m.id)),
     }
+
+    // Write provision stamp so subsequent runs can skip
+    let _ = ssh.write_provision_stamp(&local_stamp);
 
     // Re-probe so the caller records the post-provision truth.
     let after = ssh.probe();
@@ -824,7 +1036,8 @@ mod tests {
     }
 
     #[test]
-    fn ssh_args_include_port_and_key_only_when_set() {        let m = Machine::new("10.0.0.5", "pi", 2222, Some("/k/id".into()), "worker");
+    fn ssh_args_include_port_and_key_only_when_set() {
+        let m = Machine::new("10.0.0.5", "pi", 2222, Some("/k/id".into()), "worker");
         let ssh = Ssh::for_machine(&m);
         let args = ssh.ssh_args();
         assert!(args.contains(&"-p".to_string()));
@@ -836,5 +1049,120 @@ mod tests {
         let args2 = Ssh::for_machine(&m2).ssh_args();
         assert!(!args2.contains(&"-p".to_string()));
         assert!(!args2.contains(&"-i".to_string()));
+    }
+
+    /// A throwaway repo root holding only the files the stamp looks at.
+    fn stamp_fixture(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("bm-stamp-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["prompts", "refs", "python", "data", "assets"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("prompts/digest.md"), "prompt v1").unwrap();
+        std::fs::write(root.join("python/requirements.txt"), "torch\n").unwrap();
+        std::fs::write(root.join("data/cast.json"), r#"{"Narrator":"Đức Trí"}"#).unwrap();
+        std::fs::write(root.join("voices.json"), r#"{"Narrator":"refs/n.wav"}"#).unwrap();
+        std::fs::write(root.join("refs/n.wav"), vec![1u8; 64]).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_stamp_is_stable_and_content_addressed() {
+        let root = stamp_fixture("stable");
+        let a = compute_provision_stamp(&root, "0.2.0");
+        let b = compute_provision_stamp(&root, "0.2.0");
+        assert_eq!(a, b, "nothing changed, so the stamp must not either");
+        assert_eq!(a.sources_hash.len(), 64, "sha-256 hex is 64 chars");
+        assert_eq!(a.voices_hash.len(), 64);
+        assert!(a.sources_in_sync(&b) && a.voices_in_sync(&b));
+
+        // A cast edit is a source change and nothing else.
+        std::fs::write(root.join("data/cast.json"), r#"{"Narrator":"Adam"}"#).unwrap();
+        let c = compute_provision_stamp(&root, "0.2.0");
+        assert_ne!(a.sources_hash, c.sources_hash, "a cast edit must resync sources");
+        assert_eq!(a.voices_hash, c.voices_hash, "…and must not re-enroll voices");
+
+        // A version bump redeploys the agent even when every file is identical.
+        let d = compute_provision_stamp(&root, "0.3.0");
+        assert!(!a.sources_in_sync(&d), "a new agent build must redeploy");
+        assert!(a.voices_in_sync(&d), "the agent version says nothing about voices");
+    }
+
+    #[test]
+    fn voices_hash_tracks_the_manifest_and_the_reference_clips() {
+        let root = stamp_fixture("voices");
+        let base = compute_provision_stamp(&root, "0.2.0");
+
+        // A rename in voices.json must re-enroll even though the clip is
+        // identical: enrollment is keyed by name, not by file.
+        std::fs::write(root.join("voices.json"), r#"{"Storyteller":"refs/n.wav"}"#).unwrap();
+        let renamed = compute_provision_stamp(&root, "0.2.0");
+        assert!(!base.voices_in_sync(&renamed), "a rename must re-enroll");
+        assert!(base.sources_in_sync(&renamed), "voices.json is not a source");
+
+        // A new clip changes the refs signature without touching the manifest.
+        std::fs::write(root.join("refs/m.wav"), vec![2u8; 64]).unwrap();
+        let added = compute_provision_stamp(&root, "0.2.0");
+        assert!(!renamed.voices_in_sync(&added), "a new clip must re-enroll");
+        assert!(base.sources_in_sync(&added), "refs/ is not part of the sources hash");
+    }
+
+    #[test]
+    fn a_stamp_payload_parses_and_garbage_does_not() {
+        let s = ProvisionStamp {
+            agent_version: "0.2.0".into(),
+            sources_hash: "a".repeat(64),
+            voices_hash: "b".repeat(64),
+        };
+        let text = serde_json::to_string(&s).unwrap();
+        assert_eq!(parse_stamp(&text).unwrap(), s, "a real payload round-trips");
+        assert!(parse_stamp("").is_none());
+        assert!(
+            parse_stamp("not json").is_none(),
+            "a truncated file is a cache miss, never a crash"
+        );
+        // TEST-NET-1: any attempt to connect fails, so this box has no stamp.
+        let ssh = Ssh {
+            target: "nobody@192.0.2.1".into(),
+            port: 22,
+            key: None,
+            local: false,
+        };
+        assert!(ssh.read_provision_stamp().is_none());
+    }
+
+    #[test]
+    fn copy_dir_leaves_an_unchanged_signature_alone() {
+        // The local fast path compares size+mtime, exactly like rsync. To prove
+        // the skip (a real identical file cannot be told apart anyway), the
+        // destination is given different *content* with the same signature: if
+        // it is copied over, the comparison did not happen.
+        let src = std::env::temp_dir().join("bm-copy-skip-src");
+        let dst = std::env::temp_dir().join("bm-copy-skip-dst");
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.txt"), "same").unwrap();
+        copy_dir(&src, &dst).unwrap();
+
+        std::fs::write(dst.join("a.txt"), "diff").unwrap();
+        let t = std::fs::metadata(src.join("a.txt")).unwrap().modified().unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(dst.join("a.txt"))
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+        copy_dir(&src, &dst).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.join("a.txt")).unwrap(),
+            "diff",
+            "an identical size+mtime must not be re-copied"
+        );
+
+        // A changed size is a real change and must be copied.
+        std::fs::write(src.join("a.txt"), "a longer body").unwrap();
+        copy_dir(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "a longer body");
     }
 }

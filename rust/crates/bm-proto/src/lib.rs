@@ -83,6 +83,30 @@ impl TaskState {
     pub fn is_terminal(self) -> bool {
         matches!(self, TaskState::Done | TaskState::Shelved)
     }
+
+    /// Lowercase name, matching the JSON wire form. The TUI filters and colours
+    /// by this string, so it must stay in step with `serde`'s rename.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskState::Pending => "pending",
+            TaskState::Assigned => "assigned",
+            TaskState::Running => "running",
+            TaskState::Done => "done",
+            TaskState::Failed => "failed",
+            TaskState::Shelved => "shelved",
+        }
+    }
+
+    /// Every state, in pipeline order — the filter's vocabulary, printed in the
+    /// Tasks screen's hint line so nobody has to guess a spelling.
+    pub const ALL: [TaskState; 6] = [
+        TaskState::Pending,
+        TaskState::Assigned,
+        TaskState::Running,
+        TaskState::Done,
+        TaskState::Failed,
+        TaskState::Shelved,
+    ];
 }
 
 /// One (chapter, stage) unit of work.
@@ -391,6 +415,11 @@ pub enum Op {
     /// Requeue tasks stranded on dead workers (no live beat). Unsticks
     /// chapters after a kill without waiting out leases.
     Requeue,
+    /// Retry shelved tasks (too many strikes) after fixing the cause.
+    /// Resets strikes so the next failure gets a full 3 attempts again.
+    Retry,
+    /// Retry an individual task by stage/chapter, optionally forcing re-run.
+    RetryTask,
 }
 
 impl Op {
@@ -403,6 +432,8 @@ impl Op {
             Op::PreviewVoice => "preview-voice",
             Op::Eta => "eta",
             Op::Requeue => "requeue",
+            Op::Retry => "retry",
+            Op::RetryTask => "retry-task",
         }
     }
 
@@ -415,6 +446,8 @@ impl Op {
             Op::PreviewVoice,
             Op::Eta,
             Op::Requeue,
+            Op::Retry,
+            Op::RetryTask,
         ]
         .into_iter()
         .find(|o| o.as_str() == s)
@@ -436,6 +469,12 @@ pub struct OpRequest {
     pub character: Option<String>,
     #[serde(default)]
     pub voice: Option<String>,
+    #[serde(default)]
+    pub stage: Option<Stage>,
+    #[serde(default)]
+    pub chapter: Option<u32>,
+    #[serde(default)]
+    pub force: Option<bool>,
 }
 
 
@@ -496,6 +535,8 @@ mod tests {
             Op::PreviewVoice,
             Op::Eta,
             Op::Requeue,
+            Op::Retry,
+            Op::RetryTask,
         ] {
             assert_eq!(Op::parse(op.as_str()), Some(op));
         }
@@ -531,5 +572,47 @@ mod tests {
         // must not invent one — an empty key means "not a catalogue voice".
         assert_eq!(r.voices[0].key, "");
         assert_eq!(r.cast["Narrator"], "Đức Trí");
+    }
+
+    #[test]
+    fn task_state_names_match_the_wire_form() {
+        // The TUI filters and colours tasks by `as_str`; a divergence from
+        // serde's lowercase rename would make a filter match nothing.
+        for st in TaskState::ALL {
+            let wire = serde_json::to_value(st).unwrap();
+            assert_eq!(wire.as_str(), Some(st.as_str()), "{st:?}");
+        }
+        assert_eq!(TaskState::Shelved.as_str(), "shelved");
+        assert_eq!(TaskState::Running.as_str(), "running");
+    }
+
+    #[test]
+    fn retry_task_requests_carry_stage_chapter_and_force() {
+        let req: OpRequest = serde_json::from_str(
+            r#"{"op":"retry-task","stage":"digest","chapter":7,"force":true}"#,
+        )
+        .unwrap();
+        assert_eq!(req.op, Op::RetryTask);
+        assert_eq!(req.op.as_str(), "retry-task");
+        assert_eq!(req.stage, Some(Stage::Digest));
+        assert_eq!(req.chapter, Some(7));
+        assert_eq!(req.force, Some(true));
+        // Everything else stays None: a retry must not smuggle a voice or range.
+        assert!(req.start.is_none() && req.voice.is_none() && req.character.is_none());
+
+        // An old caller that knows nothing of the new fields still parses, and
+        // the missing keys read as "not specified" rather than as an error.
+        let bare: OpRequest = serde_json::from_str(r#"{"op":"retry-task"}"#).unwrap();
+        assert_eq!(bare.stage, None);
+        assert_eq!(bare.chapter, None);
+        assert_eq!(bare.force, None);
+
+        // `retry` with a chapter is the narrow form of the blanket retry.
+        let narrow: OpRequest =
+            serde_json::from_str(r#"{"op":"retry","stage":"render","chapter":3}"#).unwrap();
+        assert_eq!(narrow.op, Op::Retry);
+        assert_eq!(narrow.stage, Some(Stage::Render));
+        assert_eq!(narrow.chapter, Some(3));
+        assert_eq!(narrow.force, None, "absent force means plain retry");
     }
 }

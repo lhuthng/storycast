@@ -158,6 +158,32 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             let mut inner = st.lock().await;
             Json(OpResult { ok: true, message: inner.op_requeue_orphans() })
         }
+        bm_proto::Op::Retry => {
+            let mut inner = st.lock().await;
+            // The blanket retry forgives every shelved task. When a chapter is
+            // named, it narrows to that one task instead — which is what the
+            // Tasks screen sends, so one bad digest never re-queues the batch.
+            match (req.stage, req.chapter) {
+                (Some(stage), Some(chapter)) => Json(OpResult {
+                    ok: true,
+                    message: inner.op_retry_task(stage, chapter, req.force.unwrap_or(false)),
+                }),
+                _ => Json(OpResult { ok: true, message: inner.op_retry_shelved() }),
+            }
+        }
+        bm_proto::Op::RetryTask => {
+            let (stage, chapter, force) = (req.stage, req.chapter, req.force.unwrap_or(false));
+            match (stage, chapter) {
+                (Some(stage), Some(chapter)) => {
+                    let mut inner = st.lock().await;
+                    Json(OpResult { ok: true, message: inner.op_retry_task(stage, chapter, force) })
+                }
+                _ => Json(OpResult {
+                    ok: false,
+                    message: "retry-task requires stage and chapter".into(),
+                }),
+            }
+        }
     }
 }
 
@@ -283,6 +309,7 @@ async fn op_voices(layout: &bm_core::Layout, engine: &str) -> OpResult {
 }
 async fn state(State(st): State<Shared>) -> impl IntoResponse {
     let inner = st.lock().await;
+    let events: Vec<_> = inner.recent_events(100);
     Json(serde_json::json!({
         "tasks": inner.tasks.values().collect::<Vec<_>>(),
         "machines": inner.machines.values().collect::<Vec<_>>(),
@@ -292,6 +319,9 @@ async fn state(State(st): State<Shared>) -> impl IntoResponse {
         // that are actually in force instead of hardcoded guesses. No secrets
         // live here — those stay in .env.
         "settings": inner.settings,
+        // Scheduler events (task done/fail, retry, orphan reap, …) surfaced in
+        // the TUI's event pane. The TUI deduplicates by event id.
+        "events": events,
     }))
 }
 

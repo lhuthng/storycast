@@ -7,8 +7,9 @@
 use anyhow::Result;
 use bm_core::{Layout, config::Settings};
 use bm_proto::{now_secs, Complete, Machine, MachineState, Stage, Task, TaskOffer, TaskState};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 const LEASE_SECS: [(Stage, u64); 4] = [
     (Stage::Crawl, 600),
@@ -19,6 +20,20 @@ const LEASE_SECS: [(Stage, u64); 4] = [
 
 fn lease_for(stage: Stage) -> u64 {
     LEASE_SECS.iter().find(|(s, _)| *s == stage).map(|(_, l)| *l).unwrap_or(600)
+}
+
+/// Maximum number of events kept in memory. Older entries fall off the front.
+const EVENT_CAP: usize = 200;
+
+/// An event from the scheduler: task completion/failure, lease expiry, operator
+/// actions, etc. Surfaced in `/api/state` so the TUI can show them live.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventRecord {
+    pub id: u64,
+    pub ts: u64,
+    /// `"info"` | `"ok"` | `"warn"` | `"error"`
+    pub level: String,
+    pub text: String,
 }
 
 pub struct Inner {
@@ -32,6 +47,9 @@ pub struct Inner {
     /// so a reboot never mistakes still-grinding workers (whose beats arrive
     /// within seconds) for dead ones.
     pub started_at: u64,
+    /// Ring buffer of scheduler events surfaced to the TUI.
+    pub events: VecDeque<EventRecord>,
+    next_event_id: u64,
 }
 
 impl Inner {
@@ -44,7 +62,29 @@ impl Inner {
             workers: HashMap::new(),
             beats: HashMap::new(),
             started_at: now_secs(),
+            events: VecDeque::new(),
+            next_event_id: 0,
         }
+    }
+
+    fn push_event(&mut self, level: &str, text: String) {
+        let id = self.next_event_id;
+        self.next_event_id += 1;
+        self.events.push_back(EventRecord {
+            id,
+            ts: now_secs(),
+            level: level.to_string(),
+            text,
+        });
+        while self.events.len() > EVENT_CAP {
+            self.events.pop_front();
+        }
+    }
+
+    /// The most recent `limit` events, newest last (ascending id order).
+    pub fn recent_events(&self, limit: usize) -> Vec<&EventRecord> {
+        let skip = self.events.len().saturating_sub(limit);
+        self.events.iter().skip(skip).collect()
     }
 
     fn ledger_path(&self) -> std::path::PathBuf {
@@ -379,17 +419,34 @@ impl Inner {
                     c.duration_secs,
                     &c.worker_id,
                 );
+                self.push_event("ok", format!(
+                    "[{}] {} done in {:.1}s{}",
+                    c.worker_id, c.task_id, c.duration_secs,
+                    if c.detail.is_empty() { String::new() } else { format!(" — {}", bm_core::util::head_chars(&c.detail, 80)) }
+                ));
                 self.save();
             }
             Outcome::Failed => {
-                if let Some(t) = self.tasks.get_mut(&c.task_id) {
-                    t.attempts += 1;
-                    t.detail = c.detail.clone();
-                    t.state = if t.attempts >= 3 { TaskState::Shelved } else { TaskState::Pending };
-                    t.assigned_to = None;
-                    t.lease_until = None;
-                    t.updated = now_secs();
-                }
+                let shelved = {
+                    if let Some(t) = self.tasks.get_mut(&c.task_id) {
+                        t.attempts += 1;
+                        t.detail = c.detail.clone();
+                        t.state = if t.attempts >= 3 { TaskState::Shelved } else { TaskState::Pending };
+                        t.assigned_to = None;
+                        t.lease_until = None;
+                        t.updated = now_secs();
+                        t.state == TaskState::Shelved
+                    } else {
+                        false
+                    }
+                };
+                let level = if shelved { "error" } else { "warn" };
+                let note = if shelved { " (shelved — press u to retry)" } else { " (will retry)" };
+                self.push_event(level, format!(
+                    "[{}] {} FAILED{}: {}",
+                    c.worker_id, c.task_id, note,
+                    bm_core::util::head_chars(&c.detail, 200)
+                ));
                 self.save();
             }
         }
@@ -413,11 +470,13 @@ impl Inner {
     pub fn reap(&mut self) -> Vec<String> {
         let now = now_secs();
         let mut out = Vec::new();
+        let mut expired = Vec::new();
         for t in self.tasks.values_mut() {
             if matches!(t.state, TaskState::Assigned | TaskState::Running)
                 && t.lease_until.map(|l| l < now).unwrap_or(false)
             {
                 Self::release(t, now, "lease expired");
+                expired.push(t.id());
                 out.push(t.id());
             }
         }
@@ -425,6 +484,7 @@ impl Inner {
         // window the ETA calls live). Workers beat every 2s, so a live one is
         // never caught here — and the boot grace in `started_at` means a
         // reboot never mistakes grinding workers for dead ones either.
+        let mut orphaned = Vec::new();
         if now.saturating_sub(self.started_at) > 120 {
             let live: std::collections::HashSet<&str> = self
                 .beats
@@ -442,9 +502,35 @@ impl Inner {
                 };
                 if orphan && !out.contains(&t.id()) {
                     Self::release(t, now, "worker gone");
+                    orphaned.push(t.id());
                     out.push(t.id());
                 }
             }
+        }
+        // Both passes are silent by design (no strikes), which used to mean an
+        // operator saw a task flip back to Pending with no explanation. The
+        // events are pushed after the loops: the loops hold `tasks` mutably.
+        if !expired.is_empty() {
+            expired.sort();
+            self.push_event(
+                "warn",
+                format!(
+                    "lease expired — requeued {}: {}",
+                    expired.len(),
+                    expired.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+                ),
+            );
+        }
+        if !orphaned.is_empty() {
+            orphaned.sort();
+            self.push_event(
+                "warn",
+                format!(
+                    "worker gone — requeued {}: {}",
+                    orphaned.len(),
+                    orphaned.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+                ),
+            );
         }
         if !out.is_empty() {
             self.save();
@@ -497,6 +583,90 @@ impl Inner {
             back.len(),
             back.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
         )
+    }
+
+    /// Manual retry for shelved tasks (3 strikes) after fixing the cause.
+    /// Strikes reset — unlike `release`, which keeps them — so the next
+    /// failure gets a full 3 attempts again. The operator asserts the cause
+    /// is fixed by pressing the key, so forgiveness is the point.
+    pub fn op_retry_shelved(&mut self) -> String {
+        let now = now_secs();
+        let mut back = Vec::new();
+        for t in self.tasks.values_mut() {
+            if t.state != TaskState::Shelved {
+                continue;
+            }
+            t.state = TaskState::Pending;
+            t.attempts = 0;
+            t.assigned_to = None;
+            t.lease_until = None;
+            t.detail = "requeued: manual retry".into();
+            t.updated = now;
+            back.push(t.id());
+        }
+        back.sort();
+        if back.is_empty() {
+            return "no shelved tasks — nothing to retry".into();
+        }
+        self.save();
+        let msg = format!(
+            "retried {} shelved task(s): {}",
+            back.len(),
+            back.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+        );
+        self.push_event("ok", msg.clone());
+        msg
+    }
+
+    /// Retry an individual task by stage and chapter.
+    ///
+    /// Resets attempts to 0 so the next failure gets a full 3 tries again.
+    /// When `force` is true, deletes the on-disk artifact that would otherwise
+    /// cause reconcile to mark it Done, so the task re-runs end-to-end.
+    pub fn op_retry_task(&mut self, stage: Stage, chapter: u32, force: bool) -> String {
+        let key = format!("{stage}:{chapter}");
+        let now = now_secs();
+        let task = match self.tasks.get_mut(&key) {
+            Some(t) => t,
+            None => return format!("task {key} not found"),
+        };
+        let prev_state = format!("{:?}", task.state).to_lowercase();
+        task.state = TaskState::Pending;
+        task.attempts = 0;
+        task.assigned_to = None;
+        task.lease_until = None;
+        task.detail = format!("requeued: manual retry (was {prev_state})");
+        task.updated = now;
+
+        // When forcing, remove the output artifact so the stage re-runs fully
+        // rather than reconcile marking it Done immediately.
+        if force {
+            match stage {
+                Stage::Crawl => {
+                    let _ = std::fs::remove_file(self.layout.chapter_txt(chapter));
+                }
+                Stage::Digest => {
+                    let _ = std::fs::remove_file(self.layout.script(chapter));
+                }
+                Stage::Render => {
+                    let engine = self.settings.engine.clone();
+                    let _ = std::fs::remove_dir_all(self.layout.seg_dir(&engine, chapter));
+                }
+                Stage::Merge => {
+                    if let Some(p) = self.layout.final_mp3(chapter).to_str() {
+                        let _ = std::fs::remove_file(p);
+                    }
+                }
+            }
+        }
+        self.save();
+        let msg = format!(
+            "{}:{} requeued (was {prev_state}{})",
+            stage, chapter,
+            if force { ", forced re-run" } else { "" }
+        );
+        self.push_event("ok", msg.clone());
+        msg
     }
 
     /// ETA for the remaining range, from measured throughput divided by
@@ -1140,5 +1310,182 @@ mod tests {
         assert_eq!(inner.tasks["digest:2"].attempts, 0, "strikes untouched (none here)");
         assert_eq!(inner.tasks["digest:3"].state, TaskState::Assigned);
         assert!(inner.op_requeue_orphans().contains("no orphaned"), "second run is a no-op");
+    }
+
+    #[test]
+    fn retry_shelved_resets_strikes_and_reoffers_the_chapter() {
+        let (_d, mut inner) = fixture();
+        let mut t = Task::new(2, Stage::Digest);
+        t.state = TaskState::Shelved;
+        t.attempts = 3;
+        inner.tasks.insert("digest:2".into(), t);
+        let mut c = Task::new(2, Stage::Crawl);
+        c.state = TaskState::Done;
+        inner.tasks.insert("crawl:2".into(), c);
+        inner.workers.insert("w1".into(), "127.0.0.1".into());
+
+        let msg = inner.op_retry_shelved();
+        assert!(msg.contains("digest:2"), "{msg}");
+        assert_eq!(inner.tasks["digest:2"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["digest:2"].attempts, 0, "manual retry forgives strikes");
+        // The chapter-level shelve gate lifts, so the task is offerable again.
+        assert!(inner.offer("w1").is_some(), "retried task must be offered");
+        assert!(inner.op_retry_shelved().contains("no shelved"), "second run is a no-op");
+    }
+
+    fn completion(worker: &str, task: &str, ok: bool, detail: &str) -> Complete {
+        Complete {
+            worker_id: worker.into(),
+            task_id: task.into(),
+            ok,
+            detail: detail.into(),
+            duration_secs: 12.5,
+            bible_delta: None,
+            units: 0,
+            script: None,
+            text: None,
+            mp3_b64: None,
+        }
+    }
+
+    #[test]
+    fn a_failed_task_lands_in_the_event_stream_with_its_cause() {
+        // The whole point of the event buffer: a digest that dies on a worker
+        // must say *why* in the TUI, not just flip a row back to Pending.
+        let (_d, mut inner) = fixture();
+        let mut t = Task::new(4, Stage::Digest);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w1".into());
+        inner.tasks.insert("digest:4".into(), t);
+
+        inner.complete(&completion(
+            "w1",
+            "digest:4",
+            false,
+            "opencode exited 1: model 'claude' unavailable",
+        ));
+
+        let events = inner.recent_events(10);
+        let last = events.last().expect("a failure must record an event");
+        assert_eq!(last.level, "warn", "a first failure retries, so it is a warning");
+        assert!(last.text.contains("w1") && last.text.contains("digest:4"), "{}", last.text);
+        assert!(
+            last.text.contains("model 'claude' unavailable"),
+            "the worker's reason must survive: {}",
+            last.text
+        );
+        assert_eq!(inner.tasks["digest:4"].state, TaskState::Pending, "one strike, not shelved");
+    }
+
+    #[test]
+    fn the_third_failure_escalates_to_error_and_names_the_retry_key() {
+        let (_d, mut inner) = fixture();
+        let mut t = Task::new(4, Stage::Digest);
+        t.state = TaskState::Running;
+        t.attempts = 2;
+        t.assigned_to = Some("w1".into());
+        inner.tasks.insert("digest:4".into(), t);
+
+        inner.complete(&completion("w1", "digest:4", false, "digest returned no segments"));
+
+        let last = inner.recent_events(1).into_iter().next().unwrap().clone();
+        assert_eq!(last.level, "error", "three strikes is an error, not a warning");
+        assert!(last.text.contains("shelved"), "{}", last.text);
+        assert!(last.text.contains('u'), "the way out must be named: {}", last.text);
+        assert_eq!(inner.tasks["digest:4"].state, TaskState::Shelved);
+    }
+
+    #[test]
+    fn events_are_capped_and_ids_stay_in_order() {
+        let (_d, mut inner) = fixture();
+        for i in 0..(EVENT_CAP + 25) {
+            inner.push_event("info", format!("event {i}"));
+        }
+        let all = inner.recent_events(EVENT_CAP * 2);
+        assert_eq!(all.len(), EVENT_CAP, "the buffer must not grow without bound");
+        let ids: Vec<u64> = all.iter().map(|e| e.id).collect();
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "ids must ascend: {ids:?}");
+        assert_eq!(*ids.last().unwrap(), (EVENT_CAP + 24) as u64);
+        // `limit` is a tail window, not a reordering.
+        let tail = inner.recent_events(3);
+        assert_eq!(
+            tail.iter().map(|e| e.text.clone()).collect::<Vec<_>>(),
+            vec![
+                format!("event {}", EVENT_CAP + 22),
+                format!("event {}", EVENT_CAP + 23),
+                format!("event {}", EVENT_CAP + 24),
+            ]
+        );
+        assert!(inner.recent_events(0).is_empty());
+    }
+
+    #[test]
+    fn reap_explains_a_requeue_instead_of_flipping_a_row_silently() {
+        let (_d, mut inner) = fixture();
+        let mut t = Task::new(5, Stage::Render);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w9".into());
+        t.lease_until = Some(now_secs().saturating_sub(5));
+        inner.tasks.insert("render:5".into(), t);
+
+        let requeued = inner.reap();
+        assert_eq!(requeued, vec!["render:5".to_string()]);
+        assert_eq!(inner.tasks["render:5"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["render:5"].attempts, 0, "silence is not a strike");
+
+        let last = inner.recent_events(1).into_iter().next().unwrap().clone();
+        assert_eq!(last.level, "warn");
+        assert!(last.text.contains("lease expired"), "{}", last.text);
+        assert!(last.text.contains("render:5"), "{}", last.text);
+
+        // A quiet reap stays quiet: no event, nothing to re-announce every 10s.
+        let before = inner.events.len();
+        assert!(inner.reap().is_empty());
+        assert_eq!(inner.events.len(), before, "nothing happened, nothing logged");
+    }
+
+    #[test]
+    fn retry_task_targets_one_chapter_and_force_clears_its_artifact() {
+        let (_d, mut inner) = fixture();
+        let script = inner.layout.script(3);
+        std::fs::write(&script, r#"{"segments":[]}"#).unwrap();
+        let mut t = Task::new(3, Stage::Digest);
+        t.state = TaskState::Shelved;
+        t.attempts = 3;
+        t.assigned_to = Some("w1".into());
+        t.lease_until = Some(now_secs() + 60);
+        t.detail = "digest failed: no such model".into();
+        inner.tasks.insert("digest:3".into(), t);
+        let mut other = Task::new(4, Stage::Digest);
+        other.state = TaskState::Shelved;
+        inner.tasks.insert("digest:4".into(), other);
+
+        // Without force the artifact is left alone: reconcile may still see it.
+        let msg = inner.op_retry_task(Stage::Digest, 3, false);
+        assert!(msg.contains("digest:3"), "{msg}");
+        assert_eq!(inner.tasks["digest:3"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["digest:3"].attempts, 0, "a manual retry forgives strikes");
+        assert!(inner.tasks["digest:3"].assigned_to.is_none());
+        assert!(inner.tasks["digest:3"].lease_until.is_none());
+        assert!(inner.tasks["digest:3"].detail.contains("requeued"));
+        assert!(script.exists(), "a plain retry keeps the artifact");
+        assert_eq!(
+            inner.tasks["digest:4"].state,
+            TaskState::Shelved,
+            "only the named chapter is touched"
+        );
+
+        // Forced: the stale script goes, so the stage really re-runs.
+        let msg = inner.op_retry_task(Stage::Digest, 3, true);
+        assert!(msg.contains("forced"), "{msg}");
+        assert!(!script.exists(), "force must delete what made it look done");
+
+        // And the operator action is in the stream, with the state it replaced.
+        let last = inner.recent_events(1).into_iter().next().unwrap().clone();
+        assert_eq!(last.level, "ok");
+        assert!(last.text.contains("digest:3"), "{}", last.text);
+        assert!(last.text.contains("was pending"), "{}", last.text);
+
+        assert!(inner.op_retry_task(Stage::Merge, 99, false).contains("not found"));
     }
 }

@@ -231,7 +231,7 @@ the files, guarded by inductor-down + no-local-workers.
 | `v` | voices | Read the roster, enforce policy, refill cast gaps. |
 | `s` | swap-voice | Repoint one character (see above). Blocked mid-play; works offline. |
 | `e` | eta | Remaining work from measured throughput ÷ live workers. |
-| `u` | — | No such key: orphaned tasks free themselves via the reaper. |
+| `u` | retry | Requeue shelved tasks after fixing the cause (strikes reset). |
 
 TUI keys: `a` add machine · `p` provision selected · `P` force re-provision ·
 `d` drop · `i` inspect · `r` refresh · `?` help · `C` colour · `q` quit.
@@ -242,39 +242,3 @@ named voice (`path as Name`, manual assignment only).
 Provisioning is idempotent: configured machines get a sources sync + voice
 check only; the venv build runs only when missing. `p` reports
 `complete — ready` vs `INCOMPLETE` honestly instead of always "finished".
-
-## Troubleshooting (earned the hard way)
-
-- **Remote box never gets tasks** — no worker process there (`pgrep` it).
-  Provision installs; only `B` starts. Also check the inductor bind: remotes
-  need LAN-wide (`0.0.0.0`), which `B` sets automatically when remotes are
-  registered; a hand-started `--bind 127.0.0.1` is deaf to them.
-- **`B` provisions only local** — the TUI knew zero machines (fresh launch +
-  dead inductor). Current builds fall back to the ledger file; older ones
-  default local-only. `X`, then `B` again once the registry is visible.
-- **Tasks stuck `assigned` to a dead worker** — the reaper frees them ~2 min
-  after boot automatically (no key, no lease wait). Strikes are kept.
-- **Chapter never appears (e.g. ch2 missing)** — its digest is stranding or
-  shelved upstream; renders only offer after digest reads Done. Check Tasks
-  for `shelved: digest:N`, fix thelogged cause, unstick.
-- **Render fails on a voice** — the gate is gone, so this is now the engine
-  refusing (unknown/unenrolled voice). Re-provision (`p`) re-enrolls; check
-  the probe's `voices=` list for the name.
-- **Digest 404s on Gemini models** — short names don't exist on v1beta; use
-  full IDs. A `503` means the model exists but is overloaded — the chain
-  moves on by itself.
-- **Digest fails `GEMINI_API_KEY missing` on a remote** — keys are
-  per-machine; that box has no `.env`. Copy the key over, restart its worker.
-- **Merge stuck `assigned` + worker idle** — affinity points at a machine the
-  scheduler can't map. Heartbeats reheal the map; check `affinity` vs
-  `workers` in `/api/state`.
-- **Fresh box digests fail on auth** — `opencode auth login` needs a browser
-  on that machine. Provisioning installs the CLI; login stays yours.
-- **Reports vanish for big mp3s** — axum's default 2 MB body cap 413s them;
-  this repo disables the limit (LAN-only API). Re-enable auth/limits only
-  past 10 MB.
-- **Nested `assets/assets` (or `refs/refs`) on a worker** — rsync directory
-  semantics: sources must sync *contents* (trailing slash).
-- **A completion during an inductor outage** — the worker retries, then moves
-  on; the task requeues on lease expiry and reruns. Chapters are never lost,
-  but finished work can be discarded — keep outages short.
