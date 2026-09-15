@@ -8,7 +8,8 @@ use axum::{
     Router,
 };
 use bm_proto::{
-    Complete, Heartbeat, Machine, OpRequest, OpResult, Register, Roster, TaskRequest, VoiceInfo,
+    Complete, Heartbeat, Machine, MachineState, OpRequest, OpResult, Register, Roster, TaskRequest,
+    VoiceInfo,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -40,6 +41,11 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
         inner.machines.insert(r.addr.clone(), m);
         r.addr.clone()
     };
+    // A registering worker is alive by definition — this is what flips a
+    // background-provisioned box Online with no polling involved.
+    if let Some(m) = inner.machines.get_mut(&addr) {
+        m.state = MachineState::Online;
+    }
     inner.workers.insert(r.worker_id.clone(), addr);
     inner.save();
     Json(serde_json::json!({"ok": true}))
@@ -55,6 +61,7 @@ async fn heartbeat(State(st): State<Shared>, Json(h): Json<Heartbeat>) -> impl I
     if let Some(addr) = addr {
         if let Some(m) = inner.machines.get_mut(&addr) {
             m.last_seen = bm_proto::now_secs();
+            m.state = MachineState::Online;
         }
     }
     inner.beats.insert(h.worker_id.clone(), h);
@@ -86,6 +93,36 @@ async fn add_machine(State(st): State<Shared>, Json(m): Json<Machine>) -> impl I
 #[derive(Deserialize)]
 struct AddrQuery {
     addr: String,
+}
+
+/// TUI-driven machine phase transitions (provisioning / error / note) while a
+/// box catches up in the background. Register/heartbeat own Online; this owns
+/// everything before the first beat. Unknown addresses are refused, not
+/// created — creation stays with register and the add-machine flow.
+#[derive(Deserialize)]
+struct MachineStateUpdate {
+    addr: String,
+    state: MachineState,
+    #[serde(default)]
+    note: String,
+}
+
+async fn set_machine_state(
+    State(st): State<Shared>,
+    Json(u): Json<MachineStateUpdate>,
+) -> impl IntoResponse {
+    let mut inner = st.lock().await;
+    match inner.machines.get_mut(&u.addr) {
+        Some(m) => {
+            m.state = u.state;
+            if !u.note.is_empty() {
+                m.note = u.note;
+            }
+            inner.save();
+            Json(serde_json::json!({"ok": true}))
+        }
+        None => Json(serde_json::json!({"ok": false, "error": format!("unknown machine {}", u.addr)})),
+    }
 }
 
 async fn drop_machine(State(st): State<Shared>, Query(q): Query<AddrQuery>) -> impl IntoResponse {
@@ -184,6 +221,92 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                 }),
             }
         }
+        bm_proto::Op::Reconcile => {
+            // Plan under the lock, think outside it: the LLM call takes
+            // seconds and must never block heartbeats and completions.
+            let (layout, settings) = {
+                let inner = st.lock().await;
+                (inner.layout.clone(), inner.settings.clone())
+            };
+            Json(op_reconcile(&st, &layout, &settings).await)
+        }
+    }
+}
+
+/// Fold duplicates: deterministic canon-key folds over the bible AND the cast
+/// (title/casing/parenthetical variants that never entered the bible) apply
+/// immediately; ambiguous pairs go to the analyzer on the next press.
+/// Certain folds never wait on the LLM — that call takes minutes on
+/// rate-limited tiers while the TUI gives up in seconds.
+async fn op_reconcile(
+    st: &Shared,
+    layout: &bm_core::Layout,
+    settings: &bm_core::config::Settings,
+) -> OpResult {
+    let bible: serde_json::Value =
+        bm_core::read_json(&layout.bible()).unwrap_or(serde_json::json!({"characters": []}));
+    let plan = bm_core::digest::reconcile_plan(&bible);
+    let mut merges = plan.folds;
+    {
+        let cast = bm_core::cast::read_cast(&settings.engine, &layout.cast(&settings.engine));
+        let keys: Vec<String> = cast.keys().cloned().collect();
+        // ponytail: linear scans, merge lists are tiny
+        let mut seen: std::collections::HashSet<String> =
+            merges.iter().flat_map(|(_, a)| a.iter().cloned()).collect();
+        for (canonical, absorbs) in bm_core::digest::cast_only_folds(&bible, &keys) {
+            let fresh: Vec<String> =
+                absorbs.into_iter().filter(|a| seen.insert(a.clone())).collect();
+            if fresh.is_empty() {
+                continue;
+            }
+            match merges.iter_mut().find(|(c, _)| c == &canonical) {
+                Some((_, a)) => a.extend(fresh),
+                None => merges.push((canonical, fresh)),
+            }
+        }
+    }
+    if merges.is_empty() && plan.candidates.is_empty() {
+        let n = bible
+            .get("characters")
+            .and_then(|c| c.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        return OpResult { ok: true, message: format!("reconcile: bible already clean ({n} characters)") };
+    }
+    if !merges.is_empty() {
+        let mut inner = st.lock().await;
+        return match inner.apply_reconcile(&merges) {
+            Ok(msg) => OpResult {
+                ok: true,
+                message: format!(
+                    "{msg}{}",
+                    if plan.candidates.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "; {} ambiguous pairs remain — press m again",
+                            plan.candidates.len()
+                        )
+                    }
+                ),
+            },
+            Err(e) => OpResult { ok: false, message: format!("reconcile refused: {e:#}") },
+        };
+    }
+    // No certain folds. The ambiguous pairs are listed for a human to judge —
+    // the analyzer hallucinates merges for mere token-sharers ("Dịch Phong"
+    // into "Tịnh Vô Phong"), so it no longer auto-applies anything here.
+    let pairs: Vec<String> = plan
+        .candidates
+        .iter()
+        .map(|(a, b)| format!("{a} / {b}"))
+        .collect();
+    OpResult {
+        ok: true,
+        message: format!(
+            "reconcile: nothing certain to fold; ambiguous pairs (no auto-merge): {}",
+            pairs.join("; ")
+        ),
     }
 }
 
@@ -604,6 +727,7 @@ pub fn router(st: Shared) -> Router {
         .route("/api/complete", post(complete))
         .route("/api/machines", post(add_machine))
         .route("/api/machines", delete(drop_machine))
+        .route("/api/machines/state", post(set_machine_state))
         .route("/api/op", post(op))
         .route("/api/state", get(state))
         .route("/api/roster", get(roster))
@@ -627,6 +751,96 @@ mod tests {
         std::fs::create_dir_all(layout.output()).unwrap();
         std::fs::write(layout.bible(), r#"{"characters":[]}"#).unwrap();
         d
+    }
+
+    #[tokio::test]
+    async fn register_and_heartbeat_flip_a_machine_online() {
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+            layout,
+            bm_core::config::Settings::default(),
+        )));
+        register(
+            State(st.clone()),
+            Json(Register {
+                worker_id: "w1".into(),
+                addr: "192.168.2.2".into(),
+                hostname: "box".into(),
+                capabilities: vec![],
+                tts_url: None,
+                version: "0.2.0".into(),
+            }),
+        )
+        .await;
+        {
+            let inner = st.lock().await;
+            assert_eq!(inner.machines["192.168.2.2"].state, MachineState::Online);
+        }
+        heartbeat(
+            State(st.clone()),
+            Json(Heartbeat {
+                worker_id: "w1".into(),
+                addr: "192.168.2.2".into(),
+                task_id: None,
+                stage: None,
+                chapter: None,
+                progress: 0.0,
+                activity: "idle".into(),
+                eta_secs: None,
+                ts: bm_proto::now_secs(),
+                hostname: "box".into(),
+            }),
+        )
+        .await;
+        {
+            let inner = st.lock().await;
+            let m = &inner.machines["192.168.2.2"];
+            assert_eq!(m.state, MachineState::Online);
+            assert!(m.last_seen > 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn machine_state_route_updates_known_boxes_only() {
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+            layout,
+            bm_core::config::Settings::default(),
+        )));
+        {
+            let mut inner = st.lock().await;
+            inner.machines.insert(
+                "192.168.2.2".into(),
+                Machine::new("192.168.2.2", "thang", 22, None, "worker"),
+            );
+        }
+        set_machine_state(
+            State(st.clone()),
+            Json(MachineStateUpdate {
+                addr: "192.168.2.2".into(),
+                state: MachineState::Provisioning,
+                note: "pushing sources".into(),
+            }),
+        )
+        .await;
+        {
+            let inner = st.lock().await;
+            let m = &inner.machines["192.168.2.2"];
+            assert_eq!(m.state, MachineState::Provisioning);
+            assert_eq!(m.note, "pushing sources");
+        }
+        // Unknown addresses are refused, never created.
+        set_machine_state(
+            State(st.clone()),
+            Json(MachineStateUpdate { addr: "10.9.9.9".into(), state: MachineState::Error, note: String::new() }),
+        )
+        .await;
+        {
+            let inner = st.lock().await;
+            assert!(!inner.machines.contains_key("10.9.9.9"));
+        }
     }
 
     #[tokio::test]

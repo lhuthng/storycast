@@ -152,23 +152,18 @@ nothing is lost (see §4).
 make tui
 ```
 
-| Key                   | Does                                                                                                                                  |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| **B**                 | _One key to run everything_: provisions every registered machine, starts the backend + workers, then launches the saved chapter range |
-| **R**                 | System overview — previews range/analyzer; `Enter` launches                                                                           |
-| **t**                 | Enqueue a chapter range (`<start> <count>`) — needs the inductor up                                                                   |
-| **K**                 | **Task ledger** — every task, its failure reason; `u` retry, `F` force re-run                                                         |
-| **u**                 | Retry all shelved tasks (strikes reset)                                                                                               |
-| **v** / **s** / **S** | Voice roster refresh / swap one character's voice / cast overview                                                                     |
-| **e**                 | ETA for the remaining range                                                                                                           |
-| **p** / **P**         | Provision the selected machine / force re-provision                                                                                   |
-| **a** / **d** / **i** | Add a machine by IP / drop it / inspect it                                                                                            |
-| **X**                 | Stop everything, everywhere                                                                                                           |
-| **r**                 | Refresh now · **?** full help · **C** colour on/off · **q** quit                                                                      |
+| Key                    | Does                                                                                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `:`                    | **Command line — every operator action runs here**: `:a` add machine, `:p`/`:P` provision/force, `:d` drop, `:t` translate, `:v` voices, `:s` swap, `:e` eta, `:u` retry, `:m` reconcile, `:B` backend, `:X` stop. Words work too (`:reconcile`, `:backend`, `:quit`); actions that need input open their prompt after `Enter`. No single key can fire anything destructive. |
+| **R** / **K** / **S**  | Read-only screens — system overview (`Enter` launches) / **task ledger** / cast overview                                             |
+| **i**                  | Inspect the selected machine (probe output, capabilities)                                                                              |
+| **arrows / k j**       | Move the selection · **PgUp PgDn** scroll the log · **G** pin to newest                                                               |
+| **r**                  | Refresh now · **?** full help · **C** colour on/off · **q** quit                                                                      |
 
-`B` with no machines registered runs a local-only cluster — the easy first run.
-In the task ledger (`K`): `j/k` or arrows to move, type to filter (e.g.
-`shelved`, `digest`, `42`), `Enter` for the full error, `Esc`/`q` to close.
+`:` + `B` with no machines registered runs a local-only cluster — the easy
+first run. In the task ledger (`K`): `j/k` or arrows to move, type to filter
+(e.g. `shelved`, `digest`, `42`), `u` retry / `F` force re-run the highlighted
+row, `Enter` for the full error, `Esc`/`q` to close.
 
 ### C. "Spread it over the LAN" (cluster)
 
@@ -185,7 +180,7 @@ make link NAME=box-1 ADDR=192.168.2.2
 make provision BOX=box-1
 
 # 3. Start the cluster (re-provisions — fast now — then launches everything)
-make tui     # press B
+make tui     # press :B
 ```
 
 Workers pull chapters from a shared queue, so idle machines pick up work

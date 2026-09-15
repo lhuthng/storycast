@@ -13,7 +13,7 @@
 //!   state that says what to do next.
 
 use bm_core::Layout;
-use bm_proto::{Heartbeat, Machine, Op, OpRequest, Roster, Stage, Task, TaskState, VoiceInfo};
+use bm_proto::{Heartbeat, Machine, MachineState, Op, OpRequest, Roster, Stage, Task, TaskState, VoiceInfo};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -29,6 +29,10 @@ use ratatui::{
 };
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 /// Event scrollback depth. Older lines fall off the top.
@@ -45,7 +49,7 @@ const REFRESH_TICKS: u64 = 4;
 const MIN_W: u16 = 76;
 const MIN_H: u16 = 20;
 
-/// Above this the full five-pane dashboard fits without squeezing Events,
+/// Above this the full five-pane dashboard fits without squeezing Logs,
 /// which is the one pane that must stay readable.
 const FULL_W: u16 = 100;
 const FULL_H: u16 = 32;
@@ -96,12 +100,12 @@ const COMPACT_FOOTER_H: u16 = 4;
 /// The compact tier gets shorter labels because it has 76 columns to work with;
 /// every key is described in full on the help screen, which `?` opens.
 const KEYS_FULL: [&str; 2] = [
-    "a add · p provision · d drop · i inspect · t translate · c crawl-setup · u retry · K tasks",
-    "P force · v voices · s swap-voice · S cast · e eta · r refresh · ? help · C colour · q quit",
+    ":a add · :p provision · :d drop · :t translate · :c crawl · :e eta · i inspect",
+    ":u retry · :m rec · :B back · :X stop · :s swap · :v voices · S cast · K tasks · r · ? · C · q",
 ];
 const KEYS_COMPACT: [&str; 2] = [
-    "a add · p prov · d drop · i info · t translate · c crawl · u retry",
-    "v voices · s swap · S cast · e eta · r refresh · ? help · K tasks · q quit",
+    ":a add · :p prov · :d drop · :t trans · :c crawl · :B back · :X stop",
+    ":u · :m · :v voices · :s swap · :S cast · K tasks · r · ? · q quit · : cmd",
 ];
 
 /// Compact-tier column widths. The full tier has slack and keeps its widths
@@ -214,20 +218,19 @@ impl Level {
 #[derive(Debug, Clone)]
 struct LogLine {
     level: Level,
-    /// Offset from TUI start. Deliberately relative: the repo takes no clock
-    /// dependency, and a monotonic stamp is what you actually correlate a
-    /// provisioning run against.
-    at: Duration,
+    /// Wall-clock epoch seconds on this machine, for the pane stamp.
+    /// Relative uptime was unreadable next to multi-day ledger history —
+    /// local time is what an operator correlates against everything else.
+    wall: u64,
     text: String,
 }
 
-fn stamp(d: Duration) -> String {
-    let s = d.as_secs();
-    if s >= 3600 {
-        format!("+{}h{:02}m", s / 3600, (s % 3600) / 60)
-    } else {
-        format!("+{:02}:{:02}", s / 60, s % 60)
-    }
+/// Local `HH:MM:SS` for a pane stamp. Unparseable input (including 0, the
+/// never-logged sentinel) reads as dashes, never as 1970.
+fn wall_hms(epoch: u64) -> String {
+    chrono::DateTime::from_timestamp(epoch as i64, 0)
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "--:--:--".into())
 }
 
 /// Map an inductor event level onto the pane's severity.
@@ -266,6 +269,10 @@ enum TextKind {
     RunConfig,
     Translate,
     CrawlTemplate,
+    /// `:` command line: the buffer names a key (`m`) or a word
+    /// (`reconcile`) and Enter presses it for you. Never dispatched —
+    /// handled inline so one keypress can open another prompt.
+    Command,
 }
 
 /// A single-line editor with a real cursor. The old prompt could only append
@@ -417,6 +424,7 @@ enum ConfirmAction {
     DropMachine { addr: String },
     SwapVoice { character: String, voice: String },
     StopBackend,
+    Reconcile,
 }
 
 #[derive(Debug, Clone)]
@@ -502,9 +510,11 @@ enum Screen {
 
 #[derive(Debug)]
 enum Job {
-    /// Long SSH/rsync flow, executed off the UI task.
+    /// Long SSH/rsync flow for exactly one box, executed off the UI task.
+    /// Touches nothing else: no veto, no restart, no other worker.
     Provision {
         layout_root: std::path::PathBuf,
+        api: String,
         machine: Machine,
         force: bool,
     },
@@ -516,8 +526,10 @@ enum Job {
     /// Start the local backend, then run a range on it once live.
     /// `enqueue` is false for bare `B` (backend only) and true for the run
     /// screen's Enter (backend + job). `machines` is the registry snapshot at
-    /// submit: every box provisions first, and the backend spawns only when
-    /// all of them report ready.
+    /// submit. Degraded start: the backend goes up first (seconds), then each
+    /// box provisions in the background and joins as it becomes ready — a
+    /// failing box lands in Error, never vetoes the rest. `cancel` lets `X`
+    /// stop the catch-up loop between boxes.
     StartBackend {
         layout_root: std::path::PathBuf,
         api: String,
@@ -526,6 +538,7 @@ enum Job {
         count: u32,
         enqueue: bool,
         machines: Vec<Machine>,
+        cancel: Arc<AtomicBool>,
     },
     /// Stop everything: the local backend by PID file, strays by sweep, and
     /// every registered remote worker over ssh. `X` means the cluster is
@@ -575,6 +588,9 @@ enum DoneKind {
     },
     /// Pool changed under the roster: reload it (only if one is showing).
     ReloadRoster,
+    /// A backend start sequence finished (backend up, catch-up done or
+    /// cancelled). Clears the double-`B` guard; anything else is Other.
+    StartDone,
     Other,
 }
 
@@ -588,6 +604,8 @@ enum Ev {
     State(Result<serde_json::Value, String>),
     /// The backend a `B` job started is up enough to take work: enqueue this.
     BackendLive { start: u32, count: u32 },
+    /// Push a machine's state directly into the TUI's in-memory list.
+    MachineUpdate { addr: String, state: MachineState, note: String },
 }
 
 // --- app --------------------------------------------------------------------
@@ -598,7 +616,6 @@ struct App {
     layout_root: std::path::PathBuf,
     /// Shared HTTP client for the inductor API.
     http: reqwest::Client,
-    started: Instant,
     machines: Vec<Machine>,
     beats: Vec<Heartbeat>,
     tasks: Vec<Task>,
@@ -627,6 +644,16 @@ struct App {
     /// follows on the first live refresh — so one keypress runs chapters,
     /// not just processes.
     pending_enqueue: Option<(u32, u32)>,
+    /// A backend start sequence is in flight: refuses a second `B`/`R` start,
+    /// cleared when the sequence reports `DoneKind::StartDone`.
+    backend_start_outstanding: bool,
+    /// Cancel flag for the in-flight start's catch-up loop, set
+    /// synchronously by `X` (the stop job itself still queues behind).
+    start_cancel: Option<Arc<AtomicBool>>,
+    /// Screen a `:` command returns to after it runs: commands fire in the
+    /// context they were typed in, so `:F` in the task list retries the
+    /// highlighted row instead of losing it.
+    command_return: Option<Screen>,
     colour: bool,
     status: LogLine,
     conn: Conn,
@@ -640,7 +667,6 @@ impl App {
             api: api.trim_end_matches('/').to_string(),
             layout_root: std::path::PathBuf::new(),
             http: reqwest::Client::new(),
-            started: Instant::now(),
             machines: Vec::new(),
             beats: Vec::new(),
             tasks: Vec::new(),
@@ -658,10 +684,13 @@ impl App {
             inflight: Vec::new(),
             last_event_id: None,
             pending_enqueue: None,
+            backend_start_outstanding: false,
+            start_cancel: None,
+            command_return: None,
             colour: true,
             status: LogLine {
                 level: Level::Info,
-                at: Duration::ZERO,
+                wall: bm_proto::now_secs(),
                 text: "press ? for help".into(),
             },
             conn: Conn::Unknown,
@@ -678,14 +707,13 @@ impl App {
     }
 
     fn log_at(&mut self, level: Level, text: impl Into<String>) {
-        let at = self.started.elapsed();
-        self.push_log(LogLine { level, at, text: text.into() });
+        self.push_log(LogLine { level, wall: bm_proto::now_secs(), text: text.into() });
     }
 
     fn set_status(&mut self, level: Level, text: impl Into<String>) {
         self.status = LogLine {
             level,
-            at: self.started.elapsed(),
+            wall: bm_proto::now_secs(),
             text: text.into(),
         };
     }
@@ -856,12 +884,10 @@ impl App {
             }
             self.last_event_id = Some(rec.id);
             // The record's own `ts` is epoch seconds on the inductor's clock;
-            // the pane stamps offsets from *this* TUI's start, so it is mapped
-            // through the moment of arrival — the same rule background log lines
-            // follow (see run_loop).
+            // close enough to local time for a pane stamp (same LAN, same day).
             self.push_log(LogLine {
                 level: level_from_str(&rec.level),
-                at: self.started.elapsed(),
+                wall: rec.ts,
                 text: rec.text,
             });
         }
@@ -896,6 +922,12 @@ impl App {
                 self.pending_enqueue = Some((start, count));
                 self.log_at(Level::Info, format!("ch{start}×{count} will enqueue once live"));
             }
+            Ev::MachineUpdate { addr, state, note } => {
+                if let Some(m) = self.machines.iter_mut().find(|m| m.addr == addr) {
+                    m.state = state;
+                    m.note = note;
+                }
+            }
             // A poller snapshot, applied the moment it arrives: nothing here
             // waits on the network, which is what keeps the drawing loop moving
             // even when the inductor is slow to answer.
@@ -903,8 +935,10 @@ impl App {
             Ev::State(Err(e)) => self.state_failed(e),
             Ev::Done(kind) => {
                 self.pending = self.pending.saturating_sub(1);
-                if let DoneKind::Op { op, key, ok, voice } = kind {
-                    self.inflight.retain(|k| *k != key);
+                match kind {
+                    DoneKind::StartDone => self.backend_start_outstanding = false,
+                    DoneKind::Op { op, key, ok, voice } => {
+                        self.inflight.retain(|k| *k != key);
                     if let Screen::Pick(p) = &mut self.screen {
                         p.previewing = None;
                         if op == Op::PreviewVoice && ok {
@@ -920,6 +954,8 @@ impl App {
                     if op == Op::SwapVoice && ok {
                         self.roster = None;
                     }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -954,6 +990,40 @@ fn stage_color(s: &str) -> Color {
         "merge" => Color::Green,
         _ => Color::Gray,
     }
+}
+
+/// Display alias for a worker: a stable animal name + colour derived from the
+/// worker id. Raw ids (`host-pid`) are meaningless to an operator and change
+/// on every restart; the alias is arbitrary but stable for the same id, so a
+/// box is recognisable at a glance. Display-only — the protocol, ledger and
+/// affinity still use the raw id.
+fn worker_alias(id: &str) -> (&'static str, Color) {
+    const ANIMALS: [&str; 16] = [
+        "fox", "owl", "bear", "wolf", "hare", "lynx", "otter", "hawk", "deer", "mole",
+        "crane", "boar", "seal", "wren", "ibex", "newt",
+    ];
+    const COLOURS: [Color; 6] = [
+        Color::Red,
+        Color::Green,
+        Color::Yellow,
+        Color::Blue,
+        Color::Magenta,
+        Color::Cyan,
+    ];
+    let mut h: u64 = 0;
+    for b in id.bytes() {
+        h = h.wrapping_mul(31).wrapping_add(b as u64);
+    }
+    (
+        ANIMALS[h as usize % ANIMALS.len()],
+        COLOURS[h as usize / ANIMALS.len() % COLOURS.len()],
+    )
+}
+
+/// Alias for an optional assignee, for the uncoloured table cells.
+fn worker_name(id: Option<&str>) -> String {
+    id.map(|i| worker_alias(i).0.to_string())
+        .unwrap_or_else(|| "—".into())
 }
 
 /// `last_seen` is 0 for a machine that has never reported. Subtracting it from
@@ -1428,7 +1498,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let compact = size == Size::Compact;
 
     // Compact gives up the Tasks pane — its numbers move to the footer — so
-    // that Events keeps rows. Events is the pane that must stay readable.
+    // that Logs keeps rows. Logs is the pane that must stay readable.
     let (machines_h, workers_h) = if compact {
         (COMPACT_MACHINES_H, COMPACT_WORKERS_H)
     } else {
@@ -1594,7 +1664,11 @@ fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compact: bool) {
                 st.clone(),
                 style_of(colour, stage_color(&st)),
             ));
-            let mut cells = vec![cell(b.worker_id.clone())];
+            let (alias, alias_colour) = worker_alias(&b.worker_id);
+            let mut cells = vec![Line::from(Span::styled(
+                alias,
+                style_of(colour, alias_colour),
+            ))];
             // The machine column is derivable from the Machines pane; the
             // activity string is not, so the machine column goes first.
             if !compact {
@@ -1937,7 +2011,7 @@ fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksView) {
                     cell(t.stage.as_str().to_string()),
                     state_cell(colour, t.state.as_str()),
                     cell(t.attempts.to_string()),
-                    cell(t.assigned_to.clone().unwrap_or_else(|| "—".into())),
+                    cell(worker_name(t.assigned_to.as_deref())),
                     cell(format!("{}s", age_secs(t.updated))),
                     cell(why_label(&t.detail)),
                 ];
@@ -2065,7 +2139,7 @@ fn draw_task_detail(f: &mut ratatui::Frame, app: &App, view: &TaskDetail) {
             ),
         ]),
         kv("attempts", format!("{} of 3 before it is shelved", t.attempts)),
-        kv("worker", t.assigned_to.clone().unwrap_or_else(|| "—".into())),
+        kv("worker", worker_name(t.assigned_to.as_deref())),
         kv("lease", lease),
         kv("affinity", t.affinity.clone().unwrap_or_else(|| "—".into())),
         kv("updated", format!("{}s ago", age_secs(t.updated))),
@@ -2111,8 +2185,41 @@ fn draw_task_detail(f: &mut ratatui::Frame, app: &App, view: &TaskDetail) {
     );
 }
 
+/// Leading speaker token of a log line, if any: `[192.168.2.2] …` and
+/// `localhost-4578: …` qualify; plain sentences (`reconcile: …`) do not — a
+/// bare word before a colon is message text, not a speaker. The alias
+/// prefixes the untouched line, so monochrome mode loses colour but no
+/// information.
+fn log_head(text: &str) -> Option<&str> {
+    if let Some(rest) = text.strip_prefix('[') {
+        if let Some(end) = rest.find("] ") {
+            let id = rest[..end].trim();
+            if !id.is_empty() {
+                return Some(id);
+            }
+        }
+        return None;
+    }
+    if let Some(pos) = text.find(": ") {
+        let head = &text[..pos];
+        if (head.contains('-') || head.contains('.')) && !head.chars().any(char::is_whitespace) {
+            return Some(head);
+        }
+    }
+    None
+}
+
 fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title("Events");
+    let wrap_w = area.width.saturating_sub(2) as usize;
+    let viewport_h = area.height.saturating_sub(2) as usize;
+    let total = app.events.len();
+
+    let title = if app.events_scroll > 0 {
+        format!("Logs — {} line(s) back · G for newest", app.events_scroll)
+    } else {
+        "Logs".to_string()
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
     if app.events.is_empty() {
         f.render_widget(
             empty_body(vec!["nothing has happened yet".into()]).block(block),
@@ -2121,45 +2228,61 @@ fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let height = area.height.saturating_sub(2) as usize;
-    let total = app.events.len();
-    // Anchor to the newest line: events are appended at the back, and a list
-    // rendered from the front hides exactly the lines you just caused.
-    let offset = app.events_scroll.min(total.saturating_sub(height.min(total)));
-    let end = total - offset;
-    let start = end.saturating_sub(height);
-
     let colour = app.colour;
     let lines: Vec<Line> = app
         .events
         .iter()
-        .skip(start)
-        .take(end - start)
         .map(|l| {
-            Line::from(vec![
+            let body_style = match l.level {
+                Level::Warn => style_of(colour, Color::Yellow),
+                Level::Error => style_of(colour, Color::Red),
+                _ => Style::default(),
+            };
+            let mut spans = vec![
                 Span::styled(
-                    format!("[{}] ", stamp(l.at)),
+                    format!("{} ", wall_hms(l.wall)),
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(format!("{} ", l.level.glyph()), style_of(colour, l.level.color())),
-                Span::styled(l.text.clone(), style_of(colour, l.level.color())),
-            ])
+            ];
+            match log_head(&l.text) {
+                Some(id) => {
+                    let (alias, tint) = worker_alias(id);
+                    spans.push(Span::styled(format!("[{alias}] "), style_of(colour, tint)));
+                    spans.push(Span::styled(l.text.clone(), body_style));
+                }
+                None => spans.push(Span::styled(l.text.clone(), body_style)),
+            }
+            Line::from(spans)
         })
         .collect();
 
-    let title = if offset > 0 {
-        format!("Events — {offset} line(s) back · G for newest")
-    } else {
-        "Events".to_string()
-    };
-    let block = block.title(title);
-    // Wrapped, not clipped: a worker's failure reason is the one line in this
-    // pane that must be readable end to end, and it is always the longest. The
-    // scroll math above counts ledger lines, so a wrapped line occupies more
-    // rows than `events_scroll` accounts for — the title says how far back the
-    // list is scrolled, which stays truthful either way.
+    // Compute the visual row offset so scrolling stays correct even when
+    // wrapped lines change width on resize.  events_scroll counts logical
+    // lines; we convert to display rows here.
+    let total_visual: usize = lines
+        .iter()
+        .map(|l| {
+            let w = l.width();
+            if w == 0 { 1 } else { w.div_ceil(wrap_w) }
+        })
+        .sum();
+    let show_from = total.saturating_sub(app.events_scroll);
+    let visual_skip: usize = lines
+        .iter()
+        .take(show_from)
+        .map(|l| {
+            let w = l.width();
+            if w == 0 { 1 } else { w.div_ceil(wrap_w) }
+        })
+        .sum();
+    let scroll_row = visual_skip.min(total_visual.saturating_sub(viewport_h));
+
     f.render_widget(
-        Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll_row as u16, 0)),
         area,
     );
 }
@@ -2269,7 +2392,10 @@ fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
     for (k, v) in [
         ("↑ ↓  k j", "move the machine cursor"),
         ("K", "task ledger: every task, its failure detail, and a re-queue key"),
-        ("PgUp PgDn", "scroll the event log   (G returns to newest)"),
+        ("i", "inspect the selected machine (probe output, capabilities)"),
+        ("R", "system overview: preview everything"),
+        ("S", "cast overview: every speaker × voice"),
+        ("PgUp PgDn", "scroll the log   (G returns to newest)"),
         ("r", "refresh now"),
         ("?", "this help"),
         ("C", "toggle colour (state names are always shown, so nothing depends on colour)"),
@@ -2281,28 +2407,36 @@ fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         ]));
     }
 
-    section(&mut lines, "Cluster");
-    for (k, v) in [
-        ("a", "add a machine by IP or hostname"),
-        ("p", "provision the selected machine"),
-        ("P", "re-provision it, forcing past the skip-if-configured check"),
-        ("d", "drop the selected machine from the cluster registry"),
-        ("i", "inspect the selected machine (probe output, capabilities)"),
+    section(&mut lines, "The command line");
+    for v in [
+        "`:` opens the command line: `:m`, `:B`, `:X`, or words like :reconcile, :backend, :stop",
+        "or :quit. Every action runs from here — no single key can fire",
+        "anything destructive, so a stray keypress is always safe.",
+        "Actions that need more input (add machine, provision, translate, crawl)",
+        "open their normal prompt or confirm after Enter.",
     ] {
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {k:<12}"), app.style(Color::Cyan)),
-            Span::raw(v.to_string()),
-        ]));
+        lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }
-
-    section(&mut lines, "Backend");
+    section(&mut lines, "Commands");
     for (k, v) in [
-        ("B", "start everything: provision all machines, start workers everywhere, then backend"),
-        ("R", "system overview: preview everything, Enter provisions + launches"),
-        ("X", "stop everything everywhere: local backend plus workers on all machines"),
+        (":a  :add", "add a machine by IP or hostname"),
+        (":A  :sample", "pool a clip — tags from the filename, enrolled locally"),
+        (":N  :named", "a `path as Name` voice — manual assignment only"),
+        (":p  :provision", "provision the selected machine"),
+        (":P  :reprovision", "re-provision it, forcing past the skip-if-configured check"),
+        (":d  :drop", "drop the selected machine from the cluster registry"),
+        (":t  :translate", "enqueue crawl + digest for a chapter range"),
+        (":c  :crawl", "save the URL template, then probe-crawl one chapter"),
+        (":v  :voices", "re-read the roster, enforce the accent policy, refill gaps"),
+        (":s  :swap", "repoint one character — destructive, see below"),
+        (":e  :eta", "estimate the remaining wall-clock time"),
+        (":u  :retry", "requeue every shelved task — strikes reset"),
+        (":m  :reconcile", "fold duplicates — asks first; certain folds apply, ambiguous only listed"),
+        (":B  :backend", "backend up now, machines provision in background and join as ready"),
+        (":X  :stop", "stop everything everywhere: local backend plus workers on all machines"),
     ] {
         lines.push(Line::from(vec![
-            Span::styled(format!("  {k:<12}"), app.style(Color::Cyan)),
+            Span::styled(format!("  {k:<16}"), app.style(Color::Cyan)),
             Span::raw(v.to_string()),
         ]));
     }
@@ -2311,26 +2445,16 @@ fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         Style::default().fg(Color::DarkGray),
     )));
 
-    section(&mut lines, "Pipeline operations");
-    for (k, v) in [
-        ("t  translate", "enqueue crawl + digest for a chapter range"),
-        ("u  retry", "requeue every shelved task — strikes reset. In the K list it applies to the highlighted row only"),
-        ("K  tasks", "the ledger: filter, Enter for the full failure reason, u retry, F force re-run"),
-        ("c  crawl-setup", "save the URL template, then probe-crawl one chapter"),
-        ("v  voices", "re-read the roster, enforce the accent policy, refill gaps"),
-        ("A  add-sample", "pool a clip — tags from the filename, enrolled locally"),
-        ("N  add named", "a `path as Name` voice — manual assignment only"),
-        ("s  swap-voice", "repoint one character — destructive, see below"),
-        ("S  cast", "every speaker × voice, flagging shared voices and policy problems"),
-        ("e  eta", "estimate the remaining wall-clock time"),
+    section(&mut lines, "Task ledger (K)");
+    for v in [
+        "Filter with a few letters, Enter for the full failure reason.",
+        "u retries the highlighted row; F force re-runs it. Both are direct",
+        "keys here — this screen is read-only navigation otherwise.",
     ] {
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {k:<14}"), app.style(Color::Cyan)),
-            Span::raw(v.to_string()),
-        ]));
+        lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }
 
-    section(&mut lines, "Voice picker (s) and cast overview (S)");
+    section(&mut lines, "Voice picker (:s) and cast overview (S)");
     for v in [
         "Step 1 picks a character, step 2 picks a voice. S shows the whole cast",
         "at once, and Enter there jumps straight to step 2 for that speaker.",
@@ -2351,7 +2475,7 @@ fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         "mp3s and requeues render + merge. Every other character keeps its cache.",
         "VieNeu presets are Central/South only — Northern voices are rejected by",
         "policy. Enrolled clones always pass, because they were vetted on enrolment.",
-        "Below 100x30 the Tasks pane folds into the footer so Events keeps its rows;",
+        "Below 100x30 the Tasks pane folds into the footer so Logs keeps its rows;",
         "below 76x20 the dashboard is replaced by a size notice, because a clipped",
         "dashboard is worse than an honest one.",
         "Jobs run in the background: the interface never blocks, and a second copy of",
@@ -2552,7 +2676,7 @@ fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker) {
                             } else if !users.is_empty() {
                                 (format!("in use: {}", users.join(", ")), Color::Yellow)
                             } else if !v.allowed {
-                                ("blocked by accent policy".to_string(), Color::Red)
+                                ("accent policy concern".to_string(), Color::Yellow)
                             } else {
                                 ("available".to_string(), Color::DarkGray)
                             };
@@ -2623,7 +2747,7 @@ fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker) {
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(Span::styled(
-                "blocked voices are shown for completeness but the inductor will reject them",
+                "concern voices are shown for completeness but the inductor will reject them",
                 Style::default().fg(Color::DarkGray),
             )),
         ],
@@ -2793,7 +2917,7 @@ fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
                 }
                 let (status, status_colour) = match r.verdict() {
                     Verdict::Unassigned => ("unassigned — v fills gaps".to_string(), Color::DarkGray),
-                    Verdict::Blocked => ("blocked by the accent policy".to_string(), Color::Red),
+                    Verdict::Blocked => ("accent policy concern".to_string(), Color::Yellow),
                     Verdict::Unknown => ("unknown voice — stale cast?".to_string(), Color::Red),
                     Verdict::Ok if r.shared() => (
                         format!(
@@ -2877,7 +3001,7 @@ fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(Span::styled(
-                "blocked = the accent policy rejects it · unknown = the roster has never heard of it",
+                "concern = outside your accent policy · unknown = the roster has never heard of it",
                 Style::default().fg(Color::DarkGray),
             )),
         ]),
@@ -3124,17 +3248,91 @@ fn draw_machine_info(f: &mut ratatui::Frame, app: &App, addr: &str) {
 
 // --- background execution ---------------------------------------------------
 
+/// Bounded wait for a freshly spawned inductor to answer `/api/state`.
+/// True the moment it answers, false after `secs` — the caller reports and
+/// quits instead of blocking a job (and the dashboard) forever.
+async fn wait_api_live(api: &str, secs: u64) -> bool {
+    for _ in 0..secs.max(1) {
+        if crate::backend::inductor_up(api).await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    false
+}
+
+/// Record one box's phase (`provisioning`, `error`, …) with a note, for the
+/// Machines pane. API first; the ledger file only as a fallback while the
+/// inductor is confirmed down (never fight a live scheduler for its file).
+async fn set_machine_state(
+    api: &str,
+    layout_root: &std::path::Path,
+    addr: &str,
+    state: MachineState,
+    note: &str,
+) {
+    let body = serde_json::json!({"addr": addr, "state": state.as_str(), "note": note});
+    let url = format!("{}/api/machines/state", api.trim_end_matches('/'));
+    if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(5)).build() {
+        let _ = client.post(&url).json(&body).send().await;
+    }
+    // Always write the ledger file as well: when the inductor is up the
+    // TUI refreshes from the API, but the ledger is the only source
+    // before the API starts or if the POST fails.
+    let path = layout_root.join(".bm/ledger.json");
+    let mut doc: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(serde_json::json!({"machines": []}));
+    let mut changed = false;
+    if let Some(arr) = doc.get_mut("machines").and_then(|m| m.as_array_mut()) {
+        if let Some(e) = arr
+            .iter_mut()
+            .find(|x| x.get("addr").and_then(|a| a.as_str()) == Some(addr))
+        {
+            e["state"] = serde_json::Value::String(state.as_str().into());
+            if !note.is_empty() {
+                e["note"] = serde_json::Value::String(note.into());
+            }
+            changed = true;
+        }
+    }
+    if changed {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or_default()).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
 async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
     let send = |level: Level, text: String| {
         let _ = tx.send(Ev::Log(LogLine {
             level,
-            at: Duration::ZERO,
+            wall: bm_proto::now_secs(),
             text,
         }));
     };
     match job {
-        Job::Provision { layout_root, machine, force } => {
+        Job::Provision { layout_root, api, machine, force } => {
             let addr = machine.addr.clone();
+            let again = machine.clone();
+            let send_update = |tx: &tokio::sync::mpsc::UnboundedSender<Ev>, state: MachineState, note: &str| {
+                let _ = tx.send(Ev::MachineUpdate {
+                    addr: addr.clone(),
+                    state,
+                    note: note.to_string(),
+                });
+            };
+            send_update(&tx, MachineState::Provisioning, if force { "force re-provision (p)" } else { "provisioning (p)" });
+            set_machine_state(
+                &api,
+                &layout_root,
+                &addr,
+                MachineState::Provisioning,
+                if force { "force re-provision (p)" } else { "provisioning (p)" },
+            )
+            .await;
             let layout = bm_core::Layout::new(&layout_root);
             let out = tokio::task::spawn_blocking(move || {
                 crate::provision_machine(
@@ -3149,19 +3347,123 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
             .await;
             match out {
                 Ok((ready, lines)) => {
+                    // Extract the most actionable line from the provision log:
+                    // prefer the inner root cause (e.g. "rsync: command not
+                    // found") over the outer wrapper ("agent install failed").
+                    let fail_reason = lines
+                        .iter()
+                        .rev()
+                        .find(|l| l.contains("missing") || l.contains("not found"))
+                        .or_else(|| lines.iter().rev().find(|l| l.contains("failed")))
+                        .map(|l| {
+                            // Strip the "[addr] " prefix if present.
+                            let raw = if let Some(rest) = l.strip_prefix('[') {
+                                rest.find(']').map_or(l.as_str(), |i| &rest[i + 2..])
+                            } else {
+                                l.as_str()
+                            };
+                            bm_core::util::head_chars(raw, 120)
+                        })
+                        .unwrap_or_default();
                     for l in lines {
                         send(Level::Info, l);
                     }
-                    send(
-                        if ready { Level::Ok } else { Level::Error },
-                        if ready {
-                            format!("[{addr}] provision complete — ready for work")
+                    if ready {
+                        send_update(&tx, MachineState::Provisioning, "worker launched — Online on its first beat");
+                        send(Level::Ok, format!("[{addr}] provision complete — starting its worker"));
+                        // Worker half only, never the inductor: a `p` retry
+                        // finishes with the box joined, whatever else runs.
+                        if crate::backend::is_local_addr(&addr) {
+                            for l in crate::backend::start_local_worker(&layout_root, &api) {
+                                send(Level::Info, format!("[{addr}] {l}"));
+                            }
                         } else {
-                            format!("[{addr}] provision INCOMPLETE — fix it and press p again")
-                        },
-                    );
+                            let port = crate::backend::api_port(&api);
+                            match tokio::task::spawn_blocking(move || {
+                                crate::backend::start_remote_workers(&[again], port)
+                            })
+                            .await
+                            {
+                                Ok((true, lines)) => {
+                                    for l in lines {
+                                        send(Level::Info, l);
+                                    }
+                                }
+                                Ok((false, lines)) => {
+                                    for l in lines {
+                                        send(Level::Error, l);
+                                    }
+                                    send_update(&tx, MachineState::Error, "provisioned but the worker would not start — press p again");
+                                    set_machine_state(
+                                        &api,
+                                        &layout_root,
+                                        &addr,
+                                        MachineState::Error,
+                                        "provisioned but the worker would not start — press p again",
+                                    )
+                                    .await;
+                                    let _ = tx.send(Ev::Done(DoneKind::Other));
+                                    return;
+                                }
+                                Err(e) => {
+                                    send(Level::Error, format!("[{addr}] worker start task failed: {e}"));
+                                    send_update(&tx, MachineState::Error, "provisioned but the worker start crashed — press p again");
+                                    set_machine_state(
+                                        &api,
+                                        &layout_root,
+                                        &addr,
+                                        MachineState::Error,
+                                        "provisioned but the worker start crashed — press p again",
+                                    )
+                                    .await;
+                                    let _ = tx.send(Ev::Done(DoneKind::Other));
+                                    return;
+                                }
+                            }
+                        }
+                        set_machine_state(
+                            &api,
+                            &layout_root,
+                            &addr,
+                            MachineState::Provisioning,
+                            "worker launched — Online on its first beat",
+                        )
+                        .await;
+                    } else {
+                        // The note carries the actual failing step from the
+                        // provision log (python missing, ssh abort, …) — a
+                        // bare "INCOMPLETE" made the machine pane lie about
+                        // what the box needs.
+                        let reason = if fail_reason.is_empty() {
+                            "provision INCOMPLETE".to_string()
+                        } else {
+                            fail_reason
+                        };
+                        send_update(&tx, MachineState::Error, &reason);
+                        set_machine_state(
+                            &api,
+                            &layout_root,
+                            &addr,
+                            MachineState::Error,
+                            &reason,
+                        )
+                        .await;
+                        send(Level::Error, format!("[{addr}] {reason} — fix it and press p again"));
+                    }
                 }
-                Err(e) => send(Level::Error, format!("[{addr}] provision task failed: {e}")),
+                Err(e) => {
+                    send(Level::Error, format!("[{addr}] provision task crashed: {e}"));
+                    send_update(&tx, MachineState::Error, "provision task crashed — press p again");
+                    set_machine_state(
+                        &api,
+                        &layout_root,
+                        &addr,
+                        MachineState::Error,
+                        "provision task crashed — press p again",
+                    )
+                    .await;
+                    send(Level::Error, format!("[{addr}] provision task failed: {e}"));
+                }
             }
             let _ = tx.send(Ev::Done(DoneKind::Other));
         }
@@ -3207,66 +3509,20 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
                 }
             }
         }
-        Job::StartBackend { layout_root, api, mut api_up, start, count, enqueue, machines } => {
-            // Provision first, spawn after: a start means every machine is
-            // ready, and one failing box aborts the whole start loudly rather
-            // than letting work pile up on a half-built cluster.
-            let targets: Vec<Machine> = if machines.is_empty() {
-                vec![Machine::new("127.0.0.1", "local", 22, None, "worker")]
-            } else {
-                let mut ms = machines;
-                ms.sort_by(|a, b| a.addr.cmp(&b.addr));
-                ms.dedup_by(|a, b| a.addr == b.addr);
-                ms
-            };
-            send(Level::Info, format!("provisioning {} machine(s) before start…", targets.len()));
-            // Every box provisions at once: the flows are independent ssh/rsync
-            // sessions, and a five-box cluster used to take five times as long
-            // as its slowest machine. Results are collected by address below, so
-            // the report keeps the registry's order however the joins land.
-            let mut set = tokio::task::JoinSet::new();
-            for m in &targets {
-                let (layout_root, m) = (layout_root.clone(), m.clone());
-                let addr = m.addr.clone();
-                set.spawn_blocking(move || {
-                    let layout = bm_core::Layout::new(&layout_root);
-                    let out = crate::provision_machine(
-                        &layout,
-                        &m.addr,
-                        &m.ssh_user,
-                        m.ssh_port,
-                        m.ssh_key.clone(),
-                        false,
-                    );
-                    (addr, out)
-                });
+        Job::StartBackend { layout_root, api, mut api_up, start, count, enqueue, machines, cancel } => {
+            // Degraded start: the backend goes up first (seconds), then each
+            // box provisions in the background and joins as it becomes ready.
+            // A failing box lands in Error with its reason — it never vetoes
+            // the rest. Sequential, not parallel: one ssh flow at a time keeps
+            // `X` cancellation prompt between boxes.
+            let mut targets = machines;
+            targets.sort_by(|a, b| a.addr.cmp(&b.addr));
+            targets.dedup_by(|a, b| a.addr == b.addr);
+            if targets.is_empty() {
+                targets = vec![Machine::new("127.0.0.1", "local", 22, None, "worker")];
             }
-            let mut results: Vec<(String, bool)> = Vec::new();
-            while let Some(joined) = set.join_next().await {
-                match joined {
-                    Ok((addr, (ready, lines))) => {
-                        for l in lines {
-                            send(Level::Info, l);
-                        }
-                        results.push((addr, ready));
-                    }
-                    Err(e) => {
-                        send(Level::Error, format!("provision task failed: {e}"));
-                        results.push((String::from("unknown"), false));
-                    }
-                }
-            }
-            results.sort_by(|a, b| a.0.cmp(&b.0));
-            if let Err(veto) = crate::backend::provision_verdict(&results) {
-                send(Level::Error, veto);
-                let _ = tx.send(Ev::Done(DoneKind::Other));
-                return;
-            }
-            // Remotes before local: a box that will not run a worker vetoes
-            // the whole start, so `B` never leaves a half-started cluster.
-            let has_remotes = targets.iter().any(|m| {
-                !["127.0.0.1", "localhost", "::1"].contains(&m.addr.as_str())
-            });
+            send(Level::Info, format!("starting backend now — {} machine(s) catch up in background…", targets.len()));
+            let has_remotes = targets.iter().any(|m| !crate::backend::is_local_addr(&m.addr));
             let port = crate::backend::api_port(&api);
             if has_remotes {
                 // A running inductor bound to loopback (old start, hand start)
@@ -3291,52 +3547,24 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
                             Level::Error,
                             "cannot rebind an inductor this TUI didn't start — stop it by hand (or restart it with --bind 0.0.0.0), then B again".into(),
                         );
-                        let _ = tx.send(Ev::Done(DoneKind::Other));
+                        let _ = tx.send(Ev::Done(DoneKind::StartDone));
                         return;
                     }
                     api_up = false;
                 }
-                send(Level::Info, "starting remote workers…".into());
-                let machines = targets.clone();
-                let out = tokio::task::spawn_blocking(move || {
-                    crate::backend::start_remote_workers(&machines, port)
-                })
-                .await;
-                        match out {
-                            Ok((true, lines)) => {
-                                for l in lines {
-                                    send(Level::Info, l);
-                                }
-                            }
-                            Ok((false, lines)) => {
-                                for l in lines {
-                                    send(Level::Error, l);
-                                }
-                                send(
-                                    Level::Error,
-                                    "remote worker start failed — start aborted (local backend untouched)".into(),
-                                );
-                                let _ = tx.send(Ev::Done(DoneKind::Other));
-                                return;
-                            }
-                            Err(e) => {
-                                send(Level::Error, format!("remote start task failed: {e}"));
-                                let _ = tx.send(Ev::Done(DoneKind::Other));
-                                return;
-                            }
-                        }
             }
-            send(Level::Ok, "all machines provisioned — starting backend".into());
-            // Spawning is instant (the servers boot in the background); the
-            // enqueue waits for the first live refresh (see Ev::BackendLive) —
-            // and only when asked: bare `B` brings the backend, nothing more.
             // The analyzer was already saved to the settings file at submit,
             // so a fresh backend picks it up — but a live one never re-reads
             // it, hence the warning.
             if api_up {
                 send(Level::Warn, "inductor already up: analyzer saved, takes effect on next restart (X, then B)".into());
             }
-            match crate::backend::start_backend(&layout_root, &api, api_up, crate::backend::public_bind(has_remotes)) {
+            // Inductor only: workers start per-box after that box provisions,
+            // so an unready box never takes tasks it would fail. Spawning is
+            // instant (the server boots in the background); the enqueue waits
+            // for the first live refresh (see Ev::BackendLive) — and only
+            // when asked: bare `B` brings the backend, nothing more.
+            match crate::backend::start_backend(&layout_root, &api, api_up, crate::backend::public_bind(has_remotes), false) {
                 Ok(lines) => {
                     for l in lines {
                         send(Level::Ok, l);
@@ -3346,9 +3574,92 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
                         let _ = tx.send(Ev::BackendLive { start, count });
                     }
                 }
-                Err(e) => send(Level::Error, format!("backend start failed: {e:#}")),
+                Err(e) => {
+                    send(Level::Error, format!("backend start failed: {e:#}"));
+                    let _ = tx.send(Ev::Done(DoneKind::StartDone));
+                    return;
+                }
             }
-            let _ = tx.send(Ev::Done(DoneKind::Other));
+            if !wait_api_live(&api, 30).await {
+                send(Level::Error, "backend spawned but never answered — check .bm/inductor.log, then B again".into());
+                let _ = tx.send(Ev::Done(DoneKind::StartDone));
+                return;
+            }
+            // Catch-up loop: provision one box, launch its worker, next.
+            let mut failed: Vec<String> = Vec::new();
+            for m in &targets {
+                if cancel.load(Ordering::Relaxed) {
+                    send(Level::Warn, "start cancelled (X) — remaining boxes stay unprovisioned; p retries one".into());
+                    break;
+                }
+                let addr = m.addr.clone();
+                set_machine_state(&api, &layout_root, &addr, MachineState::Provisioning, "catching up in background").await;
+                let layout = bm_core::Layout::new(&layout_root);
+                let (mc, mf, mp, mk) = (m.addr.clone(), m.ssh_user.clone(), m.ssh_port, m.ssh_key.clone());
+                let out = tokio::task::spawn_blocking(move || {
+                    crate::provision_machine(&layout, &mc, &mf, mp, mk, false)
+                })
+                .await;
+                match out {
+                    Ok((ready, lines)) => {
+                        for l in lines {
+                            send(Level::Info, l);
+                        }
+                        if !ready {
+                            failed.push(addr.clone());
+                            set_machine_state(&api, &layout_root, &addr, MachineState::Error, "catch-up failed — select it and press p to retry").await;
+                            send(Level::Error, format!("[{addr}] catch-up failed — cluster runs without it; select it and press p to retry"));
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        failed.push(addr.clone());
+                        set_machine_state(&api, &layout_root, &addr, MachineState::Error, "catch-up task crashed — press p to retry").await;
+                        send(Level::Error, format!("[{addr}] catch-up task failed: {e}"));
+                        continue;
+                    }
+                }
+                if crate::backend::is_local_addr(&addr) {
+                    for l in crate::backend::start_local_worker(&layout_root, &api) {
+                        send(Level::Info, format!("[{addr}] {l}"));
+                    }
+                } else {
+                    let one = m.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        crate::backend::start_remote_workers(&[one], port)
+                    })
+                    .await
+                    {
+                        Ok((true, lines)) => {
+                            for l in lines {
+                                send(Level::Info, l);
+                            }
+                        }
+                        Ok((false, lines)) => {
+                            for l in lines {
+                                send(Level::Error, l);
+                            }
+                            failed.push(addr.clone());
+                            set_machine_state(&api, &layout_root, &addr, MachineState::Error, "provisioned but the worker would not start — press p to retry").await;
+                            send(Level::Error, format!("[{addr}] worker start failed — press p to retry"));
+                            continue;
+                        }
+                        Err(e) => {
+                            failed.push(addr.clone());
+                            set_machine_state(&api, &layout_root, &addr, MachineState::Error, "worker start task crashed — press p to retry").await;
+                            send(Level::Error, format!("[{addr}] worker start task failed: {e}"));
+                            continue;
+                        }
+                    }
+                }
+                set_machine_state(&api, &layout_root, &addr, MachineState::Provisioning, "ready — Online on its first beat").await;
+            }
+            if failed.is_empty() {
+                send(Level::Ok, "all machines caught up — cluster complete".into());
+            } else {
+                send(Level::Warn, format!("{} machine(s) in Error — cluster runs degraded; select one and press p", failed.len()));
+            }
+            let _ = tx.send(Ev::Done(DoneKind::StartDone));
         }
         Job::StopBackend { layout_root, machines, api } => {
             // Cluster-wide stop, off the UI task: ssh sweeps take seconds per
@@ -3372,6 +3683,12 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
             let _ = tx.send(Ev::Done(DoneKind::Other));
         }
         Job::Op { api, http, req, layout_root } => {
+            // Ops can wait on the analyzer for minutes; the shared 15s
+            // client would time them out. Polling keeps the short one.
+            let http = reqwest::Client::builder()
+                .timeout(Duration::from_secs(300))
+                .build()
+                .unwrap_or(http);
             let name = req.op.as_str().to_string();
             let voice = req.voice.clone();
             let op = req.op;
@@ -3502,10 +3819,8 @@ fn run_preview(app: &App) -> RunPreview {
 /// configuration shape. `Err` keeps the prompt open; omitted trailing fields
 /// keep their current values (clearing a model chain is a settings-file edit,
 /// not something a blank field should do by accident).
-fn parse_run_config(
-    buf: &str,
-    current_analyzer: &str,
-) -> Result<(u32, u32, String, Option<Vec<String>>), String> {
+type RunConfig = (u32, u32, String, Option<Vec<String>>);
+fn parse_run_config(buf: &str, current_analyzer: &str) -> Result<RunConfig, String> {
     let (start, count) = parse_range(buf)?;
     let tokens: Vec<&str> = buf.split_whitespace().collect();
     let analyzer = match tokens.get(2) {
@@ -3577,12 +3892,96 @@ fn parse_range(buf: &str) -> Result<(u32, u32), String> {
     Ok((start, count))
 }
 
+/// What a `:` command line request actually runs. Read-only commands map to
+/// `Key` — their single keys still exist in Normal mode, so `:m`-style
+/// recursion presses them as if typed. Operator actions map to the variants
+/// below and run directly, because their single keys were removed: a stray
+/// keypress must never provision, reconcile or stop anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Command {
+    Key(KeyCode),
+    AddMachine,
+    AddSample,
+    AddNamed,
+    Provision { force: bool },
+    DropMachine,
+    Translate,
+    CrawlSetup,
+    Voices,
+    SwapVoice,
+    Eta,
+    Retry,
+    Reconcile,
+    Backend,
+    Stop,
+}
+
+/// `:` command line → the command. A single character is a command key
+/// (`:m` is reconcile); longer words are the readable form (`:reconcile`
+/// is too). Unknown input stays an error in the prompt.
+fn command_key(input: &str) -> Option<Command> {
+    let word = input.trim();
+    if word.chars().count() == 1 {
+        let c = word.chars().next().filter(|c| *c != ':')?;
+        return Some(match c {
+            'a' => Command::AddMachine,
+            'A' => Command::AddSample,
+            'N' => Command::AddNamed,
+            'p' => Command::Provision { force: false },
+            'P' => Command::Provision { force: true },
+            'd' => Command::DropMachine,
+            't' => Command::Translate,
+            'c' => Command::CrawlSetup,
+            'v' => Command::Voices,
+            's' => Command::SwapVoice,
+            'e' => Command::Eta,
+            'u' => Command::Retry,
+            'm' => Command::Reconcile,
+            'B' => Command::Backend,
+            'X' => Command::Stop,
+            // Read-only keys keep their Normal-mode arms, so the command
+            // presses the key and every context behaves like it was typed.
+            _ => Command::Key(KeyCode::Char(c)),
+        });
+    }
+    Some(match word.to_ascii_lowercase().as_str() {
+        "quit" => Command::Key(KeyCode::Char('q')),
+        "add" => Command::AddMachine,
+        "drop" => Command::DropMachine,
+        "inspect" => Command::Key(KeyCode::Char('i')),
+        "provision" => Command::Provision { force: false },
+        "reprovision" => Command::Provision { force: true },
+        "translate" => Command::Translate,
+        "crawl" => Command::CrawlSetup,
+        "retry" => Command::Retry,
+        "tasks" => Command::Key(KeyCode::Char('K')),
+        "voices" => Command::Voices,
+        "swap" => Command::SwapVoice,
+        "cast" => Command::Key(KeyCode::Char('S')),
+        "eta" => Command::Eta,
+        "reconcile" => Command::Reconcile,
+        "refresh" => Command::Key(KeyCode::Char('r')),
+        "colour" | "color" => Command::Key(KeyCode::Char('C')),
+        "backend" => Command::Backend,
+        "run" => Command::Key(KeyCode::Char('R')),
+        "stop" => Command::Stop,
+        "newest" => Command::Key(KeyCode::Char('G')),
+        "named" => Command::AddNamed,
+        "sample" => Command::AddSample,
+        "help" => Command::Key(KeyCode::Char('?')),
+        _ => return None,
+    })
+}
+
 /// Validate and dispatch a submitted text prompt.
 ///
 /// Returns `Err(message)` to keep the prompt open with the problem stated,
 /// rather than silently substituting a default.
 fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, String> {
     match prompt.kind {
+        // `:` commands run through the key handler, never dispatch: reaching
+        // here means a bug, and the prompt staying open says so.
+        TextKind::Command => Err("commands run from the command line, not submit".into()),
         // Save-only prompt, persisted from the run screen's Enter branch:
         // reaching dispatch would launch without saving, so refuse.
         TextKind::RunConfig => Err("run config is saved from the run screen".into()),
@@ -3594,7 +3993,8 @@ fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, String> {
             if addr.contains(char::is_whitespace) {
                 return Err(format!("“{addr}” contains whitespace — one address only"));
             }
-            let m = Machine::new(&addr, "thang", 22, None, "worker");
+            let key = std::env::var("SSH_KEY").ok();
+            let m = Machine::new(&addr, "thang", 22, key, "worker");
             Ok(Job::AddMachine {
                 api: app.api.clone(),
                 http: app.http.clone(),
@@ -3750,6 +4150,7 @@ async fn handle_key(
                                 job_tx,
                                 Job::Provision {
                                     layout_root: app.layout_root.clone(),
+                                    api: app.api.clone(),
                                     machine: m,
                                     force,
                                 },
@@ -3788,7 +4189,13 @@ async fn handle_key(
                     }
                     ConfirmAction::StopBackend => {
                         // Cluster-wide and slow (ssh sweeps) — a background job,
-                        // never inline, so the dashboard keeps drawing.
+                        // never inline, so the dashboard keeps drawing. Cancel
+                        // a start catch-up first: the stop job queues behind it
+                        // otherwise, and an in-flight provision must not
+                        // relaunch what X is killing.
+                        if let Some(flag) = app.start_cancel.take() {
+                            flag.store(true, Ordering::Relaxed);
+                        }
                         app.set_status(Level::Info, "stopping everything, everywhere…");
                         dispatch(
                             app,
@@ -3799,6 +4206,10 @@ async fn handle_key(
                                 api: app.api.clone(),
                             },
                         );
+                    }
+                    ConfirmAction::Reconcile => {
+                        dispatch_op(app, job_tx, http, OpRequest { op: Op::Reconcile, ..Default::default() });
+                        app.set_status(Level::Info, "reconciling duplicate characters — watch events");
                     }
                 }
             }
@@ -3843,10 +4254,39 @@ async fn handle_key(
         let mut p = prompt;
         match key.code {
             KeyCode::Esc => {
-                app.screen = Screen::Normal;
+                app.screen = app.command_return.take().unwrap_or(Screen::Normal);
                 app.set_status(Level::Info, "cancelled — nothing was submitted");
             }
             KeyCode::Enter => {
+                // `:` command line: press the named key for the operator.
+                // Back to the screen it was typed in first, then recurse —
+                // the mapped key runs exactly what it always runs, prompts
+                // and confirms included.
+                if p.kind == TextKind::Command {
+                    let buf = p.buf.trim().to_string();
+                    app.screen = app.command_return.take().unwrap_or(Screen::Normal);
+                    if buf.is_empty() {
+                        app.set_status(Level::Info, "cancelled — nothing was submitted");
+                        return false;
+                    }
+                    return match command_key(&buf) {
+                        // Read-only commands press a still-live key, so a
+                        // context (task list, picker) reacts exactly as if it
+                        // had been typed there. Operator actions run directly
+                        // via `do_command` — their keys were removed.
+                        Some(Command::Key(code)) => {
+                            Box::pin(handle_key(app, KeyEvent::new(code, KeyModifiers::empty()), http, job_tx)).await
+                        }
+                        Some(cmd) => {
+                            do_command(app, cmd, http, job_tx);
+                            false
+                        }
+                        None => {
+                            app.set_status(Level::Error, format!("unknown command :{buf} — try :help"));
+                            false
+                        }
+                    };
+                }
                 // Run-config edits save a file and launch nothing: handled
                 // here rather than in `submit_text`, which can only dispatch.
                 if p.kind == TextKind::RunConfig {
@@ -3943,7 +4383,7 @@ async fn handle_key(
                                 app.set_status(
                                     Level::Warn,
                                     format!(
-                                        "{} is blocked by the accent policy — pick another",
+                                        "{} is an accent policy concern — pick another",
                                         v.name
                                     ),
                                 );
@@ -4188,6 +4628,18 @@ async fn handle_key(
                     None => app.set_status(Level::Warn, "no task selected"),
                 }
             }
+            KeyCode::Char(':') => {
+                // A global command from the ledger. `u` stays a row-scoped
+                // direct key here; `:u` reaches the global retry instead.
+                app.command_return = Some(Screen::Tasks(v.clone()));
+                app.screen = Screen::Text(TextPrompt::new(
+                    TextKind::Command,
+                    ":",
+                    "command — u/F stay row-scoped here, everything else is global",
+                    "",
+                ));
+                app.set_status(Level::Info, "command mode — Enter runs it, Esc closes");
+            }
             KeyCode::Backspace => {
                 v.filter.pop();
                 v.cursor = 0;
@@ -4263,21 +4715,29 @@ async fn handle_key(
             }
             KeyCode::Enter => {
                 let cfg = run_preview(app);
-                dispatch(
-                    app,
-                    job_tx,
-                    Job::StartBackend {
-                        layout_root: app.layout_root.clone(),
-                        api: app.api.clone(),
-                        api_up: app.conn == Conn::Up,
-                        start: cfg.start,
-                        count: cfg.count,
-                        enqueue: true,
-                        machines: app.effective_machines(),
-                    },
-                );
+                if app.backend_start_outstanding {
+                    app.set_status(Level::Warn, "backend start already running — watch events");
+                } else {
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    app.start_cancel = Some(cancel.clone());
+                    app.backend_start_outstanding = true;
+                    dispatch(
+                        app,
+                        job_tx,
+                        Job::StartBackend {
+                            layout_root: app.layout_root.clone(),
+                            api: app.api.clone(),
+                            api_up: app.conn == Conn::Up,
+                            start: cfg.start,
+                            count: cfg.count,
+                            enqueue: true,
+                            machines: app.effective_machines(),
+                            cancel,
+                        },
+                    );
+                }
                 app.screen = Screen::Normal;
-                app.set_status(Level::Info, format!("provisioning, then launching ch{}×{}…", cfg.start, cfg.count));
+                app.set_status(Level::Info, format!("starting backend, then launching ch{}×{}…", cfg.start, cfg.count));
             }
             KeyCode::Char('e') | KeyCode::Char('E') => {
                 let cfg = run_preview(app);
@@ -4319,6 +4779,19 @@ async fn handle_key(
             }
         }
         KeyCode::Char('?') => app.screen = Screen::Help { scroll: 0 },
+        KeyCode::Char(':') => {
+            // Command mode: every operator key behind a prompt, so a stray
+            // keypress can never provision, reconcile or stop anything.
+            // `:m` is `m`, `:reconcile` is `m` spelled out.
+            app.command_return = Some(Screen::Normal);
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::Command,
+                ":",
+                "command — a key (m B X) or a word (reconcile backend stop quit)",
+                "",
+            ));
+            app.set_status(Level::Info, "command mode — Enter runs it, Esc closes");
+        }
         KeyCode::Char('C') => {
             app.colour = !app.colour;
             let on = if app.colour { "on" } else { "off" };
@@ -4337,16 +4810,88 @@ async fn handle_key(
         KeyCode::Home => app.selected = 0,
         KeyCode::End => app.selected = app.machines.len().saturating_sub(1),
         KeyCode::PageUp => {
-            app.events_scroll = app.events_scroll.saturating_add(3);
+            app.events_scroll = app.events_scroll.saturating_add(5);
         }
         KeyCode::PageDown => {
-            app.events_scroll = app.events_scroll.saturating_sub(3);
+            app.events_scroll = app.events_scroll.saturating_sub(5);
         }
         KeyCode::Char('G') => {
             app.events_scroll = 0;
             app.set_status(Level::Info, "event log pinned to newest");
         }
-        KeyCode::Char('a') => {
+        KeyCode::Char('i') => match app.selected_machine() {
+            None => app.set_status(Level::Warn, "no machine selected"),
+            Some(m) => app.screen = Screen::Machine(m.addr.clone()),
+        },
+        KeyCode::Char('S') => {
+            app.screen = Screen::Cast(CastView::new());
+            if app.roster.is_none() {
+                app.load_roster(job_tx, http);
+            }
+        }
+        KeyCode::Char('B') => {
+            // Backend up now, boxes join in background — a second press
+            // while the first sequence runs would provision everything
+            // twice, so it is refused instead of queued.
+            if app.backend_start_outstanding {
+                app.set_status(Level::Warn, "backend start already running — watch events");
+            } else {
+                let cfg = run_preview(app);
+                let cancel = Arc::new(AtomicBool::new(false));
+                app.start_cancel = Some(cancel.clone());
+                app.backend_start_outstanding = true;
+                dispatch(
+                    app,
+                    job_tx,
+                    Job::StartBackend {
+                        layout_root: app.layout_root.clone(),
+                        api: app.api.clone(),
+                        api_up: app.conn == Conn::Up,
+                        start: cfg.start,
+                        count: cfg.count,
+                        enqueue: false,
+                        machines: app.effective_machines(),
+                        cancel,
+                    },
+                );
+                app.set_status(Level::Info, "starting backend now — boxes join in background; watch events");
+            }
+        }
+        KeyCode::Char('R') => {
+            app.screen = Screen::Run;
+            if app.roster.is_none() {
+                app.load_roster(job_tx, http);
+            }
+        }
+        // The task ledger. Capital K so the lowercase `k` can stay "move up" —
+        // and so it reads as the sibling of `R` (run screen) and `S` (cast).
+        KeyCode::Char('K') => {
+            app.screen = Screen::Tasks(TasksView::new());
+        }
+        // Operator commands fire from the `:` line only: a stray keypress
+        // must never provision, reconcile or stop anything. This arm catches
+        // every gated key before the fallthrough swallows it silently.
+        KeyCode::Char(c) if matches!(c, 'a'|'A'|'N'|'p'|'P'|'d'|'t'|'c'|'v'|'s'|'e'|'u'|'m'|'B'|'X') => {
+            app.set_status(Level::Warn, format!("use ':{c}' — operator commands live on the command line"));
+        }
+        _ => {}
+    }
+    false
+}
+
+/// Run a `:` operator command. `Command::Key` never arrives here — the caller
+/// presses those as a live key so a context (task list, picker) reacts the
+/// same as a real keypress. Only the gated actions land in this match, which
+/// is exactly the set of things a stray keypress must never do.
+fn do_command(
+    app: &mut App,
+    cmd: Command,
+    http: &reqwest::Client,
+    job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
+) {
+    match cmd {
+        Command::Key(_) => unreachable!("Command::Key is pressed by the caller"),
+        Command::AddMachine => {
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::AddMachine,
                 "Add machine",
@@ -4354,7 +4899,7 @@ async fn handle_key(
                 "",
             ));
         }
-        KeyCode::Char('A') => {
+        Command::AddSample => {
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::AddSample,
                 "Add pooled sample",
@@ -4362,7 +4907,7 @@ async fn handle_key(
                 "",
             ));
         }
-        KeyCode::Char('N') => {
+        Command::AddNamed => {
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::AddNamed,
                 "Add named voice",
@@ -4370,44 +4915,38 @@ async fn handle_key(
                 "",
             ));
         }
-        KeyCode::Char('p') | KeyCode::Char('P') => {
-            let force = matches!(key.code, KeyCode::Char('P'));
-            match app.selected_machine() {
-                None => app.set_status(
-                    Level::Warn,
-                    "no machine selected — press a to add one first",
-                ),
-                Some(m) => {
-                    app.screen = Screen::Confirm(Confirm {
-                        title: if force {
-                            "Re-provision (force)".into()
+        Command::Provision { force } => match app.selected_machine() {
+            None => app.set_status(Level::Warn, "no machine selected — :a adds one first"),
+            Some(m) => {
+                app.screen = Screen::Confirm(Confirm {
+                    title: if force {
+                        "Re-provision (force)".into()
+                    } else {
+                        "Provision machine".into()
+                    },
+                    danger: false,
+                    body: vec![
+                        format!("Onboard {} over ssh.", m.addr),
+                        String::new(),
+                        if force {
+                            "Force ignores the skip-if-configured check and rebuilds the".into()
                         } else {
-                            "Provision machine".into()
+                            "Already-configured machines are detected and skipped, so this is".into()
                         },
-                        danger: false,
-                        body: vec![
-                            format!("Onboard {} over ssh.", m.addr),
-                            String::new(),
-                            if force {
-                                "Force ignores the skip-if-configured check and rebuilds the".into()
-                            } else {
-                                "Already-configured machines are detected and skipped, so this is".into()
-                            },
-                            if force {
-                                "worker venv when present. That is the slow path.".into()
-                            } else {
-                                "cheap to run again — it will report why it did nothing.".into()
-                            },
-                        ],
-                        action: ConfirmAction::Provision {
-                            addr: m.addr.clone(),
-                            force,
+                        if force {
+                            "worker venv when present. That is the slow path.".into()
+                        } else {
+                            "cheap to run again — it will report why it did nothing.".into()
                         },
-                    });
-                }
+                    ],
+                    action: ConfirmAction::Provision {
+                        addr: m.addr.clone(),
+                        force,
+                    },
+                });
             }
-        }
-        KeyCode::Char('d') => match app.selected_machine() {
+        },
+        Command::DropMachine => match app.selected_machine() {
             None => app.set_status(Level::Warn, "no machine selected"),
             Some(m) => {
                 app.screen = Screen::Confirm(Confirm {
@@ -4423,11 +4962,7 @@ async fn handle_key(
                 });
             }
         },
-        KeyCode::Char('i') => match app.selected_machine() {
-            None => app.set_status(Level::Warn, "no machine selected"),
-            Some(m) => app.screen = Screen::Machine(m.addr.clone()),
-        },
-        KeyCode::Char('t') => {
+        Command::Translate => {
             let start = app.setting_u32("start", 1);
             let count = app.setting_u32("count", 1);
             app.screen = Screen::Text(TextPrompt::new(
@@ -4437,7 +4972,7 @@ async fn handle_key(
                 &format!("{start} {count}"),
             ));
         }
-        KeyCode::Char('c') => {
+        Command::CrawlSetup => {
             let current = app.setting_str("url_template", "");
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::CrawlTemplate,
@@ -4446,60 +4981,65 @@ async fn handle_key(
                 &current,
             ));
         }
-        KeyCode::Char('v') => {
+        Command::Voices => {
             dispatch_op(app, job_tx, http, OpRequest { op: Op::Voices, ..Default::default() });
         }
-        KeyCode::Char('s') => {
+        Command::SwapVoice => {
             app.screen = Screen::Pick(Picker::new());
             if app.roster.is_none() {
                 app.load_roster(job_tx, http);
             }
         }
-        KeyCode::Char('S') => {
-            app.screen = Screen::Cast(CastView::new());
-            if app.roster.is_none() {
-                app.load_roster(job_tx, http);
-            }
-        }
-        KeyCode::Char('e') => {
+        Command::Eta => {
             dispatch_op(app, job_tx, http, OpRequest { op: Op::Eta, ..Default::default() });
         }
-        KeyCode::Char('u') => {
+        Command::Retry => {
             dispatch_op(app, job_tx, http, OpRequest { op: Op::Retry, ..Default::default() });
         }
-        KeyCode::Char('B') => {
-            // Backend on: every registered machine provisions first, and the
-            // backend spawns only when all of them report ready. The range
-            // comes from the saved settings — visible in the footer and on
-            // the run screen, so it is a choice, not a surprise.
-            let cfg = run_preview(app);
-            dispatch(
-                app,
-                job_tx,
-                Job::StartBackend {
-                    layout_root: app.layout_root.clone(),
-                    api: app.api.clone(),
-                    api_up: app.conn == Conn::Up,
+        Command::Reconcile => {
+            // Reconcile rewrites cast + scripts and re-renders losers: worth
+            // one Enter, like every other destructive action.
+            app.screen = Screen::Confirm(Confirm {
+                title: "Fold duplicate characters?".into(),
+                danger: false,
+                body: vec![
+                    "Certain folds (titles, casing, parentheticals) apply at once;".into(),
+                    "ambiguous pairs are only listed, never auto-merged.".into(),
+                    String::new(),
+                    "Cast rewritten, losers re-rendered. Workers keep working.".into(),
+                ],
+                action: ConfirmAction::Reconcile,
+            });
+        }
+        Command::Backend => {
+            // Backend up now, boxes join in background — a second press
+            // while the first sequence runs would provision everything
+            // twice, so it is refused instead of queued.
+            if app.backend_start_outstanding {
+                app.set_status(Level::Warn, "backend start already running — watch events");
+            } else {
+                let cfg = run_preview(app);
+                let cancel = Arc::new(AtomicBool::new(false));
+                app.start_cancel = Some(cancel.clone());
+                app.backend_start_outstanding = true;
+                dispatch(
+                    app,
+                    job_tx,
+                    Job::StartBackend {
+                        layout_root: app.layout_root.clone(),
+                        api: app.api.clone(),
+                        api_up: app.conn == Conn::Up,
                         start: cfg.start,
                         count: cfg.count,
                         enqueue: false,
                         machines: app.effective_machines(),
-                },
-            );
-            app.set_status(Level::Info, "provisioning machines, then starting backend — watch events");
-        }
-        KeyCode::Char('R') => {
-            app.screen = Screen::Run;
-            if app.roster.is_none() {
-                app.load_roster(job_tx, http);
+                        cancel,
+                    },
+                );
+                app.set_status(Level::Info, "starting backend now — boxes join in background; watch events");
             }
         }
-        // The task ledger. Capital K so the lowercase `k` can stay "move up" —
-        // and so it reads as the sibling of `R` (run screen) and `S` (cast).
-        KeyCode::Char('K') => {
-            app.screen = Screen::Tasks(TasksView::new());
-        }
-        KeyCode::Char('X') => {
+        Command::Stop => {
             let mut remotes: Vec<String> = app
                 .effective_machines()
                 .iter()
@@ -4527,9 +5067,7 @@ async fn handle_key(
                 action: ConfirmAction::StopBackend,
             });
         }
-        _ => {}
     }
-    false
 }
 
 /// Percent-encode the few characters that can appear in an address query.
@@ -4618,15 +5156,6 @@ async fn run_loop(
             // voice is in the picker without a manual R. Read before `apply`
             // moves the event.
             let reload_roster = matches!(ev, Ev::Done(DoneKind::ReloadRoster));
-            // Background lines carry no timestamp of their own; stamp them on
-            // arrival so the log reads in the order things actually finished.
-            let ev = match ev {
-                Ev::Log(mut l) if l.at == Duration::ZERO => {
-                    l.at = app.started.elapsed();
-                    Ev::Log(l)
-                }
-                other => other,
-            };
             app.apply(ev);
             if reload_roster && app.roster.is_some() {
                 app.load_roster(&job_tx, &http);
@@ -4718,7 +5247,7 @@ pub async fn snapshot(api: &str) -> anyhow::Result<()> {
     for b in &beats {
         println!(
             "  {:<14} {:<8} ch{:<4} {:>3}%  {:<28} eta={}",
-            b.worker_id,
+            worker_alias(&b.worker_id).0,
             b.stage.map(|s| s.as_str()).unwrap_or("-"),
             b.chapter.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
             (b.progress.clamp(0.0, 1.0) * 100.0).round() as u32,
@@ -4900,9 +5429,7 @@ mod tests {
         // Down backend: the saved file is what the next boot will use.
         let dir = std::env::temp_dir().join("bm-runconfig-preview");
         let _ = std::fs::remove_dir_all(&dir);
-        let mut settings = bm_core::config::Settings::default();
-        settings.start = 1;
-        settings.count = 1;
+        let settings = bm_core::config::Settings { start: 1, count: 1, ..bm_core::config::Settings::default() };
         settings.save(&bm_core::Layout::new(&dir).settings()).unwrap();
         let mut app = App::new("http://x");
         app.layout_root = dir;
@@ -4949,19 +5476,52 @@ mod tests {
             other => panic!("expected a start-backend job, got {other:?}"),
         }
 
-        // Bare `B` brings the backend and nothing else.
+        // Bare `:B` brings the backend and nothing else.
         let mut app = App::new("http://x");
-        handle_key(&mut app, key(KeyCode::Char('B')), &http, &job_tx).await;
+        handle_key(&mut app, key(KeyCode::Char(':')), &http, &job_tx).await;
+        app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "B"));
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
         assert!(matches!(app.screen, Screen::Normal));
         match job_rx.try_recv() {
-            Ok(Job::StartBackend { enqueue, .. }) => assert!(!enqueue, "bare B carries no job"),
+            Ok(Job::StartBackend { enqueue, .. }) => assert!(!enqueue, "bare :B carries no job"),
             other => panic!("expected a start-backend job, got {other:?}"),
         }
+
+        // A second `:B` while the first sequence runs dispatches nothing;
+        // `StartDone` re-arms it.
+        assert!(app.backend_start_outstanding, "B marks the start in flight");
+        app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "B"));
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+        assert!(job_rx.try_recv().is_err(), "double B must not queue another start");
+        app.apply(Ev::Done(DoneKind::StartDone));
+        assert!(!app.backend_start_outstanding, "StartDone re-arms B");
 
         // `Esc` just closes.
         app.screen = Screen::Run;
         handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
         assert!(matches!(app.screen, Screen::Normal));
+    }
+
+    #[tokio::test]
+    async fn machine_state_falls_back_to_the_ledger_file_while_down() {
+        // Nothing answers on port 9 (discard): the API post fails fast and
+        // the ledger patch carries the phase instead.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".bm")).unwrap();
+        std::fs::write(
+            d.path().join(".bm/ledger.json"),
+            r#"{"tasks": [], "machines": [
+                {"id": "a", "addr": "a", "ssh_user": "u", "ssh_port": 22, "role": "worker", "state": "unknown", "last_seen": 0, "note": ""}
+            ]}"#,
+        )
+        .unwrap();
+        set_machine_state("http://127.0.0.1:9", d.path(), "a", MachineState::Provisioning, "catching up").await;
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(d.path().join(".bm/ledger.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(doc["machines"][0]["state"], "provisioning");
+        assert_eq!(doc["machines"][0]["note"], "catching up");
     }
 
     #[test]
@@ -5014,19 +5574,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_key_dispatches_the_retry_op_once() {
+    async fn retry_command_dispatches_the_retry_op_once() {
         let http = reqwest::Client::new();
         let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         let mut app = App::new("http://x");
-        handle_key(&mut app, key(KeyCode::Char('u')), &http, &job_tx).await;
+        handle_key(&mut app, key(KeyCode::Char(':')), &http, &job_tx).await;
+        app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "u"));
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
         match job_rx.try_recv() {
             Ok(Job::Op { req, .. }) => assert_eq!(req.op, Op::Retry),
             other => panic!("expected a retry op, got {other:?}"),
         }
-        // A second press while one is in flight is refused, not queued twice.
-        handle_key(&mut app, key(KeyCode::Char('u')), &http, &job_tx).await;
+        // A second :u while one is in flight is refused, not queued twice.
+        app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "u"));
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
         assert!(job_rx.try_recv().is_err(), "duplicate retry must be refused");
+        // A bare `u` from Normal mode is a stray key: it must not dispatch.
+        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app2 = App::new("http://x");
+        handle_key(&mut app2, key(KeyCode::Char('u')), &http, &tx2).await;
+        assert!(matches!(app2.screen, Screen::Normal));
+        assert!(app2.status.text.contains("command line"), "{}", app2.status.text);
+        assert!(rx2.try_recv().is_err(), "a stray u must never dispatch a retry");
     }
 
     #[test]
@@ -5228,10 +5798,44 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_switches_units_at_an_hour() {
-        assert_eq!(stamp(Duration::from_secs(12)), "+00:12");
-        assert_eq!(stamp(Duration::from_secs(192)), "+03:12");
-        assert_eq!(stamp(Duration::from_secs(3720)), "+1h02m");
+    fn wall_clock_stamps_read_as_local_hh_mm_ss() {
+        // Shape, not value: the machine's timezone is whatever it is.
+        for epoch in [1u64, 1_789_485_796u64] {
+            let s = wall_hms(epoch);
+            assert_eq!(s.len(), 8, "{s}");
+            assert_eq!(&s[2..3], ":");
+            assert_eq!(&s[5..6], ":");
+            assert!(s.chars().filter(|c| *c != ':').all(|c| c.is_ascii_digit()), "{s}");
+        }
+    }
+
+    #[test]
+    fn log_heads_alias_machines_and_workers_but_not_sentences() {
+        assert_eq!(log_head("[192.168.2.2] enrolled x"), Some("192.168.2.2"));
+        assert_eq!(log_head("localhost-4578: render done"), Some("localhost-4578"));
+        assert_eq!(log_head("DESKTOP-V1JNVB0-18150: digest done"), Some("DESKTOP-V1JNVB0-18150"));
+        assert_eq!(log_head("reconcile: nothing to fold"), None);
+        assert_eq!(log_head("render:52 done"), None);
+        assert_eq!(log_head("backend starting"), None);
+        assert_eq!(log_head("[broken"), None);
+    }
+
+    #[test]
+    fn command_line_maps_keys_and_words() {
+        assert_eq!(command_key("m"), Some(Command::Reconcile));
+        assert_eq!(command_key("B"), Some(Command::Backend));
+        assert_eq!(command_key("?"), Some(Command::Key(KeyCode::Char('?'))));
+        assert_eq!(command_key("u"), Some(Command::Retry), "single chars are commands");
+        assert_eq!(command_key("r"), Some(Command::Key(KeyCode::Char('r'))));
+        assert_eq!(command_key("reconcile"), Some(Command::Reconcile));
+        assert_eq!(command_key("backend"), Some(Command::Backend));
+        assert_eq!(command_key("stop"), Some(Command::Stop));
+        assert_eq!(command_key("quit"), Some(Command::Key(KeyCode::Char('q'))));
+        assert_eq!(command_key("colour"), Some(Command::Key(KeyCode::Char('C'))));
+        assert_eq!(command_key("color"), Some(Command::Key(KeyCode::Char('C'))));
+        assert_eq!(command_key(":"), None, "a bare colon reopens nothing");
+        assert_eq!(command_key("frobnicate"), None);
+        assert_eq!(command_key(""), None);
     }
 
     #[test]
@@ -5485,8 +6089,23 @@ mod tests {
     }
 
     #[test]
-    fn the_size_guard_replaces_the_dashboard_below_the_floor() {
+    fn the_log_pane_has_one_title_aliases_and_local_time() {
         let mut app = App::new("http://127.0.0.1:8901");
+        app.log_at(Level::Ok, "[192.168.2.2] enrolled x");
+        app.log_at(Level::Error, "localhost-99: render failed: boom");
+        app.log_at(Level::Info, "reconcile: nothing certain to fold");
+        let text = render_text(&mut app, 140, 44);
+        assert!(text.contains("Logs"), "pane renamed:\n{text}");
+        assert!(!text.contains("Events"), "no stale title anywhere:\n{text}");
+        let (alias, _) = worker_alias("192.168.2.2");
+        assert!(text.contains(&format!("[{alias}]")), "machine line aliased:\n{text}");
+        let (walias, _) = worker_alias("localhost-99");
+        assert!(text.contains(&format!("[{walias}]")), "worker line aliased:\n{text}");
+        assert!(text.contains("reconcile: nothing certain"), "plain lines pass through:\n{text}");
+    }
+
+    #[test]
+    fn the_size_guard_replaces_the_dashboard_below_the_floor() {        let mut app = App::new("http://127.0.0.1:8901");
         let text = render_text(&mut app, 60, 16);
         assert!(text.contains("too small"), "{text}");
         assert!(!text.contains("Machines"), "no clipped panes behind the notice:\n{text}");
@@ -5512,7 +6131,7 @@ mod tests {
         let text = render_text(&mut app, 80, 24);
         assert!(text.contains("Machines"), "{text}");
         assert!(text.contains("Workers"), "{text}");
-        assert!(text.contains("Events"), "Events keeps its pane:\n{text}");
+        assert!(text.contains("Logs"), "Logs keeps its pane:\n{text}");
         assert!(!text.contains("┌Tasks"), "the Tasks pane is collapsed:\n{text}");
         assert!(text.contains("tasks:"), "its roll-up takes its place:\n{text}");
     }
@@ -5521,7 +6140,7 @@ mod tests {
     fn the_full_tier_shows_every_pane_and_the_new_key() {
         let mut app = App::new("http://127.0.0.1:8901");
         let text = render_text(&mut app, 140, 44);
-        for pane in ["Machines", "Workers", "Tasks", "Events"] {
+        for pane in ["Machines", "Workers", "Tasks", "Logs"] {
             assert!(text.contains(pane), "{pane} is missing:\n{text}");
         }
         assert!(text.contains("S cast"), "the cast key is advertised:\n{text}");
@@ -5553,7 +6172,7 @@ mod tests {
         assert!(text.contains("2 to fix"), "Lâm and Hà:\n{text}");
         assert!(text.contains("1 unassigned"), "Mới:\n{text}");
         assert!(text.contains("shared with 1 other"), "{text}");
-        assert!(text.contains("blocked by the accent policy"), "Lâm is flagged:\n{text}");
+        assert!(text.contains("accent policy concern"), "Lâm is flagged:\n{text}");
         assert!(text.contains("unknown voice — stale cast?"), "Hà is flagged:\n{text}");
         assert!(text.contains("unassigned — v fills gaps"), "Mới is flagged:\n{text}");
     }
@@ -5607,7 +6226,7 @@ mod tests {
             "the detail column carries the reason:\n{text}"
         );
         assert!(text.contains("u retry  ·  F force re-run"), "{text}");
-        assert!(text.contains("w2"), "the worker that failed:\n{text}");
+        assert!(text.contains(worker_alias("w2").0), "the worker that failed:\n{text}");
     }
 
     #[test]
@@ -5684,7 +6303,7 @@ mod tests {
             "the *rest* of the reason, which the pane never showed:\n{text}"
         );
         assert!(text.contains("3 of 3 before it is shelved"), "{text}");
-        assert!(text.contains("w2"), "the worker that failed:\n{text}");
+        assert!(text.contains(worker_alias("w2").0), "the worker that failed:\n{text}");
         assert!(text.contains("lease"), "the lease is on the page:\n{text}");
 
         // Esc returns to the list — and to the same view of it.
@@ -5731,6 +6350,52 @@ mod tests {
             }
             other => panic!("expected a forced retry-task op, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn m_asks_first_and_confirms_into_a_reconcile_op() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = App::new("http://127.0.0.1:8901");
+        handle_key(&mut app, key(KeyCode::Char(':')), &http, &job_tx).await;
+        app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "m"));
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Confirm(_)), ":m opens a confirm, not an op");
+        assert!(job_rx.try_recv().is_err(), "nothing dispatches before confirm");
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+        match job_rx.try_recv() {
+            Ok(Job::Op { req, .. }) => assert_eq!(req.op, Op::Reconcile),
+            other => panic!("expected a reconcile op, got {other:?}"),
+        }
+        assert!(app.status.text.contains("reconciling"), "{}", app.status.text);
+
+        // A bare `m` from Normal mode is a stray key: it must never reach the
+        // confirm, let alone dispatch.
+        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app2 = App::new("http://127.0.0.1:8901");
+        handle_key(&mut app2, key(KeyCode::Char('m')), &http, &tx2).await;
+        assert!(matches!(app2.screen, Screen::Normal), "a stray m must not open confirm");
+        assert!(app2.status.text.contains("command line"), "{}", app2.status.text);
+        assert!(rx2.try_recv().is_err(), "a stray m must never dispatch");
+    }
+
+    #[tokio::test]
+    async fn colon_opens_a_command_line_that_presses_keys() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = App::new("http://127.0.0.1:8901");
+        handle_key(&mut app, key(KeyCode::Char(':')), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Text(_)), ": opens the command line");
+        // `:r` refreshes: a state fetch against a dead inductor fails
+        // quietly into the status line, dispatching no job.
+        app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "r"));
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Normal), "submit closes the prompt");
+        assert!(job_rx.try_recv().is_err(), "refresh dispatches no job");
+        // `:frobnicate` stays an error, `:q` quits through the normal path.
+        app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "frobnicate"));
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+        assert!(app.status.text.contains("unknown command"), "{}", app.status.text);
     }
 
     #[tokio::test]

@@ -23,6 +23,7 @@ base64 = { workspace = true }
 reqwest = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

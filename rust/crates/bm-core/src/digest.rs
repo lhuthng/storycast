@@ -105,7 +105,133 @@ pub fn bible_context(bible: &Value) -> String {
     serde_json::to_string(&lean).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// Honorific/title suffixes that never denote a different person: "Huyền Vũ
+/// lão tổ" is Huyền Vũ addressed with respect, not a debut. Stripped (after
+/// lowercasing) when comparing names, so a suffixed form folds into the bare
+/// name instead of forking a second bible entry with its own voice.
+const TITLE_SUFFIXES: [&str; 13] = [
+    "lão tổ",
+    "tiền bối",
+    "đại nhân",
+    "công tử",
+    "tiểu thư",
+    "thiếu gia",
+    "trưởng lão",
+    "sư phụ",
+    "sư huynh",
+    "sư tỷ",
+    "sư đệ",
+    "sư muội",
+    "đạo hữu",
+];
+
+/// Comparison key for character names: squeezed whitespace, no trailing
+/// `(...)` description ("Mao Ý (thanh niên mặc hoa phục)" → "mao ý"), no
+/// title suffix, lowercased ("Sở Cuồng Sư" == "Sở Cuồng sư"). Display forms
+/// are never rewritten — only compared through this.
+pub fn canon_key(name: &str) -> String {
+    let mut s = squeeze_ws(name);
+    if let Some(open) = s.rfind('(') {
+        if s.ends_with(')') {
+            s = s[..open].trim_end().to_string();
+        }
+    }
+    let mut low = s.to_lowercase();
+    loop {
+        let mut stripped = false;
+        for t in TITLE_SUFFIXES {
+            if let Some(rest) = low.strip_suffix(t) {
+                let rest = rest.trim_end();
+                if !rest.is_empty() {
+                    low = rest.to_string();
+                    stripped = true;
+                    break;
+                }
+            }
+        }
+        if !stripped {
+            break;
+        }
+    }
+    low.trim().to_string()
+}
+
+/// Canonical bible name for any surface form: exact name-or-alias match
+/// first (today's behaviour, unchanged), then the canonical-key fallback.
+/// Unknown forms come back untouched — never invent an owner.
+pub fn resolve_speaker(bible: &Value, name: &str) -> String {
+    let chars: &[Value] = bible
+        .get("characters")
+        .and_then(|c| c.as_array())
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    for c in chars {
+        let cname = c.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if cname == name {
+            return cname.to_string();
+        }
+        if c
+            .get("proper_aliases")
+            .and_then(|a| a.as_array())
+            .map(|a| a.iter().any(|x| x.as_str() == Some(name)))
+            .unwrap_or(false)
+        {
+            return cname.to_string();
+        }
+    }
+    let key = canon_key(name);
+    for c in chars {
+        let cname = c.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if canon_key(cname) == key {
+            return cname.to_string();
+        }
+        if c
+            .get("proper_aliases")
+            .and_then(|a| a.as_array())
+            .map(|a| a.iter().any(|x| x.as_str().map(canon_key).as_deref() == Some(key.as_str())))
+            .unwrap_or(false)
+        {
+            return cname.to_string();
+        }
+    }
+    name.to_string()
+}
+
+/// Rewrite a digest's roster + segment speakers to canonical bible names, in
+/// place. Returns how many speaker slots changed. Run wherever a script is
+/// persisted (worker digest, inductor completion, reconcile) so everything
+/// downstream — cast, render runs, merge — only ever sees one name per person.
+pub fn canonicalize_script(data: &mut Value, bible: &Value) -> usize {
+    let mut changed = 0;
+    if let Some(roster) = data.get_mut("roster").and_then(|r| r.as_array_mut()) {
+        for r in roster.iter_mut() {
+            if let Some(n) = r.as_str() {
+                let c = resolve_speaker(bible, n);
+                if c != n {
+                    *r = Value::String(c);
+                    changed += 1;
+                }
+            }
+        }
+    }
+    if let Some(segs) = data.get_mut("segments").and_then(|s| s.as_array_mut()) {
+        for s in segs.iter_mut() {
+            if let Some(sp) = s.get("speaker").and_then(|v| v.as_str()).map(String::from) {
+                let c = resolve_speaker(bible, &sp);
+                if c != sp {
+                    s["speaker"] = Value::String(c);
+                    changed += 1;
+                }
+            }
+        }
+    }
+    changed
+}
+
 fn alias_owner(form: &str, owner: &str, bible: &Value) -> Option<String> {
+    // Compared through the canonical key: "Sở Cuồng sư" is owned by whoever
+    // holds "Sở Cuồng Sư", and a character owns its own variant spellings.
+    let (fk, ok) = (canon_key(form), canon_key(owner));
     bible
         .get("characters")
         .and_then(|c| c.as_array())
@@ -115,9 +241,9 @@ fn alias_owner(form: &str, owner: &str, bible: &Value) -> Option<String> {
                 let owns = c
                     .get("proper_aliases")
                     .and_then(|a| a.as_array())
-                    .map(|a| a.iter().any(|x| x.as_str() == Some(form)))
+                    .map(|a| a.iter().any(|x| x.as_str().map(canon_key) == Some(fk.clone())))
                     .unwrap_or(false);
-                if name != owner && owns {
+                if canon_key(name) != ok && owns {
                     Some(name.to_string())
                 } else {
                     None
@@ -141,19 +267,47 @@ fn promotable(form: &str, owner: &str, bible: &Value, log: &mut Vec<String>) -> 
     Some(f.to_string())
 }
 
+/// Attach surface forms to an existing character's `proper_aliases`, through
+/// the full promotable check. Shared by the new-character and new-alias
+/// paths so both agree on what may join the bible.
+fn attach_aliases(
+    bible: &mut Value,
+    owner: &str,
+    forms: &[String],
+    chapter: &str,
+    log: &mut Vec<String>,
+) {
+    let mut ok_forms: Vec<String> = Vec::new();
+    for f in forms {
+        if let Some(ok) = promotable(f, owner, bible, log) {
+            if !ok_forms.contains(&ok) {
+                ok_forms.push(ok);
+            }
+        }
+    }
+    if ok_forms.is_empty() {
+        return;
+    }
+    if let Some(arr) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) {
+        for c in arr.iter_mut() {
+            if c.get("name").and_then(|n| n.as_str()) == Some(owner) {
+                let aliases = c.get_mut("proper_aliases").and_then(|a| a.as_array_mut());
+                if let Some(aliases) = aliases {
+                    for ok in &ok_forms {
+                        if !aliases.iter().any(|x| x.as_str() == Some(ok.as_str())) {
+                            aliases.push(json!(ok));
+                            log.push(format!("   bible alias {ok:?} -> {owner} [{chapter}]"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Fold a digest's new-character/alias findings into the shared bible.
 pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String> {
     let mut log = Vec::new();
-
-    let existing: Vec<String> = bible
-        .get("characters")
-        .and_then(|c| c.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|c| c.get("name").and_then(|n| n.as_str()).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
 
     let new_chars = data
         .get("new_characters")
@@ -168,7 +322,36 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
             .unwrap_or("")
             .trim()
             .to_string();
-        if name.is_empty() || existing.contains(&name) {
+        if name.is_empty() {
+            continue;
+        }
+        let extra: Vec<String> = nc
+            .get("proper_aliases")
+            .and_then(|a| a.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // A variant spelling of someone already in the bible folds into them —
+        // "Huyền Vũ lão tổ" arriving as a new_character joins Huyền Vũ as an
+        // alias instead of forking a second entry with its own voice.
+        let key = canon_key(&name);
+        let matched = bible
+            .get("characters")
+            .and_then(|c| c.as_array())
+            .and_then(|a| {
+                a.iter().find_map(|c| {
+                    let n = c.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                    (canon_key(n) == key).then(|| n.to_string())
+                })
+            });
+        if let Some(owner) = matched {
+            let mut forms = vec![name.clone()];
+            forms.extend(extra);
+            attach_aliases(bible, &owner, &forms, chapter, &mut log);
+            log.push(format!("   bible =fold {name:?} into {owner} [{chapter}]"));
             continue;
         }
         // The name itself always joins (ownership veto only): a character must be
@@ -212,7 +395,10 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
     }
 
     if let Some(map) = data.get("new_aliases").and_then(|a| a.as_object()) {
-        for (owner, forms) in map {
+        for (raw_owner, forms) in map {
+            // The owner key goes through the same resolution as speakers: a
+            // variant spelling still lands on the canonical character.
+            let owner = resolve_speaker(bible, raw_owner);
             let owns_character = bible
                 .get("characters")
                 .and_then(|c| c.as_array())
@@ -225,28 +411,11 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
                 continue;
             }
             let Some(list) = forms.as_array() else { continue };
-            for form in list {
-                let Some(form) = form.as_str() else { continue };
-                if let Some(ok) = promotable(form, owner, bible, &mut log) {
-                    if let Some(arr) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) {
-                        for c in arr.iter_mut() {
-                            if c.get("name").and_then(|n| n.as_str()) == Some(owner.as_str()) {
-                                let aliases = c
-                                    .get_mut("proper_aliases")
-                                    .and_then(|a| a.as_array_mut());
-                                if let Some(aliases) = aliases {
-                                    if !aliases.iter().any(|x| x.as_str() == Some(ok.as_str())) {
-                                        aliases.push(json!(ok));
-                                        log.push(format!(
-                                            "   bible alias {ok:?} -> {owner} [{chapter}]"
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let strs: Vec<String> = list
+                .iter()
+                .filter_map(|f| f.as_str().map(String::from))
+                .collect();
+            attach_aliases(bible, &owner, &strs, chapter, &mut log);
         }
     }
 
@@ -263,7 +432,9 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
     if let Some(segs) = data.get("segments").and_then(|s| s.as_array()) {
         for s in segs {
             if let Some(sp) = s.get("speaker").and_then(|v| v.as_str()) {
-                if !spoke.iter().any(|x| x == sp) {
+                // Canonical comparison: a variant speaker still marks its
+                // character as seen.
+                if !spoke.iter().any(|x| canon_key(x) == canon_key(sp)) {
                     spoke.push(sp.to_string());
                 }
             }
@@ -272,7 +443,7 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
     if let Some(chars) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) {
         for c in chars.iter_mut() {
             let name = c.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-            if spoke.contains(&name) {
+            if spoke.iter().any(|x| canon_key(x) == canon_key(&name)) {
                 let seen = c.get_mut("chapters_seen").and_then(|v| v.as_array_mut());
                 if let Some(seen) = seen {
                     if !seen.iter().any(|x| x.as_str() == Some(chapter)) {
@@ -287,8 +458,312 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
 }
 
 // ---------------------------------------------------------------------------
-// validation
+// bible reconciliation — unifying forked characters after the fact
 // ---------------------------------------------------------------------------
+
+/// One proposed fold: every name in `absorb` is the same person as
+/// `canonical` and disappears into them.
+pub type BibleMerge = (String, Vec<String>);
+
+/// Fold absorbed entries into their canonical character: aliases and
+/// chapters_seen union, the absorbed names themselves join `proper_aliases`
+/// (so future digests resolve through them), personality/voice_hint fill in
+/// only when the canonical side is empty. Returns the merges that actually
+/// applied, plus the log.
+pub fn apply_merges(
+    bible: &mut Value,
+    merges: &[BibleMerge],
+) -> (Vec<BibleMerge>, Vec<String>) {
+    let mut log = Vec::new();
+    let mut applied: Vec<BibleMerge> = Vec::new();
+    let Some(chars) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) else {
+        return (applied, log);
+    };
+    for (canonical, absorb) in merges {
+        let canon_idx = chars
+            .iter()
+            .position(|c| c.get("name").and_then(|n| n.as_str()) == Some(canonical.as_str()));
+        let Some(ci) = canon_idx else {
+            log.push(format!("   reconcile: skip — {canonical:?} not in bible"));
+            continue;
+        };
+        let mut done: Vec<String> = Vec::new();
+        for name in absorb {
+            if name == canonical {
+                continue;
+            }
+            let Some(ai) = chars
+                .iter()
+                .position(|c| c.get("name").and_then(|n| n.as_str()) == Some(name.as_str()))
+            else {
+                continue;
+            };
+            if ai == ci {
+                continue;
+            }
+            let victim = chars.remove(ai);
+            // Removing shifts indices: re-locate the canonical entry.
+            let ci = chars
+                .iter()
+                .position(|c| c.get("name").and_then(|n| n.as_str()) == Some(canonical.as_str()))
+                .unwrap_or(usize::MAX);
+            if ci == usize::MAX {
+                chars.push(victim);
+                continue;
+            }
+            let target = &mut chars[ci];
+            let mut aliases: Vec<String> = target
+                .get("proper_aliases")
+                .and_then(|a| a.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for a in victim
+                .get("proper_aliases")
+                .and_then(|x| x.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)))
+                .into_iter()
+                .flatten()
+                .chain(std::iter::once(name.clone()))
+            {
+                if !aliases.iter().any(|x| x == &a) {
+                    aliases.push(a);
+                }
+            }
+            target["proper_aliases"] = json!(aliases);
+            let mut seen: Vec<String> = target
+                .get("chapters_seen")
+                .and_then(|a| a.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for ch in victim
+                .get("chapters_seen")
+                .and_then(|a| a.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)))
+                .into_iter()
+                .flatten()
+            {
+                if !seen.contains(&ch) {
+                    seen.push(ch);
+                }
+            }
+            seen.sort();
+            target["chapters_seen"] = json!(seen);
+            for key in ["personality", "voice_hint"] {
+                let empty = target
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true);
+                if empty {
+                    if let Some(v) = victim.get(key).cloned() {
+                        target[key] = v;
+                    }
+                }
+            }
+            log.push(format!("   reconcile: {name:?} -> {canonical}"));
+            done.push(name.clone());
+        }
+        if !done.is_empty() {
+            applied.push((canonical.clone(), done));
+        }
+    }
+    (applied, log)
+}
+
+/// Parse the reconciler LLM's answer: `{"merges":[{"canonical":..,"absorb":[..]}]}`
+/// (a bare array of the same objects also parses). Unknown names are kept —
+/// the applier skips what is not in the bible. Unparseable input means no
+/// LLM merges, never an error: the deterministic folds still apply.
+pub fn parse_reconcile_merges(text: &str) -> Vec<BibleMerge> {
+    let s = text.trim();
+    let s = s.strip_prefix("```json").unwrap_or(s);
+    let s = s.strip_prefix("```").unwrap_or(s);
+    let s = s.strip_suffix("```").unwrap_or(s).trim();
+    let v: Value = match serde_json::from_str(s) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let arr = v
+        .get("merges")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .or_else(|| v.as_array().cloned())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for m in &arr {
+        let canonical = m
+            .get("canonical")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let absorb: Vec<String> = m
+            .get("absorb")
+            .and_then(|a| a.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|x| x.trim().to_string()))
+                    .filter(|x| !x.is_empty() && x != &canonical)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !canonical.is_empty() && !absorb.is_empty() {
+            out.push((canonical, absorb));
+        }
+    }
+    out
+}
+
+/// What the reconciler found without asking anyone: certain folds plus the
+/// ambiguous pairs worth one LLM call, with the prompt for it.
+pub struct ReconcilePlan {
+    /// Canon-key collisions — same bare name, safe to fold blind.
+    pub folds: Vec<BibleMerge>,
+    /// Same-token pairs with different keys — the LLM's only question.
+    pub candidates: Vec<(String, String)>,
+    /// Empty when there is nothing to ask.
+    pub prompt: String,
+}
+
+fn first_seen_of(c: &Value) -> String {
+    c.get("first_seen")
+        .and_then(|v| v.as_str())
+        .unwrap_or("zz")
+        .to_string()
+}
+
+/// Plan a bible reconciliation: deterministic folds first, LLM candidates
+/// second. Pure over the bible value — no I/O, so the inductor never holds
+/// its lock while the LLM thinks.
+pub fn reconcile_plan(bible: &Value) -> ReconcilePlan {
+    let chars: &[Value] = bible
+        .get("characters")
+        .and_then(|c| c.as_array())
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    let names: Vec<String> = chars
+        .iter()
+        .filter_map(|c| c.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+
+    // Group by canonical key: "Sở Cuồng Sư"/"Sở Cuồng sư", titled and
+    // parenthetical variants all land in one bucket. Canonical is the
+    // earliest-seen entry (the original, not the fork), ties go shortest.
+    let mut groups: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (i, n) in names.iter().enumerate() {
+        groups.entry(canon_key(n)).or_default().push(i);
+    }
+    let mut folds: Vec<BibleMerge> = Vec::new();
+    for idxs in groups.values().filter(|v| v.len() > 1) {
+        let mut idxs = idxs.clone();
+        idxs.sort_by_key(|&i| (first_seen_of(&chars[i]), names[i].len()));
+        let canonical = names[idxs[0]].clone();
+        let absorb: Vec<String> = idxs[1..].iter().map(|&i| names[i].clone()).collect();
+        folds.push((canonical, absorb));
+    }
+
+    // Ambiguous pairs: share a word but differ canonically ("Huyền Vũ" vs
+    // "Huyền Vũ Môn"?). Capped — the prompt stays small either way.
+    let folded: std::collections::HashSet<String> = folds
+        .iter()
+        .flat_map(|(c, a)| std::iter::once(c.clone()).chain(a.iter().cloned()))
+        .collect();
+    let tokens = |n: &str| -> Vec<String> {
+        n.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.chars().count() > 1)
+            .map(String::from)
+            .collect()
+    };
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    for (i, a) in names.iter().enumerate() {
+        if folded.contains(a) || a == "Narrator" {
+            continue;
+        }
+        let ta = tokens(a);
+        for b in names.iter().skip(i + 1) {
+            if folded.contains(b) || b == "Narrator" {
+                continue;
+            }
+            let tb = tokens(b);
+            if ta.iter().any(|w| tb.contains(w)) {
+                candidates.push((a.clone(), b.clone()));
+                if candidates.len() >= 20 {
+                    break;
+                }
+            }
+        }
+        if candidates.len() >= 20 {
+            break;
+        }
+    }
+
+    let prompt = if candidates.is_empty() {
+        String::new()
+    } else {
+        let roster: Vec<Value> = chars
+            .iter()
+            .map(|c| {
+                json!({
+                    "name": c.get("name"),
+                    "aliases": c.get("proper_aliases"),
+                    "personality": c.get("personality"),
+                })
+            })
+            .collect();
+        format!(
+            "You are merging duplicate characters in a Vietnamese web-novel cast list.\n\
+             These pairs share a word but may be different people. Reply STRICT JSON only, no commentary:\n\
+             {{\"merges\":[{{\"canonical\":\"<exact existing name>\",\"absorb\":[\"<exact existing name>\",...]}}]}}\n\
+             Merge ONLY when certain both names are the same person (titles like lão tổ/tiền bối/đại nhân, \
+             descriptions in parentheses, or casing/spelling variants of one name). When unsure, omit the pair — \
+             an empty merges list is a valid answer.\n\
+             Candidate pairs: {}\nBible: {}",
+            serde_json::to_string(&candidates).unwrap_or_default(),
+            serde_json::to_string(&roster).unwrap_or_default(),
+        )
+    };
+    ReconcilePlan { folds, candidates, prompt }
+}
+
+/// Deterministic folds for cast keys that never made it into the bible:
+/// same canon-key as a bible entry (titles, parentheticals, casing).
+/// The bible name is canonical. Pure — the caller applies them through
+/// `apply_reconcile`, which records the alias and rewrites cast + scripts.
+pub fn cast_only_folds(bible: &Value, cast_keys: &[String]) -> Vec<BibleMerge> {
+    let chars: &[Value] = bible
+        .get("characters")
+        .and_then(|c| c.as_array())
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    let mut canon_of: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for c in chars {
+        if let Some(n) = c.get("name").and_then(|n| n.as_str()) {
+            canon_of.entry(canon_key(n)).or_insert_with(|| n.to_string());
+        }
+    }
+    let in_bible =
+        |n: &str| chars.iter().any(|c| c.get("name").and_then(|x| x.as_str()) == Some(n));
+    let mut out: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for k in cast_keys {
+        if k == "Narrator" || in_bible(k) {
+            continue;
+        }
+        if let Some(canonical) = canon_of.get(&canon_key(k)) {
+            out.entry(canonical.clone()).or_default().push(k.clone());
+        }
+    }
+    out.into_iter().collect()
+}
 
 /// Inline non-verbal cues the VieNeu v3 Turbo emotion checkpoint renders as
 /// sound instead of speech — researched from the installed engine
@@ -380,7 +855,11 @@ pub fn validate(data: &Value, bible: &Value) -> Result<()> {
 
     for (i, s) in segments.iter().enumerate() {
         let speaker = s.get("speaker").and_then(|v| v.as_str()).unwrap_or("");
-        if !names.iter().any(|n| n == speaker) {
+        // A variant spelling that resolves to a known character is fine — the
+        // inductor canonicalizes the script on completion.
+        if !names.iter().any(|n| n == speaker)
+            && !known.iter().any(|k| k == &resolve_speaker(bible, speaker))
+        {
             anyhow::bail!("segment {i}: unknown speaker {speaker:?}");
         }
         let text = s.get("text").and_then(|t| t.as_str()).unwrap_or("");
@@ -401,7 +880,9 @@ pub fn validate(data: &Value, bible: &Value) -> Result<()> {
     if let Some(mentions) = data.get("mentions").and_then(|m| m.as_object()) {
         for (form, owner) in mentions {
             let owner = owner.as_str().unwrap_or("");
-            if !known.iter().any(|k| k == owner) {
+            if !known.iter().any(|k| k == owner)
+                && !known.iter().any(|k| k == &resolve_speaker(bible, owner))
+            {
                 anyhow::bail!("mention {form:?} -> unknown {owner:?}");
             }
         }
@@ -999,8 +1480,10 @@ mod tests {
         assert!(plain.analyze_models.is_empty());
         assert_eq!(analyze_chain(&plain), vec![plain.analyze_model.clone()]);
 
-        let mut chained = Settings::default();
-        chained.analyze_models = vec![" gemini-3.8-flash ".into(), " ".into(), "gemini-3.5-flash".into()];
+        let chained = Settings {
+            analyze_models: vec![" gemini-3.8-flash ".into(), " ".into(), "gemini-3.5-flash".into()],
+            ..Settings::default()
+        };
         assert_eq!(analyze_chain(&chained), vec!["gemini-3.8-flash", "gemini-3.5-flash"]);
     }
 
@@ -1196,6 +1679,179 @@ mod tests {
             .find(|c| c["name"] == "B")
             .unwrap();
         assert_eq!(b["proper_aliases"], json!(["B"]));
+    }
+
+    #[test]
+    fn canon_key_strips_titles_descriptions_and_case() {
+        assert_eq!(canon_key("Huyền Vũ lão tổ"), "huyền vũ");
+        assert_eq!(canon_key("Mao Ý (thanh niên mặc hoa phục)"), "mao ý");
+        assert_eq!(canon_key("Sở Cuồng Sư"), canon_key("Sở Cuồng sư"));
+        assert_eq!(canon_key("  Dịch   Phong  "), "dịch phong");
+        assert_eq!(canon_key("Lão Tổ"), "lão tổ", "a bare title is a name, not stripped");
+        assert_eq!(canon_key("Huyền Vũ tiền bối"), "huyền vũ");
+    }
+
+    #[test]
+    fn merge_bible_folds_a_suffixed_new_character_into_its_owner() {
+        let mut bible = bible_with("Huyền Vũ", &["Huyền Vũ"]);
+        let data = json!({
+            "new_characters": [{
+                "name": "Huyền Vũ lão tổ", "voice_hint": "adult male",
+                "personality": "x", "tags": ["male"],
+                "proper_aliases": []
+            }],
+            "roster": ["Huyền Vũ lão tổ"],
+            "segments": [{"speaker": "Huyền Vũ lão tổ", "text": "Ừ."}]
+        });
+        let log = merge_bible(&mut bible, &data, "25");
+        let chars = bible["characters"].as_array().unwrap();
+        assert_eq!(chars.len(), 1, "no fork: {chars:?}");
+        let aliases = chars[0]["proper_aliases"].as_array().unwrap();
+        assert!(aliases.iter().any(|a| a == "Huyền Vũ lão tổ"), "{aliases:?}");
+        assert!(log.iter().any(|l| l.contains("=fold")), "{log:?}");
+        assert_eq!(chars[0]["chapters_seen"], json!(["25"]), "variant speaker marks seen");
+    }
+
+    #[test]
+    fn merge_bible_folds_a_case_variant_without_a_second_entry() {
+        let mut bible = bible_with("Sở Cuồng Sư", &["Sở Cuồng Sư"]);
+        let data = json!({
+            "new_characters": [{
+                "name": "Sở Cuồng sư", "voice_hint": "adult male",
+                "personality": "x", "tags": ["male"], "proper_aliases": []
+            }],
+            "roster": [],
+            "segments": []
+        });
+        merge_bible(&mut bible, &data, "03");
+        assert_eq!(bible["characters"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_bible_resolves_a_variant_owner_key() {
+        let mut bible = bible_with("Mao Ý", &["Mao Ý"]);
+        let data = json!({
+            "new_characters": [],
+            "new_aliases": {"Mao Ý (thanh niên mặc hoa phục)": ["Mao Ý hoa phục"]},
+            "roster": [],
+            "segments": []
+        });
+        merge_bible(&mut bible, &data, "04");
+        let aliases = bible["characters"][0]["proper_aliases"].as_array().unwrap();
+        assert!(aliases.iter().any(|a| a == "Mao Ý hoa phục"), "{aliases:?}");
+    }
+
+    #[test]
+    fn resolve_speaker_prefers_exact_then_canon_then_passthrough() {
+        let bible = bible_with("Sở Cuồng Sư", &["Sở Cuồng Sư"]);
+        assert_eq!(resolve_speaker(&bible, "Sở Cuồng Sư"), "Sở Cuồng Sư");
+        assert_eq!(resolve_speaker(&bible, "Sở Cuồng sư"), "Sở Cuồng Sư");
+        assert_eq!(resolve_speaker(&bible, "Người Lạ"), "Người Lạ", "unknown passes through");
+    }
+
+    #[test]
+    fn canonicalize_script_rewrites_roster_and_speakers() {
+        let bible = bible_with("Mao Ý", &["Mao Ý", "Mao Ý (thanh niên mặc hoa phục)"]);
+        let mut data = json!({
+            "roster": ["Mao Ý (thanh niên mặc hoa phục)", "Narrator"],
+            "segments": [
+                {"speaker": "Mao Ý (thanh niên mặc hoa phục)", "text": "Hừ."},
+                {"speaker": "Narrator", "text": "Gió thổi."}
+            ]
+        });
+        assert_eq!(canonicalize_script(&mut data, &bible), 2);
+        assert_eq!(data["roster"], json!(["Mao Ý", "Narrator"]));
+        assert_eq!(data["segments"][0]["speaker"], json!("Mao Ý"));
+        assert_eq!(data["segments"][1]["speaker"], json!("Narrator"));
+    }
+
+    #[test]
+    fn apply_merges_unions_aliases_chapters_and_keeps_the_canonical_voice_hint() {
+        let mut bible = json!({"characters": [
+            {"name": "Huyền Vũ", "personality": "cold", "voice_hint": "adult male",
+             "proper_aliases": ["Huyền Vũ"], "first_seen": "10", "chapters_seen": ["10"]},
+            {"name": "Huyền Vũ lão tổ", "personality": "", "voice_hint": "",
+             "proper_aliases": ["Huyền Vũ lão tổ"], "first_seen": "25", "chapters_seen": ["25", "26"]}
+        ]});
+        let (applied, _) = apply_merges(&mut bible, &[("Huyền Vũ".into(), vec!["Huyền Vũ lão tổ".into()])]);
+        assert_eq!(applied.len(), 1);
+        let chars = bible["characters"].as_array().unwrap();
+        assert_eq!(chars.len(), 1);
+        assert_eq!(chars[0]["name"], json!("Huyền Vũ"));
+        let aliases = chars[0]["proper_aliases"].as_array().unwrap();
+        assert!(aliases.iter().any(|a| a == "Huyền Vũ lão tổ"), "{aliases:?}");
+        assert_eq!(chars[0]["chapters_seen"], json!(["10", "25", "26"]));
+        assert_eq!(chars[0]["voice_hint"], json!("adult male"), "canonical hint survives");
+    }
+
+    #[test]
+    fn apply_merges_skips_unknown_names_quietly() {
+        let mut bible = bible_with("A", &["A"]);
+        let (applied, _) = apply_merges(
+            &mut bible,
+            &[("A".into(), vec!["Ghost".into()]), ("Ghost".into(), vec!["A".into()])],
+        );
+        assert!(applied.is_empty());
+        assert_eq!(bible["characters"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_reconcile_merges_tolerates_shapes_and_garbage() {
+        let got = parse_reconcile_merges(
+            "```json\n{\"merges\":[{\"canonical\":\"A\",\"absorb\":[\"B\",\"A\"]}]}\n```",
+        );
+        assert_eq!(got, vec![("A".to_string(), vec!["B".to_string()])]);
+        let bare = parse_reconcile_merges("[{\"canonical\":\"A\",\"absorb\":[\"B\"]}]");
+        assert_eq!(bare.len(), 1);
+        assert!(parse_reconcile_merges("not json at all").is_empty());
+        assert!(parse_reconcile_merges("{\"merges\":[]}").is_empty());
+    }
+
+    #[test]
+    fn reconcile_plan_folds_canon_groups_and_asks_about_the_rest() {
+        let bible = json!({"characters": [
+            {"name": "Sở Cuồng Sư", "personality": "x", "voice_hint": "adult male",
+             "proper_aliases": ["Sở Cuồng Sư"], "first_seen": "02", "chapters_seen": []},
+            {"name": "Sở Cuồng sư", "personality": "y", "voice_hint": "",
+             "proper_aliases": ["Sở Cuồng sư"], "first_seen": "09", "chapters_seen": []},
+            {"name": "Huyền Vũ", "personality": "cold", "voice_hint": "adult male",
+             "proper_aliases": ["Huyền Vũ"], "first_seen": "01", "chapters_seen": []},
+            {"name": "Huyền Vũ Môn", "personality": "a sect", "voice_hint": "",
+             "proper_aliases": ["Huyền Vũ Môn"], "first_seen": "05", "chapters_seen": []}
+        ]});
+        let plan = reconcile_plan(&bible);
+        assert_eq!(plan.folds.len(), 1, "only the case pair folds blind");
+        assert_eq!(plan.folds[0].0, "Sở Cuồng Sư", "earliest-seen wins");
+        assert_eq!(plan.folds[0].1, vec!["Sở Cuồng sư".to_string()]);
+        assert!(
+            plan.candidates.iter().any(|(a, b)| a == "Huyền Vũ" && b == "Huyền Vũ Môn"),
+            "shared-token pair goes to the LLM: {:?}",
+            plan.candidates
+        );
+        assert!(!plan.prompt.is_empty());
+    }
+
+    #[test]
+    fn reconcile_plan_is_empty_on_a_clean_bible() {
+        let bible = bible_with("A", &["A"]);
+        let plan = reconcile_plan(&bible);
+        assert!(plan.folds.is_empty() && plan.candidates.is_empty() && plan.prompt.is_empty());
+    }
+
+    #[test]
+    fn cast_only_folds_catches_title_case_and_parenthetical_variants() {
+        let bible = json!({"characters": [
+            {"name": "Huyền Vũ", "proper_aliases": [], "first_seen": "01", "chapters_seen": []},
+            {"name": "Sở Cuồng sư", "proper_aliases": [], "first_seen": "02", "chapters_seen": []},
+            {"name": "Mao Ý", "proper_aliases": [], "first_seen": "03", "chapters_seen": []}
+        ]});
+        let cast = ["Huyền Vũ lão tổ", "Sở Cuồng Sư", "Mao Ý (thanh niên mặc hoa phục)",
+            "Ngao Khánh", "Huyền Vũ", "Narrator"]
+            .iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let folds = cast_only_folds(&bible, &cast);
+        assert_eq!(folds.len(), 3, "{folds:?}");
+        // New people and existing entries never fold.
+        assert!(!folds.iter().any(|(_, a)| a.contains(&"Ngao Khánh".to_string())));
     }
 
     #[test]
