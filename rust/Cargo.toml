@@ -12,7 +12,7 @@ version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
-description = "Cluster orchestration for the beyond-myriads novel-to-audiobook pipeline"
+description = "Cluster orchestration for the storycast novel-to-audiobook pipeline"
 
 [workspace.dependencies]
 bm-proto = { path = "crates/bm-proto" }
