@@ -474,7 +474,12 @@ pub fn segments_complete(
     if segments.is_empty() {
         return false;
     }
-    let policy = crate::voices::policy_for(engine);
+    // Same policy the renderer assigned with: a completeness check that
+    // admits excluded voices would call a correctly-rendered chapter ready,
+    // or a correctly-planned one missing.
+    let Ok(policy) = crate::cast::policy_for_bible(engine, bible_path) else {
+        return false;
+    };
     let Ok(cast) = crate::cast::load_cast(script_path, cast_path, bible_path, &policy, false) else {
         return false;
     };
@@ -577,7 +582,7 @@ pub fn assemble(
     engine: &str,
     assets: &Path,
 ) -> Result<PathBuf> {
-    let policy = crate::voices::policy_for(engine);
+    let policy = crate::cast::policy_for_bible(engine, bible_path)?;
     let cast = crate::cast::load_cast(script_path, cast_path, bible_path, &policy, false)?;
     let text = std::fs::read_to_string(script_path)
         .with_context(|| format!("reading {}", script_path.display()))?;

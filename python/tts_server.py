@@ -147,8 +147,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "audio/wav")
         self.send_header("Content-Length", str(len(body)))
-        # Lets a client name the file without guessing from the request.
-        self.send_header("X-Voice", voice)
+        # NOTE: no X-Voice header on purpose — HTTP headers are latin-1 and a
+        # Vietnamese voice name (Đức Trí, Thái Sơn…) crashed every infer with
+        # UnicodeEncodeError while the server itself stayed up. Nothing reads
+        # it; the request already names the voice.
         self.end_headers()
         self.wfile.write(body)
 

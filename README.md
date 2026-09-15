@@ -75,8 +75,15 @@ Then start an agent there pointing at the inductor:
 
 TUI keys: `a` add machine · `p` provision selected · `P` force re-provision ·
 `d` drop · `i` inspect · `r` refresh · `?` help · `C` colour · `q` quit.
+`B` starts a local backend now (inductor + worker, detached, logs in `.bm/`)
+— no prompt, no job, and it reconciles nothing: chapters start only through
+an explicit enqueue. `R` previews the whole run (backend, range, digest
+backend + models, engine, voices, tasks); `Enter` launches backend-if-needed
+plus the job, `e` edits `<start> <count> [analyzer] [models,…]` into settings.
+`X` stops what this TUI started, never anything else.
 `A` pools a sample clip: tags come from the filename
-(`young-female-4.mp3` → young, female).
+(`young-female-4.mp3` → young, female) and the voice auto-rolls.
+`N` adds a named voice (`path as Name`): manual assignment only, never rotates.
 `bm-inductor tui --api http://127.0.0.1:8901`.
 
 `s` (swap voice) opens a two-step picker instead of a blind prompt: pick the
@@ -257,6 +264,10 @@ characters (and an empty pool) fall back to the preset pools exactly as before.
   `rsync_push`; blow away the nesting if you see it.
 - **Fresh box digests fail on auth** — `opencode auth login` needs a browser
   on that machine. Provisioning installs the CLI; login stays yours.
+- **Gemini digest backend falls through a model chain.** `analyze_model` is the
+  single model; set `analyze_models` in `.bm/settings.json` for
+  `3.8 → 3.7 → …` order — each gets a few attempts, then the next, then
+  `opencode` as the last resort. Only key/request errors stop immediately.
 - **Sidecar RSS climbs across chapters** — by design it can't: agents start
   the sidecar per render task and stop it after. A single chapter peaks
   ~3–5 GB transient (model + buffers), then the OS reclaims all of it.

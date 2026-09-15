@@ -30,6 +30,11 @@ pub struct Settings {
     pub local_model: String,
     pub ollama_url: String,
     pub analyze_model: String,
+    /// Gemini fallback chain, first tried first. When empty (the default) the
+    /// single `analyze_model` above stands alone — which keeps every existing
+    /// settings file parsing exactly as before.
+    #[serde(default)]
+    pub analyze_models: Vec<String>,
     /// Gemini TTS fallback chain, newest first.
     pub model_order: Vec<String>,
     /// Port the inductor's control API listens on.
@@ -43,8 +48,8 @@ impl Default for Settings {
         Settings {
             url_template: "https://storya.click/truyen/nguoi-tren-van-nguoi/chuong-{n}".into(),
             engine: "vieneu".into(),
-            start: 21,
-            count: 80,
+            start: 1,
+            count: 1,
             speed: 1.25,
             gap_ms: 300,
             ambience: true,
@@ -54,6 +59,7 @@ impl Default for Settings {
             local_model: "gemma-4-12b".into(),
             ollama_url: "http://localhost:11434".into(),
             analyze_model: "gemini-3.5-flash".into(),
+            analyze_models: Vec::new(),
             model_order: vec![
                 "gemini-3.1-flash-tts-preview".into(),
                 "gemini-2.5-pro-preview-tts".into(),
