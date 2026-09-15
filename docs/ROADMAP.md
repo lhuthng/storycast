@@ -32,7 +32,7 @@ is one generic HTTP provider driven entirely by settings and `.env`:
 
 Concretely:
 
-1. Add a provider to `bm-core/src/digest.rs` next to
+1. Add a provider to `bm-core/src/digest/llm.rs` next to
    `generate_gemini`/`generate_openrouter`/`generate_ollama`/`generate_opencode`,
    posting the OpenAI-compatible `chat/completions` body (`response_format:
    json_object`, `max_tokens`, temperature 0) and reading
@@ -48,7 +48,7 @@ Concretely:
 4. Test it the way the repo tests everything: a test that pins the request
    shape against a local fixture server (no real API keys in tests).
 
-Files likely touched: `rust/crates/bm-core/src/digest.rs`,
+Files likely touched: `rust/crates/bm-core/src/digest/llm.rs`,
 `rust/crates/bm-core/src/config.rs`, `.env.example`.
 
 ## 2. AWS: workers on EC2, artifacts and output in S3 (`planned`)
@@ -89,7 +89,8 @@ the inductor's disk. The goal is a cluster that survives the internet:
 - `.bm/machines.json` needs an `instance-id` next to addr/user/key — and must
   stay git-ignored, since credentials live there too.
 
-Files likely touched: `rust/crates/bm-core/src/provision.rs`,
+Files likely touched: `rust/crates/bm-core/src/provision/` (the `Ssh` transport
+in `ssh.rs`, the new AWS target in `steps.rs`),
 `rust/crates/bm-inductor/src/{backend,state,api}.rs`, `bm-agent` report paths,
 `.bm/machines.json` schema.
 
