@@ -1,4 +1,4 @@
-# beyond-myriads-converter
+# storycast
 
 Vietnamese web-novel chapters → multi-voice audiobooks, distributed across a
 cluster of machines. One orchestrator ("inductor") schedules work; worker
