@@ -465,7 +465,9 @@ enum Job {
     },
     /// Start the local backend, then run a range on it once live.
     /// `enqueue` is false for bare `B` (backend only) and true for the run
-    /// screen's Enter (backend + job).
+    /// screen's Enter (backend + job). `machines` is the registry snapshot at
+    /// submit: every box provisions first, and the backend spawns only when
+    /// all of them report ready.
     StartBackend {
         layout_root: std::path::PathBuf,
         api: String,
@@ -473,6 +475,15 @@ enum Job {
         start: u32,
         count: u32,
         enqueue: bool,
+        machines: Vec<Machine>,
+    },
+    /// Stop everything: the local backend by PID file, strays by sweep, and
+    /// every registered remote worker over ssh. `X` means the cluster is
+    /// quiet afterwards — not just this box.
+    StopBackend {
+        layout_root: std::path::PathBuf,
+        machines: Vec<Machine>,
+        api: String,
     },
     /// Local file work: copy a clip into `refs/`, tag it from its filename,
     /// register it in the pool and in `voices.json`. Needs no inductor.
@@ -493,10 +504,12 @@ enum Job {
         api: String,
         http: reqwest::Client,
         req: OpRequest,
+        layout_root: std::path::PathBuf,
     },
     LoadRoster {
         api: String,
         http: reqwest::Client,
+        layout_root: std::path::PathBuf,
     },
 }
 
@@ -642,6 +655,18 @@ impl App {
         self.machines.get(self.selected).cloned()
     }
 
+    /// Machines to act on for B/R/X: the live registry when the inductor
+    /// answers, the ledger file when it doesn't. A fresh TUI against a dead
+    /// inductor has an empty list — defaulting to local-only there is how B
+    /// silently drops remote boxes, so the file (addr + ssh credentials, no
+    /// liveness needed) stands in instead.
+    fn effective_machines(&self) -> Vec<Machine> {
+        if !self.machines.is_empty() {
+            return self.machines.clone();
+        }
+        registry_machines(&self.layout_root)
+    }
+
     /// Any screen other than the dashboard. Used by the size guard to say when
     /// a dialog is still open, and by the "is anything pending" checks.
     fn dialog_open(&self) -> bool {
@@ -667,6 +692,7 @@ impl App {
             Job::LoadRoster {
                 api: self.api.clone(),
                 http: http.clone(),
+                layout_root: self.layout_root.clone(),
             },
         );
     }
@@ -880,6 +906,31 @@ fn matches(filter: &str, haystack: &str) -> bool {
 }
 
 // --- selection helpers ------------------------------------------------------
+
+/// Registry as persisted on disk: addr + ssh credentials, no liveness. The
+/// fallback behind `effective_machines` when the inductor is unreachable.
+fn registry_machines(layout_root: &std::path::Path) -> Vec<Machine> {
+    if layout_root.as_os_str().is_empty() {
+        return Vec::new();
+    }
+    let text = match std::fs::read_to_string(layout_root.join(".bm").join("ledger.json")) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let doc: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<Machine> = doc
+        .get("machines")
+        .and_then(|m| m.as_array())
+        .map(|a| {
+            a.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect()
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| a.addr.cmp(&b.addr));
+    out
+}
 
 fn filtered_characters(app: &App, filter: &str) -> Vec<String> {
     match &app.roster {
@@ -1717,9 +1768,9 @@ fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
 
     section(&mut lines, "Backend");
     for (k, v) in [
-        ("B", "start the backend now — no prompt, no job"),
-        ("R", "system overview: preview everything, Enter launches"),
-        ("X", "stop the backend this TUI started — never anything else"),
+        ("B", "start everything: provision all machines, start workers everywhere, then backend"),
+        ("R", "system overview: preview everything, Enter provisions + launches"),
+        ("X", "stop everything everywhere: local backend plus workers on all machines"),
     ] {
         lines.push(Line::from(vec![
             Span::styled(format!("  {k:<12}"), app.style(Color::Cyan)),
@@ -2566,11 +2617,18 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
             })
             .await;
             match out {
-                Ok(lines) => {
+                Ok((ready, lines)) => {
                     for l in lines {
                         send(Level::Info, l);
                     }
-                    send(Level::Ok, format!("[{addr}] provision finished"));
+                    send(
+                        if ready { Level::Ok } else { Level::Error },
+                        if ready {
+                            format!("[{addr}] provision complete — ready for work")
+                        } else {
+                            format!("[{addr}] provision INCOMPLETE — fix it and press p again")
+                        },
+                    );
                 }
                 Err(e) => send(Level::Error, format!("[{addr}] provision task failed: {e}")),
             }
@@ -2618,7 +2676,118 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
                 }
             }
         }
-        Job::StartBackend { layout_root, api, api_up, start, count, enqueue } => {
+        Job::StartBackend { layout_root, api, mut api_up, start, count, enqueue, machines } => {
+            // Provision first, spawn after: a start means every machine is
+            // ready, and one failing box aborts the whole start loudly rather
+            // than letting work pile up on a half-built cluster.
+            let targets: Vec<Machine> = if machines.is_empty() {
+                vec![Machine::new("127.0.0.1", "local", 22, None, "worker")]
+            } else {
+                let mut ms = machines;
+                ms.sort_by(|a, b| a.addr.cmp(&b.addr));
+                ms.dedup_by(|a, b| a.addr == b.addr);
+                ms
+            };
+            send(Level::Info, format!("provisioning {} machine(s) before start…", targets.len()));
+            let mut results: Vec<(String, bool)> = Vec::new();
+            for m in &targets {
+                let (layout_root, m) = (layout_root.clone(), m.clone());
+                let addr = m.addr.clone();
+                let out = tokio::task::spawn_blocking(move || {
+                    let layout = bm_core::Layout::new(&layout_root);
+                    crate::provision_machine(
+                        &layout,
+                        &m.addr,
+                        &m.ssh_user,
+                        m.ssh_port,
+                        m.ssh_key.clone(),
+                        false,
+                    )
+                })
+                .await;
+                match out {
+                    Ok((ready, lines)) => {
+                        for l in lines {
+                            send(Level::Info, l);
+                        }
+                        results.push((addr, ready));
+                    }
+                    Err(e) => {
+                        send(Level::Error, format!("provision task failed: {e}"));
+                        results.push((addr.clone(), false));
+                    }
+                }
+            }
+            if let Err(veto) = crate::backend::provision_verdict(&results) {
+                send(Level::Error, veto);
+                let _ = tx.send(Ev::Done(DoneKind::Other));
+                return;
+            }
+            // Remotes before local: a box that will not run a worker vetoes
+            // the whole start, so `B` never leaves a half-started cluster.
+            let has_remotes = targets.iter().any(|m| {
+                !["127.0.0.1", "localhost", "::1"].contains(&m.addr.as_str())
+            });
+            let port = crate::backend::api_port(&api);
+            if has_remotes {
+                // A running inductor bound to loopback (old start, hand start)
+                // is deaf to exactly these boxes: restart it LAN-wide first.
+                // Workers ride through — they re-register on their own and
+                // their in-flight reports still count afterwards.
+                let dark = crate::backend::lan_blackout(&targets, port).await;
+                if !dark.is_empty() {
+                    send(
+                        Level::Warn,
+                        format!(
+                            "inductor invisible from {} — restarting it LAN-wide (workers ride through)…",
+                            dark.join(", ")
+                        ),
+                    );
+                    let (gone, lines) = crate::backend::stop_inductor(&layout_root).await;
+                    for l in lines {
+                        send(Level::Info, l);
+                    }
+                    if !gone {
+                        send(
+                            Level::Error,
+                            "cannot rebind an inductor this TUI didn't start — stop it by hand (or restart it with --bind 0.0.0.0), then B again".into(),
+                        );
+                        let _ = tx.send(Ev::Done(DoneKind::Other));
+                        return;
+                    }
+                    api_up = false;
+                }
+                send(Level::Info, "starting remote workers…".into());
+                let machines = targets.clone();
+                let out = tokio::task::spawn_blocking(move || {
+                    crate::backend::start_remote_workers(&machines, port)
+                })
+                .await;
+                        match out {
+                            Ok((true, lines)) => {
+                                for l in lines {
+                                    send(Level::Info, l);
+                                }
+                            }
+                            Ok((false, lines)) => {
+                                for l in lines {
+                                    send(Level::Error, l);
+                                }
+                                send(
+                                    Level::Error,
+                                    "remote worker start failed — start aborted (local backend untouched)".into(),
+                                );
+                                let _ = tx.send(Ev::Done(DoneKind::Other));
+                                return;
+                            }
+                            Err(e) => {
+                                send(Level::Error, format!("remote start task failed: {e}"));
+                                let _ = tx.send(Ev::Done(DoneKind::Other));
+                                return;
+                            }
+                        }
+            }
+            send(Level::Ok, "all machines provisioned — starting backend".into());
             // Spawning is instant (the servers boot in the background); the
             // enqueue waits for the first live refresh (see Ev::BackendLive) —
             // and only when asked: bare `B` brings the backend, nothing more.
@@ -2628,7 +2797,7 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
             if api_up {
                 send(Level::Warn, "inductor already up: analyzer saved, takes effect on next restart (X, then B)".into());
             }
-            match crate::backend::start_backend(&layout_root, &api, api_up) {
+            match crate::backend::start_backend(&layout_root, &api, api_up, crate::backend::public_bind(has_remotes)) {
                 Ok(lines) => {
                     for l in lines {
                         send(Level::Ok, l);
@@ -2640,6 +2809,15 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
                 }
                 Err(e) => send(Level::Error, format!("backend start failed: {e:#}")),
             }
+            let _ = tx.send(Ev::Done(DoneKind::Other));
+        }
+        Job::StopBackend { layout_root, machines, api } => {
+            // Cluster-wide stop, off the UI task: ssh sweeps take seconds per
+            // box and must never freeze the dashboard.
+            for line in crate::backend::stop_everywhere(&layout_root, &machines, &api).await {
+                send(Level::Info, line);
+            }
+            send(Level::Ok, "stop requested everywhere — see lines above per machine".into());
             let _ = tx.send(Ev::Done(DoneKind::Other));
         }
         Job::DropMachine { api, http, addr } => {
@@ -2654,10 +2832,11 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
             send(level, text);
             let _ = tx.send(Ev::Done(DoneKind::Other));
         }
-        Job::Op { api, http, req } => {
+        Job::Op { api, http, req, layout_root } => {
             let name = req.op.as_str().to_string();
             let voice = req.voice.clone();
             let op = req.op;
+            let character = req.character.clone();
             let ok = match http.post(format!("{api}/api/op")).json(&req).send().await {
                 Ok(r) => match r.json::<bm_proto::OpResult>().await {
                     Ok(res) => {
@@ -2671,19 +2850,46 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
                     }
                 },
                 Err(e) => {
-                    send(Level::Error, format!("{name} failed: {e}"));
-                    false
+                    // Swap-voice survives a dead inductor: same mutation against
+                    // the files, guarded by inductor-down + no-local-workers.
+                    // Every other op genuinely needs the scheduler.
+                    if op == Op::SwapVoice {
+                        match crate::api::offline_swap(
+                            &api,
+                            &layout_root,
+                            &character.clone().unwrap_or_default(),
+                            &voice.clone().unwrap_or_default(),
+                        )
+                        .await
+                        {
+                            Ok(msg) => {
+                                send(Level::Ok, format!("{name}: {msg}"));
+                                true
+                            }
+                            Err(msg) => {
+                                send(Level::Error, format!("{name}: {msg} (inductor also unreachable: {e})"));
+                                false
+                            }
+                        }
+                    } else {
+                        send(Level::Error, format!("{name} failed: {e}"));
+                        false
+                    }
                 }
             };
             let _ = tx.send(Ev::Done(DoneKind::Op { op, ok, voice }));
         }
-        Job::LoadRoster { api, http } => {
+        Job::LoadRoster { api, http, layout_root } => {
             let res = match http.get(format!("{api}/api/roster")).send().await {
                 Ok(r) => match r.json::<Roster>().await {
                     Ok(roster) => Ok(roster),
                     Err(e) => Err(format!("bad roster payload: {e}")),
                 },
-                Err(e) => Err(format!("roster request failed: {e}")),
+                Err(_) => {
+                    // Inductor down (X stops it): build from files so picking
+                    // voices never needs the control plane.
+                    Ok(crate::api::offline_roster(&layout_root).await)
+                }
             };
             let _ = tx.send(Ev::Roster(res));
             let _ = tx.send(Ev::Done(DoneKind::Other));
@@ -2691,11 +2897,12 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
     }
 }
 
-fn op_job(api: &str, http: &reqwest::Client, req: OpRequest) -> Job {
+fn op_job(app: &App, http: &reqwest::Client, req: OpRequest) -> Job {
     Job::Op {
-        api: api.to_string(),
+        api: app.api.clone(),
         http: http.clone(),
         req,
+        layout_root: app.layout_root.clone(),
     }
 }
 
@@ -2886,7 +3093,7 @@ fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, String> {
         TextKind::Translate => {
             let (start, count) = parse_range(&prompt.buf)?;
             Ok(op_job(
-                &app.api,
+                app,
                 &app.http,
                 OpRequest {
                     op: Op::Translate,
@@ -2905,7 +3112,7 @@ fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, String> {
                 return Err("template must contain {n} — that is where the chapter number goes".into());
             }
             Ok(op_job(
-                &app.api,
+                app,
                 &app.http,
                 OpRequest {
                     op: Op::CrawlSetup,
@@ -2939,7 +3146,7 @@ fn dispatch_op(
         return;
     }
     app.inflight.push(op);
-    dispatch(app, job_tx, op_job(&app.api, http, req));
+    dispatch(app, job_tx, op_job(app, http, req));
 }
 
 async fn handle_key(
@@ -3007,11 +3214,18 @@ async fn handle_key(
                         );
                     }
                     ConfirmAction::StopBackend => {
-                        app.set_status(Level::Info, "stopping local backend…");
-                        for line in crate::backend::stop_backend(&app.layout_root).await {
-                            app.log_at(Level::Info, line);
-                        }
-                        app.set_status(Level::Info, "stop requested — see events");
+                        // Cluster-wide and slow (ssh sweeps) — a background job,
+                        // never inline, so the dashboard keeps drawing.
+                        app.set_status(Level::Info, "stopping everything, everywhere…");
+                        dispatch(
+                            app,
+                            job_tx,
+                            Job::StopBackend {
+                                layout_root: app.layout_root.clone(),
+                                machines: app.effective_machines(),
+                                api: app.api.clone(),
+                            },
+                        );
                     }
                 }
             }
@@ -3352,10 +3566,11 @@ async fn handle_key(
                         start: cfg.start,
                         count: cfg.count,
                         enqueue: true,
+                        machines: app.effective_machines(),
                     },
                 );
                 app.screen = Screen::Normal;
-                app.set_status(Level::Info, format!("launching ch{}×{}…", cfg.start, cfg.count));
+                app.set_status(Level::Info, format!("provisioning, then launching ch{}×{}…", cfg.start, cfg.count));
             }
             KeyCode::Char('e') | KeyCode::Char('E') => {
                 let cfg = run_preview(app);
@@ -3543,7 +3758,8 @@ async fn handle_key(
             dispatch_op(app, job_tx, http, OpRequest { op: Op::Eta, ..Default::default() });
         }
         KeyCode::Char('B') => {
-            // Backend on, instantly: no prompt, no job. The reconcile range
+            // Backend on: every registered machine provisions first, and the
+            // backend spawns only when all of them report ready. The range
             // comes from the saved settings — visible in the footer and on
             // the run screen, so it is a choice, not a surprise.
             let cfg = run_preview(app);
@@ -3554,12 +3770,13 @@ async fn handle_key(
                     layout_root: app.layout_root.clone(),
                     api: app.api.clone(),
                     api_up: app.conn == Conn::Up,
-                    start: cfg.start,
-                    count: cfg.count,
-                    enqueue: false,
+                        start: cfg.start,
+                        count: cfg.count,
+                        enqueue: false,
+                        machines: app.effective_machines(),
                 },
             );
-            app.set_status(Level::Info, "starting backend — watch the status line");
+            app.set_status(Level::Info, "provisioning machines, then starting backend — watch events");
         }
         KeyCode::Char('R') => {
             app.screen = Screen::Run;
@@ -3568,17 +3785,30 @@ async fn handle_key(
             }
         }
         KeyCode::Char('X') => {
+            let mut remotes: Vec<String> = app
+                .effective_machines()
+                .iter()
+                .map(|m| m.addr.clone())
+                .filter(|a| !["127.0.0.1", "localhost", "::1"].contains(&a.as_str()))
+                .collect();
+            remotes.sort();
+            remotes.dedup();
+            let mut body = vec![
+                "Stop the local backend AND every worker on every machine.".into(),
+                "In-flight tasks return to the queue; the ledger keeps".into(),
+                "everything, so nothing is lost.".into(),
+                String::new(),
+            ];
+            if remotes.is_empty() {
+                body.push("No remote machines registered — local only.".into());
+            } else {
+                body.push(format!("Remote boxes swept over ssh: {}.", remotes.join(", ")));
+                body.push("Unreachable boxes report and are skipped.".into());
+            }
             app.screen = Screen::Confirm(Confirm {
-                title: "Stop local backend?".into(),
-                danger: false,
-                body: vec![
-                    "Stop the inductor + worker this TUI started.".into(),
-                    "In-flight tasks return to the queue; the ledger keeps".into(),
-                    "everything, so nothing is lost.".into(),
-                    String::new(),
-                    "A backend started elsewhere (tmux, another shell)".into(),
-                    "is never touched — only this TUI's own processes stop.".into(),
-                ],
+                title: "Stop everything, everywhere?".into(),
+                danger: true,
+                body,
                 action: ConfirmAction::StopBackend,
             });
         }
@@ -3995,6 +4225,36 @@ mod tests {
         app.screen = Screen::Run;
         handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
         assert!(matches!(app.screen, Screen::Normal));
+    }
+
+    #[test]
+    fn machine_targets_fall_back_to_the_ledger_file() {
+        // The trap: fresh TUI + dead inductor leaves app.machines empty, and
+        // B used to default to local-only, silently dropping remotes. The
+        // registry file (addr + ssh credentials) stands in instead.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".bm")).unwrap();
+        std::fs::write(
+            d.path().join(".bm").join("ledger.json"),
+            r#"{"tasks": [], "machines": [
+                {"id": "192.168.2.2", "addr": "192.168.2.2", "ssh_user": "thang", "ssh_port": 22, "ssh_key": "/k", "role": "worker", "state": "unknown", "last_seen": 0, "note": ""},
+                {"id": "127.0.0.1", "addr": "127.0.0.1", "ssh_user": "local", "ssh_port": 22, "role": "worker", "state": "unknown", "last_seen": 0, "note": ""}
+            ]}"#,
+        )
+        .unwrap();
+        let found = registry_machines(d.path());
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[1].addr, "192.168.2.2");
+        assert_eq!(found[1].ssh_key.as_deref(), Some("/k"), "credentials ride along");
+
+        let mut app = App::new("http://x");
+        app.layout_root = d.path().to_path_buf();
+        assert_eq!(app.effective_machines().len(), 2, "empty memory reads the file");
+        app.machines = vec![Machine::new("127.0.0.1", "local", 22, None, "worker")];
+        assert_eq!(app.effective_machines().len(), 1, "live data wins when present");
+
+        let nowhere = std::path::Path::new("/nonexistent-root-xyz");
+        assert!(registry_machines(nowhere).is_empty(), "missing file means local-only, not a crash");
     }
 
     #[test]

@@ -130,7 +130,9 @@ enum RosterCmd {
 }
 
 /// Blocking provision run shared by the CLI and the TUI background task.
-/// Returns the log lines for display.
+/// Returns `(ready, lines)`: `ready` is the post-provision probe saying the
+/// box runs this exact agent build with TTS python — the gate a start hides
+/// behind. Soft failures (voice enrolment, opencode check) only ride the log.
 pub fn provision_machine(
     layout: &Layout,
     addr: &str,
@@ -138,7 +140,7 @@ pub fn provision_machine(
     port: u16,
     key: Option<String>,
     force: bool,
-) -> Vec<String> {
+) -> (bool, Vec<String>) {
     use bm_core::provision::{provision, Ssh};
     let mut log = Vec::new();
     let probe_ssh = Ssh {
@@ -153,16 +155,16 @@ pub fn provision_machine(
         Ok(b) => b,
         Err(e) => {
             log.push(format!("[{addr}] {e}"));
-            return log;
+            return (false, log);
         }
     };
     log.push(format!("[{addr}] agent binary: {}", binary.display()));
     let mut m = Machine::new(addr, user, port, key, "worker");
     m.tts_url = Some("http://127.0.0.1:8818".into());
-    let (_after, mut flow) =
+    let (after, mut flow) =
         provision(&m, &layout.root, &binary, env!("CARGO_PKG_VERSION"), force);
     log.append(&mut flow);
-    log
+    (after.configured(env!("CARGO_PKG_VERSION")), log)
 }
 
 fn check_bins() -> anyhow::Result<()> {
@@ -236,8 +238,12 @@ async fn cmd_provision(
         move || provision_machine(&layout, &addr, &user, port, key, force)
     })
     .await?;
-    for line in &log {
+    let (ready, lines) = log;
+    for line in &lines {
         println!("{line}");
+    }
+    if !ready {
+        println!("[{addr}] provision INCOMPLETE — fix the errors above and run it again");
     }
     // Register the machine so the scheduler sees it: prefer the live API,
     // fall back to merging the ledger file (safe only when no inductor runs —

@@ -156,10 +156,17 @@ impl Ssh {
 
     fn ssh_args(&self) -> Vec<String> {
         let mut args = vec![
+            // Never prompt, never linger: every use is scripted, and a stalled
+            // connection must die instead of hanging a TUI job forever.
+            "-n".into(),
             "-o".into(),
             "BatchMode=yes".into(),
             "-o".into(),
             "ConnectTimeout=10".into(),
+            "-o".into(),
+            "ServerAliveInterval=5".into(),
+            "-o".into(),
+            "ServerAliveCountMax=2".into(),
         ];
         if self.port != 22 {
             args.push("-p".into());
@@ -466,55 +473,58 @@ echo "PYTHON-OK (fresh venv)"
         if !manifest_src.exists() {
             return Ok("VOICES-OK (no voices.json — no clones to enroll)".to_string());
         }
-        let manifest: std::collections::HashMap<String, String> =
+        // Parsed (and discarded) as validation: a malformed manifest must fail
+        // here with the file named, not deep inside the remote python.
+        let _manifest: std::collections::HashMap<String, String> =
             serde_json::from_str(&std::fs::read_to_string(&manifest_src).with_context(|| {
                 format!("reading {}", manifest_src.display())
             })?)
             .context("parsing voices.json (name -> refs/*.wav)")?;
         self.rsync_push(&repo_root.join("refs"), "refs", false)?;
         self.rsync_push(&manifest_src, "voices.json", false)?;
-        let want: Vec<String> = {
-            let mut w: Vec<String> = manifest
-                .keys()
-                .filter(|k| !k.starts_with('_')) // skip "_note" metadata keys
-                .cloned()
-                .collect();
-            w.sort();
-            w
-        };
+        // The missing-set is computed in python, not the shell: voice names
+        // contain spaces ("Châu Tinh Trì"), and every shell word-split turned
+        // them into fragments that matched nothing — enrollment died on the
+        // first multi-word name with `manifest[name]` KeyError, enrolling zero
+        // voices. `voices.json` is already on the target, so python reads the
+        // want-list straight from it; no name list crosses the shell at all.
         let script = format!(
             r#"set -e
 D="$HOME/{d}"
 V="$D/python/.venv/bin/python"
 STORE=$(ls $D/python/.venv/lib/*/site-packages/vieneu/assets/voices_v3_turbo.json 2>/dev/null | head -n 1)
 [ -n "$STORE" ] || {{ echo "voice store not found (venv broken?)" >&2; exit 6; }}
-HAVE=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(chr(31).join(d.get('presets', d).keys()))" "$STORE")
-HAVE_SP=" $(echo "$HAVE" | tr '\037' ' ') "
-MISSING=""
-for name in {want}; do
-  case "$HAVE_SP" in *" $name "*) ;; *) MISSING="$MISSING $name";; esac
-done
-MISSING=$(echo "$MISSING" | sed 's/^ *//')
-if [ -z "$MISSING" ]; then echo "VOICES-OK (already enrolled)"; exit 0; fi
-echo "enrolling:$MISSING"
 cd "$D"
 PYTHONPATH="$D/python" "$V" -c "
 import json
 import tts_vieneu as vn
 manifest = json.load(open('voices.json'))
-tts = vn.engine()
-for line in '''$MISSING'''.split():
-    name = line.strip()
-    if not name:
-        continue
-    tts.add_voice(name, manifest[name])
-    print('enrolled', name, flush=True)
-tts.save_voices()
+store = json.load(open('$STORE'))
+have = set(store.get('presets', store).keys())
+missing = sorted(n for n in manifest if not n.startswith('_') and n not in have)
+if not missing:
+    print('VOICES-OK (already enrolled)')
+else:
+    print('enrolling: ' + ', '.join(missing), flush=True)
+    tts = vn.engine()
+    failed = []
+    for name in missing:
+        try:
+            tts.add_voice(name, manifest[name])
+            print('enrolled', name, flush=True)
+        except Exception as e:
+            # One bad clip (missing/corrupt ref file) must not vaporize the
+            # rest: report it, keep going, save whoever enrolled.
+            print('SKIP', name, type(e).__name__, str(e)[:160], flush=True)
+            failed.append(name)
+    tts.save_voices()
+    if failed:
+        print('VOICES-PARTIAL (saved the rest, failed: ' + ', '.join(failed) + ')', flush=True)
+        raise SystemExit('voice enrollment failed for: ' + ', '.join(failed))
+    print('VOICES-OK (all enrolled)')
 "
-echo "VOICES-OK (enrolled:$MISSING)"
 "#,
             d = REMOTE_DIR,
-            want = want.join(" ")
         );
         let (code, stdout, stderr) = self.run(&script, 1800)?;
         if code != 0 {
@@ -699,8 +709,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn localhost_is_detected_as_local() {
-        for addr in ["127.0.0.1", "localhost", "::1"] {
+    fn ssh_never_prompts_never_lingers() {
+        // Every ssh use is scripted: no stdin, no password prompts, and a
+        // stalled connection must die instead of hanging a TUI job forever.
+        let args = Ssh::for_machine(&Machine::new("192.168.2.2", "thang", 22, None, "worker"))
+            .ssh_args()
+            .join(" ");
+        for flag in ["-n", "BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=5", "ServerAliveCountMax=2"] {
+            assert!(args.contains(flag), "{args}");
+        }
+    }
+
+    #[test]
+    fn localhost_is_detected_as_local() {        for addr in ["127.0.0.1", "localhost", "::1"] {
             let m = Machine::new(addr, "me", 22, None, "worker");
             assert!(Ssh::for_machine(&m).local, "{addr} should be local");
         }

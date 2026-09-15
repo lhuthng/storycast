@@ -266,25 +266,8 @@ async fn run_render(
         .collect();
     let total = todo.len();
     std::fs::create_dir_all(&seg_dir)?;
-    // Accent gate (ports tts_vieneu.assert_allowed): presets must be
-    // Central/South; user-enrolled clones (bare labels) are always allowed.
-    let roster = tts.voices().await?;
-    let enrolled: std::collections::HashSet<&str> = roster
-        .iter()
-        .filter(|(label, id)| label == id)
-        .map(|(_, id)| id.as_str())
-        .collect();
-    let policy = tts.policy().await?;
-    let allowed: std::collections::HashSet<&str> = policy
-        .get("allowed_voices")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
-    for u in todo.iter() {
-        if !allowed.contains(u.voice.as_str()) && !enrolled.contains(u.voice.as_str()) {
-            anyhow::bail!("non Central/South voice in cast (policy): {}", u.voice);
-        }
-    }
+    // No accent gate: any voice the sidecar can synthesize is allowed. If the
+    // engine itself rejects a voice, that failure surfaces from /infer.
     let manifest = layout.output().join("render-manifest.jsonl");
     for (i, u) in todo.iter().enumerate() {
         set_progress(

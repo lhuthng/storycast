@@ -40,6 +40,7 @@ impl Tts {
     }
 
     /// The installed roster as `(label, id)` pairs.
+    #[allow(dead_code)]
     pub async fn voices(&self) -> Result<Vec<(String, String)>> {
         let resp = self
             .http
