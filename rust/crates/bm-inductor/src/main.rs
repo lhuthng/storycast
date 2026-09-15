@@ -162,7 +162,7 @@ pub fn provision_machine(
     let mut m = Machine::new(addr, user, port, key, "worker");
     m.tts_url = Some("http://127.0.0.1:8818".into());
     let (after, mut flow) =
-        provision(&m, &layout.root, &binary, env!("CARGO_PKG_VERSION"), force);
+        provision(&m, &layout.root, &binary, env!("CARGO_PKG_VERSION"), force, Some(pre));
     log.append(&mut flow);
     (after.configured(env!("CARGO_PKG_VERSION")), log)
 }
