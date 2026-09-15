@@ -1,4 +1,4 @@
-# beyond-myriads-converter — one-command operations.
+# storycast — one-command operations.
 #
 #   make build                  compile the workspace
 #   make tui                    live cluster dashboard (needs the inductor up)

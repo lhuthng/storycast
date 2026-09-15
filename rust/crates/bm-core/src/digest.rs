@@ -619,8 +619,8 @@ async fn generate_openrouter(prompt: &str, settings: &Settings) -> Result<String
     let resp = client
         .post("https://openrouter.ai/api/v1/chat/completions")
         .header("Authorization", format!("Bearer {key}"))
-        .header("HTTP-Referer", "https://github.com/beyond-myriads-converter")
-        .header("X-Title", "beyond-myriads-converter")
+        .header("HTTP-Referer", "https://github.com/lhuthng/storycast")
+        .header("X-Title", "storycast")
         .json(&body)
         .send()
         .await

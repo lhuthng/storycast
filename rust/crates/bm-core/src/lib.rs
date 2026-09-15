@@ -1,4 +1,4 @@
-//! Pipeline core for beyond-myriads-converter.
+//! Pipeline core for storycast.
 //!
 //! This is a 1:1 behavioural port of the original Python stages so that a
 //! chapter rendered by a Rust worker is byte-comparable with one rendered by

@@ -1,7 +1,7 @@
 [project]
-name = "beyond-myriads-tts"
+name = "storycast-tts"
 version = "0.2.0"
-description = "TTS sidecar for beyond-myriads-converter: VieNeu (local) + Gemini (cloud) voice rendering"
+description = "TTS sidecar for storycast: VieNeu (local) + Gemini (cloud) voice rendering"
 requires-python = ">=3.10"
 dependencies = [
   "google-genai>=1.0.0",
