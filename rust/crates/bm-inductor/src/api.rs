@@ -99,7 +99,11 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
     match req.op {
         bm_proto::Op::Translate => {
             let mut inner = st.lock().await;
-            let (start, count) = (req.start.unwrap_or(21), req.count.unwrap_or(80));
+            let (start, count) = (req.start.unwrap_or(1), req.count.unwrap_or(1));
+            // Reconcile first: enqueue alone only tops up crawl+digest, so a
+            // range whose render/merge tasks went missing (reset ledger, older
+            // builds) would digest and then idle with nothing offerable.
+            inner.reconcile(start, count);
             let (crawls, digests) = inner.enqueue_translate(start, count);
             Json(OpResult {
                 ok: true,
@@ -115,7 +119,7 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                 }
                 (inner.layout.clone(), inner.settings.url_template.clone())
             };
-            Json(op_crawl_setup(&layout, &template, req.start.unwrap_or(21)).await)
+            Json(op_crawl_setup(&layout, &template, req.start.unwrap_or(1)).await)
         }
         bm_proto::Op::Voices => {
             let (layout, engine) = {
@@ -147,7 +151,7 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
         }
         bm_proto::Op::Eta => {
             let inner = st.lock().await;
-            let (start, count) = (req.start.unwrap_or(21), req.count.unwrap_or(80));
+            let (start, count) = (req.start.unwrap_or(1), req.count.unwrap_or(1));
             Json(OpResult { ok: true, message: inner.op_eta(start, count) })
         }
     }
@@ -381,7 +385,11 @@ async fn build_roster(
     // registry names but nothing enrolled yet still shows, as vetted-at-adding
     // like any clone (the render fails loudly if it never gets enrolled).
     for (name, entry) in bm_core::pool::load_pool(&layout.root.join("voice-pool.json")) {
-        let style = format!("pool: {}", entry.tags.join(", "));
+        let style = if entry.tags.is_empty() {
+            "named voice".to_string()
+        } else {
+            format!("pool: {}", entry.tags.join(", "))
+        };
         match voices.iter_mut().find(|v| v.name == name) {
             Some(v) => v.style = style,
             None => voices.push(VoiceInfo {

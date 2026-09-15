@@ -244,7 +244,13 @@ enum Conn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextKind {
     AddMachine,
+    /// Pooled sample: tags come from the filename, the voice auto-rolls.
     AddSample,
+    /// Named voice (`path as Name`): manual assignment only, never rotates.
+    AddNamed,
+    /// Run-config editor (opened with `e` on the run screen): saves range,
+    /// analyzer and model chain to the settings file. Launches nothing.
+    RunConfig,
     Translate,
     CrawlTemplate,
 }
@@ -397,6 +403,7 @@ enum ConfirmAction {
     Provision { addr: String, force: bool },
     DropMachine { addr: String },
     SwapVoice { character: String, voice: String },
+    StopBackend,
 }
 
 #[derive(Debug, Clone)]
@@ -434,6 +441,8 @@ enum Screen {
     Text(TextPrompt),
     Pick(Picker),
     Cast(CastView),
+    /// System overview: backend, config, voices, tasks — Enter launches.
+    Run,
     Confirm(Confirm),
     /// Machine detail, keyed by address so a refresh can never retarget it.
     Machine(String),
@@ -454,12 +463,24 @@ enum Job {
         http: reqwest::Client,
         m: Machine,
     },
+    /// Start the local backend, then run a range on it once live.
+    /// `enqueue` is false for bare `B` (backend only) and true for the run
+    /// screen's Enter (backend + job).
+    StartBackend {
+        layout_root: std::path::PathBuf,
+        api: String,
+        api_up: bool,
+        start: u32,
+        count: u32,
+        enqueue: bool,
+    },
     /// Local file work: copy a clip into `refs/`, tag it from its filename,
     /// register it in the pool and in `voices.json`. Needs no inductor.
     AddSample {
         layout_root: std::path::PathBuf,
         path: String,
         name: Option<String>,
+        tags: Option<Vec<String>>,
     },
     /// Deregister a machine. Idempotent, so it needs no confirmation beyond
     /// the one the operator already gave.
@@ -479,8 +500,11 @@ enum Job {
     },
 }
 
+#[derive(Debug)]
 enum DoneKind {
     Op { op: Op, ok: bool, voice: Option<String> },
+    /// Pool changed under the roster: reload it (only if one is showing).
+    ReloadRoster,
     Other,
 }
 
@@ -488,6 +512,8 @@ enum Ev {
     Log(LogLine),
     Roster(Result<Roster, String>),
     Done(DoneKind),
+    /// The backend a `B` job started is up enough to take work: enqueue this.
+    BackendLive { start: u32, count: u32 },
 }
 
 // --- app --------------------------------------------------------------------
@@ -516,6 +542,11 @@ struct App {
     /// Jobs in flight, for the "working…" indicator and duplicate suppression.
     pending: usize,
     inflight: Vec<Op>,
+    /// A chapter range to enqueue once the inductor answers. Set when `B`
+    /// starts a backend: the backend boots in the background, and the job
+    /// follows on the first live refresh — so one keypress runs chapters,
+    /// not just processes.
+    pending_enqueue: Option<(u32, u32)>,
     colour: bool,
     status: LogLine,
     conn: Conn,
@@ -545,6 +576,7 @@ impl App {
             roster_error: None,
             pending: 0,
             inflight: Vec::new(),
+            pending_enqueue: None,
             colour: true,
             status: LogLine {
                 level: Level::Info,
@@ -716,6 +748,12 @@ impl App {
                 self.roster_loading = false;
                 self.roster_error = Some(e.clone());
                 self.log_at(Level::Error, format!("roster: {e}"));
+            }
+            // The `B` job started a backend: run this range on the first live
+            // refresh. Stored, not sent, because the inductor is still booting.
+            Ev::BackendLive { start, count } => {
+                self.pending_enqueue = Some((start, count));
+                self.log_at(Level::Info, format!("ch{start}×{count} will enqueue once live"));
             }
             Ev::Done(kind) => {
                 self.pending = self.pending.saturating_sub(1);
@@ -1093,6 +1131,19 @@ fn centered_padded(area: Rect, w: u16, h: u16, pad: u16) -> Rect {
     )
 }
 
+/// The chapter range from the inductor's settings, for the footer: `start`
+/// and `count` are what the prompts prefill and what `B` reconciles, so they
+/// stay on screen instead of living in a file nobody opens.
+fn range_label(settings: &Option<serde_json::Value>) -> Option<String> {
+    let s = settings.as_ref()?;
+    let start = s.get("start").and_then(|v| v.as_u64())? as u32;
+    let count = s.get("count").and_then(|v| v.as_u64())? as u32;
+    if count == 0 {
+        return None;
+    }
+    Some(format!("chapters {start}–{}", start + count - 1))
+}
+
 /// One-line task roll-up, rendered in the footer when the terminal is too short
 /// for the Tasks pane. Collapsing the pane must not lose the numbers.
 fn task_rollup(counts: &serde_json::Value, colour: bool) -> Line<'static> {
@@ -1251,6 +1302,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Screen::Text(p) => draw_text_prompt(f, app, &p),
         Screen::Pick(p) => draw_picker(f, app, &p),
         Screen::Cast(v) => draw_cast(f, app, &v),
+        Screen::Run => draw_run(f, app),
         Screen::Confirm(c) => draw_confirm(f, app, &c),
         Screen::Machine(addr) => draw_machine_info(f, app, &addr),
         _ => {}
@@ -1277,7 +1329,7 @@ fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, compact: boo
         match &app.conn {
             Conn::Down(e) => {
                 body.push(e.clone());
-                body.push("is the inductor running?  make serve".into());
+                body.push("press R to run the system (B backend only)".into());
             }
             _ => body.push("press a to add one by IP or hostname".into()),
         }
@@ -1593,6 +1645,21 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact: bool) {
             Style::default().fg(Color::DarkGray),
         ));
     }
+    if let Some(analyzer) = app.settings.as_ref().and_then(|s| s.get("analyzer")).and_then(|e| e.as_str()) {
+        spans.push(Span::styled(
+            format!("   digest: {analyzer}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    // The chapter range the prompts prefill and `B` reconciles: the thing that
+    // decides whether work lands on ch1 or ch21. Shown always, so a default
+    // nobody looked at can never surprise again.
+    if let Some(r) = range_label(&app.settings) {
+        spans.push(Span::styled(
+            format!("   {r}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
 
     let mut lines = keys;
     lines.push(Line::from(spans));
@@ -1648,12 +1715,29 @@ fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         ]));
     }
 
+    section(&mut lines, "Backend");
+    for (k, v) in [
+        ("B", "start the backend now — no prompt, no job"),
+        ("R", "system overview: preview everything, Enter launches"),
+        ("X", "stop the backend this TUI started — never anything else"),
+    ] {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {k:<12}"), app.style(Color::Cyan)),
+            Span::raw(v.to_string()),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        "  backend logs live in .bm/inductor.log and .bm/agent.log",
+        Style::default().fg(Color::DarkGray),
+    )));
+
     section(&mut lines, "Pipeline operations");
     for (k, v) in [
         ("t  translate", "enqueue crawl + digest for a chapter range"),
         ("c  crawl-setup", "save the URL template, then probe-crawl one chapter"),
         ("v  voices", "re-read the roster, enforce the accent policy, refill gaps"),
-        ("A  add-sample", "pool a clip from refs/ — tags come from the filename"),
+        ("A  add-sample", "pool a clip — tags from the filename, enrolled locally"),
+        ("N  add named", "a `path as Name` voice — manual assignment only"),
         ("s  swap-voice", "repoint one character — destructive, see below"),
         ("S  cast", "every speaker × voice, flagging shared voices and policy problems"),
         ("e  eta", "estimate the remaining wall-clock time"),
@@ -2219,6 +2303,106 @@ fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
     );
 }
 
+/// System overview: backend, config, voices, tasks — everything one launch
+/// needs, on one screen. Modelled on the cast overview: read here, act with
+/// `Enter` (launch) or `e` (edit the config it shows).
+fn draw_run(f: &mut ratatui::Frame, app: &App) {
+    let area = centered_padded(f.area(), 76, 26, 1);
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.style(Color::Cyan))
+        .title("System — Enter launches · e edits config · Esc closes");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 10 {
+        return;
+    }
+
+    let cfg = run_preview(app);
+    let dim = Style::default().fg(Color::DarkGray);
+    let kv = |k: &str, v: String| {
+        Line::from(vec![
+            Span::styled(format!("  {k:<10}"), app.style(Color::Cyan)),
+            Span::raw(v),
+        ])
+    };
+    let live_workers = app
+        .beats
+        .iter()
+        .filter(|b| bm_proto::now_secs().saturating_sub(b.ts) < 90)
+        .count();
+    let models = if cfg.models.is_empty() {
+        "(single model)".to_string()
+    } else {
+        cfg.models.join(", ")
+    };
+
+    let mut lines = vec![
+        kv("backend", match app.conn {
+            Conn::Up => format!("answering at {}", app.api),
+            Conn::Down(_) => "DOWN — B starts it".to_string(),
+            Conn::Unknown => "connecting…".to_string(),
+        }),
+        kv("workers", format!("{live_workers} live")),
+        kv(
+            "range",
+            if cfg.count == 0 {
+                "no chapters (e to set)".to_string()
+            } else {
+                format!(
+                    "chapters {}–{} {}",
+                    cfg.start,
+                    cfg.start + cfg.count.saturating_sub(1),
+                    if cfg.live {
+                        "(live)"
+                    } else if cfg.saved {
+                        "(saved)"
+                    } else {
+                        "(defaults — e to set)"
+                    },
+                )
+            },
+        ),
+        kv("digest", format!("{} ({models})", cfg.analyzer)),
+        kv("engine", cfg.engine.clone()),
+    ];
+    match &app.roster {
+        None if app.roster_loading => {
+            lines.push(kv("voices", "loading roster…".to_string()));
+        }
+        None => {
+            lines.push(kv("voices", "roster not loaded — press R to retry".to_string()));
+        }
+        Some(r) => {
+            let rows = app.cast_rows();
+            let unassigned = rows.iter().filter(|x| x.unassigned()).count();
+            let flagged = rows
+                .iter()
+                .filter(|x| matches!(x.verdict(), Verdict::Blocked | Verdict::Unknown))
+                .count();
+            lines.push(kv(
+                "voices",
+                format!("{} voices · {} cast · {unassigned} unassigned · {flagged} to fix", r.voices.len(), r.cast.len()),
+            ));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(task_rollup(&app.counts, app.colour));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Enter starts the backend if down, then runs the range above",
+        dim,
+    )));
+    lines.push(Line::from(Span::styled(
+        "e edits range, analyzer and model chain (saved to settings)",
+        dim,
+    )));
+
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
 fn draw_text_prompt(f: &mut ratatui::Frame, app: &App, prompt: &TextPrompt) {
     let area = centered(f.area(), 88, 8);
     f.render_widget(Clear, area);
@@ -2407,15 +2591,54 @@ async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
             }
             let _ = tx.send(Ev::Done(DoneKind::Other));
         }
-        Job::AddSample { layout_root, path, name } => {
-            match bm_core::pool::add_sample(&layout_root, std::path::Path::new(&path), None, name) {
+        Job::AddSample { layout_root, path, name, tags } => {
+            // Off the UI thread: enrollment loads the voice model and takes a
+            // while. Same shape as the provision arm below.
+            let for_log = path.clone();
+            let out = tokio::task::spawn_blocking(move || {
+                bm_core::pool::add_sample(&layout_root, std::path::Path::new(&path), tags, name)
+            })
+            .await;
+            match out {
+                Ok(Ok(lines)) => {
+                    for l in lines {
+                        send(Level::Ok, l);
+                    }
+                    // The picker may be showing the pre-sample roster: fetch a
+                    // fresh one so the new voice is there without pressing R.
+                    let _ = tx.send(Ev::Done(DoneKind::ReloadRoster));
+                }
+                Ok(Err(e)) => {
+                    send(Level::Error, format!("add-sample {for_log}: {e:#}"));
+                    let _ = tx.send(Ev::Done(DoneKind::Other));
+                }
+                Err(e) => {
+                    send(Level::Error, format!("add-sample {for_log} task failed: {e}"));
+                    let _ = tx.send(Ev::Done(DoneKind::Other));
+                }
+            }
+        }
+        Job::StartBackend { layout_root, api, api_up, start, count, enqueue } => {
+            // Spawning is instant (the servers boot in the background); the
+            // enqueue waits for the first live refresh (see Ev::BackendLive) —
+            // and only when asked: bare `B` brings the backend, nothing more.
+            // The analyzer was already saved to the settings file at submit,
+            // so a fresh backend picks it up — but a live one never re-reads
+            // it, hence the warning.
+            if api_up {
+                send(Level::Warn, "inductor already up: analyzer saved, takes effect on next restart (X, then B)".into());
+            }
+            match crate::backend::start_backend(&layout_root, &api, api_up) {
                 Ok(lines) => {
                     for l in lines {
                         send(Level::Ok, l);
                     }
-                    send(Level::Info, "pool updated — press R to reload the roster".into());
+                    // Only on success: no backend, no job.
+                    if enqueue {
+                        let _ = tx.send(Ev::BackendLive { start, count });
+                    }
                 }
-                Err(e) => send(Level::Error, format!("add-sample {path}: {e:#}")),
+                Err(e) => send(Level::Error, format!("backend start failed: {e:#}")),
             }
             let _ = tx.send(Ev::Done(DoneKind::Other));
         }
@@ -2478,12 +2701,144 @@ fn op_job(api: &str, http: &reqwest::Client, req: OpRequest) -> Job {
 
 // --- input ------------------------------------------------------------------
 
+/// What the run screen previews and launches with: the live settings while the
+/// backend answers, the saved file while it doesn't, defaults when neither
+/// exists. The source rides along and is shown — a compiled-in default must
+/// read differently from a range somebody saved.
+struct RunPreview {
+    start: u32,
+    count: u32,
+    analyzer: String,
+    models: Vec<String>,
+    engine: String,
+    live: bool,
+    /// A settings file exists (vs compiled defaults standing in).
+    saved: bool,
+}
+
+fn run_preview(app: &App) -> RunPreview {
+    let saved = !app.layout_root.as_os_str().is_empty()
+        && bm_core::Layout::new(&app.layout_root).settings().is_file();
+    if let Some(s) = &app.settings {
+        let models = s
+            .get("analyze_models")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|m| m.as_str()).map(String::from).collect())
+            .unwrap_or_default();
+        return RunPreview {
+            start: s.get("start").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+            count: s.get("count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+            analyzer: s.get("analyzer").and_then(|v| v.as_str()).unwrap_or("opencode").to_string(),
+            models,
+            engine: s.get("engine").and_then(|v| v.as_str()).unwrap_or("vieneu").to_string(),
+            live: true,
+            saved,
+        };
+    }
+    let s = if app.layout_root.as_os_str().is_empty() {
+        bm_core::config::Settings::default()
+    } else {
+        bm_core::config::Settings::load(&bm_core::Layout::new(&app.layout_root).settings())
+    };
+    RunPreview {
+        start: s.start,
+        count: s.count,
+        analyzer: s.analyzer,
+        models: s.analyze_models,
+        engine: s.engine,
+        live: false,
+        saved,
+    }
+}
+
+/// Parse `<start> <count> [analyzer] [models,comma,separated]` — the run
+/// configuration shape. `Err` keeps the prompt open; omitted trailing fields
+/// keep their current values (clearing a model chain is a settings-file edit,
+/// not something a blank field should do by accident).
+fn parse_run_config(
+    buf: &str,
+    current_analyzer: &str,
+) -> Result<(u32, u32, String, Option<Vec<String>>), String> {
+    let (start, count) = parse_range(buf)?;
+    let tokens: Vec<&str> = buf.split_whitespace().collect();
+    let analyzer = match tokens.get(2) {
+        None => current_analyzer.to_string(),
+        Some(a) if ["opencode", "openrouter", "local", "gemini"].contains(a) => a.to_string(),
+        Some(a) => return Err(format!("analyzer “{a}” unknown — opencode|openrouter|local|gemini")),
+    };
+    // Everything past the analyzer is the model list, rejoined: `3.8-flash,
+    // 3.7-flash` (natural spacing) works exactly like `3.8-flash,3.7-flash`.
+    // A model name never contains a space, so a spaced piece is a typo.
+    let models: Option<Vec<String>> = {
+        let rest = tokens.get(3..).unwrap_or(&[]).join(" ");
+        if rest.trim().is_empty() {
+            None
+        } else {
+            let v: Vec<String> = rest
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if v.is_empty() {
+                return Err("models list is empty — e.g. 3.8-flash,3.7-flash,3.5-flash".into());
+            }
+            if v.iter().any(|m| m.contains(char::is_whitespace)) {
+                return Err("models are comma-separated — e.g. 3.8-flash,3.7-flash (no spaces outside commas)".into());
+            }
+            Some(v)
+        }
+    };
+    Ok((start, count, analyzer, models))
+}
+
+/// Persist run configuration to the settings file. Returns a status line.
+fn save_run_config(app: &App, buf: &str) -> Result<String, String> {
+    let (start, count, analyzer, models) =
+        parse_run_config(buf, &app.setting_str("analyzer", "opencode"))?;
+    if app.layout_root.as_os_str().is_empty() {
+        return Err("no repo root — restart the TUI from a checkout".into());
+    }
+    let settings_path = bm_core::Layout::new(&app.layout_root).settings();
+    let mut settings = bm_core::config::Settings::load(&settings_path);
+    // Everything on the line is saved: the file is the single source the run
+    // screen previews, the footer shows and the next backend boots with.
+    settings.start = start;
+    settings.count = count;
+    settings.analyzer = analyzer.clone();
+    if let Some(m) = models {
+        settings.analyze_models = m;
+    }
+    settings.save(&settings_path).map_err(|e| format!("saving settings: {e:#}"))?;
+    Ok(format!("run config saved: ch{start}×{count}, digest {analyzer}"))
+}
+
+/// Parse `<start> <count>` — the shape the `t` prompt takes.
+/// `Err` keeps the prompt open with the problem stated, never a silent default.
+fn parse_range(buf: &str) -> Result<(u32, u32), String> {
+    let mut it = buf.split_whitespace();
+    let start: u32 = match it.next() {
+        Some(s) => s.parse().map_err(|_| format!("start “{s}” is not a chapter number"))?,
+        None => return Err("expected: <start> <count>, e.g. 1 1".into()),
+    };
+    let count: u32 = match it.next() {
+        Some(s) => s.parse().map_err(|_| format!("count “{s}” is not a number"))?,
+        None => return Err("expected: <start> <count>, e.g. 1 1".into()),
+    };
+    if count == 0 {
+        return Err("count must be at least 1".into());
+    }
+    Ok((start, count))
+}
+
 /// Validate and dispatch a submitted text prompt.
 ///
 /// Returns `Err(message)` to keep the prompt open with the problem stated,
 /// rather than silently substituting a default.
 fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, String> {
     match prompt.kind {
+        // Save-only prompt, persisted from the run screen's Enter branch:
+        // reaching dispatch would launch without saving, so refuse.
+        TextKind::RunConfig => Err("run config is saved from the run screen".into()),
         TextKind::AddMachine => {
             let addr = prompt.buf.trim().to_string();
             if addr.is_empty() {
@@ -2500,34 +2855,36 @@ fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, String> {
             })
         }
         TextKind::AddSample => {
-            // `refs/trien-chieu.mp3 as Triển Chiêu`: the voice answers to the
-            // given name, the tags still come from the filename.
-            let (path, name) = match prompt.buf.rsplit_once(" as ") {
-                Some((p, n)) if !p.trim().is_empty() && !n.trim().is_empty() => {
-                    (p.trim().to_string(), Some(n.trim().to_string()))
-                }
-                _ => (prompt.buf.trim().to_string(), None),
-            };
+            // Pooled sample only: the whole buffer is the path, tags come
+            // from the filename. Anything with `as` belongs to N (named) —
+            // say so instead of filing it under a nonsense filename.
+            if prompt.buf.contains(" as ") {
+                return Err("that looks like a named voice — press N and use `path as Name`".into());
+            }
+            let path = prompt.buf.trim().to_string();
             if path.is_empty() {
                 return Err("path is empty — point at a clip, e.g. ~/dl/young-female-4.mp3".into());
             }
-            Ok(Job::AddSample { layout_root: app.layout_root.clone(), path, name })
+            Ok(Job::AddSample { layout_root: app.layout_root.clone(), path, name: None, tags: None })
+        }
+        TextKind::AddNamed => {
+            // `refs/narrator.mp3 as Narrator`: the name is required, the tags
+            // stay empty — a named voice answers by hand, never auto-rolls.
+            let (path, name) = match prompt.buf.rsplit_once(" as ") {
+                Some((p, n)) if !p.trim().is_empty() && !n.trim().is_empty() => {
+                    (p.trim().to_string(), n.trim().to_string())
+                }
+                _ => return Err("named voices need `path as Name` — e.g. refs/narrator.mp3 as Narrator".into()),
+            };
+            Ok(Job::AddSample {
+                layout_root: app.layout_root.clone(),
+                path,
+                name: Some(name),
+                tags: Some(Vec::new()),
+            })
         }
         TextKind::Translate => {
-            let mut it = prompt.buf.split_whitespace();
-            let start_raw = it.next();
-            let count_raw = it.next();
-            let start: u32 = match start_raw {
-                Some(s) => s.parse().map_err(|_| format!("start “{s}” is not a chapter number"))?,
-                None => return Err("expected: <start> <count>, e.g. 21 80".into()),
-            };
-            let count: u32 = match count_raw {
-                Some(s) => s.parse().map_err(|_| format!("count “{s}” is not a number"))?,
-                None => return Err("expected: <start> <count>, e.g. 21 80".into()),
-            };
-            if count == 0 {
-                return Err("count must be at least 1".into());
-            }
+            let (start, count) = parse_range(&prompt.buf)?;
             Ok(op_job(
                 &app.api,
                 &app.http,
@@ -2553,7 +2910,7 @@ fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, String> {
                 OpRequest {
                     op: Op::CrawlSetup,
                     url_template: Some(template),
-                    start: Some(app.setting_u32("start", 21)),
+                    start: Some(app.setting_u32("start", 1)),
                     ..Default::default()
                 },
             ))
@@ -2649,6 +3006,13 @@ async fn handle_key(
                             format!("swapping {character} → {voice}…"),
                         );
                     }
+                    ConfirmAction::StopBackend => {
+                        app.set_status(Level::Info, "stopping local backend…");
+                        for line in crate::backend::stop_backend(&app.layout_root).await {
+                            app.log_at(Level::Info, line);
+                        }
+                        app.set_status(Level::Info, "stop requested — see events");
+                    }
                 }
             }
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -2695,16 +3059,30 @@ async fn handle_key(
                 app.screen = Screen::Normal;
                 app.set_status(Level::Info, "cancelled — nothing was submitted");
             }
-            KeyCode::Enter => match submit_text(app, &p) {
-                Ok(job) => {
-                    app.set_status(Level::Ok, format!("submitted: {}", p.buf.trim()));
-                    app.screen = Screen::Normal;
-                    dispatch(app, job_tx, job);
+            KeyCode::Enter => {
+                // Run-config edits save a file and launch nothing: handled
+                // here rather than in `submit_text`, which can only dispatch.
+                if p.kind == TextKind::RunConfig {
+                    match save_run_config(app, &p.buf) {
+                        Ok(msg) => {
+                            app.screen = Screen::Normal;
+                            app.set_status(Level::Ok, msg);
+                        }
+                        Err(msg) => app.set_status(Level::Error, msg),
+                    }
+                } else {
+                    match submit_text(app, &p) {
+                        Ok(job) => {
+                            app.set_status(Level::Ok, format!("submitted: {}", p.buf.trim()));
+                            app.screen = Screen::Normal;
+                            dispatch(app, job_tx, job);
+                        }
+                        // Keep the prompt open: the operator's typing is preserved and
+                        // the problem is stated in place.
+                        Err(msg) => app.set_status(Level::Error, msg),
+                    }
                 }
-                // Keep the prompt open: the operator's typing is preserved and
-                // the problem is stated in place.
-                Err(msg) => app.set_status(Level::Error, msg),
-            },
+            }
             KeyCode::Backspace => p.backspace(),
             KeyCode::Delete => p.delete(),
             KeyCode::Left => p.left(),
@@ -2955,6 +3333,50 @@ async fn handle_key(
         return false;
     }
 
+    // System overview: a preview of everything, modelled on the cast screen.
+    // No filter here, so letters are free for actions.
+    if let Screen::Run = app.screen {
+        match key.code {
+            KeyCode::Esc => {
+                app.screen = Screen::Normal;
+            }
+            KeyCode::Enter => {
+                let cfg = run_preview(app);
+                dispatch(
+                    app,
+                    job_tx,
+                    Job::StartBackend {
+                        layout_root: app.layout_root.clone(),
+                        api: app.api.clone(),
+                        api_up: app.conn == Conn::Up,
+                        start: cfg.start,
+                        count: cfg.count,
+                        enqueue: true,
+                    },
+                );
+                app.screen = Screen::Normal;
+                app.set_status(Level::Info, format!("launching ch{}×{}…", cfg.start, cfg.count));
+            }
+            KeyCode::Char('e') | KeyCode::Char('E') => {
+                let cfg = run_preview(app);
+                let models = cfg.models.join(",");
+                let prefill = if models.is_empty() {
+                    format!("{} {} {}", cfg.start, cfg.count, cfg.analyzer)
+                } else {
+                    format!("{} {} {} {}", cfg.start, cfg.count, cfg.analyzer, models)
+                };
+                app.screen = Screen::Text(TextPrompt::new(
+                    TextKind::RunConfig,
+                    "Run config",
+                    "range as <start> <count> [analyzer] [models,comma,separated]. Saved to settings.",
+                    &prefill,
+                ));
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     // Normal mode.
     match key.code {
         KeyCode::Char('q') => {
@@ -3013,8 +3435,16 @@ async fn handle_key(
         KeyCode::Char('A') => {
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::AddSample,
-                "Add sample voice to the pool",
-                "clip path — tags come from the filename; append `as Name` to rename",
+                "Add pooled sample",
+                "clip path, e.g. ~/dl/young-female-4.mp3 — tags come from the filename, voice auto-rolls",
+                "",
+            ));
+        }
+        KeyCode::Char('N') => {
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::AddNamed,
+                "Add named voice",
+                "clip path as Name, e.g. refs/narrator.mp3 as Narrator — manual assignment only, never rotates",
                 "",
             ));
         }
@@ -3076,8 +3506,8 @@ async fn handle_key(
             Some(m) => app.screen = Screen::Machine(m.addr.clone()),
         },
         KeyCode::Char('t') => {
-            let start = app.setting_u32("start", 21);
-            let count = app.setting_u32("count", 80);
+            let start = app.setting_u32("start", 1);
+            let count = app.setting_u32("count", 1);
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::Translate,
                 "Translate — enqueue crawl + digest",
@@ -3111,6 +3541,46 @@ async fn handle_key(
         }
         KeyCode::Char('e') => {
             dispatch_op(app, job_tx, http, OpRequest { op: Op::Eta, ..Default::default() });
+        }
+        KeyCode::Char('B') => {
+            // Backend on, instantly: no prompt, no job. The reconcile range
+            // comes from the saved settings — visible in the footer and on
+            // the run screen, so it is a choice, not a surprise.
+            let cfg = run_preview(app);
+            dispatch(
+                app,
+                job_tx,
+                Job::StartBackend {
+                    layout_root: app.layout_root.clone(),
+                    api: app.api.clone(),
+                    api_up: app.conn == Conn::Up,
+                    start: cfg.start,
+                    count: cfg.count,
+                    enqueue: false,
+                },
+            );
+            app.set_status(Level::Info, "starting backend — watch the status line");
+        }
+        KeyCode::Char('R') => {
+            app.screen = Screen::Run;
+            if app.roster.is_none() {
+                app.load_roster(job_tx, http);
+            }
+        }
+        KeyCode::Char('X') => {
+            app.screen = Screen::Confirm(Confirm {
+                title: "Stop local backend?".into(),
+                danger: false,
+                body: vec![
+                    "Stop the inductor + worker this TUI started.".into(),
+                    "In-flight tasks return to the queue; the ledger keeps".into(),
+                    "everything, so nothing is lost.".into(),
+                    String::new(),
+                    "A backend started elsewhere (tmux, another shell)".into(),
+                    "is never touched — only this TUI's own processes stop.".into(),
+                ],
+                action: ConfirmAction::StopBackend,
+            });
         }
         _ => {}
     }
@@ -3174,6 +3644,10 @@ async fn run_loop(
     loop {
         terminal.draw(|f| draw(f, &mut app))?;
         while let Ok(ev) = rx.try_recv() {
+            // A finished add-sample refreshes a showing roster, so the new
+            // voice is in the picker without a manual R. Read before `apply`
+            // moves the event.
+            let reload_roster = matches!(ev, Ev::Done(DoneKind::ReloadRoster));
             // Background lines carry no timestamp of their own; stamp them on
             // arrival so the log reads in the order things actually finished.
             let ev = match ev {
@@ -3184,6 +3658,9 @@ async fn run_loop(
                 other => other,
             };
             app.apply(ev);
+            if reload_roster && app.roster.is_some() {
+                app.load_roster(&job_tx, &http);
+            }
         }
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
@@ -3199,6 +3676,23 @@ async fn run_loop(
         app.tick += 1;
         if app.tick.is_multiple_of(REFRESH_TICKS) {
             app.refresh(&http).await;
+            // A `B` start asked for work: fire it on the first live refresh,
+            // when there is finally an inductor to hear it.
+            if app.conn == Conn::Up {
+                if let Some((start, count)) = app.pending_enqueue.take() {
+                    dispatch_op(
+                        &mut app,
+                        &job_tx,
+                        &http,
+                        OpRequest {
+                            op: Op::Translate,
+                            start: Some(start),
+                            count: Some(count),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
         }
     }
     Ok(())
@@ -3382,6 +3876,161 @@ mod tests {
     }
 
     #[test]
+    fn run_config_parses_range_analyzer_and_models() {
+        let (s, c, a, m) = parse_run_config("1 1", "opencode").unwrap();
+        assert_eq!((s, c), (1, 1));
+        assert_eq!(a, "opencode");
+        assert!(m.is_none(), "omitted models stay out of the file");
+        let (_, _, a, m) = parse_run_config("2 5 gemini 3.8-flash, 3.7-flash", "opencode").unwrap();
+        assert_eq!(a, "gemini");
+        assert_eq!(m.unwrap(), vec!["3.8-flash", "3.7-flash"]);
+        assert!(parse_run_config("abc 80", "opencode").unwrap_err().contains("not a chapter number"));
+        assert!(parse_run_config("1 1 watson", "opencode").unwrap_err().contains("unknown"));
+        assert!(parse_run_config("1 1 gemini 3.8-flash 3.7-flash", "opencode")
+            .unwrap_err()
+            .contains("comma-separated"));
+        assert!(parse_run_config("1 1 gemini ,", "opencode").unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn run_config_save_persists_everything_it_parsed() {
+        let dir = std::env::temp_dir().join("bm-runconfig-save");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = App::new("http://x");
+        app.layout_root = dir.clone();
+
+        let msg = save_run_config(&app, "1 1 gemini 3.8-flash,3.7-flash").unwrap();
+        assert!(msg.contains("ch1"), "{msg}");
+        let saved: bm_core::config::Settings =
+            bm_core::read_json(&bm_core::Layout::new(&dir).settings()).unwrap();
+        assert_eq!((saved.start, saved.count), (1, 1));
+        assert_eq!(saved.analyzer, "gemini");
+        assert_eq!(saved.analyze_models, vec!["3.8-flash", "3.7-flash"]);
+
+        // Omitted models keep the saved chain — a blank field must not wipe it.
+        save_run_config(&app, "1 1 gemini").unwrap();
+        let saved: bm_core::config::Settings =
+            bm_core::read_json(&bm_core::Layout::new(&dir).settings()).unwrap();
+        assert_eq!(saved.analyze_models, vec!["3.8-flash", "3.7-flash"]);
+
+        assert!(save_run_config(&app, "1 1 watson").unwrap_err().contains("unknown"));
+    }
+
+    #[test]
+    fn run_preview_prefers_live_api_then_file_then_defaults() {
+        // Live backend: its boot-time settings, labeled as such.
+        let mut app = App::new("http://x");
+        app.settings = Some(serde_json::json!({
+            "start": 5, "count": 2, "analyzer": "gemini",
+            "analyze_models": ["3.8-flash"], "engine": "vieneu",
+        }));
+        let cfg = run_preview(&app);
+        assert!(cfg.live);
+        assert_eq!((cfg.start, cfg.count), (5, 2));
+        assert_eq!(cfg.analyzer, "gemini");
+        assert_eq!(cfg.models, vec!["3.8-flash"]);
+
+        // Down backend: the saved file is what the next boot will use.
+        let dir = std::env::temp_dir().join("bm-runconfig-preview");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut settings = bm_core::config::Settings::default();
+        settings.start = 1;
+        settings.count = 1;
+        settings.save(&bm_core::Layout::new(&dir).settings()).unwrap();
+        let mut app = App::new("http://x");
+        app.layout_root = dir;
+        let cfg = run_preview(&app);
+        assert!(!cfg.live);
+        assert!(cfg.saved, "a settings file exists");
+        assert_eq!((cfg.start, cfg.count), (1, 1));
+
+        // Neither: honest defaults, labeled as nobody's choice.
+        let app = App::new("http://x");
+        let cfg = run_preview(&app);
+        assert!(!cfg.live);
+        assert!(!cfg.saved);
+        assert_eq!((cfg.start, cfg.count), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn run_screen_enters_and_launches_with_previewed_values() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        // `e` opens the config editor prefilled from the preview.
+        let mut app = App::new("http://x");
+        app.settings = Some(serde_json::json!({
+            "start": 1, "count": 1, "analyzer": "opencode", "engine": "vieneu",
+        }));
+        app.screen = Screen::Run;
+        handle_key(&mut app, key(KeyCode::Char('e')), &http, &job_tx).await;
+        match &app.screen {
+            Screen::Text(p) => assert_eq!(p.buf, "1 1 opencode"),
+            other => panic!("expected the config editor, got {other:?}"),
+        }
+
+        // `Enter` launches backend-if-needed plus the job: one dispatch.
+        app.screen = Screen::Run;
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Normal));
+        match job_rx.try_recv() {
+            Ok(Job::StartBackend { start, count, enqueue, .. }) => {
+                assert_eq!((start, count), (1, 1));
+                assert!(enqueue, "the run screen always brings a job");
+            }
+            other => panic!("expected a start-backend job, got {other:?}"),
+        }
+
+        // Bare `B` brings the backend and nothing else.
+        let mut app = App::new("http://x");
+        handle_key(&mut app, key(KeyCode::Char('B')), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Normal));
+        match job_rx.try_recv() {
+            Ok(Job::StartBackend { enqueue, .. }) => assert!(!enqueue, "bare B carries no job"),
+            other => panic!("expected a start-backend job, got {other:?}"),
+        }
+
+        // `Esc` just closes.
+        app.screen = Screen::Run;
+        handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Normal));
+    }
+
+    #[test]
+    fn the_run_screen_renders_without_a_roster_or_backend() {
+        let mut app = App::new("http://127.0.0.1:8901");
+        app.conn = Conn::Down("inductor unreachable at http://127.0.0.1:8901".into());
+        app.screen = Screen::Run;
+        let text = render_text(&mut app, 140, 44);
+        assert!(text.contains("System"), "{text}");
+        assert!(text.contains("Enter launches"), "{text}");
+        assert!(text.contains("DOWN"), "no backend is attached:\n{text}");
+    }
+
+    #[test]
+    fn backend_live_parks_the_range_until_the_next_refresh() {
+        let mut app = App::new("http://x");
+        assert!(app.pending_enqueue.is_none());
+        app.apply(Ev::BackendLive { start: 1, count: 1 });
+        assert_eq!(app.pending_enqueue, Some((1, 1)));
+    }
+
+    #[test]
+    fn range_label_names_the_configured_chapters() {
+        assert_eq!(
+            range_label(&Some(serde_json::json!({"start": 1, "count": 1}))).as_deref(),
+            Some("chapters 1–1")
+        );
+        assert_eq!(
+            range_label(&Some(serde_json::json!({"start": 21, "count": 80}))).as_deref(),
+            Some("chapters 21–100")
+        );
+        assert!(range_label(&None).is_none());
+        assert!(range_label(&Some(serde_json::json!({"start": 1, "count": 0}))).is_none());
+    }
+
+    #[test]
     fn crawl_template_requires_the_chapter_placeholder() {
         let mut app = App::new("http://x");
         let p = TextPrompt::new(TextKind::CrawlTemplate, "t", "h", "https://x/chuong");
@@ -3402,16 +4051,80 @@ mod tests {
     }
 
     #[test]
-    fn add_sample_splits_an_as_rename_off_the_path() {
+    fn add_sample_refuses_names_and_points_at_the_named_window() {
+        // One window, one job: `as` belongs to N, never smuggled through A.
         let mut app = App::new("http://x");
-        let p = TextPrompt::new(TextKind::AddSample, "t", "h", "refs/trien-chieu.mp3 as Triển Chiêu");
+        let p = TextPrompt::new(TextKind::AddSample, "t", "h", "refs/narrator.mp3 as Narrator");
+        assert!(submit_text(&mut app, &p).unwrap_err().contains("press N"));
+    }
+
+    #[test]
+    fn add_named_requires_path_as_name_and_stays_private() {
+        let mut app = App::new("http://x");
+        let p = TextPrompt::new(TextKind::AddNamed, "t", "h", "refs/trien-chieu.mp3 as Triển Chiêu");
         match submit_text(&mut app, &p) {
-            Ok(Job::AddSample { path, name, .. }) => {
+            Ok(Job::AddSample { path, name, tags, .. }) => {
                 assert_eq!(path, "refs/trien-chieu.mp3");
                 assert_eq!(name.as_deref(), Some("Triển Chiêu"));
+                assert_eq!(tags, Some(Vec::new()), "named voices carry no pool tags");
             }
             other => panic!("expected an add-sample job, got {other:?}"),
         }
+        // Half a rename keeps the window open.
+        for bad in ["refs/narrator.mp3 as ", " as Narrator", "refs/narrator.mp3"] {
+            let p = TextPrompt::new(TextKind::AddNamed, "t", "h", bad);
+            assert!(submit_text(&mut app, &p).is_err(), "{bad:?} must not submit");
+        }
+    }
+
+    #[tokio::test]
+    async fn add_sample_success_reloads_the_roster() {
+        let dir = std::env::temp_dir().join("bm-addsample-reload");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("young-male-9.mp3");
+        std::fs::write(&src, b"fake").unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
+        run_job(
+            Job::AddSample { layout_root: dir, path: src.display().to_string(), name: None, tags: None },
+            tx,
+        )
+        .await;
+        let mut dones = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Ev::Done(k) = ev {
+                dones.push(k);
+            }
+        }
+        assert!(
+            dones.iter().any(|k| matches!(k, DoneKind::ReloadRoster)),
+            "success must refresh the showing roster: {dones:?}"
+        );
+        assert!(
+            dones.iter().all(|k| !matches!(k, DoneKind::Other)),
+            "no stale Done: {dones:?}"
+        );
+
+        // Failure refreshes nothing — the roster it would fetch is unchanged.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
+        run_job(
+            Job::AddSample {
+                layout_root: std::env::temp_dir().join("bm-addsample-reload"),
+                path: "/nonexistent/clip.mp3".into(),
+                name: None,
+                tags: None,
+            },
+            tx,
+        )
+        .await;
+        let mut dones = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Ev::Done(k) = ev {
+                dones.push(k);
+            }
+        }
+        assert!(dones.iter().all(|k| matches!(k, DoneKind::Other)), "{dones:?}");
     }
 
     #[tokio::test]

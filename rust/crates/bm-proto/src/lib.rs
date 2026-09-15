@@ -286,6 +286,10 @@ pub struct TaskOffer {
     pub engine: String,
     #[serde(default)]
     pub model_order: Vec<String>,
+    /// Digest backend: `opencode` | `openrouter` | `local` | `gemini`.
+    /// Defaults to `opencode` so old inductors' offers still parse.
+    #[serde(default = "default_analyzer")]
+    pub analyzer: String,
     /// Current bible snapshot. The worker uses it to build the prompt and
     /// mirrors it locally so the cast assigner can read voice hints; it never
     /// writes the authoritative copy back.
@@ -309,6 +313,10 @@ pub struct TaskOffer {
 
 fn default_speed() -> f64 {
     1.0
+}
+
+fn default_analyzer() -> String {
+    "opencode".into()
 }
 
 /// One selectable voice plus the metadata an operator needs to choose it.
@@ -486,6 +494,17 @@ mod tests {
             assert_eq!(Op::parse(op.as_str()), Some(op));
         }
         assert_eq!(Op::parse("nope"), None);
+    }
+
+    #[test]
+    fn offer_without_analyzer_means_opencode() {
+        // An old inductor never sent `analyzer`; its offers still digest.
+        let o: TaskOffer = serde_json::from_str(
+            r#"{"task_id":"digest:1","chapter":1,"stage":"digest","root":"/r",
+                "engine":"vieneu","gap_ms":300,"speed":1.25,"ambience":true}"#,
+        )
+        .unwrap();
+        assert_eq!(o.analyzer, "opencode");
     }
 
     #[test]

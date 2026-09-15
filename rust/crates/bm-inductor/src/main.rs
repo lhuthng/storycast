@@ -1,6 +1,7 @@
 //! Inductor: control API + scheduler. Workers report facts; this decides.
 
 mod api;
+mod backend;
 mod roster;
 mod state;
 mod tui;
@@ -30,9 +31,9 @@ enum Cmd {
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
         /// Chapter range to reconcile on startup.
-        #[arg(long, default_value = "21")]
+        #[arg(long, default_value = "1")]
         start: u32,
-        #[arg(long, default_value = "80")]
+        #[arg(long, default_value = "1")]
         count: u32,
     },
     /// Onboard one machine by address: probe, push what's missing, verify.
@@ -111,16 +112,18 @@ enum RosterCmd {
     },
     /// Add a sample clip to the voice pool: copies it under `refs/`, takes its
     /// tags from the filename (`young-female-4.mp3` → young, female), registers
-    /// it in `voice-pool.json` and maps it in `voices.json` so the next
-    /// provision enrolls it on workers.
+    /// it in `voice-pool.json`, maps it in `voices.json` so the next provision
+    /// enrolls it on workers — and enrolls it into this machine's own store
+    /// right away when it has one, so renders use it immediately.
     AddSample {
         /// Clip to add (mp3/wav/m4a/ogg/flac).
         path: std::path::PathBuf,
         /// Override the filename tags: `--tags young,female`.
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
-        /// Voice name to register under (default: the file stem).
-        /// `refs/narrator.mp3 --name Narrator` voices as `Narrator`.
+        /// Voice name to register under (default: the file stem). Without
+        /// `--tags` the voice stays private: assignable by hand, never
+        /// auto-rolled. `refs/narrator.mp3 --name Narrator` voices as `Narrator`.
         #[arg(long)]
         name: Option<String>,
     },

@@ -11,7 +11,7 @@
 //! `add_sample` parses the tags out of the name, the registry is the truth.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Tag pairs that can never share a voice. Everything else is free-form: a tag
 /// the table does not mention only ever matches by equality.
@@ -170,6 +170,36 @@ fn write_pool(path: &Path, pool: &Pool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve a user-typed clip path: `~` grows to `$HOME`, and a relative path
+/// is tried against the working directory first, then the repo root. The TUI
+/// prompt is not a shell, so neither happens by itself.
+fn resolve_clip(root: &Path, src: &Path) -> PathBuf {
+    let s = src.to_string_lossy();
+    let expanded = if s == "~" || s.starts_with("~/") {
+        match std::env::var("HOME") {
+            Ok(home) => {
+                let mut h = home;
+                h.push_str(&s[1..]);
+                PathBuf::from(h)
+            }
+            Err(_) => src.to_path_buf(),
+        }
+    } else {
+        src.to_path_buf()
+    };
+    if expanded.is_file() || expanded.is_absolute() {
+        return expanded;
+    }
+    let under_root = root.join(&expanded);
+    if under_root.is_file() {
+        under_root
+    } else {
+        // Return the CWD-relative form so the "no such file" error names what
+        // was typed, not a guess.
+        expanded
+    }
+}
+
 /// Enroll a clip into the pool: copy it under `refs/`, tag it from its
 /// filename (or `tags_override`), register it in `voice-pool.json` under
 /// `name_override` (or the file stem), and map it in `voices.json` so the next
@@ -184,6 +214,8 @@ pub fn add_sample(
 ) -> anyhow::Result<Vec<String>> {
     use anyhow::Context;
     let mut log = Vec::new();
+    let src = resolve_clip(root, src);
+    let src = src.as_path();
     if !src.is_file() {
         anyhow::bail!("no such file: {}", src.display());
     }
@@ -198,17 +230,28 @@ pub fn add_sample(
     if stem.is_empty() {
         anyhow::bail!("cannot take a sample name from {}", src.display());
     }
-    // `refs/narrator.mp3 as Narrator`: the voice answers to the given name,
-    // the tags still come from the filename.
+    // An explicit name answers to exactly that; filename tags only apply to
+    // the classic pooled shape (no rename, no override).
     let name = name_override.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or(stem.clone());
     let ext = src.extension().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     if !matches!(ext.to_lowercase().as_str(), "mp3" | "wav" | "m4a" | "ogg" | "flac") {
         anyhow::bail!("{filename:?} is not audio (mp3/wav/m4a/ogg/flac)");
     }
-    let tags = tags_override.unwrap_or_else(|| parse_sample_tags(&stem));
-    if tags.is_empty() {
-        anyhow::bail!("no tags in {stem:?} — rename to tag-tag-N.ext or pass --tags");
-    }
+    let tags = match tags_override {
+        // Explicit — including empty, which is a named voice: assignable by
+        // hand, never auto-rolled (`compatible` needs a shared tag).
+        Some(t) => t,
+        // Renamed without tags is also a named voice, not a pool sample.
+        None if name != stem => Vec::new(),
+        // Classic pooled sample: tags come from the filename or not at all.
+        None => {
+            let t = parse_sample_tags(&stem);
+            if t.is_empty() {
+                anyhow::bail!("no tags in {stem:?} — rename to tag-tag-N.ext or pass --tags");
+            }
+            t
+        }
+    };
 
     let refs = root.join("refs");
     std::fs::create_dir_all(&refs)?;
@@ -235,7 +278,11 @@ pub fn add_sample(
         PoolEntry { file: format!("refs/{filename}"), tags: tags.clone() },
     );
     write_pool(&pool_path, &pool)?;
-    log.push(format!("pool: {name} [{tags}]", tags = tags.join(", ")));
+    if tags.is_empty() {
+        log.push(format!("named voice: {name} (manual assignment only, never auto-rolled)"));
+    } else {
+        log.push(format!("pool: {name} [{tags}]", tags = tags.join(", ")));
+    }
 
     // The pool decides *who* a sample may voice; `voices.json` gets it onto
     // workers. One entry, same name, so the two files cannot drift apart.
@@ -249,12 +296,99 @@ pub fn add_sample(
     manifest[name.clone()] = serde_json::Value::String(format!("refs/{filename}"));
     crate::util::atomic_write(&manifest_path, &serde_json::to_string_pretty(&manifest)?)?;
     log.push(format!("voices.json: {name} -> refs/{filename} (enrolled on next provision)"));
+
+    // Usable now, not just after provisioning: enroll into this machine's own
+    // store when it has one. A failure here never fails the add — the registry
+    // above is the durable state; the enroll is a convenience for this box.
+    // Blocking (loads the voice model); callers run it off the UI thread.
+    match enroll_local(root, &name, &format!("refs/{filename}")) {
+        Ok(lines) => log.extend(lines),
+        Err(e) => log.push(format!("local enroll failed (provision still covers it): {e:#}")),
+    }
     Ok(log)
+}
+
+/// Enroll one sample into THIS machine's voice store (`root/.venv`), so
+/// renders use it immediately. Skips cleanly with no local venv — provision
+/// enrolls from `voices.json` then.
+pub fn enroll_local(root: &Path, name: &str, file: &str) -> anyhow::Result<Vec<String>> {
+    let py = root.join(".venv/bin/python");
+    if !py.is_file() || !root.join("python/tts_vieneu.py").is_file() {
+        return Ok(vec!["no local voice store — enrolled on next provision".to_string()]);
+    }
+    // Name and clip travel as argv, never interpolated: diacritics and spaces
+    // survive intact, and there is nothing to quote.
+    let script = [
+        "import sys, tts_vieneu as vn",
+        "name, ref = sys.argv[1], sys.argv[2]",
+        "tts = vn.engine()",
+        "have = {vid for label, vid in tts.list_preset_voices() if label == vid}",
+        "print('already enrolled' if name in have else 'enrolling ' + name, flush=True)",
+        "if name not in have:",
+        "    tts.add_voice(name, ref)",
+        "    tts.save_voices()",
+        "    print('enrolled ' + name, flush=True)",
+    ]
+    .join("\n");
+    let out = std::process::Command::new(&py)
+        .arg("-c")
+        .arg(&script)
+        .arg(name)
+        .arg(file)
+        .current_dir(root)
+        .env("PYTHONPATH", root.join("python"))
+        .output()?;
+    let mut lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("{} ({})", lines.pop().unwrap_or_else(|| "enroll failed".into()), crate::util::head_chars(err.trim(), 160));
+    }
+    Ok(lines)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_clip_expands_tilde_and_falls_back_to_the_root() {
+        // `~` without a shell.
+        let home = std::env::temp_dir().join("bm-clip-home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("young-male-8.mp3"), b"fake").unwrap();
+        let saved = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home);
+        let got = resolve_clip(Path::new("/nonexistent-root"), Path::new("~/young-male-8.mp3"));
+        assert_eq!(got, home.join("young-male-8.mp3"));
+        if let Some(h) = saved {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        // Relative, missing from the working directory: found under the root.
+        // (Cargo runs tests with CWD at the crate dir, which has no `in/`.)
+        let root = std::env::temp_dir().join("bm-clip-root");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("in")).unwrap();
+        std::fs::write(root.join("in/young-male-9.mp3"), b"fake").unwrap();
+        let got = resolve_clip(&root, Path::new("in/young-male-9.mp3"));
+        assert_eq!(got, root.join("in/young-male-9.mp3"));
+
+        // End to end through add_sample with a root-relative path.
+        let log = add_sample(&root, Path::new("in/young-male-9.mp3"), None, None).unwrap();
+        assert!(log.iter().any(|l| l.contains("young-male-9")), "{log:?}");
+        assert!(root.join("refs/young-male-9.mp3").is_file());
+
+        // Missing everywhere: the error names what was typed.
+        let err = add_sample(&root, Path::new("nope/young-male-9.mp3"), None, None).unwrap_err();
+        assert!(err.to_string().contains("nope/young-male-9.mp3"), "{err}");
+    }
 
     #[test]
     fn filename_tags_drop_the_take_number() {
@@ -328,6 +462,8 @@ mod tests {
         let log = add_sample(&d, &src, None, None).unwrap();
         assert!(log.iter().any(|l| l.contains("young-female-9")), "{log:?}");
         assert!(d.join("refs/young-female-9.mp3").is_file());
+        // No venv here: enrollment defers to provisioning, loudly, not silently.
+        assert!(log.iter().any(|l| l.contains("next provision")), "{log:?}");
 
         let pool = load_pool(&d.join("voice-pool.json"));
         assert_eq!(pool["young-female-9"].tags, vec!["young", "female"]);
@@ -341,21 +477,56 @@ mod tests {
     }
 
     #[test]
-    fn add_sample_can_rename_the_voice() {
+    fn enroll_without_a_venv_defers_to_provisioning() {
+        let d = std::env::temp_dir().join("bm-pool-no-venv");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // Positive path needs model weights and minutes; the skip contract —
+        // Ok, and said out loud — is what pins the fresh-clone behavior.
+        let lines = enroll_local(&d, "young-female-1", "refs/young-female-1.mp3").unwrap();
+        assert!(lines.iter().any(|l| l.contains("next provision")), "{lines:?}");
+    }
+
+    #[test]
+    fn a_renamed_voice_is_named_not_pooled() {
         // `refs/narrator.mp3 as Narrator`: the registry and the enrollment
-        // answer to the given name; the tags still come from the filename.
+        // answer to the given name — and with no tags it never auto-rolls,
+        // however tag-compatible a character looks.
         let d = std::env::temp_dir().join("bm-pool-rename");
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let src = d.join("narrator.mp3");
         std::fs::write(&src, b"fake-audio").unwrap();
 
-        add_sample(&d, &src, None, Some("Narrator".into())).unwrap();
+        let log = add_sample(&d, &src, None, Some("Narrator".into())).unwrap();
+        assert!(log.iter().any(|l| l.contains("named voice")), "{log:?}");
         let pool = load_pool(&d.join("voice-pool.json"));
-        assert_eq!(pool["Narrator"].tags, vec!["narrator"]);
+        assert!(pool["Narrator"].tags.is_empty());
         assert!(!pool.contains_key("narrator"), "the stem must not leak in as a second voice");
+        assert!(
+            candidates(&pool, &["young".to_string(), "female".to_string()]).is_empty(),
+            "a named voice rolls for nobody"
+        );
         let manifest: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(d.join("voices.json")).unwrap()).unwrap();
         assert_eq!(manifest["Narrator"], "refs/narrator.mp3");
+    }
+
+    #[test]
+    fn explicit_tags_still_pool_a_renamed_voice() {
+        // The power-user shape: custom name AND rotation tags.
+        let d = std::env::temp_dir().join("bm-pool-rename-tags");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let src = d.join("clip.mp3");
+        std::fs::write(&src, b"fake-audio").unwrap();
+
+        add_sample(&d, &src, Some(vec!["old".into(), "male".into()]), Some("Lão".into())).unwrap();
+        let pool = load_pool(&d.join("voice-pool.json"));
+        assert_eq!(pool["Lão"].tags, vec!["old", "male"]);
+        assert_eq!(
+            candidates(&pool, &["old".to_string(), "male".to_string()]),
+            vec!["Lão".to_string()]
+        );
     }
 }

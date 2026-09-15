@@ -250,7 +250,7 @@ async fn run_render(
     let text = std::fs::read_to_string(&script_path)?;
     let data: Value = serde_json::from_str(&text)?;
     let segments = data.get("segments").and_then(|s| s.as_array()).cloned().unwrap_or_default();
-    let policy = bm_core::voices::policy_for(engine);
+    let policy = bm_core::cast::policy_for_bible(engine, &layout.bible())?;
     let cast = bm_core::cast::load_cast(&script_path, &cast_path, &layout.bible(), &policy, true)?;
     let local = engine == "vieneu";
     let planned = bm_core::assemble::drop_headline(&segments);
@@ -430,8 +430,16 @@ async fn run_offer(
         }
         Digest => {
             let bible = offer.bible.clone().unwrap_or(json!({"characters": []}));
-            let (delta, script) = run_digest(layout, n, &bible, settings, "opencode", shared, false).await?;
-            Ok(TaskResult { ok: true, detail: format!("digest ch{n}"), delta: Some(delta), units: 1, script: Some(script), text: None, mp3_b64: None })
+            // The inductor's pick wins; an empty offer (old inductor) falls
+            // back to this worker's own settings, then to opencode.
+            let analyzer = if offer.analyzer.is_empty() {
+                let a = settings.analyzer.clone();
+                if a.is_empty() { "opencode".into() } else { a }
+            } else {
+                offer.analyzer.clone()
+            };
+            let (delta, script) = run_digest(layout, n, &bible, settings, &analyzer, shared, false).await?;
+            Ok(TaskResult { ok: true, detail: format!("digest ch{n} via {analyzer}"), delta: Some(delta), units: 1, script: Some(script), text: None, mp3_b64: None })
         }
         Render => {
             sidecar.ensure(layout).await?;
@@ -594,7 +602,8 @@ async fn main() -> Result<()> {
                     let bible: Value = serde_json::from_str(
                         &std::fs::read_to_string(layout.bible()).unwrap_or_else(|_| "{\"characters\":[]}".into()),
                     )?;
-                    run_digest(&layout, chapter, &bible, &settings, "opencode", &shared, true).await?;
+                    let analyzer = if settings.analyzer.is_empty() { "opencode".into() } else { settings.analyzer.clone() };
+                    run_digest(&layout, chapter, &bible, &settings, &analyzer, &shared, true).await?;
                 }
                 "render" => {
                     let tts_url = tts_url.unwrap_or_else(|| "http://127.0.0.1:8818".into());

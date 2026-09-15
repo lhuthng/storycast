@@ -290,6 +290,31 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
 // validation
 // ---------------------------------------------------------------------------
 
+/// Inline non-verbal cues the VieNeu v3 Turbo emotion checkpoint renders as
+/// sound instead of speech — researched from the installed engine
+/// (`vieneu_utils/phonemize_text.py`, `_EMOTION_TAG_TO_K`): exactly these
+/// three, in English, Vietnamese and unaccented forms. Any other bracketed
+/// span is phonemized as ORDINARY TEXT (read aloud!), so the digest may only
+/// emit these, and validation below rejects the rest.
+const ALLOWED_INLINE_TAGS: [&str; 9] = [
+    "cười", "chuckle", "cuoi",
+    "thở dài", "sigh", "tho dai",
+    "hắng giọng", "clear throat", "hang giong",
+];
+
+/// Bracketed spans in segment text, without the brackets.
+fn inline_tags(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find(']') else { break };
+        out.push(after[..close].trim().to_string());
+        rest = &after[close + 1..];
+    }
+    out
+}
+
 fn split_voice_head(hint: &str) -> String {
     hint.split([',', ':', '-', '–'])
         .next()
@@ -358,12 +383,18 @@ pub fn validate(data: &Value, bible: &Value) -> Result<()> {
         if !names.iter().any(|n| n == speaker) {
             anyhow::bail!("segment {i}: unknown speaker {speaker:?}");
         }
-        if s.get("text").and_then(|t| t.as_str()).unwrap_or("").is_empty() {
+        let text = s.get("text").and_then(|t| t.as_str()).unwrap_or("");
+        if text.is_empty() {
             anyhow::bail!("segment {i}: empty text");
         }
-        let direction = s.get("direction").and_then(|d| d.as_str()).unwrap_or("");
-        if !direction.starts_with("Say ") {
-            anyhow::bail!("segment {i}: direction must start with 'Say '");
+        // Only the engine's three emotion cues may stand in brackets —
+        // anything else is spoken aloud literally downstream.
+        for tag in inline_tags(text) {
+            if !ALLOWED_INLINE_TAGS.contains(&tag.to_lowercase().as_str()) {
+                anyhow::bail!(
+                    "segment {i}: [{tag}] is not a voice tag ([cười]/[thở dài]/[hắng giọng] only)"
+                );
+            }
         }
     }
 
@@ -621,22 +652,60 @@ async fn generate_openrouter(prompt: &str, settings: &Settings) -> Result<String
         .ok_or_else(|| GenError::Fatal(anyhow!("OpenRouter response had no content")))
 }
 
-/// Gemini text model over REST, with the same 6-attempt pacing the Python SDK
-/// path used (the SDK's own retry reused a closed http client, hence the manual loop).
+/// Gemini model chain over REST, ending in opencode as the last resort.
+///
+/// `analyze_models` (when set) IS the chain; otherwise the legacy single
+/// `analyze_model` stands alone, which is today's behavior. Each model gets a
+/// few attempts, then the next one, then opencode.
+///
+/// Skipped fast, never retried: 401/403 (the key is wrong for every model)
+/// and 400 (the request itself is bad) — retrying those anywhere is burning
+/// quota for nothing. Everything else walks on: 429s (after sleeping the
+/// provider's own delay), 5xx, transport errors, unknown-model 404s and spent
+/// day-quotas.
 async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<String, GenError> {
     let key = std::env::var("GEMINI_API_KEY")
         .map_err(|_| GenError::Fatal(anyhow!("GEMINI_API_KEY missing — copy .env.example to .env")))?;
+    let mut last = String::from("no models configured");
+    for model in analyze_chain(settings) {
+        match try_gemini_model(prompt, &key, &model).await {
+            ModelNext::Text(t) => return Ok(t),
+            ModelNext::Abort(e) => return Err(GenError::Fatal(e)),
+            ModelNext::Skip(reason) => {
+                eprintln!("gemini {model} exhausted ({reason}) — next model");
+                last = format!("{model}: {reason}");
+            }
+        }
+    }
+    eprintln!("gemini chain exhausted ({last}) — falling back to opencode");
+    match generate_opencode(prompt, settings).await {
+        Ok(t) => Ok(t),
+        Err(GenError::RateLimited(m)) => Err(GenError::RateLimited(m)),
+        Err(GenError::Fatal(e)) => Err(GenError::Fatal(anyhow!(
+            "gemini chain exhausted ({last}); opencode fallback failed: {e:#}"
+        ))),
+    }
+}
+
+/// What one model attempt resolved to: text, the next model, or give up now.
+enum ModelNext {
+    Text(String),
+    Skip(String),
+    Abort(anyhow::Error),
+}
+
+/// Up to three attempts against one Gemini model.
+async fn try_gemini_model(prompt: &str, key: &str, model: &str) -> ModelNext {
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        settings.analyze_model, key
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
     );
     let body = json!({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 16384},
     });
     let client = reqwest::Client::new();
-    let mut last: Option<String> = None;
-    for attempt in 0..6 {
+    let mut last = String::from("no attempts ran");
+    for attempt in 0..3 {
         let resp = client.post(&url).json(&body).send().await;
         let (status, text) = match resp {
             Ok(r) => {
@@ -644,49 +713,78 @@ async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<String, Ge
                 (status, r.text().await.unwrap_or_default())
             }
             Err(e) => {
-                last = Some(format!("transport error: {e}"));
+                last = format!("transport error: {e}");
                 continue;
             }
         };
         if status.is_success() {
-            let v: Value = serde_json::from_str(&text)
-                .map_err(|e| GenError::Fatal(anyhow!(e).context("gemini response not JSON")))?;
-            return v
+            let v: Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(e) => return ModelNext::Abort(anyhow!(e).context("gemini response not JSON")),
+            };
+            return match v
                 .pointer("/candidates/0/content/parts/0/text")
                 .and_then(|t| t.as_str())
                 .map(String::from)
-                .ok_or_else(|| {
-                    GenError::Fatal(anyhow!(
-                        "gemini response had no text part: {}",
-                        head_chars(&text, 300)
-                    ))
-                });
+            {
+                Some(t) => ModelNext::Text(t),
+                None => ModelNext::Abort(anyhow!(
+                    "gemini response had no text part: {}",
+                    head_chars(&text, 300)
+                )),
+            };
         }
-        if text.contains("PerDay") {
-            return Err(GenError::Fatal(anyhow!(
-                "text-model day quota exhausted — resume remaining chapters tomorrow"
-            )));
+        match status.as_u16() {
+            // Wrong key or bad request: identical for every model, stop now.
+            401 | 403 => {
+                return ModelNext::Abort(anyhow!(
+                    "gemini error {status} on {model}: key or project rejected — {}",
+                    head_chars(text.trim(), 200)
+                ))
+            }
+            400 => {
+                return ModelNext::Abort(anyhow!(
+                    "gemini error 400 on {model}: {}",
+                    head_chars(text.trim(), 200)
+                ))
+            }
+            // Unknown model name or its day quota spent: the next model is
+            // exactly what the chain is for.
+            404 => return ModelNext::Skip(format!("{status} ({})", head_chars(text.trim(), 120))),
+            _ if text.contains("PerDay") => {
+                return ModelNext::Skip("day quota spent".to_string())
+            }
+            429 => {
+                let wait = parse_retry_delay(&text).map(|d| d + 2.0).unwrap_or(30.0);
+                last = format!("429, retry in {wait:.0}s");
+                eprintln!(
+                    "gemini {model} attempt {}/3 rate-limited, sleeping {:.0}s",
+                    attempt + 1,
+                    wait
+                );
+                tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+            }
+            _ => {
+                last = format!("{status}: {}", head_chars(text.trim(), 200));
+            }
         }
-        if status.as_u16() == 429 {
-            let wait = parse_retry_delay(&text).map(|d| d + 2.0).unwrap_or(30.0);
-            last = Some(format!("429, retry in {wait:.0}s"));
-            eprintln!(
-                "analyze attempt {}/6 rate-limited, sleeping {:.0}s",
-                attempt + 1,
-                wait
-            );
-            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
-            continue;
-        }
-        return Err(GenError::Fatal(anyhow!(
-            "gemini error {status}: {}",
-            head_chars(&text, 300)
-        )));
     }
-    Err(GenError::Fatal(anyhow!(
-        "gemini still rate-limited after 6 attempts: {}",
-        last.unwrap_or_default()
-    )))
+    ModelNext::Skip(last)
+}
+
+/// Models to try, in order: `analyze_models` when set, else the legacy single.
+fn analyze_chain(settings: &Settings) -> Vec<String> {
+    let chain: Vec<String> = settings
+        .analyze_models
+        .iter()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .collect();
+    if chain.is_empty() {
+        vec![settings.analyze_model.clone()]
+    } else {
+        chain
+    }
 }
 
 /// One generation attempt against the configured backend.
@@ -896,6 +994,56 @@ mod tests {
     }
 
     #[test]
+    fn analyze_chain_defaults_to_the_single_model() {
+        let plain = Settings::default();
+        assert!(plain.analyze_models.is_empty());
+        assert_eq!(analyze_chain(&plain), vec![plain.analyze_model.clone()]);
+
+        let mut chained = Settings::default();
+        chained.analyze_models = vec![" gemini-3.8-flash ".into(), " ".into(), "gemini-3.5-flash".into()];
+        assert_eq!(analyze_chain(&chained), vec!["gemini-3.8-flash", "gemini-3.5-flash"]);
+    }
+
+    #[test]
+    fn gemini_without_a_key_fails_before_touching_the_network() {
+        let saved = std::env::var("GEMINI_API_KEY").ok();
+        std::env::remove_var("GEMINI_API_KEY");
+        let err = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(generate_gemini("{}", &Settings::default()))
+            .unwrap_err();
+        assert!(err.to_string().contains("GEMINI_API_KEY missing"), "{err}");
+        if let Some(k) = saved {
+            std::env::set_var("GEMINI_API_KEY", k);
+        }
+    }
+
+    #[test]
+    fn inline_tags_accept_the_engine_three_and_nothing_else() {
+        assert_eq!(inline_tags("Hắn [cười] lớn."), vec!["cười"]);
+        assert_eq!(inline_tags("[thở dài] Rồi đi."), vec!["thở dài"]);
+        assert!(inline_tags("Không có gì.").is_empty());
+        assert_eq!(inline_tags("a [b] c [d]"), vec!["b", "d"]);
+
+        let tagged = |text: &str| {
+            json!({
+                "segments": [{"speaker": "Narrator", "text": text, "direction": "Say calm in Vietnamese: x"}],
+                "roster": ["Narrator"]
+            })
+        };
+        validate(&tagged("Hắn [cười]."), &json!({"characters": []})).unwrap();
+        validate(&tagged("Nàng [CƯỜI]."), &json!({"characters": []})).unwrap();
+        validate(&tagged("Hắn [sigh]."), &json!({"characters": []})).unwrap();
+        let err = validate(&tagged("Dừng [pause] lại."), &json!({"characters": []})).unwrap_err();
+        assert!(err.to_string().contains("[pause]"), "{err}");
+        // Invented tags are read aloud downstream — that is why they fail here.
+        let err = validate(&tagged("Hắn [khóc]."), &json!({"characters": []})).unwrap_err();
+        assert!(err.to_string().contains("voice tag"), "{err}");
+    }
+
+    #[test]
     fn retry_delay_parses_both_provider_shapes() {
         assert_eq!(parse_retry_delay("... retry in 53.262507263s"), Some(53.262507263));
         assert_eq!(parse_retry_delay(r#"{"retryDelay": "53s"}"#), Some(53.0));
@@ -926,15 +1074,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_a_bad_direction_and_a_bad_voice_hint() {
-        let bad_dir = json!({
-            "segments": [{"speaker": "Narrator", "text": "hi", "direction": "narrate"}],
+    fn validate_ignores_direction_and_rejects_a_bad_voice_hint() {
+        // `direction` used to be required ("Say ..."); nothing consumes it, so
+        // it is neither required nor checked now — old scripts keep passing.
+        let no_dir = json!({
+            "segments": [{"speaker": "Narrator", "text": "hi"}],
             "roster": ["Narrator"]
         });
-        assert!(validate(&bad_dir, &json!({"characters": []})).is_err());
+        validate(&no_dir, &json!({"characters": []})).unwrap();
 
         let bad_hint = json!({
-            "segments": [{"speaker": "Narrator", "text": "hi", "direction": "Say calm in Vietnamese: hi"}],
+            "segments": [{"speaker": "Narrator", "text": "hi"}],
             "roster": ["Narrator"],
             "new_characters": [{"name": "X", "voice_hint": "mysterious"}]
         });

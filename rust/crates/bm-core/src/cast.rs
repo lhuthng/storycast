@@ -10,7 +10,7 @@ use crate::voices::VoicePolicy;
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// `character -> voice`. Ordered so the file on disk is diff-friendly.
 pub type Cast = BTreeMap<String, String>;
@@ -96,6 +96,38 @@ fn pool_for_bible(bible_path: &Path) -> crate::pool::Pool {
         }
     }
     crate::pool::load_pool(Path::new("/nonexistent/voice-pool.json"))
+}
+
+/// The operator roster for these paths, real layout or test fixture: the first
+/// `.bm/voices.json` found walking up from the bible, else a path that loads
+/// as "no opinion". Missing means unrestricted, exactly like today.
+fn roster_for_bible(bible_path: &Path) -> PathBuf {
+    let mut dirs = Vec::new();
+    if let Some(d) = bible_path.parent() {
+        dirs.push(d.to_path_buf());
+        if let Some(p) = d.parent() {
+            dirs.push(p.to_path_buf());
+        }
+    }
+    for dir in &dirs {
+        let cand = dir.join(".bm/voices.json");
+        if cand.is_file() {
+            return cand;
+        }
+    }
+    dirs.first()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".bm/voices.json")
+}
+
+/// The assignable-voice policy for a render: the operator's own roster, never
+/// the shipped catalogue alone. Assigning from the catalogue once voice-matched
+/// a Northern preset the sidecar gate then refused — shelving the chapter for
+/// a voice nobody was allowed to use.
+pub fn policy_for_bible(engine: &str, bible_path: &Path) -> Result<VoicePolicy> {
+    crate::voices::effective_policy(&roster_for_bible(bible_path), engine)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Resolve the full cast for a chapter, assigning any missing speaker.
@@ -218,6 +250,21 @@ pub fn load_cast(
         }
         let hint = hints.get(name).cloned().unwrap_or_default();
         let preset = policy.pool_for_hint(&hint).to_vec();
+        // The accent policy binds the assigner too, not just the gates: with
+        // an exclusion in force, an excluded preset must never be written into
+        // the cast for a gate to reject later. Empty `allowed` is "no
+        // restriction", so the shipped catalogue behaves exactly as before.
+        // A character with nothing admissible stays unassigned and fails
+        // loudly at planning, naming them — instead of shelving three renders
+        // against a voice nobody may use.
+        let preset: Vec<String> = if policy.allowed.is_empty() {
+            preset
+        } else {
+            preset
+                .into_iter()
+                .filter(|v| policy.allowed.iter().any(|a| a == v))
+                .collect()
+        };
         let pick = preset
             .iter()
             .min_by_key(|v| {
@@ -441,6 +488,45 @@ mod tests {
             .unwrap();
         assert_eq!(cast.get("Narrator").unwrap(), "Đức Trí");
         assert_eq!(cast.get("Dịch Phong").unwrap(), "Thái Sơn");
+    }
+
+    #[test]
+    fn an_excluded_preset_is_never_assigned() {
+        // The operator bans Northern: the assigner must not write Minh Đức
+        // (or any Northern preset) into the cast for a gate to reject later —
+        // that exact write shelved a real chapter three times.
+        let d = tmpdir("policy-assign");
+        std::fs::create_dir_all(d.join(".bm")).unwrap();
+        std::fs::write(
+            d.join(".bm/voices.json"),
+            r#"{"version":1,"engines":{"vieneu":{"policy":{"excluded_accents":["Northern"]}}}}"#,
+        )
+        .unwrap();
+        let script = d.join("script-01.json");
+        std::fs::write(&script, r#"{"roster":["Ông Già"],"segments":[]}"#).unwrap();
+        let bible = d.join("bible.json");
+        std::fs::write(
+            &bible,
+            r#"{"characters":[{"name":"Ông Già","voice_hint":"elderly male, stern","tags":["old","male"],"proper_aliases":[]}]}"#,
+        )
+        .unwrap();
+
+        let policy = policy_for_bible("vieneu", &bible).unwrap();
+        assert!(!policy.allowed.is_empty(), "the exclusion must bite");
+        let cast =
+            load_cast(&script, &d.join("cast-vieneu.json"), &bible, &policy, false).unwrap();
+        let got = cast.get("Ông Già").unwrap();
+        assert!(policy.allowed.contains(got), "assigned {got:?} outside the policy");
+        assert_ne!(got, "Minh Đức");
+    }
+
+    #[test]
+    fn a_malformed_roster_fails_the_render_policy_loudly() {
+        let d = tmpdir("policy-broken");
+        std::fs::create_dir_all(d.join(".bm")).unwrap();
+        std::fs::write(d.join(".bm/voices.json"), "{ nope").unwrap();
+        let err = policy_for_bible("vieneu", &d.join("bible.json")).unwrap_err();
+        assert!(err.to_string().contains("parsing"), "{err}");
     }
 
     #[test]

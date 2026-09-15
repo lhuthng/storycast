@@ -254,6 +254,7 @@ impl Inner {
             tts_url: t.stage.needs_tts().then_some(tts_url),
             engine: self.settings.engine.clone(),
             model_order: self.settings.model_order.clone(),
+            analyzer: self.settings.analyzer.clone(),
             bible: if bible.is_null() { None } else { Some(bible) },
             script,
             text,
@@ -632,6 +633,17 @@ impl Inner {
                 }
             }
             if !self.layout.script(n).is_file() {
+                // A digest is only offered once its crawl reads Done — and a
+                // backend booted empty never created that task at all. Seed it
+                // Done when the text is already on disk, or the digest waits
+                // forever while workers idle (exactly this bug).
+                if self.layout.chapter_txt(n).is_file() {
+                    let c = self.ensure_task(n, Stage::Crawl);
+                    if c.state == TaskState::Pending {
+                        c.state = TaskState::Done;
+                        c.updated = now_secs();
+                    }
+                }
                 let t = self.ensure_task(n, Stage::Digest);
                 if t.state == TaskState::Pending {
                     digests += 1;
@@ -835,6 +847,47 @@ mod tests {
         // Anything else undeclared still needs a prior assignment to be trusted.
         let err = inner.op_swap_voice("A", "Chưa Từng Có").unwrap_err().to_string();
         assert!(err.contains("neither an admitted preset"), "{err}");
+    }
+
+    #[test]
+    fn enqueue_seeds_crawl_done_so_the_digest_is_offerable() {
+        // Empty boot (B reconciles nothing) + text on disk + no script: the
+        // digest must become offerable, which needs crawl:1 Done, not missing.
+        // Before the fix the digest waited forever while workers idled.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::write(layout.chapter_txt(1), "Chương 1: X\n\nbody\n").unwrap();
+
+        let (crawls, digests) = inner.enqueue_translate(1, 1);
+        assert_eq!((crawls, digests), (0, 1));
+        assert_eq!(inner.tasks["crawl:1"].state, TaskState::Done);
+        assert_eq!(inner.tasks["digest:1"].state, TaskState::Pending);
+
+        inner.workers.insert("w1".into(), "127.0.0.1".into());
+        let offer = inner.offer("w1").expect("digest:1 must be offered");
+        assert_eq!(offer.task_id, "digest:1");
+    }
+
+    #[test]
+    fn translate_heals_a_range_missing_downstream_tasks() {
+        // Ledger holds only digest:done (hand-reset, older builds): after a
+        // translate the full chain exists again instead of idling with nothing
+        // offerable.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::write(layout.chapter_txt(1), "Chương 1: X\n\nbody\n").unwrap();
+        std::fs::write(
+            layout.script(1),
+            r#"{"roster":["Narrator"],"segments":[{"speaker":"Narrator","text":"x"}]}"#,
+        )
+        .unwrap();
+        inner.reconcile(1, 1);
+        assert!(inner.tasks.contains_key("render:1"), "render recreated");
+        assert!(inner.tasks.contains_key("merge:1"), "merge recreated");
+        assert_eq!(inner.tasks["digest:1"].state, TaskState::Done);
+        assert_eq!(inner.tasks["render:1"].state, TaskState::Pending);
     }
 
     #[test]
