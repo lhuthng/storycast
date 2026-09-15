@@ -24,6 +24,7 @@ RULES:
 2. Attribute quotes via dialogue tags and context (noi, hoi, quat, day do, cam than, tu an ui...). Pronouns han/nang + nearby names/titles resolve to that character. Tag every segment with its scene; consecutive segments in one place/time share one label.
 3. mentions records EVERY surface form used for a speaker in this chapter (pronouns han/nang/ta, titles ty ty, descriptive phrases) — it is chapter-local context, never global identity.
 4. new_characters / new_aliases are for PROPER NAMES ONLY (real names, stable unambiguous titles). Never propose pronouns, generic nouns (pham nhan, con...), or verb phrases there — those belong in mentions.
+   A KNOWN name plus decoration is NOT a new person: "Huyền Vũ lão tổ" is Huyền Vũ with a title, "Mao Ý (thanh niên mặc hoa phục)" is Mao Ý with a description, "Sở Cuồng sư" is "Sở Cuồng Sư" with different casing. Report every such form in new_aliases under the bare bible name — NEVER as a new_character. Speaker labels are bare names only, no parentheticals.
 5. Narrator covers all non-dialogue prose. EXCEPTION: game-system notifications inside the
    protagonist's head (lines like "Dinh -- ...", status readouts like "Ky chu:", "Tuoi tac:",
    skill/achievement lists) are spoken by the "Hệ thống" character (already in the bible) —

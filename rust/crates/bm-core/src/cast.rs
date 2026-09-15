@@ -146,12 +146,18 @@ pub fn load_cast(
     save: bool,
 ) -> Result<Cast> {
     // --- gather speakers and voice hints -------------------------------------
+    // Voice hints live in the bible now; the script only names people. The
+    // bible loads first because every gathered speaker is canonicalized
+    // against it: a variant form ("Sở Cuồng sư") joins under its canonical
+    // name ("Sở Cuồng Sư") instead of rolling a second voice.
+    let bible = crate::digest::load_bible(bible_path);
     let mut hints: BTreeMap<String, String> = BTreeMap::new();
     let mut speakers: Vec<String> = vec!["Narrator".to_string()];
     let mut seen: HashSet<String> = speakers.iter().cloned().collect();
     let add_speaker = |speakers: &mut Vec<String>, seen: &mut HashSet<String>, name: &str| {
-        if !name.is_empty() && seen.insert(name.to_string()) {
-            speakers.push(name.to_string());
+        let name = crate::digest::resolve_speaker(&bible, name);
+        if !name.is_empty() && seen.insert(name.clone()) {
+            speakers.push(name);
         }
     };
 
@@ -168,7 +174,7 @@ pub fn load_cast(
                     continue;
                 }
                 hints.insert(
-                    name.to_string(),
+                    crate::digest::resolve_speaker(&bible, name),
                     c.get("voice_hint")
                         .and_then(|h| h.as_str())
                         .unwrap_or("")
@@ -190,7 +196,7 @@ pub fn load_cast(
     }
 
     // Voice hints live in the bible now; the script only names people.
-    let bible = crate::digest::load_bible(bible_path);
+    // (Speakers above were already canonicalized, so these keys line up.)
     let mut char_tags: BTreeMap<String, Vec<String>> = BTreeMap::new();
     if let Some(chars) = bible.get("characters").and_then(|c| c.as_array()) {
         for c in chars {
