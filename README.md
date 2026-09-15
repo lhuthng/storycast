@@ -1,244 +1,278 @@
-# storycast
+# Storycast — turn a web novel into a multi-voice audiobook, on one machine or a whole cluster
 
-Vietnamese web-novel chapters → multi-voice audiobooks, distributed across a
-cluster of machines. One orchestrator ("inductor") schedules work; worker
-agents pull tasks, report progress, and push results back. TTS runs in a
-Python sidecar; everything else is Rust + Tokio.
+Storycast takes a novel that exists as web pages and produces finished,
+multi-voice audiobook chapters: **`Ch.42 - The Title.mp3`**, with a different
+voice per character, pauses, and optional ambience — automatically, chapter
+after chapter, optionally spread across several computers on your LAN.
 
-If you only need the daily flow, read [Start, watch, stop](#start-watch-stop)
-and [Changing voices](#changing-voices). The rest explains how the machine
-works when something surprises you.
+It is **not tied to one novel, one site, or one language**. Point it at any
+chapter URL template and it will crawl, dramatize and speak it.
 
-## Architecture
+## What you get when you clone, and what you bring
 
-```mermaid
-flowchart LR
-    subgraph Control["Control plane (this machine)"]
-        TUI["bm-inductor tui"]
-        IND["bm-inductor serve :8901<br/>scheduler · ledger · HTTP API"]
-        TUI <--> IND
-    end
-    subgraph Workers["Work plane (any machine)"]
-        A1["bm-agent worker<br/>local"]
-        A2["bm-agent worker<br/>192.168.x.x"]
-        S1[("TTS sidecar :8818<br/>per render task")]
-        S2[("TTS sidecar :8818<br/>per render task")]
-        A1 <--> S1
-        A2 <--> S2
-    end
-    A1 -->|"pull task · heartbeat 2s<br/>report complete"| IND
-    A2 -->|"pull task · heartbeat 2s<br/>report complete"| IND
+The repo is the _machine_, not the _material_. A fresh clone contains:
+
+| In the repo                           | What it is                                                                                                                                                                                                            |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rust/` (four crates)                 | The pipeline: scheduler, workers, dashboard, provisioning                                                                                                                                                             |
+| `python/`                             | The TTS sidecar — **Vieneu** by default (local voice-clone TTS), with a **Gemini TTS** engine also built in                                                                                                           |
+| `prompts/analyze.txt`                 | An **example** dramatization prompt (written for Vietnamese web novels). This is the main thing you edit for another language or genre — the program only requires that it returns the JSON shape described inside it |
+| `voices.default.json`                 | The built-in catalogue voices the engine ships with                                                                                                                                                                   |
+| `assets/`, `Makefile`, `.env.example` | Scene maps, ambience loops, one-command operations, config template                                                                                                                                                   |
+
+Everything _specific to your book_ is created at runtime and git-ignored, so a
+fresh clone is a valid empty state:
+
+| Created by you / at runtime (ignored by git) | What it is                                                                                                         |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `url_template` in `.bm/settings.json`        | Where the chapters live — `{n}` is the chapter number. **This is the only novel-specific setting you must change** |
+| Edits to `prompts/analyze.txt`               | Your own dramatization style/language, if the shipped example doesn't fit                                          |
+| `voices.json`, `voice-pool.json`, `refs/`    | Your cloned voices and reference clips (skip entirely to use the catalogue voices)                                 |
+| `data/`, `output/`                           | Scripts, character bible, cached audio, finished MP3s                                                              |
+| `.bm/`                                       | Ledger, settings, machine registry, logs                                                                           |
+| `.env`                                       | Your API keys (from `.env.example`)                                                                                |
+
+So the same program converts any novel: the language, cast and voices all come
+from your prompt, your URL template and your voice files — the code only knows
+how to fetch a chapter → turn prose into a script of labelled segments → speak
+each segment with the right voice → glue the audio together.
+
+---
+
+## 1. What it actually does (the 60-second version)
+
+For each chapter, four stages run in order:
+
+```
+URL ──crawl──▶ clean text ──digest──▶ script-NN.json ──render──▶ per-segment audio ──merge──▶ Ch.N - Title.mp3
+                                │
+                                └─▶ bible.json        (who the characters are, kept across chapters)
+                                    cast-vieneu.json  (which voice speaks each character)
 ```
 
-```mermaid
-flowchart TB
-    subgraph Disk["Shared-nothing layout (synced, never shared live)"]
-        direction LR
-        CH["data/chapters/chNN.txt"]
-        SC["data/script-NN.json"]
-        BI["data/bible.json"]
-        CA["data/cast-vieneu.json"]
-        SE["data/audio/segments-*/*.wav"]
-        MP["output/Ch.N - Title.mp3"]
-    end
-    IND -- "offer carries bible/script/text inline" --> A1
-    A1 -- "crawl text · digest script+bible-delta · merge mp3 (base64)" --> IND
-    S1 -- "wav per segment" --> A1
+- **crawl** — downloads chapter `{n}` from your URL template and cleans it into
+  plain text.
+- **digest** — sends the text + the character bible to an LLM with your prompt
+  (`prompts/analyze.txt`). The LLM answers in strict JSON: who speaks, which
+  pronoun/alias belongs to whom, and the chapter split into segments with
+  speaker + mood + scene. Result: `data/script-NN.json`.
+- **render** — speaks every segment through the TTS engine using the voice
+  assigned to that segment's speaker. Each finished segment is cached, so a
+  crash costs seconds, not a chapter.
+- **merge** — concatenates the segments (gaps + optional ambience beds) into
+  the final `Ch.N - Title.mp3` in `output/`.
+
+A scheduler — the **inductor** — owns this state and hands chapters to workers
+(**agents**), on this machine and on any boxes you add over SSH.
+
+---
+
+## 2. Install
+
+Requirements: **Rust** (1.75+), **Python 3** (for the Vieneu TTS sidecar), and
+an analyzer of your choice: a Gemini API key, [opencode](https://opencode.ai),
+an OpenRouter key, or a local Ollama.
+
+```bash
+git clone lhuthng/storycast.git
+cd storycast
+make build               # compiles the Rust workspace
+
+cp .env.example .env     # then edit: put your key(s) in
+#   GEMINI_API_KEY=...      (or OPENROUTER_API_KEY, or nothing if you use opencode)
+#   TTS_ENGINE=vieneu       (default; `gemini` for the API engine)
 ```
 
-There is no shared filesystem and no shared database. The inductor is the
-only decider and the only writer of shared state; everything a worker needs
-rides inside the task offer, and everything it produces comes home in the
-completion report. Small files go out (~30 KB scripts), mp3s (~5 MB) come
-home. Segment caches never cross the network.
+The Python side of Vieneu lives in `python/` (`tts_vieneu.py`,
+`tts_server.py`). A virtualenv with its dependencies is created for you when
+needed — the first build downloads ~1.7 GB of model weights, once.
 
-## Start, watch, stop
+### Tell it about your novel
 
-Prereqs: Rust toolchain, `ffmpeg`, `ssh`, `rsync`, `curl`, Python 3.12 with
-`python/requirements.txt`, voice reference clips in `refs/` (see
-[Voices](#voices)).
-
-| Goal | Keys |
-|---|---|
-| Start everything | `B` |
-| Preview + start with a chapter range | `R`, `e` edits range, `Enter` launches |
-| Enqueue a range on a running backend | `t`, type `<start> <count>` |
-| Stop everything, everywhere | `X`, confirm |
-| Add a machine / provision it / drop it | `a`, `p` (`P` forces), `d` |
-
-**`B` means ready, not hopefully-ready.** It provisions every registered
-machine first (agent binary, sources, venv, voice enrolment), starts a worker
-on each remote, then boots the local backend — and aborts the whole start if
-any box fails, naming it. When remotes exist the inductor binds LAN-wide so
-they can reach it; solo runs stay on loopback. If a running inductor turns
-out loopback-bound while remotes are registered, `B` restarts it LAN-wide
-automatically (workers re-register on their own; in-flight reports still
-count).
-
-**`X` means quiet afterwards.** It stops the local backend, sweeps the local
-box for strays, then kills workers and sidecars on every registered machine
-over ssh, each reporting its own outcome. Tasks stranded on dead workers are
-requeued into the ledger the moment no inductor answers — stop→start loses
-nothing to lease waits. In-flight tasks return to the queue; the ledger keeps
-everything.
-
-**Watch:** the Workers pane (live beat: stage, chapter, progress bar,
-activity), the Tasks pane (per-stage done/open/failed/shelved), Events (every
-completion and refusal lands here). Finished mp3s land in `output/`.
-
-```mermaid
-flowchart TB
-    B(["B / R+Enter"]) --> P["provision every machine"]
-    P -- "any box fails" --> AB["abort, name the box"]
-    P -- "all ready" --> RW["start remote workers"]
-    RW -- "a launch fails" --> AB
-    RW --> RB["rebind inductor LAN-wide if remotes can't see it"]
-    RB --> LB["spawn local backend (empty reconcile: boot invents no work)"]
-    LB --> ENQ["enqueue range (R only)"]
-    ENQ --> PULL["workers pull · heartbeat · complete"]
-    X(["X + confirm"]) --> KL["stop local backend + sweep strays"]
-    KL --> KR["kill remote workers + sidecars over ssh"]
-    KR --> RQ["requeue stranded assignments in ledger"]
+```bash
+make tui        # press c, then paste your template, e.g.:
+                #   https://example.com/truyen/any-novel/chapter-{n}
 ```
 
-## How tasks flow
+`{n}` is where the chapter number goes. The TUI saves it to
+`.bm/settings.json` and immediately probe-crawls one chapter to prove the
+selector finds the text. This URL template is the **only novel-specific thing
+you must change** to convert a different novel (plus, if you want a different
+dramatization style, `prompts/analyze.txt`).
 
-One chapter is four tasks: `crawl → digest → render → merge`. Each stage only
-becomes offerable when its upstream stages read `Done`, so a chapter walks
-the chain in order while different chapters overlap across workers.
+### Tell it who speaks (optional, for cloned voices)
 
-```mermaid
-stateDiagram-v2
-    [*] --> pending: enqueue / requeue
-    pending --> assigned: oldest Pending with upstream Done
-    assigned --> done: worker reports ok
-    assigned --> pending: report failed (attempts+1, <3) · lease expired (no strike) · worker dead >90s (no strike)
-    assigned --> shelved: 3rd reported failure
-    shelved --> pending: fix the cause, swap a voice, or reset the entry
-    done --> [*]
+- `voices.json` maps character names → a clip in `refs/`, e.g.
+  `{"Narrator": "refs/narrator.mp3"}`. Both are git-ignored: they are personal.
+- `voice-pool.json` is the tag-matched sample pool. Add a clip with
+  `bm-inductor roster add-sample refs/young-female-4.mp3` — tags come from the
+  filename, and the clip is enrolled on every worker at the next provision.
+- Add nothing and the engine's built-in catalogue voices are used; a per-engine
+  accent policy assigns a voice to each character automatically.
+
+### Give it atmosphere (ambience)
+
+Chapters don't have to be dry voices. The dramatization prompt tags every
+segment with a `scene` label (`"market-stall-morning"`, `"forest-night"`), and
+the merge stage turns those labels into background sound:
+
+- Consecutive same-speaker lines form a *run*; the run's majority scene label
+  is matched against ordered keyword rules in `assets/scene-map.json` — first
+  match wins. `"storm"` lays `rain-storm.mp3` under the mix at 22% volume,
+  `"night"` gets crickets, `"market"` gets a crowd, and so on (8 beds ship in
+  `assets/ambience/`).
+- The bed loops for the whole run and is **ducked automatically** whenever
+  someone speaks (ffmpeg sidechain: the bed drops away under the voice and
+  swells back in the pauses). Rules can also attach a reverb preset for room
+  feel.
+- A missing bed file is not an error — that span just plays dry voice.
+- To customize: drop your own loops into `assets/ambience/`, add or reorder
+  rules in `assets/scene-map.json` (`match` keywords, `bed`, `level`, optional
+  `reverb`), or turn the whole thing off with `"ambience": false` in
+  `.bm/settings.json` (the stock TUI run screen doesn't yet expose it, but the
+  setting is read at merge time).
+
+---
+
+## 3. Start it — three ways, easiest first
+
+### A. "Just run it on this machine" (solo, headless)
+
+```bash
+make serve START=1 COUNT=10      # terminal 1: inductor (scheduler + API on :8901)
+make agent                       # terminal 2: a local worker
 ```
 
-- **Workers pull; the inductor is the only decider** (eligibility, leases,
-  strikes). There is no push and no worker-side scheduling.
-- **Leases expire back to the pool with no strike** — silence is not failure
-  (crawl 10m, digest 20m, render 90m, merge 30m). A reaper also frees tasks
-  assigned to workers with no live beat (>90s), so kills and crashes unstick
-  themselves within ~2 minutes without waiting out leases.
-- **3 reported failures shelve a chapter;** the rest flow around it. Shelving
-  counts *reported* failures, so fix the cause first (dead box, stale binary,
-  bad voice), then unstick it.
-- **Merge runs where the segments are** (affinity): the machine that rendered
-  a chapter merges it. Segment caches never cross the network.
-- **Ledger (`.bm/ledger.json`) persists assignments + strikes;** startup
-  reconciles from artifacts on disk, so restarts resume instead of restarting.
-- **Digest workers return bible deltas; the inductor merges as the single
-  writer.** Scripts hold content only — headlines are never segments.
+That's it — watch `output/` fill up with `Ch.N - Title.mp3`. Stop with `Ctrl-C`;
+nothing is lost (see §4).
 
-Typical offer/complete round trip:
+### B. "Run it and watch it" (recommended — the TUI does everything)
 
-```mermaid
-sequenceDiagram
-    participant W as worker
-    participant I as inductor
-    participant T as TTS sidecar
-    W->>I: GET /api/task?worker_id=…
-    I-->>W: offer (script/bible/text inline)
-    W->>T: POST /infer per uncached segment
-    T-->>W: wav bytes
-    W->>I: POST /api/complete (ok + artifacts)
-    I-->>W: 200 (ledger saved)
+```bash
+make tui
 ```
 
-## How fast it renders
+| Key                   | Does                                                                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| **B**                 | _One key to run everything_: provisions every registered machine, starts the backend + workers, then launches the saved chapter range |
+| **R**                 | System overview — previews range/analyzer; `Enter` launches                                                                           |
+| **t**                 | Enqueue a chapter range (`<start> <count>`) — needs the inductor up                                                                   |
+| **K**                 | **Task ledger** — every task, its failure reason; `u` retry, `F` force re-run                                                         |
+| **u**                 | Retry all shelved tasks (strikes reset)                                                                                               |
+| **v** / **s** / **S** | Voice roster refresh / swap one character's voice / cast overview                                                                     |
+| **e**                 | ETA for the remaining range                                                                                                           |
+| **p** / **P**         | Provision the selected machine / force re-provision                                                                                   |
+| **a** / **d** / **i** | Add a machine by IP / drop it / inspect it                                                                                            |
+| **X**                 | Stop everything, everywhere                                                                                                           |
+| **r**                 | Refresh now · **?** full help · **C** colour on/off · **q** quit                                                                      |
 
-Measured medians from this repo's own throughput ledger (`.bm/stats.jsonl`,
-which also feeds `e` / eta):
+`B` with no machines registered runs a local-only cluster — the easy first run.
+In the task ledger (`K`): `j/k` or arrows to move, type to filter (e.g.
+`shelved`, `digest`, `42`), `Enter` for the full error, `Esc`/`q` to close.
 
-| Stage | Median wall time | Unit |
-|---|---|---|
-| digest | ~71 s | per chapter (LLM: script + bible delta) |
-| render | ~63 s | per chapter (~29 TTS calls, ~2 s/call) |
-| merge | ~3 s | per chapter (local ffmpeg assemble) |
-| crawl | seconds | per chapter (fetch + clean) |
+### C. "Spread it over the LAN" (cluster)
 
-What decides render speed, in order:
+```bash
+# 1. Remember the other box (writes .bm/machines.json, git-ignored)
+make link NAME=box-1 ADDR=192.168.2.2
 
-1. **Cache hits.** Every segment file that already exists (>1 KB) is skipped.
-   Re-running a chapter after a partial render only voices the missing runs.
-2. **Run batching.** Consecutive lines by one speaker render as a single TTS
-   call, so chatty chapters cost fewer calls than the line count suggests.
-3. **Sidecar lifecycle.** The agent boots the sidecar per render task and
-   stops it after (~3–5 GB transient RSS returns to the OS), so the first
-   call of a task pays model-load while the rest run hot.
-4. **Worker count.** Digest and render parallelise across boxes; merge sticks
-   to the render box by affinity.
+#    …or skip `link` and onboard straight by address:
+#    make provision ADDR=192.168.2.2 KEY=~/.ssh/your-key
 
-`e` (eta) estimates the remaining range from measured throughput ÷ live
-workers, falling back to guesses (marked `(guess)`) with no data yet.
+# 2. Onboard it over SSH: pushes sources, builds the Python venv, enrolls your
+#    clone voices, starts the TTS sidecar. Cheap to re-run — a content stamp
+#    makes a nothing-changed run finish in under a second.
+make provision BOX=box-1
 
-## Scripts: what they are and how they're handled
+# 3. Start the cluster (re-provisions — fast now — then launches everything)
+make tui     # press B
+```
 
-`data/script-NN.json` is the chapter's directed content: an ordered `segments`
-array of `{speaker, text, mood, scene}` plus `roster`/`mentions` metadata.
-The digest stage writes it (via the analyzer chain, below); render and merge
-only read it. Treat scripts as build input: never hand-edit one without
-purging that chapter's `data/audio/segments-*/` dir, or stale audio will be
-served as fresh.
+Workers pull chapters from a shared queue, so idle machines pick up work
+automatically. A chapter's render+merge stays on the box that rendered it, so
+cached segments are never re-uploaded.
 
-Chapter headlines (`Chương N, <title>`) are spoken but are never segments:
-the assembler drops the headline row and renders it as a separate title clip.
+Headless or screen-reader friendly: `bm-inductor tui --once` prints one
+plain-text snapshot and exits (fine in scripts, `watch`, CI).
 
-**Digest backends** (`R` → `e` → `<start> <count> [analyzer] [models,…]`):
-`opencode` | `openrouter` | `local` | `gemini`. With `analyze_models` set,
-each model gets a few attempts in order, then `opencode` as last resort; only
-key/request errors stop immediately. Model names go into the API URL verbatim
-— use full IDs (`gemini-3.6-flash`, not `3.6-flash`). A digest that returns
-unparseable JSON gets one repair pass before the chain moves on. Secrets
-(`GEMINI_API_KEY`, …) live in each machine's own `.env` and never travel in
-offers — a fresh box fails digests until it has its own key.
+---
 
-## Voices
+## 4. Where everything lives
 
-`voices.default.json` is the shipped catalogue: every preset with
-gender/accent/style, committed on purpose so a fresh clone renders with no
-local config. It states no preference and excludes nothing.
+Everything below except the first three rows is created at runtime and
+git-ignored — see the two tables at the top for the tracked/ignored split.
 
-Your taste lives in `.bm/voices.json` (gitignored): excluded accents and a
-`default_cast`. The cast file (`data/cast-vieneu.json`) stores voice **keys**,
-stable across renames. Enrolled clones (`voices.json` + `refs/*.wav`) and
-pooled samples (`voice-pool.json`, tags from filenames) are vetted at adding
-and always assignable. Provisioning re-enrolls whatever is missing on every
-run, so a venv rebuild never silently loses the cast — one bad clip is
-skipped loudly without blocking the rest.
+| Path                                        | What it is                                                                                  |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `prompts/analyze.txt`                       | **The dramatization prompt — your main customization point** (tracked; an example you edit) |
+| `assets/ambience/`, `assets/scene-map.json` | Ambience loops and scene labels (tracked)                                                   |
+| `voices.default.json`                       | The built-in catalogue voices (tracked)                                                     |
+| `output/Ch.N - Title.mp3`                   | **The finished audiobook chapters**                                                         |
+| `data/chapters/NN.txt`                      | Crawled, cleaned chapter text                                                               |
+| `data/script-NN.json`                       | The dramatized script (segments + speakers + moods + scenes)                                |
+| `data/bible.json`                           | The growing character bible (canonical names, aliases, voice traits)                        |
+| `data/cast-vieneu.json`                     | Speaker → voice assignment (one per engine)                                                 |
+| `data/audio/segments-vieneu-NN/`            | Cached per-segment audio (one dir per chapter, per engine) — renders are resumable          |
+| `voices.json`                               | Character → reference clip (clone voices)                                                   |
+| `voice-pool.json`                           | Tagged sample pool for automatic voice assignment                                           |
+| `refs/`                                     | Your voice clips                                                                            |
+| `.bm/settings.json`                         | Run config: url_template, engine, start/count, speed, gap_ms, ambience, analyzer, models    |
+| `.bm/ledger.json`                           | The task ledger — which chapter/stage is in which state; survives restarts                  |
+| `.bm/machines.json`                         | Linked machines (addr, ssh user/port/key)                                                   |
+| `~/.bm-worker/`                             | A worker's whole world on any machine: agent binary, venv, sources, `.provision_stamp.json` |
 
-**Changing voices:** `S` shows the whole cast with a verdict per row
-(`ok`, `shared`, `blocked`, `unknown`, `unassigned`); `Enter` jumps to the
-picker. `s` picks character → voice (`Tab` auditions into
-`data/previews/`). A swap deletes **only** that speaker's cached segment
-files, drops the stale mp3s, and requeues render+merge for the touched
-chapters — everyone else keeps cache. **Rule: `X`, swap, `B` — never swap
-while workers show anything but idle.** Mid-play swaps are refused
-(`busy: render:5 on w1 — X stops everything, then swap`); with the inductor
-down the picker reads from disk (`offline` in the header) and commits against
-the files, guarded by inductor-down + no-local-workers.
+The pipeline is **restart-safe**: all of the above is on disk. Kill anything at
+any time — the inductor picks up exactly where the ledger says, and cached
+segments are never re-rendered.
 
-## Operations reference (TUI keys or `POST /api/op`)
+---
 
-| Key | Op | What it does |
-|---|---|---|
-| `t` | translate | Enqueue crawl+digest for a range (`start count`). Idempotent. |
-| `c` | crawl-setup | Persist the URL template; probe-crawl one chapter, report selector health. |
-| `v` | voices | Read the roster, enforce policy, refill cast gaps. |
-| `s` | swap-voice | Repoint one character (see above). Blocked mid-play; works offline. |
-| `e` | eta | Remaining work from measured throughput ÷ live workers. |
-| `u` | retry | Requeue shelved tasks after fixing the cause (strikes reset). |
+## 5. When something fails (the short version)
 
-TUI keys: `a` add machine · `p` provision selected · `P` force re-provision ·
-`d` drop · `i` inspect · `r` refresh · `?` help · `C` colour · `q` quit.
-`A` pools a sample clip (tags from filename, voice auto-rolls); `N` adds a
-named voice (`path as Name`, manual assignment only).
-`bm-inductor tui --once --api …` prints one plain-text snapshot and exits.
+- A task that fails 3 times is **shelved** so it stops starving healthy
+  chapters. Open **K**: the row shows _why_ — the worker's actual error, in
+  full on `Enter`. `u` re-queues it (forgiving the strikes), `F` re-runs it from
+  scratch and clears any partial output (e.g. a stale `script-NN.json`).
+- A task whose worker dies, or whose lease expires, is re-queued automatically
+  — silence is never punished as a failure.
+- The Events pane records every completion, failure, expiry and operator action
+  with its reason; the same stream is on `/api/state` under `events`.
+- Full guide: **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)**.
+- Under the hood (crates, state machine, API, provisioning cache):
+  **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+- Plans (any-provider LLM, AWS EC2 + S3): **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
-Provisioning is idempotent: configured machines get a sources sync + voice
-check only; the venv build runs only when missing. `p` reports
-`complete — ready` vs `INCOMPLETE` honestly instead of always "finished".
+---
+
+## 6. Tests & development
+
+```bash
+make test                            # cargo test --workspace + clippy -D warnings
+cargo test -p bm-inductor tui::      # just the TUI tests
+```
+
+The suite never touches the network: SSH targets in tests are TEST-NET
+addresses, the LLM/TTS sides are stubbed, and the TUI renders to an in-memory
+backend.
+
+More design reading, kept local (`.docs/` is git-ignored, so it is not in the
+repo history):
+
+- `.docs/TUI_UX_AUDIT.md` — the reasoning behind every pane and key in the dashboard
+- `.docs/VOICE_CONFIG_PROPOSAL.md` — the voice pool / accent policy design
+- `.docs/PLAN.md` — the original build plan, milestone by milestone
+
+## 7. Honest limitations
+
+- **Vieneu is local and free but heavy**: ~1.7 GB of model weights, and it
+  speaks Vietnamese best. For other languages, either use the Gemini TTS engine
+  (`TTS_ENGINE=gemini`) or adapt `python/tts_router.py` to bring your own.
+- **Gemini TTS is quota-limited** on the free API tier (~10 TTS calls/day); the
+  Gemini _app_ subscription does not raise API limits. Pay-as-you-go in AI
+  Studio costs pennies per chapter.
+- **Digest burns LLM tokens** — roughly one analyzer call per chapter. Free
+  model tiers work but rate-limit; the analyzer chain falls through a list of
+  models automatically.
+- **Crawling needs a predictable URL** (`{n}` template) and a findable chapter
+  body. `c` in the TUI saves the template and probe-crawls one chapter to
+  prove it before you commit to a range.
