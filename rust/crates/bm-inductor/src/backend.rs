@@ -11,9 +11,10 @@
 //! the local ones by PID file plus a sweep for strays, the remote ones over
 //! ssh — because a half-stopped cluster silently keeps rendering.
 //!
-//! Starting works the other way round: `start_backend` only spawns after
-//! every registered machine provisions clean (see `provision_verdict`), so a
-//! start means ready, not hopefully-ready.
+//! Starting works degraded-first: the backend goes up immediately, then each
+//! box provisions in the background and joins as it becomes ready. A failing
+//! box lands in Error with its reason — it never vetoes the rest, because the
+//! scheduler only offers tasks to beating workers anyway.
 
 use bm_core::provision::{Ssh, REMOTE_DIR};
 use bm_proto::Machine;
@@ -322,8 +323,10 @@ pub fn start_remote_workers(machines: &[Machine], api_port: u16) -> (bool, Vec<S
 /// one half: a dead worker must not block the inductor, and vice versa. Lines
 /// are facts for the event log; the TUI's refresh loop flips the status to
 /// live on its own once the inductor answers. `bind` comes from
-/// `public_bind`: LAN-wide when the cluster has remotes.
-pub fn start_backend(layout_root: &Path, api: &str, api_up: bool, bind: &str) -> anyhow::Result<Vec<String>> {
+/// `public_bind`: LAN-wide when the cluster has remotes. `with_worker` false
+/// spawns the inductor only — the degraded start launches each box's worker
+/// after that box provisions, so an unready box never takes failing tasks.
+pub fn start_backend(layout_root: &Path, api: &str, api_up: bool, bind: &str, with_worker: bool) -> anyhow::Result<Vec<String>> {
     if layout_root.as_os_str().is_empty() {
         anyhow::bail!("no repo root — restart the TUI from a checkout");
     }
@@ -331,7 +334,6 @@ pub fn start_backend(layout_root: &Path, api: &str, api_up: bool, bind: &str) ->
         anyhow::bail!("this starts a backend on THIS machine, but the TUI watches {api}");
     }
     let bin_i = sibling_bin("bm-inductor")?;
-    let bin_a = sibling_bin("bm-agent")?;
     let port = api_port(api).to_string();
 
     let mut lines = Vec::new();
@@ -352,21 +354,40 @@ pub fn start_backend(layout_root: &Path, api: &str, api_up: bool, bind: &str) ->
             Err(e) => lines.push(format!("inductor failed to start: {e:#}")),
         }
     }
-    // Worker half: extra workers are harmless, so only our own PID suppresses.
-    if let Some(pid) = read_pid(&pid_file(layout_root, "agent")).filter(|p| is_alive(*p)) {
-        lines.push(format!("worker already running (pid {pid})"));
-    } else {
-        let log = log_file(layout_root, "agent");
-        let args = ["worker".to_string(), "--inductor".to_string(), api.to_string()];
-        match spawn_one(&bin_a, &args, &log) {
-            Ok(pid) => {
-                let _ = std::fs::write(pid_file(layout_root, "agent"), pid.to_string());
-                lines.push(format!("worker starting in background (pid {pid}, {})", log.display()));
-            }
-            Err(e) => lines.push(format!("worker failed to start: {e:#}")),
-        }
+    // Worker half unless the caller stages it per-box (degraded start):
+    // extra workers are harmless, so only our own PID suppresses.
+    if with_worker {
+        lines.extend(start_local_worker(layout_root, api));
     }
     Ok(lines)
+}
+
+/// Start the local worker unless this TUI already runs one. Split out so a
+/// single-box `p` retry can launch exactly its box's worker without touching
+/// the inductor half.
+pub fn start_local_worker(layout_root: &Path, api: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(pid) = read_pid(&pid_file(layout_root, "agent")).filter(|p| is_alive(*p)) {
+        lines.push(format!("worker already running (pid {pid})"));
+        return lines;
+    }
+    let bin_a = match sibling_bin("bm-agent") {
+        Ok(b) => b,
+        Err(e) => {
+            lines.push(format!("worker failed to start: {e:#}"));
+            return lines;
+        }
+    };
+    let log = log_file(layout_root, "agent");
+    let args = ["worker".to_string(), "--inductor".to_string(), api.to_string()];
+    match spawn_one(&bin_a, &args, &log) {
+        Ok(pid) => {
+            let _ = std::fs::write(pid_file(layout_root, "agent"), pid.to_string());
+            lines.push(format!("worker starting in background (pid {pid}, {})", log.display()));
+        }
+        Err(e) => lines.push(format!("worker failed to start: {e:#}")),
+    }
+    lines
 }
 
 fn signal(pid: u32, sig: &str) {
@@ -428,7 +449,7 @@ fn sidecar_kill_script() -> String {
      echo left=$(pgrep -f 'tts_server\\.p[y]' 2>/dev/null | wc -l)".into()
 }
 
-fn is_local_addr(addr: &str) -> bool {
+pub(crate) fn is_local_addr(addr: &str) -> bool {
     matches!(addr, "127.0.0.1" | "localhost" | "::1")
 }
 
@@ -656,21 +677,8 @@ pub(crate) async fn inductor_up(api: &str) -> bool {
     }
 }
 
-/// Gate a backend start on provisioning: every machine must report ready, or
-/// nothing starts. Returns the refusal naming the failures.
-pub fn provision_verdict(results: &[(String, bool)]) -> Result<(), String> {
-    let bad: Vec<&str> =
-        results.iter().filter(|(_, ok)| !ok).map(|(a, _)| a.as_str()).collect();
-    if bad.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "provision incomplete on {} — start aborted (fix it with p, drop the box with d, then start again)",
-            bad.join(", ")
-        ))
-    }
-}
-
+// Per-machine catch-up outcomes are reported inline by the start sequence;
+// no gate remains to test here.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,15 +794,6 @@ mod tests {
     }
 
     #[test]
-    fn provision_verdict_blocks_on_any_failure_and_names_it() {
-        assert!(provision_verdict(&[]).is_ok(), "nothing registered means local-only start");
-        assert!(provision_verdict(&[("a".into(), true), ("b".into(), true)]).is_ok());
-        let err = provision_verdict(&[("a".into(), true), ("b".into(), false)]).unwrap_err();
-        assert!(err.contains("on b —"), "{err}");
-        assert!(err.contains("start aborted"), "{err}");
-    }
-
-    #[test]
     fn stopping_with_no_pidfiles_reports_and_touches_nothing() {
         let d = std::env::temp_dir().join("bm-backend-stop-empty");
         let _ = std::fs::remove_dir_all(&d);
@@ -843,10 +842,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         // Remote first: the guard fires before any binary is resolved.
-        let err = start_backend(&d, "http://192.168.2.7:8901", false, "127.0.0.1").unwrap_err();
+        let err = start_backend(&d, "http://192.168.2.7:8901", false, "127.0.0.1", true).unwrap_err();
         assert!(err.to_string().contains("THIS machine"), "{err}");
         // Local but no binaries beside the test harness: names the problem.
-        let err = start_backend(&d, "http://127.0.0.1:9", false, "127.0.0.1").unwrap_err();
+        let err = start_backend(&d, "http://127.0.0.1:9", false, "127.0.0.1", true).unwrap_err();
         assert!(err.to_string().contains("no bm-"), "{err}");
     }
 }

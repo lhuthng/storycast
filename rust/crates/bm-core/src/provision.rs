@@ -355,9 +355,15 @@ echo "probe=done"
             .output()
             .context("spawning rsync")?;
         if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let hint = if stderr.contains("command not found") {
+                " — rsync is not on this box; install it, e.g. sudo apt install -y rsync"
+            } else {
+                ""
+            };
             anyhow::bail!(
-                "rsync push failed: {}",
-                crate::util::head_chars(&String::from_utf8_lossy(&out.stderr), 300)
+                "rsync push failed: {}{hint}",
+                crate::util::head_chars(&stderr, 300)
             );
         }
         Ok(())
@@ -471,6 +477,8 @@ echo "probe=done"
     /// Create the TTS virtualenv and install the sidecar's dependencies.
     /// Only runs when the probe says the interpreter is missing, because the
     /// VieNeu weights are ~1.7 GB and this is the slow part of onboarding.
+    /// A missing `python3` (or venv module) is named with its fix, not left as
+    /// a bare remote traceback: provisioning never installs python itself.
     pub fn ensure_python(&self, force: bool) -> Result<String> {
         let script = format!(
             r#"set -e
@@ -479,8 +487,12 @@ if [ {force} -eq 0 ] && [ -x "$D/.venv/bin/python" ]; then
   echo "PYTHON-OK (existing venv)"
   exit 0
 fi
-command -v python3 >/dev/null 2>&1 || {{ echo "python3 not found on this machine" >&2; exit 4; }}
-python3 -m venv "$D/.venv"
+command -v python3 >/dev/null 2>&1 || {{ echo "python3 missing on this box — install it, e.g. sudo apt install -y python3 python3-venv" >&2; exit 4; }}
+set +e
+python3 -m venv "$D/.venv" 2>"$D/venv.err"
+VENV_RC=$?
+set -e
+[ $VENV_RC -eq 0 ] || {{ echo "venv build failed: $(head -1 "$D/venv.err") — install the venv module, e.g. sudo apt install -y python3-venv" >&2; exit 5; }}
 "$D/.venv/bin/python" -m pip install -q --upgrade pip
 "$D/.venv/bin/python" -m pip install -q -r "$D/requirements.txt"
 echo "PYTHON-OK (fresh venv)"
@@ -874,7 +886,7 @@ pub fn provision(
             match ssh.ensure_python(force) {
                 Ok(v) => log.push(format!("[{}] {v}", m.id)),
                 Err(e) => {
-                    log.push(format!("[{}] python provisioning failed: {e}", m.id));
+                    log.push(format!("[{}] {e}", m.id));
                     return (probe, log);
                 }
             }

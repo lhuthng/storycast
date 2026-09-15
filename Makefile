@@ -14,7 +14,6 @@
 #   START  first chapter for serve      (default 1)
 #   COUNT  how many chapters            (default 100)
 #   BOX    linked box name for provision (default box-1 when linked)
-#   KEY    ssh key path for link/provision (default ~/.ssh/ssh-key-my-wsl)
 
 RUST_DIR := rust
 BIN := $(RUST_DIR)/target/debug
@@ -38,7 +37,7 @@ agent: build
 
 provision: build
 ifdef ADDR
-	$(BIN)/bm-inductor provision --addr $(ADDR) --user thang --key $(KEY)
+	$(BIN)/bm-inductor provision --addr $(ADDR) --user thang
 else
 	$(BIN)/bm-inductor provision --box $(BOX)
 endif
@@ -50,10 +49,9 @@ endif
 ifndef ADDR
 	$(error NAME and ADDR are required: make link NAME=box-1 ADDR=192.168.2.2)
 endif
-	$(BIN)/bm-inductor link --name $(NAME) --addr $(ADDR) --user thang --key $(KEY)
+	$(BIN)/bm-inductor link --name $(NAME) --addr $(ADDR) --user thang
 
 BOX ?= box-1
-KEY ?= ~/.ssh/ssh-key-my-wsl
 
 test:
 	cargo test --workspace --manifest-path $(RUST_DIR)/Cargo.toml

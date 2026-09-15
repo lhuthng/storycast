@@ -376,10 +376,13 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 linked.as_ref().map(|b| b.port).unwrap_or(port)
             };
-            let key = key.or_else(|| linked.as_ref().and_then(|b| b.key.clone()));
+            let key = key
+                .or_else(|| linked.as_ref().and_then(|b| b.key.clone()))
+                .or_else(|| std::env::var("SSH_KEY").ok());
             cmd_provision(layout, addr, user, port, key, api_port, force).await
         }
         Cmd::Link { name, addr, user, port, key } => {
+            let key = key.or_else(|| std::env::var("SSH_KEY").ok());
             let bxo = bm_core::provision::LinkedBox {
                 name: name.clone(),
                 addr,

@@ -420,6 +420,11 @@ pub enum Op {
     Retry,
     /// Retry an individual task by stage/chapter, optionally forcing re-run.
     RetryTask,
+    /// Fold duplicate characters into one (title/case/description variants
+    /// of the same person), rewrite cast + scripts, re-render the losers.
+    /// Only deterministic same-key folds apply; ambiguous pairs are listed
+    /// for a human and never auto-merged.
+    Reconcile,
 }
 
 impl Op {
@@ -434,6 +439,7 @@ impl Op {
             Op::Requeue => "requeue",
             Op::Retry => "retry",
             Op::RetryTask => "retry-task",
+            Op::Reconcile => "reconcile",
         }
     }
 
@@ -448,6 +454,7 @@ impl Op {
             Op::Requeue,
             Op::Retry,
             Op::RetryTask,
+            Op::Reconcile,
         ]
         .into_iter()
         .find(|o| o.as_str() == s)
@@ -537,6 +544,7 @@ mod tests {
             Op::Requeue,
             Op::Retry,
             Op::RetryTask,
+            Op::Reconcile,
         ] {
             assert_eq!(Op::parse(op.as_str()), Some(op));
         }

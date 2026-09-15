@@ -40,6 +40,11 @@ Common causes per stage:
   BOX=…` — enrollment is stamped, so it only re-enrolls what changed.
 * **merge fails** — usually a missing segment (the render was interrupted and
   the segment cache incomplete). Retry the render task first, then merge.
+* **one character speaks with two voices** — the bible forked: title/case/
+  description variants (`Huyền Vũ lão tổ`, `Sở Cuồng sư`) became separate
+  entries. Press `:m` (reconcile): certain folds apply immediately, ambiguous
+  pairs go to the analyzer once, the cast is rewritten and only the losers'
+  chapters re-render. Refused mid-play — `:X` first, like a voice swap.
 
 ## Provisioning problems
 

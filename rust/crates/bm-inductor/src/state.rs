@@ -364,18 +364,26 @@ impl Inner {
                     self.ensure_task(chapter, Stage::Digest);
                 }
                 if stage == Stage::Digest {
-                    if let Some(s) = script {
-                        let _ = bm_core::atomic_write(
-                            &self.layout.script(chapter),
-                            &serde_json::to_string_pretty(&s).unwrap_or_default(),
-                        );
-                    }
                     if let Some(d) = delta {
                         let path = self.layout.bible();
                         let mut bible: Value =
                             bm_core::read_json(&path).unwrap_or(json!({"characters": []}));
                         bm_core::digest::merge_bible(&mut bible, &d, &format!("{chapter:02}"));
                         let _ = bm_core::digest::save_bible(&bible, &path);
+                    }
+                    if let Some(mut s) = script {
+                        // Canonicalize against the just-merged bible (which now
+                        // includes this chapter's own newcomers): variant
+                        // speakers collapse to one name before the script hits
+                        // disk, so cast/render/merge never see the fork.
+                        let path = self.layout.bible();
+                        let bible: Value =
+                            bm_core::read_json(&path).unwrap_or(json!({"characters": []}));
+                        bm_core::digest::canonicalize_script(&mut s, &bible);
+                        let _ = bm_core::atomic_write(
+                            &self.layout.script(chapter),
+                            &serde_json::to_string_pretty(&s).unwrap_or_default(),
+                        );
                     }
                     self.ensure_task(chapter, Stage::Render);
                 }
@@ -725,13 +733,11 @@ impl Inner {
         )
     }
 
-    /// Repoint one character's voice and invalidate only its cached segments.
-    /// Other characters keep their cache; affected chapters re-render + merge.
-    /// Refused while workers are mid-play: swapping then mixes voices and
-    /// marks stale mp3s done. Only *fresh* evidence counts (30s) — stale
-    /// beats and ghost assignments are the reaper's job, and an offline Inner
-    /// (empty beats, e.g. swapping while the inductor is down) always passes.
-    pub fn op_swap_voice(&mut self, character: &str, voice: &str) -> anyhow::Result<String> {
+    /// Refuse voice/cache surgery while workers are mid-play: acting then
+    /// mixes voices and marks stale mp3s done. Only *fresh* evidence counts
+    /// (30s) — stale beats and ghost assignments are the reaper's job, and an
+    /// offline Inner (empty beats) always passes.
+    fn ensure_idle(&self) -> anyhow::Result<()> {
         let now = now_secs();
         let fresh = |ts: u64| now.saturating_sub(ts) < 30;
         let mut busy: Vec<String> = Vec::new();
@@ -766,6 +772,115 @@ impl Inner {
                 busy.iter().take(4).cloned().collect::<Vec<_>>().join(", ")
             );
         }
+        Ok(())
+    }
+
+    /// Every persisted chapter script, sorted: the unit every bulk pass
+    /// (swap invalidation, reconcile rewrite) walks.
+    fn script_paths(&self) -> Vec<(u32, std::path::PathBuf)> {
+        let mut scripts: Vec<std::path::PathBuf> = std::fs::read_dir(self.layout.data())
+            .map(|rd| rd.filter_map(|e| e.ok().map(|x| x.path())).collect())
+            .unwrap_or_default();
+        scripts.retain(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("script-") && n.ends_with(".json"))
+                .unwrap_or(false)
+        });
+        let mut out: Vec<(u32, std::path::PathBuf)> = scripts
+            .into_iter()
+            .map(|sp| {
+                let n: u32 = sp
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.strip_prefix("script-"))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                (n, sp)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Surgical invalidation for one speaker: delete only their run files
+    /// (filenames embed the OLD voice — exactly the stale set), drop the
+    /// finished mp3s, requeue render+merge. Returns touched chapters + files.
+    fn invalidate_character(
+        &mut self,
+        engine: &str,
+        character: &str,
+        old: &str,
+    ) -> (Vec<u32>, u32) {
+        let mut chapters: Vec<u32> = Vec::new();
+        let mut files = 0u32;
+        for (n, sp) in self.script_paths() {
+            let data: Value = bm_core::read_json(&sp).unwrap_or(Value::Null);
+            let segments = data.get("segments").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+            let planned = bm_core::assemble::drop_headline(&segments);
+            let seg_dir = self.layout.seg_dir(engine, n);
+            let local = engine == "vieneu";
+            let mut touched = false;
+            for run in bm_core::assemble::runs(planned) {
+                if run.speaker != character {
+                    continue;
+                }
+                let names: Vec<String> = if local {
+                    let (a, b) = (run.idx[0], run.idx[run.idx.len() - 1]);
+                    let tag = if a == b { format!("{a:04}") } else { format!("{a:04}-{b:04}") };
+                    vec![format!("{tag}_{old}.wav")]
+                } else {
+                    run.idx.iter().map(|i| format!("{i:04}_{old}.wav")).collect()
+                };
+                for name in names {
+                    let stale = seg_dir.join(&name);
+                    if stale.is_file() {
+                        let _ = std::fs::remove_file(&stale);
+                        files += 1;
+                        touched = true;
+                    }
+                }
+            }
+            if character == "Narrator" {
+                let stale = seg_dir.join(format!("title_{old}.wav"));
+                if stale.is_file() {
+                    let _ = std::fs::remove_file(&stale);
+                    files += 1;
+                    touched = true;
+                }
+            }
+            if touched {
+                chapters.push(n);
+                // Stale product goes away; render+merge requeue fresh.
+                let _ = std::fs::remove_file(self.layout.final_mp3(n));
+                for stage in [Stage::Render, Stage::Merge] {
+                    let key = format!("{stage}:{n}");
+                    if let Some(t) = self.tasks.get_mut(&key) {
+                        t.state = TaskState::Pending;
+                        t.attempts = 0;
+                        t.assigned_to = None;
+                        t.lease_until = None;
+                        t.updated = now_secs();
+                    } else {
+                        let mut t = Task::new(n, stage);
+                        t.updated = now_secs();
+                        self.tasks.insert(key, t);
+                    }
+                }
+            }
+        }
+        self.save();
+        (chapters, files)
+    }
+
+    /// Repoint one character's voice and invalidate only its cached segments.
+    /// Other characters keep their cache; affected chapters re-render + merge.
+    /// Refused while workers are mid-play: swapping then mixes voices and
+    /// marks stale mp3s done. Only *fresh* evidence counts (30s) — stale
+    /// beats and ghost assignments are the reaper's job, and an offline Inner
+    /// (empty beats, e.g. swapping while the inductor is down) always passes.
+    pub fn op_swap_voice(&mut self, character: &str, voice: &str) -> anyhow::Result<String> {
+        self.ensure_idle()?;
         let engine = self.settings.engine.clone();
         // The operator's own roster, not the shipped default: this is the gate
         // that decides what may be assigned on this machine.
@@ -823,86 +938,153 @@ impl Inner {
         bm_core::cast::write_cast(&engine, &cast_path, &cast)?;
         // Surgical invalidation: only this speaker's run files (+ the headline
         // file when the Narrator itself moves), only where scripts exist.
-        let mut chapters: Vec<u32> = Vec::new();
-        let mut files = 0u32;
-        let mut scripts: Vec<std::path::PathBuf> = std::fs::read_dir(self.layout.data())?
-            .filter_map(|e| e.ok().map(|x| x.path()))
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with("script-") && n.ends_with(".json"))
-                    .unwrap_or(false)
-            })
-            .collect();
-        scripts.sort();
-        for sp in scripts {
-            let n: u32 = sp
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.strip_prefix("script-"))
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            let data: Value = bm_core::read_json(&sp).unwrap_or(Value::Null);
-            let segments = data.get("segments").and_then(|s| s.as_array()).cloned().unwrap_or_default();
-            let planned = bm_core::assemble::drop_headline(&segments);
-            let seg_dir = self.layout.seg_dir(&engine, n);
-            let local = engine == "vieneu";
-            let mut touched = false;
-            for run in bm_core::assemble::runs(planned) {
-                if run.speaker != character {
-                    continue;
-                }
-                // Filenames embed the OLD voice — exactly the stale set:
-                // run tags locally, per-line files on the cloud path.
-                let names: Vec<String> = if local {
-                    let (a, b) = (run.idx[0], run.idx[run.idx.len() - 1]);
-                    let tag = if a == b { format!("{a:04}") } else { format!("{a:04}-{b:04}") };
-                    vec![format!("{tag}_{old}.wav")]
-                } else {
-                    run.idx.iter().map(|i| format!("{i:04}_{old}.wav")).collect()
-                };
-                for name in names {
-                    let stale = seg_dir.join(&name);
-                    if stale.is_file() {
-                        let _ = std::fs::remove_file(&stale);
-                        files += 1;
-                        touched = true;
-                    }
-                }
-            }
-            if character == "Narrator" {
-                let stale = seg_dir.join(format!("title_{old}.wav"));
-                if stale.is_file() {
-                    let _ = std::fs::remove_file(&stale);
-                    files += 1;
-                    touched = true;
-                }
-            }
-            if touched {
-                chapters.push(n);
-                // Stale product goes away; render+merge requeue fresh.
-                let _ = std::fs::remove_file(self.layout.final_mp3(n));
-                for stage in [Stage::Render, Stage::Merge] {
-                    let key = format!("{stage}:{n}");
-                    if let Some(t) = self.tasks.get_mut(&key) {
-                        t.state = TaskState::Pending;
-                        t.attempts = 0;
-                        t.assigned_to = None;
-                        t.lease_until = None;
-                        t.updated = now_secs();
-                    } else {
-                        let mut t = Task::new(n, stage);
-                        t.updated = now_secs();
-                        self.tasks.insert(key, t);
-                    }
-                }
-            }
-        }
-        self.save();
+        let (chapters, files) = self.invalidate_character(&engine, character, &old);
         Ok(format!(
             "{character}: {old} -> {voice}; invalidated {files} segment files across {} chapters ({:?}); re-render queued",
             chapters.len(),
             chapters.iter().take(8).collect::<Vec<_>>(),
+        ))
+    }
+
+    /// Fold duplicate characters into one: bible entries, cast keys, every
+    /// persisted script, then the losers' cached audio. Same mid-play refusal
+    /// as a voice swap — it performs the same surgery, once per absorbed name.
+    ///
+    /// Invalidation runs BEFORE the script rewrite: the stale-file scan
+    /// matches variant speakers, which the rewrite then erases.
+    pub fn apply_reconcile(
+        &mut self,
+        merges: &[bm_core::digest::BibleMerge],
+    ) -> anyhow::Result<String> {
+        self.ensure_idle()?;
+        let engine = self.settings.engine.clone();
+        let path = self.layout.bible();
+        // Pre-mutation snapshot: one reconcile rewrites bible, cast and
+        // dozens of scripts at once — a bad merge must be restorable.
+        {
+            let snap = self.layout.scratch().join(format!("reconcile-bak-{}", now_secs()));
+            let _ = std::fs::create_dir_all(&snap);
+            let _ = std::fs::copy(&path, snap.join("bible.json"));
+            let _ = std::fs::copy(self.layout.cast(&engine), snap.join("cast.json"));
+        }
+        let mut bible: Value = bm_core::read_json(&path).unwrap_or(json!({"characters": []}));
+        let (mut applied, log) = bm_core::digest::apply_merges(&mut bible, merges);
+        // Cast-only variants never entered the bible, so the merger skips
+        // them — yet they fork voices. Same canon-key + present in the cast
+        // folds here, so the cast + script rewrite below still runs.
+        {
+            let cast_now = bm_core::cast::read_cast(&engine, &self.layout.cast(&engine));
+            fn in_bible(bible: &Value, n: &str) -> bool {
+                bible
+                    .get("characters")
+                    .and_then(|c| c.as_array())
+                    .map(|a| a.iter().any(|c| c.get("name").and_then(|x| x.as_str()) == Some(n)))
+                    .unwrap_or(false)
+            }
+            for (canonical, absorbs) in merges {
+                if !in_bible(&bible, canonical) {
+                    continue;
+                }
+                let mut extra = Vec::new();
+                for name in absorbs {
+                    if name == canonical
+                        || in_bible(&bible, name)
+                        || !cast_now.contains_key(name)
+                        || applied.iter().any(|(_, d)| d.contains(name))
+                        || bm_core::digest::canon_key(name) != bm_core::digest::canon_key(canonical)
+                    {
+                        continue;
+                    }
+                    extra.push(name.clone());
+                }
+                if extra.is_empty() {
+                    continue;
+                }
+                if let Some(chars) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) {
+                    if let Some(target) = chars
+                        .iter_mut()
+                        .find(|c| c.get("name").and_then(|x| x.as_str()) == Some(canonical.as_str()))
+                    {
+                        let mut aliases: Vec<String> = target
+                            .get("proper_aliases")
+                            .and_then(|a| a.as_array())
+                            .map(|a| {
+                                a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
+                            })
+                            .unwrap_or_default();
+                        for a in &extra {
+                            if !aliases.contains(a) {
+                                aliases.push(a.clone());
+                            }
+                        }
+                        target["proper_aliases"] = json!(aliases);
+                        applied.push((canonical.clone(), extra));
+                    }
+                }
+            }
+        }
+        if applied.is_empty() {
+            return Ok("reconcile: nothing to fold".into());
+        }
+        bm_core::digest::save_bible(&bible, &path)?;
+
+        // Cast keys: the canonical entry keeps its voice and adopts the
+        // absorbed one only when unassigned; absorbed keys disappear.
+        let cast_path = self.layout.cast(&engine);
+        let mut cast = bm_core::cast::read_cast(&engine, &cast_path);
+        let mut invalidations: Vec<(String, String)> = Vec::new();
+        for (canonical, absorb) in &applied {
+            for name in absorb {
+                if let Some(v) = cast.remove(name) {
+                    if !cast.contains_key(canonical) {
+                        cast.insert(canonical.clone(), v.clone());
+                    }
+                    invalidations.push((name.clone(), v));
+                }
+            }
+        }
+        bm_core::cast::write_cast(&engine, &cast_path, &cast)?;
+
+        let mut chapters: Vec<u32> = Vec::new();
+        let mut files = 0u32;
+        for (name, old) in &invalidations {
+            let (ch, f) = self.invalidate_character(&engine, name, old);
+            files += f;
+            for n in ch {
+                if !chapters.contains(&n) {
+                    chapters.push(n);
+                }
+            }
+        }
+
+        // Every script through the folded bible: roster + speakers go canonical.
+        let mut scripts = 0u32;
+        for (_, sp) in self.script_paths() {
+            let mut data: Value = bm_core::read_json(&sp).unwrap_or(Value::Null);
+            if bm_core::digest::canonicalize_script(&mut data, &bible) > 0
+                && bm_core::atomic_write(
+                    &sp,
+                    &serde_json::to_string_pretty(&data).unwrap_or_default(),
+                )
+                .is_ok()
+            {
+                scripts += 1;
+            }
+        }
+
+        chapters.sort();
+        for line in &log {
+            self.push_event("info", format!("reconcile {line}"));
+        }
+        self.save();
+        let who: Vec<String> = applied
+            .iter()
+            .map(|(c, a)| format!("{c} <= {}", a.join(", ")))
+            .collect();
+        Ok(format!(
+            "reconcile: {}; {scripts} scripts rewritten, {files} stale segment files across {} chapters re-render queued",
+            who.join("; "),
+            chapters.len(),
         ))
     }
 
@@ -1072,6 +1254,107 @@ mod tests {
             bm_core::read_json(&layout.cast("vieneu")).unwrap();
         assert_eq!(disk["A"], "minh-triet", "persisted as a key, not a name");
         assert_eq!(disk["B"], "adam");
+    }
+
+    #[test]
+    fn reconcile_folds_bible_cast_scripts_and_requeues_renders() {
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.bible(),
+            serde_json::to_string(&serde_json::json!({"characters": [
+                {"name": "Huyền Vũ", "personality": "cold", "voice_hint": "adult male",
+                 "proper_aliases": ["Huyền Vũ"], "first_seen": "10", "chapters_seen": ["10"]},
+                {"name": "Huyền Vũ lão tổ", "personality": "", "voice_hint": "",
+                 "proper_aliases": ["Huyền Vũ lão tổ"], "first_seen": "25", "chapters_seen": ["25"]}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            layout.cast("vieneu"),
+            r#"{"Huyền Vũ":"Đức Trí","Huyền Vũ lão tổ":"Adam","Narrator":"Đức Trí"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            layout.script(25),
+            r#"{"roster":["Huyền Vũ lão tổ"],"segments":[{"speaker":"Huyền Vũ lão tổ","text":"Ừ."}]}"#,
+        )
+        .unwrap();
+        let seg = layout.seg_dir("vieneu", 25);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000_Adam.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(layout.final_mp3(25), vec![0u8; 2000]).unwrap();
+
+        let msg = inner
+            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Huyền Vũ lão tổ".into()])])
+            .unwrap();
+        assert!(msg.contains("Huyền Vũ <= Huyền Vũ lão tổ"), "{msg}");
+
+        let bible: Value = bm_core::read_json(&layout.bible()).unwrap();
+        let chars = bible["characters"].as_array().unwrap();
+        assert_eq!(chars.len(), 1);
+        assert!(chars[0]["proper_aliases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "Huyền Vũ lão tổ"));
+
+        let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
+        assert_eq!(cast["Huyền Vũ"], "Đức Trí", "canonical keeps its voice");
+        assert!(!cast.contains_key("Huyền Vũ lão tổ"), "absorbed key disappears");
+
+        let script: Value = bm_core::read_json(&layout.script(25)).unwrap();
+        assert_eq!(script["segments"][0]["speaker"], serde_json::json!("Huyền Vũ"));
+        assert_eq!(script["roster"], serde_json::json!(["Huyền Vũ"]));
+
+        assert!(!seg.join("0000_Adam.wav").exists(), "loser's cache goes");
+        assert!(!layout.final_mp3(25).exists(), "stale product goes away");
+        assert_eq!(inner.tasks["render:25"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["merge:25"].state, TaskState::Pending);
+        assert!(inner.events.iter().any(|e| e.text.contains("reconcile")), "logged");
+    }
+
+    #[test]
+    fn reconcile_with_no_merges_changes_nothing() {
+        let (_d, mut inner) = fixture();
+        let msg = inner.apply_reconcile(&[]).unwrap();
+        assert!(msg.contains("nothing to fold"), "{msg}");
+    }
+
+    #[test]
+    fn reconcile_folds_cast_only_variants_missing_from_the_bible() {
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.bible(),
+            serde_json::to_string(&serde_json::json!({"characters": [
+                {"name": "Huyền Vũ", "personality": "cold", "voice_hint": "adult male",
+                 "proper_aliases": ["Huyền Vũ"], "first_seen": "10", "chapters_seen": ["10"]}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            layout.cast("vieneu"),
+            r#"{"Huyền Vũ":"Đức Trí","Huyền Vũ lão tổ":"Adam","Narrator":"Đức Trí"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            layout.script(25),
+            r#"{"roster":["Huyền Vũ lão tổ"],"segments":[{"speaker":"Huyền Vũ lão tổ","text":"Ừ."}]}"#,
+        )
+        .unwrap();
+
+        let msg = inner
+            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Huyền Vũ lão tổ".into()])])
+            .unwrap();
+        assert!(msg.contains("Huyền Vũ <= Huyền Vũ lão tổ"), "{msg}");
+
+        let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
+        assert!(!cast.contains_key("Huyền Vũ lão tổ"), "absorbed key disappears");
+        let script: Value = bm_core::read_json(&layout.script(25)).unwrap();
+        assert_eq!(script["segments"][0]["speaker"], serde_json::json!("Huyền Vũ"));
     }
 
     #[test]
