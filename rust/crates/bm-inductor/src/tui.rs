@@ -39,7 +39,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::time::Duration;
-use crate::tui::{app::App, draw::draw, input::{dispatch_op, handle_key}, jobs::{Ev, Job, fetch_state, run_job}, jobs::DoneKind, style::{Conn, seen_label, worker_alias}};
+use crate::tui::{app::App, draw::draw, input::{dispatch_op, handle_key}, jobs::{Ev, Job, fetch_state, run_job}, jobs::DoneKind, style::{Conn, seen_label, worker_alias}, model::reported_alias};
 
 pub async fn run(api: &str, layout: Layout) -> anyhow::Result<()> {
     enable_raw_mode()?;
@@ -205,11 +205,9 @@ pub async fn snapshot(api: &str) -> anyhow::Result<()> {
         println!("  none — start one with: bm-agent worker --inductor <this host>");
     }
     for b in &beats {
-        let name = if b.alias.is_empty() {
-            worker_alias(&b.worker_id).0.to_string()
-        } else {
-            b.alias.clone()
-        };
+        let name = reported_alias(&beats, &b.worker_id)
+            .unwrap_or_else(|| worker_alias(&b.worker_id).0)
+            .to_string();
         println!(
             "  {:<14} {:<8} ch{:<4} {:>3}%  {:<28} eta={}",
             name,
