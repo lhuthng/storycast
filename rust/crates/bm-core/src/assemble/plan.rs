@@ -497,11 +497,17 @@ pub struct RenderedSegment {
     pub chapter: u32,
 }
 
+/// Largest single unit the pipeline accepts: ~11 minutes of 48 kHz 16-bit
+/// mono. Runs are speaker-continuous, and narration runs for thousands of
+/// characters (ch63 opens with a 7-minute monologue) — an 8 MB cap shelved
+/// those chapters as "suspicious" when they are merely long.
+pub const MAX_SEGMENT_BYTES: usize = 64 << 20;
+
 impl RenderedSegment {
     /// Read the wav, with a cap against accidents (segments are KBs).
     pub fn read_bytes(&self) -> Result<Vec<u8>, String> {
         match std::fs::read(&self.path) {
-            Ok(b) if b.len() > 8 << 20 => Err(format!(
+            Ok(b) if b.len() > MAX_SEGMENT_BYTES => Err(format!(
                 "{} MB — refusing a suspicious segment",
                 b.len() >> 20
             )),

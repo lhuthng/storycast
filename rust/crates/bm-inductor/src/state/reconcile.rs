@@ -44,11 +44,6 @@ impl Inner {
                 if done && t.state == TaskState::Pending {
                     t.state = TaskState::Done;
                     t.updated = now_secs();
-                    // Locally complete segments merge locally (remote renders
-                    // set their own affinity when they report).
-                    if stage == Stage::Render && t.affinity.is_none() {
-                        t.affinity = Some("127.0.0.1".into());
-                    }
                 }
             }
             // Assignments from a dead run: verify artifacts; unverified keeps
@@ -66,9 +61,6 @@ impl Inner {
                     if matches!(t.state, TaskState::Assigned | TaskState::Running) {
                         if done_now {
                             t.state = TaskState::Done;
-                            if stage == Stage::Render && t.affinity.is_none() {
-                                t.affinity = Some("127.0.0.1".into());
-                            }
                             t.assigned_to = None;
                             t.lease_until = None;
                         } else {
@@ -134,6 +126,35 @@ impl Inner {
         out
     }
 
+    /// Drop a chapter's rendered output and requeue render+merge: the script
+    /// changed underneath them, so every segment filename and voice resolve
+    /// is suspect. Attempts reset — this is new work, not a retry — and the
+    /// stale mp3 goes so nothing serves the old dramatization meanwhile.
+    pub(crate) fn invalidate_render(&mut self, chapter: u32) {
+        let engine = self.settings.engine.clone();
+        let _ = std::fs::remove_dir_all(self.layout.seg_dir(&engine, chapter));
+        let _ = std::fs::remove_file(self.layout.final_mp3(chapter));
+        for stage in [Stage::Render, Stage::Merge] {
+            let key = format!("{stage}:{chapter}");
+            match self.tasks.get_mut(&key) {
+                Some(t) => {
+                    t.state = TaskState::Pending;
+                    t.attempts = 0;
+                    t.assigned_to = None;
+                    t.lease_until = None;
+                    t.detail = "requeued: script changed".into();
+                    t.updated = now_secs();
+                }
+                None => {
+                    let mut t = Task::new(chapter, stage);
+                    t.updated = now_secs();
+                    self.tasks.insert(key, t);
+                }
+            }
+        }
+        self.save();
+    }
+
     /// Surgical invalidation for one speaker: delete only their local run
     /// files (filenames embed the OLD voice — exactly the stale set), drop
     /// the finished mp3s, requeue render+merge. Returns touched chapters + files.
@@ -145,6 +166,9 @@ impl Inner {
     /// Requeueing is safe regardless — segment filenames embed the voice, so
     /// the worker only re-synthesizes the new voice's files and the merger
     /// (`expected_wavs`) resolves against the current cast.
+    ///
+    /// Narrowing: a chapter whose local store is already complete and holds
+    /// no stale files is left alone — there is nothing to re-speak.
     pub(crate) fn invalidate_character(
         &mut self,
         engine: &str,
@@ -153,11 +177,12 @@ impl Inner {
     ) -> (Vec<u32>, u32) {
         let mut chapters: Vec<u32> = Vec::new();
         let mut files = 0u32;
+        let store = bm_core::segments::LocalStore::new(self.layout.clone());
         for (n, sp) in self.script_paths() {
             let data: Value = bm_core::read_json(&sp).unwrap_or(Value::Null);
             let segments = data.get("segments").and_then(|s| s.as_array()).cloned().unwrap_or_default();
             let planned = bm_core::assemble::drop_headline(&segments);
-            let seg_dir = self.layout.seg_dir(engine, n);
+            let seg_dir = bm_core::segments::SegmentStore::dir(&store, engine, n);
             let local = engine == "vieneu";
             let speaks = bm_core::assemble::runs(planned).iter().any(|run| run.speaker == character);
             let mut touched = false;
@@ -189,9 +214,21 @@ impl Inner {
                     touched = true;
                 }
             }
-            // `speaks`, not `touched`, gates the requeue: the title-only
-            // Narrator case is covered by `touched`, everything else by runs.
-            if touched || speaks {
+            // Requeue when stale files were found, or the speaker is heard but
+            // the local store is incomplete (pre-migration remote chapters,
+            // never-rendered chapters). A complete store with no stale files
+            // needs nothing — the gate `touched || speaks` used to requeue
+            // those too, because no local file meant "unknown origin".
+            let complete = speaks
+                && !touched
+                && bm_core::assemble::segments_complete(
+                    &sp,
+                    &self.layout.cast(engine),
+                    &self.layout.bible(),
+                    &seg_dir,
+                    engine,
+                );
+            if touched || (speaks && !complete) {
                 chapters.push(n);
                 // Stale product goes away; render+merge requeue fresh.
                 let _ = std::fs::remove_file(self.layout.final_mp3(n));

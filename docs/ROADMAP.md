@@ -57,9 +57,9 @@ Files likely touched: `rust/crates/bm-core/src/digest/llm.rs`,
 storage** (artifacts + output), *not* Bedrock and *not* Polly for now.
 
 **My reading, to confirm:** today the cluster assumes one LAN: the inductor
-pushes sources/venv/voices over `ssh`+`rsync`, segment caches live on the box
-that rendered them (merge *affinity* depends on that), and `output/` lands on
-the inductor's disk. The goal is a cluster that survives the internet:
+pushes sources/venv/voices over `ssh`+`rsync`, the segment store lives on the
+inductor's disk (merge *affinity* pins merges to the local node), and `output/`
+lands on the inductor's disk. The goal is a cluster that survives the internet:
 
 ### 2a. S3 as the shared artifact store
 
@@ -67,9 +67,11 @@ the inductor's disk. The goal is a cluster that survives the internet:
   (`script-NN.json`, chapter text, bible deltas, mp3 payloads, and the cached
   segments) becomes addressable in S3, so workers never depend on a direct
   connection to the inductor to hand things back.
+- The segment store already sits behind the `SegmentStore` trait
+  (`bm-core/src/segments.rs`, `LocalStore` the only implementation): `S3Store`
+  becomes an implementation instead of a rewrite.
 - `output/Ch.N - Title.mp3` lands in the bucket (and optionally still syncs
-  home). With a shared store, merge *affinity* can relax: any box can merge
-  from cached segments instead of only the one that rendered them.
+  home).
 - Open question to settle: AWS CLI via shell (matches the repo's "shell out
   to ssh/rsync" philosophy — zero new dependencies) vs. an SDK crate. CLI is
   the smaller, more consistent change; start there.

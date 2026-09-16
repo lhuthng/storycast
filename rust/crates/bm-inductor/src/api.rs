@@ -1,6 +1,7 @@
 //! Control API: the only way workers and operators talk to the scheduler.
 
 use axum::{
+    body::Bytes,
     extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
@@ -47,11 +48,20 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
         m.state = MachineState::Online;
     }
     inner.workers.insert(r.worker_id.clone(), addr.clone());
+    inner.caps.insert(r.worker_id.clone(), r.capabilities.clone());
     // A worker announcing itself is a bind: its config survives restarts in
     // machines.json, not just in memory. The "unknown"-user placeholder
     // carries no configured values, so it stays memory-only as before.
     if inner.machines.get(&addr).map(|m| m.ssh_user.as_str()) != Some("unknown") {
         inner.persist_box(&addr, &r.hostname);
+    }
+    // Staged-rollout visibility: an agent without `render-segments` keeps
+    // taking every other stage but never sees a render offer. Say so on the
+    // machine, or the idle box looks broken.
+    if !r.capabilities.iter().any(|c| c == "render-segments") {
+        if let Some(m) = inner.machines.get_mut(&addr) {
+            m.note = "agent predates render-segments: crawl/digest/merge only".into();
+        }
     }
     inner.save();
     Json(serde_json::json!({"ok": true}))
@@ -87,6 +97,66 @@ async fn complete(State(st): State<Shared>, Json(c): Json<Complete>) -> impl Int
     let line = inner.complete(&c);
     println!("{line}");
     Json(serde_json::json!({"ok": true}))
+}
+
+#[derive(Deserialize)]
+struct SegmentQuery {
+    chapter: u32,
+    engine: String,
+    name: String,
+}
+
+/// One rendered unit, uploaded by a non-local worker. The 200 below is the
+/// discard contract: a file is deleted on the worker only after the inductor
+/// returns 200 for that exact file.
+///
+/// The name is validated against the expected set for (chapter, engine) — a
+/// worker may not write an arbitrary path into the store — and the body
+/// against the same size bounds the merger enforces (non-trivial, ≤ 8 MB).
+/// Rejects rather than storing a file the merger would ignore.
+async fn put_segment(
+    State(st): State<Shared>,
+    Query(q): Query<SegmentQuery>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let bad = |msg: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok": false, "error": msg})),
+        )
+    };
+    if !(1000..=bm_core::assemble::MAX_SEGMENT_BYTES).contains(&body.len()) {
+        return bad(format!(
+            "segment {} is {} bytes, want 1001..={}",
+            q.name,
+            body.len(),
+            bm_core::assemble::MAX_SEGMENT_BYTES
+        ));
+    }
+    let (layout, engine) = {
+        let inner = st.lock().await;
+        (inner.layout.clone(), inner.settings.engine.clone())
+    };
+    if q.engine != engine {
+        return bad(format!("engine {:?} is not this run's {engine:?}", q.engine));
+    }
+    let Some(expected) = crate::segments::expected_names(&layout, &engine, q.chapter) else {
+        return bad(format!("chapter {} cannot be planned here", q.chapter));
+    };
+    if !expected.contains(&q.name) {
+        return bad(format!("{} is not an expected file for chapter {}", q.name, q.chapter));
+    }
+    let store = bm_core::segments::LocalStore::new(layout);
+    match bm_core::segments::SegmentStore::put(&store, &engine, q.chapter, &q.name, &body) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"ok": true, "bytes": body.len()})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"ok": false, "error": format!("storing {} failed: {e:#}", q.name)})),
+        ),
+    }
 }
 
 async fn add_machine(State(st): State<Shared>, Json(m): Json<Machine>) -> impl IntoResponse {
@@ -801,6 +871,7 @@ pub fn router(st: Shared) -> Router {
         .route("/api/heartbeat", post(heartbeat))
         .route("/api/task", get(task))
         .route("/api/complete", post(complete))
+        .route("/api/segment", post(put_segment))
         .route("/api/machines", post(add_machine))
         .route("/api/machines", delete(drop_machine))
         .route("/api/machines/state", post(set_machine_state))
@@ -829,9 +900,98 @@ mod tests {
         d
     }
 
-    #[tokio::test]
-    async fn register_and_heartbeat_flip_a_machine_online() {
+    /// A plannable chapter: one run by A, so `0000_Adam.wav` is the whole
+    /// expected set.
+    fn one_run_layout() -> (tempfile::TempDir, bm_core::Layout) {
         let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        std::fs::write(
+            layout.script(1),
+            r#"{"segments":[{"speaker":"A","text":"a full sentence for synthesis here"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Adam"}"#).unwrap();
+        (d, layout)
+    }
+
+    async fn seg_put(
+        st: &Shared,
+        chapter: u32,
+        engine: &str,
+        name: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, serde_json::Value) {
+        use axum::response::IntoResponse;
+        let resp = put_segment(
+            State(st.clone()),
+            Query(SegmentQuery {
+                chapter,
+                engine: engine.into(),
+                name: name.into(),
+            }),
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 << 10).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn segment_state(layout: &bm_core::Layout) -> Shared {
+        std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+            layout.clone(),
+            bm_core::config::Settings::default(),
+        )))
+    }
+
+    #[tokio::test]
+    async fn put_segment_stores_an_expected_file() {
+        let (_d, layout) = one_run_layout();
+        let st = segment_state(&layout);
+        let wav = vec![7u8; 2000];
+        let (status, v) =
+            seg_put(&st, 1, "vieneu", "0000_Adam.wav", wav.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["bytes"], 2000);
+        assert_eq!(
+            std::fs::read(layout.seg_dir("vieneu", 1).join("0000_Adam.wav")).unwrap(),
+            wav
+        );
+    }
+
+    #[tokio::test]
+    async fn put_segment_rejects_unknown_names_and_bad_sizes() {
+        let (_d, layout) = one_run_layout();
+        let st = segment_state(&layout);
+        // Outside the expected set: a worker may not write arbitrary paths.
+        let (status, v) = seg_put(&st, 1, "vieneu", "../../../evil.wav", vec![7u8; 2000]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+        let (status, v) = seg_put(&st, 1, "vieneu", "nope.wav", vec![7u8; 2000]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+        // Below the completeness threshold and above the unit cap: the merger
+        // would ignore both, so the store refuses them instead.
+        let (status, _) = seg_put(&st, 1, "vieneu", "0000_Adam.wav", vec![7u8; 900]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let over = bm_core::assemble::MAX_SEGMENT_BYTES + 1;
+        let (status, v) =
+            seg_put(&st, 1, "vieneu", "0000_Adam.wav", vec![7u8; over]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+        // Wrong engine for this run.
+        let (status, _) = seg_put(&st, 1, "gemini", "0000_Adam.wav", vec![7u8; 2000]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            !layout.seg_dir("vieneu", 1).join("../../../evil.wav").exists()
+                && std::fs::read_dir(layout.seg_dir("vieneu", 1))
+                    .map(|rd| rd.count())
+                    .unwrap_or(0)
+                    == 0,
+            "rejections store nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_and_heartbeat_flip_a_machine_online() {        let d = scratch();
         let layout = bm_core::Layout::new(d.path());
         let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
             layout,

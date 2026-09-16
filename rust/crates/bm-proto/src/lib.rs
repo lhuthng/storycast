@@ -339,6 +339,33 @@ pub struct TaskOffer {
     pub speed: f64,
     #[serde(default)]
     pub ambience: bool,
+    /// Render stage: exactly the units the inductor's store lacks — the
+    /// worker speaks these and nothing else. `None` (old inductor) means
+    /// "plan from your own script as before"; `Some([])` means the store is
+    /// already complete, so report `ok` with `units: 0` at once. The Option
+    /// (not a bare Vec) is what keeps those two apart.
+    #[serde(default)]
+    pub render_units: Option<Vec<RenderUnitSpec>>,
+    /// This worker shares the inductor's root: its seg-dir writes land in the
+    /// authoritative store directly, so it neither uploads nor discards.
+    /// The inductor decides — the worker never guesses from paths.
+    #[serde(default)]
+    pub local_node: bool,
+}
+
+/// One TTS call the inductor planned: everything the worker needs to speak
+/// exactly one file, and nothing it doesn't (no script, no cast, no bible).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderUnitSpec {
+    /// "0004-0011" | "title" — for progress lines, not for paths.
+    pub tag: String,
+    /// "0004-0011_Narrator.wav" — the file it must produce.
+    pub name: String,
+    pub speaker: String,
+    pub voice: String,
+    pub text: String,
+    pub temperature: f64,
+    pub silence_p: f64,
 }
 
 fn default_speed() -> f64 {

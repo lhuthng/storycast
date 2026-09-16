@@ -14,6 +14,7 @@ impl Inner {
             tasks: HashMap::new(),
             machines: HashMap::new(),
             workers: HashMap::new(),
+            caps: HashMap::new(),
             beats: HashMap::new(),
             started_at: now_secs(),
             events: VecDeque::new(),
@@ -71,7 +72,8 @@ impl Inner {
             .collect();
         let doc = json!({"tasks": self.tasks.values().collect::<Vec<_>>(),
                          "machine_state": state,
-                         "workers": self.workers});
+                         "workers": self.workers,
+                         "caps": self.caps});
         let _ = bm_core::write_json(&self.ledger_path(), &doc);
     }
 
@@ -117,6 +119,16 @@ impl Inner {
             for (k, v) in w {
                 if let Some(addr) = v.as_str() {
                     self.workers.insert(k.clone(), addr.to_string());
+                }
+            }
+        }
+        if let Some(c) = doc.get("caps").and_then(|c| c.as_object()) {
+            for (k, v) in c {
+                if let Some(list) = v.as_array() {
+                    self.caps.insert(
+                        k.clone(),
+                        list.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect(),
+                    );
                 }
             }
         }
