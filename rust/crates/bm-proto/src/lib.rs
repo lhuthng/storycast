@@ -198,7 +198,13 @@ pub struct Machine {
 }
 
 impl Machine {
-    pub fn new(addr: &str, ssh_user: &str, ssh_port: u16, ssh_key: Option<String>, role: &str) -> Self {
+    pub fn new(
+        addr: &str,
+        ssh_user: &str,
+        ssh_port: u16,
+        ssh_key: Option<String>,
+        role: &str,
+    ) -> Self {
         Machine {
             id: addr.to_string(),
             addr: addr.to_string(),
@@ -464,6 +470,9 @@ pub enum Op {
     /// Only deterministic same-key folds apply; ambiguous pairs are listed
     /// for a human and never auto-merged.
     Reconcile,
+    /// Rewrite written-out non-verbal sounds into engine tags across every
+    /// script (`Ha ha ha!` → `[cười]`), and requeue the chapters it touches.
+    Retag,
 }
 
 impl Op {
@@ -480,6 +489,7 @@ impl Op {
             Op::Retry => "retry",
             Op::RetryTask => "retry-task",
             Op::Reconcile => "reconcile",
+            Op::Retag => "retag",
         }
     }
 
@@ -496,6 +506,7 @@ impl Op {
             Op::Retry,
             Op::RetryTask,
             Op::Reconcile,
+            Op::Retag,
         ]
         .into_iter()
         .find(|o| o.as_str() == s)
@@ -529,8 +540,11 @@ pub struct OpRequest {
     /// Sending text is how an operator hears a *real* line instead of a sample.
     #[serde(default)]
     pub text: Option<String>,
+    /// Report-only mode for the ops that rewrite state (`retag`): show what
+    /// would change and write nothing.
+    #[serde(default)]
+    pub dry_run: Option<bool>,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpResult {
@@ -565,11 +579,23 @@ pub struct OpResult {
 
 impl OpResult {
     pub fn ok(message: impl Into<String>) -> Self {
-        OpResult { ok: true, message: message.into(), audio_b64: None, line_text: None, line_speaker: None }
+        OpResult {
+            ok: true,
+            message: message.into(),
+            audio_b64: None,
+            line_text: None,
+            line_speaker: None,
+        }
     }
 
     pub fn fail(message: impl Into<String>) -> Self {
-        OpResult { ok: false, message: message.into(), audio_b64: None, line_text: None, line_speaker: None }
+        OpResult {
+            ok: false,
+            message: message.into(),
+            audio_b64: None,
+            line_text: None,
+            line_speaker: None,
+        }
     }
 
     /// Attach the rendered wav, base64, so the caller can play it.
@@ -642,6 +668,7 @@ mod tests {
             Op::Retry,
             Op::RetryTask,
             Op::Reconcile,
+            Op::Retag,
         ] {
             assert_eq!(Op::parse(op.as_str()), Some(op));
         }
@@ -679,7 +706,10 @@ mod tests {
         assert!(OpResult::ok("m").ok && OpResult::ok("m").audio_b64.is_none());
         assert!(!OpResult::fail("m").ok);
         assert_eq!(
-            OpResult::ok("m").with_audio_b64("UklGRg==").audio_b64.as_deref(),
+            OpResult::ok("m")
+                .with_audio_b64("UklGRg==")
+                .audio_b64
+                .as_deref(),
             Some("UklGRg==")
         );
     }

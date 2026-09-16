@@ -4,7 +4,7 @@
 //! persisted on each mutation, and reconciled from artifacts on startup, so a
 //! restart resumes instead of restarting.
 
-use bm_core::{Layout, config::Settings};
+use bm_core::{config::Settings, Layout};
 use bm_proto::{Machine, Stage, Task};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -22,7 +22,11 @@ const LEASE_SECS: [(Stage, u64); 4] = [
 ];
 
 fn lease_for(stage: Stage) -> u64 {
-    LEASE_SECS.iter().find(|(s, _)| *s == stage).map(|(_, l)| *l).unwrap_or(600)
+    LEASE_SECS
+        .iter()
+        .find(|(s, _)| *s == stage)
+        .map(|(_, l)| *l)
+        .unwrap_or(600)
 }
 
 /// Maximum number of events kept in memory. Older entries fall off the front.
@@ -64,7 +68,7 @@ pub struct Inner {
 mod tests {
     use super::*;
     use bm_core::config::Settings;
-    use bm_proto::{Complete, Stage, Task, TaskState, now_secs};
+    use bm_proto::{now_secs, Complete, Stage, Task, TaskState};
     use serde_json::Value;
 
     fn fixture() -> (tempfile::TempDir, Inner) {
@@ -114,13 +118,19 @@ mod tests {
         assert_eq!((m1.last_seen, m1.note.as_str()), (123, "provisioned"));
         assert_eq!(m1.capabilities, vec!["gpu".to_string()]);
         assert_eq!(inner.machines["127.0.0.1"].ssh_key, None);
-        assert_eq!(inner.workers.get("w1").map(String::as_str), Some("192.168.2.2"));
+        assert_eq!(
+            inner.workers.get("w1").map(String::as_str),
+            Some("192.168.2.2")
+        );
 
         // Config file: both boxes, keys byte-for-byte, names default to addr.
         let boxes = bm_core::provision::load_boxes(&layout.machines());
         assert_eq!(boxes.len(), 2);
         let b1 = boxes.iter().find(|b| b.addr == "192.168.2.2").unwrap();
-        assert_eq!((b1.name.as_str(), b1.key.as_deref()), ("192.168.2.2", Some("~/.ssh/ssh-key-my-wsl")));
+        assert_eq!(
+            (b1.name.as_str(), b1.key.as_deref()),
+            ("192.168.2.2", Some("~/.ssh/ssh-key-my-wsl"))
+        );
 
         // Ledger file: new shape, and the pre-migration snapshot is kept.
         let disk: Value = bm_core::read_json(&ledger).unwrap();
@@ -128,13 +138,19 @@ mod tests {
         let st = disk["machine_state"].as_object().unwrap();
         assert_eq!(st.len(), 2);
         assert_eq!(st["192.168.2.2"]["state"], serde_json::json!("online"));
-        assert!(ledger.with_extension("json.bak").exists(), "pre-migration snapshot");
+        assert!(
+            ledger.with_extension("json.bak").exists(),
+            "pre-migration snapshot"
+        );
 
         // Idempotent: a second load over the migrated file changes nothing.
         let mut again = Inner::new(layout.clone(), Settings::default());
         again.load_ledger();
         assert_eq!(again.machines.len(), 2);
-        assert_eq!(again.machines["192.168.2.2"].ssh_key.as_deref(), Some("~/.ssh/ssh-key-my-wsl"));
+        assert_eq!(
+            again.machines["192.168.2.2"].ssh_key.as_deref(),
+            Some("~/.ssh/ssh-key-my-wsl")
+        );
         let disk2: Value = bm_core::read_json(&ledger).unwrap();
         assert_eq!(disk, disk2, "reload must not rewrite");
     }
@@ -148,12 +164,21 @@ mod tests {
             "box-9",
         );
         bm_core::provision::save_box(&layout.machines(), &bxo).unwrap();
-        inner.machines.insert("10.0.0.9".into(), bm_core::provision::join_machine(&bxo, Some(&rt)));
+        inner.machines.insert(
+            "10.0.0.9".into(),
+            bm_core::provision::join_machine(&bxo, Some(&rt)),
+        );
         inner.save();
 
         let disk: Value = bm_core::read_json(&layout.bm_state().join("ledger.json")).unwrap();
-        assert!(disk.get("machines").is_none(), "config never lands in the ledger");
-        assert_eq!(disk["machine_state"]["10.0.0.9"]["note"], serde_json::json!(""));
+        assert!(
+            disk.get("machines").is_none(),
+            "config never lands in the ledger"
+        );
+        assert_eq!(
+            disk["machine_state"]["10.0.0.9"]["note"],
+            serde_json::json!("")
+        );
     }
 
     #[test]
@@ -167,7 +192,10 @@ mod tests {
         let raw = std::fs::read_to_string(&src).expect("BM_REAL_LEDGER readable");
         let doc: Value = serde_json::from_str(&raw).unwrap();
         let tasks_n = doc["tasks"].as_array().map(|a| a.len()).unwrap_or(0);
-        assert!(tasks_n > 100, "this gate wants the real ledger, got {tasks_n} tasks");
+        assert!(
+            tasks_n > 100,
+            "this gate wants the real ledger, got {tasks_n} tasks"
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let layout = Layout::new(dir.path());
@@ -177,17 +205,29 @@ mod tests {
         inner.load_ledger();
 
         assert_eq!(inner.tasks.len(), tasks_n, "no task lost");
-        assert_eq!(inner.machines["192.168.2.2"].ssh_key.as_deref(), Some("~/.ssh/ssh-key-my-wsl"), "the live key survives");
+        assert_eq!(
+            inner.machines["192.168.2.2"].ssh_key.as_deref(),
+            Some("~/.ssh/ssh-key-my-wsl"),
+            "the live key survives"
+        );
         assert_eq!(inner.machines["127.0.0.1"].ssh_key, None);
 
         let snap: Vec<(String, String)> = {
-            let mut v: Vec<_> = inner.machines.values().map(|m| (m.addr.clone(), serde_json::to_string(m).unwrap())).collect();
+            let mut v: Vec<_> = inner
+                .machines
+                .values()
+                .map(|m| (m.addr.clone(), serde_json::to_string(m).unwrap()))
+                .collect();
             v.sort();
             v
         };
         inner.load_ledger();
         let snap2: Vec<(String, String)> = {
-            let mut v: Vec<_> = inner.machines.values().map(|m| (m.addr.clone(), serde_json::to_string(m).unwrap())).collect();
+            let mut v: Vec<_> = inner
+                .machines
+                .values()
+                .map(|m| (m.addr.clone(), serde_json::to_string(m).unwrap()))
+                .collect();
             v.sort();
             v
         };
@@ -203,7 +243,11 @@ mod tests {
             r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"A","text":"y"},{"speaker":"B","text":"z"}]}"#,
         )
         .unwrap();
-        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam","Narrator":"Đức Trí"}"#).unwrap();
+        std::fs::write(
+            layout.cast("vieneu"),
+            r#"{"A":"Đức Trí","B":"Adam","Narrator":"Đức Trí"}"#,
+        )
+        .unwrap();
         let seg = layout.seg_dir("vieneu", 1);
         std::fs::create_dir_all(&seg).unwrap();
         std::fs::write(seg.join("0000-0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
@@ -212,8 +256,14 @@ mod tests {
 
         let msg = inner.op_swap_voice("A", "Minh Triết").unwrap();
         assert!(msg.contains("Đức Trí -> Minh Triết"), "{msg}");
-        assert!(!seg.join("0000-0001_Đức Trí.wav").exists(), "stale run file must go");
-        assert!(seg.join("0002_Adam.wav").exists(), "other voices keep cache");
+        assert!(
+            !seg.join("0000-0001_Đức Trí.wav").exists(),
+            "stale run file must go"
+        );
+        assert!(
+            seg.join("0002_Adam.wav").exists(),
+            "other voices keep cache"
+        );
         assert!(!layout.final_mp3(1).exists(), "stale product goes away");
         assert_eq!(inner.tasks["render:1"].state, TaskState::Pending);
         assert_eq!(inner.tasks["merge:1"].state, TaskState::Pending);
@@ -250,10 +300,23 @@ mod tests {
         t.assigned_to = Some("remote-w".into());
         inner.tasks.insert("render:7".into(), t);
 
-        inner.complete(&completion("remote-w", "render:7", true, "render ch7 (2 calls)"));
-        assert_eq!(inner.tasks["render:7"].state, TaskState::Done, "gate passes: files are home");
+        inner.complete(&completion(
+            "remote-w",
+            "render:7",
+            true,
+            "render ch7 (2 calls)",
+        ));
+        assert_eq!(
+            inner.tasks["render:7"].state,
+            TaskState::Done,
+            "gate passes: files are home"
+        );
         let m = inner.tasks.get("merge:7").expect("merge task exists");
-        assert_eq!(m.affinity.as_deref(), Some("127.0.0.1"), "merge runs where the segments are");
+        assert_eq!(
+            m.affinity.as_deref(),
+            Some("127.0.0.1"),
+            "merge runs where the segments are"
+        );
     }
 
     #[test]
@@ -272,9 +335,16 @@ mod tests {
         std::fs::write(layout.final_mp3(8), vec![0u8; 2000]).unwrap();
 
         inner.complete(&completion("w1", "merge:8", true, "merge ch8 -> out.mp3"));
-        assert_eq!(inner.tasks["merge:8"].state, TaskState::Done, "file present: done");
+        assert_eq!(
+            inner.tasks["merge:8"].state,
+            TaskState::Done,
+            "file present: done"
+        );
         let msg = inner.complete(&completion("w1", "merge:9", true, "merge ch9 -> out.mp3"));
-        assert!(msg.contains("failed"), "no payload and no file fails: {msg}");
+        assert!(
+            msg.contains("failed"),
+            "no payload and no file fails: {msg}"
+        );
         assert!(msg.contains("no file"), "the absence is named: {msg}");
         assert_eq!(inner.tasks["merge:9"].state, TaskState::Pending);
     }
@@ -307,12 +377,23 @@ mod tests {
         inner.workers.insert("old-w".into(), "192.168.2.2".into());
         inner.caps.insert(
             "old-w".into(),
-            vec!["crawl".into(), "digest".into(), "render".into(), "merge".into()],
+            vec![
+                "crawl".into(),
+                "digest".into(),
+                "render".into(),
+                "merge".into(),
+            ],
         );
         inner.workers.insert("new-w".into(), "192.168.2.2".into());
         inner.caps.insert(
             "new-w".into(),
-            vec!["crawl".into(), "digest".into(), "render".into(), "merge".into(), "render-segments".into()],
+            vec![
+                "crawl".into(),
+                "digest".into(),
+                "render".into(),
+                "merge".into(),
+                "render-segments".into(),
+            ],
         );
 
         assert!(inner.offer("old-w").is_none(), "old agent never renders");
@@ -381,9 +462,15 @@ mod tests {
         }
 
         let msg = inner.op_swap_voice("A", "Minh Triết").unwrap();
-        assert!(!msg.contains("11"), "complete store, no stale files: untouched: {msg}");
+        assert!(
+            !msg.contains("11"),
+            "complete store, no stale files: untouched: {msg}"
+        );
         assert!(layout.final_mp3(11).exists(), "product stays");
-        assert!(seg.join("0000-0001_Minh Triết.wav").exists(), "current files stay");
+        assert!(
+            seg.join("0000-0001_Minh Triết.wav").exists(),
+            "current files stay"
+        );
         assert_eq!(inner.tasks["render:11"].state, TaskState::Done);
         assert_eq!(inner.tasks["merge:11"].state, TaskState::Done);
     }
@@ -416,11 +503,15 @@ mod tests {
         inner.tasks.insert("digest:12".into(), t);
 
         let mut c = completion("w1", "digest:12", true, "digest ch12");
-        c.script = Some(serde_json::json!({"segments":[{"speaker":"A","text":"a rewritten line here"}]}));
+        c.script =
+            Some(serde_json::json!({"segments":[{"speaker":"A","text":"a rewritten line here"}]}));
         inner.complete(&c);
 
         assert_eq!(inner.tasks["render:12"].state, TaskState::Pending);
-        assert_eq!(inner.tasks["render:12"].attempts, 0, "new work, not a retry");
+        assert_eq!(
+            inner.tasks["render:12"].attempts, 0,
+            "new work, not a retry"
+        );
         assert_eq!(inner.tasks["merge:12"].state, TaskState::Pending);
         assert!(!seg.join("0000_Adam.wav").exists(), "stale segments go");
         assert!(!layout.final_mp3(12).exists(), "stale product goes");
@@ -459,6 +550,74 @@ mod tests {
     }
 
     #[test]
+    fn retag_rewrites_laughs_and_requeues_only_edited_runs() {
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(13),
+            r#"{"segments":[{"speaker":"A","text":"Ha ha ha!"},{"speaker":"B","text":"z"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Adam","B":"Đức Trí"}"#).unwrap();
+        let seg = layout.seg_dir("vieneu", 13);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000_Adam.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(seg.join("0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(layout.final_mp3(13), vec![0u8; 2000]).unwrap();
+        for stage in [Stage::Render, Stage::Merge] {
+            let mut t = Task::new(13, stage);
+            t.state = TaskState::Done;
+            inner.tasks.insert(format!("{stage}:13"), t);
+        }
+
+        let msg = inner.op_retag(false).unwrap();
+        assert!(msg.contains("13"), "touched chapter listed: {msg}");
+        let back: serde_json::Value = bm_core::read_json(&layout.script(13)).unwrap();
+        assert_eq!(back["segments"][0]["text"], "[cười]");
+        assert_eq!(back["segments"][1]["text"], "z", "untouched text kept");
+        assert!(
+            !seg.join("0000_Adam.wav").exists(),
+            "edited run's file goes"
+        );
+        assert!(
+            seg.join("0001_Đức Trí.wav").exists(),
+            "other runs keep cache"
+        );
+        assert!(!layout.final_mp3(13).exists(), "stale product goes");
+        assert_eq!(inner.tasks["render:13"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["merge:13"].state, TaskState::Pending);
+
+        // Second run is a no-op: deterministic convergence.
+        let msg2 = inner.op_retag(false).unwrap();
+        assert!(msg2.contains("already tags"), "{msg2}");
+    }
+
+    #[test]
+    fn retag_dry_run_reports_without_writing() {
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(15),
+            r#"{"segments":[{"speaker":"A","text":"Haizz, x"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Adam"}"#).unwrap();
+        let seg = layout.seg_dir("vieneu", 15);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000_Adam.wav"), vec![0u8; 2000]).unwrap();
+
+        let msg = inner.op_retag(true).unwrap();
+        assert!(msg.contains("15"), "report names the chapter: {msg}");
+        let back: serde_json::Value = bm_core::read_json(&layout.script(15)).unwrap();
+        assert!(back["segments"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Haizz"));
+        assert!(seg.join("0000_Adam.wav").exists(), "nothing deleted");
+        assert!(!inner.tasks.contains_key("render:15"), "nothing requeued");
+    }
+
+    #[test]
     fn missing_units_omits_what_the_store_already_holds() {
         // Doc test 1: a store holding 29 of 32 units yields an offer of 3.
         let (_d, inner) = fixture();
@@ -466,7 +625,9 @@ mod tests {
         let mut segs = Vec::new();
         for i in 0..32u32 {
             let sp = if i % 2 == 0 { "A" } else { "B" };
-            segs.push(serde_json::json!({"speaker": sp, "text": format!("line {i} spoken aloud here")}));
+            segs.push(
+                serde_json::json!({"speaker": sp, "text": format!("line {i} spoken aloud here")}),
+            );
         }
         std::fs::write(
             layout.script(9),
@@ -493,7 +654,10 @@ mod tests {
             "exactly the missing three, in order: {names:?}"
         );
         assert_eq!(units[0].speaker, "B");
-        assert!(!units[0].text.is_empty(), "the worker gets text, not a lookup key");
+        assert!(
+            !units[0].text.is_empty(),
+            "the worker gets text, not a lookup key"
+        );
 
         // Full store → Some([]): report ok/0, not a replan.
         for i in [5u32, 17, 30] {
@@ -518,7 +682,11 @@ mod tests {
             r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"B","text":"z"}]}"#,
         )
         .unwrap();
-        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam","Narrator":"Đức Trí"}"#).unwrap();
+        std::fs::write(
+            layout.cast("vieneu"),
+            r#"{"A":"Đức Trí","B":"Adam","Narrator":"Đức Trí"}"#,
+        )
+        .unwrap();
         std::fs::write(layout.final_mp3(1), vec![0u8; 2000]).unwrap();
         for stage in [Stage::Render, Stage::Merge] {
             let mut t = Task::new(1, stage);
@@ -544,7 +712,11 @@ mod tests {
             r#"{"segments":[{"speaker":"B","text":"z"}]}"#,
         )
         .unwrap();
-        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam","Narrator":"Đức Trí"}"#).unwrap();
+        std::fs::write(
+            layout.cast("vieneu"),
+            r#"{"A":"Đức Trí","B":"Adam","Narrator":"Đức Trí"}"#,
+        )
+        .unwrap();
         std::fs::write(layout.final_mp3(2), vec![0u8; 2000]).unwrap();
         for stage in [Stage::Render, Stage::Merge] {
             let mut t = Task::new(2, stage);
@@ -605,17 +777,26 @@ mod tests {
 
         let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
         assert_eq!(cast["Huyền Vũ"], "Đức Trí", "canonical keeps its voice");
-        assert!(!cast.contains_key("Huyền Vũ lão tổ"), "absorbed key disappears");
+        assert!(
+            !cast.contains_key("Huyền Vũ lão tổ"),
+            "absorbed key disappears"
+        );
 
         let script: Value = bm_core::read_json(&layout.script(25)).unwrap();
-        assert_eq!(script["segments"][0]["speaker"], serde_json::json!("Huyền Vũ"));
+        assert_eq!(
+            script["segments"][0]["speaker"],
+            serde_json::json!("Huyền Vũ")
+        );
         assert_eq!(script["roster"], serde_json::json!(["Huyền Vũ"]));
 
         assert!(!seg.join("0000_Adam.wav").exists(), "loser's cache goes");
         assert!(!layout.final_mp3(25).exists(), "stale product goes away");
         assert_eq!(inner.tasks["render:25"].state, TaskState::Pending);
         assert_eq!(inner.tasks["merge:25"].state, TaskState::Pending);
-        assert!(inner.events.iter().any(|e| e.text.contains("reconcile")), "logged");
+        assert!(
+            inner.events.iter().any(|e| e.text.contains("reconcile")),
+            "logged"
+        );
     }
 
     #[test]
@@ -655,9 +836,15 @@ mod tests {
         assert!(msg.contains("Huyền Vũ <= Huyền Vũ lão tổ"), "{msg}");
 
         let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
-        assert!(!cast.contains_key("Huyền Vũ lão tổ"), "absorbed key disappears");
+        assert!(
+            !cast.contains_key("Huyền Vũ lão tổ"),
+            "absorbed key disappears"
+        );
         let script: Value = bm_core::read_json(&layout.script(25)).unwrap();
-        assert_eq!(script["segments"][0]["speaker"], serde_json::json!("Huyền Vũ"));
+        assert_eq!(
+            script["segments"][0]["speaker"],
+            serde_json::json!("Huyền Vũ")
+        );
     }
 
     #[test]
@@ -678,7 +865,10 @@ mod tests {
             r#"{"version":1,"engines":{"vieneu":{"policy":{"excluded_accents":["Northern"]}}}}"#,
         )
         .unwrap();
-        let err = inner.op_swap_voice("A", "Minh Đức").unwrap_err().to_string();
+        let err = inner
+            .op_swap_voice("A", "Minh Đức")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("neither an admitted preset"), "{err}");
 
         // An admitted voice still swaps.
@@ -714,7 +904,10 @@ mod tests {
         // Pooled samples are vetted at adding: assignable with nobody on them.
         assert!(inner.op_swap_voice("A", "young-female-1").is_ok());
         // Anything else undeclared still needs a prior assignment to be trusted.
-        let err = inner.op_swap_voice("A", "Chưa Từng Có").unwrap_err().to_string();
+        let err = inner
+            .op_swap_voice("A", "Chưa Từng Có")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("neither an admitted preset"), "{err}");
     }
 
@@ -750,8 +943,14 @@ mod tests {
     #[test]
     fn swap_refuses_while_workers_are_mid_play() {
         let (_d, mut inner) = busy_inner();
-        let err = inner.op_swap_voice("A", "Quang Sơn").unwrap_err().to_string();
-        assert!(err.contains("mid-play") && err.contains("render:1"), "{err}");
+        let err = inner
+            .op_swap_voice("A", "Quang Sơn")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("mid-play") && err.contains("render:1"),
+            "{err}"
+        );
         assert!(err.contains('X'), "names the way out: {err}");
     }
 
@@ -875,7 +1074,9 @@ mod tests {
             t.lease_until = Some(now + 5000);
             inner.tasks.insert(id.into(), t);
         }
-        inner.tasks.insert("digest:4".into(), Task::new(4, Stage::Digest));
+        inner
+            .tasks
+            .insert("digest:4".into(), Task::new(4, Stage::Digest));
         inner.beats.insert(
             "w-live".into(),
             bm_proto::Heartbeat {
@@ -896,9 +1097,15 @@ mod tests {
         assert!(msg.contains("digest:2"), "{msg}");
         assert!(!msg.contains("digest:3"), "live worker untouched: {msg}");
         assert_eq!(inner.tasks["digest:2"].state, TaskState::Pending);
-        assert_eq!(inner.tasks["digest:2"].attempts, 0, "strikes untouched (none here)");
+        assert_eq!(
+            inner.tasks["digest:2"].attempts, 0,
+            "strikes untouched (none here)"
+        );
         assert_eq!(inner.tasks["digest:3"].state, TaskState::Assigned);
-        assert!(inner.op_requeue_orphans().contains("no orphaned"), "second run is a no-op");
+        assert!(
+            inner.op_requeue_orphans().contains("no orphaned"),
+            "second run is a no-op"
+        );
     }
 
     #[test]
@@ -916,10 +1123,16 @@ mod tests {
         let msg = inner.op_retry_shelved();
         assert!(msg.contains("digest:2"), "{msg}");
         assert_eq!(inner.tasks["digest:2"].state, TaskState::Pending);
-        assert_eq!(inner.tasks["digest:2"].attempts, 0, "manual retry forgives strikes");
+        assert_eq!(
+            inner.tasks["digest:2"].attempts, 0,
+            "manual retry forgives strikes"
+        );
         // The chapter-level shelve gate lifts, so the task is offerable again.
         assert!(inner.offer("w1").is_some(), "retried task must be offered");
-        assert!(inner.op_retry_shelved().contains("no shelved"), "second run is a no-op");
+        assert!(
+            inner.op_retry_shelved().contains("no shelved"),
+            "second run is a no-op"
+        );
     }
 
     fn completion(worker: &str, task: &str, ok: bool, detail: &str) -> Complete {
@@ -960,8 +1173,14 @@ mod tests {
         inner.tasks.insert("render:6".into(), t);
 
         let msg = inner.complete(&completion("w1", "render:6", true, "render ch6 (2 calls)"));
-        assert!(msg.contains("failed"), "an incomplete ok-report fails: {msg}");
-        assert!(msg.contains("0002_Adam.wav"), "the missing file is named: {msg}");
+        assert!(
+            msg.contains("failed"),
+            "an incomplete ok-report fails: {msg}"
+        );
+        assert!(
+            msg.contains("0002_Adam.wav"),
+            "the missing file is named: {msg}"
+        );
         assert_eq!(inner.tasks["render:6"].state, TaskState::Pending);
         assert_eq!(inner.tasks["render:6"].attempts, 1);
     }
@@ -985,14 +1204,25 @@ mod tests {
 
         let events = inner.recent_events(10);
         let last = events.last().expect("a failure must record an event");
-        assert_eq!(last.level, "warn", "a first failure retries, so it is a warning");
-        assert!(last.text.contains("w1") && last.text.contains("digest:4"), "{}", last.text);
+        assert_eq!(
+            last.level, "warn",
+            "a first failure retries, so it is a warning"
+        );
+        assert!(
+            last.text.contains("w1") && last.text.contains("digest:4"),
+            "{}",
+            last.text
+        );
         assert!(
             last.text.contains("model 'claude' unavailable"),
             "the worker's reason must survive: {}",
             last.text
         );
-        assert_eq!(inner.tasks["digest:4"].state, TaskState::Pending, "one strike, not shelved");
+        assert_eq!(
+            inner.tasks["digest:4"].state,
+            TaskState::Pending,
+            "one strike, not shelved"
+        );
     }
 
     #[test]
@@ -1004,12 +1234,24 @@ mod tests {
         t.assigned_to = Some("w1".into());
         inner.tasks.insert("digest:4".into(), t);
 
-        inner.complete(&completion("w1", "digest:4", false, "digest returned no segments"));
+        inner.complete(&completion(
+            "w1",
+            "digest:4",
+            false,
+            "digest returned no segments",
+        ));
 
         let last = inner.recent_events(1).into_iter().next().unwrap().clone();
-        assert_eq!(last.level, "error", "three strikes is an error, not a warning");
+        assert_eq!(
+            last.level, "error",
+            "three strikes is an error, not a warning"
+        );
         assert!(last.text.contains("shelved"), "{}", last.text);
-        assert!(last.text.contains('u'), "the way out must be named: {}", last.text);
+        assert!(
+            last.text.contains('u'),
+            "the way out must be named: {}",
+            last.text
+        );
         assert_eq!(inner.tasks["digest:4"].state, TaskState::Shelved);
     }
 
@@ -1020,9 +1262,16 @@ mod tests {
             inner.push_event("info", format!("event {i}"));
         }
         let all = inner.recent_events(EVENT_CAP * 2);
-        assert_eq!(all.len(), EVENT_CAP, "the buffer must not grow without bound");
+        assert_eq!(
+            all.len(),
+            EVENT_CAP,
+            "the buffer must not grow without bound"
+        );
         let ids: Vec<u64> = all.iter().map(|e| e.id).collect();
-        assert!(ids.windows(2).all(|w| w[0] < w[1]), "ids must ascend: {ids:?}");
+        assert!(
+            ids.windows(2).all(|w| w[0] < w[1]),
+            "ids must ascend: {ids:?}"
+        );
         assert_eq!(*ids.last().unwrap(), (EVENT_CAP + 24) as u64);
         // `limit` is a tail window, not a reordering.
         let tail = inner.recent_events(3);
@@ -1049,7 +1298,10 @@ mod tests {
         let requeued = inner.reap();
         assert_eq!(requeued, vec!["render:5".to_string()]);
         assert_eq!(inner.tasks["render:5"].state, TaskState::Pending);
-        assert_eq!(inner.tasks["render:5"].attempts, 0, "silence is not a strike");
+        assert_eq!(
+            inner.tasks["render:5"].attempts, 0,
+            "silence is not a strike"
+        );
 
         let last = inner.recent_events(1).into_iter().next().unwrap().clone();
         assert_eq!(last.level, "warn");
@@ -1059,7 +1311,11 @@ mod tests {
         // A quiet reap stays quiet: no event, nothing to re-announce every 10s.
         let before = inner.events.len();
         assert!(inner.reap().is_empty());
-        assert_eq!(inner.events.len(), before, "nothing happened, nothing logged");
+        assert_eq!(
+            inner.events.len(),
+            before,
+            "nothing happened, nothing logged"
+        );
     }
 
     #[test]
@@ -1082,7 +1338,10 @@ mod tests {
         let msg = inner.op_retry_task(Stage::Digest, 3, false);
         assert!(msg.contains("digest:3"), "{msg}");
         assert_eq!(inner.tasks["digest:3"].state, TaskState::Pending);
-        assert_eq!(inner.tasks["digest:3"].attempts, 0, "a manual retry forgives strikes");
+        assert_eq!(
+            inner.tasks["digest:3"].attempts, 0,
+            "a manual retry forgives strikes"
+        );
         assert!(inner.tasks["digest:3"].assigned_to.is_none());
         assert!(inner.tasks["digest:3"].lease_until.is_none());
         assert!(inner.tasks["digest:3"].detail.contains("requeued"));
@@ -1104,6 +1363,8 @@ mod tests {
         assert!(last.text.contains("digest:3"), "{}", last.text);
         assert!(last.text.contains("was pending"), "{}", last.text);
 
-        assert!(inner.op_retry_task(Stage::Merge, 99, false).contains("not found"));
+        assert!(inner
+            .op_retry_task(Stage::Merge, 99, false)
+            .contains("not found"));
     }
 }

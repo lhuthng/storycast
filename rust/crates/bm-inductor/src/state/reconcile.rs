@@ -1,6 +1,6 @@
-use super::{Inner, lease_for};
-use bm_proto::{Machine, MachineState, Stage, Task, TaskState, now_secs};
-use serde_json::{Value, json};
+use super::{lease_for, Inner};
+use bm_proto::{now_secs, Machine, MachineState, Stage, Task, TaskState};
+use serde_json::{json, Value};
 
 impl Inner {
     /// Derive artifact truth from disk, then reconcile assignments a dead run
@@ -100,7 +100,7 @@ impl Inner {
 
     /// Every persisted chapter script, sorted: the unit every bulk pass
     /// (swap invalidation, reconcile rewrite) walks.
-    fn script_paths(&self) -> Vec<(u32, std::path::PathBuf)> {
+    pub(crate) fn script_paths(&self) -> Vec<(u32, std::path::PathBuf)> {
         let mut scripts: Vec<std::path::PathBuf> = std::fs::read_dir(self.layout.data())
             .map(|rd| rd.filter_map(|e| e.ok().map(|x| x.path())).collect())
             .unwrap_or_default();
@@ -180,11 +180,17 @@ impl Inner {
         let store = bm_core::segments::LocalStore::new(self.layout.clone());
         for (n, sp) in self.script_paths() {
             let data: Value = bm_core::read_json(&sp).unwrap_or(Value::Null);
-            let segments = data.get("segments").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+            let segments = data
+                .get("segments")
+                .and_then(|s| s.as_array())
+                .cloned()
+                .unwrap_or_default();
             let planned = bm_core::assemble::drop_headline(&segments);
             let seg_dir = bm_core::segments::SegmentStore::dir(&store, engine, n);
             let local = engine == "vieneu";
-            let speaks = bm_core::assemble::runs(planned).iter().any(|run| run.speaker == character);
+            let speaks = bm_core::assemble::runs(planned)
+                .iter()
+                .any(|run| run.speaker == character);
             let mut touched = false;
             for run in bm_core::assemble::runs(planned) {
                 if run.speaker != character {
@@ -192,10 +198,17 @@ impl Inner {
                 }
                 let names: Vec<String> = if local {
                     let (a, b) = (run.idx[0], run.idx[run.idx.len() - 1]);
-                    let tag = if a == b { format!("{a:04}") } else { format!("{a:04}-{b:04}") };
+                    let tag = if a == b {
+                        format!("{a:04}")
+                    } else {
+                        format!("{a:04}-{b:04}")
+                    };
                     vec![format!("{tag}_{old}.wav")]
                 } else {
-                    run.idx.iter().map(|i| format!("{i:04}_{old}.wav")).collect()
+                    run.idx
+                        .iter()
+                        .map(|i| format!("{i:04}_{old}.wav"))
+                        .collect()
                 };
                 for name in names {
                     let stale = seg_dir.join(&name);
@@ -268,7 +281,10 @@ impl Inner {
         // Pre-mutation snapshot: one reconcile rewrites bible, cast and
         // dozens of scripts at once — a bad merge must be restorable.
         {
-            let snap = self.layout.scratch().join(format!("reconcile-bak-{}", now_secs()));
+            let snap = self
+                .layout
+                .scratch()
+                .join(format!("reconcile-bak-{}", now_secs()));
             let _ = std::fs::create_dir_all(&snap);
             let _ = std::fs::copy(&path, snap.join("bible.json"));
             let _ = std::fs::copy(self.layout.cast(&engine), snap.join("cast.json"));
@@ -284,7 +300,10 @@ impl Inner {
                 bible
                     .get("characters")
                     .and_then(|c| c.as_array())
-                    .map(|a| a.iter().any(|c| c.get("name").and_then(|x| x.as_str()) == Some(n)))
+                    .map(|a| {
+                        a.iter()
+                            .any(|c| c.get("name").and_then(|x| x.as_str()) == Some(n))
+                    })
                     .unwrap_or(false)
             }
             for (canonical, absorbs) in merges {
@@ -307,15 +326,16 @@ impl Inner {
                     continue;
                 }
                 if let Some(chars) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) {
-                    if let Some(target) = chars
-                        .iter_mut()
-                        .find(|c| c.get("name").and_then(|x| x.as_str()) == Some(canonical.as_str()))
-                    {
+                    if let Some(target) = chars.iter_mut().find(|c| {
+                        c.get("name").and_then(|x| x.as_str()) == Some(canonical.as_str())
+                    }) {
                         let mut aliases: Vec<String> = target
                             .get("proper_aliases")
                             .and_then(|a| a.as_array())
                             .map(|a| {
-                                a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(String::from))
+                                    .collect()
                             })
                             .unwrap_or_default();
                         for a in &extra {

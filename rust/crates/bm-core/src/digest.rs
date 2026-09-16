@@ -24,11 +24,11 @@ mod reconcile;
 mod tags;
 
 pub use canon::{
-    apply_merges, BibleMerge, canon_key, canonicalize_script, merge_bible, resolve_speaker,
+    apply_merges, canon_key, canonicalize_script, merge_bible, resolve_speaker, BibleMerge,
 };
+pub use llm::{generate, parse_retry_delay, GenError};
 pub use reconcile::{cast_only_folds, parse_reconcile_merges, reconcile_plan, ReconcilePlan};
-pub use llm::{generate, GenError, parse_retry_delay};
-pub use tags::{tags_of, validate, warn_vietnamese};
+pub use tags::{retag_text, tags_of, validate, warn_vietnamese};
 
 /// What a digest produces: the per-chapter script plus the bible delta.
 #[derive(Debug, Clone)]
@@ -162,10 +162,7 @@ pub async fn digest_chapter(
                 Err(e2) => {
                     let dump = layout.data().join(".last-analyze-raw.json");
                     let _ = atomic_write(&dump, &raw);
-                    anyhow::bail!(
-                        "digest invalid ({e2}); raw saved to {}",
-                        dump.display()
-                    );
+                    anyhow::bail!("digest invalid ({e2}); raw saved to {}", dump.display());
                 }
             }
         }
@@ -276,7 +273,10 @@ mod tests {
         }]});
         let ctx = bible_context(&bible);
         assert!(ctx.contains("\"name\":\"A\""));
-        assert!(!ctx.contains("chapters_seen"), "context leaked chapter baggage: {ctx}");
+        assert!(
+            !ctx.contains("chapters_seen"),
+            "context leaked chapter baggage: {ctx}"
+        );
     }
 
     #[test]
