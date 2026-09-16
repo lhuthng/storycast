@@ -9,9 +9,9 @@
 //! completeness boolean, because the migration needs the *missing names*.
 
 use anyhow::{Context, Result};
-use bm_core::provision::{REMOTE_DIR, Ssh, load_boxes, resolve_key};
+use bm_core::provision::{load_boxes, resolve_key, Ssh, REMOTE_DIR};
 use bm_core::segments::SegmentEntry;
-use bm_core::{Layout, config::Settings};
+use bm_core::{config::Settings, Layout};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One box the inventory covers: how to reach it plus a display label.
@@ -25,17 +25,15 @@ struct Target {
 /// provisioned before `link` existed, or whose link was dropped). Filtered by
 /// `--from` (address or link name) when given.
 fn targets(layout: &Layout, settings: &Settings, only: &[String]) -> Vec<Target> {
-    let mut addrs: BTreeMap<String, (String, u16, Option<String>, String)> =
-        BTreeMap::new();
+    let mut addrs: BTreeMap<String, (String, u16, Option<String>, String)> = BTreeMap::new();
     for b in load_boxes(&layout.machines()) {
         addrs.insert(
             b.addr.clone(),
             (b.user.clone(), b.port, b.key.clone(), b.name.clone()),
         );
     }
-    if let Ok(doc) = bm_core::read_json::<serde_json::Value>(
-        &layout.bm_state().join("ledger.json"),
-    ) {
+    if let Ok(doc) = bm_core::read_json::<serde_json::Value>(&layout.bm_state().join("ledger.json"))
+    {
         if let Some(rt) = doc.get("machine_state").and_then(|v| v.as_object()) {
             for addr in rt.keys() {
                 addrs.entry(addr.clone()).or_insert_with(|| {
@@ -91,7 +89,10 @@ fn chapters(layout: &Layout) -> Vec<u32> {
     };
     for e in rd.filter_map(|e| e.ok()) {
         let n = e.file_name().to_string_lossy().into_owned();
-        if let Some(num) = n.strip_prefix("script-").and_then(|s| s.strip_suffix(".json")) {
+        if let Some(num) = n
+            .strip_prefix("script-")
+            .and_then(|s| s.strip_suffix(".json"))
+        {
             if let Ok(ch) = num.parse::<u32>() {
                 if layout.script(ch).is_file() {
                     out.push(ch);
@@ -108,17 +109,16 @@ fn chapters(layout: &Layout) -> Vec<u32> {
 /// chapter verifies; the completion gate (`complete()`) treats a non-empty
 /// list as a failed report. `None` when the chapter cannot be planned here at
 /// all — also a failure, with nothing to name.
-pub(crate) fn missing_wavs(
-    layout: &Layout,
-    engine: &str,
-    chapter: u32,
-) -> Option<Vec<String>> {
+pub(crate) fn missing_wavs(layout: &Layout, engine: &str, chapter: u32) -> Option<Vec<String>> {
     let expected = expected_names(layout, engine, chapter)?;
     let dir = layout.seg_dir(engine, chapter);
     let mut missing: Vec<String> = expected
         .into_iter()
         .filter(|name| {
-            !dir.join(name).metadata().map(|m| m.len() > 1000).unwrap_or(false)
+            !dir.join(name)
+                .metadata()
+                .map(|m| m.len() > 1000)
+                .unwrap_or(false)
         })
         .collect();
     missing.sort();
@@ -140,12 +140,16 @@ pub(crate) fn expected_names(
     let data: serde_json::Value = serde_json::from_str(&text).ok()?;
     let segments = data.get("segments")?.as_array()?;
     let policy = bm_core::cast::policy_for_bible(engine, &layout.bible()).ok()?;
-    let cast =
-        bm_core::cast::load_cast(&script_path, &layout.cast(engine), &layout.bible(), &policy, false)
-            .ok()?;
+    let cast = bm_core::cast::load_cast(
+        &script_path,
+        &layout.cast(engine),
+        &layout.bible(),
+        &policy,
+        false,
+    )
+    .ok()?;
     let local = engine == "vieneu";
-    let title =
-        bm_core::assemble::title_speech_for_script(&script_path, &cast, segments);
+    let title = bm_core::assemble::title_speech_for_script(&script_path, &cast, segments);
     let wavs = bm_core::assemble::expected_wavs(
         segments,
         &cast,
@@ -155,8 +159,7 @@ pub(crate) fn expected_names(
     )
     .ok()?;
     Some(
-        wavs
-            .iter()
+        wavs.iter()
             .filter_map(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
@@ -181,7 +184,10 @@ fn coverage(expected: &BTreeSet<String>, have: &BTreeSet<String>) -> Coverage {
     } else if n == 0 {
         Coverage::NoDirectory
     } else {
-        Coverage::Partial { have: n, want: expected.len() }
+        Coverage::Partial {
+            have: n,
+            want: expected.len(),
+        }
     }
 }
 
@@ -210,8 +216,7 @@ fn remote_manifest(ssh: &Ssh) -> Result<Vec<SegmentEntry>> {
             bm_core::util::head_chars(stderr.trim(), 200)
         );
     }
-    serde_json::from_str(stdout.trim())
-        .with_context(|| "parsing agent segments output".to_string())
+    serde_json::from_str(stdout.trim()).with_context(|| "parsing agent segments output".to_string())
 }
 
 /// Delete files in a seg dir that `expected_wavs` never names (stale voices
@@ -225,17 +230,15 @@ pub fn cmd_prune(layout: &Layout, settings: &Settings, prune: bool) -> Result<()
     let engine = settings.engine.clone();
     // Live renders first: never sweep a directory a worker may be writing.
     let mut live: BTreeSet<u32> = BTreeSet::new();
-    if let Ok(doc) = bm_core::read_json::<serde_json::Value>(
-        &layout.bm_state().join("ledger.json"),
-    ) {
+    if let Ok(doc) = bm_core::read_json::<serde_json::Value>(&layout.bm_state().join("ledger.json"))
+    {
         if let Some(tasks) = doc.get("tasks").and_then(|t| t.as_array()) {
             for t in tasks {
                 let active = t
                     .get("state")
                     .and_then(|s| s.as_str())
                     .is_some_and(|s| s == "assigned" || s == "running");
-                let is_render =
-                    t.get("stage").and_then(|s| s.as_str()) == Some("render");
+                let is_render = t.get("stage").and_then(|s| s.as_str()) == Some("render");
                 if active && is_render {
                     if let Some(n) = t.get("chapter").and_then(|c| c.as_u64()) {
                         live.insert(n as u32);
@@ -357,8 +360,10 @@ pub fn cmd_segments(
                 .collect();
             let c = coverage(&expected, &have);
             // Files worth pulling: expected, held remotely, missing locally.
-            let mut pull: Vec<&String> =
-                have.intersection(&expected).filter(|f| !local.contains(*f)).collect();
+            let mut pull: Vec<&String> = have
+                .intersection(&expected)
+                .filter(|f| !local.contains(*f))
+                .collect();
             pull.sort();
             print!("  {:<10} {}", t.label, show(c));
             if !pull.is_empty() {
@@ -373,8 +378,7 @@ pub fn cmd_segments(
                     expected.iter().filter(|f| !have.contains(*f)).collect();
                 gone.sort();
                 if !gone.is_empty() {
-                    let shown: Vec<&str> =
-                        gone.iter().take(5).map(|s| s.as_str()).collect();
+                    let shown: Vec<&str> = gone.iter().take(5).map(|s| s.as_str()).collect();
                     print!(" — remote lacks: {}", shown.join(", "));
                     if gone.len() > 5 {
                         print!(" (+{} more)", gone.len() - 5);
@@ -428,10 +432,14 @@ mod tests {
 
     #[test]
     fn coverage_splits_complete_partial_and_missing() {
-        let e: BTreeSet<String> =
-            ["a".into(), "b".into(), "c".into()].into_iter().collect();
+        let e: BTreeSet<String> = ["a".into(), "b".into(), "c".into()].into_iter().collect();
         assert_eq!(
-            coverage(&e, &["a".into(), "b".into(), "c".into(), "x".into()].into_iter().collect()),
+            coverage(
+                &e,
+                &["a".into(), "b".into(), "c".into(), "x".into()]
+                    .into_iter()
+                    .collect()
+            ),
             Coverage::Complete,
             "extras never demote"
         );

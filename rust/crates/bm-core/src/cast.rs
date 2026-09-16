@@ -57,8 +57,7 @@ pub fn read_cast(engine: &str, path: &Path) -> Cast {
 fn cast_for_disk(engine: &str, cast: &Cast) -> Cast {
     cast.iter()
         .map(|(character, voice)| {
-            let value =
-                crate::voices::key_for_name(engine, voice).unwrap_or_else(|| voice.clone());
+            let value = crate::voices::key_for_name(engine, voice).unwrap_or_else(|| voice.clone());
             (character.clone(), value)
         })
         .collect()
@@ -377,7 +376,10 @@ mod tests {
         )
         .unwrap();
         assert!(cast.contains_key("Brand New"));
-        assert!(!cast_path.exists(), "read-only mode must not create the file");
+        assert!(
+            !cast_path.exists(),
+            "read-only mode must not create the file"
+        );
     }
 
     #[test]
@@ -424,8 +426,14 @@ mod tests {
         let cast_path = d.join("cast-vieneu.json");
         std::fs::write(&cast_path, r#"{"Narrator":"Đức Trí"}"#).unwrap();
 
-        let cast = load_cast(&script, &cast_path, &d.join("bible.json"), &vieneu_policy(), true)
-            .unwrap();
+        let cast = load_cast(
+            &script,
+            &cast_path,
+            &d.join("bible.json"),
+            &vieneu_policy(),
+            true,
+        )
+        .unwrap();
         assert_eq!(
             cast.get("Narrator").unwrap(),
             "Đức Trí",
@@ -448,10 +456,20 @@ mod tests {
         )
         .unwrap();
         let cast_path = d.join("cast-vieneu.json");
-        std::fs::write(&cast_path, r#"{"Narrator":"duc-tri","Dịch Phong":"thai-son"}"#).unwrap();
+        std::fs::write(
+            &cast_path,
+            r#"{"Narrator":"duc-tri","Dịch Phong":"thai-son"}"#,
+        )
+        .unwrap();
 
-        let cast = load_cast(&script, &cast_path, &d.join("bible.json"), &vieneu_policy(), true)
-            .unwrap();
+        let cast = load_cast(
+            &script,
+            &cast_path,
+            &d.join("bible.json"),
+            &vieneu_policy(),
+            true,
+        )
+        .unwrap();
         assert_eq!(cast.get("Narrator").unwrap(), "Đức Trí");
         assert_eq!(cast.get("Dịch Phong").unwrap(), "Thái Sơn");
         // Keys in, keys out: re-writing a migrated file is a no-op in shape.
@@ -470,8 +488,14 @@ mod tests {
         let cast_path = d.join("cast-vieneu.json");
         std::fs::write(&cast_path, r#"{"Suneo":"Suneo"}"#).unwrap();
 
-        let cast = load_cast(&script, &cast_path, &d.join("bible.json"), &vieneu_policy(), true)
-            .unwrap();
+        let cast = load_cast(
+            &script,
+            &cast_path,
+            &d.join("bible.json"),
+            &vieneu_policy(),
+            true,
+        )
+        .unwrap();
         assert_eq!(cast.get("Suneo").unwrap(), "Suneo");
         assert_eq!(on_disk(&cast_path).get("Suneo").unwrap(), "Suneo");
     }
@@ -488,10 +512,20 @@ mod tests {
         )
         .unwrap();
         let cast_path = d.join("cast-vieneu.json");
-        std::fs::write(&cast_path, r#"{"Narrator":"duc-tri","Dịch Phong":"Thái Sơn"}"#).unwrap();
+        std::fs::write(
+            &cast_path,
+            r#"{"Narrator":"duc-tri","Dịch Phong":"Thái Sơn"}"#,
+        )
+        .unwrap();
 
-        let cast = load_cast(&script, &cast_path, &d.join("bible.json"), &vieneu_policy(), false)
-            .unwrap();
+        let cast = load_cast(
+            &script,
+            &cast_path,
+            &d.join("bible.json"),
+            &vieneu_policy(),
+            false,
+        )
+        .unwrap();
         assert_eq!(cast.get("Narrator").unwrap(), "Đức Trí");
         assert_eq!(cast.get("Dịch Phong").unwrap(), "Thái Sơn");
     }
@@ -519,10 +553,12 @@ mod tests {
 
         let policy = policy_for_bible("vieneu", &bible).unwrap();
         assert!(!policy.allowed.is_empty(), "the exclusion must bite");
-        let cast =
-            load_cast(&script, &d.join("cast-vieneu.json"), &bible, &policy, false).unwrap();
+        let cast = load_cast(&script, &d.join("cast-vieneu.json"), &bible, &policy, false).unwrap();
         let got = cast.get("Ông Già").unwrap();
-        assert!(policy.allowed.contains(got), "assigned {got:?} outside the policy");
+        assert!(
+            policy.allowed.contains(got),
+            "assigned {got:?} outside the policy"
+        );
         assert_ne!(got, "Minh Đức");
     }
 
@@ -569,8 +605,14 @@ mod tests {
             r#"{"characters":[{"name":"Cô Bé","voice_hint":"girl, bright","tags":["young","female"],"proper_aliases":[]}]}"#,
         )
         .unwrap();
-        let cast = load_cast(&script, &d.join("cast-vieneu.json"), &bible, &vieneu_policy(), false)
-            .unwrap();
+        let cast = load_cast(
+            &script,
+            &d.join("cast-vieneu.json"),
+            &bible,
+            &vieneu_policy(),
+            false,
+        )
+        .unwrap();
         assert_eq!(cast.get("Cô Bé").unwrap(), "young-female-1");
     }
 
@@ -592,11 +634,23 @@ mod tests {
             r#"{"characters":[{"name":"Cậu Bé","voice_hint":"boy, polite","tags":["young","male"],"proper_aliases":[]}]}"#,
         )
         .unwrap();
-        let cast = load_cast(&script, &d.join("cast-vieneu.json"), &bible, &vieneu_policy(), false)
-            .unwrap();
+        let cast = load_cast(
+            &script,
+            &d.join("cast-vieneu.json"),
+            &bible,
+            &vieneu_policy(),
+            false,
+        )
+        .unwrap();
         let got = cast.get("Cậu Bé").unwrap();
-        assert_ne!(got, "young-female-1", "a clashing sample must never voice him");
-        assert!(vieneu_policy().male.contains(got), "falls back to the male presets: {got:?}");
+        assert_ne!(
+            got, "young-female-1",
+            "a clashing sample must never voice him"
+        );
+        assert!(
+            vieneu_policy().male.contains(got),
+            "falls back to the male presets: {got:?}"
+        );
     }
 
     #[test]
@@ -612,8 +666,14 @@ mod tests {
             r#"{"characters":[{"name":"Lão Ông","voice_hint":"elderly male, stern","proper_aliases":[]}]}"#,
         )
         .unwrap();
-        let cast = load_cast(&script, &d.join("cast-vieneu.json"), &bible, &vieneu_policy(), false)
-            .unwrap();
+        let cast = load_cast(
+            &script,
+            &d.join("cast-vieneu.json"),
+            &bible,
+            &vieneu_policy(),
+            false,
+        )
+        .unwrap();
         assert_eq!(cast.get("Lão Ông").unwrap(), "old-male-1");
     }
 }

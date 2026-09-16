@@ -12,17 +12,17 @@
 //! restriction is the operator's and lives in `.bm/voices.json`; see
 //! `OperatorRoster`.
 
+mod catalogue;
 mod consts;
 mod label;
-mod catalogue;
 
 pub use catalogue::{
-    CATALOGUE_JSON, EnginePolicy, EngineRoster, OperatorEngine, OperatorPolicy,
-    OperatorRoster, RosterFile, RosterVoice, effective_engine, effective_engine_lenient,
-    effective_offline_voices, effective_policy, key_for_name, name_for_key, resolve_voice_name,
+    effective_engine, effective_engine_lenient, effective_offline_voices, effective_policy,
+    key_for_name, name_for_key, resolve_voice_name, EnginePolicy, EngineRoster, OperatorEngine,
+    OperatorPolicy, OperatorRoster, RosterFile, RosterVoice, CATALOGUE_JSON,
 };
 pub use consts::{
-    GEMINI_FEMALE, GEMINI_MALE, GEMINI_NEUTRAL, VIENEU_FEMALE, VIENEU_MALE, VoicePolicy,
-    gemini_policy, policy_for, vieneu_policy,
+    gemini_policy, policy_for, vieneu_policy, VoicePolicy, GEMINI_FEMALE, GEMINI_MALE,
+    GEMINI_NEUTRAL, VIENEU_FEMALE, VIENEU_MALE,
 };
 pub use label::{enrolled_voices, offline_voices, policy_note, voices_from_labels};

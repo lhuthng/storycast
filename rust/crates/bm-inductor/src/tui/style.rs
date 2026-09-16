@@ -49,7 +49,11 @@ pub(crate) struct LogLine {
 /// never-logged sentinel) reads as dashes, never as 1970.
 pub(crate) fn wall_hms(epoch: u64) -> String {
     chrono::DateTime::from_timestamp(epoch as i64, 0)
-        .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+        .map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_else(|| "--:--:--".into())
 }
 
@@ -77,7 +81,11 @@ pub(crate) enum Conn {
 
 pub(crate) fn bar(frac: f32, width: usize) -> String {
     let fill = (frac.clamp(0.0, 1.0) * width as f32).round() as usize;
-    format!("{}{}", "█".repeat(fill), "░".repeat(width.saturating_sub(fill)))
+    format!(
+        "{}{}",
+        "█".repeat(fill),
+        "░".repeat(width.saturating_sub(fill))
+    )
 }
 
 pub(crate) fn state_color(s: &str) -> Color {
@@ -110,8 +118,8 @@ pub(crate) fn stage_color(s: &str) -> Color {
 /// affinity still use the raw id.
 pub(crate) fn worker_alias(id: &str) -> (&'static str, Color) {
     const ANIMALS: [&str; 16] = [
-        "fox", "owl", "bear", "wolf", "hare", "lynx", "otter", "hawk", "deer", "mole",
-        "crane", "boar", "seal", "wren", "ibex", "newt",
+        "fox", "owl", "bear", "wolf", "hare", "lynx", "otter", "hawk", "deer", "mole", "crane",
+        "boar", "seal", "wren", "ibex", "newt",
     ];
     const COLOURS: [Color; 6] = [
         Color::Red,

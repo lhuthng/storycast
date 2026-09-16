@@ -60,7 +60,10 @@ pub fn lan_ip() -> anyhow::Result<String> {
 /// must hand each box the address on *its* subnet — the first address found
 /// is routinely the wrong one.
 pub fn dial_back_ip(remote: &str) -> anyhow::Result<String> {
-    let out = std::process::Command::new("route").arg("get").arg(remote).output();
+    let out = std::process::Command::new("route")
+        .arg("get")
+        .arg(remote)
+        .output();
     if let Ok(o) = out {
         let text = String::from_utf8_lossy(&o.stdout).to_string();
         if let Some(iface) = parse_route_iface(&text) {
@@ -69,7 +72,9 @@ pub fn dial_back_ip(remote: &str) -> anyhow::Result<String> {
             }
         }
     }
-    let out = std::process::Command::new("ip").args(["route", "get", remote]).output();
+    let out = std::process::Command::new("ip")
+        .args(["route", "get", remote])
+        .output();
     if let Ok(o) = out {
         let text = String::from_utf8_lossy(&o.stdout).to_string();
         if let Some(ip) = parse_route_src(&text) {
@@ -88,12 +93,22 @@ fn usable_ipv4(s: &str) -> bool {
 
 /// Address of one interface: DHCP answer first, interface table second.
 fn iface_ip(iface: &str) -> Option<String> {
-    let out = std::process::Command::new("ipconfig").args(["getifaddr", iface]).output().ok()?;
-    let ip = String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or("").to_string();
+    let out = std::process::Command::new("ipconfig")
+        .args(["getifaddr", iface])
+        .output()
+        .ok()?;
+    let ip = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
     if usable_ipv4(&ip) {
         return Some(ip);
     }
-    let out = std::process::Command::new("ifconfig").arg(iface).output().ok()?;
+    let out = std::process::Command::new("ifconfig")
+        .arg(iface)
+        .output()
+        .ok()?;
     parse_ifconfig_inet(&String::from_utf8_lossy(&out.stdout))
 }
 
@@ -101,14 +116,21 @@ fn iface_ip(iface: &str) -> Option<String> {
 fn parse_route_iface(out: &str) -> Option<String> {
     out.lines().find_map(|l| {
         let t = l.trim();
-        t.strip_prefix("interface:").map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        t.strip_prefix("interface:")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     })
 }
 
 /// `1.2.3.4 via 9.9.9.9 dev eth0 src 10.0.0.5 ...` → `10.0.0.5`. Linux.
 fn parse_route_src(out: &str) -> Option<String> {
     let words: Vec<&str> = out.split_whitespace().collect();
-    words.iter().position(|w| *w == "src").and_then(|i| words.get(i + 1)).map(|s| s.to_string()).filter(|s| usable_ipv4(s))
+    words
+        .iter()
+        .position(|w| *w == "src")
+        .and_then(|i| words.get(i + 1))
+        .map(|s| s.to_string())
+        .filter(|s| usable_ipv4(s))
 }
 
 /// First `inet A.B.C.D` (not `inet6`) in `ifconfig` output.
@@ -139,7 +161,11 @@ mod tests {
 
     #[test]
     fn only_loopback_counts_as_this_machine() {
-        for a in ["http://127.0.0.1:8901", "http://localhost:8901", "http://[::1]:8901"] {
+        for a in [
+            "http://127.0.0.1:8901",
+            "http://localhost:8901",
+            "http://[::1]:8901",
+        ] {
             assert!(api_is_local(a), "{a}");
         }
         for a in ["http://192.168.2.7:8901", "http://example:8901"] {
@@ -163,7 +189,10 @@ mod tests {
         assert_eq!(parse_route_src("no src here\n"), None);
         let ifc = "en0: flags=8863<UP>\n\tinet 192.168.2.1 netmask 0xffffff00 broadcast 192.168.2.255\n\tinet6 fe80::1%en0\n\tstatus: active\n";
         assert_eq!(parse_ifconfig_inet(ifc), Some("192.168.2.1".into()));
-        assert_eq!(parse_ifconfig_inet("\tinet 127.0.0.1 netmask 0xff000000\n"), None);
+        assert_eq!(
+            parse_ifconfig_inet("\tinet 127.0.0.1 netmask 0xff000000\n"),
+            None
+        );
         assert_eq!(parse_ifconfig_inet("no addresses\n"), None);
     }
 }

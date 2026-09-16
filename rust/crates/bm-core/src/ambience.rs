@@ -146,7 +146,12 @@ pub struct Span {
 }
 
 /// Tile the mix timeline into spans of identical (bed, level, reverb).
-pub fn build_spans(wavs: &[PathBuf], scenes: &[String], gap_ms: u32, cfg: &SceneMap) -> Result<Vec<Span>> {
+pub fn build_spans(
+    wavs: &[PathBuf],
+    scenes: &[String],
+    gap_ms: u32,
+    cfg: &SceneMap,
+) -> Result<Vec<Span>> {
     let mut spans: Vec<Span> = Vec::new();
     let mut t = 0.0f64;
     for (wav, scene) in wavs.iter().zip(scenes.iter()) {
@@ -154,7 +159,9 @@ pub fn build_spans(wavs: &[PathBuf], scenes: &[String], gap_ms: u32, cfg: &Scene
         let rule = match_scene(scene, cfg);
         match spans.last_mut() {
             Some(last)
-                if last.bed == rule.bed && last.level == rule.level && last.reverb == rule.reverb =>
+                if last.bed == rule.bed
+                    && last.level == rule.level
+                    && last.reverb == rule.reverb =>
             {
                 last.end = t + dur;
             }
@@ -293,7 +300,12 @@ pub fn apply_ambience(
         eprintln!("ambience: bed missing ({bed}) -> dry voice for those spans");
     }
     for span in spans.iter_mut() {
-        if span.bed.as_ref().map(|b| missing.contains(b)).unwrap_or(false) {
+        if span
+            .bed
+            .as_ref()
+            .map(|b| missing.contains(b))
+            .unwrap_or(false)
+        {
             span.bed = None;
             span.level = 0.0;
         }
@@ -391,7 +403,11 @@ pub fn apply_ambience(
             "ambience [{:.0}-{:.0}s] {} -> {}{}",
             span.start,
             span.end,
-            if span.scene.is_empty() { "?" } else { &span.scene },
+            if span.scene.is_empty() {
+                "?"
+            } else {
+                &span.scene
+            },
             tag,
             span.reverb
                 .as_ref()
@@ -437,14 +453,19 @@ mod tests {
     fn first_matching_rule_wins_specific_before_general() {
         let cfg = scene_map();
         assert_eq!(
-            match_scene("street-day-book-discovery", &cfg).bed.as_deref(),
+            match_scene("street-day-book-discovery", &cfg)
+                .bed
+                .as_deref(),
             Some("market-crowd.mp3")
         );
         assert_eq!(
             match_scene("courtyard-rain-day", &cfg).bed.as_deref(),
             Some("rain-light.mp3")
         );
-        assert_eq!(match_scene("great-hall-day", &cfg).reverb.as_deref(), Some("hall"));
+        assert_eq!(
+            match_scene("great-hall-day", &cfg).reverb.as_deref(),
+            Some("hall")
+        );
         assert_eq!(match_scene("something-unknown-xyz", &cfg).bed, None);
     }
 

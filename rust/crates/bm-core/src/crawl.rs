@@ -36,7 +36,20 @@ const SITE_BYLINE_PREFIX: &str = "Người Trên Vạn Người - Chương";
 
 /// Tags whose closing boundary should become a line break.
 const BLOCK_TAGS: [&str; 15] = [
-    "br", "p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "section", "article", "main",
+    "br",
+    "p",
+    "div",
+    "li",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "tr",
+    "section",
+    "article",
+    "main",
     "blockquote",
 ];
 
@@ -173,7 +186,11 @@ fn decode_entities(s: &str) -> String {
 
 fn is_chapter_heading(line: &str) -> bool {
     match line.strip_prefix("Chương ") {
-        Some(rest) => rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false),
+        Some(rest) => rest
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false),
         None => false,
     }
 }
@@ -223,9 +240,7 @@ pub fn clean_storya_html(html: &str) -> String {
     let start_idx = body
         .iter()
         .position(|l| {
-            l.chars().count() > 40
-                && !is_chapter_heading(l)
-                && !JUNK.iter().any(|k| l.contains(k))
+            l.chars().count() > 40 && !is_chapter_heading(l) && !JUNK.iter().any(|k| l.contains(k))
         })
         .unwrap_or(0);
 
@@ -241,8 +256,8 @@ pub fn clean_storya_html(html: &str) -> String {
 
 /// Read a chapter that is already on disk.
 pub fn read_local(path: &Path) -> Result<String> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(format!("{}\n", text.trim()))
 }
 
@@ -290,7 +305,10 @@ mod tests {
 
     #[test]
     fn decodes_entities() {
-        assert_eq!(decode_entities("a &amp; b &lt;c&gt; &quot;d&quot;"), "a & b <c> \"d\"");
+        assert_eq!(
+            decode_entities("a &amp; b &lt;c&gt; &quot;d&quot;"),
+            "a & b <c> \"d\""
+        );
         assert_eq!(decode_entities("100% &nbsp;ok"), "100%  ok");
         assert_eq!(decode_entities("bare & ampersand"), "bare & ampersand");
     }

@@ -69,7 +69,10 @@ pub fn take_for_mood(cluster: &str) -> (f64, f64) {
 pub fn mood_take(segments: &[Value], idx: &[usize]) -> (f64, f64) {
     let mut best: Option<(f64, f64)> = None;
     for i in idx {
-        let mood = segments[*i].get("mood").and_then(|m| m.as_str()).unwrap_or("neutral");
+        let mood = segments[*i]
+            .get("mood")
+            .and_then(|m| m.as_str())
+            .unwrap_or("neutral");
         let cand = take_for_mood(&mood_cluster(mood));
         if best.is_none_or(|(t, _)| cand.0 > t) {
             best = Some(cand);

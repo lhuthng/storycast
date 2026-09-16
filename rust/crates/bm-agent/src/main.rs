@@ -26,7 +26,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const SIDECAR_PORT: u16 = 8818;
 
 #[derive(Parser)]
-#[command(name = "bm-agent", version, about = "Pipeline worker: run stages, report progress")]
+#[command(
+    name = "bm-agent",
+    version,
+    about = "Pipeline worker: run stages, report progress"
+)]
 struct Cli {
     /// Repo root (discovered via prompts/analyze.txt when omitted).
     #[arg(long)]
@@ -216,7 +220,11 @@ async fn run_crawl(layout: &Layout, n: u32, url: &str, shared: &Shared) -> Resul
     }
     let dest = layout.chapter_txt(n);
     bm_core::atomic_write(&dest, &cleaned)?;
-    set_progress(shared, 1.0, format!("crawled ch{n} ({} chars)", cleaned.len()));
+    set_progress(
+        shared,
+        1.0,
+        format!("crawled ch{n} ({} chars)", cleaned.len()),
+    );
     Ok((1, cleaned))
 }
 
@@ -260,7 +268,11 @@ async fn run_digest(
         bm_core::digest::merge_bible(&mut local, &outcome.delta, &format!("{n:02}"));
         bm_core::digest::save_bible(&local, &layout.bible())?;
     }
-    set_progress(shared, 1.0, format!("digest ch{n} done ({} segments)", outcome.segments));
+    set_progress(
+        shared,
+        1.0,
+        format!("digest ch{n} done ({} segments)", outcome.segments),
+    );
     let script: Value = serde_json::from_str(&std::fs::read_to_string(layout.script(n))?)?;
     Ok((outcome.delta, script))
 }
@@ -343,7 +355,9 @@ async fn upload_segment(
     } else {
         anyhow::bail!(
             "uploading {name}: {}",
-            v.get("error").and_then(|e| e.as_str()).unwrap_or("unknown refusal")
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("unknown refusal")
         )
     }
 }
@@ -374,14 +388,20 @@ async fn render_offered_units(
             i as f32 / total.max(1) as f32,
             format!("render ch{n} {} ({}/{})", u.tag, i + 1, total),
         );
-        let wav = tts.infer(&u.text, &u.voice, u.temperature, u.silence_p, engine).await?;
+        let wav = tts
+            .infer(&u.text, &u.voice, u.temperature, u.silence_p, engine)
+            .await?;
         if local_node {
             std::fs::write(seg_dir.join(&u.name), &wav)?;
         } else {
             upload_segment(http, inductor, engine, n, &u.name, &wav).await?;
         }
     }
-    set_progress(shared, 1.0, format!("render ch{n} done ({total} new calls)"));
+    set_progress(
+        shared,
+        1.0,
+        format!("render ch{n} done ({total} new calls)"),
+    );
     Ok(total as u64)
 }
 
@@ -399,19 +419,25 @@ async fn run_render(
     let seg_dir = layout.seg_dir(engine, n);
     let text = std::fs::read_to_string(&script_path)?;
     let data: Value = serde_json::from_str(&text)?;
-    let segments = data.get("segments").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+    let segments = data
+        .get("segments")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
     let policy = bm_core::cast::policy_for_bible(engine, &layout.bible())?;
     let cast = bm_core::cast::load_cast(&script_path, &cast_path, &layout.bible(), &policy, true)?;
     let local = engine == "vieneu";
     let planned = bm_core::assemble::drop_headline(&segments);
-    let first = planned.first().map(|s| s.get("text").and_then(|t| t.as_str()).unwrap_or("")).unwrap_or("");
+    let first = planned
+        .first()
+        .map(|s| s.get("text").and_then(|t| t.as_str()).unwrap_or(""))
+        .unwrap_or("");
     let title = bm_core::assemble::title_speech(layout, n, &cast, first);
     let units = bm_core::assemble::plan_render(planned, &cast, &seg_dir, local, title.as_ref())?;
     let todo: Vec<_> = units
         .into_iter()
         .filter(|u| {
-            !(u.dest.exists()
-                && u.dest.metadata().map(|m| m.len() > 1000).unwrap_or(false))
+            !(u.dest.exists() && u.dest.metadata().map(|m| m.len() > 1000).unwrap_or(false))
         })
         .collect();
     let total = todo.len();
@@ -425,7 +451,9 @@ async fn run_render(
             i as f32 / total.max(1) as f32,
             format!("render ch{n} {} ({}/{})", u.tag, i + 1, total),
         );
-        let wav = tts.infer(&u.text, &u.voice, u.temperature, u.silence_p, engine).await?;
+        let wav = tts
+            .infer(&u.text, &u.voice, u.temperature, u.silence_p, engine)
+            .await?;
         std::fs::write(&u.dest, &wav)?;
         bm_core::assemble::manifest_append(
             &manifest,
@@ -433,7 +461,11 @@ async fn run_render(
                     "temp": u.temperature, "engine": engine}),
         )?;
     }
-    set_progress(shared, 1.0, format!("render ch{n} done ({total} new calls)"));
+    set_progress(
+        shared,
+        1.0,
+        format!("render ch{n} done ({total} new calls)"),
+    );
     Ok(total as u64)
 }
 
@@ -563,7 +595,15 @@ async fn run_offer(
         Crawl => {
             let url = offer.url.clone().unwrap_or_else(|| settings.chapter_url(n));
             let (units, text) = run_crawl(layout, n, &url, shared).await?;
-            Ok(TaskResult { ok: true, detail: format!("crawled ch{n}"), delta: None, units, script: None, text: Some(text), mp3_b64: None })
+            Ok(TaskResult {
+                ok: true,
+                detail: format!("crawled ch{n}"),
+                delta: None,
+                units,
+                script: None,
+                text: Some(text),
+                mp3_b64: None,
+            })
         }
         Digest => {
             let bible = offer.bible.clone().unwrap_or(json!({"characters": []}));
@@ -571,12 +611,25 @@ async fn run_offer(
             // back to this worker's own settings, then to opencode.
             let analyzer = if offer.analyzer.is_empty() {
                 let a = settings.analyzer.clone();
-                if a.is_empty() { "opencode".into() } else { a }
+                if a.is_empty() {
+                    "opencode".into()
+                } else {
+                    a
+                }
             } else {
                 offer.analyzer.clone()
             };
-            let (delta, script) = run_digest(layout, n, &bible, settings, &analyzer, shared, false).await?;
-            Ok(TaskResult { ok: true, detail: format!("digest ch{n} via {analyzer}"), delta: Some(delta), units: 1, script: Some(script), text: None, mp3_b64: None })
+            let (delta, script) =
+                run_digest(layout, n, &bible, settings, &analyzer, shared, false).await?;
+            Ok(TaskResult {
+                ok: true,
+                detail: format!("digest ch{n} via {analyzer}"),
+                delta: Some(delta),
+                units: 1,
+                script: Some(script),
+                text: None,
+                mp3_b64: None,
+            })
         }
         Render => {
             sidecar.ensure(layout).await?;
@@ -607,10 +660,27 @@ async fn run_offer(
                 }
             };
             sidecar.stop(); // per-task lifecycle: RSS returns to the OS here
-            Ok(TaskResult { ok: true, detail: format!("render ch{n} ({units} calls)"), delta: None, units, script: None, text: None, mp3_b64: None })
+            Ok(TaskResult {
+                ok: true,
+                detail: format!("render ch{n} ({units} calls)"),
+                delta: None,
+                units,
+                script: None,
+                text: None,
+                mp3_b64: None,
+            })
         }
         Merge => {
-            let path = run_merge(layout, n, &offer.engine, offer.gap_ms, offer.speed, offer.ambience, shared).await?;
+            let path = run_merge(
+                layout,
+                n,
+                &offer.engine,
+                offer.gap_ms,
+                offer.speed,
+                offer.ambience,
+                shared,
+            )
+            .await?;
             // Local node: `publish()` already renamed the mp3 into the
             // inductor's `output/` — shipping 7 MB of base64 back to the
             // machine that wrote it is pure cost, so the report carries
@@ -625,7 +695,15 @@ async fn run_offer(
                     &std::fs::read(&path).with_context(|| format!("reading merged {path}"))?,
                 ))
             };
-            Ok(TaskResult { ok: true, detail: format!("merge ch{n} -> {path}"), delta: None, units: 1, script: None, text: None, mp3_b64: mp3 })
+            Ok(TaskResult {
+                ok: true,
+                detail: format!("merge ch{n} -> {path}"),
+                delta: None,
+                units: 1,
+                script: None,
+                text: None,
+                mp3_b64: mp3,
+            })
         }
     }
 }
@@ -649,7 +727,9 @@ async fn worker_loop(
     addr: String,
     tts_url: String,
 ) -> Result<()> {
-    let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
     let hostname = hostname_simple();
     let alias = worker_alias_for(&layout.root);
     let shared: Shared = Arc::new(Mutex::new(Progress {
@@ -685,7 +765,12 @@ async fn worker_loop(
     // The inductor may not be up yet (or the network may flap): retry
     // registration forever instead of dying on the first failure.
     loop {
-        match http.post(format!("{inductor}/api/register")).json(&reg).send().await {
+        match http
+            .post(format!("{inductor}/api/register"))
+            .json(&reg)
+            .send()
+            .await
+        {
             Ok(r) if r.status().is_success() => break,
             Ok(r) => {
                 set_progress(&shared, 0.0, format!("register refused: {}", r.status()));
@@ -720,12 +805,26 @@ async fn worker_loop(
         };
         set_task(&shared, &offer);
         let t0 = Instant::now();
-        let res = match run_offer(&layout, &settings, &offer, &shared, &mut sidecar, &inductor, &http).await {
+        let res = match run_offer(
+            &layout,
+            &settings,
+            &offer,
+            &shared,
+            &mut sidecar,
+            &inductor,
+            &http,
+        )
+        .await
+        {
             Ok(r) => r,
             Err(e) => TaskResult {
                 ok: false,
                 detail: format!("{} ch{} failed: {e:#}", offer.stage, offer.chapter),
-                delta: None, units: 0, script: None, text: None, mp3_b64: None,
+                delta: None,
+                units: 0,
+                script: None,
+                text: None,
+                mp3_b64: None,
             },
         };
         println!("[{}] {}", if res.ok { "ok" } else { "FAIL" }, res.detail);
@@ -755,7 +854,10 @@ async fn worker_loop(
                     reported = true;
                     break;
                 }
-                Ok(r) => println!("[WARN] complete report refused ({}), retry {attempt}/3", r.status()),
+                Ok(r) => println!(
+                    "[WARN] complete report refused ({}), retry {attempt}/3",
+                    r.status()
+                ),
                 Err(e) => println!("[WARN] complete report lost, retry {attempt}/3: {e}"),
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
@@ -763,8 +865,13 @@ async fn worker_loop(
         // Phase 4: a non-local worker's copy is scratch. It goes only after
         // the report is accepted — a lost report keeps the files until the
         // re-offered (now empty) units report success, then they go.
-        if should_sweep(offer.stage, offer.render_units.as_deref(), offer.local_node, res.ok, reported)
-        {
+        if should_sweep(
+            offer.stage,
+            offer.render_units.as_deref(),
+            offer.local_node,
+            res.ok,
+            reported,
+        ) {
             let dir = layout.seg_dir(&offer.engine, offer.chapter);
             match std::fs::remove_dir_all(&dir) {
                 Ok(()) => println!("[ok] swept {}", dir.display()),
@@ -786,12 +893,54 @@ fn hostname_simple() -> String {
 /// collided constantly. Now the name is drawn once, kept in `worker.alias`,
 /// and reported on every heartbeat.
 const ALIAS_POOL: [&str; 48] = [
-    "fox", "owl", "bear", "wolf", "hare", "lynx", "otter", "hawk", "deer", "mole",
-    "crane", "boar", "seal", "wren", "ibex", "newt", "badger", "stoat", "vole",
-    "shrew", "weasel", "ferret", "mink", "marten", "sable", "pika", "marmot",
-    "gopher", "chipmunk", "squirrel", "rabbit", "hedgehog", "porcupine",
-    "armadillo", "opossum", "raccoon", "skunk", "coyote", "jackal", "hyena",
-    "leopard", "cougar", "bobcat", "ocelot", "serval", "caracal", "genet", "civet",
+    "fox",
+    "owl",
+    "bear",
+    "wolf",
+    "hare",
+    "lynx",
+    "otter",
+    "hawk",
+    "deer",
+    "mole",
+    "crane",
+    "boar",
+    "seal",
+    "wren",
+    "ibex",
+    "newt",
+    "badger",
+    "stoat",
+    "vole",
+    "shrew",
+    "weasel",
+    "ferret",
+    "mink",
+    "marten",
+    "sable",
+    "pika",
+    "marmot",
+    "gopher",
+    "chipmunk",
+    "squirrel",
+    "rabbit",
+    "hedgehog",
+    "porcupine",
+    "armadillo",
+    "opossum",
+    "raccoon",
+    "skunk",
+    "coyote",
+    "jackal",
+    "hyena",
+    "leopard",
+    "cougar",
+    "bobcat",
+    "ocelot",
+    "serval",
+    "caracal",
+    "genet",
+    "civet",
 ];
 
 /// The worker's display name: the kept one, or a fresh draw persisted for
@@ -830,9 +979,19 @@ async fn main() -> Result<()> {
     bm_core::config::load_dotenv(&layout.root.join(".env"));
     let settings = Settings::load(&layout.settings());
     match cli.cmd {
-        Cmd::Run { stage, chapter, url, tts_url, engine } => {
+        Cmd::Run {
+            stage,
+            chapter,
+            url,
+            tts_url,
+            engine,
+        } => {
             let shared: Shared = Arc::new(Mutex::new(Progress::default()));
-            let engine = if engine.is_empty() { settings.engine.clone() } else { engine };
+            let engine = if engine.is_empty() {
+                settings.engine.clone()
+            } else {
+                engine
+            };
             match stage.as_str() {
                 "crawl" => {
                     let url = url.unwrap_or_else(|| settings.chapter_url(chapter));
@@ -840,10 +999,18 @@ async fn main() -> Result<()> {
                 }
                 "digest" => {
                     let bible: Value = serde_json::from_str(
-                        &std::fs::read_to_string(layout.bible()).unwrap_or_else(|_| "{\"characters\":[]}".into()),
+                        &std::fs::read_to_string(layout.bible())
+                            .unwrap_or_else(|_| "{\"characters\":[]}".into()),
                     )?;
-                    let analyzer = if settings.analyzer.is_empty() { "opencode".into() } else { settings.analyzer.clone() };
-                    run_digest(&layout, chapter, &bible, &settings, &analyzer, &shared, true).await?;
+                    let analyzer = if settings.analyzer.is_empty() {
+                        "opencode".into()
+                    } else {
+                        settings.analyzer.clone()
+                    };
+                    run_digest(
+                        &layout, chapter, &bible, &settings, &analyzer, &shared, true,
+                    )
+                    .await?;
                 }
                 "render" => {
                     let tts_url = tts_url.unwrap_or_else(|| "http://127.0.0.1:8818".into());
@@ -853,13 +1020,28 @@ async fn main() -> Result<()> {
                     sidecar.stop();
                 }
                 "merge" => {
-                    run_merge(&layout, chapter, &engine, settings.gap_ms, settings.speed, settings.ambience, &shared).await?;
+                    run_merge(
+                        &layout,
+                        chapter,
+                        &engine,
+                        settings.gap_ms,
+                        settings.speed,
+                        settings.ambience,
+                        &shared,
+                    )
+                    .await?;
                 }
                 other => anyhow::bail!("unknown stage {other:?} (crawl|digest|render|merge)"),
             }
         }
-        Cmd::Worker { inductor, worker_id, addr, tts_url } => {
-            let worker_id = worker_id.unwrap_or_else(|| format!("{}-{}", hostname_simple(), std::process::id()));
+        Cmd::Worker {
+            inductor,
+            worker_id,
+            addr,
+            tts_url,
+        } => {
+            let worker_id = worker_id
+                .unwrap_or_else(|| format!("{}-{}", hostname_simple(), std::process::id()));
             let addr = addr.unwrap_or_else(|| "127.0.0.1".into());
             let tts_url = tts_url.unwrap_or_else(|| "http://127.0.0.1:8818".into());
             worker_loop(layout, settings, inductor, worker_id, addr, tts_url).await?;
@@ -889,7 +1071,10 @@ mod tests {
         let text = serde_json::to_string(&segment_manifest(&root.join("data/audio"))).unwrap();
         let back: Vec<bm_core::segments::SegmentEntry> = serde_json::from_str(&text).unwrap();
         assert_eq!(back.len(), 1);
-        assert_eq!((back[0].chapter, back[0].name.as_str()), (7, "0000_Adam.wav"));
+        assert_eq!(
+            (back[0].chapter, back[0].name.as_str()),
+            (7, "0000_Adam.wav")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -917,11 +1102,26 @@ mod tests {
             should_sweep(stage, units, local, ok, reported)
         };
         assert!(sweep(Stage::Render, Some(&one), false, true, true));
-        assert!(!sweep(Stage::Render, Some(&one), false, true, false), "lost report keeps files");
-        assert!(!sweep(Stage::Render, Some(&one), false, false, true), "failure keeps files");
-        assert!(!sweep(Stage::Render, Some(&one), true, true, true), "local node never sweeps");
-        assert!(!sweep(Stage::Render, None, false, true, true), "legacy path never sweeps");
-        assert!(!sweep(Stage::Merge, Some(&one), false, true, true), "merge untouched");
+        assert!(
+            !sweep(Stage::Render, Some(&one), false, true, false),
+            "lost report keeps files"
+        );
+        assert!(
+            !sweep(Stage::Render, Some(&one), false, false, true),
+            "failure keeps files"
+        );
+        assert!(
+            !sweep(Stage::Render, Some(&one), true, true, true),
+            "local node never sweeps"
+        );
+        assert!(
+            !sweep(Stage::Render, None, false, true, true),
+            "legacy path never sweeps"
+        );
+        assert!(
+            !sweep(Stage::Merge, Some(&one), false, true, true),
+            "merge untouched"
+        );
         // The empty-units re-offer after a lost report: accepted, then sweep
         // the stranded files from the first attempt.
         assert!(sweep(Stage::Render, Some(&[]), false, true, true));
@@ -929,14 +1129,19 @@ mod tests {
 
     #[test]
     fn worker_alias_is_drawn_once_then_kept() {
-        let root =
-            std::env::temp_dir().join(format!("bmalias{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("bmalias{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let first = worker_alias_for(&root);
-        assert!(ALIAS_POOL.contains(&first.as_str()), "drawn from the pool: {first}");
+        assert!(
+            ALIAS_POOL.contains(&first.as_str()),
+            "drawn from the pool: {first}"
+        );
         assert_eq!(worker_alias_for(&root), first, "a restart keeps its name");
-        assert!(root.join("worker.alias").is_file(), "persisted in the worker root");
+        assert!(
+            root.join("worker.alias").is_file(),
+            "persisted in the worker root"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -945,8 +1150,7 @@ mod tests {
         // The 192.168.2.2 outage: provision builds python/.venv but the agent
         // only looked at root/.venv, so every sidecar spawn fell back to a
         // bare python3 without the TTS modules.
-        let root =
-            std::env::temp_dir().join(format!("bmvenv{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("bmvenv{}", std::process::id()));
         let layout = Layout::new(&root);
         let managed = layout.python_dir().join(".venv/bin");
         let legacy = layout.root.join(".venv/bin");
@@ -958,7 +1162,11 @@ mod tests {
         std::fs::write(legacy.join("python"), "").unwrap();
         assert_eq!(s.python(&layout), managed.join("python"), "managed wins");
         std::fs::remove_dir_all(layout.python_dir().join(".venv")).unwrap();
-        assert_eq!(s.python(&layout), legacy.join("python"), "legacy fallback holds");
+        assert_eq!(
+            s.python(&layout),
+            legacy.join("python"),
+            "legacy fallback holds"
+        );
         std::fs::remove_dir_all(layout.root.join(".venv")).unwrap();
         assert_eq!(s.python(&layout), PathBuf::from("python3"), "last resort");
         let _ = std::fs::remove_dir_all(&root);

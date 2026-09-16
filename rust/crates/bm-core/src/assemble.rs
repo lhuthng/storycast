@@ -8,9 +8,13 @@ mod mood;
 mod plan;
 mod wav;
 
-pub use self::plan::{MAX_SEGMENT_BYTES, Run, character_has_lines, drop_headline, expected_wavs, pick_exact, pick_rendered, plan_render, rendered_segments, runs, segment_miss, segments_complete, title_speech, title_speech_for_script, RenderedSegment};
-pub use self::wav::{GEMINI_RATE, VIENEU_RATE, read_wav, sample_rate_for, silent_wav};
-use self::wav::{Wav, write_wav};
+pub use self::plan::{
+    character_has_lines, drop_headline, expected_wavs, pick_exact, pick_rendered, plan_render,
+    rendered_segments, runs, segment_miss, segments_complete, title_speech,
+    title_speech_for_script, RenderedSegment, Run, MAX_SEGMENT_BYTES,
+};
+pub use self::wav::{read_wav, sample_rate_for, silent_wav, GEMINI_RATE, VIENEU_RATE};
+use self::wav::{write_wav, Wav};
 use crate::util::{atomic_write, head_chars};
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -124,7 +128,12 @@ pub fn assemble(
     let missing: Vec<String> = wavs
         .iter()
         .filter(|w| !w.metadata().map(|m| m.len() > 1000).unwrap_or(false))
-        .map(|w| w.file_name().unwrap_or_default().to_string_lossy().to_string())
+        .map(|w| {
+            w.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        })
         .collect();
     if !missing.is_empty() {
         anyhow::bail!(
@@ -146,7 +155,12 @@ pub fn assemble(
         } else {
             segments
                 .iter()
-                .map(|s| s.get("scene").and_then(|v| v.as_str()).unwrap_or("").to_string())
+                .map(|s| {
+                    s.get("scene")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                })
                 .collect()
         };
         if title.is_some() {

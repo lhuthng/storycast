@@ -64,7 +64,11 @@ pub struct SshDefaults {
 
 impl Default for SshDefaults {
     fn default() -> Self {
-        SshDefaults { user: "thang".into(), port: 22, key: None }
+        SshDefaults {
+            user: "thang".into(),
+            port: 22,
+            key: None,
+        }
     }
 }
 

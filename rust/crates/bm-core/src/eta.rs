@@ -106,11 +106,7 @@ pub fn estimate_stage(path: &Path, stage: Stage, units: u64, workers: u64) -> St
 }
 
 /// Estimate a whole job: how many units each stage must still do.
-pub fn estimate_job(
-    path: &Path,
-    remaining: &[(Stage, u64)],
-    workers: u64,
-) -> Vec<StageEta> {
+pub fn estimate_job(path: &Path, remaining: &[(Stage, u64)], workers: u64) -> Vec<StageEta> {
     remaining
         .iter()
         .map(|(stage, units)| estimate_stage(path, *stage, *units, workers))

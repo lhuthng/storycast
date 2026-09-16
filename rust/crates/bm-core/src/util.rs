@@ -38,10 +38,9 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let v = serde_json::from_str(&text)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let v = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     Ok(v)
 }
 
@@ -67,18 +66,18 @@ pub fn head_chars(s: &str, n: usize) -> String {
 /// Single source: the TUI filter and the segment-voice matcher both use this.
 pub fn fold_char(c: char) -> char {
     match c {
-        'à' | 'á' | 'ạ' | 'ả' | 'ã' | 'â' | 'ầ' | 'ấ' | 'ậ' | 'ẩ' | 'ẫ' | 'ă' | 'ằ' | 'ắ'
-        | 'ặ' | 'ẳ' | 'ẵ' => 'a',
-        'À' | 'Á' | 'Ạ' | 'Ả' | 'Ã' | 'Â' | 'Ầ' | 'Ấ' | 'Ậ' | 'Ẩ' | 'Ẫ' | 'Ă' | 'Ằ' | 'Ắ'
-        | 'Ặ' | 'Ẳ' | 'Ẵ' => 'a',
+        'à' | 'á' | 'ạ' | 'ả' | 'ã' | 'â' | 'ầ' | 'ấ' | 'ậ' | 'ẩ' | 'ẫ' | 'ă' | 'ằ' | 'ắ' | 'ặ'
+        | 'ẳ' | 'ẵ' => 'a',
+        'À' | 'Á' | 'Ạ' | 'Ả' | 'Ã' | 'Â' | 'Ầ' | 'Ấ' | 'Ậ' | 'Ẩ' | 'Ẫ' | 'Ă' | 'Ằ' | 'Ắ' | 'Ặ'
+        | 'Ẳ' | 'Ẵ' => 'a',
         'è' | 'é' | 'ẹ' | 'ẻ' | 'ẽ' | 'ê' | 'ề' | 'ế' | 'ệ' | 'ể' | 'ễ' => 'e',
         'È' | 'É' | 'Ẹ' | 'Ẻ' | 'Ẽ' | 'Ê' | 'Ề' | 'Ế' | 'Ệ' | 'Ể' | 'Ễ' => 'e',
         'ì' | 'í' | 'ị' | 'ỉ' | 'ĩ' => 'i',
         'Ì' | 'Í' | 'Ị' | 'Ỉ' | 'Ĩ' => 'i',
-        'ò' | 'ó' | 'ọ' | 'ỏ' | 'õ' | 'ô' | 'ồ' | 'ố' | 'ộ' | 'ổ' | 'ỗ' | 'ơ' | 'ờ' | 'ớ'
-        | 'ợ' | 'ở' | 'ỡ' => 'o',
-        'Ò' | 'Ó' | 'Ọ' | 'Ỏ' | 'Õ' | 'Ô' | 'Ồ' | 'Ố' | 'Ộ' | 'Ổ' | 'Ỗ' | 'Ơ' | 'Ờ' | 'Ớ'
-        | 'Ợ' | 'Ở' | 'Ỡ' => 'o',
+        'ò' | 'ó' | 'ọ' | 'ỏ' | 'õ' | 'ô' | 'ồ' | 'ố' | 'ộ' | 'ổ' | 'ỗ' | 'ơ' | 'ờ' | 'ớ' | 'ợ'
+        | 'ở' | 'ỡ' => 'o',
+        'Ò' | 'Ó' | 'Ọ' | 'Ỏ' | 'Õ' | 'Ô' | 'Ồ' | 'Ố' | 'Ộ' | 'Ổ' | 'Ỗ' | 'Ơ' | 'Ờ' | 'Ớ' | 'Ợ'
+        | 'Ở' | 'Ỡ' => 'o',
         'ù' | 'ú' | 'ụ' | 'ủ' | 'ũ' | 'ư' | 'ừ' | 'ứ' | 'ự' | 'ử' | 'ữ' => 'u',
         'Ù' | 'Ú' | 'Ụ' | 'Ủ' | 'Ũ' | 'Ư' | 'Ừ' | 'Ứ' | 'Ự' | 'Ử' | 'Ữ' => 'u',
         'ỳ' | 'ý' | 'ỵ' | 'ỷ' | 'ỹ' => 'y',
@@ -155,9 +154,15 @@ mod tests {
     fn expand_tilde_grows_only_a_leading_bare_tilde() {
         let home = std::env::var("HOME").unwrap();
         assert_eq!(expand_tilde("~"), std::path::PathBuf::from(&home));
-        assert_eq!(expand_tilde("~/x"), std::path::PathBuf::from(format!("{home}/x")));
+        assert_eq!(
+            expand_tilde("~/x"),
+            std::path::PathBuf::from(format!("{home}/x"))
+        );
         // `~user`, absolute, relative and empty pass through untouched.
-        assert_eq!(expand_tilde("~other/x"), std::path::PathBuf::from("~other/x"));
+        assert_eq!(
+            expand_tilde("~other/x"),
+            std::path::PathBuf::from("~other/x")
+        );
         assert_eq!(expand_tilde("/abs/x"), std::path::PathBuf::from("/abs/x"));
         assert_eq!(expand_tilde("rel/x"), std::path::PathBuf::from("rel/x"));
         assert_eq!(expand_tilde(""), std::path::PathBuf::from(""));

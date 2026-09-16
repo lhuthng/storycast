@@ -1,11 +1,16 @@
 //! One task in full.
+use crate::tui::{
+    app::App,
+    model::age_secs,
+    screen::TaskDetail,
+    style::{centered_padded, empty_body, state_color, worker_name},
+};
+use bm_proto::TaskState;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use bm_proto::TaskState;
-use crate::tui::{app::App, model::age_secs, screen::TaskDetail, style::{centered_padded, empty_body, state_color, worker_name}};
 
 /// One task in full: everything the ledger knows, `detail` first among them.
 pub(crate) fn draw_task_detail(f: &mut ratatui::Frame, app: &App, view: &TaskDetail) {
@@ -21,7 +26,9 @@ pub(crate) fn draw_task_detail(f: &mut ratatui::Frame, app: &App, view: &TaskDet
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(app.style(Color::Cyan))
-        .title(format!("Task {id} — Esc back · u retry · F force re-run · q dashboard"));
+        .title(format!(
+            "Task {id} — Esc back · u retry · F force re-run · q dashboard"
+        ));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -63,7 +70,10 @@ pub(crate) fn draw_task_detail(f: &mut ratatui::Frame, app: &App, view: &TaskDet
                 app.style_bold(state_color(t.state.as_str())),
             ),
         ]),
-        kv("attempts", format!("{} of 3 before it is shelved", t.attempts)),
+        kv(
+            "attempts",
+            format!("{} of 3 before it is shelved", t.attempts),
+        ),
         kv("worker", worker_name(t.assigned_to.as_deref())),
         kv("lease", lease),
         kv("affinity", t.affinity.clone().unwrap_or_else(|| "—".into())),
@@ -85,7 +95,10 @@ pub(crate) fn draw_task_detail(f: &mut ratatui::Frame, app: &App, view: &TaskDet
             _ => Color::Gray,
         };
         for l in t.detail.lines() {
-            lines.push(Line::from(Span::styled(format!("  {l}"), app.style(colour))));
+            lines.push(Line::from(Span::styled(
+                format!("  {l}"),
+                app.style(colour),
+            )));
         }
     }
     lines.push(Line::from(""));

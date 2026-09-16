@@ -75,8 +75,16 @@ pub(crate) fn index_lines(root: &Path) -> Result<HashMap<String, Vec<String>>, S
             continue;
         };
         for seg in segments {
-            let speaker = seg.get("speaker").and_then(|s| s.as_str()).unwrap_or("").trim();
-            let text = seg.get("text").and_then(|s| s.as_str()).unwrap_or("").trim();
+            let speaker = seg
+                .get("speaker")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .trim();
+            let text = seg
+                .get("text")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .trim();
             if speaker.is_empty() || text.is_empty() {
                 continue;
             }
@@ -155,7 +163,10 @@ pub(crate) fn line_for(
         }
     }
     let text = choose_line(index.and_then(|i| i.get(character)), seed)?;
-    Some(AuditionLine { character: character.to_string(), text })
+    Some(AuditionLine {
+        character: character.to_string(),
+        text,
+    })
 }
 
 /// A deterministic index into `len`, for a given `seed`.
@@ -236,7 +247,10 @@ mod tests {
         // ...and across seeds the pick actually moves, or "random" is a lie.
         let distinct: std::collections::HashSet<String> =
             (0..64).filter_map(|s| choose_line(Some(&l), s)).collect();
-        assert!(distinct.len() > 1, "every seed picked the same line: {distinct:?}");
+        assert!(
+            distinct.len() > 1,
+            "every seed picked the same line: {distinct:?}"
+        );
     }
 
     #[test]
@@ -249,7 +263,10 @@ mod tests {
 
         let held = line_for(None, "Kiên", Some(&idx), 3).unwrap();
         assert_eq!(held.character, "Kiên");
-        assert!(held.text.starts_with("k1") || held.text.starts_with("k2"), "{held:?}");
+        assert!(
+            held.text.starts_with("k1") || held.text.starts_with("k2"),
+            "{held:?}"
+        );
 
         // Same character, different seed: the held line still wins, because
         // re-picking here would break the A/B.
@@ -273,7 +290,11 @@ mod tests {
 
     #[test]
     fn pick_index_stays_in_range_including_for_zero() {
-        assert_eq!(pick_index(0, 12345), 0, "an empty list must not divide by zero");
+        assert_eq!(
+            pick_index(0, 12345),
+            0,
+            "an empty list must not divide by zero"
+        );
         for len in 1..40usize {
             for seed in 0..40u64 {
                 assert!(pick_index(len, seed) < len, "len {len} seed {seed}");
@@ -304,7 +325,10 @@ mod tests {
         let kien = idx.get("Kiên").expect("Kiên is indexed");
         assert_eq!(kien, &vec!["một".to_string()], "the duplicate was dropped");
         assert_eq!(idx.get("Vũ"), Some(&vec!["hai".to_string()]));
-        assert!(!idx.contains_key(""), "a nameless speaker is not a character");
+        assert!(
+            !idx.contains_key(""),
+            "a nameless speaker is not a character"
+        );
         assert_eq!(idx.len(), 2, "notes.json is not a script: {idx:?}");
 
         let _ = std::fs::remove_dir_all(&root);

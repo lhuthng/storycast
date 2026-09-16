@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use bm_proto::VoiceInfo;
 
-use super::consts::{CONTENT_LANGUAGE, VoicePolicy};
+use super::consts::{VoicePolicy, CONTENT_LANGUAGE};
 
 // --- the committed catalogue ------------------------------------------------
 //
@@ -313,8 +313,9 @@ impl OperatorRoster {
     /// refuses to load.
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text)
-                .map_err(|e| format!("parsing {}: {e}", path.display())),
+            Ok(text) => {
+                serde_json::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(format!("reading {}: {e}", path.display())),
         }
@@ -355,7 +356,10 @@ impl OperatorRoster {
 ///
 /// The single entry point for "what does this machine actually allow", so no
 /// caller has to remember to merge. `roster_path` is `Layout::roster()`.
-pub fn effective_engine(roster_path: &std::path::Path, engine: &str) -> Result<EngineRoster, String> {
+pub fn effective_engine(
+    roster_path: &std::path::Path,
+    engine: &str,
+) -> Result<EngineRoster, String> {
     let base = RosterFile::catalogue()
         .engine(engine)
         .cloned()
@@ -497,7 +501,8 @@ mod tests {
             for v in &roster.voices {
                 assert!(seen.insert(&v.key), "{engine}: duplicate key {}", v.key);
                 let slug = !v.key.is_empty()
-                    && v.key.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                    && v.key
+                        .starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
                     && v.key
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
@@ -549,7 +554,10 @@ mod tests {
         // The shipped catalogue restricts nothing at all.
         assert!(base.accent_allowed("Northern"));
         assert!(base.accent_allowed("Central"));
-        assert!(base.to_policy("vieneu").allowed.is_empty(), "no restriction");
+        assert!(
+            base.to_policy("vieneu").allowed.is_empty(),
+            "no restriction"
+        );
 
         // An allow-list admits by accent, and `"Central/South"` matches either
         // half of the combined region the SDK labels.
@@ -602,8 +610,14 @@ mod tests {
 
     #[test]
     fn keys_resolve_to_names_and_names_resolve_to_keys() {
-        assert_eq!(key_for_name("vieneu", "Đức Trí").as_deref(), Some("duc-tri"));
-        assert_eq!(name_for_key("vieneu", "duc-tri").as_deref(), Some("Đức Trí"));
+        assert_eq!(
+            key_for_name("vieneu", "Đức Trí").as_deref(),
+            Some("duc-tri")
+        );
+        assert_eq!(
+            name_for_key("vieneu", "duc-tri").as_deref(),
+            Some("Đức Trí")
+        );
         // A name the catalogue does not declare has no key — that is a clone.
         assert_eq!(key_for_name("vieneu", "Suneo"), None);
         assert_eq!(name_for_key("vieneu", "suneo"), None);

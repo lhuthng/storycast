@@ -66,9 +66,7 @@ impl Tts {
             .send()
             .await
             .with_context(|| format!("GET {}/policy", self.base))?;
-        resp.json()
-            .await
-            .context("parsing /policy")
+        resp.json().await.context("parsing /policy")
     }
 
     /// Render one utterance to WAV bytes at the engine's native sample rate.
@@ -104,7 +102,10 @@ impl Tts {
         }
         let bytes = resp.bytes().await.context("reading wav body")?;
         if bytes.len() < 1000 {
-            anyhow::bail!("TTS worker returned a suspiciously small wav ({} bytes)", bytes.len());
+            anyhow::bail!(
+                "TTS worker returned a suspiciously small wav ({} bytes)",
+                bytes.len()
+            );
         }
         Ok(bytes.to_vec())
     }

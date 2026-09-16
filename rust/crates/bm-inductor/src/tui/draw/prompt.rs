@@ -1,10 +1,14 @@
 //! Single-line prompt overlay.
+use crate::tui::{
+    app::App,
+    screen::TextPrompt,
+    style::{centered, style_of},
+};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use crate::tui::{app::App, screen::TextPrompt, style::{centered, style_of}};
 
 pub(crate) fn draw_text_prompt(f: &mut ratatui::Frame, app: &App, prompt: &TextPrompt) {
     let area = centered(f.area(), 88, 8);

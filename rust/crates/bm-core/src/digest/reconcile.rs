@@ -1,4 +1,4 @@
-use super::canon::{BibleMerge, canon_key};
+use super::canon::{canon_key, BibleMerge};
 use serde_json::{json, Value};
 
 /// Parse the reconciler LLM's answer: `{"merges":[{"canonical":..,"absorb":[..]}]}`
@@ -155,7 +155,11 @@ pub fn reconcile_plan(bible: &Value) -> ReconcilePlan {
             serde_json::to_string(&roster).unwrap_or_default(),
         )
     };
-    ReconcilePlan { folds, candidates, prompt }
+    ReconcilePlan {
+        folds,
+        candidates,
+        prompt,
+    }
 }
 
 /// Deterministic folds for cast keys that never made it into the bible:
@@ -168,15 +172,22 @@ pub fn cast_only_folds(bible: &Value, cast_keys: &[String]) -> Vec<BibleMerge> {
         .and_then(|c| c.as_array())
         .map(|v| v.as_slice())
         .unwrap_or(&[]);
-    let mut canon_of: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut canon_of: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     for c in chars {
         if let Some(n) = c.get("name").and_then(|n| n.as_str()) {
-            canon_of.entry(canon_key(n)).or_insert_with(|| n.to_string());
+            canon_of
+                .entry(canon_key(n))
+                .or_insert_with(|| n.to_string());
         }
     }
-    let in_bible =
-        |n: &str| chars.iter().any(|c| c.get("name").and_then(|x| x.as_str()) == Some(n));
-    let mut out: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let in_bible = |n: &str| {
+        chars
+            .iter()
+            .any(|c| c.get("name").and_then(|x| x.as_str()) == Some(n))
+    };
+    let mut out: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for k in cast_keys {
         if k == "Narrator" || in_bible(k) {
             continue;
@@ -193,16 +204,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-        fn bible_with(name: &str, aliases: &[&str]) -> Value {
-            json!({"characters": [{
-                "name": name,
-                "personality": "x",
-                "voice_hint": "adult male",
-                "proper_aliases": aliases,
-                "first_seen": "01",
-                "chapters_seen": []
-            }]})
-        }
+    fn bible_with(name: &str, aliases: &[&str]) -> Value {
+        json!({"characters": [{
+            "name": name,
+            "personality": "x",
+            "voice_hint": "adult male",
+            "proper_aliases": aliases,
+            "first_seen": "01",
+            "chapters_seen": []
+        }]})
+    }
 
     #[test]
     fn parse_reconcile_merges_tolerates_shapes_and_garbage() {
@@ -233,7 +244,9 @@ mod tests {
         assert_eq!(plan.folds[0].0, "Sở Cuồng Sư", "earliest-seen wins");
         assert_eq!(plan.folds[0].1, vec!["Sở Cuồng sư".to_string()]);
         assert!(
-            plan.candidates.iter().any(|(a, b)| a == "Huyền Vũ" && b == "Huyền Vũ Môn"),
+            plan.candidates
+                .iter()
+                .any(|(a, b)| a == "Huyền Vũ" && b == "Huyền Vũ Môn"),
             "shared-token pair goes to the LLM: {:?}",
             plan.candidates
         );
@@ -254,12 +267,22 @@ mod tests {
             {"name": "Sở Cuồng sư", "proper_aliases": [], "first_seen": "02", "chapters_seen": []},
             {"name": "Mao Ý", "proper_aliases": [], "first_seen": "03", "chapters_seen": []}
         ]});
-        let cast = ["Huyền Vũ lão tổ", "Sở Cuồng Sư", "Mao Ý (thanh niên mặc hoa phục)",
-            "Ngao Khánh", "Huyền Vũ", "Narrator"]
-            .iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let cast = [
+            "Huyền Vũ lão tổ",
+            "Sở Cuồng Sư",
+            "Mao Ý (thanh niên mặc hoa phục)",
+            "Ngao Khánh",
+            "Huyền Vũ",
+            "Narrator",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
         let folds = cast_only_folds(&bible, &cast);
         assert_eq!(folds.len(), 3, "{folds:?}");
         // New people and existing entries never fold.
-        assert!(!folds.iter().any(|(_, a)| a.contains(&"Ngao Khánh".to_string())));
+        assert!(!folds
+            .iter()
+            .any(|(_, a)| a.contains(&"Ngao Khánh".to_string())));
     }
 }

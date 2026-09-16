@@ -190,8 +190,11 @@ async fn generate_openrouter(prompt: &str, settings: &Settings) -> Result<String
 /// provider's own delay), 5xx, transport errors, unknown-model 404s and spent
 /// day-quotas.
 async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<String, GenError> {
-    let key = std::env::var("GEMINI_API_KEY")
-        .map_err(|_| GenError::Fatal(anyhow!("GEMINI_API_KEY missing — copy .env.example to .env")))?;
+    let key = std::env::var("GEMINI_API_KEY").map_err(|_| {
+        GenError::Fatal(anyhow!(
+            "GEMINI_API_KEY missing — copy .env.example to .env"
+        ))
+    })?;
     let mut last = String::from("no models configured");
     for model in analyze_chain(settings) {
         match try_gemini_model(prompt, &key, &model).await {
@@ -277,9 +280,7 @@ async fn try_gemini_model(prompt: &str, key: &str, model: &str) -> ModelNext {
             // Unknown model name or its day quota spent: the next model is
             // exactly what the chain is for.
             404 => return ModelNext::Skip(format!("{status} ({})", head_chars(text.trim(), 120))),
-            _ if text.contains("PerDay") => {
-                return ModelNext::Skip("day quota spent".to_string())
-            }
+            _ if text.contains("PerDay") => return ModelNext::Skip("day quota spent".to_string()),
             429 => {
                 let wait = parse_retry_delay(&text).map(|d| d + 2.0).unwrap_or(30.0);
                 last = format!("429, retry in {wait:.0}s");
@@ -314,7 +315,11 @@ fn analyze_chain(settings: &Settings) -> Vec<String> {
 }
 
 /// One generation attempt against the configured backend.
-pub async fn generate(prompt: &str, analyzer: &str, settings: &Settings) -> Result<String, GenError> {
+pub async fn generate(
+    prompt: &str,
+    analyzer: &str,
+    settings: &Settings,
+) -> Result<String, GenError> {
     match analyzer {
         "local" => generate_ollama(prompt, settings).await,
         "openrouter" => generate_openrouter(prompt, settings).await,
@@ -337,10 +342,17 @@ mod tests {
         assert_eq!(analyze_chain(&plain), vec![plain.analyze_model.clone()]);
 
         let chained = Settings {
-            analyze_models: vec![" gemini-3.8-flash ".into(), " ".into(), "gemini-3.5-flash".into()],
+            analyze_models: vec![
+                " gemini-3.8-flash ".into(),
+                " ".into(),
+                "gemini-3.5-flash".into(),
+            ],
             ..Settings::default()
         };
-        assert_eq!(analyze_chain(&chained), vec!["gemini-3.8-flash", "gemini-3.5-flash"]);
+        assert_eq!(
+            analyze_chain(&chained),
+            vec!["gemini-3.8-flash", "gemini-3.5-flash"]
+        );
     }
 
     #[test]
@@ -361,7 +373,10 @@ mod tests {
 
     #[test]
     fn retry_delay_parses_both_provider_shapes() {
-        assert_eq!(parse_retry_delay("... retry in 53.262507263s"), Some(53.262507263));
+        assert_eq!(
+            parse_retry_delay("... retry in 53.262507263s"),
+            Some(53.262507263)
+        );
         assert_eq!(parse_retry_delay(r#"{"retryDelay": "53s"}"#), Some(53.0));
         assert_eq!(parse_retry_delay("no hint here"), None);
     }

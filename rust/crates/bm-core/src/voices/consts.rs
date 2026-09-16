@@ -52,10 +52,30 @@ pub const GEMINI_NEUTRAL: [&str; 4] = ["Schedar", "Puck", "Erinome", "Rasalgethi
 
 /// Female markers are checked *first*: "female" contains "male".
 const FEMALE_HINTS: [&str; 12] = [
-    "female", "nữ", "cô", "chị", "tỷ", "muội", "gái", "girl", "woman", "lady", "bà", "muội tử",
+    "female",
+    "nữ",
+    "cô",
+    "chị",
+    "tỷ",
+    "muội",
+    "gái",
+    "girl",
+    "woman",
+    "lady",
+    "bà",
+    "muội tử",
 ];
 const MALE_HINTS: [&str; 10] = [
-    "male", "nam", "ông", "anh", "trai", "đàn ông", "boy", "man", "lão", "adult male",
+    "male",
+    "nam",
+    "ông",
+    "anh",
+    "trai",
+    "đàn ông",
+    "boy",
+    "man",
+    "lão",
+    "adult male",
 ];
 
 /// Everything the cast assigner needs to pick a voice for a new character.
@@ -87,12 +107,18 @@ impl VoicePolicy {
     /// Voices that a cast is permitted to use. `customs` are user-enrolled
     /// clones, which bypass the preset allow-list but never the accent policy
     /// (a clone is assumed vetted when it was enrolled).
-    pub fn violations(&self, cast: &[(String, String)], customs: &[String]) -> Vec<(String, String)> {
+    pub fn violations(
+        &self,
+        cast: &[(String, String)],
+        customs: &[String],
+    ) -> Vec<(String, String)> {
         if self.allowed.is_empty() {
             return Vec::new();
         }
         cast.iter()
-            .filter(|(_, v)| !self.allowed.iter().any(|a| a == v) && !customs.iter().any(|c| c == v))
+            .filter(|(_, v)| {
+                !self.allowed.iter().any(|a| a == v) && !customs.iter().any(|c| c == v)
+            })
             .cloned()
             .collect()
     }
@@ -242,6 +268,8 @@ mod tests {
     fn gemini_policy_has_no_accent_restriction() {
         let p = gemini_policy();
         assert!(p.allowed.is_empty());
-        assert!(p.violations(&[("A".into(), "Anything".into())], &[]).is_empty());
+        assert!(p
+            .violations(&[("A".into(), "Anything".into())], &[])
+            .is_empty());
     }
 }

@@ -1,6 +1,4 @@
 //! Normal mode: operator keys. Destructive actions live behind `:`.
-use crossterm::event::{KeyCode, KeyEvent};
-use std::sync::{Arc, atomic::AtomicBool};
 use crate::tui::{
     app::App,
     input::{dispatch, runconfig::run_preview},
@@ -8,20 +6,26 @@ use crate::tui::{
     screen::{Confirm, ConfirmAction, Screen, TasksView, TextKind, TextPrompt},
     style::{Conn, Level},
 };
+use crossterm::event::{KeyCode, KeyEvent};
+use std::sync::{atomic::AtomicBool, Arc};
 
-pub(crate) async fn normal_key(app: &mut App, key: KeyEvent, http: &reqwest::Client, job_tx: &tokio::sync::mpsc::UnboundedSender<Job>) -> bool {
+pub(crate) async fn normal_key(
+    app: &mut App,
+    key: KeyEvent,
+    http: &reqwest::Client,
+    job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
+) -> bool {
     match key.code {
         KeyCode::Char('q') => {
             if app.pending > 0 {
                 app.screen = Screen::Confirm(Confirm {
                     title: "Quit with work in flight?".into(),
                     danger: true,
-                    body: vec![format!(
-                        "{} background job(s) are still running.",
-                        app.pending
-                    ),
-                    "The inductor keeps working without the TUI, but you will lose".into(),
-                    "the event log and any in-flight result.".into()],
+                    body: vec![
+                        format!("{} background job(s) are still running.", app.pending),
+                        "The inductor keeps working without the TUI, but you will lose".into(),
+                        "the event log and any in-flight result.".into(),
+                    ],
                     action: ConfirmAction::Quit,
                 });
             } else {
@@ -99,7 +103,10 @@ pub(crate) async fn normal_key(app: &mut App, key: KeyEvent, http: &reqwest::Cli
                         settings_key: app.ssh_defaults().key,
                     },
                 );
-                app.set_status(Level::Info, "starting backend now — boxes join in background; watch events");
+                app.set_status(
+                    Level::Info,
+                    "starting backend now — boxes join in background; watch events",
+                );
             }
         }
         KeyCode::Char('R') => {
@@ -116,8 +123,29 @@ pub(crate) async fn normal_key(app: &mut App, key: KeyEvent, http: &reqwest::Cli
         // Operator commands fire from the `:` line only: a stray keypress
         // must never provision, reconcile or stop anything. This arm catches
         // every gated key before the fallthrough swallows it silently.
-        KeyCode::Char(c) if matches!(c, 'a'|'A'|'N'|'p'|'P'|'d'|'t'|'c'|'v'|'s'|'e'|'u'|'m'|'B'|'X') => {
-            app.set_status(Level::Warn, format!("use ':{c}' — operator commands live on the command line"));
+        KeyCode::Char(c)
+            if matches!(
+                c,
+                'a' | 'A'
+                    | 'N'
+                    | 'p'
+                    | 'P'
+                    | 'd'
+                    | 't'
+                    | 'c'
+                    | 'v'
+                    | 's'
+                    | 'e'
+                    | 'u'
+                    | 'm'
+                    | 'B'
+                    | 'X'
+            ) =>
+        {
+            app.set_status(
+                Level::Warn,
+                format!("use ':{c}' — operator commands live on the command line"),
+            );
         }
         _ => {}
     }
