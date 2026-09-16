@@ -835,6 +835,25 @@ use std::collections::BTreeMap;
     }
 
     #[test]
+    fn log_lines_use_reported_aliases_when_beats_carry_them() {
+        // The mismatch: the Workers pane said `marmot` while the log line
+        // said `[hare] [thang-29486]` — the log hashed the raw id instead of
+        // asking the beats.
+        let mut app = App::new("http://127.0.0.1:8901");
+        app.beats = vec![beat("thang-29486", "192.168.2.2", 2, "marmot")];
+        app.log_at(Level::Ok, "[thang-29486] render:23 done in 255.3s");
+        let text = render_text(&mut app, 140, 44);
+        assert!(text.contains("[marmot]"), "the reported alias wins:\n{text}");
+        app.log_at(Level::Ok, "[ghost-1] render:24 done");
+        let text = render_text(&mut app, 140, 44);
+        let (fallback, _) = worker_alias("ghost-1");
+        assert!(
+            text.contains(&format!("[{fallback}]")),
+            "ids no beat knows keep the hash:\n{text}"
+        );
+    }
+
+    #[test]
     fn the_size_guard_replaces_the_dashboard_below_the_floor() {        let mut app = App::new("http://127.0.0.1:8901");
         let text = render_text(&mut app, 60, 16);
         assert!(text.contains("too small"), "{text}");

@@ -5,7 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
-use crate::tui::{app::App, style::{empty_body, log_head, style_of, wall_hms, worker_alias}};
+use crate::tui::{app::App, model::reported_alias, style::{empty_body, log_head, style_of, wall_hms, worker_alias}};
 use crate::tui::style::Level;
 
 pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -46,8 +46,15 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             ];
             match log_head(&l.text) {
                 Some(id) => {
-                    let (alias, tint) = worker_alias(id);
-                    spans.push(Span::styled(format!("[{alias}] "), style_of(colour, tint)));
+                    // The reported alias when a beat carries one for this id
+                    // — the same name the Workers pane shows — else the id
+                    // hash. Without the lookup the log and the pane name the
+                    // same worker differently.
+                    let display = reported_alias(&app.beats, id)
+                        .unwrap_or_else(|| worker_alias(id).0)
+                        .to_string();
+                    let tint = worker_alias(&display).1;
+                    spans.push(Span::styled(format!("[{display}] "), style_of(colour, tint)));
                     spans.push(Span::styled(l.text.clone(), body_style));
                 }
                 None => spans.push(Span::styled(l.text.clone(), body_style)),

@@ -270,6 +270,17 @@ pub(crate) fn live_beats(beats: &[Heartbeat], now: u64) -> Vec<&Heartbeat> {
     beats.iter().filter(|b| now.saturating_sub(b.ts) < 90).collect()
 }
 
+/// A worker's self-reported display name, when any beat carries one for this
+/// id. The name is drawn once at worker startup and kept in `worker.alias`;
+/// the panes show it verbatim so one worker never wears two names on one
+/// screen. `None` means fall back to hashing the id (older agents).
+pub(crate) fn reported_alias<'a>(beats: &'a [Heartbeat], id: &str) -> Option<&'a str> {
+    beats
+        .iter()
+        .find(|b| b.worker_id == id && !b.alias.is_empty())
+        .map(|b| b.alias.as_str())
+}
+
 /// Live workers on one box, by the addr their heartbeats carry. Powers the
 /// Machines pane's `workers` column — the answer to "is this box actually
 /// doing anything".

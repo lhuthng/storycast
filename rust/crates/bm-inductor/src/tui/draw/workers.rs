@@ -5,7 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Row, Table},
 };
-use crate::tui::{app::App, layout::COMPACT_WORKER_COLS, model::live_beats, style::{bar, cell, empty_body, stage_color, style_bold_of, style_of, worker_alias}};
+use crate::tui::{app::App, layout::COMPACT_WORKER_COLS, model::{live_beats, reported_alias}, style::{bar, cell, empty_body, stage_color, style_bold_of, style_of, worker_alias}};
 
 pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compact: bool) {
     let block = Block::default().borders(Borders::ALL).title("Workers");
@@ -43,11 +43,9 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compac
             // The worker's own alias when it reports one (drawn once at
             // startup, kept across restarts); the id hash otherwise, for older
             // agents whose every restart renamed them.
-            let name = if b.alias.is_empty() {
-                worker_alias(&b.worker_id).0.to_string()
-            } else {
-                b.alias.clone()
-            };
+            let name = reported_alias(&app.beats, &b.worker_id)
+                .unwrap_or_else(|| worker_alias(&b.worker_id).0)
+                .to_string();
             let tint = worker_alias(&name).1;
             let mut cells = vec![Line::from(Span::styled(
                 name,
