@@ -8,12 +8,122 @@
 use crate::util::write_json;
 use crate::voices::VoicePolicy;
 use anyhow::Result;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 
-/// `character -> voice`. Ordered so the file on disk is diff-friendly.
-pub type Cast = BTreeMap<String, String>;
+/// `character -> voice`, plus the bible those character names were resolved
+/// against. Ordered so the file on disk is diff-friendly.
+///
+/// The bible rides along because a script may name a speaker by *any* surface
+/// form the bible knows — an alias, a case variant, a title-suffixed form —
+/// while the map's keys are the canonical names `load_cast` assigned under.
+/// [`Cast::get`] folds the form it is handed through the same resolver, so the
+/// writer and every reader ask the same question.
+///
+/// Without it a script holding a variant form is assigned a voice under one
+/// name and then looked up under another: `render ch180 failed: cast has no
+/// voice for "Vân bá"`, on a chapter whose voice was assigned milliseconds
+/// earlier — because the cast held the entry under `Lão giả`.
+#[derive(Debug, Clone, Default)]
+pub struct Cast {
+    voices: BTreeMap<String, String>,
+    /// `Null` for a cast read straight off disk: exact-key lookup only, which
+    /// is what the picker and the migration want.
+    bible: Value,
+}
+
+impl Cast {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The voice for `speaker`, whatever surface form it arrives in.
+    ///
+    /// Exact key first — the common case, and the only one a bible-less cast
+    /// can answer — then the canonical name the bible folds it to. Falls
+    /// through to the exact key again so a cast whose bible has no opinion
+    /// behaves exactly as a plain map.
+    pub fn get(&self, speaker: &str) -> Option<&String> {
+        if let Some(v) = self.voices.get(speaker) {
+            return Some(v);
+        }
+        if self.bible.is_null() {
+            return None;
+        }
+        let canonical = crate::digest::resolve_speaker(&self.bible, speaker);
+        self.voices.get(&canonical)
+    }
+
+    /// The bare map, for callers whose contract is the file's shape (the
+    /// picker's wire type) rather than a name lookup.
+    pub fn into_map(self) -> BTreeMap<String, String> {
+        self.voices
+    }
+
+    /// Attach the bible the names in this cast were resolved against.
+    pub fn with_bible(mut self, bible: Value) -> Self {
+        self.bible = bible;
+        self
+    }
+}
+
+impl Deref for Cast {
+    type Target = BTreeMap<String, String>;
+    fn deref(&self) -> &Self::Target {
+        &self.voices
+    }
+}
+
+impl DerefMut for Cast {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.voices
+    }
+}
+
+impl FromIterator<(String, String)> for Cast {
+    fn from_iter<I: IntoIterator<Item = (String, String)>>(iter: I) -> Self {
+        Cast {
+            voices: iter.into_iter().collect(),
+            bible: Value::Null,
+        }
+    }
+}
+
+impl IntoIterator for Cast {
+    type Item = (String, String);
+    type IntoIter = std::collections::btree_map::IntoIter<String, String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.voices.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Cast {
+    type Item = (&'a String, &'a String);
+    type IntoIter = std::collections::btree_map::Iter<'a, String, String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.voices.iter()
+    }
+}
+
+/// The file and the wire format are the map, never the bible: a cast file has
+/// to stay a cast file, and the bible is the caller's to load.
+impl Serialize for Cast {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.voices.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Cast {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(Cast {
+            voices: BTreeMap::deserialize(d)?,
+            bible: Value::Null,
+        })
+    }
+}
 
 fn strings(v: Option<&Value>) -> Vec<String> {
     v.and_then(|x| x.as_array())
@@ -294,7 +404,10 @@ pub fn load_cast(
         // Persist keys, not names — a renamed voice must not orphan the cast.
         write_cast(&policy.engine, cast_path, &cast)?;
     }
-    Ok(cast)
+    // The bible rides out with the cast: every caller that later asks "who
+    // speaks this line?" is holding a script whose speaker may be a surface
+    // form, and the answer must be the key assigned above.
+    Ok(cast.with_bible(bible))
 }
 
 #[cfg(test)]
@@ -583,6 +696,64 @@ mod tests {
     }
 
     // --- the sample pool rolls first -----------------------------------------
+
+    #[test]
+    fn a_variant_speaker_name_resolves_to_the_assigned_voice() {
+        // The map is keyed canonically — `load_cast` folds before assigning —
+        // but the planner is handed the raw script string. A speaker written
+        // as an alias, a case variant or a title-suffixed form must therefore
+        // still find its voice, or the chapter is assigned a voice under one
+        // name and looked up under another.
+        let d = tmpdir("variant-lookup");
+        let bible = d.join("bible.json");
+        std::fs::write(
+            &bible,
+            r#"{"characters":[{"name":"Quản Vân Bằng","voice_hint":"old male",
+                "proper_aliases":["Quản Vân Bằng","nam tử bị thương"]}]}"#,
+        )
+        .unwrap();
+        let script = d.join("script-01.json");
+        std::fs::write(
+            &script,
+            r#"{"roster":["Narrator","Nam tử bị thương"],
+                "segments":[{"speaker":"Nam tử bị thương","text":"Cứu ta."}]}"#,
+        )
+        .unwrap();
+
+        let cast = load_cast(
+            &script,
+            &d.join("cast-vieneu.json"),
+            &bible,
+            &vieneu_policy(),
+            false,
+        )
+        .unwrap();
+        let voice = cast.get("Quản Vân Bằng").expect("assigned under the name");
+        assert_eq!(
+            cast.get("Nam tử bị thương"),
+            Some(voice),
+            "the script's own spelling must resolve to the same voice"
+        );
+        // And the planner — which only ever sees that spelling — plans.
+        let segs = vec![json!({"speaker": "Nam tử bị thương", "text": "Cứu ta."})];
+        let units = crate::assemble::plan_render(&segs, &cast, Path::new("segs"), true, None)
+            .expect("a variant speaker must plan");
+        assert_eq!(units.len(), 1);
+        assert_eq!(&units[0].voice, voice);
+    }
+
+    #[test]
+    fn a_cast_read_off_disk_looks_up_exactly() {
+        // The picker and the migration read the file directly and expect a
+        // plain map: no bible, no folding, no surprise substitution.
+        let d = tmpdir("plain-map");
+        let path = d.join("cast-vieneu.json");
+        std::fs::write(&path, r#"{"A":"Đức Trí"}"#).unwrap();
+        let cast = read_cast("vieneu", &path);
+        assert_eq!(cast.get("A").unwrap(), "Đức Trí");
+        assert!(cast.get("a").is_none(), "no folding without a bible");
+        assert_eq!(cast.into_map().len(), 1);
+    }
 
     fn pool_fixture(d: &Path) {
         std::fs::write(

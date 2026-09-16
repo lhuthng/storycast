@@ -1472,4 +1472,108 @@ mod tests {
             .op_retry_task(Stage::Merge, 99, false)
             .contains("not found"));
     }
+
+    #[test]
+    fn a_render_offer_freezes_the_voices_it_hands_out() {
+        // The filenames a worker writes embed the voice, so a plan that is not
+        // persisted is re-derived later — by the completion gate and by the
+        // merger — from whatever the cast file says then. Assignment is
+        // least-used over the whole file, so any other chapter's write moves
+        // it. That is the whole of "render done, then 20 segments missing":
+        // the audio was on disk under names nothing would look up again.
+        let (_d, inner) = fixture();
+        let layout = inner.layout.clone();
+        let engine = inner.settings.engine.clone();
+        std::fs::write(
+            layout.script(187),
+            r#"{"roster":["Narrator","Hám Thiên Khuyết"],
+                "segments":[{"speaker":"Hám Thiên Khuyết","text":"Chết đi!"}]}"#,
+        )
+        .unwrap();
+        // A speaker with no entry: exactly the state the offer path used to
+        // leave behind.
+        std::fs::write(layout.cast(&engine), r#"{"Narrator":"Đức Trí"}"#).unwrap();
+
+        let units = inner.missing_units(187).expect("planning must succeed");
+        assert_eq!(units.len(), 1);
+        let offered = units[0].name.clone();
+        assert!(offered.ends_with(".wav"), "{offered}");
+
+        // 1. The decision is on disk, so every later reader sees it.
+        let cast = bm_core::cast::read_cast(&engine, &layout.cast(&engine));
+        let voice = cast
+            .get("Hám Thiên Khuyết")
+            .expect("the offer must persist the voice it handed out");
+        assert!(
+            offered.contains(voice.as_str()),
+            "the offered filename must name the persisted voice: {offered} vs {voice}"
+        );
+
+        // 2. The prover the completion gate uses agrees with the worker.
+        let expected = crate::segments::expected_names(&layout, &engine, 187)
+            .expect("the chapter is plannable");
+        assert!(
+            expected.contains(&offered),
+            "the gate's set must contain what was offered: {expected:?}"
+        );
+
+        // 3. And it stays put when another chapter renders and saves.
+        std::fs::write(
+            layout.script(188),
+            r#"{"roster":["Narrator","Người Khác"],
+                "segments":[{"speaker":"Người Khác","text":"x"}]}"#,
+        )
+        .unwrap();
+        let _ = inner.missing_units(188).expect("planning must succeed");
+        let after = crate::segments::expected_names(&layout, &engine, 187).unwrap();
+        assert_eq!(
+            expected, after,
+            "another chapter's render must not move this chapter's expected set"
+        );
+    }
+
+    #[test]
+    fn a_variant_speaker_name_still_plans() {
+        // The bible says `Vân bá` is a character *and* an alias of `Lão giả`,
+        // which sits earlier in the file; and `Nam tử bị thương` is a
+        // case-variant alias of `Quản Vân Bằng`. Both real, both shelved a
+        // chapter with `cast has no voice for ...` while the cast held the
+        // voice under the canonical name.
+        let (_d, inner) = fixture();
+        let layout = inner.layout.clone();
+        let engine = inner.settings.engine.clone();
+        std::fs::write(
+            layout.bible(),
+            r#"{"characters":[
+                {"name":"Lão giả","voice_hint":"elderly male",
+                 "proper_aliases":["Lão giả","Kim lão","Vân bá"]},
+                {"name":"Vân bá","voice_hint":"adult male","proper_aliases":["Ngao Vân"]},
+                {"name":"Quản Vân Bằng","voice_hint":"old male",
+                 "proper_aliases":["Quản Vân Bằng","nam tử bị thương"]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            layout.script(180),
+            r#"{"roster":["Narrator","Vân bá"],
+                "segments":[{"speaker":"Vân bá","text":"Đi thôi."}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            layout.script(182),
+            r#"{"roster":["Narrator","Nam tử bị thương"],
+                "segments":[{"speaker":"Nam tử bị thương","text":"Cứu ta."}]}"#,
+        )
+        .unwrap();
+
+        let a = inner.missing_units(180).expect("Vân bá must plan");
+        assert_eq!(a.len(), 1);
+        let b = inner
+            .missing_units(182)
+            .expect("Nam tử bị thương must plan");
+        assert_eq!(b.len(), 1);
+        assert!(
+            crate::segments::expected_names(&layout, &engine, 180).is_some(),
+            "the gate must be able to prove ch180 too"
+        );
+    }
 }

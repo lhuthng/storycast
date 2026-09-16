@@ -79,43 +79,66 @@ pub fn canon_key(name: &str) -> String {
     low.trim().to_string()
 }
 
-/// Canonical bible name for any surface form: exact name-or-alias match
-/// first (today's behaviour, unchanged), then the canonical-key fallback.
-/// Unknown forms come back untouched — never invent an owner.
+/// Canonical bible name for any surface form: exact name, then exact alias,
+/// then the canonical-key fallback over each. Unknown forms come back
+/// untouched — never invent an owner.
+///
+/// The passes are ordered, and that order is load-bearing. A character's own
+/// name is an identity, so it must beat *any* other character's alias for it —
+/// the bible routinely contradicts itself on this, because a digest will list
+/// an epithet as an alias of one character and later introduce it as a
+/// character in its own right. `Vân bá` is exactly that: a character, and also
+/// listed among `Lão giả`'s aliases. A single interleaved pass let whichever
+/// character happened to sit earlier in the file win, so the cast was keyed
+/// under `Lão giả` while every script still said `Vân bá` — and planning that
+/// chapter failed with `cast has no voice for "Vân bá"`.
 pub fn resolve_speaker(bible: &Value, name: &str) -> String {
     let chars: &[Value] = bible
         .get("characters")
         .and_then(|c| c.as_array())
         .map(|v| v.as_slice())
         .unwrap_or(&[]);
-    for c in chars {
-        let cname = c.get("name").and_then(|n| n.as_str()).unwrap_or("");
-        if cname == name {
-            return cname.to_string();
-        }
-        if c.get("proper_aliases")
-            .and_then(|a| a.as_array())
-            .map(|a| a.iter().any(|x| x.as_str() == Some(name)))
-            .unwrap_or(false)
-        {
-            return cname.to_string();
-        }
+    fn name_of(c: &Value) -> &str {
+        c.get("name").and_then(|n| n.as_str()).unwrap_or("")
     }
-    let key = canon_key(name);
-    for c in chars {
-        let cname = c.get("name").and_then(|n| n.as_str()).unwrap_or("");
-        if canon_key(cname) == key {
-            return cname.to_string();
-        }
-        if c.get("proper_aliases")
+    let owns = |c: &Value, form: &str| -> bool {
+        c.get("proper_aliases")
+            .and_then(|a| a.as_array())
+            .map(|a| a.iter().any(|x| x.as_str() == Some(form)))
+            .unwrap_or(false)
+    };
+    let owns_key = |c: &Value, key: &str| -> bool {
+        c.get("proper_aliases")
             .and_then(|a| a.as_array())
             .map(|a| {
                 a.iter()
-                    .any(|x| x.as_str().map(canon_key).as_deref() == Some(key.as_str()))
+                    .any(|x| x.as_str().map(canon_key).as_deref() == Some(key))
             })
             .unwrap_or(false)
-        {
-            return cname.to_string();
+    };
+    // 1. exact name — an identity, never another character's alias.
+    for c in chars {
+        if name_of(c) == name {
+            return name.to_string();
+        }
+    }
+    // 2. exact alias.
+    for c in chars {
+        if owns(c, name) {
+            return name_of(c).to_string();
+        }
+    }
+    let key = canon_key(name);
+    // 3. the same name up to case, a title suffix or a trailing description.
+    for c in chars {
+        if canon_key(name_of(c)) == key {
+            return name_of(c).to_string();
+        }
+    }
+    // 4. an alias up to the same folding.
+    for c in chars {
+        if owns_key(c, &key) {
+            return name_of(c).to_string();
         }
     }
     name.to_string()
@@ -670,6 +693,33 @@ mod tests {
             "Người Lạ",
             "unknown passes through"
         );
+    }
+
+    #[test]
+    fn a_characters_own_name_beats_another_characters_alias_for_it() {
+        // The bible contradicts itself routinely: a digest lists an epithet as
+        // one character's alias, then a later chapter introduces it as a
+        // character in its own right. Real shape — `Vân bá` is a character and
+        // also sits in `Lão giả`'s aliases, earlier in the file. With the
+        // passes interleaved, position decided the answer, the cast was keyed
+        // under `Lão giả`, and the chapter would not plan.
+        let bible = json!({"characters": [
+            {"name": "Lão giả", "proper_aliases": ["Lão giả", "Kim lão", "Vân bá"]},
+            {"name": "Vân bá", "proper_aliases": ["Ngao Vân"]}
+        ]});
+        assert_eq!(
+            resolve_speaker(&bible, "Vân bá"),
+            "Vân bá",
+            "an exact name is an identity, never an alias"
+        );
+        // The alias still works for a form that is nobody's own name.
+        assert_eq!(resolve_speaker(&bible, "Kim lão"), "Lão giả");
+        // And the owner is stable whichever way round the file lists them.
+        let flipped = json!({"characters": [
+            {"name": "Vân bá", "proper_aliases": ["Ngao Vân"]},
+            {"name": "Lão giả", "proper_aliases": ["Lão giả", "Kim lão", "Vân bá"]}
+        ]});
+        assert_eq!(resolve_speaker(&flipped, "Vân bá"), "Vân bá");
     }
 
     #[test]
