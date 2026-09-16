@@ -19,9 +19,15 @@ const VOICE_HEADS: [&str; 6] = [
 /// span is phonemized as ORDINARY TEXT (read aloud!), so the digest may only
 /// emit these, and validation below rejects the rest.
 const ALLOWED_INLINE_TAGS: [&str; 9] = [
-    "cười", "chuckle", "cuoi",
-    "thở dài", "sigh", "tho dai",
-    "hắng giọng", "clear throat", "hang giong",
+    "cười",
+    "chuckle",
+    "cuoi",
+    "thở dài",
+    "sigh",
+    "tho dai",
+    "hắng giọng",
+    "clear throat",
+    "hang giong",
 ];
 
 /// Bracketed spans in segment text, without the brackets.
@@ -51,7 +57,10 @@ fn split_voice_head(hint: &str) -> String {
 pub fn tags_of(entry: &Value) -> Vec<String> {
     let tags = normalise_tags(entry.get("tags"));
     if tags.is_empty() {
-        let hint = entry.get("voice_hint").and_then(|h| h.as_str()).unwrap_or("");
+        let hint = entry
+            .get("voice_hint")
+            .and_then(|h| h.as_str())
+            .unwrap_or("");
         crate::pool::tags_from_hint(hint)
     } else {
         tags
@@ -137,7 +146,12 @@ pub fn validate(data: &Value, bible: &Value) -> Result<()> {
 
     if let Some(ncs) = data.get("new_characters").and_then(|c| c.as_array()) {
         for nc in ncs {
-            if nc.get("name").and_then(|n| n.as_str()).unwrap_or("").is_empty() {
+            if nc
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .is_empty()
+            {
                 anyhow::bail!("new_character without name");
             }
             let hint = nc.get("voice_hint").and_then(|h| h.as_str()).unwrap_or("");
@@ -177,10 +191,12 @@ fn has_diacritic(word: &str) -> bool {
 
 /// EN policy is trust-based; flag obvious violations for the review gate.
 pub fn warn_vietnamese(data: &Value, bible: &Value) -> Vec<String> {
-    let mut skip: Vec<String> = ["dich", "lac", "doan", "thanh", "nguyen", "tran", "ngo", "phong", "tuyet", "ly"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let mut skip: Vec<String> = [
+        "dich", "lac", "doan", "thanh", "nguyen", "tran", "ngo", "phong", "tuyet", "ly",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     if let Some(chars) = bible.get("characters").and_then(|c| c.as_array()) {
         for c in chars {
             if let Some(name) = c.get("name").and_then(|n| n.as_str()) {
@@ -217,11 +233,278 @@ pub fn warn_vietnamese(data: &Value, bible: &Value) -> Vec<String> {
             }
         }
     }
-    let atmosphere = data.get("atmosphere").and_then(|a| a.as_str()).unwrap_or("");
+    let atmosphere = data
+        .get("atmosphere")
+        .and_then(|a| a.as_str())
+        .unwrap_or("");
     if looks_vi(atmosphere) {
         warns.push("   WARN: atmosphere looks Vietnamese, expected English".to_string());
     }
     warns
+}
+
+/// A written-out laugh word (lowercased): ha, haha, hắc, hô, khà.
+fn is_laugh_word(w: &str) -> bool {
+    matches!(w, "ha" | "haha" | "hắc" | "hô" | "khà")
+}
+
+/// Words that are only laughter in repetition: a lone `hô` is the verb "to
+/// shout" (`hô to`, `xưng hô`), and lone `hắc`/`khà` are unobserved. `ha`
+/// alone is always the scoff — it is not a Vietnamese word otherwise.
+fn needs_company(w: &str) -> bool {
+    matches!(w, "hô" | "hắc" | "khà")
+}
+
+/// Rewrite written-out non-verbal sounds into the engine's three tags.
+/// `[cười]` for laughter, `[thở dài]` for Haizz, `[hắng giọng]` for coughs.
+/// A tag replaces the literal, never accompanies it; at most one tag is
+/// introduced per text (a second literal run is left for a human — deleting
+/// spoken content silently is worse than a missed tag). Returns `None` when
+/// nothing changes.
+///
+/// Deliberately untouched: Hừ (contempt — no tag fits), Ừm (a spoken
+/// acknowledgment), exclamations (Ồ, Hả, Trời ơi — spoken words), tongue
+/// clicks, and narration verbs. Only what the prompt's rule 9 names.
+pub fn retag_text(text: &str) -> Option<String> {
+    // A tag already present: only trim a matching literal run immediately
+    // after it ("[cười] Ha ha ha..." → "[cười]"). Never add a second tag, and
+    // never trim a different kind (`[hắng giọng] Hừ!` keeps its scoff).
+    for (tag, kind) in [("[cười]", 0u8), ("[thở dài]", 1u8), ("[hắng giọng]", 2u8)] {
+        if let Some(pos) = text.find(tag) {
+            let after = pos + tag.len();
+            let rest = &text[after..];
+            let mut k = 0usize;
+            while rest[k..].starts_with(' ') {
+                k += 1;
+            }
+            if rest[k..].starts_with('"') {
+                k += 1;
+                while rest[k..].starts_with(' ') {
+                    k += 1;
+                }
+            }
+            let run = match kind {
+                0 => match_sound_run(&rest[k..], Sound::Laugh),
+                1 => match_sound_run(&rest[k..], Sound::Sigh),
+                _ => match_sound_run(&rest[k..], Sound::Cough),
+            };
+            if let Some(len) = run {
+                let rs = k;
+                let mut te = k + len;
+                while rest[te..].starts_with([' ', '\t', '.', ',', '…', '!', ';', ':']) {
+                    te += rest[te..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                }
+                let mut out = text.to_string();
+                if rest[te..]
+                    .trim_matches([' ', '\t', '.', ',', '…', '!', ';', ':', '"', '”'])
+                    .is_empty()
+                {
+                    // The whole remainder was the laugh (maybe quoted): drop
+                    // it all rather than stranding a dangling quote.
+                    out.truncate(after);
+                } else {
+                    out.replace_range(after + rs..after + te, "");
+                }
+                return Some(out);
+            }
+            return None;
+        }
+    }
+    // No tag: convert the first literal run found, if any.
+    let mut best: Option<(usize, usize, &str)> = None;
+    for (tag, matcher) in [
+        ("[cười]", Sound::Laugh),
+        ("[thở dài]", Sound::Sigh),
+        ("[hắng giọng]", Sound::Cough),
+    ] {
+        if let Some((start, len)) = find_sound_run(text, matcher) {
+            if best.map(|(s, _, _)| start < s).unwrap_or(true) {
+                best = Some((start, len, tag));
+            }
+        }
+    }
+    let (start, len, tag) = best?;
+    // Trim spaces before the run (one separates the tag from prose, unless
+    // the run opens the text or follows an opening quote), and punctuation
+    // plus spaces after it (the tag carries the tone now).
+    let mut from = start;
+    while from > 0 && text[..from].ends_with(' ') {
+        from -= 1;
+    }
+    let sep = if from == 0 || text[..from].ends_with(['"', '“', '(', '[']) {
+        ""
+    } else {
+        " "
+    };
+    let mut end = start + len;
+    while text[end..].starts_with([' ', '\t', '.', ',', '…', '!', ';', ':']) {
+        end += text[end..]
+            .chars()
+            .next()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1);
+    }
+    // The consumed trailing space is gone: re-separate when the remainder
+    // starts with a word character (but never before a closing quote).
+    let rest = &text[end..];
+    let gap = if rest.is_empty() || rest.starts_with(['"', '”', ')', ']', '?']) {
+        ""
+    } else {
+        " "
+    };
+    let mut out = String::with_capacity(text.len() + 8);
+    out.push_str(&text[..from]);
+    out.push_str(sep);
+    out.push_str(tag);
+    out.push_str(gap);
+    out.push_str(rest);
+    Some(out)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sound {
+    Laugh,
+    Sigh,
+    Cough,
+}
+
+/// Byte length of the sound run starting at `s` (words only, no trailing
+/// punctuation), or `None`. Word boundaries on both sides: `ha` inside
+/// `hai` (number two) or `aha` (eureka) never matches.
+fn match_sound_run(s: &str, kind: Sound) -> Option<usize> {
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    let n = chars.len();
+    let mut i = 0usize;
+    // An optional standalone `a` before a ha-run ("A ha ha, ...").
+    let word_at = |i: usize| -> Option<(String, usize, usize)> {
+        if i >= n || !chars[i].1.is_alphabetic() {
+            return None;
+        }
+        let mut j = i;
+        let mut w = String::new();
+        while j < n && chars[j].1.is_alphabetic() {
+            for c in chars[j].1.to_lowercase() {
+                w.push(c);
+            }
+            j += 1;
+        }
+        Some((w, chars[i].0, if j < n { chars[j].0 } else { s.len() }))
+    };
+    // Leading `a` only counts when a laugh word follows it.
+    if kind == Sound::Laugh {
+        if let Some((w, _, wend)) = word_at(0) {
+            if w == "a" {
+                let mut k = wend;
+                while k < s.len() && s[k..].starts_with(' ') {
+                    k += 1;
+                }
+                if let Some((w2, _, _)) = word_at(byte_idx(&chars, k, s.len())) {
+                    if is_laugh_word(&w2) {
+                        i = byte_idx(&chars, k, s.len());
+                    } else {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+    let mut consumed = 0usize;
+    let mut words = 0u32;
+    let mut first = String::new();
+    loop {
+        // Skip single spaces between words.
+        let mut k = i;
+        if words > 0 {
+            if k < s.len() && s[k..].starts_with(' ') {
+                k += 1;
+            } else {
+                break;
+            }
+        }
+        let ci = byte_idx(&chars, k, s.len());
+        let Some((w, _, wend)) = word_at(ci) else {
+            break;
+        };
+        let ok = match kind {
+            Sound::Laugh => is_laugh_word(&w),
+            Sound::Sigh => {
+                let mut c = w.chars();
+                matches!((c.next(), c.next()), (Some('h'), Some('a')))
+                    && w[2..].chars().all(|c| c == 'i' || c == 'z')
+                    && w[2..].contains('z')
+            }
+            Sound::Cough => w == "khụ",
+        };
+        if !ok {
+            break;
+        }
+        if words == 0 {
+            first = w;
+        }
+        words += 1;
+        consumed = wend;
+        i = wend;
+    }
+    if words == 0 {
+        return None;
+    }
+    // A lone hô/hắc/khà is prose, not laughter.
+    if words == 1 && kind == Sound::Laugh && needs_company(&first) {
+        return None;
+    }
+    Some(consumed)
+}
+
+/// Char-index of byte offset `b` (clamped to the end).
+fn byte_idx(chars: &[(usize, char)], b: usize, len: usize) -> usize {
+    if b >= len {
+        return chars.len();
+    }
+    chars
+        .iter()
+        .position(|(off, _)| *off >= b)
+        .unwrap_or(chars.len())
+}
+
+/// Earliest `(byte start, byte len)` of a sound run anywhere in `text`,
+/// with a non-alphabetic boundary (or string edge) on both sides.
+fn find_sound_run(text: &str, kind: Sound) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < text.len() {
+        // Candidate starts: string start or right after a non-alphabetic.
+        let boundary = if i == 0 {
+            true
+        } else {
+            text[..i]
+                .chars()
+                .next_back()
+                .map(|c| !c.is_alphabetic())
+                .unwrap_or(true)
+        };
+        if boundary {
+            if let Some(len) = match_sound_run(&text[i..], kind) {
+                // Trailing boundary: end of string or non-alphabetic next.
+                let end_ok = text[i + len..]
+                    .chars()
+                    .next()
+                    .map(|c| !c.is_alphabetic())
+                    .unwrap_or(true);
+                if end_ok {
+                    return Some((i, len));
+                }
+            }
+        }
+        // Advance one char (ASCII fast path keeps the common case cheap).
+        i += if bytes[i] < 0x80 {
+            1
+        } else {
+            text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1)
+        };
+    }
+    None
 }
 
 #[cfg(test)]
@@ -229,16 +512,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-        fn bible_with(name: &str, aliases: &[&str]) -> Value {
-            json!({"characters": [{
-                "name": name,
-                "personality": "x",
-                "voice_hint": "adult male",
-                "proper_aliases": aliases,
-                "first_seen": "01",
-                "chapters_seen": []
-            }]})
-        }
+    fn bible_with(name: &str, aliases: &[&str]) -> Value {
+        json!({"characters": [{
+            "name": name,
+            "personality": "x",
+            "voice_hint": "adult male",
+            "proper_aliases": aliases,
+            "first_seen": "01",
+            "chapters_seen": []
+        }]})
+    }
 
     #[test]
     fn inline_tags_accept_the_engine_three_and_nothing_else() {
@@ -261,6 +544,79 @@ mod tests {
         // Invented tags are read aloud downstream — that is why they fail here.
         let err = validate(&tagged("Hắn [khóc]."), &json!({"characters": []})).unwrap_err();
         assert!(err.to_string().contains("voice tag"), "{err}");
+    }
+
+    #[test]
+    fn retag_text_converts_laughs_sighs_and_coughs() {
+        // Real shapes from the corpus.
+        assert_eq!(
+            retag_text("Ha ha ha!"),
+            Some("[cười]".into()),
+            "a bare laugh becomes a bare tag"
+        );
+        assert_eq!(
+            retag_text("\"Ha ha, khách sáo quá.\""),
+            Some("\"[cười] khách sáo quá.\"".into())
+        );
+        assert_eq!(
+            retag_text("Thật à, ta đúng là kỳ tài ngút trời ha ha..."),
+            Some("Thật à, ta đúng là kỳ tài ngút trời [cười]".into())
+        );
+        assert_eq!(
+            retag_text("\"A ha ha, đã lâu không gặp.\""),
+            Some("\"[cười] đã lâu không gặp.\"".into())
+        );
+        assert_eq!(
+            retag_text("\"Hắc hắc, tới đây!\""),
+            Some("\"[cười] tới đây!\"".into())
+        );
+        assert_eq!(retag_text("Hô hô hô hô."), Some("[cười]".into()));
+        assert_eq!(
+            retag_text("Haizz, đứa trẻ này..."),
+            Some("[thở dài] đứa trẻ này...".into())
+        );
+        assert_eq!(
+            retag_text("\"Khụ khụ, thôi không được đâu.\""),
+            Some("\"[hắng giọng] thôi không được đâu.\"".into())
+        );
+        // Tag plus literal collapses to the tag.
+        assert_eq!(
+            retag_text("[cười] Ha ha ha. Cứ kêu đi!"),
+            Some("[cười] Cứ kêu đi!".into())
+        );
+        assert_eq!(
+            retag_text("[cười] \"Ha ha, khách sáo quá.\""),
+            Some("[cười] \"khách sáo quá.\"".into())
+        );
+        // A tag already present blocks a second one: no change at all.
+        assert_eq!(retag_text("[cười] Haizz..."), None);
+    }
+
+    #[test]
+    fn retag_text_leaves_everything_else_alone() {
+        // Contempt, acknowledgments, exclamations, clicks, verbs: no tag fits.
+        for t in [
+            "Hừ!",
+            "Thanh Sơn lão tổ hừ lạnh một tiếng.",
+            "Ừm!",
+            "\"Ừm...\" Mậu Mậu gãi đầu.",
+            "Ồ, đến rồi!",
+            "Trời ơi!",
+            "\"Hả?\"",
+            "Dịch Phong khẽ tặc lưỡi.",
+            "Lạc Lan Tuyết hít sâu một hơi, nghiêm túc nói:",
+            "như trút được gánh nặng, thở phào nhẹ nhõm",
+            "Không có gì đặc biệt.",
+        ] {
+            assert_eq!(retag_text(t), None, "{t:?} must not change");
+        }
+        // Word-boundary discipline: `hai` (two) and `aha` (eureka) are words.
+        assert_eq!(retag_text("mang thêm hai cái ghế ra đây."), None);
+        assert_eq!(retag_text("Aha, ra vậy!"), None);
+        // A lone `hô` is the verb "to shout", not laughter — only repetition counts.
+        assert_eq!(retag_text("Mọi người hô to."), None);
+        assert_eq!(retag_text("cách xưng hô của ngươi."), None);
+        assert_eq!(retag_text("Hô hô hô hô."), Some("[cười]".into()));
     }
 
     #[test]
@@ -314,8 +670,7 @@ mod tests {
         };
         // Missing key entirely.
         let mut no_tags = base();
-        no_tags["new_characters"] =
-            json!([{"name": "X", "voice_hint": "adult male, gruff"}]);
+        no_tags["new_characters"] = json!([{"name": "X", "voice_hint": "adult male, gruff"}]);
         assert!(validate(&no_tags, &json!({"characters": []})).is_err());
 
         // A sentence is not a tag.

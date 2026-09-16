@@ -12,7 +12,10 @@ use bm_proto::Machine;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "bm-inductor", about = "Cluster orchestrator for the novel pipeline")]
+#[command(
+    name = "bm-inductor",
+    about = "Cluster orchestrator for the novel pipeline"
+)]
 struct Cli {
     /// Repo root (discovered via prompts/analyze.txt when omitted).
     #[arg(long, global = true)]
@@ -96,9 +99,22 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Rewrite written-out non-verbal sounds into engine tags across every
+    /// script (`Ha ha ha!` → `[cười]`), and requeue the chapters it touches.
+    /// Posts to a running inductor (refused while workers are mid-play).
+    /// Report-only with `--dry-run`.
+    Retag {
+        /// Inductor API base URL.
+        #[arg(long, default_value = "http://127.0.0.1:8901")]
+        api: String,
+        /// Show every change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Link a machine by name: remembers how to reach it so `provision --box`
     /// needs no flags. Writes `.bm/machines.json`, which is ignored.
-    Link {        /// Short handle, e.g. `box-1`.
+    Link {
+        /// Short handle, e.g. `box-1`.
         #[arg(long)]
         name: String,
         /// Machine address (IP or hostname).
@@ -180,25 +196,40 @@ pub fn provision_machine(
     log.push(format!("[{addr}] agent binary: {}", binary.display()));
     let mut m = Machine::new(addr, user, port, key, "worker");
     m.tts_url = Some("http://127.0.0.1:8818".into());
-    let (after, mut flow) =
-        provision(&m, &layout.root, &binary, env!("CARGO_PKG_VERSION"), force, Some(pre));
+    let (after, mut flow) = provision(
+        &m,
+        &layout.root,
+        &binary,
+        env!("CARGO_PKG_VERSION"),
+        force,
+        Some(pre),
+    );
     log.append(&mut flow);
     (after.configured(env!("CARGO_PKG_VERSION")), log)
 }
 
 fn check_bins() -> anyhow::Result<()> {
     for bin in ["ssh", "rsync", "ffmpeg"] {
-        let found = std::env::var_os("PATH").map(|paths| {
-            std::env::split_paths(&paths).any(|d| d.join(bin).is_file())
-        }).unwrap_or(false);
+        let found = std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).any(|d| d.join(bin).is_file()))
+            .unwrap_or(false);
         if !found {
-            anyhow::bail!("{bin} not found on PATH: provisioning needs ssh/rsync, merging needs ffmpeg");
+            anyhow::bail!(
+                "{bin} not found on PATH: provisioning needs ssh/rsync, merging needs ffmpeg"
+            );
         }
     }
     Ok(())
 }
 
-async fn cmd_serve(layout: Layout, settings: Settings, port: u16, bind: &str, start: u32, count: u32) -> anyhow::Result<()> {
+async fn cmd_serve(
+    layout: Layout,
+    settings: Settings,
+    port: u16,
+    bind: &str,
+    start: u32,
+    count: u32,
+) -> anyhow::Result<()> {
     let mut inner = state::Inner::new(layout, settings);
     inner.load_ledger();
     inner.reconcile(start, count);
@@ -217,7 +248,11 @@ async fn cmd_serve(layout: Layout, settings: Settings, port: u16, bind: &str, st
     let app = api::router(shared);
     let addr = format!("{bind}:{port}");
     println!("inductor on http://{addr}");
-    axum::serve(tokio::net::TcpListener::bind(&addr).await?, app.into_make_service()).await?;
+    axum::serve(
+        tokio::net::TcpListener::bind(&addr).await?,
+        app.into_make_service(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -237,6 +272,29 @@ fn agent_binary_for(arch: &str, layout: &Layout) -> anyhow::Result<std::path::Pa
         "no agent binary for arch {arch} at {} (build it first)",
         cand.display()
     )
+}
+
+/// Rewrite interjections into engine tags via the live inductor API.
+async fn cmd_retag(api: &str, dry_run: bool) -> anyhow::Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
+    let res: bm_proto::OpResult = client
+        .post(format!("{}/api/op", api.trim_end_matches('/')))
+        .json(&bm_proto::OpRequest {
+            op: bm_proto::Op::Retag,
+            dry_run: Some(dry_run),
+            ..Default::default()
+        })
+        .send()
+        .await?
+        .json()
+        .await?;
+    println!("{}", res.message);
+    if !res.ok {
+        anyhow::bail!("retag refused");
+    }
+    Ok(())
 }
 
 async fn cmd_provision(
@@ -304,7 +362,10 @@ async fn cmd_provision(
                 .unwrap_or_else(|| addr.clone());
             let (bxo, _) = bm_core::provision::split_machine(&m, &name);
             bm_core::provision::save_box(&boxes_path, &bxo)?;
-            println!("[{}] recorded in ledger file (no live inductor found)", addr);
+            println!(
+                "[{}] recorded in ledger file (no live inductor found)",
+                addr
+            );
         }
     }
     Ok(())
@@ -380,10 +441,21 @@ async fn main() -> anyhow::Result<()> {
         check_bins()?;
     }
     match cli.cmd {
-        Cmd::Serve { port, bind, start, count } => {
-            cmd_serve(layout, settings, port, &bind, start, count).await
-        }
-        Cmd::Provision { r#box, addr, user, port, key, api_port, force } => {
+        Cmd::Serve {
+            port,
+            bind,
+            start,
+            count,
+        } => cmd_serve(layout, settings, port, &bind, start, count).await,
+        Cmd::Provision {
+            r#box,
+            addr,
+            user,
+            port,
+            key,
+            api_port,
+            force,
+        } => {
             // A linked box fills every flag it stored; explicit flags win for
             // the rest. Neither is an error until both are missing an address.
             let linked = r#box
@@ -393,9 +465,7 @@ async fn main() -> anyhow::Result<()> {
                         .into_iter()
                         .find(|b| b.name == name)
                         .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "no linked box {name:?} (see `link --help`)"
-                            )
+                            anyhow::anyhow!("no linked box {name:?} (see `link --help`)")
                         })
                 })
                 .transpose()?;
@@ -419,7 +489,12 @@ async fn main() -> anyhow::Result<()> {
                 .or_else(|| settings.ssh.key.clone());
             cmd_provision(layout, addr, user, port, key, api_port, force).await
         }
-        Cmd::Segments { from, collect, prune, dry_run } => {
+        Cmd::Segments {
+            from,
+            collect,
+            prune,
+            dry_run,
+        } => {
             // Separate paths: the report hashes every local byte (~100s on a
             // full store in debug builds), while prune only lists names.
             // Neither piggybacks on the other.
@@ -429,7 +504,15 @@ async fn main() -> anyhow::Result<()> {
                 segments::cmd_segments(&layout, &settings, &from, collect, dry_run)
             }
         }
-        Cmd::Link { name, addr, user, port, key } => {            let bxo = bm_core::provision::LinkedBox {
+        Cmd::Retag { api, dry_run } => cmd_retag(&api, dry_run).await,
+        Cmd::Link {
+            name,
+            addr,
+            user,
+            port,
+            key,
+        } => {
+            let bxo = bm_core::provision::LinkedBox {
                 name: name.clone(),
                 addr,
                 user,
@@ -450,7 +533,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Roster { cmd } => match cmd {
             RosterCmd::MigrateCast { dry_run } => cmd_roster_migrate_cast(&layout, dry_run),
-            RosterCmd::AddSample { path, tags, name } => cmd_roster_add_sample(&layout, &path, tags, name),
+            RosterCmd::AddSample { path, tags, name } => {
+                cmd_roster_add_sample(&layout, &path, tags, name)
+            }
         },
     }
 }

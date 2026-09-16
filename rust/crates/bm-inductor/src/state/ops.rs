@@ -1,5 +1,5 @@
 use super::Inner;
-use bm_proto::{Stage, Task, TaskState, now_secs};
+use bm_proto::{now_secs, Stage, Task, TaskState};
 
 impl Inner {
     /// Manual trigger for the same orphan logic `reap` runs automatically:
@@ -119,7 +119,8 @@ impl Inner {
         self.save();
         let msg = format!(
             "{}:{} requeued (was {prev_state}{})",
-            stage, chapter,
+            stage,
+            chapter,
             if force { ", forced re-run" } else { "" }
         );
         self.push_event("ok", msg.clone());
@@ -169,7 +170,11 @@ impl Inner {
                     "{} {}{}",
                     e.stage,
                     bm_core::eta::human(e.secs),
-                    if e.estimated_from_fallback { " (guess)" } else { "" }
+                    if e.estimated_from_fallback {
+                        " (guess)"
+                    } else {
+                        ""
+                    }
                 )
             })
             .collect();
@@ -236,12 +241,12 @@ impl Inner {
             in_use || pooled
         };
         if !admitted {
-            anyhow::bail!(
-                "voice {voice:?} is neither an admitted preset nor currently assigned"
-            );
+            anyhow::bail!("voice {voice:?} is neither an admitted preset nor currently assigned");
         }
         if old == voice {
-            return Ok(format!("{character} already speaks as {voice} — nothing to do"));
+            return Ok(format!(
+                "{character} already speaks as {voice} — nothing to do"
+            ));
         }
         cast.insert(character.to_string(), voice.clone());
         bm_core::cast::write_cast(&engine, &cast_path, &cast)?;
@@ -256,7 +261,8 @@ impl Inner {
     }
 
     /// Enqueue crawl+digest for chapters missing scripts (idempotent).
-    pub fn enqueue_translate(&mut self, start: u32, count: u32) -> (usize, usize) {        let (mut crawls, mut digests) = (0, 0);
+    pub fn enqueue_translate(&mut self, start: u32, count: u32) -> (usize, usize) {
+        let (mut crawls, mut digests) = (0, 0);
         for n in start..start + count {
             if !self.layout.chapter_txt(n).is_file() {
                 let t = self.ensure_task(n, Stage::Crawl);
@@ -284,5 +290,152 @@ impl Inner {
         }
         self.save();
         (crawls, digests)
+    }
+
+    /// Rewrite written-out non-verbal sounds into engine tags across every
+    /// script (`Ha ha ha!` → `[cười]`), and requeue the chapters it touches.
+    /// Deterministic — no LLM, same mapping as the prompt's rule 9 — so a
+    /// re-run is a no-op once every script is clean.
+    ///
+    /// Refused while workers are mid-play (same hazard as a swap): text edits
+    /// plus file deletes under a running render mix voices. `dry_run` reports
+    /// every `(chapter#index: before → after)` and writes nothing.
+    pub fn op_retag(&mut self, dry_run: bool) -> anyhow::Result<String> {
+        if !dry_run {
+            self.ensure_idle()?;
+        }
+        let engine = self.settings.engine.clone();
+        let local = engine == "vieneu";
+        let cast = bm_core::cast::read_cast(&engine, &self.layout.cast(&engine));
+        let mut chapters: Vec<u32> = Vec::new();
+        let mut edits = 0u32;
+        let mut files = 0u32;
+        let mut detail: Vec<String> = Vec::new();
+        for (n, sp) in self.script_paths() {
+            let mut data: serde_json::Value =
+                bm_core::read_json(&sp).unwrap_or(serde_json::Value::Null);
+            let owned: Vec<serde_json::Value> = data
+                .get("segments")
+                .and_then(|s| s.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if owned.is_empty() {
+                continue;
+            }
+            // Headline segments never render (the title file speaks instead),
+            // so editing them is churn: skip exactly what `drop_headline` drops.
+            let skip = owned.len() - bm_core::assemble::drop_headline(&owned).len();
+            let mut touched: Vec<usize> = Vec::new();
+            if let Some(segments) = data.get_mut("segments").and_then(|s| s.as_array_mut()) {
+                for (i, s) in segments.iter_mut().enumerate() {
+                    if i < skip {
+                        continue;
+                    }
+                    let old = s
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if let Some(new) = bm_core::digest::retag_text(&old) {
+                        if !dry_run {
+                            s["text"] = serde_json::Value::String(new.clone());
+                        }
+                        touched.push(i);
+                        edits += 1;
+                        // Capped so one pathological chapter cannot flood the op
+                        // message; 200 entries is the whole book in practice.
+                        if detail.len() < 200 {
+                            detail.push(format!(
+                                "ch{n}#{i}: {} → {}",
+                                bm_core::util::head_chars(&old, 40),
+                                bm_core::util::head_chars(&new, 40)
+                            ));
+                        }
+                    }
+                }
+            }
+            if touched.is_empty() {
+                continue;
+            }
+            chapters.push(n);
+            if dry_run {
+                continue;
+            }
+            // Delete only the runs holding edited segments: speakers and
+            // counts are unchanged, so run boundaries are identical and every
+            // other run's cache stays valid. Positions below parallel
+            // `expected_wavs` ([title?, run0, run1, ...]); indices below are
+            // planned (post-drop), mapped from raw by `skip`.
+            let edited: Vec<serde_json::Value> = data
+                .get("segments")
+                .and_then(|s| s.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let title = bm_core::assemble::title_speech_for_script(&sp, &cast, &edited);
+            let seg_dir = self.layout.seg_dir(&engine, n);
+            let wavs =
+                bm_core::assemble::expected_wavs(&edited, &cast, &seg_dir, local, title.as_ref())
+                    .unwrap_or_default();
+            let at = if title.is_some() { 1 } else { 0 };
+            let targets: Vec<std::path::PathBuf> = if local {
+                bm_core::assemble::runs(bm_core::assemble::drop_headline(&edited))
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, run)| run.idx.iter().any(|i| touched.contains(&(i + skip))))
+                    .filter_map(|(r, _)| wavs.get(at + r).cloned())
+                    .collect()
+            } else {
+                touched
+                    .iter()
+                    .map(|i| i - skip)
+                    .filter_map(|i| wavs.get(at + i).cloned())
+                    .collect()
+            };
+            for w in targets {
+                if seg_dir.join(&w).is_file() {
+                    let _ = std::fs::remove_file(seg_dir.join(&w));
+                    files += 1;
+                }
+            }
+            let _ = bm_core::atomic_write(
+                &sp,
+                &serde_json::to_string_pretty(&data).unwrap_or_default(),
+            );
+            let _ = std::fs::remove_file(self.layout.final_mp3(n));
+            for stage in [Stage::Render, Stage::Merge] {
+                let key = format!("{stage}:{n}");
+                match self.tasks.get_mut(&key) {
+                    Some(t) => {
+                        t.state = TaskState::Pending;
+                        t.attempts = 0;
+                        t.assigned_to = None;
+                        t.lease_until = None;
+                        t.detail = "requeued: retag".into();
+                        t.updated = now_secs();
+                    }
+                    None => {
+                        let mut t = Task::new(n, stage);
+                        t.updated = now_secs();
+                        self.tasks.insert(key, t);
+                    }
+                }
+            }
+        }
+        if !dry_run {
+            self.save();
+        }
+        if chapters.is_empty() {
+            return Ok("retag: no written-out sounds found — every script already tags".into());
+        }
+        Ok(format!(
+            "retag: {edits} segments in {} chapters ({:?}){detail_str}; invalidated {files} run files, re-render queued",
+            chapters.len(),
+            chapters.iter().take(12).collect::<Vec<_>>(),
+            detail_str = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" — e.g. {}", detail.join("; "))
+            },
+        ))
     }
 }

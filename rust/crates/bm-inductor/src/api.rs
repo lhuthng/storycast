@@ -48,7 +48,9 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
         m.state = MachineState::Online;
     }
     inner.workers.insert(r.worker_id.clone(), addr.clone());
-    inner.caps.insert(r.worker_id.clone(), r.capabilities.clone());
+    inner
+        .caps
+        .insert(r.worker_id.clone(), r.capabilities.clone());
     // A worker announcing itself is a bind: its config survives restarts in
     // machines.json, not just in memory. The "unknown"-user placeholder
     // carries no configured values, so it stays memory-only as before.
@@ -138,13 +140,19 @@ async fn put_segment(
         (inner.layout.clone(), inner.settings.engine.clone())
     };
     if q.engine != engine {
-        return bad(format!("engine {:?} is not this run's {engine:?}", q.engine));
+        return bad(format!(
+            "engine {:?} is not this run's {engine:?}",
+            q.engine
+        ));
     }
     let Some(expected) = crate::segments::expected_names(&layout, &engine, q.chapter) else {
         return bad(format!("chapter {} cannot be planned here", q.chapter));
     };
     if !expected.contains(&q.name) {
-        return bad(format!("{} is not an expected file for chapter {}", q.name, q.chapter));
+        return bad(format!(
+            "{} is not an expected file for chapter {}",
+            q.name, q.chapter
+        ));
     }
     let store = bm_core::segments::LocalStore::new(layout);
     match bm_core::segments::SegmentStore::put(&store, &engine, q.chapter, &q.name, &body) {
@@ -154,7 +162,9 @@ async fn put_segment(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"ok": false, "error": format!("storing {} failed: {e:#}", q.name)})),
+            Json(
+                serde_json::json!({"ok": false, "error": format!("storing {} failed: {e:#}", q.name)}),
+            ),
         ),
     }
 }
@@ -200,7 +210,9 @@ async fn set_machine_state(
             inner.save();
             Json(serde_json::json!({"ok": true}))
         }
-        None => Json(serde_json::json!({"ok": false, "error": format!("unknown machine {}", u.addr)})),
+        None => {
+            Json(serde_json::json!({"ok": false, "error": format!("unknown machine {}", u.addr)}))
+        }
     }
 }
 
@@ -276,7 +288,13 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             };
             let character = req.character.clone().unwrap_or_default();
             let voice = req.voice.clone().unwrap_or_default();
-            Json(op_segment(&layout, &engine, &character, &voice, req.text.as_deref()))
+            Json(op_segment(
+                &layout,
+                &engine,
+                &character,
+                &voice,
+                req.text.as_deref(),
+            ))
         }
         bm_proto::Op::Eta => {
             let inner = st.lock().await;
@@ -320,6 +338,14 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             };
             Json(op_reconcile(&st, &layout, &settings).await)
         }
+        bm_proto::Op::Retag => {
+            let dry_run = req.dry_run.unwrap_or(false);
+            let mut inner = st.lock().await;
+            match inner.op_retag(dry_run) {
+                Ok(msg) => Json(OpResult::ok(msg)),
+                Err(e) => Json(OpResult::fail(format!("retag failed: {e:#}"))),
+            }
+        }
     }
 }
 
@@ -344,8 +370,10 @@ async fn op_reconcile(
         let mut seen: std::collections::HashSet<String> =
             merges.iter().flat_map(|(_, a)| a.iter().cloned()).collect();
         for (canonical, absorbs) in bm_core::digest::cast_only_folds(&bible, &keys) {
-            let fresh: Vec<String> =
-                absorbs.into_iter().filter(|a| seen.insert(a.clone())).collect();
+            let fresh: Vec<String> = absorbs
+                .into_iter()
+                .filter(|a| seen.insert(a.clone()))
+                .collect();
             if fresh.is_empty() {
                 continue;
             }
@@ -396,11 +424,7 @@ async fn op_reconcile(
 
 /// Persist the URL template and probe-crawl one chapter to prove the
 /// selector still produces plausible text.
-async fn op_crawl_setup(
-    _layout: &bm_core::Layout,
-    template: &str,
-    sample: u32,
-) -> OpResult {
+async fn op_crawl_setup(_layout: &bm_core::Layout, template: &str, sample: u32) -> OpResult {
     let url = template.replace("{n}", &sample.to_string());
     let text = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -419,14 +443,18 @@ async fn op_crawl_setup(
     };
     let cleaned = bm_core::crawl::clean_storya_html(&text);
     let first = cleaned.lines().next().unwrap_or("").to_string();
-    let looks_right = cleaned.len() > 200
-        && (first.starts_with("Chương ") || first.contains("chương"));
+    let looks_right =
+        cleaned.len() > 200 && (first.starts_with("Chương ") || first.contains("chương"));
     // A probe that reads but looks wrong is a *failure* with a diagnosis, not a
     // success with a caveat: `ok` drives the colour, so it must say `false`.
     let message = format!(
         "probe ch{sample}: {} chars, headline {first:?} — {}",
         cleaned.len(),
-        if looks_right { "selector OK" } else { "SELECTOR SUSPECT (short or no headline)" }
+        if looks_right {
+            "selector OK"
+        } else {
+            "SELECTOR SUSPECT (short or no headline)"
+        }
     );
     if looks_right {
         OpResult::ok(message)
@@ -443,9 +471,7 @@ async fn op_voices(layout: &bm_core::Layout, engine: &str) -> OpResult {
     // keep. Better to refuse than to guess.
     let policy = match bm_core::voices::effective_policy(&layout.roster(), engine) {
         Ok(p) => p,
-        Err(e) => {
-            return OpResult::fail(format!("voices: {e}"))
-        }
+        Err(e) => return OpResult::fail(format!("voices: {e}")),
     };
     // Live roster when a sidecar answers, offline fallback otherwise.
     // Enrolled clones have bare labels (voice == label).
@@ -492,20 +518,19 @@ async fn op_voices(layout: &bm_core::Layout, engine: &str) -> OpResult {
         .unwrap_or_default();
     scripts.sort();
     for sp in &scripts {
-        if let Err(e) =
-            bm_core::cast::load_cast(sp, &cast_path, &layout.bible(), &policy, true)
-        {
-            return OpResult::fail(format!(
-                "cast refill failed on {}: {e:#}",
-                sp.display()
-            ));
+        if let Err(e) = bm_core::cast::load_cast(sp, &cast_path, &layout.bible(), &policy, true) {
+            return OpResult::fail(format!("cast refill failed on {}: {e:#}", sp.display()));
         }
     }
     let cast = bm_core::cast::read_cast(engine, &cast_path);
     let gaps = cast.len().saturating_sub(filled_from);
     OpResult::ok(format!(
         "voices ({}, {} enrolled clones): pruned {dropped}, filled {gaps} gaps, {} speakers mapped",
-        if live { "live roster" } else { "offline roster" },
+        if live {
+            "live roster"
+        } else {
+            "offline roster"
+        },
         enrolled.len(),
         cast.len()
     ))
@@ -574,7 +599,9 @@ pub(crate) async fn offline_swap(
     voice: &str,
 ) -> Result<String, String> {
     if super::backend::inductor_up(api).await {
-        return Err("inductor is back — swap normally (this path is for inductor-down only)".into());
+        return Err(
+            "inductor is back — swap normally (this path is for inductor-down only)".into(),
+        );
     }
     if super::backend::local_workers_alive() {
         return Err("local workers still running — X first, then swap".into());
@@ -699,9 +726,7 @@ async fn build_roster(
     }
     // Assignable voices first, then by gender then name: a stable order means
     // the picker's cursor does not jump between refreshes.
-    voices.sort_by(|a, b| {
-        (!a.allowed, &a.gender, &a.name).cmp(&(!b.allowed, &b.gender, &b.name))
-    });
+    voices.sort_by(|a, b| (!a.allowed, &a.gender, &a.name).cmp(&(!b.allowed, &b.gender, &b.name)));
     Roster {
         engine: engine.to_string(),
         source,
@@ -750,7 +775,12 @@ async fn op_preview_voice(voice: &str, text: Option<&str>) -> OpResult {
         Ok(c) => c,
         Err(e) => return OpResult::fail(format!("preview {voice}: {e:#}")),
     };
-    let resp = match http.post(format!("{SIDECAR}{path}")).json(&body).send().await {
+    let resp = match http
+        .post(format!("{SIDECAR}{path}"))
+        .json(&body)
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             return OpResult::fail(format!(
@@ -822,7 +852,9 @@ fn op_segment(
     }
     let cands = bm_core::assemble::rendered_segments(layout, engine, voice);
     if cands.is_empty() {
-        return OpResult::fail(bm_core::assemble::segment_miss(layout, character, voice, false));
+        return OpResult::fail(bm_core::assemble::segment_miss(
+            layout, character, voice, false,
+        ));
     }
     // An exact line plays that sentence or misses honestly — never a nearby
     // one. Without it, Tab triages on a random segment.
@@ -837,8 +869,8 @@ fn op_segment(
             }
         }
     }
-    let pick = bm_core::assemble::pick_rendered(&cands, character)
-        .expect("a non-empty pool always picks");
+    let pick =
+        bm_core::assemble::pick_rendered(&cands, character).expect("a non-empty pool always picks");
     serve_segment(pick)
 }
 
@@ -934,7 +966,9 @@ mod tests {
         .await
         .into_response();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 << 10).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 << 10)
+            .await
+            .unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
@@ -950,8 +984,7 @@ mod tests {
         let (_d, layout) = one_run_layout();
         let st = segment_state(&layout);
         let wav = vec![7u8; 2000];
-        let (status, v) =
-            seg_put(&st, 1, "vieneu", "0000_Adam.wav", wav.clone()).await;
+        let (status, v) = seg_put(&st, 1, "vieneu", "0000_Adam.wav", wav.clone()).await;
         assert_eq!(status, StatusCode::OK, "{v}");
         assert_eq!(v["bytes"], 2000);
         assert_eq!(
@@ -974,14 +1007,16 @@ mod tests {
         let (status, _) = seg_put(&st, 1, "vieneu", "0000_Adam.wav", vec![7u8; 900]).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let over = bm_core::assemble::MAX_SEGMENT_BYTES + 1;
-        let (status, v) =
-            seg_put(&st, 1, "vieneu", "0000_Adam.wav", vec![7u8; over]).await;
+        let (status, v) = seg_put(&st, 1, "vieneu", "0000_Adam.wav", vec![7u8; over]).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
         // Wrong engine for this run.
         let (status, _) = seg_put(&st, 1, "gemini", "0000_Adam.wav", vec![7u8; 2000]).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(
-            !layout.seg_dir("vieneu", 1).join("../../../evil.wav").exists()
+            !layout
+                .seg_dir("vieneu", 1)
+                .join("../../../evil.wav")
+                .exists()
                 && std::fs::read_dir(layout.seg_dir("vieneu", 1))
                     .map(|rd| rd.count())
                     .unwrap_or(0)
@@ -991,7 +1026,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_and_heartbeat_flip_a_machine_online() {        let d = scratch();
+    async fn register_and_heartbeat_flip_a_machine_online() {
+        let d = scratch();
         let layout = bm_core::Layout::new(d.path());
         let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
             layout,
@@ -1071,7 +1107,11 @@ mod tests {
         // Unknown addresses are refused, never created.
         set_machine_state(
             State(st.clone()),
-            Json(MachineStateUpdate { addr: "10.9.9.9".into(), state: MachineState::Error, note: String::new() }),
+            Json(MachineStateUpdate {
+                addr: "10.9.9.9".into(),
+                state: MachineState::Error,
+                note: String::new(),
+            }),
         )
         .await;
         {
@@ -1092,7 +1132,11 @@ mod tests {
         .unwrap();
         let r = offline_roster(d.path()).await;
         assert_eq!(r.cast.get("A").map(|s| s.as_str()), Some("Đức Trí"));
-        assert!(r.characters.contains(&"A".to_string()), "{:?}", r.characters);
+        assert!(
+            r.characters.contains(&"A".to_string()),
+            "{:?}",
+            r.characters
+        );
         assert!(!r.voices.is_empty(), "catalogue fallback lists voices");
     }
 
@@ -1114,8 +1158,14 @@ mod tests {
         let msg = offline_swap_apply(d.path(), "A", "Minh Triết").expect("offline swap");
         assert!(msg.contains("Đức Trí -> Minh Triết"), "{msg}");
         assert!(msg.contains("offline"), "{msg}");
-        assert!(!seg.join("0000_Đức Trí.wav").exists(), "stale run file must go");
-        assert!(seg.join("0001_Adam.wav").exists(), "other voices keep cache");
+        assert!(
+            !seg.join("0000_Đức Trí.wav").exists(),
+            "stale run file must go"
+        );
+        assert!(
+            seg.join("0001_Adam.wav").exists(),
+            "other voices keep cache"
+        );
         let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
         assert_eq!(cast["A"], "Minh Triết");
     }
@@ -1126,7 +1176,9 @@ mod tests {
         let mut out = Vec::new();
         let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for e in rd.filter_map(|e| e.ok()) {
                 let p = e.path();
                 if p.is_dir() {
@@ -1153,7 +1205,11 @@ mod tests {
         let wav: Vec<u8> = (0u8..=255).collect();
         let res = audio_result("Đức Trí", "sample", &wav);
         assert!(res.ok, "{}", res.message);
-        assert!(res.message.contains("sample"), "say which half: {}", res.message);
+        assert!(
+            res.message.contains("sample"),
+            "say which half: {}",
+            res.message
+        );
         assert!(
             !res.message.contains('/'),
             "there is no path to report any more: {}",
@@ -1161,14 +1217,16 @@ mod tests {
         );
 
         let b64 = res.audio_b64.expect("the audio rides along");
-        let back = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            b64.as_bytes(),
-        )
-        .expect("valid base64");
+        let back =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64.as_bytes())
+                .expect("valid base64");
         assert_eq!(back, wav, "the bytes survive the wire byte for byte");
 
-        assert_eq!(tree(d.path()), before, "the op wrote nothing under the root");
+        assert_eq!(
+            tree(d.path()),
+            before,
+            "the op wrote nothing under the root"
+        );
         assert!(!layout.data().join("previews").exists(), "no audition dump");
     }
 
@@ -1180,7 +1238,11 @@ mod tests {
         assert!(!res.ok, "{}", res.message);
         assert!(res.audio_b64.is_none(), "an empty body is not audio");
         assert!(res.message.contains("no audio"), "{}", res.message);
-        assert!(res.message.contains("Adam"), "name the voice: {}", res.message);
+        assert!(
+            res.message.contains("Adam"),
+            "name the voice: {}",
+            res.message
+        );
     }
 }
 
@@ -1212,12 +1274,20 @@ mod segment_tests {
         assert_eq!(res.line_speaker.as_deref(), Some("Kiên"));
         assert_eq!(res.line_text.as_deref(), Some("Kiên lên tiếng."));
         assert!(res.audio_b64.is_some(), "bytes, not a path");
-        assert!(res.message.contains("rendered"), "say what it was: {}", res.message);
+        assert!(
+            res.message.contains("rendered"),
+            "say what it was: {}",
+            res.message
+        );
 
         // A voice with nothing rendered fails honestly — never synthesizes.
         let miss = op_segment(&layout, "vieneu", "Vũ", "Nobody", None);
         assert!(!miss.ok);
-        assert!(miss.message.contains("elsewhere or not yet"), "{}", miss.message);
+        assert!(
+            miss.message.contains("elsewhere or not yet"),
+            "{}",
+            miss.message
+        );
         assert!(miss.audio_b64.is_none());
     }
 
@@ -1259,8 +1329,7 @@ mod segment_tests {
         std::fs::create_dir_all(layout.data()).unwrap();
         std::fs::write(
             layout.script(4),
-            serde_json::json!({"segments": [{"speaker": "Kiên", "text": "Kiên đáp."}]})
-            .to_string(),
+            serde_json::json!({"segments": [{"speaker": "Kiên", "text": "Kiên đáp."}]}).to_string(),
         )
         .unwrap();
         std::fs::create_dir_all(layout.seg_dir("vieneu", 4)).unwrap();
@@ -1272,7 +1341,11 @@ mod segment_tests {
         // No lines either: the chapters themselves live elsewhere.
         let miss = op_segment(&layout, "vieneu", "Ghost", "Nobody", None);
         assert!(!miss.ok);
-        assert!(miss.message.contains("elsewhere or not yet"), "{}", miss.message);
+        assert!(
+            miss.message.contains("elsewhere or not yet"),
+            "{}",
+            miss.message
+        );
     }
 
     #[test]
@@ -1299,9 +1372,11 @@ mod segment_tests {
         // voice; either way the raw string still matches.
         let res = op_segment(&layout, "vieneu", "Kiên", "adam", None);
         assert!(res.ok, "{}", res.message);
-        assert_eq!(res.line_speaker.as_deref(), Some("Kiên"), "own lines win over Vũ's");
+        assert_eq!(
+            res.line_speaker.as_deref(),
+            Some("Kiên"),
+            "own lines win over Vũ's"
+        );
         assert_eq!(res.line_text.as_deref(), Some("Kiên đáp."));
     }
 }
-
-
