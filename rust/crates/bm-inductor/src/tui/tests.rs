@@ -25,6 +25,263 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Color;
 use std::collections::BTreeMap;
 
+#[tokio::test]
+async fn tracked_jobs_keep_lifecycle_serial_and_commands_live() {
+    use super::input::dispatch;
+    use super::jobs::run_jobs_with;
+    use std::sync::Arc;
+    use std::time::Duration;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let blocked = gate.clone();
+    let worker = tokio::spawn(run_jobs_with(job_rx, tx, move |job, tx| {
+        let blocked = blocked.clone();
+        async move {
+            if matches!(job, Job::StartBackend { .. }) {
+                blocked.notified().await;
+            }
+            let _ = tx.send(Ev::Log(LogLine {
+                level: Level::Info,
+                wall: 0,
+                text: job.label(),
+            }));
+            let _ = tx.send(Ev::Done(job.fallback_done()));
+            let _ = tx.send(Ev::Done(DoneKind::Other));
+        }
+    }));
+    let mut app = App::new("http://unused");
+    let start = Job::StartBackend {
+        layout_root: Default::default(),
+        api: "unused".into(),
+        api_up: false,
+        start: 1,
+        count: 1,
+        enqueue: false,
+        machines: vec![],
+        cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        settings_key: None,
+    };
+    assert!(dispatch(&mut app, &job_tx, start));
+    assert!(dispatch(
+        &mut app,
+        &job_tx,
+        Job::StopBackend {
+            layout_root: Default::default(),
+            machines: vec![],
+            api: "unused".into(),
+            settings_key: None,
+        }
+    ));
+    assert!(dispatch(
+        &mut app,
+        &job_tx,
+        Job::LoadLines {
+            layout_root: Default::default()
+        }
+    ));
+    assert_eq!(
+        app.background_jobs.iter().map(|j| j.id).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(app.background_jobs[0].name, "start backend");
+    assert!(app.background_jobs.iter().all(|j| j.started.is_none()));
+    assert!(app.background_jobs[0].queued <= std::time::Instant::now());
+    let mut finished = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let ev = rx.recv().await.unwrap();
+            assert!(!matches!(ev, Ev::JobStarted(2)));
+            let end = matches!(ev, Ev::JobFinished(3));
+            if let Ev::JobFinished(id) = &ev {
+                finished.push(*id);
+            }
+            app.apply(ev);
+            if end {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(app.pending, 2);
+    assert_eq!(app.background_jobs.len(), 2);
+    assert!(app.background_jobs[1].started.is_none());
+    gate.notify_one();
+    drop(job_tx);
+    tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap();
+    while let Some(ev) = rx.recv().await {
+        if let Ev::JobFinished(id) = &ev {
+            finished.push(*id);
+        }
+        app.apply(ev);
+    }
+    assert_eq!(finished, vec![3, 1, 2]);
+    assert_eq!(app.pending, 0);
+    assert!(app.background_jobs.is_empty());
+}
+
+#[test]
+fn tracked_activity_and_cleanup_use_identity_not_queue_order() {
+    let mut app = App::new("http://unused");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    for _ in 0..2 {
+        super::input::dispatch(
+            &mut app,
+            &tx,
+            Job::LoadLines {
+                layout_root: Default::default(),
+            },
+        );
+    }
+    app.apply(Ev::JobStarted(2));
+    app.apply(Ev::JobProgress {
+        id: 2,
+        text: "machine b: waiting".into(),
+    });
+    assert!(app.background_jobs[0].started.is_none());
+    assert!(app.background_jobs[1].started.is_some());
+    assert_eq!(app.background_jobs[1].activity, "machine b: waiting");
+    app.apply(Ev::Done(DoneKind::Other));
+    assert_eq!(app.background_jobs.len(), 2);
+    app.apply(Ev::JobFinished(2));
+    app.apply(Ev::JobFinished(2));
+    app.apply(Ev::JobProgress {
+        id: 2,
+        text: "late".into(),
+    });
+    assert_eq!(app.background_jobs[0].id, 1);
+    assert_eq!(app.background_jobs[0].activity, "queued");
+    assert_eq!(app.pending, 1);
+}
+
+#[tokio::test]
+async fn tracked_crashes_and_missing_done_release_markers() {
+    let mut app = App::new("http://unused");
+    let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let http = reqwest::Client::new();
+    assert!(super::input::dispatch_op(
+        &mut app,
+        &job_tx,
+        &http,
+        OpRequest {
+            op: Op::PreviewVoice,
+            voice: Some("private voice".into()),
+            ..Default::default()
+        }
+    ));
+    app.audition = Some("private voice".into());
+    app.ensure_lines(&job_tx);
+    app.load_roster(&job_tx, &http);
+    app.backend_start_outstanding = true;
+    super::input::dispatch(
+        &mut app,
+        &job_tx,
+        Job::StartBackend {
+            layout_root: Default::default(),
+            api: "unused".into(),
+            api_up: false,
+            start: 1,
+            count: 1,
+            enqueue: false,
+            machines: vec![],
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            settings_key: None,
+        },
+    );
+    drop(job_tx);
+    super::jobs::run_jobs_with(job_rx, tx, |job, _tx| async move {
+        if !matches!(job, Job::LoadLines { .. }) {
+            panic!("simulated crash");
+        }
+    })
+    .await;
+    while let Some(ev) = rx.recv().await {
+        app.apply(ev);
+    }
+    assert_eq!(app.pending, 0);
+    assert!(app.background_jobs.is_empty());
+    assert!(app.inflight.is_empty());
+    assert!(app.audition.is_none());
+    assert!(!app.lines_loading);
+    assert!(!app.roster_loading);
+    assert!(!app.backend_start_outstanding);
+}
+
+#[test]
+fn failed_dispatch_and_id_exhaustion_leave_no_markers() {
+    let mut app = App::new("http://unused");
+    let http = reqwest::Client::new();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(rx);
+    app.pending = 7;
+    app.audition = Some("voice".into());
+    assert!(!super::input::dispatch_op(
+        &mut app,
+        &tx,
+        &http,
+        OpRequest {
+            op: Op::PreviewVoice,
+            ..Default::default()
+        }
+    ));
+    app.ensure_lines(&tx);
+    app.load_roster(&tx, &http);
+    assert!(!app.lines_loading && !app.roster_loading);
+    assert!(app.audition.is_none() && app.inflight.is_empty());
+    assert_eq!(app.pending, 7);
+    assert_eq!(app.next_job_id, 0);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.next_job_id = u64::MAX;
+    assert!(!super::input::dispatch_op(
+        &mut app,
+        &tx,
+        &http,
+        OpRequest::default()
+    ));
+    assert!(rx.try_recv().is_err());
+    assert!(app.background_jobs.is_empty() && app.inflight.is_empty());
+    assert_eq!(app.pending, 7);
+    assert_eq!(app.next_job_id, u64::MAX);
+}
+
+#[tokio::test]
+async fn cancelled_start_never_touches_backend() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    super::jobs::job_start_backend(
+        tx,
+        Default::default(),
+        "unused".into(),
+        false,
+        1,
+        1,
+        true,
+        vec![],
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        None,
+    )
+    .await;
+    let mut cancelled = false;
+    let mut done = 0;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            Ev::Log(line) => {
+                cancelled |= line.text.contains("cancelled");
+                assert!(!line.text.contains("all machines caught up"));
+            }
+            Ev::Done(DoneKind::StartDone) => done += 1,
+            Ev::BackendLive { .. } => panic!("cancelled start became live"),
+            _ => {}
+        }
+    }
+    assert!(cancelled);
+    assert_eq!(done, 1);
+}
+
 #[test]
 fn accents_are_folded_so_filters_ignore_diacritics() {
     assert_eq!(fold("Thái Sơn"), "thai son");
@@ -213,7 +470,7 @@ async fn run_screen_enters_and_launches_with_previewed_values() {
     app.screen = Screen::Run;
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
     assert!(matches!(app.screen, Screen::Normal));
-    match job_rx.try_recv() {
+    match job_rx.try_recv().map(Job::into_bare) {
         Ok(Job::StartBackend {
             start,
             count,
@@ -232,7 +489,7 @@ async fn run_screen_enters_and_launches_with_previewed_values() {
     app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "B"));
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
     assert!(matches!(app.screen, Screen::Normal));
-    match job_rx.try_recv() {
+    match job_rx.try_recv().map(Job::into_bare) {
         Ok(Job::StartBackend { enqueue, .. }) => assert!(!enqueue, "bare :B carries no job"),
         other => panic!("expected a start-backend job, got {other:?}"),
     }
@@ -356,7 +613,7 @@ async fn retry_command_dispatches_the_retry_op_once() {
     handle_key(&mut app, key(KeyCode::Char(':')), &http, &job_tx).await;
     app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "u"));
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
-    match job_rx.try_recv() {
+    match job_rx.try_recv().map(Job::into_bare) {
         Ok(Job::Op { req, .. }) => assert_eq!(req.op, Op::Retry),
         other => panic!("expected a retry op, got {other:?}"),
     }
@@ -1447,7 +1704,7 @@ async fn retry_from_the_list_targets_the_highlighted_task_only() {
     );
 
     handle_key(&mut app, key(KeyCode::Char('u')), &http, &job_tx).await;
-    match job_rx.try_recv() {
+    match job_rx.try_recv().map(Job::into_bare) {
         Ok(Job::Op { req, .. }) => {
             assert_eq!(req.op, Op::RetryTask);
             assert_eq!(req.stage, Some(Stage::Digest));
@@ -1469,7 +1726,7 @@ async fn retry_from_the_list_targets_the_highlighted_task_only() {
 
     // F is a different job (force), so the duplicate guard lets it through.
     handle_key(&mut app, key(KeyCode::Char('F')), &http, &job_tx).await;
-    match job_rx.try_recv() {
+    match job_rx.try_recv().map(Job::into_bare) {
         Ok(Job::Op { req, .. }) => {
             assert_eq!(req.force, Some(true), "F asks for a forced re-run");
             assert_eq!(req.chapter, Some(3));
@@ -1495,7 +1752,7 @@ async fn m_asks_first_and_confirms_into_a_reconcile_op() {
         "nothing dispatches before confirm"
     );
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
-    match job_rx.try_recv() {
+    match job_rx.try_recv().map(Job::into_bare) {
         Ok(Job::Op { req, .. }) => assert_eq!(req.op, Op::Reconcile),
         other => panic!("expected a reconcile op, got {other:?}"),
     }
@@ -1589,7 +1846,7 @@ async fn retry_from_the_detail_page_stays_on_the_page() {
         list: TasksView::new(),
     });
     handle_key(&mut app, key(KeyCode::Char('u')), &http, &job_tx).await;
-    match job_rx.try_recv() {
+    match job_rx.try_recv().map(Job::into_bare) {
         Ok(Job::Op { req, .. }) => assert_eq!(
             (req.op, req.stage, req.chapter),
             (Op::RetryTask, Some(Stage::Digest), Some(3))
@@ -1843,7 +2100,7 @@ fn audition_app() -> App {
 
 /// Pull the `OpRequest` a keypress dispatched, if it dispatched one.
 fn last_op(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Job>) -> Option<OpRequest> {
-    match rx.try_recv().ok()? {
+    match rx.try_recv().ok()?.into_bare() {
         Job::Op { req, .. } => Some(req),
         other => panic!("expected an Op job, got {other:?}"),
     }
@@ -2311,7 +2568,7 @@ async fn the_line_index_releases_the_in_flight_count() {
     let job = job_rx
         .try_recv()
         .expect("ensure_lines dispatches the index");
-    assert!(matches!(job, Job::LoadLines { .. }), "{job:?}");
+    assert!(matches!(job.bare(), Job::LoadLines { .. }), "{job:?}");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
     run_job(job, tx).await;
 
@@ -2648,6 +2905,7 @@ async fn t_while_disconnected_reads_the_local_cache() {
     match job_rx
         .try_recv()
         .expect("t must dispatch while disconnected")
+        .into_bare()
     {
         Job::Segment {
             character,

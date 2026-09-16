@@ -33,7 +33,7 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
     ];
     if app.pending > 0 {
         spans.push(Span::styled(
-            format!("   ⏳ {} job(s) running", app.pending),
+            format!("   {} job(s) running", app.pending),
             app.style(Color::Yellow),
         ));
     }
@@ -46,7 +46,7 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
         .count();
     if shelved > 0 {
         spans.push(Span::styled(
-            format!("   ✗ {shelved} shelved — K tasks"),
+            format!("   {shelved} shelved — K tasks"),
             app.style_bold(Color::Red),
         ));
     }

@@ -4,6 +4,7 @@ pub(crate) mod cast;
 pub(crate) mod command;
 mod confirm;
 mod help;
+mod jobs;
 mod machine;
 mod normal;
 mod picker;
@@ -15,18 +16,53 @@ mod text;
 
 use crate::tui::{
     app::App,
-    jobs::{op_job, Job},
+    jobs::{op_job, BackgroundJob, Job},
     screen::Screen,
     style::Level,
 };
 use bm_proto::{OpRequest, Stage};
 use crossterm::event::KeyEvent;
 
-pub(crate) fn dispatch(app: &mut App, job_tx: &tokio::sync::mpsc::UnboundedSender<Job>, job: Job) {
-    if job_tx.send(job).is_ok() {
-        app.pending += 1;
-    } else {
-        app.set_status(Level::Error, "background worker is gone — restart the TUI");
+pub(crate) fn dispatch(
+    app: &mut App,
+    job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
+    job: Job,
+) -> bool {
+    let Some(id) = app.next_job_id.checked_add(1) else {
+        let pending = app.pending;
+        app.apply(crate::tui::jobs::Ev::Done(job.fallback_done()));
+        app.pending = pending;
+        app.set_status(
+            Level::Error,
+            "background job IDs exhausted — restart the TUI",
+        );
+        return false;
+    };
+    let name = job.label();
+    let queued = std::time::Instant::now();
+    match job_tx.send(Job::Tracked {
+        id,
+        job: Box::new(job.into_bare()),
+    }) {
+        Ok(()) => {
+            app.next_job_id = id;
+            app.pending += 1;
+            app.background_jobs.push(BackgroundJob {
+                id,
+                name,
+                queued,
+                started: None,
+                activity: "queued".into(),
+            });
+            true
+        }
+        Err(err) => {
+            let pending = app.pending;
+            app.apply(crate::tui::jobs::Ev::Done(err.0.fallback_done()));
+            app.pending = pending;
+            app.set_status(Level::Error, "background worker is gone — restart the TUI");
+            false
+        }
     }
 }
 
@@ -51,8 +87,7 @@ pub(crate) fn dispatch_op(
         return false;
     }
     app.inflight.push(key);
-    dispatch(app, job_tx, op_job(app, http, req));
-    true
+    dispatch(app, job_tx, op_job(app, http, req))
 }
 
 /// Identity of one op *instance*.
@@ -96,6 +131,9 @@ pub(crate) async fn handle_key(
     }
     if let Screen::Machine(_) = app.screen.clone() {
         return machine::key_machine(app, key).await;
+    }
+    if let Screen::Jobs { scroll, previous } = app.screen.clone() {
+        return jobs::key_jobs(app, scroll, *previous, key).await;
     }
     if let Screen::Text(prompt) = app.screen.clone() {
         return text::key_text(app, prompt, key, http, job_tx).await;

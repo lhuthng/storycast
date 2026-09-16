@@ -10,10 +10,22 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+pub(crate) struct BackgroundJob {
+    pub(crate) id: u64,
+    pub(crate) name: String,
+    pub(crate) queued: Instant,
+    pub(crate) started: Option<Instant>,
+    pub(crate) activity: String,
+}
 
 #[derive(Debug)]
 pub(crate) enum Job {
+    Tracked {
+        id: u64,
+        job: Box<Job>,
+    },
     /// Long SSH/rsync flow for exactly one box, executed off the UI task.
     /// Touches nothing else: no veto, no restart, no other worker.
     /// `settings_key` is the app-wide default the ssh chain falls back to
@@ -89,7 +101,9 @@ pub(crate) enum Job {
     /// (26 ms warm here, but unbounded on a cold or networked path) and because
     /// it runs once per session — the result is cached, so the audition itself is
     /// instant.
-    LoadLines { layout_root: std::path::PathBuf },
+    LoadLines {
+        layout_root: std::path::PathBuf,
+    },
     /// Serve one already-rendered segment from the local checkout: the
     /// disconnected form of `Op::Segment`. Same lookup the inductor runs,
     /// against the TUI's own files, so listening needs no backend.
@@ -102,8 +116,75 @@ pub(crate) enum Job {
     },
 }
 
+impl Job {
+    pub(crate) fn bare(&self) -> &Job {
+        let mut job = self;
+        while let Job::Tracked { job: inner, .. } = job {
+            job = inner;
+        }
+        job
+    }
+
+    pub(crate) fn into_bare(mut self) -> Job {
+        while let Job::Tracked { job, .. } = self {
+            self = *job;
+        }
+        self
+    }
+
+    pub(crate) fn label(&self) -> String {
+        match self.bare() {
+            Job::Provision { .. } => "provision machine",
+            Job::AddMachine { .. } => "add machine",
+            Job::StartBackend { .. } => "start backend",
+            Job::StopBackend { .. } => "stop backend",
+            Job::AddSample { .. } => "add sample",
+            Job::DropMachine { .. } => "drop machine",
+            Job::Op { req, .. } => req.op.as_str(),
+            Job::LoadRoster { .. } => "load roster",
+            Job::LoadLines { .. } => "index audition lines",
+            Job::Segment { .. } => "local segment",
+            Job::Tracked { .. } => unreachable!(),
+        }
+        .to_string()
+    }
+
+    pub(crate) fn lifecycle(&self) -> bool {
+        matches!(
+            self.bare(),
+            Job::StartBackend { .. } | Job::StopBackend { .. } | Job::Provision { .. }
+        )
+    }
+
+    pub(crate) fn fallback_done(&self) -> DoneKind {
+        let req = match self.bare() {
+            Job::Op { req, .. } => req.clone(),
+            Job::Segment { voice, .. } => OpRequest {
+                op: Op::Segment,
+                voice: Some(voice.clone()),
+                ..Default::default()
+            },
+            Job::StartBackend { .. } => return DoneKind::StartDone,
+            Job::LoadRoster { .. } => return DoneKind::RosterDone,
+            Job::LoadLines { .. } => return DoneKind::LinesDone,
+            _ => return DoneKind::Other,
+        };
+        DoneKind::Op {
+            op: req.op,
+            key: op_key(&req),
+            ok: false,
+            voice: req.voice,
+            audio_b64: None,
+            line_speaker: None,
+            line_text: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum DoneKind {
+    RosterDone,
+    LinesDone,
     Op {
         op: Op,
         /// The in-flight key this job was dispatched under, so completion frees
@@ -129,6 +210,12 @@ pub(crate) enum DoneKind {
 }
 
 pub(crate) enum Ev {
+    JobStarted(u64),
+    JobProgress {
+        id: u64,
+        text: String,
+    },
+    JobFinished(u64),
     Log(LogLine),
     Roster(Result<Roster, String>),
     Done(DoneKind),
@@ -257,6 +344,7 @@ pub(crate) async fn job_provision(
     settings_key: Option<String>,
 ) {
     let addr = machine.addr.clone();
+    send(&tx, Level::Info, format!("[{addr}] provisioning machine…"));
     let mut again = machine.clone();
     // The app-wide default fills a keyless box; a box key always wins.
     let key = bm_core::provision::resolve_key(machine.ssh_key.as_deref(), settings_key.as_deref())
@@ -523,7 +611,20 @@ pub(crate) async fn job_add_sample(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // one param per run_job local; bundling them is a redesign, not this split
+fn start_cancelled(tx: &tokio::sync::mpsc::UnboundedSender<Ev>, cancel: &AtomicBool) -> bool {
+    if !cancel.load(Ordering::Relaxed) {
+        return false;
+    }
+    send(
+        tx,
+        Level::Warn,
+        "start cancelled (X) — no more workers will launch".into(),
+    );
+    let _ = tx.send(Ev::Done(DoneKind::StartDone));
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn job_start_backend(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     layout_root: std::path::PathBuf,
@@ -541,6 +642,9 @@ pub(crate) async fn job_start_backend(
     // A failing box lands in Error with its reason — it never vetoes
     // the rest. Sequential, not parallel: one ssh flow at a time keeps
     // `X` cancellation prompt between boxes.
+    if start_cancelled(&tx, &cancel) {
+        return;
+    }
     let resolve = |m: &Machine| {
         bm_core::provision::resolve_key(m.ssh_key.as_deref(), settings_key.as_deref())
             .0
@@ -608,6 +712,9 @@ pub(crate) async fn job_start_backend(
     // instant (the server boots in the background); the enqueue waits
     // for the first live refresh (see Ev::BackendLive) — and only
     // when asked: bare `B` brings the backend, nothing more.
+    if start_cancelled(&tx, &cancel) {
+        return;
+    }
     match crate::backend::start_backend(
         &layout_root,
         &api,
@@ -630,7 +737,12 @@ pub(crate) async fn job_start_backend(
             return;
         }
     }
-    if !wait_api_live(&api, 30).await {
+    send(&tx, Level::Info, "[local backend] waiting for API…".into());
+    let live = wait_api_live(&api, 30).await;
+    if start_cancelled(&tx, &cancel) {
+        return;
+    }
+    if !live {
         send(
             &tx,
             Level::Error,
@@ -642,15 +754,11 @@ pub(crate) async fn job_start_backend(
     // Catch-up loop: provision one box, launch its worker, next.
     let mut failed: Vec<String> = Vec::new();
     for m in &targets {
-        if cancel.load(Ordering::Relaxed) {
-            send(
-                &tx,
-                Level::Warn,
-                "start cancelled (X) — remaining boxes stay unprovisioned; p retries one".into(),
-            );
-            break;
+        if start_cancelled(&tx, &cancel) {
+            return;
         }
         let addr = m.addr.clone();
+        send(&tx, Level::Info, format!("[{addr}] provisioning machine…"));
         set_machine_state(
             &api,
             &layout_root,
@@ -666,6 +774,9 @@ pub(crate) async fn job_start_backend(
             crate::provision_machine(&layout, &mc, &mf, mp, mk, false)
         })
         .await;
+        if start_cancelled(&tx, &cancel) {
+            return;
+        }
         match out {
             Ok((ready, lines)) => {
                 for l in lines {
@@ -703,6 +814,10 @@ pub(crate) async fn job_start_backend(
                 continue;
             }
         }
+        if start_cancelled(&tx, &cancel) {
+            return;
+        }
+        send(&tx, Level::Info, format!("[{addr}] launching worker…"));
         if crate::backend::is_local_addr(&addr) {
             for l in crate::backend::start_local_worker(&layout_root, &api) {
                 send(&tx, Level::Info, format!("[{addr}] {l}"));
@@ -767,6 +882,9 @@ pub(crate) async fn job_start_backend(
             "ready — Online on its first beat",
         )
         .await;
+    }
+    if start_cancelled(&tx, &cancel) {
+        return;
     }
     if failed.is_empty() {
         send(
@@ -1055,8 +1173,107 @@ fn fail_segment(tx: &tokio::sync::mpsc::UnboundedSender<Ev>, key: &str, voice: &
     }));
 }
 
+pub(crate) async fn run_jobs(
+    job_rx: tokio::sync::mpsc::UnboundedReceiver<Job>,
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+) {
+    run_jobs_with(job_rx, tx, run_job).await;
+}
+
+pub(crate) async fn run_jobs_with<F, Fut>(
+    mut job_rx: tokio::sync::mpsc::UnboundedReceiver<Job>,
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    runner: F,
+) where
+    F: Fn(Job, tokio::sync::mpsc::UnboundedSender<Ev>) -> Fut + Clone + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (lifecycle_tx, lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let route = async move {
+        while let Some(job) = job_rx.recv().await {
+            let lane = if job.lifecycle() {
+                &lifecycle_tx
+            } else {
+                &command_tx
+            };
+            if lane.send(job).is_err() {
+                break;
+            }
+        }
+    };
+    tokio::join!(
+        route,
+        run_lane(lifecycle_rx, tx.clone(), runner.clone()),
+        run_lane(command_rx, tx, runner),
+    );
+}
+
+async fn run_lane<F, Fut>(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Job>,
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    runner: F,
+) where
+    F: Fn(Job, tokio::sync::mpsc::UnboundedSender<Ev>) -> Fut + Clone + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    while let Some(job) = rx.recv().await {
+        let id = match &job {
+            Job::Tracked { id, .. } => Some(*id),
+            _ => None,
+        };
+        let fallback = job.fallback_done();
+        if let Some(id) = id {
+            let _ = tx.send(Ev::JobStarted(id));
+        }
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel();
+        let run = runner.clone();
+        let mut task = tokio::spawn(async move { run(job.into_bare(), job_tx).await });
+        let mut done = false;
+        let mut forward = |ev: Ev| {
+            if matches!(ev, Ev::Done(_)) {
+                if done {
+                    return;
+                }
+                done = true;
+            }
+            if let (Some(id), Ev::Log(line)) = (id, &ev) {
+                let _ = tx.send(Ev::JobProgress {
+                    id,
+                    text: line.text.clone(),
+                });
+            }
+            let _ = tx.send(ev);
+        };
+        let result = loop {
+            tokio::select! {
+                result = &mut task => break result,
+                Some(ev) = job_rx.recv() => forward(ev),
+            }
+        };
+        job_rx.close();
+        while let Some(ev) = job_rx.recv().await {
+            forward(ev);
+        }
+        if result.is_err() {
+            send(
+                &tx,
+                Level::Error,
+                "background job crashed — retry the operation".into(),
+            );
+        }
+        if !done {
+            let _ = tx.send(Ev::Done(fallback));
+        }
+        if let Some(id) = id {
+            let _ = tx.send(Ev::JobFinished(id));
+        }
+    }
+}
+
 pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
-    match job {
+    match job.into_bare() {
+        Job::Tracked { .. } => unreachable!(),
         Job::Provision {
             layout_root,
             api,
