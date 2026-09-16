@@ -131,6 +131,17 @@ impl Inner {
     /// Units of `chapter` the inductor's own store lacks, for a render offer.
     /// `None` when the chapter cannot be planned here (missing script,
     /// unparseable JSON, uncast speaker).
+    ///
+    /// This **persists** the cast (`save = true`), unlike every read-only
+    /// prover. The units it returns are the filenames the worker will write,
+    /// and a filename embeds the voice — so a decision that is not written
+    /// down is recomputed later by the completion gate and the merger from
+    /// whatever the cast file happens to say then. The assignment is
+    /// least-used over the whole file, so *any* other chapter's write moves it:
+    /// the worker's 32 files land, the gate recomputes 20 different names, and
+    /// the chapter reports `incomplete` and `20 segments missing` while the
+    /// audio sits on disk. Planning is the moment the voices are decided; this
+    /// is where they are frozen.
     pub(crate) fn missing_units(&self, chapter: u32) -> Option<Vec<RenderUnitSpec>> {
         let engine = self.settings.engine.clone();
         let script_path = self.layout.script(chapter);
@@ -143,7 +154,7 @@ impl Inner {
             &self.layout.cast(&engine),
             &self.layout.bible(),
             &policy,
-            false,
+            true,
         )
         .ok()?;
         let local = engine == "vieneu";
@@ -428,6 +439,7 @@ impl Inner {
             &self.settings.engine,
             &self.layout.cast(&self.settings.engine),
         )
+        .into_map()
     }
 
     /// Every speaker the inductor can name: the operator's cast, the cast file,

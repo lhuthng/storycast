@@ -178,6 +178,14 @@ impl Inner {
         let mut chapters: Vec<u32> = Vec::new();
         let mut files = 0u32;
         let store = bm_core::segments::LocalStore::new(self.layout.clone());
+        // Speakers are matched literally *or* through the bible. Literally,
+        // because a fold calls this with the absorbed name while the bible has
+        // already been rewritten to hold that name as the winner's alias — the
+        // scripts still say it, so the files it produced are the stale ones.
+        // Through the bible, because the picker offers canonical names while a
+        // script may spell the same speaker as a variant, and a swap that
+        // misses those leaves exactly the files it was invoked to remove.
+        let bible = bm_core::digest::load_bible(&self.layout.bible());
         for (n, sp) in self.script_paths() {
             let data: Value = bm_core::read_json(&sp).unwrap_or(Value::Null);
             let segments = data
@@ -188,12 +196,14 @@ impl Inner {
             let planned = bm_core::assemble::drop_headline(&segments);
             let seg_dir = bm_core::segments::SegmentStore::dir(&store, engine, n);
             let local = engine == "vieneu";
-            let speaks = bm_core::assemble::runs(planned)
-                .iter()
-                .any(|run| run.speaker == character);
+            let is_them = |run: &bm_core::assemble::Run| {
+                run.speaker == character
+                    || bm_core::digest::resolve_speaker(&bible, &run.speaker) == character
+            };
+            let speaks = bm_core::assemble::runs(planned).iter().any(is_them);
             let mut touched = false;
             for run in bm_core::assemble::runs(planned) {
-                if run.speaker != character {
+                if !is_them(&run) {
                     continue;
                 }
                 let names: Vec<String> = if local {
