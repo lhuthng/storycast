@@ -4,12 +4,29 @@ use serde_json::{json, Value};
 
 /// Surface forms that may NEVER join the bible: pronouns, generic nouns, verb phrases.
 const ALIAS_STOP: [&str; 18] = [
-    "hắn", "nàng", "ta", "ngươi", "y", "huynh", "đệ", "tỷ", "muội", "phàm nhân", "con", "người",
-    "tên", "tiểu", "lão", "tiểu tử", "narrator", "người dẫn chuyện",
+    "hắn",
+    "nàng",
+    "ta",
+    "ngươi",
+    "y",
+    "huynh",
+    "đệ",
+    "tỷ",
+    "muội",
+    "phàm nhân",
+    "con",
+    "người",
+    "tên",
+    "tiểu",
+    "lão",
+    "tiểu tử",
+    "narrator",
+    "người dẫn chuyện",
 ];
 
 /// Vietnamese letters carrying a diacritic — the tell-tale of un-translated text.
-pub(crate) const VI_DIACRITICS: &str = "àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ";
+pub(crate) const VI_DIACRITICS: &str =
+    "àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ";
 
 /// Honorific/title suffixes that never denote a different person: "Huyền Vũ
 /// lão tổ" is Huyền Vũ addressed with respect, not a debut. Stripped (after
@@ -76,8 +93,7 @@ pub fn resolve_speaker(bible: &Value, name: &str) -> String {
         if cname == name {
             return cname.to_string();
         }
-        if c
-            .get("proper_aliases")
+        if c.get("proper_aliases")
             .and_then(|a| a.as_array())
             .map(|a| a.iter().any(|x| x.as_str() == Some(name)))
             .unwrap_or(false)
@@ -91,10 +107,12 @@ pub fn resolve_speaker(bible: &Value, name: &str) -> String {
         if canon_key(cname) == key {
             return cname.to_string();
         }
-        if c
-            .get("proper_aliases")
+        if c.get("proper_aliases")
             .and_then(|a| a.as_array())
-            .map(|a| a.iter().any(|x| x.as_str().map(canon_key).as_deref() == Some(key.as_str())))
+            .map(|a| {
+                a.iter()
+                    .any(|x| x.as_str().map(canon_key).as_deref() == Some(key.as_str()))
+            })
             .unwrap_or(false)
         {
             return cname.to_string();
@@ -147,7 +165,10 @@ fn alias_owner(form: &str, owner: &str, bible: &Value) -> Option<String> {
                 let owns = c
                     .get("proper_aliases")
                     .and_then(|a| a.as_array())
-                    .map(|a| a.iter().any(|x| x.as_str().map(canon_key) == Some(fk.clone())))
+                    .map(|a| {
+                        a.iter()
+                            .any(|x| x.as_str().map(canon_key) == Some(fk.clone()))
+                    })
                     .unwrap_or(false);
                 if canon_key(name) != ok && owns {
                     Some(name.to_string())
@@ -316,7 +337,9 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
             if !owns_character {
                 continue;
             }
-            let Some(list) = forms.as_array() else { continue };
+            let Some(list) = forms.as_array() else {
+                continue;
+            };
             let strs: Vec<String> = list
                 .iter()
                 .filter_map(|f| f.as_str().map(String::from))
@@ -348,7 +371,11 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
     }
     if let Some(chars) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) {
         for c in chars.iter_mut() {
-            let name = c.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+            let name = c
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
             if spoke.iter().any(|x| canon_key(x) == canon_key(&name)) {
                 let seen = c.get_mut("chapters_seen").and_then(|v| v.as_array_mut());
                 if let Some(seen) = seen {
@@ -376,10 +403,7 @@ pub type BibleMerge = (String, Vec<String>);
 /// (so future digests resolve through them), personality/voice_hint fill in
 /// only when the canonical side is empty. Returns the merges that actually
 /// applied, plus the log.
-pub fn apply_merges(
-    bible: &mut Value,
-    merges: &[BibleMerge],
-) -> (Vec<BibleMerge>, Vec<String>) {
+pub fn apply_merges(bible: &mut Value, merges: &[BibleMerge]) -> (Vec<BibleMerge>, Vec<String>) {
     let mut log = Vec::new();
     let mut applied: Vec<BibleMerge> = Vec::new();
     let Some(chars) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) else {
@@ -488,16 +512,16 @@ pub fn apply_merges(
 mod tests {
     use super::*;
 
-        fn bible_with(name: &str, aliases: &[&str]) -> Value {
-            json!({"characters": [{
-                "name": name,
-                "personality": "x",
-                "voice_hint": "adult male",
-                "proper_aliases": aliases,
-                "first_seen": "01",
-                "chapters_seen": []
-            }]})
-        }
+    fn bible_with(name: &str, aliases: &[&str]) -> Value {
+        json!({"characters": [{
+            "name": name,
+            "personality": "x",
+            "voice_hint": "adult male",
+            "proper_aliases": aliases,
+            "first_seen": "01",
+            "chapters_seen": []
+        }]})
+    }
 
     #[test]
     fn merge_bible_keeps_normalised_tags() {
@@ -571,7 +595,11 @@ mod tests {
         assert_eq!(canon_key("Mao Ý (thanh niên mặc hoa phục)"), "mao ý");
         assert_eq!(canon_key("Sở Cuồng Sư"), canon_key("Sở Cuồng sư"));
         assert_eq!(canon_key("  Dịch   Phong  "), "dịch phong");
-        assert_eq!(canon_key("Lão Tổ"), "lão tổ", "a bare title is a name, not stripped");
+        assert_eq!(
+            canon_key("Lão Tổ"),
+            "lão tổ",
+            "a bare title is a name, not stripped"
+        );
         assert_eq!(canon_key("Huyền Vũ tiền bối"), "huyền vũ");
     }
 
@@ -591,9 +619,16 @@ mod tests {
         let chars = bible["characters"].as_array().unwrap();
         assert_eq!(chars.len(), 1, "no fork: {chars:?}");
         let aliases = chars[0]["proper_aliases"].as_array().unwrap();
-        assert!(aliases.iter().any(|a| a == "Huyền Vũ lão tổ"), "{aliases:?}");
+        assert!(
+            aliases.iter().any(|a| a == "Huyền Vũ lão tổ"),
+            "{aliases:?}"
+        );
         assert!(log.iter().any(|l| l.contains("=fold")), "{log:?}");
-        assert_eq!(chars[0]["chapters_seen"], json!(["25"]), "variant speaker marks seen");
+        assert_eq!(
+            chars[0]["chapters_seen"],
+            json!(["25"]),
+            "variant speaker marks seen"
+        );
     }
 
     #[test]
@@ -630,7 +665,11 @@ mod tests {
         let bible = bible_with("Sở Cuồng Sư", &["Sở Cuồng Sư"]);
         assert_eq!(resolve_speaker(&bible, "Sở Cuồng Sư"), "Sở Cuồng Sư");
         assert_eq!(resolve_speaker(&bible, "Sở Cuồng sư"), "Sở Cuồng Sư");
-        assert_eq!(resolve_speaker(&bible, "Người Lạ"), "Người Lạ", "unknown passes through");
+        assert_eq!(
+            resolve_speaker(&bible, "Người Lạ"),
+            "Người Lạ",
+            "unknown passes through"
+        );
     }
 
     #[test]
@@ -657,15 +696,25 @@ mod tests {
             {"name": "Huyền Vũ lão tổ", "personality": "", "voice_hint": "",
              "proper_aliases": ["Huyền Vũ lão tổ"], "first_seen": "25", "chapters_seen": ["25", "26"]}
         ]});
-        let (applied, _) = apply_merges(&mut bible, &[("Huyền Vũ".into(), vec!["Huyền Vũ lão tổ".into()])]);
+        let (applied, _) = apply_merges(
+            &mut bible,
+            &[("Huyền Vũ".into(), vec!["Huyền Vũ lão tổ".into()])],
+        );
         assert_eq!(applied.len(), 1);
         let chars = bible["characters"].as_array().unwrap();
         assert_eq!(chars.len(), 1);
         assert_eq!(chars[0]["name"], json!("Huyền Vũ"));
         let aliases = chars[0]["proper_aliases"].as_array().unwrap();
-        assert!(aliases.iter().any(|a| a == "Huyền Vũ lão tổ"), "{aliases:?}");
+        assert!(
+            aliases.iter().any(|a| a == "Huyền Vũ lão tổ"),
+            "{aliases:?}"
+        );
         assert_eq!(chars[0]["chapters_seen"], json!(["10", "25", "26"]));
-        assert_eq!(chars[0]["voice_hint"], json!("adult male"), "canonical hint survives");
+        assert_eq!(
+            chars[0]["voice_hint"],
+            json!("adult male"),
+            "canonical hint survives"
+        );
     }
 
     #[test]
@@ -673,10 +722,12 @@ mod tests {
         let mut bible = bible_with("A", &["A"]);
         let (applied, _) = apply_merges(
             &mut bible,
-            &[("A".into(), vec!["Ghost".into()]), ("Ghost".into(), vec!["A".into()])],
+            &[
+                ("A".into(), vec!["Ghost".into()]),
+                ("Ghost".into(), vec!["A".into()]),
+            ],
         );
         assert!(applied.is_empty());
         assert_eq!(bible["characters"].as_array().unwrap().len(), 1);
     }
-
 }

@@ -39,7 +39,10 @@ impl KeySource {
 /// else ssh decides. `~` expands here, once, for every transport. Empty
 /// strings fall through — clearing the field is how an operator unsets a key.
 /// No validation: that belongs at bind time, where a prompt can complain.
-pub fn resolve_key(box_key: Option<&str>, settings_key: Option<&str>) -> (Option<PathBuf>, KeySource) {
+pub fn resolve_key(
+    box_key: Option<&str>,
+    settings_key: Option<&str>,
+) -> (Option<PathBuf>, KeySource) {
     fn clean(s: Option<&str>) -> Option<&str> {
         s.map(str::trim).filter(|s| !s.is_empty())
     }
@@ -100,9 +103,7 @@ impl Ssh {
     /// behind a never-exiting remote launch — starving every job queued after
     /// it (including the voice roster) forever.
     pub fn run(&self, script: &str, timeout_secs: u64) -> Result<(i32, String, String)> {
-        let full = format!(
-            "export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH\n{script}"
-        );
+        let full = format!("export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH\n{script}");
         let mut cmd = if self.local {
             let mut c = Command::new("sh");
             c.arg("-c").arg(&full);
@@ -119,8 +120,15 @@ impl Ssh {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .with_context(|| format!("spawning {} for {}", if self.local { "sh" } else { "ssh" }, self.target))?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
+            .with_context(|| {
+                format!(
+                    "spawning {} for {}",
+                    if self.local { "sh" } else { "ssh" },
+                    self.target
+                )
+            })?;
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => break,
@@ -288,10 +296,18 @@ mod tests {
         // The swap-voice hang: a never-exiting remote launch wedged the TUI's
         // serial job queue because `run` ignored `timeout_secs`. `sleep` stands
         // in for the wedged command; the local path runs the same wait loop.
-        let ssh = Ssh { target: "local".into(), port: 22, key: None, local: true };
+        let ssh = Ssh {
+            target: "local".into(),
+            port: 22,
+            key: None,
+            local: true,
+        };
         let t = std::time::Instant::now();
         let err = ssh.run("sleep 30", 1).unwrap_err();
-        assert!(t.elapsed() < std::time::Duration::from_secs(10), "must die near the deadline, not after the sleep");
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(10),
+            "must die near the deadline, not after the sleep"
+        );
         assert!(err.to_string().contains("timed out after 1s"), "got: {err}");
 
         let (code, out, _) = ssh.run("echo hi", 10).expect("a fast command still runs");
@@ -311,12 +327,26 @@ mod tests {
             local: false,
         };
         let args = ssh.ssh_args();
-        let i = args.iter().position(|a| a == "-i").expect("key flag present");
+        let i = args
+            .iter()
+            .position(|a| a == "-i")
+            .expect("key flag present");
         assert_eq!(args[i + 1], format!("{home}/.ssh/k"), "ssh argv: {args:?}");
-        assert_eq!(ssh.rsync_e(), format!("ssh -o BatchMode=yes -o ConnectTimeout=10 -p 22 -i {home}/.ssh/k"));
+        assert_eq!(
+            ssh.rsync_e(),
+            format!("ssh -o BatchMode=yes -o ConnectTimeout=10 -p 22 -i {home}/.ssh/k")
+        );
 
-        let bare = Ssh { target: "t@h".into(), port: 2222, key: None, local: false };
-        assert!(!bare.ssh_args().contains(&"-i".to_string()), "no key, no flag");
+        let bare = Ssh {
+            target: "t@h".into(),
+            port: 2222,
+            key: None,
+            local: false,
+        };
+        assert!(
+            !bare.ssh_args().contains(&"-i".to_string()),
+            "no key, no flag"
+        );
         assert!(!bare.rsync_e().contains("-i"), "no key, no flag");
     }
 
@@ -324,9 +354,15 @@ mod tests {
     fn resolve_key_prefers_box_then_settings_then_ssh_default() {
         let home = std::env::var("HOME").unwrap();
         let (p, src) = resolve_key(Some("~/.ssh/box-k"), Some("~/.ssh/app-k"));
-        assert_eq!((p.unwrap(), src), (PathBuf::from(format!("{home}/.ssh/box-k")), KeySource::Box));
+        assert_eq!(
+            (p.unwrap(), src),
+            (PathBuf::from(format!("{home}/.ssh/box-k")), KeySource::Box)
+        );
         let (p, src) = resolve_key(None, Some("/k/app"));
-        assert_eq!((p.unwrap(), src), (PathBuf::from("/k/app"), KeySource::Settings));
+        assert_eq!(
+            (p.unwrap(), src),
+            (PathBuf::from("/k/app"), KeySource::Settings)
+        );
         // Empty strings fall through: clearing the field unsets the key.
         let (p, src) = resolve_key(Some("  "), Some(""));
         assert_eq!((p, src), (None, KeySource::SshDefault));
@@ -342,13 +378,20 @@ mod tests {
         let args = Ssh::for_machine(&Machine::new("192.168.2.2", "thang", 22, None, "worker"))
             .ssh_args()
             .join(" ");
-        for flag in ["-n", "BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=5", "ServerAliveCountMax=2"] {
+        for flag in [
+            "-n",
+            "BatchMode=yes",
+            "ConnectTimeout=10",
+            "ServerAliveInterval=5",
+            "ServerAliveCountMax=2",
+        ] {
             assert!(args.contains(flag), "{args}");
         }
     }
 
     #[test]
-    fn localhost_is_detected_as_local() {        for addr in ["127.0.0.1", "localhost", "::1"] {
+    fn localhost_is_detected_as_local() {
+        for addr in ["127.0.0.1", "localhost", "::1"] {
             let m = Machine::new(addr, "me", 22, None, "worker");
             assert!(Ssh::for_machine(&m).local, "{addr} should be local");
         }
@@ -417,7 +460,10 @@ mod tests {
         copy_dir(&src, &dst).unwrap();
 
         std::fs::write(dst.join("a.txt"), "diff").unwrap();
-        let t = std::fs::metadata(src.join("a.txt")).unwrap().modified().unwrap();
+        let t = std::fs::metadata(src.join("a.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
         std::fs::File::options()
             .write(true)
             .open(dst.join("a.txt"))
@@ -434,6 +480,9 @@ mod tests {
         // A changed size is a real change and must be copied.
         std::fs::write(src.join("a.txt"), "a longer body").unwrap();
         copy_dir(&src, &dst).unwrap();
-        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "a longer body");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("a.txt")).unwrap(),
+            "a longer body"
+        );
     }
 }

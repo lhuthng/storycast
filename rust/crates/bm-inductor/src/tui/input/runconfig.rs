@@ -23,14 +23,27 @@ pub(crate) fn run_preview(app: &App) -> RunPreview {
         let models = s
             .get("analyze_models")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|m| m.as_str()).map(String::from).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m.as_str())
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default();
         return RunPreview {
             start: s.get("start").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
             count: s.get("count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
-            analyzer: s.get("analyzer").and_then(|v| v.as_str()).unwrap_or("opencode").to_string(),
+            analyzer: s
+                .get("analyzer")
+                .and_then(|v| v.as_str())
+                .unwrap_or("opencode")
+                .to_string(),
             models,
-            engine: s.get("engine").and_then(|v| v.as_str()).unwrap_or("vieneu").to_string(),
+            engine: s
+                .get("engine")
+                .and_then(|v| v.as_str())
+                .unwrap_or("vieneu")
+                .to_string(),
             live: true,
             saved,
         };
@@ -63,7 +76,11 @@ pub(crate) fn parse_run_config(buf: &str, current_analyzer: &str) -> Result<RunC
     let analyzer = match tokens.get(2) {
         None => current_analyzer.to_string(),
         Some(a) if ["opencode", "openrouter", "local", "gemini"].contains(a) => a.to_string(),
-        Some(a) => return Err(format!("analyzer “{a}” unknown — opencode|openrouter|local|gemini")),
+        Some(a) => {
+            return Err(format!(
+                "analyzer “{a}” unknown — opencode|openrouter|local|gemini"
+            ))
+        }
     };
     // Everything past the analyzer is the model list, rejoined: `3.8-flash,
     // 3.7-flash` (natural spacing) works exactly like `3.8-flash,3.7-flash`.
@@ -107,8 +124,12 @@ pub(crate) fn save_run_config(app: &App, buf: &str) -> Result<String, String> {
     if let Some(m) = models {
         settings.analyze_models = m;
     }
-    settings.save(&settings_path).map_err(|e| format!("saving settings: {e:#}"))?;
-    Ok(format!("run config saved: ch{start}×{count}, digest {analyzer}"))
+    settings
+        .save(&settings_path)
+        .map_err(|e| format!("saving settings: {e:#}"))?;
+    Ok(format!(
+        "run config saved: ch{start}×{count}, digest {analyzer}"
+    ))
 }
 
 /// Persist one app-wide ssh default to the settings file. Returns a status
@@ -161,7 +182,9 @@ pub(crate) fn save_ssh_setting(
         }
         _ => return Err("not an ssh setting prompt".into()),
     };
-    settings.save(&settings_path).map_err(|e| format!("saving settings: {e:#}"))?;
+    settings
+        .save(&settings_path)
+        .map_err(|e| format!("saving settings: {e:#}"))?;
     Ok(msg)
 }
 
@@ -170,11 +193,15 @@ pub(crate) fn save_ssh_setting(
 pub(crate) fn parse_range(buf: &str) -> Result<(u32, u32), String> {
     let mut it = buf.split_whitespace();
     let start: u32 = match it.next() {
-        Some(s) => s.parse().map_err(|_| format!("start “{s}” is not a chapter number"))?,
+        Some(s) => s
+            .parse()
+            .map_err(|_| format!("start “{s}” is not a chapter number"))?,
         None => return Err("expected: <start> <count>, e.g. 1 1".into()),
     };
     let count: u32 = match it.next() {
-        Some(s) => s.parse().map_err(|_| format!("count “{s}” is not a number"))?,
+        Some(s) => s
+            .parse()
+            .map_err(|_| format!("count “{s}” is not a number"))?,
         None => return Err("expected: <start> <count>, e.g. 1 1".into()),
     };
     if count == 0 {

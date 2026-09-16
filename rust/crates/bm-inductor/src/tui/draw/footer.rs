@@ -1,12 +1,17 @@
 //! Footer: keys, status, roll-up.
+use crate::tui::{
+    app::App,
+    layout::{KEYS_COMPACT, KEYS_FULL},
+    model::task_rollup,
+    style::{range_label, Conn},
+};
+use bm_proto::TaskState;
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
-use bm_proto::TaskState;
-use crate::tui::{app::App, layout::{KEYS_COMPACT, KEYS_FULL}, model::task_rollup, style::{Conn, range_label}};
 
 pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact: bool) {
     let dim = Style::default().fg(Color::DarkGray);
@@ -47,10 +52,7 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
     }
     match &app.conn {
         Conn::Up => {
-            let ago = app
-                .refreshed
-                .map(|t| t.elapsed().as_secs())
-                .unwrap_or(0);
+            let ago = app.refreshed.map(|t| t.elapsed().as_secs()).unwrap_or(0);
             spans.push(Span::styled(
                 format!("   ● live ({ago}s ago)"),
                 app.style(Color::Green),
@@ -60,15 +62,28 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
         Conn::Unknown => spans.push(Span::styled("   ● connecting…", app.style(Color::Yellow))),
     }
     if !app.colour {
-        spans.push(Span::styled("   [mono]", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            "   [mono]",
+            Style::default().fg(Color::DarkGray),
+        ));
     }
-    if let Some(engine) = app.settings.as_ref().and_then(|s| s.get("engine")).and_then(|e| e.as_str()) {
+    if let Some(engine) = app
+        .settings
+        .as_ref()
+        .and_then(|s| s.get("engine"))
+        .and_then(|e| e.as_str())
+    {
         spans.push(Span::styled(
             format!("   engine: {engine}"),
             Style::default().fg(Color::DarkGray),
         ));
     }
-    if let Some(analyzer) = app.settings.as_ref().and_then(|s| s.get("analyzer")).and_then(|e| e.as_str()) {
+    if let Some(analyzer) = app
+        .settings
+        .as_ref()
+        .and_then(|s| s.get("analyzer"))
+        .and_then(|e| e.as_str())
+    {
         spans.push(Span::styled(
             format!("   digest: {analyzer}"),
             Style::default().fg(Color::DarkGray),

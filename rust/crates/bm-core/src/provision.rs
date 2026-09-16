@@ -18,9 +18,9 @@ mod ssh;
 mod stamp;
 mod steps;
 
-pub use ssh::{KeySource, Ssh, resolve_key};
-pub use stamp::{ProvisionStamp, compute_provision_stamp};
-pub use steps::{Probe, provision};
+pub use ssh::{resolve_key, KeySource, Ssh};
+pub use stamp::{compute_provision_stamp, ProvisionStamp};
+pub use steps::{provision, Probe};
 
 /// Directory under the remote `$HOME` that holds a worker's whole world.
 pub const REMOTE_DIR: &str = "bm-worker";
@@ -62,7 +62,13 @@ fn default_role() -> String {
 impl LinkedBox {
     /// The runtime machine `provision` and the scheduler speak.
     pub fn machine(&self) -> Machine {
-        let mut m = Machine::new(&self.addr, &self.user, self.port, self.key.clone(), &self.role);
+        let mut m = Machine::new(
+            &self.addr,
+            &self.user,
+            self.port,
+            self.key.clone(),
+            &self.role,
+        );
         m.tts_url = Some(format!("http://127.0.0.1:{TTS_PORT}"));
         m
     }
@@ -167,7 +173,8 @@ pub fn join_all(
     boxes: Vec<LinkedBox>,
     rt: &serde_json::Map<String, serde_json::Value>,
 ) -> Vec<Machine> {
-    let mut runtimes: std::collections::HashMap<String, MachineRuntime> = std::collections::HashMap::new();
+    let mut runtimes: std::collections::HashMap<String, MachineRuntime> =
+        std::collections::HashMap::new();
     for (addr, v) in rt {
         if let Ok(r) = serde_json::from_value::<MachineRuntime>(v.clone()) {
             runtimes.insert(addr.clone(), r);
@@ -197,7 +204,10 @@ mod tests {
         let dir = std::env::temp_dir().join("bm-provision-boxes");
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("machines.json");
-        assert!(super::load_boxes(&path).is_empty(), "missing file, not an error");
+        assert!(
+            super::load_boxes(&path).is_empty(),
+            "missing file, not an error"
+        );
 
         let bxo = super::LinkedBox {
             name: "box-1".into(),
@@ -210,9 +220,16 @@ mod tests {
         super::save_box(&path, &bxo).unwrap();
         // Same address re-binds in place (the name may change); a new
         // address adds a second box.
-        let again = super::LinkedBox { name: "renamed".into(), ..bxo.clone() };
+        let again = super::LinkedBox {
+            name: "renamed".into(),
+            ..bxo.clone()
+        };
         super::save_box(&path, &again).unwrap();
-        let other = super::LinkedBox { name: "box-2".into(), addr: "10.0.0.9".into(), ..bxo.clone() };
+        let other = super::LinkedBox {
+            name: "box-2".into(),
+            addr: "10.0.0.9".into(),
+            ..bxo.clone()
+        };
         super::save_box(&path, &other).unwrap();
 
         let boxes = super::load_boxes(&path);
@@ -242,9 +259,18 @@ mod tests {
 
     #[test]
     fn split_join_roundtrips_config_and_runtime() {
-        let m = bm_proto::Machine::new("192.168.2.2", "thang", 2222, Some("~/.ssh/k".into()), "worker");
+        let m = bm_proto::Machine::new(
+            "192.168.2.2",
+            "thang",
+            2222,
+            Some("~/.ssh/k".into()),
+            "worker",
+        );
         let (bxo, rt) = super::split_machine(&m, "box-1");
-        assert_eq!((bxo.name.as_str(), bxo.addr.as_str(), bxo.port), ("box-1", "192.168.2.2", 2222));
+        assert_eq!(
+            (bxo.name.as_str(), bxo.addr.as_str(), bxo.port),
+            ("box-1", "192.168.2.2", 2222)
+        );
         assert_eq!(bxo.key.as_deref(), Some("~/.ssh/k"));
         // No runtime yet: a bound-but-never-seen box still joins, as Unknown.
         let joined = super::join_machine(&bxo, None);

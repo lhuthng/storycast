@@ -1,10 +1,10 @@
 //! Help overlay.
+use crate::tui::{app::App, style::centered_padded};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
-use crate::tui::{app::App, style::centered_padded};
 
 pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
     let area = centered_padded(f.area(), 84, 32, 1);
@@ -21,13 +21,22 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
     section(&mut lines, "Navigation");
     for (k, v) in [
         ("↑ ↓  k j", "move the machine cursor"),
-        ("K", "task ledger: every task, its failure detail, and a re-queue key"),
-        ("i", "inspect the selected machine (probe output, capabilities)"),
+        (
+            "K",
+            "task ledger: every task, its failure detail, and a re-queue key",
+        ),
+        (
+            "i",
+            "inspect the selected machine (probe output, capabilities)",
+        ),
         ("R", "system overview: preview everything"),
         ("PgUp PgDn", "scroll the log   (G returns to newest)"),
         ("r", "refresh now"),
         ("?", "this help"),
-        ("C", "toggle colour (state names are always shown, so nothing depends on colour)"),
+        (
+            "C",
+            "toggle colour (state names are always shown, so nothing depends on colour)",
+        ),
         ("q", "quit"),
     ] {
         lines.push(Line::from(vec![
@@ -49,21 +58,57 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
     section(&mut lines, "Commands");
     for (k, v) in [
         (":a  :add", "add a machine by IP or hostname"),
-        (":A  :sample", "pool a clip — tags from the filename, enrolled locally"),
-        (":N  :named", "a `path as Name` voice — manual assignment only"),
+        (
+            ":A  :sample",
+            "pool a clip — tags from the filename, enrolled locally",
+        ),
+        (
+            ":N  :named",
+            "a `path as Name` voice — manual assignment only",
+        ),
         (":p  :provision", "provision the selected machine"),
-        (":P  :reprovision", "re-provision it, forcing past the skip-if-configured check"),
-        (":d  :drop", "drop the selected machine from the cluster registry"),
-        (":t  :translate", "enqueue crawl + digest for a chapter range"),
-        (":c  :crawl", "save the URL template, then probe-crawl one chapter"),
-        (":v  :voices", "re-read the roster, enforce the accent policy, refill gaps"),
-        (":s  :swap", "repoint one character — destructive, see below"),
-        (":S  :cast", "cast overview: every speaker × voice, read-only"),
+        (
+            ":P  :reprovision",
+            "re-provision it, forcing past the skip-if-configured check",
+        ),
+        (
+            ":d  :drop",
+            "drop the selected machine from the cluster registry",
+        ),
+        (
+            ":t  :translate",
+            "enqueue crawl + digest for a chapter range",
+        ),
+        (
+            ":c  :crawl",
+            "save the URL template, then probe-crawl one chapter",
+        ),
+        (
+            ":v  :voices",
+            "re-read the roster, enforce the accent policy, refill gaps",
+        ),
+        (
+            ":s  :swap",
+            "repoint one character — destructive, see below",
+        ),
+        (
+            ":S  :cast",
+            "cast overview: every speaker × voice, read-only",
+        ),
         (":e  :eta", "estimate the remaining wall-clock time"),
         (":u  :retry", "requeue every shelved task — strikes reset"),
-        (":m  :reconcile", "fold duplicates — asks first; certain folds apply, ambiguous only listed"),
-        (":B  :backend", "backend up now, machines provision in background and join as ready"),
-        (":X  :stop", "stop everything everywhere: local backend plus workers on all machines"),
+        (
+            ":m  :reconcile",
+            "fold duplicates — asks first; certain folds apply, ambiguous only listed",
+        ),
+        (
+            ":B  :backend",
+            "backend up now, machines provision in background and join as ready",
+        ),
+        (
+            ":X  :stop",
+            "stop everything everywhere: local backend plus workers on all machines",
+        ),
     ] {
         lines.push(Line::from(vec![
             Span::styled(format!("  {k:<16}"), app.style(Color::Cyan)),
@@ -99,7 +144,10 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }
 
-    section(&mut lines, "Auditioning a voice (picker step 2 and cast overview)");
+    section(
+        &mut lines,
+        "Auditioning a voice (picker step 2 and cast overview)",
+    );
     for v in [
         "`t`, `T` and `^T` audition and nothing else — the two letters don't",
         "filter on these two screens (step 1 still types everything). `t`",
@@ -148,8 +196,5 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
     let inner_h = area.height.saturating_sub(2) as usize;
     let max = lines.len().saturating_sub(inner_h);
     let offset = scroll.min(max) as u16;
-    f.render_widget(
-        Paragraph::new(lines).block(block).scroll((offset, 0)),
-        area,
-    );
+    f.render_widget(Paragraph::new(lines).block(block).scroll((offset, 0)), area);
 }

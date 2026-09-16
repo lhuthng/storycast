@@ -135,8 +135,8 @@ pub(crate) fn parse_stamp(text: &str) -> Option<ProvisionStamp> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::ssh::Ssh;
+    use super::*;
 
     /// A throwaway repo root holding only the files the stamp looks at.
     fn stamp_fixture(name: &str) -> std::path::PathBuf {
@@ -166,13 +166,22 @@ mod tests {
         // A cast edit is a source change and nothing else.
         std::fs::write(root.join("data/cast.json"), r#"{"Narrator":"Adam"}"#).unwrap();
         let c = compute_provision_stamp(&root, "0.2.0");
-        assert_ne!(a.sources_hash, c.sources_hash, "a cast edit must resync sources");
-        assert_eq!(a.voices_hash, c.voices_hash, "…and must not re-enroll voices");
+        assert_ne!(
+            a.sources_hash, c.sources_hash,
+            "a cast edit must resync sources"
+        );
+        assert_eq!(
+            a.voices_hash, c.voices_hash,
+            "…and must not re-enroll voices"
+        );
 
         // A version bump redeploys the agent even when every file is identical.
         let d = compute_provision_stamp(&root, "0.3.0");
         assert!(!a.sources_in_sync(&d), "a new agent build must redeploy");
-        assert!(a.voices_in_sync(&d), "the agent version says nothing about voices");
+        assert!(
+            a.voices_in_sync(&d),
+            "the agent version says nothing about voices"
+        );
     }
 
     #[test]
@@ -185,13 +194,19 @@ mod tests {
         std::fs::write(root.join("voices.json"), r#"{"Storyteller":"refs/n.wav"}"#).unwrap();
         let renamed = compute_provision_stamp(&root, "0.2.0");
         assert!(!base.voices_in_sync(&renamed), "a rename must re-enroll");
-        assert!(base.sources_in_sync(&renamed), "voices.json is not a source");
+        assert!(
+            base.sources_in_sync(&renamed),
+            "voices.json is not a source"
+        );
 
         // A new clip changes the refs signature without touching the manifest.
         std::fs::write(root.join("refs/m.wav"), vec![2u8; 64]).unwrap();
         let added = compute_provision_stamp(&root, "0.2.0");
         assert!(!renamed.voices_in_sync(&added), "a new clip must re-enroll");
-        assert!(base.sources_in_sync(&added), "refs/ is not part of the sources hash");
+        assert!(
+            base.sources_in_sync(&added),
+            "refs/ is not part of the sources hash"
+        );
     }
 
     #[test]

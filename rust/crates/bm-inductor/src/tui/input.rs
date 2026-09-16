@@ -13,14 +13,14 @@ pub(crate) mod submit;
 mod tasks;
 mod text;
 
-use crossterm::event::KeyEvent;
-use bm_proto::{OpRequest, Stage};
 use crate::tui::{
     app::App,
-    jobs::{Job, op_job},
+    jobs::{op_job, Job},
     screen::Screen,
     style::Level,
 };
+use bm_proto::{OpRequest, Stage};
+use crossterm::event::KeyEvent;
 
 pub(crate) fn dispatch(app: &mut App, job_tx: &tokio::sync::mpsc::UnboundedSender<Job>, job: Job) {
     if job_tx.send(job).is_ok() {
@@ -44,7 +44,10 @@ pub(crate) fn dispatch_op(
 ) -> bool {
     let key = op_key(&req);
     if app.inflight.contains(&key) {
-        app.set_status(Level::Warn, format!("{} is already running", req.op.as_str()));
+        app.set_status(
+            Level::Warn,
+            format!("{} is already running", req.op.as_str()),
+        );
         return false;
     }
     app.inflight.push(key);
@@ -74,11 +77,7 @@ pub(crate) fn urlencode(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            c => c
-                .to_string()
-                .bytes()
-                .map(|b| format!("%{b:02X}"))
-                .collect(),
+            c => c.to_string().bytes().map(|b| format!("%{b:02X}")).collect(),
         })
         .collect()
 }

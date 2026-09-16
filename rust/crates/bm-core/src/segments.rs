@@ -128,9 +128,7 @@ pub fn manifest(audio_dir: &Path) -> Vec<SegmentEntry> {
             });
         }
     }
-    out.sort_by(|a, b| {
-        (a.chapter, &a.engine, &a.name).cmp(&(b.chapter, &b.engine, &b.name))
-    });
+    out.sort_by(|a, b| (a.chapter, &a.engine, &a.name).cmp(&(b.chapter, &b.engine, &b.name)));
     out
 }
 
@@ -149,12 +147,20 @@ mod tests {
     fn local_store_round_trips_atomically() {
         let root = tmpdir("store");
         let store = LocalStore::new(crate::Layout::new(root.clone()));
-        assert!(store.names("vieneu", 3).unwrap().is_empty(), "missing dir reads empty");
-        store.put("vieneu", 3, "0000_Adam.wav", b"RIFF-data").unwrap();
+        assert!(
+            store.names("vieneu", 3).unwrap().is_empty(),
+            "missing dir reads empty"
+        );
+        store
+            .put("vieneu", 3, "0000_Adam.wav", b"RIFF-data")
+            .unwrap();
         // No half-file visible: only the final name lands.
         let names = store.names("vieneu", 3).unwrap();
         assert_eq!(names, vec!["0000_Adam.wav".to_string()]);
-        assert_eq!(store.get("vieneu", 3, "0000_Adam.wav").unwrap(), b"RIFF-data");
+        assert_eq!(
+            store.get("vieneu", 3, "0000_Adam.wav").unwrap(),
+            b"RIFF-data"
+        );
         assert!(store.get("vieneu", 3, "nope.wav").is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -169,7 +175,11 @@ mod tests {
         std::fs::write(root.join("not-segments/x.wav"), b"nope").unwrap();
 
         let got = manifest(&root);
-        assert_eq!(got.len(), 1, "only segments-<engine>-NN dirs count: {got:?}");
+        assert_eq!(
+            got.len(),
+            1,
+            "only segments-<engine>-NN dirs count: {got:?}"
+        );
         let e = &got[0];
         assert_eq!(
             (e.chapter, e.engine.as_str(), e.name.as_str()),

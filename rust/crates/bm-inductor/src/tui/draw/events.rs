@@ -1,12 +1,16 @@
 //! Log pane.
+use crate::tui::style::Level;
+use crate::tui::{
+    app::App,
+    model::reported_alias,
+    style::{empty_body, log_head, style_of, wall_hms, worker_alias},
+};
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
-use crate::tui::{app::App, model::reported_alias, style::{empty_body, log_head, style_of, wall_hms, worker_alias}};
-use crate::tui::style::Level;
 
 pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let wrap_w = area.width.saturating_sub(2) as usize;
@@ -42,7 +46,10 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                     format!("{} ", wall_hms(l.wall)),
                     Style::default().fg(Color::DarkGray),
                 ),
-                Span::styled(format!("{} ", l.level.glyph()), style_of(colour, l.level.color())),
+                Span::styled(
+                    format!("{} ", l.level.glyph()),
+                    style_of(colour, l.level.color()),
+                ),
             ];
             match log_head(&l.text) {
                 Some(id) => {
@@ -54,7 +61,10 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                         .unwrap_or_else(|| worker_alias(id).0)
                         .to_string();
                     let tint = worker_alias(&display).1;
-                    spans.push(Span::styled(format!("[{display}] "), style_of(colour, tint)));
+                    spans.push(Span::styled(
+                        format!("[{display}] "),
+                        style_of(colour, tint),
+                    ));
                     spans.push(Span::styled(l.text.clone(), body_style));
                 }
                 None => spans.push(Span::styled(l.text.clone(), body_style)),
@@ -70,7 +80,11 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|l| {
             let w = l.width();
-            if w == 0 { 1 } else { w.div_ceil(wrap_w) }
+            if w == 0 {
+                1
+            } else {
+                w.div_ceil(wrap_w)
+            }
         })
         .sum();
     let show_from = total.saturating_sub(app.events_scroll);
@@ -79,7 +93,11 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .take(show_from)
         .map(|l| {
             let w = l.width();
-            if w == 0 { 1 } else { w.div_ceil(wrap_w) }
+            if w == 0 {
+                1
+            } else {
+                w.div_ceil(wrap_w)
+            }
         })
         .sum();
     let scroll_row = visual_skip.min(total_visual.saturating_sub(viewport_h));

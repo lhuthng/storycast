@@ -175,7 +175,10 @@ mod tests {
         std::fs::write(&path, r#"{"Narrator":"duc-tri","Suneo":"Suneo"}"#).unwrap();
 
         let r = migrate_cast_file("vieneu", &path, false).unwrap();
-        assert!(!r.written, "only the clone is unmigratable, so nothing changes");
+        assert!(
+            !r.written,
+            "only the clone is unmigratable, so nothing changes"
+        );
         assert_eq!(r.entries, 2);
         assert_eq!(r.keyed, 1);
         assert_eq!(r.unmigratable.len(), 1);
@@ -191,7 +194,10 @@ mod tests {
         let runs = migrate_cast(&l, false).unwrap();
         assert_eq!(runs.len(), 2);
         let gem = runs.iter().find(|r| r.engine == "gemini").unwrap();
-        assert_eq!(gem.changed[0].2, "charon", "resolved against its own engine");
+        assert_eq!(
+            gem.changed[0].2, "charon",
+            "resolved against its own engine"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Screens: the modal states the key chain and the painter agree on.
-use bm_proto::Stage;
 use crate::tui::audition::AuditionLine;
+use bm_proto::Stage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TextKind {
@@ -207,7 +207,12 @@ pub(crate) struct CastView {
 
 impl CastView {
     pub(crate) fn new() -> Self {
-        CastView { cursor: 0, scroll: 0, filter: String::new(), line: None }
+        CastView {
+            cursor: 0,
+            scroll: 0,
+            filter: String::new(),
+            line: None,
+        }
     }
 }
 
@@ -226,7 +231,11 @@ pub(crate) struct TasksView {
 
 impl TasksView {
     pub(crate) fn new() -> Self {
-        TasksView { cursor: 0, scroll: 0, filter: String::new() }
+        TasksView {
+            cursor: 0,
+            scroll: 0,
+            filter: String::new(),
+        }
     }
 }
 
@@ -247,7 +256,9 @@ pub(crate) struct TaskDetail {
 #[derive(Debug, Clone)]
 pub(crate) enum Screen {
     Normal,
-    Help { scroll: usize },
+    Help {
+        scroll: usize,
+    },
     Text(TextPrompt),
     Pick(Picker),
     Cast(CastView),

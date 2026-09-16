@@ -1,19 +1,19 @@
 //! The dashboard state: what the poller fills and every pane reads.
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, atomic::AtomicBool};
-use std::time::Instant;
-use bm_proto::{Heartbeat, Machine, Op, Roster, Task};
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use ratatui::style::{Color, Style};
 use crate::tui::EVENT_CAP;
 use crate::tui::{
     audio::Player,
     input::dispatch,
-    jobs::{DoneKind, Ev, Job, fetch_state},
-    model::{CastRow, cast_rows, registry_machines},
+    jobs::{fetch_state, DoneKind, Ev, Job},
+    model::{cast_rows, registry_machines, CastRow},
     screen::Screen,
-    style::{Conn, Level, LogLine, level_from_str, style_bold_of, style_of},
+    style::{level_from_str, style_bold_of, style_of, Conn, Level, LogLine},
 };
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use bm_proto::{Heartbeat, Machine, Op, Roster, Task};
+use ratatui::style::{Color, Style};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{atomic::AtomicBool, Arc};
+use std::time::Instant;
 
 pub(crate) struct App {
     pub(crate) api: String,
@@ -130,10 +130,7 @@ impl App {
     /// Called when a screen that can audition opens, so the hundred file opens
     /// happen while the operator is still reading the table rather than after they
     /// press the key. Idempotent: a second call while it is loading does nothing.
-    pub(crate) fn ensure_lines(
-        &mut self,
-        job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-    ) {
+    pub(crate) fn ensure_lines(&mut self, job_tx: &tokio::sync::mpsc::UnboundedSender<Job>) {
         if self.lines.is_some() || self.lines_loading {
             return;
         }
@@ -141,7 +138,9 @@ impl App {
         dispatch(
             self,
             job_tx,
-            Job::LoadLines { layout_root: self.layout_root.clone() },
+            Job::LoadLines {
+                layout_root: self.layout_root.clone(),
+            },
         );
     }
 
@@ -196,7 +195,11 @@ impl App {
     }
 
     pub(crate) fn log_at(&mut self, level: Level, text: impl Into<String>) {
-        self.push_log(LogLine { level, wall: bm_proto::now_secs(), text: text.into() });
+        self.push_log(LogLine {
+            level,
+            wall: bm_proto::now_secs(),
+            text: text.into(),
+        });
     }
 
     pub(crate) fn set_status(&mut self, level: Level, text: impl Into<String>) {
@@ -320,11 +323,9 @@ impl App {
             serde_json::from_value(v.get("machines").cloned().unwrap_or_default())
                 .unwrap_or_default();
         let mut beats: Vec<Heartbeat> =
-            serde_json::from_value(v.get("beats").cloned().unwrap_or_default())
-                .unwrap_or_default();
+            serde_json::from_value(v.get("beats").cloned().unwrap_or_default()).unwrap_or_default();
         let mut tasks: Vec<Task> =
-            serde_json::from_value(v.get("tasks").cloned().unwrap_or_default())
-                .unwrap_or_default();
+            serde_json::from_value(v.get("tasks").cloned().unwrap_or_default()).unwrap_or_default();
         // The API serialises HashMaps, whose iteration order is not
         // stable. Without sorting, every refresh reshuffles the rows
         // and the cursor silently lands on a different machine.
@@ -385,7 +386,11 @@ impl App {
             }
         }
         for rec in fresh {
-            if self.last_event_id.map(|last| rec.id <= last).unwrap_or(false) {
+            if self
+                .last_event_id
+                .map(|last| rec.id <= last)
+                .unwrap_or(false)
+            {
                 continue;
             }
             self.last_event_id = Some(rec.id);
@@ -426,7 +431,10 @@ impl App {
             // refresh. Stored, not sent, because the inductor is still booting.
             Ev::BackendLive { start, count } => {
                 self.pending_enqueue = Some((start, count));
-                self.log_at(Level::Info, format!("ch{start}×{count} will enqueue once live"));
+                self.log_at(
+                    Level::Info,
+                    format!("ch{start}×{count} will enqueue once live"),
+                );
             }
             Ev::MachineUpdate { addr, state, note } => {
                 if let Some(m) = self.machines.iter_mut().find(|m| m.addr == addr) {
@@ -463,7 +471,15 @@ impl App {
                 self.pending = self.pending.saturating_sub(1);
                 match kind {
                     DoneKind::StartDone => self.backend_start_outstanding = false,
-                    DoneKind::Op { op, key, ok, voice, audio_b64, line_speaker, line_text } => {
+                    DoneKind::Op {
+                        op,
+                        key,
+                        ok,
+                        voice,
+                        audio_b64,
+                        line_speaker,
+                        line_text,
+                    } => {
                         self.inflight.retain(|k| *k != key);
                         if op == Op::PreviewVoice || op == Op::Segment {
                             self.audition = None;
@@ -481,7 +497,10 @@ impl App {
                                 // exact line rather than another random pick.
                                 if op == Op::Segment {
                                     if let (Some(speaker), Some(text)) = (line_speaker, line_text) {
-                                        let line = crate::tui::audition::AuditionLine { character: speaker, text };
+                                        let line = crate::tui::audition::AuditionLine {
+                                            character: speaker,
+                                            text,
+                                        };
                                         match &mut self.screen {
                                             Screen::Cast(v) => v.line = Some(line),
                                             Screen::Pick(p) => p.line = Some(line),

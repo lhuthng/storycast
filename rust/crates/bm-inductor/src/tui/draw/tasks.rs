@@ -1,12 +1,22 @@
 //! Tasks pane plus the full-screen ledger overlay.
+use crate::tui::{
+    app::App,
+    layout::size_class,
+    layout::Size,
+    model::{age_secs, clamp_scroll, filtered_tasks, task_state_counts},
+    screen::TasksView,
+    style::{
+        cell, centered_padded, empty_body, stage_color, state_cell, state_color, style_bold_of,
+        style_of, why_label, worker_name,
+    },
+};
+use bm_proto::TaskState;
 use ratatui::{
     layout::{Constraint, Direction, Layout as RLayout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Row, Table},
 };
-use bm_proto::TaskState;
-use crate::tui::{app::App, layout::Size, layout::size_class, model::{age_secs, clamp_scroll, filtered_tasks, task_state_counts}, screen::TasksView, style::{cell, centered_padded, empty_body, stage_color, state_cell, style_bold_of, style_of, state_color, why_label, worker_name}};
 
 pub(crate) fn draw_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let block = Block::default().borders(Borders::ALL).title("Tasks");
@@ -78,7 +88,10 @@ pub(crate) fn draw_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
     shelved.dedup();
     if !shelved.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!("shelved: {} — press K to open the list, u to retry", shelved.join(" ")),
+            format!(
+                "shelved: {} — press K to open the list, u to retry",
+                shelved.join(" ")
+            ),
             app.style(Color::Red),
         )));
     }
@@ -209,7 +222,15 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
                     Constraint::Length(8),
                     Constraint::Min(20),
                 ],
-                vec!["ch", "stage", "state", "att", "worker", "updated", "detail (why)"],
+                vec![
+                    "ch",
+                    "stage",
+                    "state",
+                    "att",
+                    "worker",
+                    "updated",
+                    "detail (why)",
+                ],
             )
         };
 
@@ -237,9 +258,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
                     TaskState::Assigned | TaskState::Running => {
                         Row::new(cells).style(style_of(colour, Color::Yellow))
                     }
-                    TaskState::Done => {
-                        Row::new(cells).style(Style::default().fg(Color::DarkGray))
-                    }
+                    TaskState::Done => Row::new(cells).style(Style::default().fg(Color::DarkGray)),
                     TaskState::Pending => Row::new(cells),
                 };
                 if idx == cursor {
@@ -264,7 +283,10 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
     let hint = if shown.is_empty() {
         vec![
             Line::from(Span::styled("Esc or q closes", dim)),
-            Line::from(Span::styled("Backspace widens · Ctrl-U clears the filter", dim)),
+            Line::from(Span::styled(
+                "Backspace widens · Ctrl-U clears the filter",
+                dim,
+            )),
         ]
     } else {
         let t = &shown[view.cursor.min(shown.len() - 1)];

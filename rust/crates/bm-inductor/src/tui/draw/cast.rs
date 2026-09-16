@@ -1,4 +1,13 @@
 //! Cast overview overlay.
+use crate::tui::{
+    app::App,
+    layout::{cols, size_class, Size, CAST_COLS_NARROW, CAST_COLS_WIDE},
+    model::{clamp_scroll, filtered_cast_rows, Verdict},
+    screen::CastView,
+    style::{
+        cell, centered_padded, dash_if_empty, empty_body, gender_label, style_bold_of, style_of,
+    },
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout as RLayout},
     style::{Color, Modifier, Style},
@@ -6,7 +15,6 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Row, Table, Wrap},
 };
 use std::collections::BTreeMap;
-use crate::tui::{app::App, layout::{CAST_COLS_NARROW, CAST_COLS_WIDE, cols, size_class, Size}, model::{Verdict, clamp_scroll, filtered_cast_rows}, screen::CastView, style::{cell, centered_padded, dash_if_empty, empty_body, gender_label, style_bold_of, style_of}};
 
 /// The whole cast in one table: speaker, voice, that voice's metadata, and how
 /// the assignment stands against the policy and the rest of the cast.
@@ -89,7 +97,10 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
             app.style_bold(Color::Red),
         ));
     } else if !all.is_empty() {
-        summary.push(Span::styled("  ·  all assignments valid", app.style(Color::Green)));
+        summary.push(Span::styled(
+            "  ·  all assignments valid",
+            app.style(Color::Green),
+        ));
     }
     if let Some(r) = &app.roster {
         // Only when there is room: on a narrow terminal the provenance would
@@ -125,7 +136,10 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
         } else {
             "no speakers known yet — run t (translate) or v (voices) first".to_string()
         };
-        f.render_widget(empty_body(vec![msg]).wrap(Wrap { trim: true }), rows_area[2]);
+        f.render_widget(
+            empty_body(vec![msg]).wrap(Wrap { trim: true }),
+            rows_area[2],
+        );
     } else if list.is_empty() {
         f.render_widget(
             empty_body(vec![format!(
@@ -141,9 +155,21 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
         // the terminal: the overlay has its own borders to pay for.
         let table_w = rows_area[2].width.saturating_sub(2);
         let wide = table_w >= cols(&CAST_COLS_WIDE);
-        let speaker_w = if wide { CAST_COLS_WIDE[0] } else { CAST_COLS_NARROW[0] } as usize;
-        let voice_w = if wide { CAST_COLS_WIDE[1] } else { CAST_COLS_NARROW[1] } as usize;
-        let accent_w = if wide { CAST_COLS_WIDE[3] } else { CAST_COLS_NARROW[2] } as usize;
+        let speaker_w = if wide {
+            CAST_COLS_WIDE[0]
+        } else {
+            CAST_COLS_NARROW[0]
+        } as usize;
+        let voice_w = if wide {
+            CAST_COLS_WIDE[1]
+        } else {
+            CAST_COLS_NARROW[1]
+        } as usize;
+        let accent_w = if wide {
+            CAST_COLS_WIDE[3]
+        } else {
+            CAST_COLS_NARROW[2]
+        } as usize;
 
         let mut scroll = view.scroll;
         clamp_scroll(view.cursor, &mut scroll, list.len(), body);
@@ -171,7 +197,9 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
                     voice_cells.push(Span::styled(" clone", style_of(colour, Color::Magenta)));
                 }
                 let (status, status_colour) = match r.verdict() {
-                    Verdict::Unassigned => ("unassigned — v fills gaps".to_string(), Color::DarkGray),
+                    Verdict::Unassigned => {
+                        ("unassigned — v fills gaps".to_string(), Color::DarkGray)
+                    }
                     Verdict::Blocked => ("accent policy concern".to_string(), Color::Yellow),
                     Verdict::Unknown => ("unknown voice — stale cast?".to_string(), Color::Red),
                     Verdict::Ok if r.shared() => (
@@ -198,7 +226,10 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
                     dash_if_empty(&r.accent),
                     width = accent_w
                 )));
-                cells.push(Line::from(Span::styled(status, style_of(colour, status_colour))));
+                cells.push(Line::from(Span::styled(
+                    status,
+                    style_of(colour, status_colour),
+                )));
                 let mut row = Row::new(cells);
                 if selected {
                     row = row.style(Style::default().add_modifier(Modifier::REVERSED));

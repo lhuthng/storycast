@@ -39,7 +39,9 @@ pub(crate) fn sibling_bin(name: &str) -> anyhow::Result<PathBuf> {
     let p = if exe.file_name().map(|n| n == name).unwrap_or(false) {
         exe.clone()
     } else {
-        exe.parent().map(|d| d.join(name)).unwrap_or_else(|| PathBuf::from(name))
+        exe.parent()
+            .map(|d| d.join(name))
+            .unwrap_or_else(|| PathBuf::from(name))
     };
     if p.is_file() {
         Ok(p)
@@ -60,7 +62,10 @@ pub(crate) fn spawn_one(bin: &Path, args: &[String], log: &Path) -> anyhow::Resu
         cmd.push(' ');
         cmd.push_str(&shq(a));
     }
-    let script = format!("nohup {cmd} >> {} 2>&1 & echo $!", shq(&log.to_string_lossy()));
+    let script = format!(
+        "nohup {cmd} >> {} 2>&1 & echo $!",
+        shq(&log.to_string_lossy())
+    );
     let out = std::process::Command::new("sh")
         .arg("-c")
         .arg(&script)
@@ -83,10 +88,12 @@ pub(crate) fn spawn_one(bin: &Path, args: &[String], log: &Path) -> anyhow::Resu
 /// `t`, API); a hand-run `serve --start/--count` keeps its own scope.
 /// `bind` is LAN-wide when remote workers exist, loopback for solo runs.
 pub(crate) fn serve_args(port: &str, bind: &str) -> Vec<String> {
-    ["serve", "--port", port, "--bind", bind, "--start", "1", "--count", "0"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    [
+        "serve", "--port", port, "--bind", bind, "--start", "1", "--count", "0",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 pub(crate) fn signal(pid: u32, sig: &str) {
@@ -115,7 +122,10 @@ mod tests {
 
     #[test]
     fn shell_quoting_survives_spaces_and_quotes() {
-        assert_eq!(shq("/tmp/Documents SSD/bm-agent"), "'/tmp/Documents SSD/bm-agent'");
+        assert_eq!(
+            shq("/tmp/Documents SSD/bm-agent"),
+            "'/tmp/Documents SSD/bm-agent'"
+        );
         assert_eq!(shq("a'b"), "'a'\\''b'");
     }
 
@@ -131,7 +141,17 @@ mod tests {
         // default can ever auto-run chapters again.
         assert_eq!(
             serve_args("8901", "127.0.0.1"),
-            vec!["serve", "--port", "8901", "--bind", "127.0.0.1", "--start", "1", "--count", "0"]
+            vec![
+                "serve",
+                "--port",
+                "8901",
+                "--bind",
+                "127.0.0.1",
+                "--start",
+                "1",
+                "--count",
+                "0"
+            ]
         );
     }
 }

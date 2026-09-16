@@ -23,14 +23,14 @@
 //!
 //! `Enter` is the only key that changes the cast.
 
-use bm_proto::{Op, OpRequest};
 use crate::tui::{
     app::App,
-    audition::{AuditionLine, line_for},
+    audition::{line_for, AuditionLine},
     input::{dispatch, dispatch_op, op_key},
     jobs::Job,
     style::{Conn, Level},
 };
+use bm_proto::{Op, OpRequest};
 
 /// Render and play `voice` speaking the held line — or a fresh line for
 /// `character` when nothing fitting is held.
@@ -52,13 +52,19 @@ pub(crate) fn audition(
     reroll: bool,
 ) -> Option<AuditionLine> {
     if voice.trim().is_empty() {
-        app.set_status(Level::Warn, format!("no voice to audition for “{character}”"));
+        app.set_status(
+            Level::Warn,
+            format!("no voice to audition for “{character}”"),
+        );
         return held.cloned();
     }
     // One render at a time: the sidecar is a single model on one machine, and two
     // samples at once would also talk over each other.
     if let Some(v) = app.audition.clone() {
-        app.set_status(Level::Warn, format!("{v} is still rendering — one audition at a time"));
+        app.set_status(
+            Level::Warn,
+            format!("{v} is still rendering — one audition at a time"),
+        );
         return held.cloned();
     }
 
@@ -80,7 +86,10 @@ pub(crate) fn audition(
             } else {
                 "no lines in the scripts yet"
             };
-            app.set_status(Level::Warn, format!("{character}: {why} — nothing to render"));
+            app.set_status(
+                Level::Warn,
+                format!("{character}: {why} — nothing to render"),
+            );
             return held.cloned();
         }
     };
@@ -106,7 +115,10 @@ pub(crate) fn audition(
     }
     app.set_status(
         Level::Info,
-        format!("rendering “{}” for “{character}” ({voice})…", bm_core::util::head_chars(&l.text, 48)),
+        format!(
+            "rendering “{}” for “{character}” ({voice})…",
+            bm_core::util::head_chars(&l.text, 48)
+        ),
     );
     Some(l)
 }
@@ -148,11 +160,17 @@ pub(crate) fn segment(
     text: &str,
 ) {
     if voice.trim().is_empty() {
-        app.set_status(Level::Warn, format!("no voice to audition for “{character}”"));
+        app.set_status(
+            Level::Warn,
+            format!("no voice to audition for “{character}”"),
+        );
         return;
     }
     if let Some(v) = app.audition.clone() {
-        app.set_status(Level::Warn, format!("{v} is still rendering — one audition at a time"));
+        app.set_status(
+            Level::Warn,
+            format!("{v} is still rendering — one audition at a time"),
+        );
         return;
     }
     if !matches!(app.conn, Conn::Up) {
@@ -165,9 +183,15 @@ pub(crate) fn segment(
         }
         // Same duplicate suppression the API path gets: one fetch at a time,
         // and the Done handler frees exactly this key.
-        let key = op_key(&OpRequest { op: Op::Segment, ..Default::default() });
+        let key = op_key(&OpRequest {
+            op: Op::Segment,
+            ..Default::default()
+        });
         if app.inflight.contains(&key) {
-            app.set_status(Level::Warn, format!("{} is already running", Op::Segment.as_str()));
+            app.set_status(
+                Level::Warn,
+                format!("{} is already running", Op::Segment.as_str()),
+            );
             return;
         }
         app.inflight.push(key);
@@ -205,10 +229,7 @@ pub(crate) fn segment(
         app.audition = None;
         return;
     }
-    app.set_status(
-        Level::Info,
-        format!("testing {voice} on the shown line…"),
-    );
+    app.set_status(Level::Info, format!("testing {voice} on the shown line…"));
 }
 
 /// The voice currently assigned to `character`, if the roster knows one.

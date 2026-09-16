@@ -1,7 +1,5 @@
 //! `:` commands: names for keys, direct runs for gated operator actions.
-use std::sync::{Arc, atomic::AtomicBool};
-use crossterm::event::KeyCode;
-use bm_proto::{Op, OpRequest};
+use crate::tui::input::runconfig::run_preview;
 use crate::tui::{
     app::App,
     input::{dispatch, dispatch_op},
@@ -9,7 +7,9 @@ use crate::tui::{
     screen::{CastView, Confirm, ConfirmAction, Picker, Screen, TextKind, TextPrompt},
     style::{Conn, Level},
 };
-use crate::tui::input::runconfig::run_preview;
+use bm_proto::{Op, OpRequest};
+use crossterm::event::KeyCode;
+use std::sync::{atomic::AtomicBool, Arc};
 
 /// What a `:` command line request actually runs. Read-only commands map to
 /// `Key` — their single keys still exist in Normal mode, so `:m`-style
@@ -163,7 +163,8 @@ pub(crate) fn do_command(
                         if force {
                             "Force ignores the skip-if-configured check and rebuilds the".into()
                         } else {
-                            "Already-configured machines are detected and skipped, so this is".into()
+                            "Already-configured machines are detected and skipped, so this is"
+                                .into()
                         },
                         if force {
                             "worker venv when present. That is the slow path.".into()
@@ -188,9 +189,12 @@ pub(crate) fn do_command(
                         format!("Remove {} from the cluster registry.", m.addr),
                         String::new(),
                         "This forgets the machine. It does not touch anything on the".into(),
-                        "remote box, and re-adding it by address is enough to bring it back.".into(),
+                        "remote box, and re-adding it by address is enough to bring it back."
+                            .into(),
                     ],
-                    action: ConfirmAction::DropMachine { addr: m.addr.clone() },
+                    action: ConfirmAction::DropMachine {
+                        addr: m.addr.clone(),
+                    },
                 });
             }
         },
@@ -241,7 +245,15 @@ pub(crate) fn do_command(
             ));
         }
         Command::Voices => {
-            dispatch_op(app, job_tx, http, OpRequest { op: Op::Voices, ..Default::default() });
+            dispatch_op(
+                app,
+                job_tx,
+                http,
+                OpRequest {
+                    op: Op::Voices,
+                    ..Default::default()
+                },
+            );
         }
         Command::SwapVoice => {
             app.screen = Screen::Pick(Picker::new());
@@ -262,10 +274,26 @@ pub(crate) fn do_command(
             app.ensure_lines(job_tx);
         }
         Command::Eta => {
-            dispatch_op(app, job_tx, http, OpRequest { op: Op::Eta, ..Default::default() });
+            dispatch_op(
+                app,
+                job_tx,
+                http,
+                OpRequest {
+                    op: Op::Eta,
+                    ..Default::default()
+                },
+            );
         }
         Command::Retry => {
-            dispatch_op(app, job_tx, http, OpRequest { op: Op::Retry, ..Default::default() });
+            dispatch_op(
+                app,
+                job_tx,
+                http,
+                OpRequest {
+                    op: Op::Retry,
+                    ..Default::default()
+                },
+            );
         }
         Command::Reconcile => {
             // Reconcile rewrites cast + scripts and re-renders losers: worth
@@ -308,7 +336,10 @@ pub(crate) fn do_command(
                         settings_key: app.ssh_defaults().key,
                     },
                 );
-                app.set_status(Level::Info, "starting backend now — boxes join in background; watch events");
+                app.set_status(
+                    Level::Info,
+                    "starting backend now — boxes join in background; watch events",
+                );
             }
         }
         Command::Stop => {
@@ -329,7 +360,10 @@ pub(crate) fn do_command(
             if remotes.is_empty() {
                 body.push("No remote machines registered — local only.".into());
             } else {
-                body.push(format!("Remote boxes swept over ssh: {}.", remotes.join(", ")));
+                body.push(format!(
+                    "Remote boxes swept over ssh: {}.",
+                    remotes.join(", ")
+                ));
                 body.push("Unreachable boxes report and are skipped.".into());
             }
             app.screen = Screen::Confirm(Confirm {

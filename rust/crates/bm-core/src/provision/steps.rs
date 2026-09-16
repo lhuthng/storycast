@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use super::ssh::Ssh;
-use super::stamp::{ProvisionStamp, compute_provision_stamp, parse_stamp};
+use super::stamp::{compute_provision_stamp, parse_stamp, ProvisionStamp};
 use super::{REMOTE_DIR, TTS_PORT};
 
 /// What a probe found on a machine.
@@ -34,9 +34,7 @@ impl Probe {
     /// A machine is ready to take work when it is reachable, runs the exact
     /// agent build we are scheduling with, and has the TTS sidecar's Python.
     pub fn configured(&self, want_version: &str) -> bool {
-        self.reachable
-            && self.agent_version.as_deref() == Some(want_version)
-            && self.python_present
+        self.reachable && self.agent_version.as_deref() == Some(want_version) && self.python_present
     }
 
     /// One-line summary for the TUI machine pane.
@@ -164,7 +162,10 @@ echo "probe=done"
     /// Install or upgrade the agent binary, then verify it runs.
     pub fn install_agent(&self, agent_binary: &Path) -> Result<String> {
         self.rsync_push(agent_binary, "bm-agent", false)?;
-        let script = format!("chmod +x $HOME/{d}/bm-agent && $HOME/{d}/bm-agent --version", d = REMOTE_DIR);
+        let script = format!(
+            "chmod +x $HOME/{d}/bm-agent && $HOME/{d}/bm-agent --version",
+            d = REMOTE_DIR
+        );
         let (code, stdout, _stderr) = self.run(&script, 30)?;
         if code != 0 {
             anyhow::bail!("installed agent would not run (exit {code})");
@@ -248,11 +249,11 @@ echo "PYTHON-OK (fresh venv)"
         }
         // Parsed (and discarded) as validation: a malformed manifest must fail
         // here with the file named, not deep inside the remote python.
-        let _manifest: std::collections::HashMap<String, String> =
-            serde_json::from_str(&std::fs::read_to_string(&manifest_src).with_context(|| {
-                format!("reading {}", manifest_src.display())
-            })?)
-            .context("parsing voices.json (name -> refs/*.wav)")?;
+        let _manifest: std::collections::HashMap<String, String> = serde_json::from_str(
+            &std::fs::read_to_string(&manifest_src)
+                .with_context(|| format!("reading {}", manifest_src.display()))?,
+        )
+        .context("parsing voices.json (name -> refs/*.wav)")?;
         self.rsync_push(&repo_root.join("refs"), "refs", false)?;
         self.rsync_push(&manifest_src, "voices.json", false)?;
         // The missing-set is computed in python, not the shell: voice names
@@ -452,9 +453,13 @@ pub fn provision(
     let remote_stamp = probe.stamp.as_ref();
 
     let sources_match = !force
-        && remote_stamp.map(|s| s.sources_in_sync(&local_stamp)).unwrap_or(false);
+        && remote_stamp
+            .map(|s| s.sources_in_sync(&local_stamp))
+            .unwrap_or(false);
     let voices_match = !force
-        && remote_stamp.map(|s| s.voices_in_sync(&local_stamp)).unwrap_or(false);
+        && remote_stamp
+            .map(|s| s.voices_in_sync(&local_stamp))
+            .unwrap_or(false);
 
     if probe.configured(agent_version) && !force {
         log.push(format!(
@@ -487,7 +492,10 @@ pub fn provision(
         }
 
         if sources_match {
-            log.push(format!("[{}] prompts/assets/refs/python in sync (cache match)", m.id));
+            log.push(format!(
+                "[{}] prompts/assets/refs/python in sync (cache match)",
+                m.id
+            ));
         } else {
             match ssh.install_sources(repo_root) {
                 Ok(()) => log.push(format!("[{}] prompts/assets/refs/python distributed", m.id)),
@@ -514,7 +522,10 @@ pub fn provision(
 
     // Voice enrollment runs only when voices changed, or on first venv build / force.
     if voices_match && probe.python_present {
-        log.push(format!("[{}] clone voices in sync (cache match, skipped PyTorch init)", m.id));
+        log.push(format!(
+            "[{}] clone voices in sync (cache match, skipped PyTorch init)",
+            m.id
+        ));
     } else {
         match ssh.ensure_voices(repo_root) {
             Ok(v) => {
@@ -548,11 +559,10 @@ pub fn provision(
     {
         let layout = crate::Layout::new(repo_root);
         let engine = crate::config::Settings::load(&layout.settings()).engine;
-        let manifest: std::collections::HashMap<String, String> =
-            serde_json::from_str(
-                &std::fs::read_to_string(repo_root.join("voices.json")).unwrap_or_default(),
-            )
-            .unwrap_or_default();
+        let manifest: std::collections::HashMap<String, String> = serde_json::from_str(
+            &std::fs::read_to_string(repo_root.join("voices.json")).unwrap_or_default(),
+        )
+        .unwrap_or_default();
         let pool = crate::pool::load_pool(&repo_root.join("voice-pool.json"));
         let catalogue: Vec<String> = crate::voices::offline_voices(&engine)
             .iter()
@@ -583,7 +593,10 @@ mod tests {
             ..Default::default()
         };
         assert!(p.configured("0.2.0"));
-        assert!(!p.configured("0.3.0"), "stale agent must trigger a redeploy");
+        assert!(
+            !p.configured("0.3.0"),
+            "stale agent must trigger a redeploy"
+        );
         p.python_present = false;
         assert!(!p.configured("0.2.0"));
         p.python_present = true;
@@ -603,7 +616,10 @@ mod tests {
         let mut pool = crate::pool::Pool::new();
         pool.insert(
             "Pool Sample".to_string(),
-            crate::pool::PoolEntry { file: "refs/pool.wav".into(), tags: vec![] },
+            crate::pool::PoolEntry {
+                file: "refs/pool.wav".into(),
+                tags: vec![],
+            },
         );
         let catalogue = vec!["Thái Sơn".to_string(), "Adam".to_string()];
         let store = vec![
@@ -614,7 +630,10 @@ mod tests {
             "Suneo".to_string(),
             "_note".to_string(),
         ];
-        assert_eq!(undeclared_voices(&store, &manifest, &pool, &catalogue), vec!["Suneo"]);
+        assert_eq!(
+            undeclared_voices(&store, &manifest, &pool, &catalogue),
+            vec!["Suneo"]
+        );
         assert!(undeclared_voices(&[], &manifest, &pool, &catalogue).is_empty());
     }
 

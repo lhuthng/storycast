@@ -30,6 +30,15 @@ pub(crate) const EVENT_CAP: usize = 500;
 /// `/api/state` poll period, in 200 ms ticks.
 pub(crate) const REFRESH_TICKS: u64 = 4;
 
+use crate::tui::{
+    app::App,
+    draw::draw,
+    input::{dispatch_op, handle_key},
+    jobs::DoneKind,
+    jobs::{fetch_state, run_job, Ev, Job},
+    model::reported_alias,
+    style::{seen_label, worker_alias, Conn},
+};
 use bm_core::Layout;
 use bm_proto::{Heartbeat, Machine, Op, OpRequest, Task, TaskState};
 use crossterm::{
@@ -39,7 +48,6 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::time::Duration;
-use crate::tui::{app::App, draw::draw, input::{dispatch_op, handle_key}, jobs::{Ev, Job, fetch_state, run_job}, jobs::DoneKind, style::{Conn, seen_label, worker_alias}, model::reported_alias};
 
 pub async fn run(api: &str, layout: Layout) -> anyhow::Result<()> {
     enable_raw_mode()?;
@@ -95,7 +103,10 @@ async fn run_loop(
             ticker.tick().await;
             // The first tick fires immediately, so the dashboard fills without
             // waiting for a full period.
-            if poll_tx.send(Ev::State(fetch_state(&poll_http, &poll_api).await)).is_err() {
+            if poll_tx
+                .send(Ev::State(fetch_state(&poll_http, &poll_api).await))
+                .is_err()
+            {
                 return; // the UI is gone
             }
         }
@@ -212,10 +223,14 @@ pub async fn snapshot(api: &str) -> anyhow::Result<()> {
             "  {:<14} {:<8} ch{:<4} {:>3}%  {:<28} eta={}",
             name,
             b.stage.map(|s| s.as_str()).unwrap_or("-"),
-            b.chapter.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
+            b.chapter
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".into()),
             (b.progress.clamp(0.0, 1.0) * 100.0).round() as u32,
             b.activity,
-            b.eta_secs.map(bm_core::eta::human).unwrap_or_else(|| "-".into())
+            b.eta_secs
+                .map(bm_core::eta::human)
+                .unwrap_or_else(|| "-".into())
         );
     }
 
@@ -237,7 +252,9 @@ pub async fn snapshot(api: &str) -> anyhow::Result<()> {
                     "  {st:<8} {}/{} done  {} open  {} failed  {} shelved",
                     get("done"),
                     total,
-                    total.saturating_sub(get("done")).saturating_sub(get("shelved")),
+                    total
+                        .saturating_sub(get("done"))
+                        .saturating_sub(get("shelved")),
                     get("failed"),
                     get("shelved")
                 );

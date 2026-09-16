@@ -15,11 +15,7 @@ use std::path::{Path, PathBuf};
 
 /// Tag pairs that can never share a voice. Everything else is free-form: a tag
 /// the table does not mention only ever matches by equality.
-const CONFLICTS: [(&str, &str); 3] = [
-    ("male", "female"),
-    ("young", "old"),
-    ("strong", "weak"),
-];
+const CONFLICTS: [(&str, &str); 3] = [("male", "female"), ("young", "old"), ("strong", "weak")];
 
 /// One pooled sample: the clip enrolled as a clone voice plus its tags.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -220,9 +216,18 @@ pub fn add_sample(
     }
     // An explicit name answers to exactly that; filename tags only apply to
     // the classic pooled shape (no rename, no override).
-    let name = name_override.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or(stem.clone());
-    let ext = src.extension().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    if !matches!(ext.to_lowercase().as_str(), "mp3" | "wav" | "m4a" | "ogg" | "flac") {
+    let name = name_override
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or(stem.clone());
+    let ext = src
+        .extension()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if !matches!(
+        ext.to_lowercase().as_str(),
+        "mp3" | "wav" | "m4a" | "ogg" | "flac"
+    ) {
         anyhow::bail!("{filename:?} is not audio (mp3/wav/m4a/ogg/flac)");
     }
     let tags = match tags_override {
@@ -263,11 +268,16 @@ pub fn add_sample(
     let mut pool = load_pool(&pool_path);
     pool.insert(
         name.clone(),
-        PoolEntry { file: format!("refs/{filename}"), tags: tags.clone() },
+        PoolEntry {
+            file: format!("refs/{filename}"),
+            tags: tags.clone(),
+        },
     );
     write_pool(&pool_path, &pool)?;
     if tags.is_empty() {
-        log.push(format!("named voice: {name} (manual assignment only, never auto-rolled)"));
+        log.push(format!(
+            "named voice: {name} (manual assignment only, never auto-rolled)"
+        ));
     } else {
         log.push(format!("pool: {name} [{tags}]", tags = tags.join(", ")));
     }
@@ -283,7 +293,9 @@ pub fn add_sample(
         });
     manifest[name.clone()] = serde_json::Value::String(format!("refs/{filename}"));
     crate::util::atomic_write(&manifest_path, &serde_json::to_string_pretty(&manifest)?)?;
-    log.push(format!("voices.json: {name} -> refs/{filename} (enrolled on next provision)"));
+    log.push(format!(
+        "voices.json: {name} -> refs/{filename} (enrolled on next provision)"
+    ));
 
     // Usable now, not just after provisioning: enroll into this machine's own
     // store when it has one. A failure here never fails the add — the registry
@@ -291,7 +303,9 @@ pub fn add_sample(
     // Blocking (loads the voice model); callers run it off the UI thread.
     match enroll_local(root, &name, &format!("refs/{filename}")) {
         Ok(lines) => log.extend(lines),
-        Err(e) => log.push(format!("local enroll failed (provision still covers it): {e:#}")),
+        Err(e) => log.push(format!(
+            "local enroll failed (provision still covers it): {e:#}"
+        )),
     }
     Ok(log)
 }
@@ -302,7 +316,9 @@ pub fn add_sample(
 pub fn enroll_local(root: &Path, name: &str, file: &str) -> anyhow::Result<Vec<String>> {
     let py = root.join(".venv/bin/python");
     if !py.is_file() || !root.join("python/tts_vieneu.py").is_file() {
-        return Ok(vec!["no local voice store — enrolled on next provision".to_string()]);
+        return Ok(vec![
+            "no local voice store — enrolled on next provision".to_string()
+        ]);
     }
     // Name and clip travel as argv, never interpolated: diacritics and spaces
     // survive intact, and there is nothing to quote.
@@ -333,7 +349,11 @@ pub fn enroll_local(root: &Path, name: &str, file: &str) -> anyhow::Result<Vec<S
         .collect();
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("{} ({})", lines.pop().unwrap_or_else(|| "enroll failed".into()), crate::util::head_chars(err.trim(), 160));
+        anyhow::bail!(
+            "{} ({})",
+            lines.pop().unwrap_or_else(|| "enroll failed".into()),
+            crate::util::head_chars(err.trim(), 160)
+        );
     }
     Ok(lines)
 }
@@ -351,7 +371,10 @@ mod tests {
         std::fs::write(home.join("young-male-8.mp3"), b"fake").unwrap();
         let saved = std::env::var("HOME").ok();
         std::env::set_var("HOME", &home);
-        let got = resolve_clip(Path::new("/nonexistent-root"), Path::new("~/young-male-8.mp3"));
+        let got = resolve_clip(
+            Path::new("/nonexistent-root"),
+            Path::new("~/young-male-8.mp3"),
+        );
         assert_eq!(got, home.join("young-male-8.mp3"));
         if let Some(h) = saved {
             std::env::set_var("HOME", h);
@@ -383,20 +406,41 @@ mod tests {
         assert_eq!(parse_sample_tags("young-female-1"), vec!["young", "female"]);
         assert_eq!(parse_sample_tags("old_male_12"), vec!["old", "male"]);
         assert_eq!(parse_sample_tags("shizuka"), vec!["shizuka"]);
-        assert!(parse_sample_tags("007").is_empty(), "a bare number is no tag");
+        assert!(
+            parse_sample_tags("007").is_empty(),
+            "a bare number is no tag"
+        );
     }
 
     #[test]
     fn young_male_cannot_take_a_young_female_sample() {
         let sample = vec!["young".to_string(), "female".to_string()];
         let has = |tags: &[&str]| tags.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(compatible(&sample, &has(&["young"])), "shares young, clashes on nothing");
+        assert!(
+            compatible(&sample, &has(&["young"])),
+            "shares young, clashes on nothing"
+        );
         assert!(compatible(&sample, &has(&["female"])), "shares female");
-        assert!(compatible(&sample, &has(&["young", "female"])), "shares both");
-        assert!(!compatible(&sample, &has(&["young", "male"])), "male clashes with female");
-        assert!(!compatible(&sample, &has(&["old", "female"])), "old clashes with young");
-        assert!(!compatible(&sample, &has(&["male"])), "no shared tag at all");
-        assert!(!compatible(&sample, &has(&[])), "untagged characters fall back to presets");
+        assert!(
+            compatible(&sample, &has(&["young", "female"])),
+            "shares both"
+        );
+        assert!(
+            !compatible(&sample, &has(&["young", "male"])),
+            "male clashes with female"
+        );
+        assert!(
+            !compatible(&sample, &has(&["old", "female"])),
+            "old clashes with young"
+        );
+        assert!(
+            !compatible(&sample, &has(&["male"])),
+            "no shared tag at all"
+        );
+        assert!(
+            !compatible(&sample, &has(&[])),
+            "untagged characters fall back to presets"
+        );
     }
 
     #[test]
@@ -404,7 +448,10 @@ mod tests {
         let sample = vec!["sly".to_string()];
         let has = |tags: &[&str]| tags.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert!(compatible(&sample, &has(&["sly", "young"])));
-        assert!(!compatible(&sample, &has(&["young"])), "unknown tags give no antonyms, only overlap");
+        assert!(
+            !compatible(&sample, &has(&["young"])),
+            "unknown tags give no antonyms, only overlap"
+        );
     }
 
     #[test]
@@ -421,9 +468,27 @@ mod tests {
     #[test]
     fn candidates_are_compatible_names_sorted() {
         let mut pool = Pool::new();
-        pool.insert("young-female-1".into(), PoolEntry { file: "refs/young-female-1.mp3".into(), tags: vec!["young".into(), "female".into()] });
-        pool.insert("young-female-2".into(), PoolEntry { file: "refs/young-female-2.mp3".into(), tags: vec!["young".into(), "female".into()] });
-        pool.insert("old-male-1".into(), PoolEntry { file: "refs/old-male-1.mp3".into(), tags: vec!["old".into(), "male".into()] });
+        pool.insert(
+            "young-female-1".into(),
+            PoolEntry {
+                file: "refs/young-female-1.mp3".into(),
+                tags: vec!["young".into(), "female".into()],
+            },
+        );
+        pool.insert(
+            "young-female-2".into(),
+            PoolEntry {
+                file: "refs/young-female-2.mp3".into(),
+                tags: vec!["young".into(), "female".into()],
+            },
+        );
+        pool.insert(
+            "old-male-1".into(),
+            PoolEntry {
+                file: "refs/old-male-1.mp3".into(),
+                tags: vec!["old".into(), "male".into()],
+            },
+        );
         let got = candidates(&pool, &["young".to_string(), "female".to_string()]);
         assert_eq!(got, vec!["young-female-1", "young-female-2"]);
         assert!(candidates(&pool, &[]).is_empty());
@@ -461,7 +526,10 @@ mod tests {
 
         // Adding the same file twice is idempotent, not an error.
         let again = add_sample(&d, &src, None, None).unwrap();
-        assert!(again.iter().any(|l| l.contains("already in place")), "{again:?}");
+        assert!(
+            again.iter().any(|l| l.contains("already in place")),
+            "{again:?}"
+        );
     }
 
     #[test]
@@ -472,7 +540,10 @@ mod tests {
         // Positive path needs model weights and minutes; the skip contract —
         // Ok, and said out loud — is what pins the fresh-clone behavior.
         let lines = enroll_local(&d, "young-female-1", "refs/young-female-1.mp3").unwrap();
-        assert!(lines.iter().any(|l| l.contains("next provision")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("next provision")),
+            "{lines:?}"
+        );
     }
 
     #[test]
@@ -490,7 +561,10 @@ mod tests {
         assert!(log.iter().any(|l| l.contains("named voice")), "{log:?}");
         let pool = load_pool(&d.join("voice-pool.json"));
         assert!(pool["Narrator"].tags.is_empty());
-        assert!(!pool.contains_key("narrator"), "the stem must not leak in as a second voice");
+        assert!(
+            !pool.contains_key("narrator"),
+            "the stem must not leak in as a second voice"
+        );
         assert!(
             candidates(&pool, &["young".to_string(), "female".to_string()]).is_empty(),
             "a named voice rolls for nobody"
@@ -509,7 +583,13 @@ mod tests {
         let src = d.join("clip.mp3");
         std::fs::write(&src, b"fake-audio").unwrap();
 
-        add_sample(&d, &src, Some(vec!["old".into(), "male".into()]), Some("Lão".into())).unwrap();
+        add_sample(
+            &d,
+            &src,
+            Some(vec!["old".into(), "male".into()]),
+            Some("Lão".into()),
+        )
+        .unwrap();
         let pool = load_pool(&d.join("voice-pool.json"));
         assert_eq!(pool["Lão"].tags, vec!["old", "male"]);
         assert_eq!(

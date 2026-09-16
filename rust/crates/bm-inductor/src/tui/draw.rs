@@ -13,17 +13,21 @@ mod task_detail;
 mod tasks;
 mod workers;
 
+use crate::tui::{
+    app::App,
+    layout::{
+        size_class, Size, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H, COMPACT_MACHINES_H,
+        COMPACT_WORKERS_H, FULL_EVENTS_MIN_H, FULL_FOOTER_H, FULL_MACHINES_H, FULL_TASKS_H,
+        FULL_WORKERS_H, MIN_H, MIN_W,
+    },
+    screen::Screen,
+    style::centered_padded,
+};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout as RLayout, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
-};
-use crate::tui::{
-    app::App,
-    layout::{COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H, COMPACT_MACHINES_H, COMPACT_WORKERS_H, FULL_EVENTS_MIN_H, FULL_FOOTER_H, FULL_MACHINES_H, FULL_TASKS_H, FULL_WORKERS_H, MIN_H, MIN_W, Size, size_class},
-    screen::Screen,
-    style::centered_padded,
 };
 
 /// The size guard: the only thing on screen when the terminal cannot hold the

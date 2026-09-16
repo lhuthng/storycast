@@ -1,4 +1,11 @@
 //! Voice picker overlay.
+use crate::tui::{
+    app::App,
+    model::{clamp_scroll, filtered_characters, filtered_voices, users_of},
+    screen::{PickStage, Picker},
+    style::{centered, dash_if_empty, empty_body, gender_label, style_bold_of, style_of},
+};
+use bm_proto::VoiceInfo;
 use ratatui::{
     layout::{Constraint, Direction, Layout as RLayout},
     style::{Color, Style},
@@ -6,8 +13,6 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use std::collections::BTreeMap;
-use bm_proto::VoiceInfo;
-use crate::tui::{app::App, model::{clamp_scroll, filtered_characters, filtered_voices, users_of}, screen::{PickStage, Picker}, style::{centered, dash_if_empty, empty_body, gender_label, style_bold_of, style_of}};
 
 pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker) {
     let area = centered(f.area(), 96, 24);
@@ -69,7 +74,10 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                 ("OFFLINE roster — metadata may be incomplete", Color::Yellow)
             };
             Line::from(vec![
-                Span::styled(format!("{label} · engine {}   ", r.engine), app.style(colour)),
+                Span::styled(
+                    format!("{label} · engine {}   ", r.engine),
+                    app.style(colour),
+                ),
                 Span::styled(r.policy_note.clone(), Style::default().fg(Color::DarkGray)),
             ])
         }
@@ -127,7 +135,12 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
     let meta: BTreeMap<String, VoiceInfo> = app
         .roster
         .as_ref()
-        .map(|r| r.voices.iter().map(|v| (v.name.clone(), v.clone())).collect())
+        .map(|r| {
+            r.voices
+                .iter()
+                .map(|v| (v.name.clone(), v.clone()))
+                .collect()
+        })
         .unwrap_or_default();
     match picker.stage {
         PickStage::Character => {
@@ -218,16 +231,15 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                         let selected = i == picker.cursor;
                         let marker = if selected { "▸ " } else { "  " };
                         let users = users_of(&cast, &v.name);
-                        let (status, colour_of_status) =
-                            if users.contains(&picker.character) {
-                                ("current".to_string(), Color::Green)
-                            } else if !users.is_empty() {
-                                (format!("in use: {}", users.join(", ")), Color::Yellow)
-                            } else if !v.allowed {
-                                ("accent policy concern".to_string(), Color::Yellow)
-                            } else {
-                                ("available".to_string(), Color::DarkGray)
-                            };
+                        let (status, colour_of_status) = if users.contains(&picker.character) {
+                            ("current".to_string(), Color::Green)
+                        } else if !users.is_empty() {
+                            (format!("in use: {}", users.join(", ")), Color::Yellow)
+                        } else if !v.allowed {
+                            ("accent policy concern".to_string(), Color::Yellow)
+                        } else {
+                            ("available".to_string(), Color::DarkGray)
+                        };
                         let mut spans = vec![
                             Span::styled(marker.to_string(), style_of(colour, Color::Cyan)),
                             Span::styled(

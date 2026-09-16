@@ -1,12 +1,14 @@
 //! System overview overlay.
+use crate::tui::model::Verdict;
+use crate::tui::style::Conn;
+use crate::tui::{
+    app::App, input::runconfig::run_preview, model::task_rollup, style::centered_padded,
+};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use crate::tui::{app::App, input::runconfig::run_preview, model::task_rollup, style::centered_padded};
-use crate::tui::style::Conn;
-use crate::tui::model::Verdict;
 
 /// System overview: backend, config, voices, tasks — everything one launch
 /// needs, on one screen. Modelled on the cast overview: read here, act with
@@ -45,11 +47,14 @@ pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
     };
 
     let mut lines = vec![
-        kv("backend", match app.conn {
-            Conn::Up => format!("answering at {}", app.api),
-            Conn::Down(_) => "DOWN — B starts it".to_string(),
-            Conn::Unknown => "connecting…".to_string(),
-        }),
+        kv(
+            "backend",
+            match app.conn {
+                Conn::Up => format!("answering at {}", app.api),
+                Conn::Down(_) => "DOWN — B starts it".to_string(),
+                Conn::Unknown => "connecting…".to_string(),
+            },
+        ),
         kv("workers", format!("{live_workers} live")),
         kv(
             "range",
@@ -78,7 +83,10 @@ pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
             lines.push(kv("voices", "loading roster…".to_string()));
         }
         None => {
-            lines.push(kv("voices", "roster not loaded — press R to retry".to_string()));
+            lines.push(kv(
+                "voices",
+                "roster not loaded — press R to retry".to_string(),
+            ));
         }
         Some(r) => {
             let rows = app.cast_rows();
@@ -89,7 +97,11 @@ pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
                 .count();
             lines.push(kv(
                 "voices",
-                format!("{} voices · {} cast · {unassigned} unassigned · {flagged} to fix", r.voices.len(), r.cast.len()),
+                format!(
+                    "{} voices · {} cast · {unassigned} unassigned · {flagged} to fix",
+                    r.voices.len(),
+                    r.cast.len()
+                ),
             ));
         }
     }

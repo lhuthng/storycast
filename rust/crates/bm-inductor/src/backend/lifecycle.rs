@@ -34,8 +34,10 @@ fn remote_worker_launch_script(inductor_url: &str, addr: &str) -> String {
 pub fn start_remote_workers(machines: &[Machine], api_port: u16) -> (bool, Vec<String>) {
     let mut lines = Vec::new();
     let mut ok = true;
-    let mut remotes: Vec<&Machine> =
-        machines.iter().filter(|m| !is_local_addr(&m.addr)).collect();
+    let mut remotes: Vec<&Machine> = machines
+        .iter()
+        .filter(|m| !is_local_addr(&m.addr))
+        .collect();
     remotes.sort_by(|a, b| a.addr.cmp(&b.addr));
     remotes.dedup_by(|a, b| a.addr == b.addr);
     for m in remotes {
@@ -53,7 +55,10 @@ pub fn start_remote_workers(machines: &[Machine], api_port: u16) -> (bool, Vec<S
         // Check first, launch second (two round trips — see the builders for
         // why one combined script is a self-match trap).
         let already: Option<String> = match ssh.run(&remote_worker_check_script(), 30) {
-            Ok((_, stdout, _)) => stdout.trim().strip_prefix("ALREADY:").map(|s| s.to_string()),
+            Ok((_, stdout, _)) => stdout
+                .trim()
+                .strip_prefix("ALREADY:")
+                .map(|s| s.to_string()),
             Err(e) => {
                 lines.push(format!("[{}] worker check failed ({e:#})", m.addr));
                 ok = false;
@@ -76,12 +81,19 @@ pub fn start_remote_workers(machines: &[Machine], api_port: u16) -> (bool, Vec<S
                 } else if let Some(pid) = out.strip_prefix("STARTED:") {
                     lines.push(format!("[{}] worker started (pid {pid})", m.addr));
                 } else {
-                    lines.push(format!("[{}] unexpected worker start output: {out}", m.addr));
+                    lines.push(format!(
+                        "[{}] unexpected worker start output: {out}",
+                        m.addr
+                    ));
                     ok = false;
                 }
             }
             Ok((code, _, stderr)) => {
-                lines.push(format!("[{}] worker start failed (exit {code}): {}", m.addr, stderr.trim()));
+                lines.push(format!(
+                    "[{}] worker start failed (exit {code}): {}",
+                    m.addr,
+                    stderr.trim()
+                ));
                 ok = false;
             }
             Err(e) => {
@@ -100,7 +112,13 @@ pub fn start_remote_workers(machines: &[Machine], api_port: u16) -> (bool, Vec<S
 /// `public_bind`: LAN-wide when the cluster has remotes. `with_worker` false
 /// spawns the inductor only — the degraded start launches each box's worker
 /// after that box provisions, so an unready box never takes failing tasks.
-pub fn start_backend(layout_root: &Path, api: &str, api_up: bool, bind: &str, with_worker: bool) -> anyhow::Result<Vec<String>> {
+pub fn start_backend(
+    layout_root: &Path,
+    api: &str,
+    api_up: bool,
+    bind: &str,
+    with_worker: bool,
+) -> anyhow::Result<Vec<String>> {
     if layout_root.as_os_str().is_empty() {
         anyhow::bail!("no repo root — restart the TUI from a checkout");
     }
@@ -114,8 +132,11 @@ pub fn start_backend(layout_root: &Path, api: &str, api_up: bool, bind: &str, wi
     // Inductor half: skip when anything already answers — a second inductor on
     // the same port would just die on bind, noisily, in the log.
     if api_up {
-        lines.push(format!("inductor already answering at {api} — not started again"));
-    } else if let Some(pid) = read_pid(&pid_file(layout_root, "inductor")).filter(|p| is_alive(*p)) {
+        lines.push(format!(
+            "inductor already answering at {api} — not started again"
+        ));
+    } else if let Some(pid) = read_pid(&pid_file(layout_root, "inductor")).filter(|p| is_alive(*p))
+    {
         lines.push(format!("inductor already running (pid {pid})"));
     } else {
         let log = log_file(layout_root, "inductor");
@@ -123,7 +144,10 @@ pub fn start_backend(layout_root: &Path, api: &str, api_up: bool, bind: &str, wi
         match spawn_one(&bin_i, &args, &log) {
             Ok(pid) => {
                 let _ = std::fs::write(pid_file(layout_root, "inductor"), pid.to_string());
-                lines.push(format!("inductor starting in background (pid {pid}, {})", log.display()));
+                lines.push(format!(
+                    "inductor starting in background (pid {pid}, {})",
+                    log.display()
+                ));
             }
             Err(e) => lines.push(format!("inductor failed to start: {e:#}")),
         }
@@ -153,11 +177,18 @@ pub fn start_local_worker(layout_root: &Path, api: &str) -> Vec<String> {
         }
     };
     let log = log_file(layout_root, "agent");
-    let args = ["worker".to_string(), "--inductor".to_string(), api.to_string()];
+    let args = [
+        "worker".to_string(),
+        "--inductor".to_string(),
+        api.to_string(),
+    ];
     match spawn_one(&bin_a, &args, &log) {
         Ok(pid) => {
             let _ = std::fs::write(pid_file(layout_root, "agent"), pid.to_string());
-            lines.push(format!("worker starting in background (pid {pid}, {})", log.display()));
+            lines.push(format!(
+                "worker starting in background (pid {pid}, {})",
+                log.display()
+            ));
         }
         Err(e) => lines.push(format!("worker failed to start: {e:#}")),
     }
@@ -185,7 +216,9 @@ pub async fn stop_backend(layout_root: &Path) -> Vec<String> {
                     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 }
                 if is_alive(pid) {
-                    lines.push(format!("{name}: would not die (pid {pid}) — kill it by hand"));
+                    lines.push(format!(
+                        "{name}: would not die (pid {pid}) — kill it by hand"
+                    ));
                 } else {
                     let _ = std::fs::remove_file(&pid_path);
                     lines.push(format!("{name}: stopped (was pid {pid})"));
@@ -203,7 +236,8 @@ pub async fn stop_backend(layout_root: &Path) -> Vec<String> {
 fn worker_kill_script() -> String {
     "pkill -f 'bm-agent worke[r]' 2>/dev/null; sleep 1; \
      pkill -9 -f 'bm-agent worke[r]' 2>/dev/null; sleep 1; \
-     echo left=$(pgrep -f 'bm-agent worke[r]' 2>/dev/null | wc -l)".into()
+     echo left=$(pgrep -f 'bm-agent worke[r]' 2>/dev/null | wc -l)"
+        .into()
 }
 
 /// Same for the per-render TTS sidecar: orphaned servers hold the port and
@@ -211,14 +245,18 @@ fn worker_kill_script() -> String {
 fn sidecar_kill_script() -> String {
     "pkill -f 'tts_server\\.p[y]' 2>/dev/null; sleep 1; \
      pkill -9 -f 'tts_server\\.p[y]' 2>/dev/null; sleep 1; \
-     echo left=$(pgrep -f 'tts_server\\.p[y]' 2>/dev/null | wc -l)".into()
+     echo left=$(pgrep -f 'tts_server\\.p[y]' 2>/dev/null | wc -l)"
+        .into()
 }
 
 /// Sweep one machine for leftover workers + sidecars. Returns the report
 /// lines; the ssh transport failing is a report, never an error.
 fn sweep_one(label: &str, ssh: &Ssh) -> Vec<String> {
     let mut out = Vec::new();
-    for (what, script) in [("worker", worker_kill_script()), ("sidecar", sidecar_kill_script())] {
+    for (what, script) in [
+        ("worker", worker_kill_script()),
+        ("sidecar", sidecar_kill_script()),
+    ] {
         match ssh.run(&script, 30) {
             Ok((_, stdout, _)) => {
                 let left = stdout
@@ -233,10 +271,14 @@ fn sweep_one(label: &str, ssh: &Ssh) -> Vec<String> {
                 if left == 0 {
                     out.push(format!("{label}: {what}s stopped"));
                 } else {
-                    out.push(format!("{label}: {what}s stopped ({left} would not die — kill by hand)"));
+                    out.push(format!(
+                        "{label}: {what}s stopped ({left} would not die — kill by hand)"
+                    ));
                 }
             }
-            Err(e) => out.push(format!("{label}: sweep failed ({e:#}) — anything there keeps running")),
+            Err(e) => out.push(format!(
+                "{label}: sweep failed ({e:#}) — anything there keeps running"
+            )),
         }
     }
     out
@@ -254,21 +296,32 @@ pub async fn stop_everywhere(layout_root: &Path, machines: &[Machine], api: &str
     // Requeue stranded assignments, but only with no live scheduler: the file
     // is the inductor's to write while it answers.
     if inductor_up(api).await {
-        lines.push("inductor still answering — ledger untouched (assigned tasks keep their leases)".into());
+        lines.push(
+            "inductor still answering — ledger untouched (assigned tasks keep their leases)".into(),
+        );
     } else {
         match requeue_assigned_in_ledger(layout_root) {
-            Ok(back) if back.is_empty() => lines.push("no stranded tasks — nothing requeued".into()),
+            Ok(back) if back.is_empty() => {
+                lines.push("no stranded tasks — nothing requeued".into())
+            }
             Ok(back) => lines.push(format!(
                 "requeued {} stranded task(s): {}",
                 back.len(),
                 back.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
             )),
-            Err(e) => lines.push(format!("ledger requeue failed ({e:#}) — stranded tasks keep leases")),
+            Err(e) => lines.push(format!(
+                "ledger requeue failed ({e:#}) — stranded tasks keep leases"
+            )),
         }
     }
     // Sweeps block (ssh timeouts, kill grace periods) — off the runtime.
     let local_sweep = tokio::task::spawn_blocking(|| {
-        let local = Ssh { target: "local".into(), port: 22, key: None, local: true };
+        let local = Ssh {
+            target: "local".into(),
+            port: 22,
+            key: None,
+            local: true,
+        };
         sweep_one("local", &local)
     })
     .await;
@@ -276,8 +329,10 @@ pub async fn stop_everywhere(layout_root: &Path, machines: &[Machine], api: &str
         Ok(ls) => lines.extend(ls),
         Err(e) => lines.push(format!("local sweep task failed ({e})")),
     }
-    let mut remotes: Vec<&Machine> =
-        machines.iter().filter(|m| !is_local_addr(&m.addr)).collect();
+    let mut remotes: Vec<&Machine> = machines
+        .iter()
+        .filter(|m| !is_local_addr(&m.addr))
+        .collect();
     remotes.sort_by(|a, b| a.addr.cmp(&b.addr));
     remotes.dedup_by(|a, b| a.addr == b.addr);
     for m in remotes {
@@ -306,7 +361,9 @@ pub async fn stop_inductor(layout_root: &Path) -> (bool, Vec<String>) {
         }
         Some(pid) if !is_alive(pid) => {
             let _ = std::fs::remove_file(&pid_path);
-            lines.push(format!("inductor: already stopped (cleaned stale pid {pid})"));
+            lines.push(format!(
+                "inductor: already stopped (cleaned stale pid {pid})"
+            ));
             true
         }
         Some(pid) => {
@@ -317,7 +374,9 @@ pub async fn stop_inductor(layout_root: &Path) -> (bool, Vec<String>) {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             }
             if is_alive(pid) {
-                lines.push(format!("inductor: would not die (pid {pid}) — kill it by hand"));
+                lines.push(format!(
+                    "inductor: would not die (pid {pid}) — kill it by hand"
+                ));
                 false
             } else {
                 let _ = std::fs::remove_file(&pid_path);
@@ -395,7 +454,10 @@ fn requeue_assigned_in_ledger(layout_root: &Path) -> anyhow::Result<Vec<String>>
                     o.insert("state".into(), serde_json::Value::String("pending".into()));
                     o.insert("assigned_to".into(), serde_json::Value::Null);
                     o.insert("lease_until".into(), serde_json::Value::Null);
-                    o.insert("detail".into(), serde_json::Value::String("requeued by X (worker gone)".into()));
+                    o.insert(
+                        "detail".into(),
+                        serde_json::Value::String("requeued by X (worker gone)".into()),
+                    );
                 }
                 back.push(id);
             }
@@ -449,7 +511,10 @@ mod tests {
             !sidecar_kill_script().contains("tts_server.py"),
             "verbatim pattern would self-match"
         );
-        assert!(worker_kill_script().contains("left="), "sweep must report survivors");
+        assert!(
+            worker_kill_script().contains("left="),
+            "sweep must report survivors"
+        );
     }
 
     #[test]
@@ -463,9 +528,15 @@ mod tests {
         assert!(!check.contains("bm-agent worker"), "self-match: {check}");
         assert!(check.contains("ALREADY:"), "{check}");
         let launch = remote_worker_launch_script("http://192.168.2.1:8901", "192.168.2.2");
-        assert!(!launch.contains("pkill") && !launch.contains("pgrep"), "launch must not inspect: {launch}");
+        assert!(
+            !launch.contains("pkill") && !launch.contains("pgrep"),
+            "launch must not inspect: {launch}"
+        );
         assert!(launch.contains("./bm-agent worker --inductor"), "{launch}");
-        assert!(launch.contains("http://192.168.2.1:8901") && launch.contains("192.168.2.2"), "{launch}");
+        assert!(
+            launch.contains("http://192.168.2.1:8901") && launch.contains("192.168.2.2"),
+            "{launch}"
+        );
     }
 
     #[test]
@@ -480,7 +551,10 @@ mod tests {
             .unwrap()
             .block_on(stop_inductor(&d));
         assert!(gone, "{lines:?}");
-        assert!(lines.iter().any(|l| l.contains("not started by this TUI")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("not started by this TUI")),
+            "{lines:?}"
+        );
     }
 
     #[test]
@@ -494,7 +568,10 @@ mod tests {
             .unwrap()
             .block_on(stop_backend(&d));
         assert_eq!(lines.len(), 2);
-        assert!(lines.iter().all(|l| l.contains("not started by this TUI")), "{lines:?}");
+        assert!(
+            lines.iter().all(|l| l.contains("not started by this TUI")),
+            "{lines:?}"
+        );
     }
 
     #[test]
@@ -512,7 +589,10 @@ mod tests {
             .arg("sleep 60 >/dev/null 2>&1 & echo $!")
             .output()
             .expect("sh exists on test machines");
-        let pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().expect("a pid");
+        let pid: u32 = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("a pid");
         assert!(is_alive(pid));
         std::fs::write(d.join(".bm/agent.pid"), pid.to_string()).unwrap();
 
@@ -521,9 +601,17 @@ mod tests {
             .build()
             .unwrap()
             .block_on(stop_backend(&d));
-        assert!(lines.iter().any(|l| l.contains("stopped") && l.contains(&pid.to_string())), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("stopped") && l.contains(&pid.to_string())),
+            "{lines:?}"
+        );
         assert!(!is_alive(pid), "the process must be gone");
-        assert!(!d.join(".bm/agent.pid").exists(), "the PID file goes with it");
+        assert!(
+            !d.join(".bm/agent.pid").exists(),
+            "the PID file goes with it"
+        );
     }
 
     #[test]
@@ -532,7 +620,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         // Remote first: the guard fires before any binary is resolved.
-        let err = start_backend(&d, "http://192.168.2.7:8901", false, "127.0.0.1", true).unwrap_err();
+        let err =
+            start_backend(&d, "http://192.168.2.7:8901", false, "127.0.0.1", true).unwrap_err();
         assert!(err.to_string().contains("THIS machine"), "{err}");
         // Local but no binaries beside the test harness: names the problem.
         let err = start_backend(&d, "http://127.0.0.1:9", false, "127.0.0.1", true).unwrap_err();

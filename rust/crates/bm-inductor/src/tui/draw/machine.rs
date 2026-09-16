@@ -1,10 +1,13 @@
 //! Machine detail overlay.
+use crate::tui::{
+    app::App,
+    style::{centered, seen_label},
+};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use crate::tui::{app::App, style::{centered, seen_label}};
 
 pub(crate) fn draw_machine_info(f: &mut ratatui::Frame, app: &App, addr: &str) {
     let area = centered(f.area(), 84, 18);

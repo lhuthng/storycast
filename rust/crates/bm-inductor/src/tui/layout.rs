@@ -145,10 +145,22 @@ const _: () = assert!(
     cols(&COMPACT_WORKER_COLS) + 2 <= MIN_W,
     "compact workers columns plus borders must fit MIN_W"
 );
-const _: () = assert!(width_of(KEYS_FULL[0]) <= FULL_W as usize, "key line 1 overflows the full tier");
-const _: () = assert!(width_of(KEYS_FULL[1]) <= FULL_W as usize, "key line 2 overflows the full tier");
-const _: () = assert!(width_of(KEYS_COMPACT[0]) <= MIN_W as usize, "key line 1 overflows compact");
-const _: () = assert!(width_of(KEYS_COMPACT[1]) <= MIN_W as usize, "key line 2 overflows compact");
+const _: () = assert!(
+    width_of(KEYS_FULL[0]) <= FULL_W as usize,
+    "key line 1 overflows the full tier"
+);
+const _: () = assert!(
+    width_of(KEYS_FULL[1]) <= FULL_W as usize,
+    "key line 2 overflows the full tier"
+);
+const _: () = assert!(
+    width_of(KEYS_COMPACT[0]) <= MIN_W as usize,
+    "key line 1 overflows compact"
+);
+const _: () = assert!(
+    width_of(KEYS_COMPACT[1]) <= MIN_W as usize,
+    "key line 2 overflows compact"
+);
 const _: () = assert!(
     cols(&CAST_COLS_NARROW) + 4 <= MIN_W,
     "the narrow cast table plus two sets of borders must fit the smallest terminal"

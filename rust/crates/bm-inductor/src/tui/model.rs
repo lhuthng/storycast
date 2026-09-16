@@ -1,11 +1,11 @@
 //! Pure selection: filters, cast rows, task queries. No widgets, no keys.
-use std::collections::BTreeMap;
+use crate::tui::{app::App, style::style_of};
 use bm_proto::{Heartbeat, Machine, Roster, Task, TaskState, VoiceInfo};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
-use crate::tui::{app::App, style::style_of};
+use std::collections::BTreeMap;
 
 /// Fold Vietnamese diacritics to ASCII so a filter of `thai son` matches
 /// `Thái Sơn`. Without it, filtering a Vietnamese cast means typing exact
@@ -45,7 +45,10 @@ pub(crate) fn registry_machines(layout_root: &std::path::Path) -> Vec<Machine> {
     }
     let boxes = bm_core::provision::load_boxes(&bm.join("machines.json"));
     let empty = serde_json::Map::new();
-    let rt = doc.get("machine_state").and_then(|v| v.as_object()).unwrap_or(&empty);
+    let rt = doc
+        .get("machine_state")
+        .and_then(|v| v.as_object())
+        .unwrap_or(&empty);
     bm_core::provision::join_all(boxes, rt)
 }
 
@@ -210,9 +213,7 @@ pub(crate) fn filtered_cast_rows(rows: &[CastRow], filter: &str) -> Vec<CastRow>
     }
     rows.iter()
         .filter(|r| {
-            matches(filter, &r.character)
-                || matches(filter, &r.voice)
-                || matches(filter, &r.style)
+            matches(filter, &r.character) || matches(filter, &r.voice) || matches(filter, &r.style)
         })
         .cloned()
         .collect()
@@ -267,7 +268,10 @@ pub(crate) fn filtered_tasks<'a>(tasks: &'a [Task], filter: &str) -> Vec<&'a Tas
 /// ETA use). The panes hide the rest: a dead worker rendered as an idle row
 /// is how two hares happen.
 pub(crate) fn live_beats(beats: &[Heartbeat], now: u64) -> Vec<&Heartbeat> {
-    beats.iter().filter(|b| now.saturating_sub(b.ts) < 90).collect()
+    beats
+        .iter()
+        .filter(|b| now.saturating_sub(b.ts) < 90)
+        .collect()
 }
 
 /// A worker's self-reported display name, when any beat carries one for this
@@ -313,7 +317,10 @@ pub(crate) fn task_rollup(counts: &serde_json::Value, colour: bool) -> Line<'sta
         return Line::from(Span::styled("tasks: waiting for the inductor…", dim));
     };
     if obj.is_empty() {
-        return Line::from(Span::styled("tasks: none queued — press t to enqueue a range", dim));
+        return Line::from(Span::styled(
+            "tasks: none queued — press t to enqueue a range",
+            dim,
+        ));
     }
     let (mut done, mut total, mut failed, mut shelved) = (0u64, 0u64, 0u64, 0u64);
     for c in obj.values() {
@@ -329,7 +336,10 @@ pub(crate) fn task_rollup(counts: &serde_json::Value, colour: bool) -> Line<'sta
     let open = total.saturating_sub(done).saturating_sub(shelved);
     let mut spans = vec![
         Span::styled("tasks: ", dim),
-        Span::styled(format!("{done}/{total} done"), style_of(colour, Color::Green)),
+        Span::styled(
+            format!("{done}/{total} done"),
+            style_of(colour, Color::Green),
+        ),
         Span::styled(format!("  · {open} open"), dim),
     ];
     if failed > 0 {

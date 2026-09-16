@@ -42,14 +42,17 @@ pub(crate) struct Player {
 
 impl Player {
     pub(crate) fn new() -> Self {
-        Self::with_scratch(std::env::temp_dir().join(format!(
-            "bm-audition-{}.wav",
-            std::process::id()
-        )))
+        Self::with_scratch(
+            std::env::temp_dir().join(format!("bm-audition-{}.wav", std::process::id())),
+        )
     }
 
     fn with_scratch(scratch: PathBuf) -> Self {
-        Player { child: None, scratch, program: PLAYER.to_string() }
+        Player {
+            child: None,
+            scratch,
+            program: PLAYER.to_string(),
+        }
     }
 
     /// Write `wav` to the scratch file and play it, stopping whatever was
@@ -93,7 +96,11 @@ impl Player {
     /// developer's speakers is a test nobody can run.
     #[cfg(test)]
     pub(crate) fn silent_for_test(scratch: PathBuf) -> Self {
-        Player { child: None, scratch, program: "true".into() }
+        Player {
+            child: None,
+            scratch,
+            program: "true".into(),
+        }
     }
 }
 
@@ -190,7 +197,10 @@ mod tests {
 
         let err = p.play_bytes(b"").unwrap_err();
         assert!(err.contains("no audio"), "{err}");
-        assert!(p.child.is_none(), "a refused play must not claim the child slot");
+        assert!(
+            p.child.is_none(),
+            "a refused play must not claim the child slot"
+        );
         assert_eq!(
             std::fs::read(&p.scratch).unwrap(),
             b"the previous sample",
@@ -223,6 +233,10 @@ mod tests {
             p.play_bytes(b"RIFF").expect("spawned");
             assert!(path.is_file(), "the sample was written");
         }
-        assert!(!path.exists(), "and removed on the way out: {}", path.display());
+        assert!(
+            !path.exists(),
+            "and removed on the way out: {}",
+            path.display()
+        );
     }
 }

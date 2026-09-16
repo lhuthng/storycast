@@ -204,9 +204,7 @@ impl Layout {
         };
         let mut title = squeeze_ws(&title);
         // trailing dot-runs: ". . ." / "..." / "…"
-        title = title
-            .trim_end_matches([' ', '.', '…'])
-            .to_string();
+        title = title.trim_end_matches([' ', '.', '…']).to_string();
         // windows-illegal filename characters
         title = title
             .chars()

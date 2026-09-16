@@ -1,11 +1,11 @@
 //! Prompt submission: validate, never silently default.
-use bm_proto::{Machine, Op, OpRequest};
 use crate::tui::{
     app::App,
     input::runconfig::parse_range,
-    jobs::{Job, op_job},
+    jobs::{op_job, Job},
     screen::{TextKind, TextPrompt},
 };
+use bm_proto::{Machine, Op, OpRequest};
 
 /// Validate and dispatch a submitted text prompt.
 ///
@@ -38,14 +38,20 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
             let user = toks.get(1).map(|s| s.to_string()).unwrap_or(def.user);
             let port: u16 = match toks.get(2) {
                 None => def.port,
-                Some(p) => p.parse().map_err(|_| format!("port “{p}” is not a number"))?,
+                Some(p) => p
+                    .parse()
+                    .map_err(|_| format!("port “{p}” is not a number"))?,
             };
             // Byte offset of the fourth field: skip three fields and the gaps
             // between them. Internal spacing of the key is preserved.
             let key = if toks.len() > 3 {
                 let mut idx = 0;
                 for _ in 0..3 {
-                    idx += buf[idx..].split_whitespace().next().map(|t| t.len()).unwrap_or(0);
+                    idx += buf[idx..]
+                        .split_whitespace()
+                        .next()
+                        .map(|t| t.len())
+                        .unwrap_or(0);
                     idx += buf[idx..]
                         .chars()
                         .take_while(|c| c.is_whitespace())
@@ -76,13 +82,20 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
             // from the filename. Anything with `as` belongs to N (named) —
             // say so instead of filing it under a nonsense filename.
             if prompt.buf.contains(" as ") {
-                return Err("that looks like a named voice — press N and use `path as Name`".into());
+                return Err(
+                    "that looks like a named voice — press N and use `path as Name`".into(),
+                );
             }
             let path = prompt.buf.trim().to_string();
             if path.is_empty() {
                 return Err("path is empty — point at a clip, e.g. ~/dl/young-female-4.mp3".into());
             }
-            Ok(Job::AddSample { layout_root: app.layout_root.clone(), path, name: None, tags: None })
+            Ok(Job::AddSample {
+                layout_root: app.layout_root.clone(),
+                path,
+                name: None,
+                tags: None,
+            })
         }
         TextKind::AddNamed => {
             // `refs/narrator.mp3 as Narrator`: the name is required, the tags
@@ -91,7 +104,12 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                 Some((p, n)) if !p.trim().is_empty() && !n.trim().is_empty() => {
                     (p.trim().to_string(), n.trim().to_string())
                 }
-                _ => return Err("named voices need `path as Name` — e.g. refs/narrator.mp3 as Narrator".into()),
+                _ => {
+                    return Err(
+                        "named voices need `path as Name` — e.g. refs/narrator.mp3 as Narrator"
+                            .into(),
+                    )
+                }
             };
             Ok(Job::AddSample {
                 layout_root: app.layout_root.clone(),
@@ -119,7 +137,9 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                 return Err("URL template is empty".into());
             }
             if !template.contains("{n}") {
-                return Err("template must contain {n} — that is where the chapter number goes".into());
+                return Err(
+                    "template must contain {n} — that is where the chapter number goes".into(),
+                );
             }
             Ok(op_job(
                 app,

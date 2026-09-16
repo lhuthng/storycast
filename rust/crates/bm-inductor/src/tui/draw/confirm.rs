@@ -1,10 +1,10 @@
 //! Confirm overlay.
+use crate::tui::{app::App, screen::Confirm, style::centered};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use crate::tui::{app::App, screen::Confirm, style::centered};
 
 pub(crate) fn draw_confirm(f: &mut ratatui::Frame, app: &App, c: &Confirm) {
     let width = 76.min(f.area().width);

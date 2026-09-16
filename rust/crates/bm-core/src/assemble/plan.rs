@@ -47,7 +47,11 @@ pub fn is_headline(text: &str) -> bool {
         Some(r) => r,
         None => return false,
     };
-    rest.trim_start().chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+    rest.trim_start()
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
 }
 
 /// Drop an embedded headline so it never plans twice: the synthetic title run
@@ -140,12 +144,19 @@ pub fn title_speech(
         return None;
     }
     let voice = cast.get("Narrator")?.clone();
-    Some(TitleSpeech { voice, text: format!("Chương {n}, {title}") })
+    Some(TitleSpeech {
+        voice,
+        text: format!("Chương {n}, {title}"),
+    })
 }
 
 /// Same, when only the script path is known (merge path): the chapter number
 /// comes from `script-NN.json`, the title from the sibling chapter text.
-pub fn title_speech_for_script(script_path: &Path, cast: &Cast, segments: &[Value]) -> Option<TitleSpeech> {
+pub fn title_speech_for_script(
+    script_path: &Path,
+    cast: &Cast,
+    segments: &[Value],
+) -> Option<TitleSpeech> {
     let stem = script_path.file_stem()?.to_str()?;
     let n: u32 = stem.strip_prefix("script-")?.parse().ok()?;
     let data_dir = script_path.parent()?;
@@ -209,7 +220,11 @@ pub fn plan_render(
         }
     } else {
         for (i, s) in segments.iter().enumerate() {
-            let speaker = s.get("speaker").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let speaker = s
+                .get("speaker")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let voice = cast
                 .get(&speaker)
                 .ok_or_else(|| anyhow::anyhow!("cast has no voice for {speaker:?}"))?
@@ -258,7 +273,8 @@ pub fn segments_complete(
     let Ok(policy) = crate::cast::policy_for_bible(engine, bible_path) else {
         return false;
     };
-    let Ok(cast) = crate::cast::load_cast(script_path, cast_path, bible_path, &policy, false) else {
+    let Ok(cast) = crate::cast::load_cast(script_path, cast_path, bible_path, &policy, false)
+    else {
         return false;
     };
     let local = engine == "vieneu";
@@ -309,7 +325,11 @@ mod tests {
         cast.insert("A".into(), "Đức Trí".into());
         cast.insert("B".into(), "Adam".into());
         let local = expected_wavs(&segs, &cast, Path::new("segs"), true, None).unwrap();
-        assert!(local[0].ends_with("0000-0001_Đức Trí.wav"), "{:?}", local[0]);
+        assert!(
+            local[0].ends_with("0000-0001_Đức Trí.wav"),
+            "{:?}",
+            local[0]
+        );
         assert!(local[1].ends_with("0002_Adam.wav"), "{:?}", local[1]);
         let cloud = expected_wavs(&segs, &cast, Path::new("segs"), false, None).unwrap();
         assert!(cloud[0].ends_with("0000_Đức Trí.wav"));
@@ -363,7 +383,11 @@ mod tests {
         let units = plan_render(&segs, &cast, Path::new("s"), true, Some(&title)).unwrap();
         assert_eq!(units.len(), 2);
         assert_eq!(units[0].tag, "title");
-        assert!(units[0].dest.ends_with("title_Đức Trí.wav"), "{:?}", units[0].dest);
+        assert!(
+            units[0].dest.ends_with("title_Đức Trí.wav"),
+            "{:?}",
+            units[0].dest
+        );
         assert_eq!(units[1].tag, "0000");
         let wavs = expected_wavs(&segs, &cast, Path::new("s"), true, Some(&title)).unwrap();
         assert_eq!(wavs.len(), 2);
@@ -523,7 +547,10 @@ impl RenderedSegment {
 /// case, diacritics or separators are the same voice for this purpose — the
 /// bible treats them the same way when it folds aliases.
 fn norm_voice(s: &str) -> String {
-    crate::util::fold(s).chars().filter(|c| !matches!(c, '-' | '_' | ' ')).collect()
+    crate::util::fold(s)
+        .chars()
+        .filter(|c| !matches!(c, '-' | '_' | ' '))
+        .collect()
 }
 
 /// Whether `character` speaks any line in the local scripts. Answers the miss
@@ -538,7 +565,10 @@ pub fn character_has_lines(layout: &Layout, character: &str) -> bool {
     };
     for e in rd.flatten() {
         let n = e.file_name().to_string_lossy().to_string();
-        let num = match n.strip_prefix("script-").and_then(|s| s.strip_suffix(".json")) {
+        let num = match n
+            .strip_prefix("script-")
+            .and_then(|s| s.strip_suffix(".json"))
+        {
             Some(num) => num,
             None => continue,
         };
@@ -555,7 +585,8 @@ pub fn character_has_lines(layout: &Layout, character: &str) -> bool {
             .get("segments")
             .and_then(|s| s.as_array())
             .map(|segs| {
-                segs.iter().any(|s| s.get("speaker").and_then(|v| v.as_str()) == Some(character))
+                segs.iter()
+                    .any(|s| s.get("speaker").and_then(|v| v.as_str()) == Some(character))
             })
             .unwrap_or(false)
         {
@@ -630,7 +661,10 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
     let key = crate::voices::key_for_name(engine, &name).unwrap_or_else(|| voice.to_string());
     // Normalized once: catalogue keys, display names and wav tags meet after
     // folding, whatever form each side was written in.
-    let want = [voice, &name, &key].iter().map(|s| norm_voice(s)).collect::<Vec<_>>();
+    let want = [voice, &name, &key]
+        .iter()
+        .map(|s| norm_voice(s))
+        .collect::<Vec<_>>();
 
     // Chapters present as scripts, in order. A missing script or seg dir is
     // skipped, not an error — the range is aspirational, the files are truth.
@@ -638,7 +672,10 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
     if let Ok(rd) = std::fs::read_dir(layout.data()) {
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().to_string();
-            if let Some(num) = n.strip_prefix("script-").and_then(|s| s.strip_suffix(".json")) {
+            if let Some(num) = n
+                .strip_prefix("script-")
+                .and_then(|s| s.strip_suffix(".json"))
+            {
                 if let Ok(c) = num.parse::<u32>() {
                     chapters.push(c);
                 }
@@ -720,7 +757,12 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
             if !ok {
                 continue;
             }
-            out.push(RenderedSegment { speaker, text, path: e.path(), chapter: n });
+            out.push(RenderedSegment {
+                speaker,
+                text,
+                path: e.path(),
+                chapter: n,
+            });
         }
     }
     out
@@ -729,23 +771,35 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
 /// One segment to play: the requested character's own lines first — hearing
 /// *them* is the point — else anything in that voice. Random every call, so
 /// Tab triages instead of repeating itself.
-pub fn pick_rendered<'a>(cands: &'a [RenderedSegment], character: &str) -> Option<&'a RenderedSegment> {
+pub fn pick_rendered<'a>(
+    cands: &'a [RenderedSegment],
+    character: &str,
+) -> Option<&'a RenderedSegment> {
     if cands.is_empty() {
         return None;
     }
-    let own: Vec<&RenderedSegment> =
-        cands.iter().filter(|c| !character.is_empty() && c.speaker == character).collect();
-    let pool: Vec<&RenderedSegment> =
-        if own.is_empty() { cands.iter().collect() } else { own };
+    let own: Vec<&RenderedSegment> = cands
+        .iter()
+        .filter(|c| !character.is_empty() && c.speaker == character)
+        .collect();
+    let pool: Vec<&RenderedSegment> = if own.is_empty() {
+        cands.iter().collect()
+    } else {
+        own
+    };
     static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| {
-            d.as_secs().wrapping_mul(1_000_000_000).wrapping_add(d.subsec_nanos() as u64)
+            d.as_secs()
+                .wrapping_mul(1_000_000_000)
+                .wrapping_add(d.subsec_nanos() as u64)
         })
         .unwrap_or(0);
-    let seed = nanos
-        .wrapping_add(CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let seed = nanos.wrapping_add(
+        CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15),
+    );
     Some(pool[(seed % pool.len() as u64) as usize])
 }
 

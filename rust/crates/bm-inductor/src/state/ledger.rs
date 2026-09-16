@@ -1,9 +1,9 @@
-use super::{EVENT_CAP, EventRecord, Inner};
+use super::{EventRecord, Inner, EVENT_CAP};
 use anyhow::Result;
-use bm_core::{Layout, config::Settings};
 use bm_core::provision::{join_all, load_boxes, save_box, split_machine};
-use bm_proto::{Machine, Task, TaskState, now_secs};
-use serde_json::{Value, json};
+use bm_core::{config::Settings, Layout};
+use bm_proto::{now_secs, Machine, Task, TaskState};
+use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 
 impl Inner {
@@ -68,7 +68,12 @@ impl Inner {
         let state: HashMap<String, Value> = self
             .machines
             .iter()
-            .map(|(a, m)| (a.clone(), serde_json::to_value(split_machine(m, "").1).unwrap_or(Value::Null)))
+            .map(|(a, m)| {
+                (
+                    a.clone(),
+                    serde_json::to_value(split_machine(m, "").1).unwrap_or(Value::Null),
+                )
+            })
             .collect();
         let doc = json!({"tasks": self.tasks.values().collect::<Vec<_>>(),
                          "machine_state": state,
@@ -90,7 +95,9 @@ impl Inner {
             match self.migrate_ledger(&doc) {
                 Ok(n) => self.push_event(
                     "info",
-                    format!("ledger migrated: {n} machines split into machines.json + machine_state"),
+                    format!(
+                        "ledger migrated: {n} machines split into machines.json + machine_state"
+                    ),
                 ),
                 Err(e) => self.push_event("error", format!("ledger migration failed: {e:#}")),
             }
@@ -110,8 +117,14 @@ impl Inner {
         }
         let boxes = load_boxes(&self.layout.machines());
         let empty = serde_json::Map::new();
-        let rt = doc.get("machine_state").and_then(|v| v.as_object()).unwrap_or(&empty);
-        self.machines = join_all(boxes, rt).into_iter().map(|m| (m.addr.clone(), m)).collect();
+        let rt = doc
+            .get("machine_state")
+            .and_then(|v| v.as_object())
+            .unwrap_or(&empty);
+        self.machines = join_all(boxes, rt)
+            .into_iter()
+            .map(|m| (m.addr.clone(), m))
+            .collect();
         // Worker identity survives restarts: without it, completions filed
         // while the map is cold get attributed to the wrong machine (and
         // merge affinity strands tasks on machines that never rendered).
@@ -127,7 +140,9 @@ impl Inner {
                 if let Some(list) = v.as_array() {
                     self.caps.insert(
                         k.clone(),
-                        list.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect(),
+                        list.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect(),
                     );
                 }
             }
@@ -241,7 +256,12 @@ impl Inner {
                 format!(
                     "lease expired — requeued {}: {}",
                     expired.len(),
-                    expired.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+                    expired
+                        .iter()
+                        .take(8)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             );
         }
@@ -252,7 +272,12 @@ impl Inner {
                 format!(
                     "worker gone — requeued {}: {}",
                     orphaned.len(),
-                    orphaned.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+                    orphaned
+                        .iter()
+                        .take(8)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             );
         }
@@ -291,7 +316,11 @@ impl Inner {
                 .map(|b| fresh(b.ts))
                 .unwrap_or(false);
             if live_holder {
-                busy.push(format!("{} on {}", t.id(), t.assigned_to.as_deref().unwrap_or("?")));
+                busy.push(format!(
+                    "{} on {}",
+                    t.id(),
+                    t.assigned_to.as_deref().unwrap_or("?")
+                ));
             }
         }
         for (w, b) in &self.beats {

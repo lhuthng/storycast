@@ -1,7 +1,7 @@
 use bm_proto::VoiceInfo;
 
-use super::catalogue::{EngineRoster, key_for_name};
-use super::consts::{CONTENT_LANGUAGE, PRESET_META, policy_for};
+use super::catalogue::{key_for_name, EngineRoster};
+use super::consts::{policy_for, CONTENT_LANGUAGE, PRESET_META};
 
 fn preset_meta(name: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
     PRESET_META.iter().find(|(n, _, _)| *n == name)
@@ -77,14 +77,19 @@ fn split_label(label: &str) -> (String, Vec<String>) {
 /// operator added by hand from the shipped presets.
 fn voice_from_label(label: &str, id: &str, allowed: &[String], engine: &str) -> VoiceInfo {
     let (name, fields) = split_label(label);
-    let name = if name.is_empty() { id.to_string() } else { name };
+    let name = if name.is_empty() {
+        id.to_string()
+    } else {
+        name
+    };
     let enrolled = label == id;
     let gender = fields.first().map(|f| gender_of(f)).unwrap_or("unknown");
-    let accent = fields
-        .get(1)
-        .map(|f| accent_of(f))
-        .unwrap_or("unknown");
-    let style = if fields.len() > 2 { fields[2..].join(" · ") } else { String::new() };
+    let accent = fields.get(1).map(|f| accent_of(f)).unwrap_or("unknown");
+    let style = if fields.len() > 2 {
+        fields[2..].join(" · ")
+    } else {
+        String::new()
+    };
     // A preset's key comes from the catalogue. An enrolled clone has none until
     // `roster add` gives it one (stage 3), so the field stays empty rather than
     // inventing a slug that the next rename would silently invalidate.
@@ -280,9 +285,15 @@ mod tests {
         roster.policy.excluded_accents = vec!["Northern".to_string()];
 
         let p = roster.to_policy("vieneu");
-        assert!(!p.allowed.contains(&"Minh Đức".to_string()), "Northern, excluded");
+        assert!(
+            !p.allowed.contains(&"Minh Đức".to_string()),
+            "Northern, excluded"
+        );
         assert!(p.allowed.contains(&"Đức Trí".to_string()), "South, kept");
-        assert!(p.allowed.contains(&"Quang Sơn".to_string()), "Central, kept");
+        assert!(
+            p.allowed.contains(&"Quang Sơn".to_string()),
+            "Central, kept"
+        );
         assert_eq!(p.allowed.len(), 10, "23 declared minus the 13 Northern");
 
         // The same rule, applied to a live sidecar label.
@@ -300,7 +311,12 @@ mod tests {
     fn offline_roster_lists_every_declared_preset_exactly_once() {
         let v = offline_voices("vieneu");
         // The neutral pool aliases the male pool for VieNeu: no duplicates.
-        assert_eq!(v.len(), 23, "{:?}", v.iter().map(|x| &x.name).collect::<Vec<_>>());
+        assert_eq!(
+            v.len(),
+            23,
+            "{:?}",
+            v.iter().map(|x| &x.name).collect::<Vec<_>>()
+        );
         assert!(
             v.iter().all(|x| x.allowed),
             "the shipped policy admits everything"
@@ -308,10 +324,19 @@ mod tests {
         assert_eq!(v.iter().filter(|x| x.gender == "male").count(), 12);
         assert_eq!(v.iter().filter(|x| x.gender == "female").count(), 11);
         // Accents are per-voice and real, not a policy guarantee.
-        assert_eq!(v.iter().find(|x| x.name == "Quang Sơn").unwrap().accent, "Central");
-        assert_eq!(v.iter().find(|x| x.name == "Minh Đức").unwrap().accent, "Northern");
+        assert_eq!(
+            v.iter().find(|x| x.name == "Quang Sơn").unwrap().accent,
+            "Central"
+        );
+        assert_eq!(
+            v.iter().find(|x| x.name == "Minh Đức").unwrap().accent,
+            "Northern"
+        );
         assert_eq!(v.iter().find(|x| x.name == "Adam").unwrap().accent, "South");
-        assert_eq!(v.iter().find(|x| x.name == "Adam").unwrap().style, "tự nhiên");
+        assert_eq!(
+            v.iter().find(|x| x.name == "Adam").unwrap().style,
+            "tự nhiên"
+        );
     }
 
     #[test]
@@ -329,7 +354,10 @@ mod tests {
     #[test]
     fn catalogue_voices_carry_their_key_and_undeclared_ones_carry_none() {
         let v = offline_voices("vieneu");
-        assert!(v.iter().all(|x| !x.key.is_empty()), "every preset is catalogued");
+        assert!(
+            v.iter().all(|x| !x.key.is_empty()),
+            "every preset is catalogued"
+        );
         assert_eq!(
             v.iter().find(|x| x.name == "Đức Trí").unwrap().key,
             "duc-tri"

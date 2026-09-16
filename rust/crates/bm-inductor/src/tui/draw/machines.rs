@@ -1,17 +1,26 @@
 //! Machines pane.
+use crate::tui::style::Conn;
+use crate::tui::{
+    app::App,
+    layout::COMPACT_MACHINE_COLS,
+    model::{clamp_scroll, live_workers},
+    style::{cell, empty_body, seen_label, state_cell, style_bold_of, style_of},
+};
 use ratatui::{
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Row, Table},
 };
-use crate::tui::{app::App, layout::COMPACT_MACHINE_COLS, model::{clamp_scroll, live_workers}, style::{cell, empty_body, seen_label, state_cell, style_bold_of, style_of}};
-use crate::tui::style::Conn;
 
 pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, compact: bool) {
     let disconnected = matches!(app.conn, Conn::Down(_));
     let colour = app.colour;
     let selected = app.selected;
-    let title = if disconnected { "Machines — DISCONNECTED" } else { "Machines" };
+    let title = if disconnected {
+        "Machines — DISCONNECTED"
+    } else {
+        "Machines"
+    };
     let border = if disconnected {
         style_of(colour, Color::Red)
     } else {
@@ -74,7 +83,10 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
     let mut header = vec!["addr", "workers", "role", "state"];
     let mut widths: Vec<Constraint> = if compact {
         // Taken from the constant the compile-time guard checks.
-        COMPACT_MACHINE_COLS[..4].iter().map(|w| Constraint::Length(*w)).collect()
+        COMPACT_MACHINE_COLS[..4]
+            .iter()
+            .map(|w| Constraint::Length(*w))
+            .collect()
     } else {
         vec![
             Constraint::Length(15),
@@ -88,7 +100,11 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
         widths.push(Constraint::Length(22));
     }
     header.push("seen");
-    widths.push(Constraint::Length(if compact { COMPACT_MACHINE_COLS[4] } else { 8 }));
+    widths.push(Constraint::Length(if compact {
+        COMPACT_MACHINE_COLS[4]
+    } else {
+        8
+    }));
 
     let table = Table::new(rows, widths)
         .header(Row::new(header).style(style_bold_of(colour, Color::Gray)))

@@ -1,6 +1,6 @@
-use super::{Inner, lease_for};
-use bm_proto::{Complete, RenderUnitSpec, Stage, Task, TaskOffer, TaskState, now_secs};
-use serde_json::{Value, json};
+use super::{lease_for, Inner};
+use bm_proto::{now_secs, Complete, RenderUnitSpec, Stage, Task, TaskOffer, TaskState};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 impl Inner {
@@ -118,8 +118,7 @@ impl Inner {
         let text = std::fs::read_to_string(&script_path).ok()?;
         let data: Value = serde_json::from_str(&text).ok()?;
         let segments = data.get("segments")?.as_array()?;
-        let policy =
-            bm_core::cast::policy_for_bible(&engine, &self.layout.bible()).ok()?;
+        let policy = bm_core::cast::policy_for_bible(&engine, &self.layout.bible()).ok()?;
         let cast = bm_core::cast::load_cast(
             &script_path,
             &self.layout.cast(&engine),
@@ -129,8 +128,7 @@ impl Inner {
         )
         .ok()?;
         let local = engine == "vieneu";
-        let title =
-            bm_core::assemble::title_speech_for_script(&script_path, &cast, segments);
+        let title = bm_core::assemble::title_speech_for_script(&script_path, &cast, segments);
         let seg_dir = self.layout.seg_dir(&engine, chapter);
         let units =
             bm_core::assemble::plan_render(segments, &cast, &seg_dir, local, title.as_ref())
@@ -141,8 +139,7 @@ impl Inner {
                 .filter(|u| {
                     // Same completeness test the agent's resume check uses: a
                     // present, non-trivial file is done.
-                    !(u.dest.exists()
-                        && u.dest.metadata().map(|m| m.len() > 1000).unwrap_or(false))
+                    !(u.dest.exists() && u.dest.metadata().map(|m| m.len() > 1000).unwrap_or(false))
                 })
                 .map(|u| RenderUnitSpec {
                     tag: u.tag,
@@ -202,17 +199,21 @@ impl Inner {
             Outcome::Stale => {
                 return format!("{}: stale report for {} ignored", c.worker_id, c.task_id)
             }
-            Outcome::Done { chapter, stage, delta, script, text, mp3_b64 } => {
+            Outcome::Done {
+                chapter,
+                stage,
+                delta,
+                script,
+                text,
+                mp3_b64,
+            } => {
                 // Completion gate (render only): the worker's word is not
                 // evidence — the files are. A report whose units never landed
                 // is a failure whose detail names them, so the next
                 // missing-only offer repeats exactly those.
                 if stage == Stage::Render {
-                    let missing = crate::segments::missing_wavs(
-                        &self.layout,
-                        &self.settings.engine,
-                        chapter,
-                    );
+                    let missing =
+                        crate::segments::missing_wavs(&self.layout, &self.settings.engine, chapter);
                     let bad = match &missing {
                         None => Some(format!("render ch{chapter} unverifiable here")),
                         Some(m) if !m.is_empty() => Some(format!(
@@ -229,9 +230,7 @@ impl Inner {
                 // machine can run downstream stages.
                 if stage == Stage::Crawl {
                     if let Some(txt) = text {
-                        let _ = bm_core::atomic_write(
-                            &self.layout.chapter_txt(chapter), &txt,
-                        );
+                        let _ = bm_core::atomic_write(&self.layout.chapter_txt(chapter), &txt);
                     }
                     self.ensure_task(chapter, Stage::Digest);
                 }
@@ -257,7 +256,8 @@ impl Inner {
                         // come from it, so a kept render would speak the old
                         // dramatization under the new one. An identical script
                         // invalidates nothing (duplicate reports are free).
-                        let old: Option<Value> = bm_core::read_json(&self.layout.script(chapter)).ok();
+                        let old: Option<Value> =
+                            bm_core::read_json(&self.layout.script(chapter)).ok();
                         let changed = old.as_ref() != Some(&s);
                         let _ = bm_core::atomic_write(
                             &self.layout.script(chapter),
@@ -283,9 +283,7 @@ impl Inner {
                     // neither is a failure, not a silent Done.
                     if let Some(b64) = mp3_b64 {
                         use base64::Engine;
-                        if let Ok(raw) =
-                            base64::engine::general_purpose::STANDARD.decode(&b64)
-                        {
+                        if let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(&b64) {
                             let dest = self.layout.final_mp3(chapter);
                             if let Some(parent) = dest.parent() {
                                 let _ = std::fs::create_dir_all(parent);
@@ -313,7 +311,11 @@ impl Inner {
                 }
                 // Throughput ledger: every completion feeds the ETA model.
                 // Render units are TTS calls; other stages count 1 per chapter.
-                let units = if stage == Stage::Render { c.units.max(1) } else { 1 };
+                let units = if stage == Stage::Render {
+                    c.units.max(1)
+                } else {
+                    1
+                };
                 let _ = bm_core::eta::record(
                     &self.layout.stats(),
                     stage,
@@ -321,11 +323,20 @@ impl Inner {
                     c.duration_secs,
                     &c.worker_id,
                 );
-                self.push_event("ok", format!(
-                    "[{}] {} done in {:.1}s{}",
-                    c.worker_id, c.task_id, c.duration_secs,
-                    if c.detail.is_empty() { String::new() } else { format!(" — {}", bm_core::util::head_chars(&c.detail, 80)) }
-                ));
+                self.push_event(
+                    "ok",
+                    format!(
+                        "[{}] {} done in {:.1}s{}",
+                        c.worker_id,
+                        c.task_id,
+                        c.duration_secs,
+                        if c.detail.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" — {}", bm_core::util::head_chars(&c.detail, 80))
+                        }
+                    ),
+                );
                 self.save();
             }
             Outcome::Failed => {
@@ -349,7 +360,11 @@ impl Inner {
             if let Some(t) = self.tasks.get_mut(task_id) {
                 t.attempts += 1;
                 t.detail = detail.clone();
-                t.state = if t.attempts >= 3 { TaskState::Shelved } else { TaskState::Pending };
+                t.state = if t.attempts >= 3 {
+                    TaskState::Shelved
+                } else {
+                    TaskState::Pending
+                };
                 t.assigned_to = None;
                 t.lease_until = None;
                 t.updated = now_secs();
@@ -359,13 +374,23 @@ impl Inner {
             }
         };
         let level = if shelved { "error" } else { "warn" };
-        let note = if shelved { " (shelved — press u to retry)" } else { " (will retry)" };
-        self.push_event(level, format!(
-            "[{worker_id}] {task_id} FAILED{note}: {}",
-            bm_core::util::head_chars(&detail, 200)
-        ));
+        let note = if shelved {
+            " (shelved — press u to retry)"
+        } else {
+            " (will retry)"
+        };
+        self.push_event(
+            level,
+            format!(
+                "[{worker_id}] {task_id} FAILED{note}: {}",
+                bm_core::util::head_chars(&detail, 200)
+            ),
+        );
         self.save();
-        format!("{worker_id}: {task_id} failed ({})", bm_core::util::head_chars(&detail, 120))
+        format!(
+            "{worker_id}: {task_id} failed ({})",
+            bm_core::util::head_chars(&detail, 120)
+        )
     }
 
     pub fn counts(&self) -> HashMap<String, HashMap<String, usize>> {
@@ -380,7 +405,10 @@ impl Inner {
 
     /// The cast exactly as the cast file holds it.
     pub fn cast_snapshot(&self) -> std::collections::BTreeMap<String, String> {
-        bm_core::cast::read_cast(&self.settings.engine, &self.layout.cast(&self.settings.engine))
+        bm_core::cast::read_cast(
+            &self.settings.engine,
+            &self.layout.cast(&self.settings.engine),
+        )
     }
 
     /// Every speaker the inductor can name: the operator's cast, the cast file,
