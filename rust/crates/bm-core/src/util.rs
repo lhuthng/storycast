@@ -62,6 +62,37 @@ pub fn head_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+/// Fold Vietnamese diacritics to ASCII lowercase, so `thai son` matches
+/// `Thái Sơn` and a clone key like `pham-tuyen` meets its display name.
+/// Single source: the TUI filter and the segment-voice matcher both use this.
+pub fn fold_char(c: char) -> char {
+    match c {
+        'à' | 'á' | 'ạ' | 'ả' | 'ã' | 'â' | 'ầ' | 'ấ' | 'ậ' | 'ẩ' | 'ẫ' | 'ă' | 'ằ' | 'ắ'
+        | 'ặ' | 'ẳ' | 'ẵ' => 'a',
+        'À' | 'Á' | 'Ạ' | 'Ả' | 'Ã' | 'Â' | 'Ầ' | 'Ấ' | 'Ậ' | 'Ẩ' | 'Ẫ' | 'Ă' | 'Ằ' | 'Ắ'
+        | 'Ặ' | 'Ẳ' | 'Ẵ' => 'a',
+        'è' | 'é' | 'ẹ' | 'ẻ' | 'ẽ' | 'ê' | 'ề' | 'ế' | 'ệ' | 'ể' | 'ễ' => 'e',
+        'È' | 'É' | 'Ẹ' | 'Ẻ' | 'Ẽ' | 'Ê' | 'Ề' | 'Ế' | 'Ệ' | 'Ể' | 'Ễ' => 'e',
+        'ì' | 'í' | 'ị' | 'ỉ' | 'ĩ' => 'i',
+        'Ì' | 'Í' | 'Ị' | 'Ỉ' | 'Ĩ' => 'i',
+        'ò' | 'ó' | 'ọ' | 'ỏ' | 'õ' | 'ô' | 'ồ' | 'ố' | 'ộ' | 'ổ' | 'ỗ' | 'ơ' | 'ờ' | 'ớ'
+        | 'ợ' | 'ở' | 'ỡ' => 'o',
+        'Ò' | 'Ó' | 'Ọ' | 'Ỏ' | 'Õ' | 'Ô' | 'Ồ' | 'Ố' | 'Ộ' | 'Ổ' | 'Ỗ' | 'Ơ' | 'Ờ' | 'Ớ'
+        | 'Ợ' | 'Ở' | 'Ỡ' => 'o',
+        'ù' | 'ú' | 'ụ' | 'ủ' | 'ũ' | 'ư' | 'ừ' | 'ứ' | 'ự' | 'ử' | 'ữ' => 'u',
+        'Ù' | 'Ú' | 'Ụ' | 'Ủ' | 'Ũ' | 'Ư' | 'Ừ' | 'Ứ' | 'Ự' | 'Ử' | 'Ữ' => 'u',
+        'ỳ' | 'ý' | 'ỵ' | 'ỷ' | 'ỹ' => 'y',
+        'Ỳ' | 'Ý' | 'Ỵ' | 'Ỷ' | 'Ỹ' => 'y',
+        'đ' => 'd',
+        'Đ' => 'd',
+        c => c.to_ascii_lowercase(),
+    }
+}
+
+pub fn fold(s: &str) -> String {
+    s.chars().map(fold_char).collect()
+}
+
 /// Expand a leading `~` to `$HOME`. Prompts and `-i` flags are not a shell,
 /// so neither expands by itself — and ssh handed a literal `~` path fails
 /// with "not accessible" while rsync (which shells out) expands it, giving
@@ -110,6 +141,14 @@ mod tests {
         assert_eq!(char_len(s), 10);
         assert_eq!(head_chars(s, 6), "Chương");
         assert_eq!(squeeze_ws("  a\n\t b  "), "a b");
+    }
+
+    #[test]
+    fn fold_strips_vietnamese_diacritics_and_case() {
+        assert_eq!(fold("Phạm Tuyên"), "pham tuyen");
+        assert_eq!(fold("Đức Trí"), "duc tri");
+        assert_eq!(fold("Adam"), "adam");
+        assert_eq!(fold("neutral"), "neutral");
     }
 
     #[test]

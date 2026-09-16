@@ -5,7 +5,7 @@ use crate::tui::{
     app::App,
     input::{dispatch, runconfig::run_preview},
     jobs::Job,
-    screen::{CastView, Confirm, ConfirmAction, Screen, TasksView, TextKind, TextPrompt},
+    screen::{Confirm, ConfirmAction, Screen, TasksView, TextKind, TextPrompt},
     style::{Conn, Level},
 };
 
@@ -73,12 +73,6 @@ pub(crate) async fn normal_key(app: &mut App, key: KeyEvent, http: &reqwest::Cli
             None => app.set_status(Level::Warn, "no machine selected"),
             Some(m) => app.screen = Screen::Machine(m.addr.clone()),
         },
-        KeyCode::Char('S') => {
-            app.screen = Screen::Cast(CastView::new());
-            if app.roster.is_none() {
-                app.load_roster(job_tx, http);
-            }
-        }
         KeyCode::Char('B') => {
             // Backend up now, boxes join in background — a second press
             // while the first sequence runs would provision everything

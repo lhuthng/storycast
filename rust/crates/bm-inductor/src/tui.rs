@@ -13,6 +13,8 @@
 //!   state that says what to do next.
 
 pub(crate) mod app;
+pub(crate) mod audio;
+pub(crate) mod audition;
 pub(crate) mod draw;
 pub(crate) mod input;
 pub(crate) mod jobs;

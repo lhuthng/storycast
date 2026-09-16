@@ -24,7 +24,6 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         ("K", "task ledger: every task, its failure detail, and a re-queue key"),
         ("i", "inspect the selected machine (probe output, capabilities)"),
         ("R", "system overview: preview everything"),
-        ("S", "cast overview: every speaker × voice"),
         ("PgUp PgDn", "scroll the log   (G returns to newest)"),
         ("r", "refresh now"),
         ("?", "this help"),
@@ -59,6 +58,7 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         (":c  :crawl", "save the URL template, then probe-crawl one chapter"),
         (":v  :voices", "re-read the roster, enforce the accent policy, refill gaps"),
         (":s  :swap", "repoint one character — destructive, see below"),
+        (":S  :cast", "cast overview: every speaker × voice, read-only"),
         (":e  :eta", "estimate the remaining wall-clock time"),
         (":u  :retry", "requeue every shelved task — strikes reset"),
         (":m  :reconcile", "fold duplicates — asks first; certain folds apply, ambiguous only listed"),
@@ -84,17 +84,44 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }
 
-    section(&mut lines, "Voice picker (:s) and cast overview (S)");
+    section(&mut lines, "Voice picker (:s) and cast overview (:S)");
     for v in [
-        "Step 1 picks a character, step 2 picks a voice. S shows the whole cast",
-        "at once, and Enter there jumps straight to step 2 for that speaker.",
+        "Step 1 picks a character, step 2 picks a voice. :S shows the whole",
+        "cast at once, read-only — swapping happens only in the picker.",
         "Type to filter. Accents are ignored, so \"thai son\" finds \"Thái Sơn\".",
-        "Movement is arrow keys only, so every letter reaches the filter.",
+        "Movement is arrow keys only, so letters reach the filter — except",
+        "`t`/`T` on step 2 and the cast overview, which audition instead.",
         "Every voice is listed with gender, accent, language and style, plus whether",
         "it is already in use and whether the accent policy permits it.",
-        "Tab auditions the highlighted voice into data/previews/<voice>.wav.",
         "Pooled samples show their tags (pool: young, female) — type one to filter.",
         "Enter advances or applies; Esc goes back one step.",
+    ] {
+        lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
+    }
+
+    section(&mut lines, "Auditioning a voice (picker step 2 and cast overview)");
+    for v in [
+        "`t`, `T` and `^T` audition and nothing else — the two letters don't",
+        "filter on these two screens (step 1 still types everything). `t`",
+        "plays the held line with the current voice, from cache only: zero",
+        "synthesis. A miss plays nothing and names the render key. In the",
+        "picker `t` never follows the cursor; in the cast overview it follows",
+        "the highlighted speaker.",
+        "`T` renders that same held line with the pointed voice: the one",
+        "deliberate generation, and the only way to hear two voices on the",
+        "same sentence before either is assigned.",
+        "`^T` renders another line with the pointed voice; the chosen one",
+        "is shown above the list.",
+        "Enter on a voice locks that sentence: later auditions keep it instead of",
+        "another random pick. None of these assign anything — only the confirm",
+        "after Enter changes the cast.",
+        "The line index is read once per session (a hundred scripts) and starts",
+        "building when the screen opens, not when you press the key.",
+        "Playback is afplay, one sample at a time; a new one stops the last.",
+        "The audio comes back from the inductor as bytes, so it is written to a",
+        "single temp file that each audition overwrites and exiting removes. The",
+        "repo is never touched, and the file sits next to the speaker even when",
+        "the inductor is on another box.",
     ] {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }

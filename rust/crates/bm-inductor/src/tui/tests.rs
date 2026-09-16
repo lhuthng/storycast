@@ -1,16 +1,19 @@
 //! Key and render tests, moved as one file.
 use super::app::App;
+use super::audio::Player;
+use super::audition::AuditionLine;
 use super::draw::draw;
 use super::input::{handle_key, op_key, urlencode};
 use super::input::command::{Command, command_key};
 use super::input::runconfig::{parse_run_config, run_preview, save_run_config, save_ssh_setting};
 use super::input::submit::submit_text;
-use super::jobs::{DoneKind, Ev, Job, run_job, set_machine_state};
+use super::jobs::{DoneKind, Ev, Job, job_segment, run_job, set_machine_state};
 use super::layout::{Size, size_class, cols, width_of, MIN_W, MIN_H, FULL_W, FULL_H, FULL_MACHINES_H, FULL_WORKERS_H, FULL_TASKS_H, FULL_EVENTS_MIN_H, FULL_FOOTER_H, COMPACT_MACHINES_H, COMPACT_WORKERS_H, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H, KEYS_FULL, KEYS_COMPACT, COMPACT_MACHINE_COLS, COMPACT_WORKER_COLS};
 use super::model::*;
 use super::screen::*;
 use super::style::*;
 use bm_proto::{Machine, MachineState, Op, OpRequest, Roster, Stage, Task, TaskState, VoiceInfo};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Color;
 use std::collections::BTreeMap;
@@ -473,13 +476,17 @@ use std::collections::BTreeMap;
         clamp_scroll(0, &mut scroll, 100, 10);
         assert_eq!(scroll, 0);
         clamp_scroll(15, &mut scroll, 100, 10);
-        assert_eq!(scroll, 6, "cursor 15 in a 10-row window starts at 6");
+        assert_eq!(scroll, 8, "cursor 15 keeps two lookahead rows in a 10-row window");
         clamp_scroll(2, &mut scroll, 100, 10);
         assert_eq!(scroll, 2);
         // A short list must not scroll past its end.
         let mut s2 = 5;
         clamp_scroll(0, &mut s2, 3, 10);
         assert_eq!(s2, 0);
+        // Near the end the padding collapses: there is nothing below to show.
+        let mut s3 = 0;
+        clamp_scroll(99, &mut s3, 100, 10);
+        assert_eq!(s3, 90);
     }
 
     #[test]
@@ -1330,6 +1337,479 @@ use std::collections::BTreeMap;
         assert!(matches!(app.screen, Screen::Normal), "second Esc closes: {:?}", app.screen);
     }
 
+    // --- auditioning --------------------------------------------------------
+
+    /// Long enough to clear `MIN_LINE_CHARS`, so the chooser prefers it over
+    /// anything shorter a fixture might also offer.
+    fn audition_line(tag: &str) -> String {
+        format!("{tag} — một câu đủ dài để làm mẫu thử giọng đọc cho nhân vật này nhé")
+    }
+
+    /// A picker at step 2 for Narrator (cast to Đức Trí), filtered to a single
+    /// candidate so "the highlighted voice" means one thing.
+    ///
+    /// The filter is load-bearing: `filtered_voices` returns roster order, not
+    /// relevance order, so an empty filter would highlight whoever happens to be
+    /// first in the catalogue rather than the voice the test names.
+    ///
+    /// The index is pre-set rather than loaded, because `ensure_lines` is what the
+    /// screens call and a test should not need a `data/` directory.
+    fn audition_app() -> App {
+        let mut app = App::new("http://127.0.0.1:8901");
+        app.conn = Conn::Up;
+        app.roster = Some(roster_fixture());
+        let mut p = Picker::new();
+        p.stage = PickStage::Voice;
+        p.character = "Narrator".into();
+        p.filter = "adam".into();
+        app.screen = Screen::Pick(p);
+        app.lines = Some(std::collections::HashMap::from([(
+            "Narrator".to_string(),
+            vec![audition_line("một"), audition_line("hai")],
+        )]));
+        app
+    }
+
+    /// Pull the `OpRequest` a keypress dispatched, if it dispatched one.
+    fn last_op(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Job>) -> Option<OpRequest> {
+        match rx.try_recv().ok()? {
+            Job::Op { req, .. } => Some(req),
+            other => panic!("expected an Op job, got {other:?}"),
+        }
+    }
+
+    /// Release the in-flight audition slot the way a completed op would.
+    ///
+    /// Deliberately carries no audio: a helper that shipped a wav would start a
+    /// real player in every test that calls it, and `cargo test` must not make
+    /// noise. The path where audio *does* arrive is covered by
+    /// `a_completed_audition_writes_the_sample_next_to_the_speaker`, which
+    /// installs a silent player first.
+    fn finish_audition(app: &mut App, voice: &str) {
+        app.apply(Ev::Done(DoneKind::Op {
+            op: Op::PreviewVoice,
+            key: op_key(&OpRequest { op: Op::PreviewVoice, ..Default::default() }),
+            ok: true,
+            voice: Some(voice.to_string()),
+            audio_b64: None,
+            line_speaker: None,
+            line_text: None,
+        }));
+    }
+
+    #[tokio::test]
+    async fn t_tests_the_current_voice_on_the_shown_line() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = audition_app();
+
+        // `t`: the current voice on the shown line, from cache only. The
+        // cursor sits on Adam, but `t` never follows it — that is what
+        // `T` (render) and Enter (pick) are for.
+        handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+        let req = last_op(&mut job_rx).expect("t must dispatch a segment fetch");
+        assert_eq!(req.op, Op::Segment);
+        assert_eq!(req.voice.as_deref(), Some("Đức Trí"), "the current voice, not the pointed one");
+        assert_eq!(req.character.as_deref(), Some("Narrator"));
+        let text = req.text.clone().expect("t always names the shown line");
+        assert_eq!(app.audition.as_deref(), Some("Đức Trí"), "the fetch is marked in flight");
+        match &app.screen {
+            Screen::Pick(p) => {
+                assert_eq!(p.filter, "adam", "t auditions in step 2 and must not type");
+                assert_eq!(
+                    p.line.as_ref().map(|l| l.text.clone()),
+                    Some(text.clone()),
+                    "the shown line is held before the audio arrives"
+                );
+            }
+            other => panic!("t must not assign, got {other:?}"),
+        }
+
+        // The served sentence is held and shown, so `T` renders it exactly.
+        let seg_key = op_key(&OpRequest { op: Op::Segment, ..Default::default() });
+        app.apply(Ev::Done(DoneKind::Op {
+            op: Op::Segment,
+            key: seg_key,
+            ok: true,
+            voice: Some("Đức Trí".into()),
+            audio_b64: None,
+            line_speaker: Some("Narrator".into()),
+            line_text: Some("câu đã render".into()),
+        }));
+        match &app.screen {
+            Screen::Pick(p) => {
+                let held = p.line.clone().expect("the served sentence is held");
+                assert_eq!((held.character.as_str(), held.text.as_str()), ("Narrator", "câu đã render"));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // `T`: that exact served sentence, rendered with the pointed voice.
+        finish_audition(&mut app, "Đức Trí");
+        handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
+        let req = last_op(&mut job_rx).expect("T must dispatch an audition");
+        assert_eq!(req.op, Op::PreviewVoice);
+        assert_eq!(req.voice.as_deref(), Some("Adam"), "the pointed voice");
+        let text = req.text.clone().expect("the line is sent as literal text");
+        assert_eq!(text, "câu đã render", "the served sentence, not a fresh pick: {text:?}");
+
+        // ...and it is still held, so the next audition speaks the same sentence.
+        let held = match &app.screen {
+            Screen::Pick(p) => p.line.clone().expect("the line is held on the picker"),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(held.character, "Narrator");
+        assert_eq!(held.text, text);
+
+        finish_audition(&mut app, "Adam");
+        handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
+        let again = last_op(&mut job_rx).expect("a second audition dispatches too");
+        assert_eq!(
+            again.text.as_deref(),
+            Some(text.as_str()),
+            "re-picking here would compare two voices on two sentences"
+        );
+    }
+
+    #[tokio::test]
+    async fn ctrl_t_rerolls_the_pointed_voice_on_another_line() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = audition_app();
+
+        // Hear the candidate, which also picks and holds the line.
+        handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
+        let candidate = last_op(&mut job_rx).expect("dispatched");
+        assert_eq!(candidate.voice.as_deref(), Some("Adam"));
+        finish_audition(&mut app, "Adam");
+
+        // `^T`: the pointed voice again, re-rolled — a render, never a
+        // cache-only segment fetch.
+        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        handle_key(&mut app, ctrl_t, &http, &job_tx).await;
+        let reroll = last_op(&mut job_rx).expect("^T must dispatch");
+        assert_eq!(reroll.op, Op::PreviewVoice);
+        assert_eq!(reroll.voice.as_deref(), Some("Adam"), "the pointed voice");
+        assert_eq!(reroll.character.as_deref(), Some("Narrator"));
+        let text = reroll.text.clone().expect("a line is always sent");
+        assert!(!text.is_empty(), "a reroll still names a line");
+        let index = app.lines.as_ref().expect("fixture has lines")["Narrator"].clone();
+        assert!(index.contains(&text), "rerolled from Narrator's lines: {text:?}");
+    }
+
+    #[tokio::test]
+    async fn controlled_letters_other_than_t_u_r_do_nothing() {
+        // `^T` auditions, `^U` clears, `^R` reloads; every other controlled
+        // letter must leave the audio and the filter alone.
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = audition_app();
+        if let Screen::Pick(p) = &mut app.screen {
+            p.filter.clear();
+        }
+        for (code, mods) in [
+            (KeyCode::Char('o'), KeyModifiers::CONTROL),
+            (KeyCode::Char('n'), KeyModifiers::CONTROL),
+        ] {
+            handle_key(&mut app, KeyEvent::new(code, mods), &http, &job_tx).await;
+        }
+        assert!(job_rx.try_recv().is_err(), "no letter binding dispatches");
+        match &app.screen {
+            Screen::Pick(p) => assert_eq!(p.filter, "", "controlled letters must not type either"),
+            other => panic!("must stay in the picker, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_audition_while_one_renders_is_refused_by_name() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = audition_app();
+        app.audition = Some("Đức Trí".into());
+
+        handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+        assert!(job_rx.try_recv().is_err(), "one render at a time");
+        assert!(app.status.text.contains("Đức Trí"), "say what is rendering: {:?}", app.status);
+        assert_eq!(app.audition.as_deref(), Some("Đức Trí"), "the running render keeps the marker");
+    }
+
+    #[tokio::test]
+    async fn a_refused_audition_does_not_leave_the_screen_wedged() {
+        // The bug this guards: the marker used to be set *before* the dispatch, and
+        // a refused dispatch sends no `Done` — so the screen sat behind a render
+        // that never started, and every later key was refused for the same reason.
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = audition_app();
+        app.inflight
+            .push(op_key(&OpRequest { op: Op::Segment, ..Default::default() }));
+
+        handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+        assert!(job_rx.try_recv().is_err(), "nothing was dispatched");
+        assert!(app.audition.is_none(), "a refused audition must not claim the marker");
+        assert!(app.status.text.contains("already running"), "{:?}", app.status);
+    }
+
+    #[tokio::test]
+    async fn plain_o_and_n_still_type_into_the_filter() {
+        // `t`/`T` audition on these screens; every other bare letter is a
+        // filter letter — o and n stand in for all of them here.
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = audition_app();
+        // Start from an empty filter so the assertion is about what was typed.
+        if let Screen::Pick(p) = &mut app.screen {
+            p.filter.clear();
+        }
+        for c in ['o', 'n'] {
+            handle_key(&mut app, key(KeyCode::Char(c)), &http, &job_tx).await;
+        }
+        match &app.screen {
+            Screen::Pick(p) => assert_eq!(p.filter, "on"),
+            other => panic!("o and n must type, got {other:?}"),
+        }
+        assert!(job_rx.try_recv().is_err(), "typing must not dispatch");
+    }
+
+    #[tokio::test]
+    async fn t_still_types_in_picker_step_1() {
+        // The audition binding is step-2-only: picking a character still
+        // needs every letter, `t` included.
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = audition_app();
+        if let Screen::Pick(p) = &mut app.screen {
+            p.stage = PickStage::Character;
+            p.filter.clear();
+        }
+        for c in ['t', 'T'] {
+            handle_key(&mut app, key(KeyCode::Char(c)), &http, &job_tx).await;
+        }
+        match &app.screen {
+            Screen::Pick(p) => {
+                assert_eq!(p.stage, PickStage::Character);
+                assert_eq!(p.filter, "tT");
+            }
+            other => panic!("t must type in step 1, got {other:?}"),
+        }
+        assert!(job_rx.try_recv().is_err(), "typing must not dispatch");
+    }
+
+    #[tokio::test]
+    async fn the_cast_overview_auditions_the_highlighted_speakers_own_voice() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = App::new("http://127.0.0.1:8901");
+        app.roster = Some(roster_fixture());
+        app.lines = Some(std::collections::HashMap::from([(
+            "Narrator".to_string(),
+            vec![audition_line("n")],
+        )]));
+        app.screen = Screen::Cast(CastView::new());
+
+        // Narrator leads the table and is cast to Đức Trí: no candidate voice
+        // exists here, so the key plays what the speaker already has.
+        handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
+        let req = last_op(&mut job_rx).expect("T must dispatch");
+        assert_eq!(req.voice.as_deref(), Some("Đức Trí"));
+        assert_eq!(req.character.as_deref(), Some("Narrator"));
+        assert!(req.text.is_some(), "the line came from the scripts");
+    }
+
+    #[tokio::test]
+    async fn t_in_the_cast_overview_tests_the_current_voice_on_the_shown_line() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = App::new("http://127.0.0.1:8901");
+        app.conn = Conn::Up;
+        app.roster = Some(roster_fixture());
+        app.lines = Some(std::collections::HashMap::from([(
+            "Narrator".to_string(),
+            vec![audition_line("n")],
+        )]));
+        app.screen = Screen::Cast(CastView::new());
+
+        handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+        let req = last_op(&mut job_rx).expect("t must dispatch a segment fetch");
+        assert_eq!(req.op, Op::Segment);
+        assert_eq!(req.voice.as_deref(), Some("Đức Trí"), "the speaker's own voice");
+        assert_eq!(req.character.as_deref(), Some("Narrator"));
+        assert!(req.text.as_deref().is_some_and(|t| !t.is_empty()), "t always names the shown line");
+    }
+
+    #[tokio::test]
+    async fn the_cast_overview_will_not_audition_an_unassigned_speaker() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = App::new("http://127.0.0.1:8901");
+        app.roster = Some(roster_fixture());
+        app.screen = Screen::Cast(CastView::new());
+        // "Mới" is a known speaker the cast file has never assigned, so the table
+        // shows it with an empty voice. Filtering to it is deterministic; walking
+        // to the last row is not, because the table's order is not the cast's.
+        if let Screen::Cast(v) = &mut app.screen {
+            v.filter = "moi".into();
+        }
+        handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+        assert!(job_rx.try_recv().is_err(), "an empty voice is nothing to play");
+        assert!(app.status.text.contains("no voice assigned"), "{:?}", app.status);
+    }
+
+        #[tokio::test]
+    async fn a_failed_line_index_says_which_half_is_out() {
+        let mut app = audition_app();
+        app.lines = None;
+        app.lines_loading = true;
+        app.apply(Ev::Lines(Err(
+            "no data/script-*.json under /r — run t (translate) first".into(),
+        )));
+        assert!(!app.lines_loading, "the guard must be released or nothing ever retries");
+        assert!(app.lines.is_none());
+        assert!(app.status.text.contains("translate"), "name the fix: {:?}", app.status);
+        assert!(
+            app.status.text.contains("t (rendered segments) still plays"),
+            "the half that still works must be stated: {:?}",
+            app.status
+        );
+    }
+
+    #[tokio::test]
+    async fn every_finished_audition_replaces_the_auditioning_line() {
+        // The bug this guards: "auditioning…" is written when the op is
+        // *dispatched*, and it used to be replaced only when the op returned
+        // *and* had audio. Against an inductor older than the TUI — which has no
+        // audio field at all — the bar kept claiming a render was in flight
+        // after it had finished, and nothing else ever clears that line.
+        let key = op_key(&OpRequest { op: Op::PreviewVoice, ..Default::default() });
+        let done = |ok: bool, audio_b64: Option<String>| DoneKind::Op {
+            op: Op::PreviewVoice,
+            key: key.clone(),
+            ok,
+            voice: Some("Adam".into()),
+            audio_b64,
+            line_speaker: None,
+            line_text: None,
+        };
+        let in_flight = || {
+            let mut app = audition_app();
+            app.audition = Some("Adam".into());
+            app.set_status(Level::Info, "auditioning Adam (sample) for “Narrator”…");
+            app
+        };
+
+        // (1) Success with no audio: an older inductor on the other end.
+        let mut app = in_flight();
+        app.apply(Ev::Done(done(true, None)));
+        assert!(app.audition.is_none(), "the marker is released");
+        assert!(!app.status.text.contains("auditioning"), "{:?}", app.status);
+        assert!(app.status.text.contains("restart"), "name the fix: {:?}", app.status);
+
+        // (2) Failure: the error itself is in the event pane, but the bar must
+        // stop saying a render is in flight.
+        let mut app = in_flight();
+        app.apply(Ev::Done(done(false, None)));
+        assert!(!app.status.text.contains("auditioning"), "{:?}", app.status);
+
+        // (3) Audio that is not base64 at all.
+        let mut app = in_flight();
+        app.apply(Ev::Done(done(true, Some("not base64 !!".into()))));
+        assert!(matches!(app.status.level, Level::Error), "{:?}", app.status);
+        assert!(app.status.text.contains("undecodable"), "{:?}", app.status);
+    }
+
+    #[tokio::test]
+    async fn a_completed_audition_writes_the_sample_next_to_the_speaker() {
+        // Why the wire carries bytes and not a path: the file has to land on the
+        // machine with the speaker, so the inductor's disk stays untouched. The
+        // stand-in player is `true` — it spawns for real and makes no sound.
+        let scratch =
+            std::env::temp_dir().join(format!("bmaud-test-{}-play.wav", std::process::id()));
+        let _ = std::fs::remove_file(&scratch);
+
+        let mut app = audition_app();
+        app.player = Player::silent_for_test(scratch.clone());
+        app.audition = Some("Adam".into());
+        app.inflight
+            .push(op_key(&OpRequest { op: Op::PreviewVoice, ..Default::default() }));
+
+        app.apply(Ev::Done(DoneKind::Op {
+            op: Op::PreviewVoice,
+            key: op_key(&OpRequest { op: Op::PreviewVoice, ..Default::default() }),
+            ok: true,
+            voice: Some("Adam".into()),
+            audio_b64: Some(B64.encode(b"RIFF-fake-wav")),
+            line_speaker: None,
+            line_text: None,
+        }));
+
+        assert_eq!(std::fs::read(&scratch).unwrap(), b"RIFF-fake-wav");
+        assert!(app.audition.is_none(), "the marker is released");
+        assert!(app.inflight.is_empty(), "the in-flight slot is released");
+        assert!(matches!(app.status.level, Level::Info), "{:?}", app.status);
+        assert!(app.status.text.contains("playing"), "{:?}", app.status);
+
+        let _ = std::fs::remove_file(&scratch);
+    }
+
+    #[tokio::test]
+    async fn the_line_index_releases_the_in_flight_count() {
+        // The bug this guards: `job_load_lines` reported `Ev::Lines` and never
+        // `Ev::Done`, so `App::pending` was +1 from the first screen that
+        // auditions until the process exited — a footer reading "1 job(s)
+        // running" over a dashboard with nothing running, permanently.
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = audition_app();
+        app.lines = None;
+        app.ensure_lines(&job_tx);
+        assert_eq!(app.pending, 1, "the dispatch is counted");
+
+        let job = job_rx.try_recv().expect("ensure_lines dispatches the index");
+        assert!(matches!(job, Job::LoadLines { .. }), "{job:?}");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
+        run_job(job, tx).await;
+
+        let mut saw_payload = false;
+        while let Ok(ev) = rx.try_recv() {
+            saw_payload |= matches!(ev, Ev::Lines(_));
+            app.apply(ev);
+        }
+        assert!(saw_payload, "the index still reports what it found");
+        assert_eq!(app.pending, 0, "and the count comes back down");
+    }
+
+    #[tokio::test]
+    async fn the_picker_shows_the_incumbent_the_held_line_and_the_keys() {
+        let mut app = audition_app();
+        if let Screen::Pick(p) = &mut app.screen {
+            p.line = Some(AuditionLine {
+                character: "Narrator".into(),
+                text: "câu thử giọng".into(),
+            });
+        }
+        let text = render_text(&mut app, 140, 44);
+        assert!(text.contains("current:"), "the incumbent must be visible:\n{text}");
+        assert!(text.contains("Đức Trí"), "…and named, not implied:\n{text}");
+        assert!(text.contains("câu thử giọng"), "the held line must be shown:\n{text}");
+        assert!(text.contains("T candidate"), "the keys must be advertised:\n{text}");
+        assert!(text.contains("^T another line"), "the reroll must be advertised:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn the_cast_overview_shows_the_line_it_will_audition() {
+        let mut app = App::new("http://127.0.0.1:8901");
+        app.roster = Some(roster_fixture());
+        app.screen = Screen::Cast(CastView::new());
+        if let Screen::Cast(v) = &mut app.screen {
+            v.line = Some(AuditionLine {
+                character: "Narrator".into(),
+                text: "câu đang thử".into(),
+            });
+        }
+        let text = render_text(&mut app, 140, 44);
+        assert!(text.contains("câu đang thử"), "a random line is random until it is shown:\n{text}");
+        assert!(text.contains("assigns nothing"), "the keys must say they are harmless:\n{text}");
+    }
+
     #[tokio::test]
     async fn tasks_filter_accepts_j_and_k_instead_of_moving() {
         let http = reqwest::Client::new();
@@ -1445,4 +1925,179 @@ use std::collections::BTreeMap;
         assert_eq!(command_key("sshkey"), Some(Command::SshKey));
         assert_eq!(command_key("sshuser"), Some(Command::SshUser));
         assert_eq!(command_key("sshport"), Some(Command::SshPort));
+    }
+
+    #[tokio::test]
+    async fn cast_opens_only_from_the_command_line() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = App::new("http://127.0.0.1:8901");
+        // Bare S is inert: the overview is gated behind :S like every other
+        // screen that can dispatch work.
+        handle_key(&mut app, key(KeyCode::Char('S')), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Normal), "bare S must not open anything: {:?}", app.screen);
+        assert!(job_rx.try_recv().is_err(), "bare S must not dispatch");
+        // Both spellings name the same command.
+        assert_eq!(command_key("S"), Some(Command::Cast));
+        assert_eq!(command_key("cast"), Some(Command::Cast));
+        app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "S"));
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Cast(_)), ":S opens the overview: {:?}", app.screen);
+    }
+
+    #[tokio::test]
+    async fn enter_in_the_cast_overview_goes_nowhere() {
+        // The overview is read-only: swapping happens only in the picker.
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = App::new("http://127.0.0.1:8901");
+        app.roster = Some(roster_fixture());
+        app.screen = Screen::Cast(CastView::new());
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Cast(_)), "Enter must not leave the overview: {:?}", app.screen);
+        assert!(job_rx.try_recv().is_err(), "Enter must not dispatch");
+    }
+
+    #[tokio::test]
+    async fn enter_on_a_voice_locks_its_sentence_for_later() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = audition_app();
+        // Hear the candidate on a real line first.
+        handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
+        let line = last_op(&mut job_rx).expect("dispatched").text.clone().unwrap();
+        finish_audition(&mut app, "Adam");
+        // Point at an allowed voice and pick it.
+        match &mut app.screen {
+            Screen::Pick(p) => {
+                p.filter.clear();
+                p.cursor = 0;
+            }
+            other => panic!("{other:?}"),
+        }
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+        assert!(matches!(app.screen, Screen::Confirm(_)), "Enter asks first: {:?}", app.screen);
+        assert_eq!(
+            app.locked_lines.get("Narrator").map(|l| l.text.clone()),
+            Some(line.clone()),
+            "the picked sentence is locked, not re-picked"
+        );
+        // Reopening the picker for them resumes on the locked sentence.
+        let mut p = Picker::new();
+        p.filter = "Narrator".into();
+        app.screen = Screen::Pick(p);
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+        match &app.screen {
+            Screen::Pick(p) => {
+                assert_eq!(p.stage, PickStage::Voice);
+                assert_eq!(
+                    p.line.as_ref().map(|l| l.text.clone()),
+                    Some(line),
+                    "no fresh random pick for a locked character"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn local_cache_layout() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = bm_core::Layout::new(dir.path());
+        std::fs::create_dir_all(layout.data()).unwrap();
+        std::fs::write(
+            layout.script(1),
+            serde_json::json!({"segments": [
+                {"speaker": "Narrator", "text": "Nar nói."},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let seg = layout.seg_dir("vieneu", 1);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000_Đức Trí.wav"), b"RIFF-fake-local").unwrap();
+        (dir, layout.root.clone())
+    }
+
+    #[tokio::test]
+    async fn t_while_disconnected_reads_the_local_cache() {
+        // No backend: t serves the same lookup from this checkout's files
+        // instead of the API. Listening needs no :B.
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let (_dir, root) = local_cache_layout();
+        let mut app = audition_app();
+        app.conn = Conn::Down("inductor down".into());
+        app.layout_root = root.clone();
+        handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+        match job_rx.try_recv().expect("t must dispatch while disconnected") {
+            Job::Segment { character, voice, text, .. } => {
+                assert_eq!(character, "Narrator");
+                assert_eq!(voice, "Đức Trí", "t tests the current voice, never the pointed one");
+                assert!(!text.is_empty(), "t always names the shown line");
+            }
+            other => panic!("offline t must be a Segment job, got {other:?}"),
+        }
+        assert_eq!(app.audition.as_deref(), Some("Đức Trí"));
+
+        // The worker reports through the same Done shape, so holding and
+        // playback cannot tell the paths apart.
+        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel::<Ev>();
+        job_segment(tx2, root, "Narrator".into(), "Đức Trí".into(), "Nar nói.".into()).await;
+        let mut done: Option<DoneKind> = None;
+        while let Ok(ev) = rx2.try_recv() {
+            if let Ev::Done(d) = ev {
+                done = Some(d);
+            }
+        }
+        match done.expect("the job owes exactly one Done") {
+            DoneKind::Op { ok, voice, audio_b64, line_speaker, line_text, .. } => {
+                assert!(ok);
+                assert_eq!(voice.as_deref(), Some("Đức Trí"));
+                assert_eq!(line_speaker.as_deref(), Some("Narrator"));
+                assert_eq!(line_text.as_deref(), Some("Nar nói."));
+                let wav = B64.decode(audio_b64.unwrap().as_bytes()).unwrap();
+                assert_eq!(wav, b"RIFF-fake-local");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(app.inflight.iter().any(|k| k.starts_with("segment|")), "the slot frees on Done");
+    }
+
+    #[tokio::test]
+    async fn t_with_no_backend_and_no_checkout_says_so() {
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = audition_app();
+        app.conn = Conn::Down("inductor down".into());
+        app.layout_root = std::path::PathBuf::new();
+        handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+        assert!(job_rx.try_recv().is_err(), "nothing to read from, nothing dispatched");
+        assert!(app.audition.is_none(), "no marker without work");
+        assert!(app.status.text.contains(":B"), "name the way back: {:?}", app.status);
+    }
+
+    #[tokio::test]
+    async fn down_at_the_last_row_stays_put() {
+        // The highlight must never leave the list: Down past the end used to
+        // silently select nothing.
+        let http = reqwest::Client::new();
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let mut app = audition_app();
+        handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
+        match &app.screen {
+            Screen::Pick(p) => assert_eq!(p.cursor, 0, "one row in the filter, nowhere to go"),
+            other => panic!("{other:?}"),
+        }
+        assert!(job_rx.try_recv().is_err(), "movement dispatches nothing");
+
+        let mut app = App::new("http://127.0.0.1:8901");
+        app.roster = Some(roster_fixture());
+        let mut v = CastView::new();
+        v.filter = "kien".into();
+        app.screen = Screen::Cast(v);
+        handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
+        match &app.screen {
+            Screen::Cast(v) => assert_eq!(v.cursor, 0, "one row in the filter, nowhere to go"),
+            other => panic!("{other:?}"),
+        }
     }

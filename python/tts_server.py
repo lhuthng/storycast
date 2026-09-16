@@ -6,9 +6,10 @@ Clients set TTS_HOST=http://<this-host>:8818 (or --tts-host) and every
 synth/preview/clone call runs here instead of locally. Stdlib only, no auth —
 LAN use or SSH tunnel only.
 
-NOTE: custom enrolled voices (Suneo, Nobita, ...) live in THIS machine's voice
-store. Copy refs/*.wav over and enroll once per name:
-    python -c "import tts_vieneu as vn; tts=vn.engine(); tts.add_voice('Suneo','refs/suneo.wav'); tts.save_voices()"
+NOTE: `voices.json` (repo root) is the single source of truth for clone
+voices — never enroll by hand into one machine's store. Add the entry
+(`"Suneo": "refs/suneo.wav"`) and provision; every worker enrolls it and
+provision warns about store voices nothing declares.
 """
 from __future__ import annotations
 

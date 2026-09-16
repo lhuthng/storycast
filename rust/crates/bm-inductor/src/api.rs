@@ -154,10 +154,9 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             // builds) would digest and then idle with nothing offerable.
             inner.reconcile(start, count);
             let (crawls, digests) = inner.enqueue_translate(start, count);
-            Json(OpResult {
-                ok: true,
-                message: format!("translate ch{start}..: {crawls} crawls + {digests} digests queued"),
-            })
+            Json(OpResult::ok(format!(
+                "translate ch{start}..: {crawls} crawls + {digests} digests queued"
+            )))
         }
         bm_proto::Op::CrawlSetup => {
             let (layout, template) = {
@@ -183,29 +182,40 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                 req.voice.clone().unwrap_or_default(),
             );
             if character.is_empty() || voice.is_empty() {
-                return Json(OpResult { ok: false, message: "swap needs character + voice".into() });
+                return Json(OpResult::fail("swap needs character + voice"));
             }
             let mut inner = st.lock().await;
             match inner.op_swap_voice(&character, &voice) {
-                Ok(msg) => Json(OpResult { ok: true, message: msg }),
-                Err(e) => Json(OpResult { ok: false, message: format!("swap failed: {e:#}") }),
+                Ok(msg) => Json(OpResult::ok(msg)),
+                Err(e) => Json(OpResult::fail(format!("swap failed: {e:#}"))),
             }
         }
         bm_proto::Op::PreviewVoice => {
-            let (layout, voice) = {
+            // No lock taken: rendering a sample reads no scheduler state, and
+            // holding the lock across a sidecar call would freeze the whole
+            // dashboard for as long as the render takes.
+            let voice = req.voice.clone().unwrap_or_default();
+            Json(op_preview_voice(&voice, req.text.as_deref()).await)
+        }
+        bm_proto::Op::Segment => {
+            // Files only, no lock beyond cloning two small values: the whole
+            // point is serving bytes without synthesis.
+            let (layout, engine) = {
                 let inner = st.lock().await;
-                (inner.layout.clone(), req.voice.clone().unwrap_or_default())
+                (inner.layout.clone(), inner.settings.engine.clone())
             };
-            Json(op_preview_voice(&layout, &voice).await)
+            let character = req.character.clone().unwrap_or_default();
+            let voice = req.voice.clone().unwrap_or_default();
+            Json(op_segment(&layout, &engine, &character, &voice, req.text.as_deref()))
         }
         bm_proto::Op::Eta => {
             let inner = st.lock().await;
             let (start, count) = (req.start.unwrap_or(1), req.count.unwrap_or(1));
-            Json(OpResult { ok: true, message: inner.op_eta(start, count) })
+            Json(OpResult::ok(inner.op_eta(start, count)))
         }
         bm_proto::Op::Requeue => {
             let mut inner = st.lock().await;
-            Json(OpResult { ok: true, message: inner.op_requeue_orphans() })
+            Json(OpResult::ok(inner.op_requeue_orphans()))
         }
         bm_proto::Op::Retry => {
             let mut inner = st.lock().await;
@@ -213,11 +223,12 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             // named, it narrows to that one task instead — which is what the
             // Tasks screen sends, so one bad digest never re-queues the batch.
             match (req.stage, req.chapter) {
-                (Some(stage), Some(chapter)) => Json(OpResult {
-                    ok: true,
-                    message: inner.op_retry_task(stage, chapter, req.force.unwrap_or(false)),
-                }),
-                _ => Json(OpResult { ok: true, message: inner.op_retry_shelved() }),
+                (Some(stage), Some(chapter)) => Json(OpResult::ok(inner.op_retry_task(
+                    stage,
+                    chapter,
+                    req.force.unwrap_or(false),
+                ))),
+                _ => Json(OpResult::ok(inner.op_retry_shelved())),
             }
         }
         bm_proto::Op::RetryTask => {
@@ -225,12 +236,9 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             match (stage, chapter) {
                 (Some(stage), Some(chapter)) => {
                     let mut inner = st.lock().await;
-                    Json(OpResult { ok: true, message: inner.op_retry_task(stage, chapter, force) })
+                    Json(OpResult::ok(inner.op_retry_task(stage, chapter, force)))
                 }
-                _ => Json(OpResult {
-                    ok: false,
-                    message: "retry-task requires stage and chapter".into(),
-                }),
+                _ => Json(OpResult::fail("retry-task requires stage and chapter")),
             }
         }
         bm_proto::Op::Reconcile => {
@@ -283,26 +291,23 @@ async fn op_reconcile(
             .and_then(|c| c.as_array())
             .map(|a| a.len())
             .unwrap_or(0);
-        return OpResult { ok: true, message: format!("reconcile: bible already clean ({n} characters)") };
+        return OpResult::ok(format!("reconcile: bible already clean ({n} characters)"));
     }
     if !merges.is_empty() {
         let mut inner = st.lock().await;
         return match inner.apply_reconcile(&merges) {
-            Ok(msg) => OpResult {
-                ok: true,
-                message: format!(
-                    "{msg}{}",
-                    if plan.candidates.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            "; {} ambiguous pairs remain — press m again",
-                            plan.candidates.len()
-                        )
-                    }
-                ),
-            },
-            Err(e) => OpResult { ok: false, message: format!("reconcile refused: {e:#}") },
+            Ok(msg) => OpResult::ok(format!(
+                "{msg}{}",
+                if plan.candidates.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; {} ambiguous pairs remain — press m again",
+                        plan.candidates.len()
+                    )
+                }
+            )),
+            Err(e) => OpResult::fail(format!("reconcile refused: {e:#}")),
         };
     }
     // No certain folds. The ambiguous pairs are listed for a human to judge —
@@ -313,13 +318,10 @@ async fn op_reconcile(
         .iter()
         .map(|(a, b)| format!("{a} / {b}"))
         .collect();
-    OpResult {
-        ok: true,
-        message: format!(
-            "reconcile: nothing certain to fold; ambiguous pairs (no auto-merge): {}",
-            pairs.join("; ")
-        ),
-    }
+    OpResult::ok(format!(
+        "reconcile: nothing certain to fold; ambiguous pairs (no auto-merge): {}",
+        pairs.join("; ")
+    ))
 }
 
 /// Persist the URL template and probe-crawl one chapter to prove the
@@ -341,23 +343,25 @@ async fn op_crawl_setup(
     {
         Ok(r) => match r.text().await {
             Ok(t) => t,
-            Err(e) => {
-                return OpResult { ok: false, message: format!("probe crawl: read failed: {e:#}") }
-            }
+            Err(e) => return OpResult::fail(format!("probe crawl: read failed: {e:#}")),
         },
-        Err(e) => return OpResult { ok: false, message: format!("probe crawl: fetch failed: {e:#}") },
+        Err(e) => return OpResult::fail(format!("probe crawl: fetch failed: {e:#}")),
     };
     let cleaned = bm_core::crawl::clean_storya_html(&text);
     let first = cleaned.lines().next().unwrap_or("").to_string();
     let looks_right = cleaned.len() > 200
         && (first.starts_with("Chương ") || first.contains("chương"));
-    OpResult {
-        ok: looks_right,
-        message: format!(
-            "probe ch{sample}: {} chars, headline {first:?} — {}",
-            cleaned.len(),
-            if looks_right { "selector OK" } else { "SELECTOR SUSPECT (short or no headline)" }
-        ),
+    // A probe that reads but looks wrong is a *failure* with a diagnosis, not a
+    // success with a caveat: `ok` drives the colour, so it must say `false`.
+    let message = format!(
+        "probe ch{sample}: {} chars, headline {first:?} — {}",
+        cleaned.len(),
+        if looks_right { "selector OK" } else { "SELECTOR SUSPECT (short or no headline)" }
+    );
+    if looks_right {
+        OpResult::ok(message)
+    } else {
+        OpResult::fail(message)
     }
 }
 /// Read the sidecar roster, enforce the accent policy on the cast file, and
@@ -370,10 +374,7 @@ async fn op_voices(layout: &bm_core::Layout, engine: &str) -> OpResult {
     let policy = match bm_core::voices::effective_policy(&layout.roster(), engine) {
         Ok(p) => p,
         Err(e) => {
-            return OpResult {
-                ok: false,
-                message: format!("voices: {e}"),
-            }
+            return OpResult::fail(format!("voices: {e}"))
         }
     };
     // Live roster when a sidecar answers, offline fallback otherwise.
@@ -424,23 +425,20 @@ async fn op_voices(layout: &bm_core::Layout, engine: &str) -> OpResult {
         if let Err(e) =
             bm_core::cast::load_cast(sp, &cast_path, &layout.bible(), &policy, true)
         {
-            return OpResult {
-                ok: false,
-                message: format!("cast refill failed on {}: {e:#}", sp.display()),
-            };
+            return OpResult::fail(format!(
+                "cast refill failed on {}: {e:#}",
+                sp.display()
+            ));
         }
     }
     let cast = bm_core::cast::read_cast(engine, &cast_path);
     let gaps = cast.len().saturating_sub(filled_from);
-    OpResult {
-        ok: true,
-        message: format!(
-            "voices ({}, {} enrolled clones): pruned {dropped}, filled {gaps} gaps, {} speakers mapped",
-            if live { "live roster" } else { "offline roster" },
-            enrolled.len(),
-            cast.len()
-        ),
-    }
+    OpResult::ok(format!(
+        "voices ({}, {} enrolled clones): pruned {dropped}, filled {gaps} gaps, {} speakers mapped",
+        if live { "live roster" } else { "offline roster" },
+        enrolled.len(),
+        cast.len()
+    ))
 }
 async fn state(State(st): State<Shared>) -> impl IntoResponse {
     let inner = st.lock().await;
@@ -647,89 +645,154 @@ async fn build_roster(
     }
 }
 
-/// Render a short sample of one voice so it can be auditioned before it is
-/// assigned. The file lands in `data/previews/` and the op reports the path, so
-/// the inductor never needs to know how a client plays audio.
-async fn op_preview_voice(layout: &bm_core::Layout, voice: &str) -> OpResult {
+/// Render one voice's speech so it can be auditioned before it is assigned.
+///
+/// Without `text` this is the voice *sample*: the sidecar's fixed audition line,
+/// which is the only way two voices are comparable. With `text` it is a real
+/// line from the book, which is what an operator actually wants to hear before
+/// committing a swap.
+///
+/// Either way the bytes come back in `OpResult::audio_b64` and **nothing is
+/// written here**. The inductor never plays anything — it is a server, and the
+/// speaker is on the client's desk — so it is also the wrong machine to put a
+/// file on: a path is useless to a client that does not share this filesystem,
+/// and an audition that lands in `data/` accumulates one clip per voice
+/// auditioned. The client owns the file, because the client owns the speaker.
+async fn op_preview_voice(voice: &str, text: Option<&str>) -> OpResult {
     let voice = voice.trim();
     if voice.is_empty() {
-        return OpResult { ok: false, message: "preview needs a voice name".into() };
+        return OpResult::fail("preview needs a voice name");
     }
+    // Two routes into the sidecar, and the difference is the point. No text
+    // means `/preview`, which speaks the sidecar's fixed audition line — the
+    // only way two voice samples are comparable. Text means `/infer`, which is
+    // how an operator hears a *real* line from the book instead of a sample.
+    let line = text.map(str::trim).filter(|t| !t.is_empty());
+    let (path, body) = match line {
+        Some(t) => ("/infer", serde_json::json!({"voice": voice, "text": t})),
+        None => ("/preview", serde_json::json!({"voice": voice})),
+    };
     let http = match reqwest::Client::builder()
         .timeout(Duration::from_secs(180))
         .no_proxy()
         .build()
     {
         Ok(c) => c,
-        Err(e) => return OpResult { ok: false, message: format!("preview {voice}: {e:#}") },
+        Err(e) => return OpResult::fail(format!("preview {voice}: {e:#}")),
     };
-    let resp = match http
-        .post(format!("{SIDECAR}/preview"))
-        .json(&serde_json::json!({"voice": voice}))
-        .send()
-        .await
-    {
+    let resp = match http.post(format!("{SIDECAR}{path}")).json(&body).send().await {
         Ok(r) => r,
         Err(e) => {
-            return OpResult {
-                ok: false,
-                message: format!("preview {voice}: TTS sidecar unreachable at {SIDECAR} ({e})"),
-            }
+            return OpResult::fail(format!(
+                "preview {voice}: TTS sidecar unreachable at {SIDECAR} ({e})"
+            ))
         }
     };
     if !resp.status().is_success() {
         let code = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return OpResult {
-            ok: false,
-            message: format!(
-                "preview {voice}: sidecar {code} — {}",
-                bm_core::util::head_chars(body.trim(), 200)
-            ),
-        };
+        return OpResult::fail(format!(
+            "preview {voice}: sidecar {code} — {}",
+            bm_core::util::head_chars(body.trim(), 200)
+        ));
     }
     let bytes = match resp.bytes().await {
         Ok(b) => b,
-        Err(e) => {
-            return OpResult { ok: false, message: format!("preview {voice}: read failed ({e})") }
-        }
+        Err(e) => return OpResult::fail(format!("preview {voice}: read failed ({e})")),
     };
-    let dir = layout.data().join("previews");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return OpResult { ok: false, message: format!("preview {voice}: {e}") };
-    }
-    let dest = dir.join(format!("{}.wav", file_safe(voice)));
-    if let Err(e) = std::fs::write(&dest, &bytes) {
-        return OpResult { ok: false, message: format!("preview {voice}: {e}") };
-    }
-    OpResult {
-        ok: true,
-        message: format!(
-            "preview {voice}: {} KB -> {} · play: afplay \"{}\"",
-            bytes.len() / 1024,
-            dest.display(),
-            dest.display()
-        ),
-    }
+    let what = match line {
+        Some(_) => "line",
+        None => "sample",
+    };
+    audio_result(voice, what, &bytes)
 }
 
-/// Voice names are Vietnamese and carry diacritics; a separator or control
-/// character must never let one escape the preview directory.
-fn file_safe(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' => '_',
-            c if c.is_control() => '_',
-            c => c,
-        })
-        .collect();
-    let cleaned = cleaned.trim().to_string();
-    if cleaned.is_empty() {
-        "voice".into()
-    } else {
-        cleaned
+/// Turn a rendered wav into the op's answer.
+///
+/// Split out from the HTTP call so the contract is testable without a sidecar:
+/// bytes in, base64 out, and **nothing written**. The inductor is the wrong
+/// machine to put a sample on — a path is useless to a client that does not
+/// share this filesystem, and a clip that landed in `data/` would accumulate
+/// one file per voice auditioned, which is exactly what the operator asked it
+/// not to do.
+fn audio_result(voice: &str, what: &str, bytes: &[u8]) -> OpResult {
+    if bytes.is_empty() {
+        // A 200 with an empty body is not audio. Passing it on would make the
+        // client report a playback failure for a render that produced nothing.
+        return OpResult::fail(format!("preview {voice}: the sidecar returned no audio"));
     }
+    OpResult::ok(format!(
+        "preview {voice} ({what}): {} KB",
+        bytes.len() / 1024
+    ))
+    .with_audio_b64(base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        bytes,
+    ))
+}
+
+/// Serve one already-rendered segment for a voice: no synthesis, just bytes
+/// from this inductor's segment cache.
+///
+/// Only what is on local disk counts. Segments rendered on another box stay
+/// there (merge affinity), and fetching them over ssh would turn a keypress
+/// into a network operation with its own failure modes — the miss says so
+/// instead, and names what would fix it. Discovery lives in `bm_core` so a
+/// disconnected TUI can run the same lookup against its own checkout.
+fn op_segment(
+    layout: &bm_core::Layout,
+    engine: &str,
+    character: &str,
+    voice: &str,
+    text: Option<&str>,
+) -> OpResult {
+    let voice = voice.trim();
+    if voice.is_empty() {
+        return OpResult::fail("segment needs a voice name");
+    }
+    let cands = bm_core::assemble::rendered_segments(layout, engine, voice);
+    if cands.is_empty() {
+        return OpResult::fail(bm_core::assemble::segment_miss(layout, character, voice, false));
+    }
+    // An exact line plays that sentence or misses honestly — never a nearby
+    // one. Without it, Tab triages on a random segment.
+    let exact = text.map(str::trim).filter(|t| !t.is_empty());
+    if let Some(want) = exact {
+        match bm_core::assemble::pick_exact(&cands, character, want) {
+            Some(pick) => return serve_segment(pick),
+            None => {
+                return OpResult::fail(bm_core::assemble::segment_miss(
+                    layout, character, voice, true,
+                ))
+            }
+        }
+    }
+    let pick = bm_core::assemble::pick_rendered(&cands, character)
+        .expect("a non-empty pool always picks");
+    serve_segment(pick)
+}
+
+/// Turn a picked segment into the op's answer: bytes, plus whose sentence it
+/// is so the client can show and hold it.
+fn serve_segment(pick: &bm_core::assemble::RenderedSegment) -> OpResult {
+    let bytes = match pick.read_bytes() {
+        Ok(b) => b,
+        Err(e) => return OpResult::fail(format!("segment unreadable: {e}")),
+    };
+    let mut res = OpResult::ok(format!(
+        "segment: “{}” ch{} ({} KB, rendered — nothing synthesized)",
+        pick.speaker,
+        pick.chapter,
+        bytes.len() / 1024
+    ))
+    .with_audio_b64(base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &bytes,
+    ));
+    if !pick.text.trim().is_empty() {
+        res = res.with_line(pick.speaker.clone(), pick.text.clone());
+    }
+    res
 }
 
 pub fn router(st: Shared) -> Router {
@@ -895,4 +958,189 @@ mod tests {
         let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
         assert_eq!(cast["A"], "Minh Triết");
     }
+
+    /// Every entry under `root`, so "the op wrote nothing" can be asserted on
+    /// the tree rather than on one path somebody remembered to check.
+    fn tree(root: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.filter_map(|e| e.ok()) {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p.clone());
+                }
+                out.push(p.strip_prefix(root).unwrap().display().to_string());
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_rendered_sample_comes_back_as_bytes_and_leaves_no_file() {
+        // The complaint this answers: auditioning wrote a clip per voice into
+        // `data/previews/`, so a session of A/B-ing left a directory of wavs
+        // nobody asked for. The audio now rides the wire and the *client* puts
+        // it next to the speaker.
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        let before = tree(d.path());
+
+        // A few bytes that are not valid UTF-8, to catch a lossy round trip.
+        let wav: Vec<u8> = (0u8..=255).collect();
+        let res = audio_result("Đức Trí", "sample", &wav);
+        assert!(res.ok, "{}", res.message);
+        assert!(res.message.contains("sample"), "say which half: {}", res.message);
+        assert!(
+            !res.message.contains('/'),
+            "there is no path to report any more: {}",
+            res.message
+        );
+
+        let b64 = res.audio_b64.expect("the audio rides along");
+        let back = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            b64.as_bytes(),
+        )
+        .expect("valid base64");
+        assert_eq!(back, wav, "the bytes survive the wire byte for byte");
+
+        assert_eq!(tree(d.path()), before, "the op wrote nothing under the root");
+        assert!(!layout.data().join("previews").exists(), "no audition dump");
+    }
+
+    #[test]
+    fn an_empty_render_is_a_failure_not_an_empty_sample() {
+        // A 200 with no body would otherwise be handed to the client as audio it
+        // cannot play, and the client would blame the speaker.
+        let res = audio_result("Adam", "line", b"");
+        assert!(!res.ok, "{}", res.message);
+        assert!(res.audio_b64.is_none(), "an empty body is not audio");
+        assert!(res.message.contains("no audio"), "{}", res.message);
+        assert!(res.message.contains("Adam"), "name the voice: {}", res.message);
+    }
 }
+
+#[cfg(test)]
+mod segment_tests {
+    use super::*;
+
+    #[test]
+    fn segment_serves_a_rendered_wav_and_its_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = bm_core::Layout::new(dir.path());
+        std::fs::create_dir_all(layout.data()).unwrap();
+        // Two speakers; the wav covers segment 1 in Adam's voice.
+        std::fs::write(
+            layout.script(1),
+            serde_json::json!({"segments": [
+                {"speaker": "Narrator", "text": "Mở đầu."},
+                {"speaker": "Kiên", "text": "Kiên lên tiếng."},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let seg = layout.seg_dir("vieneu", 1);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0001_Adam.wav"), b"RIFF-fake").unwrap();
+
+        let res = op_segment(&layout, "vieneu", "Kiên", "Adam", None);
+        assert!(res.ok, "{}", res.message);
+        assert_eq!(res.line_speaker.as_deref(), Some("Kiên"));
+        assert_eq!(res.line_text.as_deref(), Some("Kiên lên tiếng."));
+        assert!(res.audio_b64.is_some(), "bytes, not a path");
+        assert!(res.message.contains("rendered"), "say what it was: {}", res.message);
+
+        // A voice with nothing rendered fails honestly — never synthesizes.
+        let miss = op_segment(&layout, "vieneu", "Vũ", "Nobody", None);
+        assert!(!miss.ok);
+        assert!(miss.message.contains("elsewhere or not yet"), "{}", miss.message);
+        assert!(miss.audio_b64.is_none());
+    }
+
+    #[test]
+    fn segment_matches_keys_names_and_folds() {
+        // Wavs carry whatever the cast held at render time — often a
+        // lowercase key (`adam`) while the operator asks the display name
+        // (`Adam`), or an ASCII slug (`pham-tuyen`) for `Phạm Tuyên`.
+        let dir = tempfile::tempdir().unwrap();
+        let layout = bm_core::Layout::new(dir.path());
+        std::fs::create_dir_all(layout.data()).unwrap();
+        std::fs::write(
+            layout.script(3),
+            serde_json::json!({"segments": [
+                {"speaker": "Vũ", "text": "Vũ nói."},
+                {"speaker": "Kiên", "text": "Kiên đáp."},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let seg = layout.seg_dir("vieneu", 3);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000_adam.wav"), b"RIFF-a").unwrap();
+        std::fs::write(seg.join("0001_pham-tuyen.wav"), b"RIFF-p").unwrap();
+
+        let res = op_segment(&layout, "vieneu", "Kiên", "Adam", None);
+        assert!(res.ok, "{}", res.message);
+        assert_eq!(res.line_speaker.as_deref(), Some("Vũ"));
+
+        let res = op_segment(&layout, "vieneu", "Nobody", "Phạm Tuyên", None);
+        assert!(res.ok, "{}", res.message);
+        assert_eq!(res.line_text.as_deref(), Some("Kiên đáp."));
+    }
+
+    #[test]
+    fn segment_miss_names_where_the_renders_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = bm_core::Layout::new(dir.path());
+        std::fs::create_dir_all(layout.data()).unwrap();
+        std::fs::write(
+            layout.script(4),
+            serde_json::json!({"segments": [{"speaker": "Kiên", "text": "Kiên đáp."}]})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(layout.seg_dir("vieneu", 4)).unwrap();
+
+        // Lines here, no wavs: those chapters rendered on another box.
+        let miss = op_segment(&layout, "vieneu", "Kiên", "Nobody", None);
+        assert!(!miss.ok);
+        assert!(miss.message.contains("another box"), "{}", miss.message);
+        // No lines either: the chapters themselves live elsewhere.
+        let miss = op_segment(&layout, "vieneu", "Ghost", "Nobody", None);
+        assert!(!miss.ok);
+        assert!(miss.message.contains("elsewhere or not yet"), "{}", miss.message);
+    }
+
+    #[test]
+    fn segment_prefers_the_characters_own_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = bm_core::Layout::new(dir.path());
+        std::fs::create_dir_all(layout.data()).unwrap();
+        std::fs::write(
+            layout.script(2),
+            serde_json::json!({"segments": [
+                {"speaker": "Vũ", "text": "Vũ nói."},
+                {"speaker": "Kiên", "text": "Kiên đáp."},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let seg = layout.seg_dir("vieneu", 2);
+        std::fs::create_dir_all(&seg).unwrap();
+        // Filenames carry whatever the cast held at render time — a key here.
+        std::fs::write(seg.join("0000_adam.wav"), b"RIFF-0").unwrap();
+        std::fs::write(seg.join("0001_adam.wav"), b"RIFF-1").unwrap();
+
+        // key_for_name("vieneu", "Adam") may or may not know this fixture
+        // voice; either way the raw string still matches.
+        let res = op_segment(&layout, "vieneu", "Kiên", "adam", None);
+        assert!(res.ok, "{}", res.message);
+        assert_eq!(res.line_speaker.as_deref(), Some("Kiên"), "own lines win over Vũ's");
+        assert_eq!(res.line_text.as_deref(), Some("Kiên đáp."));
+    }
+}
+
+

@@ -1,11 +1,13 @@
 //! The dashboard state: what the poller fills and every pane reads.
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Instant;
 use bm_proto::{Heartbeat, Machine, Op, Roster, Task};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use ratatui::style::{Color, Style};
 use crate::tui::EVENT_CAP;
 use crate::tui::{
+    audio::Player,
     input::dispatch,
     jobs::{DoneKind, Ev, Job, fetch_state},
     model::{CastRow, cast_rows, registry_machines},
@@ -62,6 +64,22 @@ pub(crate) struct App {
     pub(crate) conn: Conn,
     pub(crate) tick: u64,
     pub(crate) refreshed: Option<Instant>,
+    /// Voice whose audition render is in flight, if any.
+    ///
+    /// On the `App`, not on the screen: an audition is one render against one
+    /// sidecar, so "one at a time" is a property of the process, not of whichever
+    /// screen asked. The picker and the cast overview both read this.
+    pub(crate) audition: Option<String>,
+    /// Sentences locked by Enter-pick, per character. Picking a voice locks
+    /// the speech it was picked on, so reopening the picker for them resumes
+    /// on that sentence instead of another random pick.
+    pub(crate) locked_lines: HashMap<String, crate::tui::audition::AuditionLine>,
+    /// `speaker -> their lines`, from `data/script-*.json`. Built once per
+    /// session by a background job and never rebuilt: a full scan is seconds.
+    pub(crate) lines: Option<std::collections::HashMap<String, Vec<String>>>,
+    pub(crate) lines_loading: bool,
+    /// The speaker on this desk. Owns the audio process, not the audio.
+    pub(crate) player: Player,
 }
 
 impl App {
@@ -99,6 +117,74 @@ impl App {
             conn: Conn::Unknown,
             tick: 0,
             refreshed: None,
+            audition: None,
+            locked_lines: HashMap::new(),
+            lines: None,
+            lines_loading: false,
+            player: Player::new(),
+        }
+    }
+
+    /// Build the audition line index if it is not already here or on its way.
+    ///
+    /// Called when a screen that can audition opens, so the hundred file opens
+    /// happen while the operator is still reading the table rather than after they
+    /// press the key. Idempotent: a second call while it is loading does nothing.
+    pub(crate) fn ensure_lines(
+        &mut self,
+        job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
+    ) {
+        if self.lines.is_some() || self.lines_loading {
+            return;
+        }
+        self.lines_loading = true;
+        dispatch(
+            self,
+            job_tx,
+            Job::LoadLines { layout_root: self.layout_root.clone() },
+        );
+    }
+
+    /// Finish an audition: play what came back, and always leave a status.
+    ///
+    /// Every path here sets a status, including the ones that play nothing. The
+    /// "auditioning…" line is written when the op is *dispatched* and this is
+    /// the only thing that ever replaces it — so a path that returns without
+    /// touching the bar leaves the operator watching a render that finished a
+    /// minute ago, which is the one state the bar can never leave by itself.
+    fn play_audition(&mut self, ok: bool, audio_b64: Option<String>) {
+        if !ok {
+            // The op's own failure text is already in the event pane; the bar's
+            // job here is to stop claiming the audition is still in flight.
+            self.set_status(Level::Error, "audition failed — see the events pane");
+            return;
+        }
+        let Some(b64) = audio_b64 else {
+            // What an *older inductor* answers with: it has no audio field at
+            // all. The TUI cannot tell that from a render that produced nothing,
+            // so it says both — and the fix is a restart, not a retry.
+            self.set_status(
+                Level::Warn,
+                "the inductor sent no audio — restart it (older build?)",
+            );
+            return;
+        };
+        let wav = match B64.decode(b64.as_bytes()) {
+            Ok(w) => w,
+            Err(e) => {
+                self.set_status(
+                    Level::Error,
+                    format!("undecodable audio from the inductor: {e}"),
+                );
+                return;
+            }
+        };
+        let kb = wav.len() / 1024;
+        match self.player.play_bytes(&wav) {
+            Ok(()) => self.set_status(Level::Info, format!("playing {kb} KB")),
+            // The render worked and the speaker did not. Naming that split is
+            // the whole message.
+            Err(e) => self.set_status(Level::Error, e),
         }
     }
 
@@ -348,6 +434,26 @@ impl App {
                     m.note = note;
                 }
             }
+            Ev::Lines(res) => {
+                self.lines_loading = false;
+                match res {
+                    Ok(index) => {
+                        self.log_at(
+                            Level::Info,
+                            format!("{} speaker(s) indexed for audition lines", index.len()),
+                        );
+                        self.lines = Some(index);
+                    }
+                    // Not fatal: the sample audition still works, only the
+                    // "exact line" half needs a script. Say which half is out.
+                    Err(e) => {
+                        self.set_status(
+                            Level::Warn,
+                            format!("audition lines unavailable: {e} — t (rendered segments) still plays"),
+                        );
+                    }
+                }
+            }
             // A poller snapshot, applied the moment it arrives: nothing here
             // waits on the network, which is what keeps the drawing loop moving
             // even when the inductor is slow to answer.
@@ -357,23 +463,40 @@ impl App {
                 self.pending = self.pending.saturating_sub(1);
                 match kind {
                     DoneKind::StartDone => self.backend_start_outstanding = false,
-                    DoneKind::Op { op, key, ok, voice } => {
+                    DoneKind::Op { op, key, ok, voice, audio_b64, line_speaker, line_text } => {
                         self.inflight.retain(|k| *k != key);
-                    if let Screen::Pick(p) = &mut self.screen {
-                        p.previewing = None;
-                        if op == Op::PreviewVoice && ok {
-                            if let Some(v) = voice {
-                                if !p.previewed.contains(&v) {
-                                    p.previewed.push(v);
+                        if op == Op::PreviewVoice || op == Op::Segment {
+                            self.audition = None;
+                            if ok {
+                                if let Screen::Pick(p) = &mut self.screen {
+                                    if let Some(v) = voice {
+                                        if !p.previewed.contains(&v) {
+                                            p.previewed.push(v);
+                                        }
+                                    }
+                                }
+                                // A served segment names its sentence: hold it
+                                // so the operator is comparing voices on words
+                                // they can see, and so T renders this
+                                // exact line rather than another random pick.
+                                if op == Op::Segment {
+                                    if let (Some(speaker), Some(text)) = (line_speaker, line_text) {
+                                        let line = crate::tui::audition::AuditionLine { character: speaker, text };
+                                        match &mut self.screen {
+                                            Screen::Cast(v) => v.line = Some(line),
+                                            Screen::Pick(p) => p.line = Some(line),
+                                            _ => {}
+                                        }
+                                    }
                                 }
                             }
+                            self.play_audition(ok, audio_b64);
                         }
-                    }
-                    // A successful swap rewrites the cast, so the picker's copy
-                    // is stale from this moment on.
-                    if op == Op::SwapVoice && ok {
-                        self.roster = None;
-                    }
+                        // A successful swap rewrites the cast, so the picker's
+                        // copy is stale from this moment on.
+                        if op == Op::SwapVoice && ok {
+                            self.roster = None;
+                        }
                     }
                     _ => {}
                 }

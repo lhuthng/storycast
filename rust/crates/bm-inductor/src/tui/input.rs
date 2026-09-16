@@ -1,4 +1,5 @@
 //! Keys in: the modal chain. Order is load-bearing — see the table in §5.
+pub(crate) mod audition;
 pub(crate) mod cast;
 pub(crate) mod command;
 mod confirm;
@@ -30,19 +31,25 @@ pub(crate) fn dispatch(app: &mut App, job_tx: &tokio::sync::mpsc::UnboundedSende
 }
 
 /// Fire a singleton op, refusing a duplicate while one is already running.
+///
+/// Returns whether it was actually dispatched. Callers that set an in-flight
+/// marker of their own **must** branch on this: a refused dispatch sends no
+/// `Done` event, so a marker set regardless is never cleared, and the screen
+/// stays wedged behind a job that does not exist.
 pub(crate) fn dispatch_op(
     app: &mut App,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
     http: &reqwest::Client,
     req: OpRequest,
-) {
+) -> bool {
     let key = op_key(&req);
     if app.inflight.contains(&key) {
         app.set_status(Level::Warn, format!("{} is already running", req.op.as_str()));
-        return;
+        return false;
     }
     app.inflight.push(key);
     dispatch(app, job_tx, op_job(app, http, req));
+    true
 }
 
 /// Identity of one op *instance*.

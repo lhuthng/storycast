@@ -165,8 +165,11 @@ tui/app.rs    App and its state transitions
 tui/style.rs  colours, glyphs, cell/line formatting
 tui/model.rs  pure view-model helpers (folding, filtering, sorting, rollups)
 tui/jobs.rs   background jobs (Job, run_job) — one sequential worker
+tui/audio.rs  the speaker: one reused temp file, played by afplay
+tui/audition.rs the line index and the chooser behind "hear a real line"
 tui/input.rs  the modal key chain, in order, then normal::normal_key
-tui/input/    one file per modal block
+tui/input/    one file per modal block; `audition.rs` is the shared
+              four-key audition decision both voice screens call
 tui/draw.rs   the tier dispatch and the overlay match
 tui/draw/     one file per pane or overlay
 tui/tests.rs  every test
@@ -174,6 +177,35 @@ tui/tests.rs  every test
 
 To follow a key press: `input.rs` → `input/<screen>.rs` → `jobs.rs` →
 `app.rs` → `draw.rs` → `draw/<pane>.rs`.
+
+**Auditioning a voice is the one place the TUI makes a sound.** The split is
+deliberate and worth keeping: the *inductor* renders (`Op::PreviewVoice` calls the
+sidecar and ships the wav back in `OpResult::audio_b64`), and the *TUI* plays,
+because the speaker is on the operator's desk and the inductor may be on another
+box. Four consequences that are easy to undo by accident:
+
+* The wire carries **bytes, not a path**. A path is only meaningful to a client
+  that shares the inductor's filesystem, and it puts the sample on the wrong
+  machine — so the client writes it, next to the speaker.
+* **One file, reused.** `audio::Player` overwrites a single temp path and removes
+  it on drop, so auditioning twenty voices leaves one clip behind rather than
+  twenty. The inductor writes nothing at all: an audition is not a pipeline
+  artifact and has no business in `data/`.
+* Playback is **not** a `Job`. The job worker is one sequential task that ssh flows
+  already queue behind; a five-second sample parked in it would stall every
+  provision behind a sound. `audio::Player` spawns and returns.
+* The in-flight marker (`App::audition`) lives on the `App`, not on a screen —
+  "one render at a time" is a property of the process, since both the picker and
+  the cast overview can start one.
+* `dispatch_op` returns whether it actually dispatched, and the marker is set
+  **only** on success. A refused dispatch sends no `Done`, so a marker set
+  regardless would never be cleared and the screen would wedge behind a render
+  that never started.
+
+Because `App::pending` is incremented by every dispatch and decremented only by
+`Ev::Done`, **every arm of `run_job` owes exactly one `Done`** — a job that
+reports its payload without one leaves the footer claiming work is running for
+the rest of the session.
 
 * **Non-blocking by construction** — HTTP polling lives in a background Tokio
   task that ships `Ev::State` over an MPSC channel; the draw loop only drains a

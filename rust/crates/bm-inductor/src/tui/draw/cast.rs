@@ -25,7 +25,7 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(app.style(Color::Cyan))
-        .title("Cast · vi-VN — Esc to close · Enter picks a new voice for the highlighted speaker");
+        .title("Cast · vi-VN — Esc to close");
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 4 {
@@ -38,7 +38,9 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
             Constraint::Length(1), // summary
             Constraint::Length(1), // filter
             Constraint::Min(1),    // table
-            Constraint::Length(2), // hints
+            // The held line gets its own row only when there is one, so the table
+            // keeps its height on a terminal that has none to spare.
+            Constraint::Length(if view.line.is_some() { 3 } else { 2 }), // hints
         ])
         .split(inner);
 
@@ -247,17 +249,29 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
         f.render_widget(table, rows_area[2]);
     }
 
-    f.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                "type to filter · ↑↓ move · Enter choose a new voice · Esc close · R reload roster",
+    let mut hints = vec![
+        Line::from(Span::styled(
+            "type to filter · ↑↓ move · Esc close · R reload roster",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "t test · T line · ^T another line — t plays rendered audio, assigns nothing (t/T don't filter)",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    // A random line is random until you are told which one it is. Say it, or the
+    // operator is comparing two voices on a sentence they cannot see.
+    if let Some(l) = &view.line {
+        hints.push(Line::from(vec![
+            Span::styled(
+                format!("line for “{}”: ", l.character),
                 Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(Span::styled(
-                "concern = outside your accent policy · unknown = the roster has never heard of it",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ]),
-        rows_area[3],
-    );
+            ),
+            Span::styled(
+                format!("“{}”", bm_core::util::head_chars(&l.text, 72)),
+                app.style(Color::Cyan),
+            ),
+        ]));
+    }
+    f.render_widget(Paragraph::new(hints), rows_area[3]);
 }

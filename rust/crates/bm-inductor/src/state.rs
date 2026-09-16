@@ -225,6 +225,60 @@ mod tests {
     }
 
     #[test]
+    fn swap_requeues_a_chapter_with_no_local_segments() {
+        // The remote-render case: a worker's segment cache never comes home,
+        // so no stale file exists locally — but the chapter still speaks with
+        // the old voice and must re-render. Gating on deleted files skipped
+        // it silently and its mp3 kept the old voice forever.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(1),
+            r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"B","text":"z"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam","Narrator":"Đức Trí"}"#).unwrap();
+        std::fs::write(layout.final_mp3(1), vec![0u8; 2000]).unwrap();
+        for stage in [Stage::Render, Stage::Merge] {
+            let mut t = Task::new(1, stage);
+            t.state = TaskState::Done;
+            inner.tasks.insert(format!("{stage}:1"), t);
+        }
+
+        let msg = inner.op_swap_voice("A", "Minh Triết").unwrap();
+        assert!(msg.contains("[1]"), "chapter 1 must be listed: {msg}");
+        assert!(!layout.final_mp3(1).exists(), "stale product goes away");
+        assert_eq!(inner.tasks["render:1"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["merge:1"].state, TaskState::Pending);
+    }
+
+    #[test]
+    fn swap_leaves_a_chapter_the_speaker_never_enters() {
+        // Narrowness in the other direction: chapters without the speaker
+        // keep their product and their Done tasks.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(2),
+            r#"{"segments":[{"speaker":"B","text":"z"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam","Narrator":"Đức Trí"}"#).unwrap();
+        std::fs::write(layout.final_mp3(2), vec![0u8; 2000]).unwrap();
+        for stage in [Stage::Render, Stage::Merge] {
+            let mut t = Task::new(2, stage);
+            t.state = TaskState::Done;
+            inner.tasks.insert(format!("{stage}:2"), t);
+        }
+
+        let msg = inner.op_swap_voice("A", "Minh Triết").unwrap();
+        assert!(!msg.contains('2'), "chapter 2 speaks nothing of A: {msg}");
+        assert!(layout.final_mp3(2).exists(), "untouched product stays");
+        assert_eq!(inner.tasks["render:2"].state, TaskState::Done);
+        assert_eq!(inner.tasks["merge:2"].state, TaskState::Done);
+    }
+
+    #[test]
     fn reconcile_folds_bible_cast_scripts_and_requeues_renders() {
         let (_d, mut inner) = fixture();
         let layout = inner.layout.clone();
