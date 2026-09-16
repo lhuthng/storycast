@@ -29,15 +29,56 @@ Common causes per stage:
   `c` in the TUI re-saves the template and probe-crawls one chapter; check the
   response in the events pane. Some sites rate-limit: lower `START`/`COUNT` and
   add pauses.
-* **digest fails** — almost always the analyzer: missing `GEMINI_API_KEY`,
-  quota exhausted (free tier: 3 RPM / 10 RPD), or the model name changed. The
+* **digest fails** — almost always the analyzer: a missing key, quota
+  exhausted (free tier: 3 RPM / 10 RPD), or the model name changed. The
   analyzer chain falls through `analyze_models` in order; check which model the
   event names. `ANALYZER=opencode|openrouter|local` in `.env` swaps the backend.
+  * **the event names a model you stopped using** (e.g. a `503` for
+    `gemini-3.5-flash` when `analyze_models` holds only
+    `gemini-3.5-flash-lite`) — a provisioned worker has **no
+    `.bm/settings.json`**: provisioning copies `prompts/`, `python/`, `assets/`,
+    `refs/` and the cast, and never the inductor's own state. It therefore used
+    to run on `Settings::default()` — the *compiled-in* `analyze_model` — and
+    ignore the operator's chain completely. The inductor now sends its analyzer
+    block (`analyze_model`, `analyze_models`, the per-backend model names,
+    `ollama_url`) with every digest offer and the worker overlays it, so the
+    model named in the event is the model in the inductor's
+    `.bm/settings.json`. Remember `analyze_model` (singular) is only the
+    fallback used when `analyze_models` is empty; a non-empty chain wins. If a
+    stale name still shows up, that box is running an agent from before the fix:
+    re-run `make provision BOX=…`. The agent is re-pushed **only when the
+    workspace version in `rust/Cargo.toml` changed** — an unchanged version
+    reports "already configured" and pushes nothing, so bump it first.
+  * **`…; opencode fallback failed: opencode CLI not found`** — the gemini chain
+    ran out *and* the fallback behind it is not installed on the box that took
+    the task. `opencode` is a **binary**, not a pip package, and provisioning
+    does not install it, so a remote worker can have gemini configured and no
+    fallback at all. Two ways out: put `opencode` on `PATH` for the worker's
+    user on that box, or accept that an exhausted gemini chain is terminal
+    there. Worth checking *before* blaming the model — a 503/429 that shelves a
+    task is often this pair, not one failure.
+  * **`GEMINI_API_KEY missing` (or `OPENROUTER_API_KEY`)** — the key is set in
+    the **inductor's** `.env`, and only there. It rides the task offer to
+    whichever worker runs the digest, so a box with no `.env` of its own is
+    normal and expected; there is nothing to copy onto it. If this fires, the
+    inductor itself has no key for the analyzer it is configured with: fix
+    `.env` next to the inductor, **restart the inductor** (it reads `.env` at
+    boot), then `u` to retry. To check which side is short, the worker logs
+    `credentials from inductor: GEMINI_API_KEY` for every task that received
+    one — no such line means the offer carried nothing.
 * **render fails / voice missing** — the TTS sidecar is down (`tts=down` in the
   Machines pane) or a speaker has no voice. `v` re-reads the roster and refills
   gaps from the pool; `s` assigns one by hand; `S` shows every speaker's
   verdict. If a clone voice is missing on a worker, re-run `make provision
   BOX=…` — enrollment is stamped, so it only re-enrolls what changed.
+  * **`GEMINI_API_KEY missing` from the sidecar (`TTS_ENGINE=gemini`)** — the
+    key is installed into the worker's environment per task, and the sidecar is
+    a child process, so it inherits whatever was installed when the worker
+    *spawned* it. A sidecar that was already running before the task — started
+    by `make provision`, or left behind by an earlier run — keeps the
+    environment it started with and will not see it. Stop it and let the worker
+    start a fresh one: `pkill -f tts_server.py` on that box. The `vieneu`
+    engine reads no key and is unaffected.
 * **merge fails** — usually a missing segment (the render was interrupted and
   the segment cache incomplete). Retry the render task first, then merge.
 * **one character speaks with two voices** — the bible forked: title/case/

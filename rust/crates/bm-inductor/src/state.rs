@@ -436,6 +436,111 @@ mod tests {
         assert!(!bm_core::is_local_node("192.168.2.2"));
     }
 
+    /// The two credential tests below mutate the process environment, which is
+    /// global while cargo runs tests in threads. Without this they can read
+    /// each other's value and flake; with it, each is deterministic.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn a_digest_offer_carries_the_key_its_analyzer_needs() {
+        // The outage: `192.168.2.2` (alias `marmot`) has no `.env` — it is
+        // personal and git-ignored, so provisioning never copies it — and every
+        // digest offered there died on `GEMINI_API_KEY missing` however
+        // carefully this inductor was set up. The key now rides the offer.
+        let _g = env_lock();
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::write(layout.chapter_txt(1), "Chương 1: X\n\nbody\n").unwrap();
+        inner.settings.analyzer = "gemini".into();
+        inner.settings.engine = "vieneu".into();
+        inner.enqueue_translate(1, 1);
+        inner
+            .workers
+            .insert("remote-w".into(), "192.168.2.2".into());
+
+        std::env::set_var("GEMINI_API_KEY", "from-the-inductors-env");
+        std::env::set_var("OPENROUTER_API_KEY", "a-different-provider");
+        let offer = inner.offer("remote-w").expect("digest:1 is offerable");
+        std::env::remove_var("GEMINI_API_KEY");
+        std::env::remove_var("OPENROUTER_API_KEY");
+
+        assert_eq!(offer.task_id, "digest:1");
+        assert_eq!(
+            offer.credentials.gemini_api_key, "from-the-inductors-env",
+            "the analyzer's key must reach the worker that runs the analyzer"
+        );
+        assert!(
+            offer.credentials.openrouter_api_key.is_empty(),
+            "only what this stage reads: {:?}",
+            offer.credentials
+        );
+    }
+
+    #[test]
+    fn a_digest_offer_carries_the_inductors_analyzer_chain() {
+        // The other half of the same defect. The backend *name* already
+        // travelled in `analyzer`, but the model chain did not, so a
+        // provisioned box — which has no `.bm/settings.json` to read, because
+        // provisioning copies `prompts/`, `python/`, `assets/` and `refs/` and
+        // never `.bm/` — digested with the compiled-in `Settings::default()`
+        // and called `gemini-3.5-flash` long after the operator had switched
+        // to `-lite`. No env involved: settings live on `Inner`.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::write(layout.chapter_txt(1), "Chương 1: X\n\nbody\n").unwrap();
+        inner.settings.analyzer = "gemini".into();
+        inner.settings.analyze_model = "gemini-3.5-flash".into();
+        inner.settings.analyze_models = vec!["gemini-3.5-flash-lite".into()];
+        inner.enqueue_translate(1, 1);
+        inner
+            .workers
+            .insert("remote-w".into(), "192.168.2.2".into());
+
+        let offer = inner.offer("remote-w").expect("digest:1 is offerable");
+        assert_eq!(offer.task_id, "digest:1");
+        assert_eq!(offer.analyzer, "gemini");
+        assert_eq!(
+            offer.analyzer_settings.analyze_models,
+            Some(vec!["gemini-3.5-flash-lite".to_string()]),
+            "the chain the worker must run"
+        );
+        assert_eq!(offer.analyzer_settings.analyze_model, "gemini-3.5-flash");
+    }
+
+    #[test]
+    fn a_crawl_offer_carries_no_credentials_at_all() {
+        // A crawl reads no provider, so the narrowing is what makes this empty.
+        // The keys are set here on purpose: without them the assertion would
+        // hold for the wrong reason — an environment that happened to be bare —
+        // and would keep passing if the narrowing were deleted.
+        let _g = env_lock();
+        let (_d, mut inner) = fixture();
+        inner.settings.analyzer = "gemini".into();
+        inner.settings.engine = "gemini".into();
+        inner.enqueue_translate(1, 1);
+        inner
+            .workers
+            .insert("remote-w".into(), "192.168.2.2".into());
+
+        std::env::set_var("GEMINI_API_KEY", "a-real-key");
+        std::env::set_var("OPENROUTER_API_KEY", "another-real-key");
+        let offer = inner.offer("remote-w").expect("crawl:1 is offerable");
+        std::env::remove_var("GEMINI_API_KEY");
+        std::env::remove_var("OPENROUTER_API_KEY");
+
+        assert_eq!(offer.task_id, "crawl:1");
+        assert!(
+            offer.credentials.is_empty(),
+            "a crawl fetches a URL and must ship no secret: {:?}",
+            offer.credentials
+        );
+    }
+
     #[test]
     fn swap_skips_a_chapter_whose_store_is_complete_and_current() {
         // Doc test 10, the narrowing: A speaks here and the local store is

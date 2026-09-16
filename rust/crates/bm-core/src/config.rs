@@ -115,6 +115,63 @@ impl Settings {
     pub fn chapter_url(&self, n: u32) -> String {
         self.url_template.replace("{n}", &n.to_string())
     }
+
+    /// The analyzer values the digest lane reads, as the block that travels
+    /// with a task offer.
+    pub fn analyzer_settings(&self) -> bm_proto::AnalyzerSettings {
+        bm_proto::AnalyzerSettings {
+            analyze_model: self.analyze_model.clone(),
+            // `Some`, not `None`: this inductor *has* an opinion, even when the
+            // opinion is "no chain". `None` is reserved for an inductor that
+            // never sent the field at all.
+            analyze_models: Some(self.analyze_models.clone()),
+            opencode_model: self.opencode_model.clone(),
+            openrouter_model: self.openrouter_model.clone(),
+            local_model: self.local_model.clone(),
+            ollama_url: self.ollama_url.clone(),
+        }
+    }
+
+    /// Overlay an offer's analyzer block: the inductor's values win, and
+    /// anything it did not send leaves this box's own value alone.
+    ///
+    /// The inductor is the single source of truth for what the analyzer runs,
+    /// because the alternative is what actually happened: a provisioned worker
+    /// has **no `.bm/settings.json`** — provisioning copies `prompts/`,
+    /// `python/`, `assets/` and `refs/` and never `.bm/`, which is the
+    /// inductor's state — so `Settings::load` falls back to
+    /// `Settings::default()` and the *compiled-in* `analyze_model` ran instead
+    /// of the operator's. That showed up as a 503 naming a model the operator
+    /// had stopped using.
+    ///
+    /// Only the analyzer's own values are taken. `url_template`, the chapter
+    /// range, `control_port`, `advertise` and `ssh` are the inductor's
+    /// business and stay where they are.
+    pub fn with_analyzer_settings(&self, a: &bm_proto::AnalyzerSettings) -> Settings {
+        let mut s = self.clone();
+        if !a.analyze_model.is_empty() {
+            s.analyze_model = a.analyze_model.clone();
+        }
+        // `Some` replaces outright — including `Some([])`, which is a
+        // deliberate "no chain". `None` is silence, not an instruction to
+        // clear.
+        if let Some(models) = &a.analyze_models {
+            s.analyze_models = models.clone();
+        }
+        if !a.opencode_model.is_empty() {
+            s.opencode_model = a.opencode_model.clone();
+        }
+        if !a.openrouter_model.is_empty() {
+            s.openrouter_model = a.openrouter_model.clone();
+        }
+        if !a.local_model.is_empty() {
+            s.local_model = a.local_model.clone();
+        }
+        if !a.ollama_url.is_empty() {
+            s.ollama_url = a.ollama_url.clone();
+        }
+        s
+    }
 }
 
 /// Minimal `.env` reader: `KEY=value`, `#` comments, optional quotes.
@@ -221,5 +278,79 @@ mod tests {
     #[test]
     fn missing_dotenv_is_not_an_error() {
         load_dotenv(Path::new("/nonexistent/.env"));
+    }
+
+    #[test]
+    fn the_inductors_analyzer_settings_win_over_the_boxes_own() {
+        // The outage: a provisioned worker has no `.bm/settings.json` —
+        // provisioning copies `prompts/`, `python/`, `assets/` and `refs/` and
+        // never `.bm/` — so `Settings::load` hands back the compiled default.
+        let remote_box = Settings::default();
+        let inductor = Settings {
+            analyze_model: "gemini-3.5-flash".into(),
+            analyze_models: vec!["gemini-3.5-flash-lite".into()],
+            opencode_model: "opencode/other".into(),
+            ..Settings::default()
+        };
+        let effective = remote_box.with_analyzer_settings(&inductor.analyzer_settings());
+        assert_eq!(effective.analyze_models, vec!["gemini-3.5-flash-lite"]);
+        assert_eq!(effective.analyze_model, "gemini-3.5-flash");
+        assert_eq!(effective.opencode_model, "opencode/other");
+    }
+
+    #[test]
+    fn an_inductor_with_no_opinion_leaves_the_boxes_own_analyzer_alone() {
+        // An older inductor sends no block at all. Every local value survives,
+        // which is what keeps either side upgradable on its own.
+        let boxed = Settings {
+            analyze_model: "mine".into(),
+            analyze_models: vec!["mine-1".into(), "mine-2".into()],
+            ollama_url: "http://elsewhere:11434".into(),
+            ..Settings::default()
+        };
+        let same = boxed.with_analyzer_settings(&bm_proto::AnalyzerSettings::default());
+        assert_eq!(same.analyze_model, "mine");
+        assert_eq!(same.analyze_models, vec!["mine-1", "mine-2"]);
+        assert_eq!(same.ollama_url, "http://elsewhere:11434");
+    }
+
+    #[test]
+    fn a_deliberately_empty_chain_clears_the_boxes_own() {
+        // `Some([])` is an instruction — "no chain, `analyze_model` alone".
+        // `None` is silence. Collapsing them would make it impossible for an
+        // operator to *remove* a chain from a box that has one.
+        let boxed = Settings {
+            analyze_models: vec!["stale-1".into()],
+            ..Settings::default()
+        };
+        let cleared = boxed.with_analyzer_settings(&bm_proto::AnalyzerSettings {
+            analyze_models: Some(vec![]),
+            ..Default::default()
+        });
+        assert!(
+            cleared.analyze_models.is_empty(),
+            "{:?}",
+            cleared.analyze_models
+        );
+    }
+
+    #[test]
+    fn the_overlay_carries_only_the_analyzer() {
+        // `url_template`, the chapter range, the control port and the ssh
+        // defaults are the inductor's business. A task offer is not a channel
+        // for them, and this path must not become one.
+        let boxed = Settings {
+            url_template: "https://mine/{n}".into(),
+            count: 7,
+            ..Settings::default()
+        };
+        let inductor = Settings {
+            url_template: "https://theirs/{n}".into(),
+            count: 99,
+            ..Settings::default()
+        };
+        let effective = boxed.with_analyzer_settings(&inductor.analyzer_settings());
+        assert_eq!(effective.url_template, "https://mine/{n}");
+        assert_eq!(effective.count, 7);
     }
 }
