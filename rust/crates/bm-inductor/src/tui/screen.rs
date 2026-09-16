@@ -256,6 +256,10 @@ pub(crate) struct TaskDetail {
 #[derive(Debug, Clone)]
 pub(crate) enum Screen {
     Normal,
+    Jobs {
+        scroll: usize,
+        previous: Box<Screen>,
+    },
     Help {
         scroll: usize,
     },

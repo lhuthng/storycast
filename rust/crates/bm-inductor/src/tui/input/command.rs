@@ -79,6 +79,7 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
         "crawl" => Command::CrawlSetup,
         "retry" => Command::Retry,
         "tasks" => Command::Key(KeyCode::Char('K')),
+        "jobs" => Command::Key(KeyCode::Char('J')),
         "voices" => Command::Voices,
         "swap" => Command::SwapVoice,
         "cast" => Command::Cast,

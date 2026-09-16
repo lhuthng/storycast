@@ -29,6 +29,10 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
             "i",
             "inspect the selected machine (probe output, capabilities)",
         ),
+        (
+            "J / :jobs",
+            "TUI background jobs: running/queued, elapsed time, activity",
+        ),
         ("R", "system overview: preview everything"),
         ("PgUp PgDn", "scroll the log   (G returns to newest)"),
         ("r", "refresh now"),

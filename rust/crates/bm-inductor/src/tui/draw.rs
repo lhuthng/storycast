@@ -4,6 +4,7 @@ mod confirm;
 mod events;
 mod footer;
 mod help;
+mod jobs;
 mod machine;
 mod machines;
 mod picker;
@@ -148,6 +149,7 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Screen::Run => run::draw_run(f, app),
         Screen::Confirm(c) => confirm::draw_confirm(f, app, &c),
         Screen::Machine(addr) => machine::draw_machine_info(f, app, &addr),
+        Screen::Jobs { scroll, .. } => jobs::draw_jobs(f, app, scroll),
         Screen::Tasks(v) => tasks::draw_tasks_screen(f, app, &v),
         Screen::TaskDetail(d) => task_detail::draw_task_detail(f, app, &d),
         _ => {}

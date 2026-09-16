@@ -3,7 +3,7 @@ use crate::tui::EVENT_CAP;
 use crate::tui::{
     audio::Player,
     input::dispatch,
-    jobs::{fetch_state, DoneKind, Ev, Job},
+    jobs::{fetch_state, BackgroundJob, DoneKind, Ev, Job},
     model::{cast_rows, registry_machines, CastRow},
     screen::Screen,
     style::{level_from_str, style_bold_of, style_of, Conn, Level, LogLine},
@@ -39,6 +39,8 @@ pub(crate) struct App {
     /// One key per op *instance* (see `op_key`), so retrying chapter 3 does not
     /// block retrying chapter 4 — but pressing the same key twice does.
     pub(crate) pending: usize,
+    pub(crate) next_job_id: u64,
+    pub(crate) background_jobs: Vec<BackgroundJob>,
     pub(crate) inflight: Vec<String>,
     /// Highest scheduler event id already folded into `events`. `None` until the
     /// first snapshot arrives, so the inductor's own history is shown once on
@@ -102,6 +104,8 @@ impl App {
             roster_loading: false,
             roster_error: None,
             pending: 0,
+            next_job_id: 0,
+            background_jobs: Vec::new(),
             inflight: Vec::new(),
             last_event_id: None,
             pending_enqueue: None,
@@ -406,6 +410,18 @@ impl App {
 
     pub(crate) fn apply(&mut self, ev: Ev) {
         match ev {
+            Ev::JobStarted(id) => {
+                if let Some(job) = self.background_jobs.iter_mut().find(|job| job.id == id) {
+                    job.started.get_or_insert_with(Instant::now);
+                    job.activity = "running".into();
+                }
+            }
+            Ev::JobProgress { id, text } => {
+                if let Some(job) = self.background_jobs.iter_mut().find(|job| job.id == id) {
+                    job.activity = text;
+                }
+            }
+            Ev::JobFinished(id) => self.background_jobs.retain(|job| job.id != id),
             Ev::Log(l) => self.push_log(l),
             Ev::Roster(Ok(r)) => {
                 self.roster_loading = false;
@@ -470,7 +486,12 @@ impl App {
             Ev::Done(kind) => {
                 self.pending = self.pending.saturating_sub(1);
                 match kind {
-                    DoneKind::StartDone => self.backend_start_outstanding = false,
+                    DoneKind::StartDone => {
+                        self.backend_start_outstanding = false;
+                        self.start_cancel = None;
+                    }
+                    DoneKind::RosterDone => self.roster_loading = false,
+                    DoneKind::LinesDone => self.lines_loading = false,
                     DoneKind::Op {
                         op,
                         key,

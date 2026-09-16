@@ -120,6 +120,15 @@ pub(crate) async fn normal_key(
         KeyCode::Char('K') => {
             app.screen = Screen::Tasks(TasksView::new());
         }
+        // The background jobs (what the footer's "N job(s) running" actually
+        // is). Sibling of `K`: capital so lowercase `j` stays "move down".
+        KeyCode::Char('J') => {
+            let previous = Box::new(app.screen.clone());
+            app.screen = Screen::Jobs {
+                scroll: 0,
+                previous,
+            };
+        }
         // Operator commands fire from the `:` line only: a stray keypress
         // must never provision, reconcile or stop anything. This arm catches
         // every gated key before the fallthrough swallows it silently.

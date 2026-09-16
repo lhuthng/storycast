@@ -2,6 +2,10 @@ use anyhow::{Context, Result};
 use bm_proto::Machine;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const RSYNC_TIMEOUT_SECS: u64 = 1800;
+const RSYNC_IO_TIMEOUT: &str = "--timeout=120";
 
 use super::REMOTE_DIR;
 use crate::util::expand_tilde;
@@ -113,43 +117,12 @@ impl Ssh {
             c.args(self.ssh_args()).arg(&full);
             c
         };
-        // Poll-and-kill: std has no `wait_timeout`, so the child is reaped by
-        // hand. The grace wait after `kill` keeps defunct processes off the
-        // table when the box answers SIGTERM promptly.
-        let mut child = cmd
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "spawning {} for {}",
-                    if self.local { "sh" } else { "ssh" },
-                    self.target
-                )
-            })?;
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    anyhow::bail!(
-                        "ssh to {} timed out after {timeout_secs}s — the box (or its network) stalled mid-command",
-                        self.target
-                    );
-                }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                Err(e) => anyhow::bail!("waiting on ssh to {}: {e}", self.target),
-            }
-        }
-        let out = child.wait_with_output()?;
-        Ok((
-            out.status.code().unwrap_or(255),
-            String::from_utf8_lossy(&out.stdout).to_string(),
-            String::from_utf8_lossy(&out.stderr).to_string(),
-        ))
+        let transport = if self.local {
+            format!("sh for {}", self.target)
+        } else {
+            format!("ssh to {}", self.target)
+        };
+        run_bounded(&mut cmd, timeout_secs, &transport)
     }
 
     fn rsync_e(&self) -> String {
@@ -166,7 +139,8 @@ impl Ssh {
             return self.rsync_push_local(src, remote_rel);
         }
         let dst = format!("{}:{}/{remote_rel}", self.target, REMOTE_DIR);
-        let mut args: Vec<String> = vec!["-az".into(), "--no-perms".into()];
+        let mut args: Vec<String> =
+            vec!["-az".into(), "--no-perms".into(), RSYNC_IO_TIMEOUT.into()];
         if delete {
             args.push("--delete".into());
         }
@@ -180,20 +154,21 @@ impl Ssh {
         }
         args.push(src_s);
         args.push(dst);
-        let out = Command::new("rsync")
-            .args(&args)
-            .output()
-            .context("spawning rsync")?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
+        let (code, _, stderr) = run_bounded(
+            Command::new("rsync").args(&args),
+            RSYNC_TIMEOUT_SECS,
+            &format!("rsync push to {}", self.target),
+        )?;
+        if code != 0 {
             let hint = if stderr.contains("command not found") {
                 " — rsync is not on this box; install it, e.g. sudo apt install -y rsync"
             } else {
                 ""
             };
             anyhow::bail!(
-                "rsync push failed: {}{hint}",
-                crate::util::head_chars(&stderr, 300)
+                "rsync push failed: {}{hint} (to {}, exit {code})",
+                crate::util::head_chars(&stderr, 300),
+                self.target
             );
         }
         Ok(())
@@ -234,25 +209,114 @@ impl Ssh {
             std::fs::create_dir_all(parent)?;
         }
         let src = format!("{}:{}/{remote_rel}", self.target, REMOTE_DIR);
-        let out = Command::new("rsync")
-            .args([
+        let (code, _, stderr) = run_bounded(
+            Command::new("rsync").args([
                 "-az",
                 "--no-perms",
+                RSYNC_IO_TIMEOUT,
                 "-e",
                 &self.rsync_e(),
                 &src,
                 &dst.to_string_lossy(),
-            ])
-            .output()
-            .context("spawning rsync")?;
-        if !out.status.success() {
+            ]),
+            RSYNC_TIMEOUT_SECS,
+            &format!("rsync pull from {}", self.target),
+        )?;
+        if code != 0 {
             anyhow::bail!(
-                "rsync pull failed: {}",
-                crate::util::head_chars(&String::from_utf8_lossy(&out.stderr), 300)
+                "rsync pull failed: {} (from {}, exit {code})",
+                crate::util::head_chars(&stderr, 300),
+                self.target
             );
         }
         Ok(())
     }
+}
+
+fn output_file() -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..128 {
+        let path = std::env::temp_dir().join(format!(
+            "bm-ssh-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => {
+                std::fs::remove_file(&path)?;
+                return Ok(file);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "no unused output file name",
+    ))
+}
+
+fn run_bounded(
+    cmd: &mut Command,
+    timeout_secs: u64,
+    transport: &str,
+) -> Result<(i32, String, String)> {
+    use std::os::unix::fs::FileExt;
+    let stdout = output_file().with_context(|| format!("creating stdout for {transport}"))?;
+    let stderr = output_file().with_context(|| format!("creating stderr for {transport}"))?;
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(
+            stdout
+                .try_clone()
+                .with_context(|| format!("cloning stdout for {transport}"))?,
+        )
+        .stderr(
+            stderr
+                .try_clone()
+                .with_context(|| format!("cloning stderr for {transport}"))?,
+        )
+        .spawn()
+        .with_context(|| format!("spawning {transport}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("{transport} timed out after {timeout_secs}s — the box (or its network) stalled mid-command");
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("waiting on {transport}: {e}");
+            }
+        }
+    };
+    let read = |file: &std::fs::File| -> std::io::Result<String> {
+        let mut bytes = vec![
+            0;
+            file.metadata()?.len().try_into().map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "output too large")
+            })?
+        ];
+        file.read_exact_at(&mut bytes, 0)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    };
+    Ok((
+        status.code().unwrap_or(255),
+        read(&stdout).with_context(|| format!("reading stdout from {transport}"))?,
+        read(&stderr).with_context(|| format!("reading stderr from {transport}"))?,
+    ))
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
@@ -303,7 +367,7 @@ mod tests {
             local: true,
         };
         let t = std::time::Instant::now();
-        let err = ssh.run("sleep 30", 1).unwrap_err();
+        let err = ssh.run("exec sleep 30", 1).unwrap_err();
         assert!(
             t.elapsed() < std::time::Duration::from_secs(10),
             "must die near the deadline, not after the sleep"
@@ -312,6 +376,59 @@ mod tests {
 
         let (code, out, _) = ssh.run("echo hi", 10).expect("a fast command still runs");
         assert_eq!((code, out.trim()), (0, "hi"));
+    }
+
+    #[test]
+    fn ssh_run_captures_large_stdout_and_stderr() {
+        let ssh = Ssh {
+            target: "local".into(),
+            port: 22,
+            key: None,
+            local: true,
+        };
+        let (code, out, err) = ssh.run(
+            "dd if=/dev/zero bs=1048576 count=2 2>/dev/null; { dd if=/dev/zero bs=1048576 count=2 2>/dev/null; } >&2; exit 7",
+            5,
+        ).unwrap();
+        assert_eq!(code, 7);
+        assert_eq!(out.as_bytes(), vec![0; 2 * 1048576]);
+        assert_eq!(err.as_bytes(), vec![0; 2 * 1048576]);
+    }
+
+    #[test]
+    fn ssh_run_does_not_wait_for_detached_output_handles() {
+        let ssh = Ssh {
+            target: "local".into(),
+            port: 22,
+            key: None,
+            local: true,
+        };
+        let start = std::time::Instant::now();
+        let result = ssh
+            .run("sleep 5 & echo started; echo warning >&2; exit 7", 1)
+            .unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        assert_eq!(result, (7, "started\n".into(), "warning\n".into()));
+    }
+
+    #[test]
+    fn bounded_runner_preserves_transport_context() {
+        let err = run_bounded(
+            Command::new("sh").args(["-c", "exec sleep 30"]),
+            1,
+            "rsync pull from user@host",
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("rsync pull from user@host timed out after 1s"));
+        let err = run_bounded(
+            &mut Command::new("/nonexistent/bm-rsync"),
+            1,
+            "rsync push to user@host",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("spawning rsync push to user@host"));
     }
 
     #[test]

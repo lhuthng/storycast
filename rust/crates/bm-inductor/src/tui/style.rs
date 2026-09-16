@@ -28,9 +28,9 @@ impl Level {
     pub(crate) fn glyph(self) -> &'static str {
         match self {
             Level::Info => "·",
-            Level::Ok => "✓",
+            Level::Ok => "OK",
             Level::Warn => "!",
-            Level::Error => "✗",
+            Level::Error => "ERROR",
         }
     }
 }

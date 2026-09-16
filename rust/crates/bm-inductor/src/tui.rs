@@ -35,7 +35,7 @@ use crate::tui::{
     draw::draw,
     input::{dispatch_op, handle_key},
     jobs::DoneKind,
-    jobs::{fetch_state, run_job, Ev, Job},
+    jobs::{fetch_state, run_jobs, Ev, Job},
     model::reported_alias,
     style::{seen_label, worker_alias, Conn},
 };
@@ -77,17 +77,8 @@ async fn run_loop(
     let http = app.http.clone();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
-    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
-    // Two senders, two owners: the job worker keeps one, the poller the other.
-    // `rx` stays on the UI task, which drains both.
-    let job_tx_ev = tx.clone();
-    // Background worker: jobs run one at a time. Provisioning in particular
-    // must not run concurrently — the flows fight over ssh.
-    tokio::spawn(async move {
-        while let Some(job) = job_rx.recv().await {
-            run_job(job, job_tx_ev.clone()).await;
-        }
-    });
+    let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    tokio::spawn(run_jobs(job_rx, tx.clone()));
 
     // State poller: `/api/state` is fetched off the UI task and delivered over
     // the same channel as everything else. Polling inline used to freeze the
