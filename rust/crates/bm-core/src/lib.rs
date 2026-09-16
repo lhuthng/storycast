@@ -25,8 +25,31 @@ pub mod eta;
 pub mod paths;
 pub mod pool;
 pub mod provision;
+pub mod segments;
 pub mod util;
 pub mod voices;
 
 pub use paths::Layout;
 pub use util::{atomic_write, read_json, write_json};
+
+/// The inductor's own node, by address. One predicate, one place: the
+/// provisioner's `Ssh.local`, the reconcile seed and the offer's `local_node`
+/// flag must never disagree about it.
+pub fn is_local_node(addr: &str) -> bool {
+    matches!(addr, "127.0.0.1" | "localhost" | "::1")
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::is_local_node;
+
+    #[test]
+    fn local_node_covers_loopback_spellings() {
+        for a in ["127.0.0.1", "localhost", "::1"] {
+            assert!(is_local_node(a), "{a}");
+        }
+        for a in ["192.168.2.2", "", "127.0.0.2", "LOCALHOST"] {
+            assert!(!is_local_node(a), "{a}");
+        }
+    }
+}

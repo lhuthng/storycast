@@ -104,7 +104,10 @@ impl Inner {
                 }
                 Stage::Render => {
                     let engine = self.settings.engine.clone();
-                    let _ = std::fs::remove_dir_all(self.layout.seg_dir(&engine, chapter));
+                    let store = bm_core::segments::LocalStore::new(self.layout.clone());
+                    let _ = std::fs::remove_dir_all(bm_core::segments::SegmentStore::dir(
+                        &store, &engine, chapter,
+                    ));
                 }
                 Stage::Merge => {
                     if let Some(p) = self.layout.final_mp3(chapter).to_str() {

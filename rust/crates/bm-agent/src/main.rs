@@ -61,6 +61,20 @@ enum Cmd {
         #[arg(long)]
         tts_url: Option<String>,
     },
+    /// List local audio segments as JSON: the inventory half of the
+    /// inductor-owned-segments migration. No scheduler involved.
+    Segments {
+        /// Emit the machine-readable manifest (the only output format).
+        #[arg(long, default_value_t = true)]
+        json: bool,
+    },
+}
+
+/// One entry of the segment inventory: which chapter, which engine, which
+/// file, how big, and what it hashes to. Shape lives in `bm_core::segments`
+/// so the inductor's diff can never disagree about it; the walk is one call.
+fn segment_manifest(audio_dir: &std::path::Path) -> Vec<bm_core::segments::SegmentEntry> {
+    bm_core::segments::manifest(audio_dir)
 }
 
 /// What the worker is doing right now — the heartbeat source of truth.
@@ -251,6 +265,128 @@ async fn run_digest(
     Ok((outcome.delta, script))
 }
 
+/// What a render offer asks for. Pure, so the zero-units arm — "do nothing
+/// and report success", the easiest arm to write as a fall-through — is
+/// pinned by a test instead of by inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderAction {
+    /// Old inductor (no `render_units`): plan from the local script.
+    Legacy,
+    /// Store already complete: report `ok` with `units: 0` at once.
+    Noop,
+    /// Speak exactly these units.
+    Units,
+}
+
+fn render_action(render_units: Option<&[bm_proto::RenderUnitSpec]>) -> RenderAction {
+    match render_units {
+        None => RenderAction::Legacy,
+        Some([]) => RenderAction::Noop,
+        Some(_) => RenderAction::Units,
+    }
+}
+
+/// Sweep a chapter's seg dir only when every clause holds: the task reported
+/// `ok`, the report was accepted, the units came from the inductor (never the
+/// legacy path, which never uploaded), and this is not the local node (whose
+/// dir IS the store). In particular a failed task keeps its files for resume,
+/// and a lost report keeps them until the re-offered empty units report
+/// success — then they go.
+fn should_sweep(
+    stage: bm_proto::Stage,
+    render_units: Option<&[bm_proto::RenderUnitSpec]>,
+    local_node: bool,
+    ok: bool,
+    reported: bool,
+) -> bool {
+    ok && reported
+        && matches!(stage, bm_proto::Stage::Render)
+        && render_units.is_some()
+        && !local_node
+}
+
+/// POST one wav to the inductor's store. A non-200 or an `ok: false` body
+/// fails the task: the unit stays missing and the next offer repeats it.
+async fn upload_segment(
+    http: &reqwest::Client,
+    inductor: &str,
+    engine: &str,
+    chapter: u32,
+    name: &str,
+    wav: &[u8],
+) -> anyhow::Result<()> {
+    let resp = http
+        .post(format!("{inductor}/api/segment"))
+        .query(&[
+            ("chapter", chapter.to_string()),
+            ("engine", engine.to_string()),
+            ("name", name.to_string()),
+        ])
+        .body(wav.to_vec())
+        .send()
+        .await
+        .with_context(|| format!("uploading {name}"))?;
+    if !resp.status().is_success() {
+        // The refusal reason rides the body — without it a 400 names no
+        // check, and the next hour is spent guessing which one fired.
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let why: String = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error")?.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| bm_core::util::head_chars(body.trim(), 200));
+        anyhow::bail!("uploading {name}: inductor refused {status}: {why}");
+    }
+    let v: serde_json::Value = resp.json().await.context("parsing segment ack")?;
+    if v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "uploading {name}: {}",
+            v.get("error").and_then(|e| e.as_str()).unwrap_or("unknown refusal")
+        )
+    }
+}
+
+/// Speak exactly the offered units. Local node writes straight into the seg
+/// dir (which is the inductor's store); everyone else uploads per file, and a
+/// single failed upload fails the whole task.
+#[allow(clippy::too_many_arguments)]
+async fn render_offered_units(
+    layout: &Layout,
+    n: u32,
+    engine: &str,
+    units: &[bm_proto::RenderUnitSpec],
+    local_node: bool,
+    inductor: &str,
+    http: &reqwest::Client,
+    tts: &Tts,
+    shared: &Shared,
+) -> Result<u64> {
+    let total = units.len();
+    let seg_dir = layout.seg_dir(engine, n);
+    if local_node {
+        std::fs::create_dir_all(&seg_dir)?;
+    }
+    for (i, u) in units.iter().enumerate() {
+        set_progress(
+            shared,
+            i as f32 / total.max(1) as f32,
+            format!("render ch{n} {} ({}/{})", u.tag, i + 1, total),
+        );
+        let wav = tts.infer(&u.text, &u.voice, u.temperature, u.silence_p, engine).await?;
+        if local_node {
+            std::fs::write(seg_dir.join(&u.name), &wav)?;
+        } else {
+            upload_segment(http, inductor, engine, n, &u.name, &wav).await?;
+        }
+    }
+    set_progress(shared, 1.0, format!("render ch{n} done ({total} new calls)"));
+    Ok(total as u64)
+}
+
+/// Legacy path: plan from the local script (old inductor, or no units
+/// offered). Keeps files locally and uploads nothing.
 async fn run_render(
     layout: &Layout,
     n: u32,
@@ -410,6 +546,8 @@ async fn run_offer(
     offer: &TaskOffer,
     shared: &Shared,
     sidecar: &mut Sidecar,
+    inductor: &str,
+    http: &reqwest::Client,
 ) -> Result<TaskResult> {
     use bm_proto::Stage::*;
     let n = offer.chapter;
@@ -442,13 +580,51 @@ async fn run_offer(
         }
         Render => {
             sidecar.ensure(layout).await?;
-            let units = run_render(layout, n, &offer.engine, &sidecar.tts(), shared).await?;
+            let units = match render_action(offer.render_units.as_deref()) {
+                // Old inductor: plan from the local script, keep files
+                // locally, upload nothing — exactly as before the migration.
+                RenderAction::Legacy => {
+                    run_render(layout, n, &offer.engine, &sidecar.tts(), shared).await?
+                }
+                // The store is already complete: report success at once.
+                RenderAction::Noop => 0,
+                // Speak exactly these; the inductor owns the rest.
+                RenderAction::Units => {
+                    // Proven non-empty by the match above.
+                    let list = offer.render_units.as_deref().unwrap_or(&[]);
+                    render_offered_units(
+                        layout,
+                        n,
+                        &offer.engine,
+                        list,
+                        offer.local_node,
+                        inductor,
+                        http,
+                        &sidecar.tts(),
+                        shared,
+                    )
+                    .await?
+                }
+            };
             sidecar.stop(); // per-task lifecycle: RSS returns to the OS here
             Ok(TaskResult { ok: true, detail: format!("render ch{n} ({units} calls)"), delta: None, units, script: None, text: None, mp3_b64: None })
         }
         Merge => {
             let path = run_merge(layout, n, &offer.engine, offer.gap_ms, offer.speed, offer.ambience, shared).await?;
-            let mp3 = std::fs::read(&path).ok().map(|b| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &b));
+            // Local node: `publish()` already renamed the mp3 into the
+            // inductor's `output/` — shipping 7 MB of base64 back to the
+            // machine that wrote it is pure cost, so the report carries
+            // nothing and the inductor verifies the file instead.
+            // Remote: the product comes home in the report, and an unreadable
+            // file fails the task rather than reporting a silent Done.
+            let mp3 = if offer.local_node {
+                None
+            } else {
+                Some(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &std::fs::read(&path).with_context(|| format!("reading merged {path}"))?,
+                ))
+            };
             Ok(TaskResult { ok: true, detail: format!("merge ch{n} -> {path}"), delta: None, units: 1, script: None, text: None, mp3_b64: mp3 })
         }
     }
@@ -493,7 +669,16 @@ async fn worker_loop(
         worker_id: worker_id.clone(),
         addr: addr.clone(),
         hostname,
-        capabilities: vec!["crawl".into(), "digest".into(), "render".into(), "merge".into()],
+        // `render-segments` is the migration gate: the inductor only offers
+        // render tasks to workers that upload units. An agent without it keeps
+        // taking crawl/digest/merge and simply never sees a render offer.
+        capabilities: vec![
+            "crawl".into(),
+            "digest".into(),
+            "render".into(),
+            "merge".into(),
+            "render-segments".into(),
+        ],
         tts_url: Some(tts_url.clone()),
         version: VERSION.into(),
     };
@@ -535,7 +720,7 @@ async fn worker_loop(
         };
         set_task(&shared, &offer);
         let t0 = Instant::now();
-        let res = match run_offer(&layout, &settings, &offer, &shared, &mut sidecar).await {
+        let res = match run_offer(&layout, &settings, &offer, &shared, &mut sidecar, &inductor, &http).await {
             Ok(r) => r,
             Err(e) => TaskResult {
                 ok: false,
@@ -558,6 +743,7 @@ async fn worker_loop(
             text: res.text,
             mp3_b64: res.mp3_b64,
         };
+        let mut reported = false;
         for attempt in 1..=3 {
             match http
                 .post(format!("{inductor}/api/complete"))
@@ -565,11 +751,25 @@ async fn worker_loop(
                 .send()
                 .await
             {
-                Ok(r) if r.status().is_success() => break,
+                Ok(r) if r.status().is_success() => {
+                    reported = true;
+                    break;
+                }
                 Ok(r) => println!("[WARN] complete report refused ({}), retry {attempt}/3", r.status()),
                 Err(e) => println!("[WARN] complete report lost, retry {attempt}/3: {e}"),
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+        // Phase 4: a non-local worker's copy is scratch. It goes only after
+        // the report is accepted — a lost report keeps the files until the
+        // re-offered (now empty) units report success, then they go.
+        if should_sweep(offer.stage, offer.render_units.as_deref(), offer.local_node, res.ok, reported)
+        {
+            let dir = layout.seg_dir(&offer.engine, offer.chapter);
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => println!("[ok] swept {}", dir.display()),
+                Err(e) => println!("[WARN] sweep {} failed: {e}", dir.display()),
+            }
         }
         clear_task(&shared);
     }
@@ -664,6 +864,10 @@ async fn main() -> Result<()> {
             let tts_url = tts_url.unwrap_or_else(|| "http://127.0.0.1:8818".into());
             worker_loop(layout, settings, inductor, worker_id, addr, tts_url).await?;
         }
+        Cmd::Segments { .. } => {
+            let manifest = segment_manifest(&layout.audio());
+            println!("{}", serde_json::to_string(&manifest)?);
+        }
     }
     Ok(())
 }
@@ -671,6 +875,57 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn segment_manifest_wire_format_round_trips() {
+        // The inductor parses this JSON; the shape is the contract. Content
+        // is covered in bm-core.
+        let root = std::env::temp_dir().join(format!("bmseg{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("data/audio/segments-vieneu-7");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("0000_Adam.wav"), b"RIFF-fake").unwrap();
+
+        let text = serde_json::to_string(&segment_manifest(&root.join("data/audio"))).unwrap();
+        let back: Vec<bm_core::segments::SegmentEntry> = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!((back[0].chapter, back[0].name.as_str()), (7, "0000_Adam.wav"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn render_action_pins_the_empty_offer_to_noop() {
+        use bm_proto::{RenderUnitSpec, Stage};
+        // Zero units means "report ok/0 at once" — never a fall-through into
+        // rendering, and never the legacy path.
+        assert_eq!(render_action(None), RenderAction::Legacy);
+        assert_eq!(render_action(Some(&[])), RenderAction::Noop);
+        let one = vec![RenderUnitSpec {
+            tag: "0000".into(),
+            name: "0000_Adam.wav".into(),
+            speaker: "A".into(),
+            voice: "Adam".into(),
+            text: "hi".into(),
+            temperature: 0.8,
+            silence_p: 0.15,
+        }];
+        assert_eq!(render_action(Some(&one)), RenderAction::Units);
+
+        // Sweep if and only if: render task, offered units, remote node,
+        // success reported. Every other combination keeps the files.
+        let sweep = |stage, units: Option<&[RenderUnitSpec]>, local, ok, reported| {
+            should_sweep(stage, units, local, ok, reported)
+        };
+        assert!(sweep(Stage::Render, Some(&one), false, true, true));
+        assert!(!sweep(Stage::Render, Some(&one), false, true, false), "lost report keeps files");
+        assert!(!sweep(Stage::Render, Some(&one), false, false, true), "failure keeps files");
+        assert!(!sweep(Stage::Render, Some(&one), true, true, true), "local node never sweeps");
+        assert!(!sweep(Stage::Render, None, false, true, true), "legacy path never sweeps");
+        assert!(!sweep(Stage::Merge, Some(&one), false, true, true), "merge untouched");
+        // The empty-units re-offer after a lost report: accepted, then sweep
+        // the stranded files from the first attempt.
+        assert!(sweep(Stage::Render, Some(&[]), false, true, true));
+    }
 
     #[test]
     fn worker_alias_is_drawn_once_then_kept() {

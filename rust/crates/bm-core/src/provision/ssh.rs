@@ -373,6 +373,20 @@ mod tests {
     }
 
     #[test]
+    fn ssh_local_agrees_with_is_local_node() {
+        // One predicate, one place: the provisioner's `Ssh.local` and the
+        // offer's `local_node` flag must never disagree.
+        for addr in ["127.0.0.1", "localhost", "::1", "192.168.2.2", "10.0.0.5"] {
+            let m = Machine::new(addr, "u", 22, None, "worker");
+            assert_eq!(
+                Ssh::for_machine(&m).local,
+                crate::is_local_node(addr),
+                "{addr}"
+            );
+        }
+    }
+
+    #[test]
     fn ssh_args_include_port_and_key_only_when_set() {
         let m = Machine::new("10.0.0.5", "pi", 2222, Some("/k/id".into()), "worker");
         let ssh = Ssh::for_machine(&m);

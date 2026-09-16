@@ -3,6 +3,7 @@
 mod api;
 mod backend;
 mod roster;
+mod segments;
 mod state;
 mod tui;
 
@@ -76,10 +77,28 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RosterCmd,
     },
+    /// Segment inventory across the cluster: per chapter per machine, diffed
+    /// against what the scripts+cast actually require. Report-only by default;
+    /// `--collect` pulls what remotes hold that this inductor lacks.
+    Segments {
+        /// Only these machines (address or link name), instead of all linked.
+        #[arg(long)]
+        from: Vec<String>,
+        /// Pull remote-held segments the inductor lacks into `data/audio/`.
+        #[arg(long)]
+        collect: bool,
+        /// Delete local files no chapter expects (stale voices). DESTRUCTIVE:
+        /// prints every path as it deletes. Without this flag the command
+        /// only reports.
+        #[arg(long)]
+        prune: bool,
+        /// Report what `--collect` would pull, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Link a machine by name: remembers how to reach it so `provision --box`
     /// needs no flags. Writes `.bm/machines.json`, which is ignored.
-    Link {
-        /// Short handle, e.g. `box-1`.
+    Link {        /// Short handle, e.g. `box-1`.
         #[arg(long)]
         name: String,
         /// Machine address (IP or hostname).
@@ -147,7 +166,7 @@ pub fn provision_machine(
         target: format!("{user}@{addr}"),
         port,
         key: key.clone(),
-        local: matches!(addr, "127.0.0.1" | "localhost" | "::1"),
+        local: bm_core::is_local_node(addr),
     };
     let pre = probe_ssh.probe();
     log.push(format!("[{addr}] {}", pre.summary()));
@@ -400,8 +419,17 @@ async fn main() -> anyhow::Result<()> {
                 .or_else(|| settings.ssh.key.clone());
             cmd_provision(layout, addr, user, port, key, api_port, force).await
         }
-        Cmd::Link { name, addr, user, port, key } => {
-            let bxo = bm_core::provision::LinkedBox {
+        Cmd::Segments { from, collect, prune, dry_run } => {
+            // Separate paths: the report hashes every local byte (~100s on a
+            // full store in debug builds), while prune only lists names.
+            // Neither piggybacks on the other.
+            if prune {
+                segments::cmd_prune(&layout, &settings, !dry_run)
+            } else {
+                segments::cmd_segments(&layout, &settings, &from, collect, dry_run)
+            }
+        }
+        Cmd::Link { name, addr, user, port, key } => {            let bxo = bm_core::provision::LinkedBox {
                 name: name.clone(),
                 addr,
                 user,

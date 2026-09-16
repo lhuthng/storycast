@@ -45,6 +45,11 @@ pub struct Inner {
     pub tasks: HashMap<String, Task>,
     pub machines: HashMap<String, Machine>,
     pub workers: HashMap<String, String>,
+    /// Advertised capabilities per worker, refreshed at every registration.
+    /// Drives the render gate: only workers with `render-segments` are
+    /// offered render tasks (they upload units; older agents keep files
+    /// locally, which the completion gate would fail anyway).
+    pub caps: HashMap<String, Vec<String>>,
     pub beats: HashMap<String, bm_proto::Heartbeat>,
     /// Boot time: the orphan pass in `reap` stays quiet for the first 120s
     /// so a reboot never mistakes still-grinding workers (whose beats arrive
@@ -222,6 +227,282 @@ mod tests {
             bm_core::read_json(&layout.cast("vieneu")).unwrap();
         assert_eq!(disk["A"], "minh-triet", "persisted as a key, not a name");
         assert_eq!(disk["B"], "adam");
+    }
+
+    #[test]
+    fn merge_affinity_is_local_after_a_remote_render() {
+        // Step 13: segments live on the inductor now, so the merge runs where
+        // they are — never where the render happened to run.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(7),
+            r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"B","text":"z"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
+        let seg = layout.seg_dir("vieneu", 7);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(seg.join("0001_Adam.wav"), vec![0u8; 2000]).unwrap();
+        let mut t = Task::new(7, Stage::Render);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("remote-w".into());
+        inner.tasks.insert("render:7".into(), t);
+
+        inner.complete(&completion("remote-w", "render:7", true, "render ch7 (2 calls)"));
+        assert_eq!(inner.tasks["render:7"].state, TaskState::Done, "gate passes: files are home");
+        let m = inner.tasks.get("merge:7").expect("merge task exists");
+        assert_eq!(m.affinity.as_deref(), Some("127.0.0.1"), "merge runs where the segments are");
+    }
+
+    #[test]
+    fn merge_without_a_payload_needs_the_file_on_disk() {
+        // Local nodes ship no mp3_b64; the file itself is the evidence. A
+        // report with neither is a failure, not a silent Done.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        for ch in [8u32, 9] {
+            let mut t = Task::new(ch, Stage::Merge);
+            t.state = TaskState::Running;
+            t.assigned_to = Some("w1".into());
+            inner.tasks.insert(format!("merge:{ch}"), t);
+        }
+        std::fs::create_dir_all(layout.final_mp3(8).parent().unwrap()).unwrap();
+        std::fs::write(layout.final_mp3(8), vec![0u8; 2000]).unwrap();
+
+        inner.complete(&completion("w1", "merge:8", true, "merge ch8 -> out.mp3"));
+        assert_eq!(inner.tasks["merge:8"].state, TaskState::Done, "file present: done");
+        let msg = inner.complete(&completion("w1", "merge:9", true, "merge ch9 -> out.mp3"));
+        assert!(msg.contains("failed"), "no payload and no file fails: {msg}");
+        assert!(msg.contains("no file"), "the absence is named: {msg}");
+        assert_eq!(inner.tasks["merge:9"].state, TaskState::Pending);
+    }
+
+    #[test]
+    fn render_offer_requires_the_upload_capability() {
+        // Staged rollout: an agent without `render-segments` keeps every
+        // other stage but never renders (its report would fail the gate
+        // anyway). Unknown workers are allowed — failing closed would strand
+        // anything that never registered.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(5),
+            r#"{"segments":[{"speaker":"A","text":"a full sentence for synthesis here"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Adam"}"#).unwrap();
+        for (stage, state) in [
+            (Stage::Crawl, TaskState::Done),
+            (Stage::Digest, TaskState::Done),
+        ] {
+            let mut t = Task::new(5, stage);
+            t.state = state;
+            inner.tasks.insert(format!("{stage}:5"), t);
+        }
+        let mut t = Task::new(5, Stage::Render);
+        t.state = TaskState::Pending;
+        inner.tasks.insert("render:5".into(), t);
+        inner.workers.insert("old-w".into(), "192.168.2.2".into());
+        inner.caps.insert(
+            "old-w".into(),
+            vec!["crawl".into(), "digest".into(), "render".into(), "merge".into()],
+        );
+        inner.workers.insert("new-w".into(), "192.168.2.2".into());
+        inner.caps.insert(
+            "new-w".into(),
+            vec!["crawl".into(), "digest".into(), "render".into(), "merge".into(), "render-segments".into()],
+        );
+
+        assert!(inner.offer("old-w").is_none(), "old agent never renders");
+        let offer = inner.offer("new-w").expect("capable worker renders");
+        assert_eq!(offer.task_id, "render:5");
+        assert!(!offer.local_node, "192.168.2.2 is not the local node");
+        assert!(offer.render_units.is_some(), "planned, not legacy");
+    }
+
+    #[test]
+    fn offer_marks_the_local_node() {
+        // The provisioner's `Ssh.local` and the offer's `local_node` run on
+        // the same predicate — one fact, checked on both sides of the wire.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(5),
+            r#"{"segments":[{"speaker":"A","text":"a full sentence for synthesis here"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Adam"}"#).unwrap();
+        for (stage, state) in [
+            (Stage::Crawl, TaskState::Done),
+            (Stage::Digest, TaskState::Done),
+        ] {
+            let mut t = Task::new(5, stage);
+            t.state = state;
+            inner.tasks.insert(format!("{stage}:5"), t);
+        }
+        let mut t = Task::new(5, Stage::Render);
+        t.state = TaskState::Pending;
+        inner.tasks.insert("render:5".into(), t);
+        inner.workers.insert("w-local".into(), "127.0.0.1".into());
+
+        let offer = inner.offer("w-local").expect("local worker renders");
+        assert!(offer.local_node);
+        for addr in ["127.0.0.1", "localhost", "::1"] {
+            assert!(bm_core::is_local_node(addr), "{addr}");
+        }
+        assert!(!bm_core::is_local_node("192.168.2.2"));
+    }
+
+    #[test]
+    fn swap_skips_a_chapter_whose_store_is_complete_and_current() {
+        // Doc test 10, the narrowing: A speaks here and the local store is
+        // already complete for the post-swap cast, with no stale files to
+        // delete (the files got ahead of the cast file — a previous render
+        // landed but the assignment never updated). Requeueing would re-speak
+        // units that are already correct, so the chapter is left alone.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(11),
+            r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"A","text":"y"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+        let seg = layout.seg_dir("vieneu", 11);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000-0001_Minh Triết.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(layout.final_mp3(11), vec![0u8; 2000]).unwrap();
+        for stage in [Stage::Render, Stage::Merge] {
+            let mut t = Task::new(11, stage);
+            t.state = TaskState::Done;
+            inner.tasks.insert(format!("{stage}:11"), t);
+        }
+
+        let msg = inner.op_swap_voice("A", "Minh Triết").unwrap();
+        assert!(!msg.contains("11"), "complete store, no stale files: untouched: {msg}");
+        assert!(layout.final_mp3(11).exists(), "product stays");
+        assert!(seg.join("0000-0001_Minh Triết.wav").exists(), "current files stay");
+        assert_eq!(inner.tasks["render:11"].state, TaskState::Done);
+        assert_eq!(inner.tasks["merge:11"].state, TaskState::Done);
+    }
+
+    #[test]
+    fn digest_completion_with_a_changed_script_invalidates_render() {
+        // A re-digest rewrites run boundaries and voices: the kept render
+        // would speak the old dramatization under the new one. Segments, mp3
+        // and both tasks go; attempts reset because this is new work.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(12),
+            r#"{"segments":[{"speaker":"A","text":"old line here"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Adam"}"#).unwrap();
+        let seg = layout.seg_dir("vieneu", 12);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000_Adam.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(layout.final_mp3(12), vec![0u8; 2000]).unwrap();
+        for stage in [Stage::Render, Stage::Merge] {
+            let mut t = Task::new(12, stage);
+            t.state = TaskState::Done;
+            inner.tasks.insert(format!("{stage}:12"), t);
+        }
+        let mut t = Task::new(12, Stage::Digest);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w1".into());
+        inner.tasks.insert("digest:12".into(), t);
+
+        let mut c = completion("w1", "digest:12", true, "digest ch12");
+        c.script = Some(serde_json::json!({"segments":[{"speaker":"A","text":"a rewritten line here"}]}));
+        inner.complete(&c);
+
+        assert_eq!(inner.tasks["render:12"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["render:12"].attempts, 0, "new work, not a retry");
+        assert_eq!(inner.tasks["merge:12"].state, TaskState::Pending);
+        assert!(!seg.join("0000_Adam.wav").exists(), "stale segments go");
+        assert!(!layout.final_mp3(12).exists(), "stale product goes");
+    }
+
+    #[test]
+    fn digest_completion_with_an_identical_script_invalidates_nothing() {
+        // Duplicate reports are free: same bytes, no surgery.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        let script = r#"{"segments":[{"speaker":"A","text":"old line here"}]}"#;
+        std::fs::write(layout.script(12), script).unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Adam"}"#).unwrap();
+        let seg = layout.seg_dir("vieneu", 12);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000_Adam.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(layout.final_mp3(12), vec![0u8; 2000]).unwrap();
+        for stage in [Stage::Render, Stage::Merge] {
+            let mut t = Task::new(12, stage);
+            t.state = TaskState::Done;
+            inner.tasks.insert(format!("{stage}:12"), t);
+        }
+        let mut t = Task::new(12, Stage::Digest);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w1".into());
+        inner.tasks.insert("digest:12".into(), t);
+
+        let mut c = completion("w1", "digest:12", true, "digest ch12");
+        c.script = Some(serde_json::from_str(script).unwrap());
+        inner.complete(&c);
+
+        assert_eq!(inner.tasks["render:12"].state, TaskState::Done);
+        assert_eq!(inner.tasks["merge:12"].state, TaskState::Done);
+        assert!(seg.join("0000_Adam.wav").exists(), "nothing touched");
+        assert!(layout.final_mp3(12).exists(), "product stays");
+    }
+
+    #[test]
+    fn missing_units_omits_what_the_store_already_holds() {
+        // Doc test 1: a store holding 29 of 32 units yields an offer of 3.
+        let (_d, inner) = fixture();
+        let layout = inner.layout.clone();
+        let mut segs = Vec::new();
+        for i in 0..32u32 {
+            let sp = if i % 2 == 0 { "A" } else { "B" };
+            segs.push(serde_json::json!({"speaker": sp, "text": format!("line {i} spoken aloud here")}));
+        }
+        std::fs::write(
+            layout.script(9),
+            serde_json::json!({"segments": segs}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
+        let seg = layout.seg_dir("vieneu", 9);
+        std::fs::create_dir_all(&seg).unwrap();
+        // Alternating speakers = 32 single-line runs: 0000..0031.
+        for i in 0..32u32 {
+            if [5, 17, 30].contains(&i) {
+                continue;
+            }
+            let voice = if i % 2 == 0 { "Đức Trí" } else { "Adam" };
+            std::fs::write(seg.join(format!("{i:04}_{voice}.wav")), vec![0u8; 2000]).unwrap();
+        }
+
+        let units = inner.missing_units(9).expect("plannable chapter");
+        let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["0005_Adam.wav", "0017_Adam.wav", "0030_Đức Trí.wav"],
+            "exactly the missing three, in order: {names:?}"
+        );
+        assert_eq!(units[0].speaker, "B");
+        assert!(!units[0].text.is_empty(), "the worker gets text, not a lookup key");
+
+        // Full store → Some([]): report ok/0, not a replan.
+        for i in [5u32, 17, 30] {
+            let voice = if i % 2 == 0 { "Đức Trí" } else { "Adam" };
+            std::fs::write(seg.join(format!("{i:04}_{voice}.wav")), vec![0u8; 2000]).unwrap();
+        }
+        assert_eq!(inner.missing_units(9).unwrap().len(), 0);
+        // No script → None: the worker plans from its own copy instead.
+        assert!(inner.missing_units(77).is_none());
     }
 
     #[test]
@@ -654,6 +935,35 @@ mod tests {
             text: None,
             mp3_b64: None,
         }
+    }
+
+    #[test]
+    fn a_render_report_with_missing_files_is_rejected_by_name() {
+        // The completion gate: the worker's word is not evidence. Mutate one
+        // wav below the completeness threshold and the `ok` report must fail
+        // naming exactly that file, so the next offer repeats it.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(6),
+            r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"A","text":"y"},{"speaker":"B","text":"z"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
+        let seg = layout.seg_dir("vieneu", 6);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000-0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(seg.join("0002_Adam.wav"), vec![0u8; 500]).unwrap();
+        let mut t = Task::new(6, Stage::Render);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w1".into());
+        inner.tasks.insert("render:6".into(), t);
+
+        let msg = inner.complete(&completion("w1", "render:6", true, "render ch6 (2 calls)"));
+        assert!(msg.contains("failed"), "an incomplete ok-report fails: {msg}");
+        assert!(msg.contains("0002_Adam.wav"), "the missing file is named: {msg}");
+        assert_eq!(inner.tasks["render:6"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["render:6"].attempts, 1);
     }
 
     #[test]

@@ -1,11 +1,11 @@
 use super::{Inner, lease_for};
-use bm_proto::{Complete, Stage, Task, TaskOffer, TaskState, now_secs};
+use bm_proto::{Complete, RenderUnitSpec, Stage, Task, TaskOffer, TaskState, now_secs};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
 impl Inner {
-    /// Oldest assignable task for this worker. Merge affinity keeps segments
-    /// on the machine that rendered them.
+    /// Oldest assignable task for this worker. Merge affinity pins merges to
+    /// the local node; render goes to any worker that uploads units.
     pub fn offer(&mut self, worker_id: &str) -> Option<TaskOffer> {
         self.reap();
         let machine = self.workers.get(worker_id).cloned().unwrap_or_default();
@@ -26,6 +26,18 @@ impl Inner {
                 }
                 if !self.upstream_done(t.chapter, t.stage) {
                     return false;
+                }
+                // Render uploads units; a worker that registered without
+                // `render-segments` keeps every other stage but never renders
+                // (its report would fail the completion gate anyway). Workers
+                // with no recorded capabilities are allowed — failing closed
+                // here would strand anything that never registered.
+                if t.stage == Stage::Render {
+                    if let Some(caps) = self.caps.get(worker_id) {
+                        if !caps.iter().any(|c| c == "render-segments") {
+                            return false;
+                        }
+                    }
                 }
                 if let Some(only) = &t.affinity {
                     return *only == machine;
@@ -83,7 +95,71 @@ impl Inner {
             gap_ms: self.settings.gap_ms,
             speed: self.settings.speed,
             ambience: self.settings.ambience,
+            // The inductor plans; the worker speaks. `None` when this chapter
+            // cannot be planned here — the worker falls back to its own
+            // script, exactly as before the migration.
+            render_units: if t.stage == Stage::Render {
+                self.missing_units(n)
+            } else {
+                None
+            },
+            // The inductor decides locality; the worker never guesses from
+            // paths. Same predicate the provisioner uses for `Ssh.local`.
+            local_node: bm_core::is_local_node(machine),
         }
+    }
+
+    /// Units of `chapter` the inductor's own store lacks, for a render offer.
+    /// `None` when the chapter cannot be planned here (missing script,
+    /// unparseable JSON, uncast speaker).
+    pub(crate) fn missing_units(&self, chapter: u32) -> Option<Vec<RenderUnitSpec>> {
+        let engine = self.settings.engine.clone();
+        let script_path = self.layout.script(chapter);
+        let text = std::fs::read_to_string(&script_path).ok()?;
+        let data: Value = serde_json::from_str(&text).ok()?;
+        let segments = data.get("segments")?.as_array()?;
+        let policy =
+            bm_core::cast::policy_for_bible(&engine, &self.layout.bible()).ok()?;
+        let cast = bm_core::cast::load_cast(
+            &script_path,
+            &self.layout.cast(&engine),
+            &self.layout.bible(),
+            &policy,
+            false,
+        )
+        .ok()?;
+        let local = engine == "vieneu";
+        let title =
+            bm_core::assemble::title_speech_for_script(&script_path, &cast, segments);
+        let seg_dir = self.layout.seg_dir(&engine, chapter);
+        let units =
+            bm_core::assemble::plan_render(segments, &cast, &seg_dir, local, title.as_ref())
+                .ok()?;
+        Some(
+            units
+                .into_iter()
+                .filter(|u| {
+                    // Same completeness test the agent's resume check uses: a
+                    // present, non-trivial file is done.
+                    !(u.dest.exists()
+                        && u.dest.metadata().map(|m| m.len() > 1000).unwrap_or(false))
+                })
+                .map(|u| RenderUnitSpec {
+                    tag: u.tag,
+                    name: u
+                        .dest
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    speaker: u.speaker,
+                    voice: u.voice,
+                    text: u.text,
+                    temperature: u.temperature,
+                    silence_p: u.silence_p,
+                })
+                .collect(),
+        )
     }
 
     /// Apply a worker report. Returns a human-readable line for the event log.
@@ -96,7 +172,6 @@ impl Inner {
             Done {
                 chapter: u32,
                 stage: Stage,
-                machine: String,
                 delta: Option<Value>,
                 script: Option<Value>,
                 text: Option<String>,
@@ -108,12 +183,10 @@ impl Inner {
             None => Outcome::Unknown,
             Some(t) if t.assigned_to.as_deref() != Some(c.worker_id.as_str()) => Outcome::Stale,
             Some(t) => {
-                let machine = self.workers.get(&c.worker_id).cloned().unwrap_or_default();
                 if c.ok {
                     Outcome::Done {
                         chapter: t.chapter,
                         stage: t.stage,
-                        machine,
                         delta: c.bible_delta.clone(),
                         script: c.script.clone(),
                         text: c.text.clone(),
@@ -129,7 +202,29 @@ impl Inner {
             Outcome::Stale => {
                 return format!("{}: stale report for {} ignored", c.worker_id, c.task_id)
             }
-            Outcome::Done { chapter, stage, machine, delta, script, text, mp3_b64 } => {
+            Outcome::Done { chapter, stage, delta, script, text, mp3_b64 } => {
+                // Completion gate (render only): the worker's word is not
+                // evidence — the files are. A report whose units never landed
+                // is a failure whose detail names them, so the next
+                // missing-only offer repeats exactly those.
+                if stage == Stage::Render {
+                    let missing = crate::segments::missing_wavs(
+                        &self.layout,
+                        &self.settings.engine,
+                        chapter,
+                    );
+                    let bad = match &missing {
+                        None => Some(format!("render ch{chapter} unverifiable here")),
+                        Some(m) if !m.is_empty() => Some(format!(
+                            "render ch{chapter} incomplete, missing: {}",
+                            m.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+                        )),
+                        _ => None,
+                    };
+                    if let Some(detail) = bad {
+                        return self.fail_task(&c.task_id, &c.worker_id, detail);
+                    }
+                }
                 // Artifacts first: the inductor holds every artifact so any
                 // machine can run downstream stages.
                 if stage == Stage::Crawl {
@@ -157,20 +252,35 @@ impl Inner {
                         let bible: Value =
                             bm_core::read_json(&path).unwrap_or(json!({"characters": []}));
                         bm_core::digest::canonicalize_script(&mut s, &bible);
+                        // A changed script invalidates everything downstream:
+                        // run boundaries (hence segment filenames) and voices
+                        // come from it, so a kept render would speak the old
+                        // dramatization under the new one. An identical script
+                        // invalidates nothing (duplicate reports are free).
+                        let old: Option<Value> = bm_core::read_json(&self.layout.script(chapter)).ok();
+                        let changed = old.as_ref() != Some(&s);
                         let _ = bm_core::atomic_write(
                             &self.layout.script(chapter),
                             &serde_json::to_string_pretty(&s).unwrap_or_default(),
                         );
+                        if changed {
+                            self.invalidate_render(chapter);
+                        }
                     }
                     self.ensure_task(chapter, Stage::Render);
                 }
                 if stage == Stage::Render {
+                    // Merge is pinned to the local node: the segments now live
+                    // on the inductor, so the merge runs where they are. The
+                    // reporting machine no longer matters.
                     let m = self.ensure_task(chapter, Stage::Merge);
-                    m.affinity =
-                        Some(if machine.is_empty() { "127.0.0.1".into() } else { machine });
+                    m.affinity = Some("127.0.0.1".into());
                 }
                 if stage == Stage::Merge {
-                    // A remote merge's product comes home in the report.
+                    // A remote merge's product comes home in the report; a
+                    // local node's `publish()` already renamed it into place,
+                    // so the file itself is the evidence. A report with
+                    // neither is a failure, not a silent Done.
                     if let Some(b64) = mp3_b64 {
                         use base64::Engine;
                         if let Ok(raw) =
@@ -185,6 +295,13 @@ impl Inner {
                                 let _ = std::fs::rename(&tmp, &dest);
                             }
                         }
+                    }
+                    if !self.layout.final_mp3(chapter).is_file() {
+                        return self.fail_task(
+                            &c.task_id,
+                            &c.worker_id,
+                            format!("merge ch{chapter} reported done but no file"),
+                        );
                     }
                 }
                 if let Some(t) = self.tasks.get_mut(&c.task_id) {
@@ -212,27 +329,7 @@ impl Inner {
                 self.save();
             }
             Outcome::Failed => {
-                let shelved = {
-                    if let Some(t) = self.tasks.get_mut(&c.task_id) {
-                        t.attempts += 1;
-                        t.detail = c.detail.clone();
-                        t.state = if t.attempts >= 3 { TaskState::Shelved } else { TaskState::Pending };
-                        t.assigned_to = None;
-                        t.lease_until = None;
-                        t.updated = now_secs();
-                        t.state == TaskState::Shelved
-                    } else {
-                        false
-                    }
-                };
-                let level = if shelved { "error" } else { "warn" };
-                let note = if shelved { " (shelved — press u to retry)" } else { " (will retry)" };
-                self.push_event(level, format!(
-                    "[{}] {} FAILED{}: {}",
-                    c.worker_id, c.task_id, note,
-                    bm_core::util::head_chars(&c.detail, 200)
-                ));
-                self.save();
+                return self.fail_task(&c.task_id, &c.worker_id, c.detail.clone());
             }
         }
         format!(
@@ -242,6 +339,33 @@ impl Inner {
             if c.ok { "done" } else { "failed" },
             bm_core::util::head_chars(&c.detail, 120)
         )
+    }
+
+    /// Record a failed report: a strike, Pending again (Shelved at 3), and an
+    /// event line. Shared by worker-reported failures and the completion
+    /// gate, which fails reports whose files never landed.
+    fn fail_task(&mut self, task_id: &str, worker_id: &str, detail: String) -> String {
+        let shelved = {
+            if let Some(t) = self.tasks.get_mut(task_id) {
+                t.attempts += 1;
+                t.detail = detail.clone();
+                t.state = if t.attempts >= 3 { TaskState::Shelved } else { TaskState::Pending };
+                t.assigned_to = None;
+                t.lease_until = None;
+                t.updated = now_secs();
+                t.state == TaskState::Shelved
+            } else {
+                false
+            }
+        };
+        let level = if shelved { "error" } else { "warn" };
+        let note = if shelved { " (shelved — press u to retry)" } else { " (will retry)" };
+        self.push_event(level, format!(
+            "[{worker_id}] {task_id} FAILED{note}: {}",
+            bm_core::util::head_chars(&detail, 200)
+        ));
+        self.save();
+        format!("{worker_id}: {task_id} failed ({})", bm_core::util::head_chars(&detail, 120))
     }
 
     pub fn counts(&self) -> HashMap<String, HashMap<String, usize>> {

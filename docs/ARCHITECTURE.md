@@ -75,20 +75,29 @@ is a *path*, which is config, not a secret.
   (`segments`, `roster`, `new_characters`, `aliases`, `fixes`). The inductor is
   the **single writer** of `data/bible.json` and the cast files — workers send
   the finished script and their bible delta back inside the completion report,
-  which removes any read-modify-write race between machines. The "analyzer" is
+  which removes any read-modify-write race between machines. A digest that
+  lands a *changed* script invalidates the chapter's render+merge (segments
+  and mp3 go, both tasks requeue fresh) — otherwise the kept render would
+  speak the old dramatization under the new one. The "analyzer" is
   pluggable (`opencode | openrouter | gemini | local`) with a fallback chain
   over models.
 * **render** (`bm-agent/src/tts.rs` + `python/`) — speaks each script segment
   through the engine. Vieneu runs as an HTTP sidecar on `127.0.0.1:8818` per
-  machine; each finished segment is cached under
-  `data/audio/segments-<engine>-NN/`, so a retry resumes mid-chapter instead
-  of starting over. The report's `units` counts real TTS calls (cache hits
-  excluded), which feeds the ETA model.
+  machine. The inductor owns `data/audio/segments-<engine>-NN/` — it is the
+  only copy of any segment; a worker's copy is scratch. Render offers carry
+  only the missing units (`render_units`, planned with the same `expected_wavs`
+  the merger uses); non-local workers upload each wav via `POST /api/segment`
+  and discard their copy once the report is accepted, while the local node
+  writes straight into the store. A render report is gated on the files being
+  present — the worker's word is not evidence. The report's `units` counts
+  real TTS calls (cache hits excluded), which feeds the ETA model. Only
+  workers advertising the `render-segments` capability are offered renders.
 * **merge** (`assemble/`, `ambience.rs`) — concatenates segments with
   `gap_ms` pauses and optional ambience beds keyed by the script's `scene`
   labels, and writes `output/Ch.N - Title.mp3`. A merge task carries
-  **affinity**: it runs on the machine that rendered the chapter, because that
-  is where the segment cache already is. A remote merge ships its mp3 home,
+  **affinity** for the local node, because that is where the segment store
+  is. A local merge ships no mp3 — the file itself is the evidence. A remote
+  merge (pre-migration affinity, or no local worker alive) ships its mp3 home,
   base64, inside the report.
 
 ## 3. The control API (bm-inductor, axum, default :8901)
@@ -98,6 +107,7 @@ is a *path*, which is config, not a secret.
 | `GET /api/state` | The whole world for the TUI: `tasks`, `machines`, `beats`, `counts`, `settings`, `events` |
 | `POST /api/offer` | A worker asks for work; answers with a task offer (or nothing) |
 | `POST /api/complete` | A worker reports done/failed (+ artifacts: script, text, bible delta, mp3) |
+| `POST /api/segment` | A non-local worker uploads one rendered wav (name validated against the expected set) |
 | `POST /api/heartbeat` | Progress: stage, chapter, %, activity, ETA |
 | `GET /api/roster` | The resolved voice roster (catalogue + pool + policy verdicts) |
 | `POST /api/op` | Operator ops: `translate`, `crawl-setup`, `voices`, `swap-voice`, `preview-voice`, `eta`, `requeue`, `retry`, `retry-task` |

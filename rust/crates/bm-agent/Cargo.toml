@@ -20,3 +20,4 @@ anyhow = { workspace = true }
 reqwest = { workspace = true }
 clap = { workspace = true }
 base64 = { workspace = true }
+sha2 = { workspace = true }
