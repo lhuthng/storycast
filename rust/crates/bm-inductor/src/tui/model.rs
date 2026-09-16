@@ -1,6 +1,6 @@
 //! Pure selection: filters, cast rows, task queries. No widgets, no keys.
 use std::collections::BTreeMap;
-use bm_proto::{Machine, Roster, Task, TaskState, VoiceInfo};
+use bm_proto::{Heartbeat, Machine, Roster, Task, TaskState, VoiceInfo};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -261,6 +261,23 @@ pub(crate) fn filtered_tasks<'a>(tasks: &'a [Task], filter: &str) -> Vec<&'a Tas
                 || chapter.contains(&f)
         })
         .collect()
+}
+
+/// Beats inside the liveness window (90s — the same window the reaper and the
+/// ETA use). The panes hide the rest: a dead worker rendered as an idle row
+/// is how two hares happen.
+pub(crate) fn live_beats(beats: &[Heartbeat], now: u64) -> Vec<&Heartbeat> {
+    beats.iter().filter(|b| now.saturating_sub(b.ts) < 90).collect()
+}
+
+/// Live workers on one box, by the addr their heartbeats carry. Powers the
+/// Machines pane's `workers` column — the answer to "is this box actually
+/// doing anything".
+pub(crate) fn live_workers(beats: &[Heartbeat], addr: &str, now: u64) -> usize {
+    live_beats(beats, now)
+        .iter()
+        .filter(|b| b.addr == addr)
+        .count()
 }
 
 /// `(state, count)` in `TaskState::ALL` order, zeroes skipped.

@@ -255,6 +255,11 @@ pub struct Heartbeat {
     /// Machine identity reported by the agent, for the TUI's machine column.
     #[serde(default)]
     pub hostname: String,
+    /// Stable display name chosen by the worker at startup and kept in its
+    /// root (`worker.alias`). Empty from older agents — the TUI falls back to
+    /// hashing the worker id, which churns on every restart.
+    #[serde(default)]
+    pub alias: String,
 }
 
 /// Sent when a task finishes (successfully or not).

@@ -182,11 +182,16 @@ pub async fn snapshot(api: &str) -> anyhow::Result<()> {
         println!("  none — add one with: bm-inductor provision --addr <ip>");
     }
     for m in &machines {
+        let now = bm_proto::now_secs();
+        let workers = beats
+            .iter()
+            .filter(|b| b.addr == m.addr && now.saturating_sub(b.ts) < 90)
+            .count();
         println!(
-            "  {:<16} {:<15} {:<13} tts={:<22} seen={}",
-            m.id,
+            "  {:<15} {:<13} workers={:<3} tts={:<22} seen={}",
             m.addr,
             m.state.as_str(),
+            workers,
             m.tts_url.clone().unwrap_or_else(|| "-".into()),
             seen_label(m)
         );
@@ -200,9 +205,14 @@ pub async fn snapshot(api: &str) -> anyhow::Result<()> {
         println!("  none — start one with: bm-agent worker --inductor <this host>");
     }
     for b in &beats {
+        let name = if b.alias.is_empty() {
+            worker_alias(&b.worker_id).0.to_string()
+        } else {
+            b.alias.clone()
+        };
         println!(
             "  {:<14} {:<8} ch{:<4} {:>3}%  {:<28} eta={}",
-            worker_alias(&b.worker_id).0,
+            name,
             b.stage.map(|s| s.as_str()).unwrap_or("-"),
             b.chapter.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
             (b.progress.clamp(0.0, 1.0) * 100.0).round() as u32,

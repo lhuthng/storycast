@@ -26,7 +26,6 @@ pub(crate) fn draw_machine_info(f: &mut ratatui::Frame, app: &App, addr: &str) {
         ])
     };
     let mut lines = vec![
-        kv("id", m.id.clone()),
         kv("addr", m.addr.clone()),
         kv("role", m.role.clone()),
         kv("state", m.state.as_str().to_string()),
