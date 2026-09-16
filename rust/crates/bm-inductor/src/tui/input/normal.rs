@@ -102,6 +102,7 @@ pub(crate) async fn normal_key(app: &mut App, key: KeyEvent, http: &reqwest::Cli
                         enqueue: false,
                         machines: app.effective_machines(),
                         cancel,
+                        settings_key: app.ssh_defaults().key,
                     },
                 );
                 app.set_status(Level::Info, "starting backend now — boxes join in background; watch events");

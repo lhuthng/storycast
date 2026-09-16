@@ -111,6 +111,60 @@ pub(crate) fn save_run_config(app: &App, buf: &str) -> Result<String, String> {
     Ok(format!("run config saved: ch{start}×{count}, digest {analyzer}"))
 }
 
+/// Persist one app-wide ssh default to the settings file. Returns a status
+/// line; `Err` keeps the prompt open. Applies to machines bound afterwards
+/// (and to a running inductor after its next restart, like every setting).
+pub(crate) fn save_ssh_setting(
+    app: &App,
+    kind: crate::tui::screen::TextKind,
+    buf: &str,
+) -> Result<String, String> {
+    use crate::tui::screen::TextKind;
+    if app.layout_root.as_os_str().is_empty() {
+        return Err("no repo root — restart the TUI from a checkout".into());
+    }
+    let settings_path = bm_core::Layout::new(&app.layout_root).settings();
+    let mut settings = bm_core::config::Settings::load(&settings_path);
+    let msg = match kind {
+        TextKind::SshKey => {
+            let key = buf.trim();
+            if key.is_empty() {
+                settings.ssh.key = None;
+                "ssh key default cleared — ssh decides per machine".to_string()
+            } else {
+                let expanded = bm_core::util::expand_tilde(key);
+                if !expanded.is_file() {
+                    return Err(format!(
+                        "no such key: {} — check the path, or clear it to let ssh decide",
+                        expanded.display()
+                    ));
+                }
+                settings.ssh.key = Some(key.to_string());
+                format!("ssh key default saved: {key}")
+            }
+        }
+        TextKind::SshUser => {
+            let user = buf.trim();
+            if user.is_empty() {
+                return Err("user is empty — enter a login name".into());
+            }
+            settings.ssh.user = user.to_string();
+            format!("ssh user default saved: {user}")
+        }
+        TextKind::SshPort => {
+            let port: u16 = buf
+                .trim()
+                .parse()
+                .map_err(|_| format!("port “{}” is not a number", buf.trim()))?;
+            settings.ssh.port = port;
+            format!("ssh port default saved: {port}")
+        }
+        _ => return Err("not an ssh setting prompt".into()),
+    };
+    settings.save(&settings_path).map_err(|e| format!("saving settings: {e:#}"))?;
+    Ok(msg)
+}
+
 /// Parse `<start> <count>` — the shape the `t` prompt takes.
 /// `Err` keeps the prompt open with the problem stated, never a silent default.
 pub(crate) fn parse_range(buf: &str) -> Result<(u32, u32), String> {

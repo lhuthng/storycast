@@ -19,16 +19,52 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
         // Save-only prompt, persisted from the run screen's Enter branch:
         // reaching dispatch would launch without saving, so refuse.
         TextKind::RunConfig => Err("run config is saved from the run screen".into()),
+        // Same for the ssh defaults: text.rs saves them on Enter, so
+        // reaching dispatch means a bug, and the prompt staying open says so.
+        TextKind::SshKey | TextKind::SshUser | TextKind::SshPort => {
+            Err("ssh defaults save from the prompt, not submit".into())
+        }
         TextKind::AddMachine => {
-            let addr = prompt.buf.trim().to_string();
-            if addr.is_empty() {
+            // Bind tuple: `addr [user [port [key...]]]` — the key is the
+            // remainder of the line so paths with spaces survive. Missing
+            // fields fall back to the app-wide ssh defaults; no key at all
+            // means ssh decides (agent / ~/.ssh/config).
+            let buf = prompt.buf.trim();
+            let toks: Vec<&str> = buf.split_whitespace().collect();
+            let Some(addr) = toks.first().map(|s| s.to_string()) else {
                 return Err("address is empty — enter an IP or hostname".into());
-            }
-            if addr.contains(char::is_whitespace) {
-                return Err(format!("“{addr}” contains whitespace — one address only"));
-            }
-            let key = std::env::var("SSH_KEY").ok();
-            let m = Machine::new(&addr, "thang", 22, key, "worker");
+            };
+            let def = app.ssh_defaults();
+            let user = toks.get(1).map(|s| s.to_string()).unwrap_or(def.user);
+            let port: u16 = match toks.get(2) {
+                None => def.port,
+                Some(p) => p.parse().map_err(|_| format!("port “{p}” is not a number"))?,
+            };
+            // Byte offset of the fourth field: skip three fields and the gaps
+            // between them. Internal spacing of the key is preserved.
+            let key = if toks.len() > 3 {
+                let mut idx = 0;
+                for _ in 0..3 {
+                    idx += buf[idx..].split_whitespace().next().map(|t| t.len()).unwrap_or(0);
+                    idx += buf[idx..]
+                        .chars()
+                        .take_while(|c| c.is_whitespace())
+                        .map(|c| c.len_utf8())
+                        .sum::<usize>();
+                }
+                let typed = buf[idx..].trim().to_string();
+                let expanded = bm_core::util::expand_tilde(&typed);
+                if !expanded.is_file() {
+                    return Err(format!(
+                        "no such key: {} — check the path, or clear it to let ssh decide",
+                        expanded.display()
+                    ));
+                }
+                Some(typed)
+            } else {
+                def.key
+            };
+            let m = Machine::new(&addr, &user, port, key, "worker");
             Ok(Job::AddMachine {
                 api: app.api.clone(),
                 http: app.http.clone(),

@@ -1,7 +1,10 @@
 //! Runtime settings and a tiny `.env` loader.
 //!
 //! Settings live in `.bm/settings.json` so the inductor can be reconfigured
-//! from the TUI and survive restarts. Secrets stay in `.env` — never here.
+//! from the TUI and survive restarts. API keys stay in `.env` — never here.
+//! The SSH key is a *path*, which is config, not a secret: it lives here
+//! (per-machine in `machines.json`, app-wide default below) and never in
+//! `.env`.
 
 use crate::util::{atomic_write, read_json};
 use anyhow::Result;
@@ -41,6 +44,28 @@ pub struct Settings {
     pub control_port: u16,
     /// Where the inductor is reachable from workers.
     pub advertise: String,
+    /// App-wide ssh defaults for binding machines: user, port, key path.
+    /// `None` key means ssh decides (agent, `~/.ssh/config`, default keys).
+    /// `#[serde(default)]` keeps every existing `settings.json` parsing —
+    /// the same trick `analyze_models` below relies on.
+    #[serde(default)]
+    pub ssh: SshDefaults,
+}
+
+/// App-wide ssh defaults. The per-machine value in `machines.json` wins;
+/// this saves retyping the same key across boxes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SshDefaults {
+    pub user: String,
+    pub port: u16,
+    pub key: Option<String>,
+}
+
+impl Default for SshDefaults {
+    fn default() -> Self {
+        SshDefaults { user: "thang".into(), port: 22, key: None }
+    }
 }
 
 impl Default for Settings {
@@ -67,6 +92,7 @@ impl Default for Settings {
             ],
             control_port: 8901,
             advertise: "127.0.0.1".into(),
+            ssh: SshDefaults::default(),
         }
     }
 }
@@ -121,6 +147,27 @@ pub fn env_or(key: &str, default: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_without_ssh_parses_as_defaults_and_roundtrips() {
+        // A pre-ssh settings.json has no `ssh` key: it must load as defaults.
+        let v: Settings = serde_json::from_str(r#"{"engine":"gemini"}"#).unwrap();
+        assert_eq!(v.engine, "gemini");
+        assert_eq!(v.ssh.user, "thang");
+        assert_eq!(v.ssh.port, 22);
+        assert_eq!(v.ssh.key, None);
+
+        let dir = std::env::temp_dir().join("bm-settings-ssh");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.json");
+        let mut s = Settings::default();
+        s.ssh.key = Some("~/.ssh/k".into());
+        s.save(&p).unwrap();
+        let back = Settings::load(&p);
+        assert_eq!(back.ssh.key.as_deref(), Some("~/.ssh/k"));
+        assert_eq!(back.ssh.user, "thang");
+    }
 
     #[test]
     fn chapter_url_substitutes_every_n() {

@@ -32,7 +32,15 @@ pub(crate) fn draw_machine_info(f: &mut ratatui::Frame, app: &App, addr: &str) {
         kv("state", m.state.as_str().to_string()),
         kv("ssh", m.ssh_target()),
         kv("ssh port", m.ssh_port.to_string()),
-        kv("ssh key", m.ssh_key.clone().unwrap_or_else(|| "default".into())),
+        kv("ssh key", {
+            let def = app.ssh_defaults();
+            let (path, src) =
+                bm_core::provision::resolve_key(m.ssh_key.as_deref(), def.key.as_deref());
+            match path {
+                Some(p) => format!("{}  ({})", p.display(), src.label()),
+                None => format!("—  ({})", src.label()),
+            }
+        }),
         kv("tts", m.tts_url.clone().unwrap_or_else(|| "—".into())),
         kv("last seen", seen_label(m)),
         kv(

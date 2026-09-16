@@ -136,7 +136,9 @@ impl Layout {
         self.bm_state().join("voices.json")
     }
 
-    /// Linked machines: the boxes this inductor may provision, by name.
+    /// Linked machines: the per-machine connection config (addr/user/port/key),
+    /// keyed by address. The inductor's join of this file with the ledger's
+    /// `machine_state` is the `Machine` the API serves.
     ///
     /// Same deal as `roster()`: inside `.bm/`, so SSH users, addresses and key
     /// paths stay on the machine and out of git with no extra ignore rules.

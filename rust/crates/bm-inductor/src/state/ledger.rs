@@ -1,6 +1,7 @@
 use super::{EVENT_CAP, EventRecord, Inner};
 use anyhow::Result;
 use bm_core::{Layout, config::Settings};
+use bm_core::provision::{join_all, load_boxes, save_box, split_machine};
 use bm_proto::{Machine, Task, TaskState, now_secs};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
@@ -44,9 +45,32 @@ impl Inner {
         self.layout.bm_state().join("ledger.json")
     }
 
+    /// Persist one in-memory machine's connection config to `machines.json`.
+    /// `fallback_name` (hostname, address) applies only when the box has no
+    /// stored name yet. Runtime still goes through `save()`.
+    pub fn persist_box(&self, addr: &str, fallback_name: &str) {
+        let Some(m) = self.machines.get(addr) else {
+            return;
+        };
+        let name = load_boxes(&self.layout.machines())
+            .iter()
+            .find(|b| b.addr == addr)
+            .map(|b| b.name.clone())
+            .unwrap_or_else(|| fallback_name.to_string());
+        let (bxo, _) = split_machine(m, &name);
+        let _ = save_box(&self.layout.machines(), &bxo);
+    }
+
     pub fn save(&self) {
+        // Runtime only: connection config lives in machines.json and is
+        // written at bind time, never on this hot path.
+        let state: HashMap<String, Value> = self
+            .machines
+            .iter()
+            .map(|(a, m)| (a.clone(), serde_json::to_value(split_machine(m, "").1).unwrap_or(Value::Null)))
+            .collect();
         let doc = json!({"tasks": self.tasks.values().collect::<Vec<_>>(),
-                         "machines": self.machines.values().collect::<Vec<_>>(),
+                         "machine_state": state,
                          "workers": self.workers});
         let _ = bm_core::write_json(&self.ledger_path(), &doc);
     }
@@ -57,6 +81,24 @@ impl Inner {
         else {
             return;
         };
+        // One-way migration: the old shape stored full Machines under
+        // `machines`. Split it once, snapshot both files first, then load
+        // the new shape (the recursive call terminates — the key is gone).
+        if doc.get("machines").and_then(|m| m.as_array()).is_some() {
+            match self.migrate_ledger(&doc) {
+                Ok(n) => self.push_event(
+                    "info",
+                    format!("ledger migrated: {n} machines split into machines.json + machine_state"),
+                ),
+                Err(e) => self.push_event("error", format!("ledger migration failed: {e:#}")),
+            }
+            self.load_ledger();
+            return;
+        }
+        self.load_new_shape(&doc);
+    }
+
+    fn load_new_shape(&mut self, doc: &Value) {
         if let Some(tasks) = doc.get("tasks").and_then(|t| t.as_array()) {
             for t in tasks {
                 if let Ok(task) = serde_json::from_value::<Task>(t.clone()) {
@@ -64,13 +106,10 @@ impl Inner {
                 }
             }
         }
-        if let Some(ms) = doc.get("machines").and_then(|m| m.as_array()) {
-            for m in ms {
-                if let Ok(mac) = serde_json::from_value::<Machine>(m.clone()) {
-                    self.machines.insert(mac.addr.clone(), mac);
-                }
-            }
-        }
+        let boxes = load_boxes(&self.layout.machines());
+        let empty = serde_json::Map::new();
+        let rt = doc.get("machine_state").and_then(|v| v.as_object()).unwrap_or(&empty);
+        self.machines = join_all(boxes, rt).into_iter().map(|m| (m.addr.clone(), m)).collect();
         // Worker identity survives restarts: without it, completions filed
         // while the map is cold get attributed to the wrong machine (and
         // merge affinity strands tasks on machines that never rendered).
@@ -81,6 +120,60 @@ impl Inner {
                 }
             }
         }
+    }
+
+    /// Split an old-shape ledger (`machines` array of full `Machine`s):
+    /// config fields into `machines.json` for any addr not already there,
+    /// runtime into `machine_state`. Idempotent — a second run finds no
+    /// `machines` key and is a no-op. Returns the migrated machine count.
+    fn migrate_ledger(&mut self, doc: &Value) -> Result<usize> {
+        let ledger_path = self.ledger_path();
+        let boxes_path = self.layout.machines();
+        // The one pass that can lose a credential: snapshot first.
+        if ledger_path.exists() {
+            std::fs::copy(&ledger_path, ledger_path.with_extension("json.bak"))?;
+        }
+        if boxes_path.exists() {
+            std::fs::copy(&boxes_path, boxes_path.with_extension("json.bak"))?;
+        }
+        let mut n = 0;
+        if let Some(ms) = doc.get("machines").and_then(|m| m.as_array()) {
+            for m in ms {
+                let Ok(mac) = serde_json::from_value::<Machine>(m.clone()) else {
+                    continue;
+                };
+                n += 1;
+                if !load_boxes(&boxes_path).iter().any(|b| b.addr == mac.addr) {
+                    // No names exist yet: the address doubles as the handle
+                    // until `link` renames the box.
+                    let (bxo, _) = split_machine(&mac, &mac.addr);
+                    save_box(&boxes_path, &bxo)?;
+                }
+            }
+        }
+        // Tasks and workers ride along untouched; `machine_state` is built
+        // here so the file is complete without a second pass.
+        let mut state = serde_json::Map::new();
+        if let Some(ms) = doc.get("machines").and_then(|m| m.as_array()) {
+            for m in ms {
+                let Ok(mac) = serde_json::from_value::<Machine>(m.clone()) else {
+                    continue;
+                };
+                state.insert(
+                    mac.addr.clone(),
+                    serde_json::to_value(split_machine(&mac, "").1)?,
+                );
+            }
+        }
+        let mut new_doc = json!({"machine_state": state});
+        if let Some(t) = doc.get("tasks") {
+            new_doc["tasks"] = t.clone();
+        }
+        if let Some(w) = doc.get("workers") {
+            new_doc["workers"] = w.clone();
+        }
+        bm_core::write_json(&ledger_path, &new_doc)?;
+        Ok(n)
     }
 
     /// Expired leases return to the pool with no strike. So do tasks stranded

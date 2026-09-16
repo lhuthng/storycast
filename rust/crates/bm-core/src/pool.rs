@@ -174,19 +174,7 @@ fn write_pool(path: &Path, pool: &Pool) -> anyhow::Result<()> {
 /// is tried against the working directory first, then the repo root. The TUI
 /// prompt is not a shell, so neither happens by itself.
 fn resolve_clip(root: &Path, src: &Path) -> PathBuf {
-    let s = src.to_string_lossy();
-    let expanded = if s == "~" || s.starts_with("~/") {
-        match std::env::var("HOME") {
-            Ok(home) => {
-                let mut h = home;
-                h.push_str(&s[1..]);
-                PathBuf::from(h)
-            }
-            Err(_) => src.to_path_buf(),
-        }
-    } else {
-        src.to_path_buf()
-    };
+    let expanded = crate::util::expand_tilde(&src.to_string_lossy());
     if expanded.is_file() || expanded.is_absolute() {
         return expanded;
     }

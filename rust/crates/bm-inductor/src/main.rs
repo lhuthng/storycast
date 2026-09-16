@@ -255,17 +255,36 @@ async fn cmd_provision(
     match client.post(&api).json(&m).send().await {
         Ok(r) if r.status().is_success() => println!("[{}] registered with live inductor", addr),
         _ => {
+            // No live inductor: merge into the ledger file (safe only when no
+            // inductor runs — the API attempt failing is exactly that signal).
+            // New shape is `machine_state` (runtime); a pre-migration file
+            // still carrying the `machines` array gets both, so the boot
+            // migration sees one coherent story.
             let path = layout.bm_state().join("ledger.json");
             let mut doc: serde_json::Value = std::fs::read_to_string(&path)
                 .ok()
                 .and_then(|t| serde_json::from_str(&t).ok())
-                .unwrap_or(serde_json::json!({"tasks": [], "machines": []}));
+                .unwrap_or(serde_json::json!({"tasks": [], "machine_state": {}}));
+            let (_, rt) = bm_core::provision::split_machine(&m, "");
+            if let Some(st) = doc.get_mut("machine_state").and_then(|v| v.as_object_mut()) {
+                st.insert(addr.clone(), serde_json::to_value(&rt)?);
+            }
             if let Some(ms) = doc.get_mut("machines").and_then(|v| v.as_array_mut()) {
                 ms.retain(|x| x.get("addr").and_then(|a| a.as_str()) != Some(addr.as_str()));
                 ms.push(serde_json::to_value(&m)?);
             }
             std::fs::create_dir_all(layout.bm_state())?;
             bm_core::atomic_write(&path, &serde_json::to_string_pretty(&doc)?)?;
+            // Config side: a provision is a bind, so the box lands in
+            // machines.json under its stored name (or the address, first time).
+            let boxes_path = layout.machines();
+            let name = bm_core::provision::load_boxes(&boxes_path)
+                .iter()
+                .find(|b| b.addr == addr)
+                .map(|b| b.name.clone())
+                .unwrap_or_else(|| addr.clone());
+            let (bxo, _) = bm_core::provision::split_machine(&m, &name);
+            bm_core::provision::save_box(&boxes_path, &bxo)?;
             println!("[{}] recorded in ledger file (no live inductor found)", addr);
         }
     }
@@ -378,11 +397,10 @@ async fn main() -> anyhow::Result<()> {
             };
             let key = key
                 .or_else(|| linked.as_ref().and_then(|b| b.key.clone()))
-                .or_else(|| std::env::var("SSH_KEY").ok());
+                .or_else(|| settings.ssh.key.clone());
             cmd_provision(layout, addr, user, port, key, api_port, force).await
         }
         Cmd::Link { name, addr, user, port, key } => {
-            let key = key.or_else(|| std::env::var("SSH_KEY").ok());
             let bxo = bm_core::provision::LinkedBox {
                 name: name.clone(),
                 addr,

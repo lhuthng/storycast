@@ -72,6 +72,123 @@ mod tests {
         (d, inner)
     }
 
+    fn old_shape_doc() -> Value {
+        let mut m1 = bm_proto::Machine::new(
+            "192.168.2.2",
+            "thang",
+            22,
+            Some("~/.ssh/ssh-key-my-wsl".into()),
+            "worker",
+        );
+        m1.state = bm_proto::MachineState::Online;
+        m1.last_seen = 123;
+        m1.note = "provisioned".into();
+        m1.capabilities = vec!["gpu".into()];
+        m1.tts_url = Some("http://127.0.0.1:8818".into());
+        let m2 = bm_proto::Machine::new("127.0.0.1", "thang", 22, None, "worker");
+        serde_json::json!({
+            "tasks": [],
+            "machines": [m1, m2],
+            "workers": {"w1": "192.168.2.2"},
+        })
+    }
+
+    #[test]
+    fn ledger_splits_config_from_runtime_and_migrates_old_shape() {
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        let ledger = layout.bm_state().join("ledger.json");
+        bm_core::write_json(&ledger, &old_shape_doc()).unwrap();
+
+        inner.load_ledger();
+        // Joined view: config and runtime both survive the split.
+        assert_eq!(inner.machines.len(), 2);
+        let m1 = &inner.machines["192.168.2.2"];
+        assert_eq!(m1.ssh_key.as_deref(), Some("~/.ssh/ssh-key-my-wsl"));
+        assert_eq!(m1.state, bm_proto::MachineState::Online);
+        assert_eq!((m1.last_seen, m1.note.as_str()), (123, "provisioned"));
+        assert_eq!(m1.capabilities, vec!["gpu".to_string()]);
+        assert_eq!(inner.machines["127.0.0.1"].ssh_key, None);
+        assert_eq!(inner.workers.get("w1").map(String::as_str), Some("192.168.2.2"));
+
+        // Config file: both boxes, keys byte-for-byte, names default to addr.
+        let boxes = bm_core::provision::load_boxes(&layout.machines());
+        assert_eq!(boxes.len(), 2);
+        let b1 = boxes.iter().find(|b| b.addr == "192.168.2.2").unwrap();
+        assert_eq!((b1.name.as_str(), b1.key.as_deref()), ("192.168.2.2", Some("~/.ssh/ssh-key-my-wsl")));
+
+        // Ledger file: new shape, and the pre-migration snapshot is kept.
+        let disk: Value = bm_core::read_json(&ledger).unwrap();
+        assert!(disk.get("machines").is_none(), "old array is gone");
+        let st = disk["machine_state"].as_object().unwrap();
+        assert_eq!(st.len(), 2);
+        assert_eq!(st["192.168.2.2"]["state"], serde_json::json!("online"));
+        assert!(ledger.with_extension("json.bak").exists(), "pre-migration snapshot");
+
+        // Idempotent: a second load over the migrated file changes nothing.
+        let mut again = Inner::new(layout.clone(), Settings::default());
+        again.load_ledger();
+        assert_eq!(again.machines.len(), 2);
+        assert_eq!(again.machines["192.168.2.2"].ssh_key.as_deref(), Some("~/.ssh/ssh-key-my-wsl"));
+        let disk2: Value = bm_core::read_json(&ledger).unwrap();
+        assert_eq!(disk, disk2, "reload must not rewrite");
+    }
+
+    #[test]
+    fn save_writes_runtime_only() {
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        let (bxo, rt) = bm_core::provision::split_machine(
+            &bm_proto::Machine::new("10.0.0.9", "thang", 22, Some("/k".into()), "worker"),
+            "box-9",
+        );
+        bm_core::provision::save_box(&layout.machines(), &bxo).unwrap();
+        inner.machines.insert("10.0.0.9".into(), bm_core::provision::join_machine(&bxo, Some(&rt)));
+        inner.save();
+
+        let disk: Value = bm_core::read_json(&layout.bm_state().join("ledger.json")).unwrap();
+        assert!(disk.get("machines").is_none(), "config never lands in the ledger");
+        assert_eq!(disk["machine_state"]["10.0.0.9"]["note"], serde_json::json!(""));
+    }
+
+    #[test]
+    fn migration_holds_for_the_live_ledger() {
+        // Local-only gate (not CI): point at a copy of the real ledger and
+        // prove the migration loses nothing at real scale.
+        let src = std::env::var("BM_REAL_LEDGER").unwrap_or_default();
+        if src.is_empty() {
+            return;
+        }
+        let raw = std::fs::read_to_string(&src).expect("BM_REAL_LEDGER readable");
+        let doc: Value = serde_json::from_str(&raw).unwrap();
+        let tasks_n = doc["tasks"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert!(tasks_n > 100, "this gate wants the real ledger, got {tasks_n} tasks");
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::new(dir.path());
+        std::fs::create_dir_all(layout.bm_state()).unwrap();
+        std::fs::write(layout.bm_state().join("ledger.json"), &raw).unwrap();
+        let mut inner = Inner::new(layout, Settings::default());
+        inner.load_ledger();
+
+        assert_eq!(inner.tasks.len(), tasks_n, "no task lost");
+        assert_eq!(inner.machines["192.168.2.2"].ssh_key.as_deref(), Some("~/.ssh/ssh-key-my-wsl"), "the live key survives");
+        assert_eq!(inner.machines["127.0.0.1"].ssh_key, None);
+
+        let snap: Vec<(String, String)> = {
+            let mut v: Vec<_> = inner.machines.values().map(|m| (m.addr.clone(), serde_json::to_string(m).unwrap())).collect();
+            v.sort();
+            v
+        };
+        inner.load_ledger();
+        let snap2: Vec<(String, String)> = {
+            let mut v: Vec<_> = inner.machines.values().map(|m| (m.addr.clone(), serde_json::to_string(m).unwrap())).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(snap, snap2, "migration is idempotent at real scale");
+    }
+
     #[test]
     fn swap_invalidates_only_the_characters_files() {
         let (_d, mut inner) = fixture();

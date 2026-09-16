@@ -49,6 +49,21 @@ Because state lives only in the ledger plus artifacts on disk, any process can
 die at any moment. Restarting the inductor re-reads the ledger; restarting a
 worker re-registers and pulls again.
 
+### Config lives next to the ledger, not in it
+
+Three files, three jobs: `.bm/settings.json` (app-wide defaults, including
+`ssh.{user,port,key}`), `.bm/machines.json` (per-machine connection config,
+keyed by address, written when a box is bound with `:a`, `link` or
+`provision`), `.bm/ledger.json` (runtime only: task states plus per-machine
+liveness under `machine_state`). The API joins config with runtime and serves
+the same `Machine` shape as always, so the TUI never sees the split.
+
+One chain resolves the ssh key, highest wins: the machine's own entry, else
+the app default, else ssh decides (agent / `~/.ssh/config` — no key at all is
+legal, not a gap). The machine overlay prints the winner and its source, so a
+mispointed key names where it was set. `.env` holds API keys only; the SSH key
+is a *path*, which is config, not a secret.
+
 ## 2. The stages (bm-core)
 
 * **crawl** (`crawl.rs`) — fetch `url_template` with `{n}` replaced, extract and
@@ -99,7 +114,8 @@ stuck row.
 
 `bm-core/src/provision/` onboards a machine over plain `ssh`/`rsync` — no SSH
 library, so your `~/.ssh/config` and keys are reused and every command is
-visible in the TUI log:
+visible in the TUI log (the machine overlay shows which key won —
+`machines.json`, `settings.json`, or the ssh default):
 
 1. **probe** — one ssh round trip: hostname, CPUs, RAM, disk, agent version,
    python present, enrolled voices, TTS up, and the **provision stamp**.

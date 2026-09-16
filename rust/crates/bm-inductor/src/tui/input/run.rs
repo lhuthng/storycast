@@ -32,9 +32,10 @@ pub(crate) async fn key_run(app: &mut App, key: KeyEvent, _http: &reqwest::Clien
                             start: cfg.start,
                             count: cfg.count,
                             enqueue: true,
-                            machines: app.effective_machines(),
-                            cancel,
-                        },
+                        machines: app.effective_machines(),
+                        cancel,
+                        settings_key: app.ssh_defaults().key,
+                    },
                     );
                 }
                 app.screen = Screen::Normal;

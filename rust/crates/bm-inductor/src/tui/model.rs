@@ -43,13 +43,16 @@ pub(crate) fn matches(filter: &str, haystack: &str) -> bool {
     f.is_empty() || fold(haystack).contains(&f)
 }
 
-/// Registry as persisted on disk: addr + ssh credentials, no liveness. The
-/// fallback behind `effective_machines` when the inductor is unreachable.
+/// Registry as persisted on disk: connection config joined with runtime, no
+/// liveness. The fallback behind `effective_machines` when the inductor is
+/// unreachable. Reads both shapes: the current `machine_state` + machines.json
+/// join, and the pre-migration `machines` array.
 pub(crate) fn registry_machines(layout_root: &std::path::Path) -> Vec<Machine> {
     if layout_root.as_os_str().is_empty() {
         return Vec::new();
     }
-    let text = match std::fs::read_to_string(layout_root.join(".bm").join("ledger.json")) {
+    let bm = layout_root.join(".bm");
+    let text = match std::fs::read_to_string(bm.join("ledger.json")) {
         Ok(t) => t,
         Err(_) => return Vec::new(),
     };
@@ -57,15 +60,18 @@ pub(crate) fn registry_machines(layout_root: &std::path::Path) -> Vec<Machine> {
         Ok(d) => d,
         Err(_) => return Vec::new(),
     };
-    let mut out: Vec<Machine> = doc
-        .get("machines")
-        .and_then(|m| m.as_array())
-        .map(|a| {
-            a.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect()
-        })
-        .unwrap_or_default();
-    out.sort_by(|a, b| a.addr.cmp(&b.addr));
-    out
+    if let Some(a) = doc.get("machines").and_then(|m| m.as_array()) {
+        let mut out: Vec<Machine> = a
+            .iter()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect();
+        out.sort_by(|a, b| a.addr.cmp(&b.addr));
+        return out;
+    }
+    let boxes = bm_core::provision::load_boxes(&bm.join("machines.json"));
+    let empty = serde_json::Map::new();
+    let rt = doc.get("machine_state").and_then(|v| v.as_object()).unwrap_or(&empty);
+    bm_core::provision::join_all(boxes, rt)
 }
 
 pub(crate) fn filtered_characters(app: &App, filter: &str) -> Vec<String> {

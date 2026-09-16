@@ -31,6 +31,7 @@ pub(crate) async fn key_confirm(app: &mut App, c: Confirm, key: KeyEvent, http: 
                                     api: app.api.clone(),
                                     machine: m,
                                     force,
+                                    settings_key: app.ssh_defaults().key,
                                 },
                             );
                         } else {
@@ -82,6 +83,7 @@ pub(crate) async fn key_confirm(app: &mut App, c: Confirm, key: KeyEvent, http: 
                                 layout_root: app.layout_root.clone(),
                                 machines: app.effective_machines(),
                                 api: app.api.clone(),
+                                settings_key: app.ssh_defaults().key,
                             },
                         );
                     }

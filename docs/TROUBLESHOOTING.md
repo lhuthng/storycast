@@ -51,6 +51,7 @@ Common causes per stage:
 | Symptom | Meaning / fix |
 |---|---|
 | `unreachable: ssh exit 255` | wrong address/user/key, or ssh asks for a password. The provisioner uses `BatchMode=yes`, so **keys must work non-interactively**; test `ssh -o BatchMode=yes user@box true`. `make link KEY=~/.ssh/your-key` then provision again |
+| provision uses the wrong key | the machine overlay's `ssh key` line names the winning source (`machines.json` / `settings.json` / ssh default) — fix it where it wins: re-bind with `:a`, `:sshkey` for the default, or `make link KEY=..` |
 | `python provisioning failed` | the box ran out of disk or has no `python3`; the venv needs ~2 GB free |
 | `voice enrollment failed for: <names>` | a clip in `voices.json` is missing or unreadable on this machine; fix `refs/`, then provision again |
 | Provisioning runs the slow path every time | the stamp changed — check *what* changed: any edit under `prompts/`, `python/requirements.txt`, the cast files, or the agent version resets the sources stamp; any change to `voices.json` or `refs/` resets the voices stamp. `P` forces the slow path deliberately |

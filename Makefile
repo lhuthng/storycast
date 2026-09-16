@@ -49,9 +49,10 @@ endif
 ifndef ADDR
 	$(error NAME and ADDR are required: make link NAME=box-1 ADDR=192.168.2.2)
 endif
-	$(BIN)/bm-inductor link --name $(NAME) --addr $(ADDR) --user thang
+	$(BIN)/bm-inductor link --name $(NAME) --addr $(ADDR) --user thang $(if $(KEY),--key $(KEY))
 
 BOX ?= box-1
+KEY ?=
 
 test:
 	cargo test --workspace --manifest-path $(RUST_DIR)/Cargo.toml

@@ -11,6 +11,12 @@ pub(crate) enum TextKind {
     /// Run-config editor (opened with `e` on the run screen): saves range,
     /// analyzer and model chain to the settings file. Launches nothing.
     RunConfig,
+    /// App-wide ssh defaults (`:sshkey`, `:sshuser`, `:sshport`): save-only
+    /// prompts in the `RunConfig` style — persist to settings.json, dispatch
+    /// nothing.
+    SshKey,
+    SshUser,
+    SshPort,
     Translate,
     CrawlTemplate,
     /// `:` command line: the buffer names a key (`m`) or a word
