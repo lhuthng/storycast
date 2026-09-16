@@ -3,7 +3,7 @@ use super::app::App;
 use super::draw::draw;
 use super::input::{handle_key, op_key, urlencode};
 use super::input::command::{Command, command_key};
-use super::input::runconfig::{parse_run_config, run_preview, save_run_config};
+use super::input::runconfig::{parse_run_config, run_preview, save_run_config, save_ssh_setting};
 use super::input::submit::submit_text;
 use super::jobs::{DoneKind, Ev, Job, run_job, set_machine_state};
 use super::layout::{Size, size_class, cols, width_of, MIN_W, MIN_H, FULL_W, FULL_H, FULL_MACHINES_H, FULL_WORKERS_H, FULL_TASKS_H, FULL_EVENTS_MIN_H, FULL_FOOTER_H, COMPACT_MACHINES_H, COMPACT_WORKERS_H, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H, KEYS_FULL, KEYS_COMPACT, COMPACT_MACHINE_COLS, COMPACT_WORKER_COLS};
@@ -451,9 +451,18 @@ use std::collections::BTreeMap;
 
     #[test]
     fn add_machine_rejects_whitespace_addresses() {
+        // The bind prompt is a tuple now (`addr [user [port [key]]]`), so a
+        // second token is a user, not an error — only the address itself is
+        // validated.
         let mut app = App::new("http://x");
         let p = TextPrompt::new(TextKind::AddMachine, "t", "h", "192.168.2.7 extra");
-        assert!(submit_text(&mut app, &p).unwrap_err().contains("whitespace"));
+        match submit_text(&mut app, &p) {
+            Ok(Job::AddMachine { m, .. }) => {
+                assert_eq!(m.addr, "192.168.2.7");
+                assert_eq!(m.ssh_user, "extra");
+            }
+            other => panic!("second token is the user now, got {other:?}"),
+        }
         let p = TextPrompt::new(TextKind::AddMachine, "t", "h", "  ");
         assert!(submit_text(&mut app, &p).unwrap_err().contains("empty"));
     }
@@ -1343,3 +1352,97 @@ use std::collections::BTreeMap;
         assert!(job_rx.try_recv().is_err(), "a filter keystroke must not dispatch");
     }
 
+
+    fn bind_app() -> App {
+        let mut app = App::new("http://x");
+        app.settings = Some(serde_json::json!({"ssh": {"user": "op", "port": 2222}}));
+        app
+    }
+
+    fn bind_machine(app: &mut App, buf: &str) -> Machine {
+        let p = TextPrompt::new(TextKind::AddMachine, "t", "h", buf);
+        match submit_text(app, &p) {
+            Ok(Job::AddMachine { m, .. }) => m,
+            other => panic!("bind {buf:?} must dispatch AddMachine, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bind_prompt_parses_the_tuple_and_falls_back_to_settings() {
+        let mut app = bind_app();
+        // Bare address: user/port from settings.ssh, no key means ssh decides.
+        let m = bind_machine(&mut app, "192.168.2.7");
+        assert_eq!((m.addr.as_str(), m.ssh_user.as_str(), m.ssh_port, m.ssh_key), ("192.168.2.7", "op", 2222, None));
+
+        // Full tuple overrides everything.
+        let dir = std::env::temp_dir().join("bm-bind-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("id_bind");
+        std::fs::write(&key, "k").unwrap();
+        let m = bind_machine(&mut app, &format!("10.0.0.1 root 22 {}", key.display()));
+        assert_eq!(m.ssh_user.as_str(), "root");
+        assert_eq!(m.ssh_port, 22);
+        assert_eq!(m.ssh_key.as_deref(), Some(key.to_str().unwrap()));
+
+        // The key is the remainder of the line, so paths with spaces survive.
+        let spaced = dir.join("my key");
+        std::fs::write(&spaced, "k").unwrap();
+        let m = bind_machine(&mut app, &format!("10.0.0.2 u 22 {}", spaced.display()));
+        assert_eq!(m.ssh_key.as_deref(), Some(spaced.to_str().unwrap()), "key keeps its spacing");
+
+        assert!(submit_text(&mut app, &TextPrompt::new(TextKind::AddMachine, "t", "h", "")).unwrap_err().contains("address is empty"));
+        assert!(submit_text(&mut app, &TextPrompt::new(TextKind::AddMachine, "t", "h", "h u xx")).unwrap_err().contains("not a number"));
+    }
+
+    #[test]
+    fn bind_prompt_with_a_missing_key_keeps_the_prompt_open() {
+        // The keep-open contract: a mispointed key names the expanded path
+        // instead of dispatching a box that can never provision.
+        let mut app = bind_app();
+        let home = std::env::var("HOME").unwrap();
+        let err = submit_text(
+            &mut app,
+            &TextPrompt::new(TextKind::AddMachine, "t", "h", "10.0.0.3 u 22 ~/.ssh/no-such-key"),
+        )
+        .unwrap_err();
+        assert!(err.contains(&format!("{home}/.ssh/no-such-key")), "names the expanded path, got: {err}");
+    }
+
+    #[test]
+    fn ssh_default_commands_save_validate_and_clear() {
+        let dir = std::env::temp_dir().join("bm-ssh-defaults-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App::new("http://x");
+        app.layout_root = dir.clone();
+        let settings_path = dir.join(".bm").join("settings.json");
+        let load = || bm_core::config::Settings::load(&settings_path);
+
+        let key = dir.join("id_def");
+        std::fs::write(&key, "k").unwrap();
+        let msg = save_ssh_setting(&app, TextKind::SshKey, key.to_str().unwrap()).unwrap();
+        assert!(msg.contains("saved"), "{msg}");
+        assert_eq!(load().ssh.key.as_deref(), Some(key.to_str().unwrap()));
+        // Clearing is a real answer: ssh decides per machine afterwards.
+        save_ssh_setting(&app, TextKind::SshKey, "  ").unwrap();
+        assert_eq!(load().ssh.key, None);
+        // A missing file keeps the prompt open, it never saves garbage.
+        let err = save_ssh_setting(&app, TextKind::SshKey, "/nonexistent/k").unwrap_err();
+        assert!(err.contains("/nonexistent/k"), "{err}");
+        assert_eq!(load().ssh.key, None);
+
+        save_ssh_setting(&app, TextKind::SshUser, "worker").unwrap();
+        assert_eq!(load().ssh.user, "worker");
+        assert!(save_ssh_setting(&app, TextKind::SshUser, "  ").unwrap_err().contains("empty"));
+
+        assert!(save_ssh_setting(&app, TextKind::SshPort, "abc").unwrap_err().contains("not a number"));
+        save_ssh_setting(&app, TextKind::SshPort, "2222").unwrap();
+        assert_eq!(load().ssh.port, 2222);
+    }
+
+    #[test]
+    fn ssh_default_words_route_to_their_commands() {
+        assert_eq!(command_key("sshkey"), Some(Command::SshKey));
+        assert_eq!(command_key("sshuser"), Some(Command::SshUser));
+        assert_eq!(command_key("sshport"), Some(Command::SshPort));
+    }

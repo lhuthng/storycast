@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use bm_proto::Machine;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::REMOTE_DIR;
+use crate::util::expand_tilde;
 
 /// A resolved SSH connection to one machine.
 pub struct Ssh {
@@ -12,6 +13,43 @@ pub struct Ssh {
     pub key: Option<String>,
     /// The inductor's own machine: run commands directly instead of ssh-ing out.
     pub local: bool,
+}
+
+/// Where the winning ssh key came from. Highest wins; `SshDefault` means no
+/// key is configured anywhere and ssh decides (agent, `~/.ssh/config`).
+/// Shown on the machine overlay so a mispointed key names its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    Box,
+    Settings,
+    SshDefault,
+}
+
+impl KeySource {
+    pub fn label(self) -> &'static str {
+        match self {
+            KeySource::Box => "machines.json",
+            KeySource::Settings => "settings.json",
+            KeySource::SshDefault => "ssh default (agent / ~/.ssh/config)",
+        }
+    }
+}
+
+/// One reader for the key chain: the per-machine value, else the app default,
+/// else ssh decides. `~` expands here, once, for every transport. Empty
+/// strings fall through — clearing the field is how an operator unsets a key.
+/// No validation: that belongs at bind time, where a prompt can complain.
+pub fn resolve_key(box_key: Option<&str>, settings_key: Option<&str>) -> (Option<PathBuf>, KeySource) {
+    fn clean(s: Option<&str>) -> Option<&str> {
+        s.map(str::trim).filter(|s| !s.is_empty())
+    }
+    if let Some(k) = clean(box_key) {
+        return (Some(expand_tilde(k)), KeySource::Box);
+    }
+    if let Some(k) = clean(settings_key) {
+        return (Some(expand_tilde(k)), KeySource::Settings);
+    }
+    (None, KeySource::SshDefault)
 }
 
 impl Ssh {
@@ -45,7 +83,7 @@ impl Ssh {
         }
         if let Some(key) = &self.key {
             args.push("-i".into());
-            args.push(key.clone());
+            args.push(expand_tilde(key).to_string_lossy().to_string());
         }
         args.push(self.target.clone());
         args
@@ -109,7 +147,7 @@ impl Ssh {
     fn rsync_e(&self) -> String {
         let mut e = format!("ssh -o BatchMode=yes -o ConnectTimeout=10 -p {}", self.port);
         if let Some(key) = &self.key {
-            e.push_str(&format!(" -i {key}"));
+            e.push_str(&format!(" -i {}", expand_tilde(key).display()));
         }
         e
     }
@@ -258,6 +296,43 @@ mod tests {
 
         let (code, out, _) = ssh.run("echo hi", 10).expect("a fast command still runs");
         assert_eq!((code, out.trim()), (0, "hi"));
+    }
+
+    #[test]
+    fn ssh_argv_expands_tilde_in_the_key_for_both_transports() {
+        // The ledger held `~/.ssh/ssh-key-my-wsl` verbatim; ssh (no shell)
+        // failed it while rsync (shell) expanded it. Both now go through
+        // expand_tilde, so `-i` always names a real path.
+        let home = std::env::var("HOME").unwrap();
+        let ssh = Ssh {
+            target: "thang@192.168.2.2".into(),
+            port: 22,
+            key: Some("~/.ssh/k".into()),
+            local: false,
+        };
+        let args = ssh.ssh_args();
+        let i = args.iter().position(|a| a == "-i").expect("key flag present");
+        assert_eq!(args[i + 1], format!("{home}/.ssh/k"), "ssh argv: {args:?}");
+        assert_eq!(ssh.rsync_e(), format!("ssh -o BatchMode=yes -o ConnectTimeout=10 -p 22 -i {home}/.ssh/k"));
+
+        let bare = Ssh { target: "t@h".into(), port: 2222, key: None, local: false };
+        assert!(!bare.ssh_args().contains(&"-i".to_string()), "no key, no flag");
+        assert!(!bare.rsync_e().contains("-i"), "no key, no flag");
+    }
+
+    #[test]
+    fn resolve_key_prefers_box_then_settings_then_ssh_default() {
+        let home = std::env::var("HOME").unwrap();
+        let (p, src) = resolve_key(Some("~/.ssh/box-k"), Some("~/.ssh/app-k"));
+        assert_eq!((p.unwrap(), src), (PathBuf::from(format!("{home}/.ssh/box-k")), KeySource::Box));
+        let (p, src) = resolve_key(None, Some("/k/app"));
+        assert_eq!((p.unwrap(), src), (PathBuf::from("/k/app"), KeySource::Settings));
+        // Empty strings fall through: clearing the field unsets the key.
+        let (p, src) = resolve_key(Some("  "), Some(""));
+        assert_eq!((p, src), (None, KeySource::SshDefault));
+        let (p, src) = resolve_key(None, None);
+        assert_eq!((p, src), (None, KeySource::SshDefault));
+        assert_eq!(KeySource::Box.label(), "machines.json");
     }
 
     #[test]

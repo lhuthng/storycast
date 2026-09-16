@@ -6,6 +6,7 @@ use crate::tui::{
         command::{Command, command_key, do_command},
         dispatch,
         runconfig::save_run_config,
+        runconfig::save_ssh_setting,
         submit::submit_text,
     },
     jobs::Job,
@@ -54,8 +55,17 @@ pub(crate) async fn key_text(app: &mut App, prompt: TextPrompt, key: KeyEvent, h
                 }
                 // Run-config edits save a file and launch nothing: handled
                 // here rather than in `submit_text`, which can only dispatch.
+                // The ssh defaults work the same way.
                 if p.kind == TextKind::RunConfig {
                     match save_run_config(app, &p.buf) {
+                        Ok(msg) => {
+                            app.screen = Screen::Normal;
+                            app.set_status(Level::Ok, msg);
+                        }
+                        Err(msg) => app.set_status(Level::Error, msg),
+                    }
+                } else if matches!(p.kind, TextKind::SshKey | TextKind::SshUser | TextKind::SshPort) {
+                    match save_ssh_setting(app, p.kind, &p.buf) {
                         Ok(msg) => {
                             app.screen = Screen::Normal;
                             app.set_status(Level::Ok, msg);

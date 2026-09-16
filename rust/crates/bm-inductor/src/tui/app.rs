@@ -150,15 +150,26 @@ impl App {
             .to_string()
     }
 
+    /// App-wide ssh defaults from the live settings (see `SshDefaults`).
+    /// Deserializing the `ssh` subtree keeps one source for the defaults —
+    /// a missing or partial subtree parses as defaults, like the file itself.
+    pub(crate) fn ssh_defaults(&self) -> bm_core::config::SshDefaults {
+        self.settings
+            .as_ref()
+            .and_then(|s| s.get("ssh"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn selected_machine(&self) -> Option<Machine> {
         self.machines.get(self.selected).cloned()
     }
 
     /// Machines to act on for B/R/X: the live registry when the inductor
-    /// answers, the ledger file when it doesn't. A fresh TUI against a dead
-    /// inductor has an empty list — defaulting to local-only there is how B
-    /// silently drops remote boxes, so the file (addr + ssh credentials, no
-    /// liveness needed) stands in instead.
+    /// answers, the on-disk registry when it doesn't. A fresh TUI against a
+    /// dead inductor has an empty list — defaulting to local-only there is how
+    /// B silently drops remote boxes, so the files (machines.json config +
+    /// ledger runtime, no liveness needed) stand in instead.
     pub(crate) fn effective_machines(&self) -> Vec<Machine> {
         if !self.machines.is_empty() {
             return self.machines.clone();

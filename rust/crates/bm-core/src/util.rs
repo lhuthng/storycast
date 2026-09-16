@@ -62,6 +62,19 @@ pub fn head_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+/// Expand a leading `~` to `$HOME`. Prompts and `-i` flags are not a shell,
+/// so neither expands by itself — and ssh handed a literal `~` path fails
+/// with "not accessible" while rsync (which shells out) expands it, giving
+/// one value two behaviours. `~user` is left alone: only the current user.
+pub fn expand_tilde(s: &str) -> std::path::PathBuf {
+    if s == "~" || s.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(home + &s[1..]);
+        }
+    }
+    std::path::PathBuf::from(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +110,17 @@ mod tests {
         assert_eq!(char_len(s), 10);
         assert_eq!(head_chars(s, 6), "Chương");
         assert_eq!(squeeze_ws("  a\n\t b  "), "a b");
+    }
+
+    #[test]
+    fn expand_tilde_grows_only_a_leading_bare_tilde() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_tilde("~"), std::path::PathBuf::from(&home));
+        assert_eq!(expand_tilde("~/x"), std::path::PathBuf::from(format!("{home}/x")));
+        // `~user`, absolute, relative and empty pass through untouched.
+        assert_eq!(expand_tilde("~other/x"), std::path::PathBuf::from("~other/x"));
+        assert_eq!(expand_tilde("/abs/x"), std::path::PathBuf::from("/abs/x"));
+        assert_eq!(expand_tilde("rel/x"), std::path::PathBuf::from("rel/x"));
+        assert_eq!(expand_tilde(""), std::path::PathBuf::from(""));
     }
 }

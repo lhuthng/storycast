@@ -8,11 +8,14 @@ use crate::tui::{app::App, input::{op_key, urlencode}, style::{Level, LogLine}};
 pub(crate) enum Job {
     /// Long SSH/rsync flow for exactly one box, executed off the UI task.
     /// Touches nothing else: no veto, no restart, no other worker.
+    /// `settings_key` is the app-wide default the ssh chain falls back to
+    /// when the machine carries no key of its own.
     Provision {
         layout_root: std::path::PathBuf,
         api: String,
         machine: Machine,
         force: bool,
+        settings_key: Option<String>,
     },
     AddMachine {
         api: String,
@@ -35,6 +38,7 @@ pub(crate) enum Job {
         enqueue: bool,
         machines: Vec<Machine>,
         cancel: Arc<AtomicBool>,
+        settings_key: Option<String>,
     },
     /// Stop everything: the local backend by PID file, strays by sweep, and
     /// every registered remote worker over ssh. `X` means the cluster is
@@ -43,6 +47,7 @@ pub(crate) enum Job {
         layout_root: std::path::PathBuf,
         machines: Vec<Machine>,
         api: String,
+        settings_key: Option<String>,
     },
     /// Local file work: copy a clip into `refs/`, tag it from its filename,
     /// register it in the pool and in `voices.json`. Needs no inductor.
@@ -191,9 +196,15 @@ fn send(tx: &tokio::sync::mpsc::UnboundedSender<Ev>, level: Level, text: String)
     let _ = tx.send(Ev::Log(LogLine { level, wall: bm_proto::now_secs(), text }));
 }
 
-pub(crate) async fn job_provision(tx: tokio::sync::mpsc::UnboundedSender<Ev>, layout_root: std::path::PathBuf, api: String, machine: Machine, force: bool) {
+pub(crate) async fn job_provision(tx: tokio::sync::mpsc::UnboundedSender<Ev>, layout_root: std::path::PathBuf, api: String, machine: Machine, force: bool, settings_key: Option<String>) {
             let addr = machine.addr.clone();
-            let again = machine.clone();
+            let mut again = machine.clone();
+            // The app-wide default fills a keyless box; a box key always wins.
+            let key = bm_core::provision::resolve_key(machine.ssh_key.as_deref(), settings_key.as_deref())
+                .0
+                .map(|p| p.to_string_lossy().to_string());
+            // The relaunched worker must ssh the same way the provision did.
+            again.ssh_key = key.clone();
             let send_update = |tx: &tokio::sync::mpsc::UnboundedSender<Ev>, state: MachineState, note: &str| {
                 let _ = tx.send(Ev::MachineUpdate {
                     addr: addr.clone(),
@@ -217,7 +228,7 @@ pub(crate) async fn job_provision(tx: tokio::sync::mpsc::UnboundedSender<Ev>, la
                     &machine.addr,
                     &machine.ssh_user,
                     machine.ssh_port,
-                    machine.ssh_key.clone(),
+                    key,
                     force,
                 )
             })
@@ -388,12 +399,17 @@ pub(crate) async fn job_add_sample(tx: tokio::sync::mpsc::UnboundedSender<Ev>, l
 }
 
 #[allow(clippy::too_many_arguments)] // one param per run_job local; bundling them is a redesign, not this split
-pub(crate) async fn job_start_backend(tx: tokio::sync::mpsc::UnboundedSender<Ev>, layout_root: std::path::PathBuf, api: String, mut api_up: bool, start: u32, count: u32, enqueue: bool, machines: Vec<Machine>, cancel: Arc<AtomicBool>) {
+pub(crate) async fn job_start_backend(tx: tokio::sync::mpsc::UnboundedSender<Ev>, layout_root: std::path::PathBuf, api: String, mut api_up: bool, start: u32, count: u32, enqueue: bool, machines: Vec<Machine>, cancel: Arc<AtomicBool>, settings_key: Option<String>) {
             // Degraded start: the backend goes up first (seconds), then each
             // box provisions in the background and joins as it becomes ready.
             // A failing box lands in Error with its reason — it never vetoes
             // the rest. Sequential, not parallel: one ssh flow at a time keeps
             // `X` cancellation prompt between boxes.
+            let resolve = |m: &Machine| {
+                bm_core::provision::resolve_key(m.ssh_key.as_deref(), settings_key.as_deref())
+                    .0
+                    .map(|p| p.to_string_lossy().to_string())
+            };
             let mut targets = machines;
             targets.sort_by(|a, b| a.addr.cmp(&b.addr));
             targets.dedup_by(|a, b| a.addr == b.addr);
@@ -472,7 +488,8 @@ pub(crate) async fn job_start_backend(tx: tokio::sync::mpsc::UnboundedSender<Ev>
                 let addr = m.addr.clone();
                 set_machine_state(&api, &layout_root, &addr, MachineState::Provisioning, "catching up in background").await;
                 let layout = bm_core::Layout::new(&layout_root);
-                let (mc, mf, mp, mk) = (m.addr.clone(), m.ssh_user.clone(), m.ssh_port, m.ssh_key.clone());
+                let (mc, mf, mp) = (m.addr.clone(), m.ssh_user.clone(), m.ssh_port);
+                let mk = resolve(m);
                 let out = tokio::task::spawn_blocking(move || {
                     crate::provision_machine(&layout, &mc, &mf, mp, mk, false)
                 })
@@ -501,7 +518,8 @@ pub(crate) async fn job_start_backend(tx: tokio::sync::mpsc::UnboundedSender<Ev>
                         send(&tx, Level::Info, format!("[{addr}] {l}"));
                     }
                 } else {
-                    let one = m.clone();
+                    let mut one = m.clone();
+                    one.ssh_key = resolve(m);
                     match tokio::task::spawn_blocking(move || {
                         crate::backend::start_remote_workers(&[one], port)
                     })
@@ -539,9 +557,19 @@ pub(crate) async fn job_start_backend(tx: tokio::sync::mpsc::UnboundedSender<Ev>
             let _ = tx.send(Ev::Done(DoneKind::StartDone));
 }
 
-pub(crate) async fn job_stop_backend(tx: tokio::sync::mpsc::UnboundedSender<Ev>, layout_root: std::path::PathBuf, machines: Vec<Machine>, api: String) {
+pub(crate) async fn job_stop_backend(tx: tokio::sync::mpsc::UnboundedSender<Ev>, layout_root: std::path::PathBuf, machines: Vec<Machine>, api: String, settings_key: Option<String>) {
             // Cluster-wide stop, off the UI task: ssh sweeps take seconds per
-            // box and must never freeze the dashboard.
+            // box and must never freeze the dashboard. Keyless boxes fall back
+            // to the app-wide default, like every other ssh flow.
+            let machines: Vec<Machine> = machines
+                .into_iter()
+                .map(|mut m| {
+                    m.ssh_key = bm_core::provision::resolve_key(m.ssh_key.as_deref(), settings_key.as_deref())
+                        .0
+                        .map(|p| p.to_string_lossy().to_string());
+                    m
+                })
+                .collect();
             for line in crate::backend::stop_everywhere(&layout_root, &machines, &api).await {
                 send(&tx, Level::Info, line);
             }
@@ -635,11 +663,11 @@ pub(crate) async fn job_load_roster(tx: tokio::sync::mpsc::UnboundedSender<Ev>, 
 
 pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
     match job {
-        Job::Provision { layout_root, api, machine, force } => job_provision(tx, layout_root, api, machine, force).await,
+        Job::Provision { layout_root, api, machine, force, settings_key } => job_provision(tx, layout_root, api, machine, force, settings_key).await,
         Job::AddMachine { api, http, m } => job_add_machine(tx, api, http, m).await,
         Job::AddSample { layout_root, path, name, tags } => job_add_sample(tx, layout_root, path, name, tags).await,
-        Job::StartBackend { layout_root, api, api_up, start, count, enqueue, machines, cancel } => job_start_backend(tx, layout_root, api, api_up, start, count, enqueue, machines, cancel).await,
-        Job::StopBackend { layout_root, machines, api } => job_stop_backend(tx, layout_root, machines, api).await,
+        Job::StartBackend { layout_root, api, api_up, start, count, enqueue, machines, cancel, settings_key } => job_start_backend(tx, layout_root, api, api_up, start, count, enqueue, machines, cancel, settings_key).await,
+        Job::StopBackend { layout_root, machines, api, settings_key } => job_stop_backend(tx, layout_root, machines, api, settings_key).await,
         Job::DropMachine { api, http, addr } => job_drop_machine(tx, api, http, addr).await,
         Job::Op { api, http, req, layout_root } => job_op(tx, api, http, req, layout_root).await,
         Job::LoadRoster { api, http, layout_root } => job_load_roster(tx, api, http, layout_root).await,

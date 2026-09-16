@@ -33,6 +33,9 @@ pub(crate) enum Command {
     Reconcile,
     Backend,
     Stop,
+    SshKey,
+    SshUser,
+    SshPort,
 }
 
 /// `:` command line → the command. A single character is a command key
@@ -84,6 +87,9 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
         "backend" => Command::Backend,
         "run" => Command::Key(KeyCode::Char('R')),
         "stop" => Command::Stop,
+        "sshkey" => Command::SshKey,
+        "sshuser" => Command::SshUser,
+        "sshport" => Command::SshPort,
         "newest" => Command::Key(KeyCode::Char('G')),
         "named" => Command::AddNamed,
         "sample" => Command::AddSample,
@@ -105,12 +111,23 @@ pub(crate) fn do_command(
     match cmd {
         Command::Key(_) => unreachable!("Command::Key is pressed by the caller"),
         Command::AddMachine => {
-            app.screen = Screen::Text(TextPrompt::new(
+            // Bind prompt: `addr [user [port [key]]]`, prefilled from the
+            // app-wide ssh defaults. The cursor starts at the front so the
+            // address is typed first and the defaults shift right untouched.
+            let def = app.ssh_defaults();
+            let mut initial = format!("{} {}", def.user, def.port);
+            if let Some(k) = &def.key {
+                initial.push(' ');
+                initial.push_str(k);
+            }
+            let mut prompt = TextPrompt::new(
                 TextKind::AddMachine,
                 "Add machine",
-                "IP or hostname of the box to onboard, e.g. 192.168.2.7",
-                "",
-            ));
+                "addr [user [port [key]]] — empty key means ssh decides (agent / ~/.ssh/config)",
+                &initial,
+            );
+            prompt.cursor = 0;
+            app.screen = Screen::Text(prompt);
         }
         Command::AddSample => {
             app.screen = Screen::Text(TextPrompt::new(
@@ -194,6 +211,33 @@ pub(crate) fn do_command(
                 &current,
             ));
         }
+        Command::SshKey => {
+            let cur = app.ssh_defaults().key.unwrap_or_default();
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::SshKey,
+                "Default ssh key",
+                "key path for machines bound without one — empty clears it (ssh decides). Must exist.",
+                &cur,
+            ));
+        }
+        Command::SshUser => {
+            let cur = app.ssh_defaults().user;
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::SshUser,
+                "Default ssh user",
+                "login for machines bound without one",
+                &cur,
+            ));
+        }
+        Command::SshPort => {
+            let cur = app.ssh_defaults().port.to_string();
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::SshPort,
+                "Default ssh port",
+                "port for machines bound without one",
+                &cur,
+            ));
+        }
         Command::Voices => {
             dispatch_op(app, job_tx, http, OpRequest { op: Op::Voices, ..Default::default() });
         }
@@ -247,6 +291,7 @@ pub(crate) fn do_command(
                         enqueue: false,
                         machines: app.effective_machines(),
                         cancel,
+                        settings_key: app.ssh_defaults().key,
                     },
                 );
                 app.set_status(Level::Info, "starting backend now — boxes join in background; watch events");

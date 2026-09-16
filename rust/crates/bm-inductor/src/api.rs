@@ -46,7 +46,13 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
     if let Some(m) = inner.machines.get_mut(&addr) {
         m.state = MachineState::Online;
     }
-    inner.workers.insert(r.worker_id.clone(), addr);
+    inner.workers.insert(r.worker_id.clone(), addr.clone());
+    // A worker announcing itself is a bind: its config survives restarts in
+    // machines.json, not just in memory. The "unknown"-user placeholder
+    // carries no configured values, so it stays memory-only as before.
+    if inner.machines.get(&addr).map(|m| m.ssh_user.as_str()) != Some("unknown") {
+        inner.persist_box(&addr, &r.hostname);
+    }
     inner.save();
     Json(serde_json::json!({"ok": true}))
 }
@@ -85,7 +91,10 @@ async fn complete(State(st): State<Shared>, Json(c): Json<Complete>) -> impl Int
 
 async fn add_machine(State(st): State<Shared>, Json(m): Json<Machine>) -> impl IntoResponse {
     let mut inner = st.lock().await;
-    inner.machines.insert(m.addr.clone(), m);
+    let addr = m.addr.clone();
+    inner.machines.insert(addr.clone(), m);
+    // Operator bind: config goes to machines.json, runtime stays in the ledger.
+    inner.persist_box(&addr, &addr);
     inner.save();
     Json(serde_json::json!({"ok": true}))
 }
@@ -128,6 +137,9 @@ async fn set_machine_state(
 async fn drop_machine(State(st): State<Shared>, Query(q): Query<AddrQuery>) -> impl IntoResponse {
     let mut inner = st.lock().await;
     inner.machines.remove(&q.addr);
+    // Config and runtime both go: a config-only box would otherwise rejoin
+    // as Unknown on the next load.
+    let _ = bm_core::provision::remove_box(&inner.layout.machines(), &q.addr);
     inner.save();
     Json(serde_json::json!({"ok": true}))
 }
@@ -439,8 +451,9 @@ async fn state(State(st): State<Shared>) -> impl IntoResponse {
         "beats": inner.beats.values().collect::<Vec<_>>(),
         "counts": inner.counts(),
         // Settings ride along so the TUI can prefill prompts with the values
-        // that are actually in force instead of hardcoded guesses. No secrets
-        // live here — those stay in .env.
+        // that are actually in force instead of hardcoded guesses. API keys
+        // stay in .env; the SSH key is a path (config, in machines.json and
+        // settings.json), not a secret.
         "settings": inner.settings,
         // Scheduler events (task done/fail, retry, orphan reap, …) surfaced in
         // the TUI's event pane. The TUI deduplicates by event id.
