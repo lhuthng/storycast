@@ -360,6 +360,7 @@ async fn heartbeat_loop(
     worker_id: String,
     addr: String,
     hostname: String,
+    alias: String,
     shared: Shared,
 ) {
     let url = format!("{inductor}/api/heartbeat");
@@ -376,6 +377,7 @@ async fn heartbeat_loop(
             eta_secs: None,
             ts: bm_proto::now_secs(),
             hostname: hostname.clone(),
+            alias: alias.clone(),
         };
         let _ = http.post(&url).json(&body).send().await;
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -473,6 +475,7 @@ async fn worker_loop(
 ) -> Result<()> {
     let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
     let hostname = hostname_simple();
+    let alias = worker_alias_for(&layout.root);
     let shared: Shared = Arc::new(Mutex::new(Progress {
         activity: "starting".to_string(),
         ..Default::default()
@@ -483,6 +486,7 @@ async fn worker_loop(
         worker_id.clone(),
         addr.clone(),
         hostname.clone(),
+        alias.clone(),
         shared.clone(),
     ));
     let reg = Register {
@@ -507,7 +511,7 @@ async fn worker_loop(
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
-    println!("registered as {worker_id}, pulling tasks");
+    println!("registered as {worker_id} (alias {alias}), pulling tasks");
     let mut sidecar = Sidecar::new(&tts_url);
     loop {
         let offer: Option<TaskOffer> = match http
@@ -577,6 +581,45 @@ fn hostname_simple() -> String {
         .unwrap_or_else(|_| "localhost".to_string())
 }
 
+/// Stable display names, one per worker root. The TUI used to hash the worker
+/// id (`host-pid`), so every restart renamed every worker and 16 names
+/// collided constantly. Now the name is drawn once, kept in `worker.alias`,
+/// and reported on every heartbeat.
+const ALIAS_POOL: [&str; 48] = [
+    "fox", "owl", "bear", "wolf", "hare", "lynx", "otter", "hawk", "deer", "mole",
+    "crane", "boar", "seal", "wren", "ibex", "newt", "badger", "stoat", "vole",
+    "shrew", "weasel", "ferret", "mink", "marten", "sable", "pika", "marmot",
+    "gopher", "chipmunk", "squirrel", "rabbit", "hedgehog", "porcupine",
+    "armadillo", "opossum", "raccoon", "skunk", "coyote", "jackal", "hyena",
+    "leopard", "cougar", "bobcat", "ocelot", "serval", "caracal", "genet", "civet",
+];
+
+/// The worker's display name: the kept one, or a fresh draw persisted for
+/// next time. One worker per root is the deployment shape; two sharing a root
+/// would share a name, so don't do that.
+fn worker_alias_for(root: &std::path::Path) -> String {
+    let path = root.join("worker.alias");
+    if let Ok(saved) = std::fs::read_to_string(&path) {
+        let saved = saved.trim().to_string();
+        if !saved.is_empty() {
+            return saved;
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let mut h = nanos.wrapping_add(std::process::id() as u64);
+    for b in hostname_simple().bytes() {
+        h = h.wrapping_mul(31).wrapping_add(b as u64);
+    }
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 27;
+    let name = ALIAS_POOL[h as usize % ALIAS_POOL.len()].to_string();
+    let _ = std::fs::write(&path, &name);
+    name
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -628,6 +671,19 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_alias_is_drawn_once_then_kept() {
+        let root =
+            std::env::temp_dir().join(format!("bmalias{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let first = worker_alias_for(&root);
+        assert!(ALIAS_POOL.contains(&first.as_str()), "drawn from the pool: {first}");
+        assert_eq!(worker_alias_for(&root), first, "a restart keeps its name");
+        assert!(root.join("worker.alias").is_file(), "persisted in the worker root");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn sidecar_python_prefers_the_managed_venv() {

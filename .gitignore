@@ -25,6 +25,10 @@ __pycache__/
 /voice-pool.json
 /refs/
 
+# Worker display name, drawn once at startup and kept (`bm-agent`).
+# Machine-local like voices.json: two boxes may honestly draw the same name.
+/worker.alias
+
 # OS noise
 .DS_Store
 

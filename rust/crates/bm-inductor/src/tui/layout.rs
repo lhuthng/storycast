@@ -79,8 +79,8 @@ pub(crate) const KEYS_COMPACT: [&str; 2] = [
 /// inline; these are the ones that must fit inside `MIN_W`, so they are named
 /// and checked while compiling.
 ///
-/// `id, addr, role, state, seen` — the `tts` column is dropped.
-pub(crate) const COMPACT_MACHINE_COLS: [u16; 5] = [16, 15, 8, 13, 8];
+/// `addr, workers, role, state, seen` — the `tts` column is dropped.
+pub(crate) const COMPACT_MACHINE_COLS: [u16; 5] = [15, 7, 8, 13, 8];
 
 /// `worker, stage, ch, progress, activity, eta` — `machine` is dropped.
 pub(crate) const COMPACT_WORKER_COLS: [u16; 6] = [14, 8, 5, 17, 16, 8];

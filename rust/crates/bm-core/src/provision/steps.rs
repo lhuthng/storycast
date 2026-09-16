@@ -44,6 +44,8 @@ impl Probe {
         if !self.reachable {
             return format!("unreachable: {}", self.note);
         }
+        // A count, not the list: 50 enrolled names wrapped the Logs pane for
+        // screens. Which voices enrolled is already on the `enrolled …` lines.
         format!(
             "{} · {} cpu · {} MB ram · {} · agent={} · python={} · voices={} · tts={}",
             self.hostname,
@@ -52,7 +54,11 @@ impl Probe {
             self.arch,
             self.agent_version.as_deref().unwrap_or("absent"),
             if self.python_present { "yes" } else { "no" },
-            if self.voices.is_empty() { "-".into() } else { self.voices.join(",") },
+            if self.voices.is_empty() {
+                "-".into()
+            } else {
+                format!("{} voices", self.voices.len())
+            },
             if self.tts_up { "up" } else { "down" },
         )
     }
@@ -610,6 +616,21 @@ mod tests {
         ];
         assert_eq!(undeclared_voices(&store, &manifest, &pool, &catalogue), vec!["Suneo"]);
         assert!(undeclared_voices(&[], &manifest, &pool, &catalogue).is_empty());
+    }
+
+    #[test]
+    fn probe_summary_counts_voices_instead_of_listing_them() {
+        // Fifty enrolled names wrapped the Logs pane for screens. The count
+        // carries the signal; which voices enrolled rides the enroll lines.
+        let p = Probe {
+            reachable: true,
+            hostname: "box".into(),
+            voices: vec!["Adam".into(), "Suneo".into()],
+            ..Default::default()
+        };
+        let s = p.summary();
+        assert!(s.contains("2 voices"), "{s}");
+        assert!(!s.contains("Suneo"), "names stay out of the summary: {s}");
     }
 
     #[test]

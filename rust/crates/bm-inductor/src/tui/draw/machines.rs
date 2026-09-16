@@ -4,7 +4,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Row, Table},
 };
-use crate::tui::{app::App, layout::COMPACT_MACHINE_COLS, model::clamp_scroll, style::{cell, empty_body, seen_label, state_cell, style_bold_of, style_of}};
+use crate::tui::{app::App, layout::COMPACT_MACHINE_COLS, model::{clamp_scroll, live_workers}, style::{cell, empty_body, seen_label, state_cell, style_bold_of, style_of}};
 use crate::tui::style::Conn;
 
 pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, compact: bool) {
@@ -47,9 +47,12 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
         .map(|(i, m)| {
             let idx = start + i;
             let cursor = if idx == selected { "▸ " } else { "  " };
+            // `id` is the addr by construction, so the column only repeated
+            // the neighbour. Live workers per box is the useful number here:
+            // the operator's actual question is "is this box doing anything".
             let mut cells = vec![
-                cell(format!("{cursor}{}", m.id)),
-                cell(m.addr.clone()),
+                cell(format!("{cursor}{}", m.addr)),
+                cell(live_workers(&app.beats, &m.addr, bm_proto::now_secs()).to_string()),
                 cell(m.role.clone()),
                 state_cell(colour, m.state.as_str()),
             ];
@@ -68,14 +71,14 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
         })
         .collect();
 
-    let mut header = vec!["id", "addr", "role", "state"];
+    let mut header = vec!["addr", "workers", "role", "state"];
     let mut widths: Vec<Constraint> = if compact {
         // Taken from the constant the compile-time guard checks.
         COMPACT_MACHINE_COLS[..4].iter().map(|w| Constraint::Length(*w)).collect()
     } else {
         vec![
-            Constraint::Length(16),
             Constraint::Length(15),
+            Constraint::Length(7),
             Constraint::Length(8),
             Constraint::Length(13),
         ]

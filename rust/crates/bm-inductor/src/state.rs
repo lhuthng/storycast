@@ -460,6 +460,7 @@ mod tests {
                 eta_secs: None,
                 ts: now_secs(),
                 hostname: "box".into(),
+                alias: String::new(),
             },
         );
         (d, inner)
@@ -575,6 +576,7 @@ mod tests {
                 eta_secs: None,
                 ts: now_secs(),
                 hostname: "box".into(),
+                alias: String::new(),
             },
         );
         assert!(inner.reap().is_empty(), "live worker untouched");
@@ -606,6 +608,7 @@ mod tests {
                 eta_secs: None,
                 ts: now,
                 hostname: "box".into(),
+                alias: String::new(),
             },
         );
         let msg = inner.op_requeue_orphans();

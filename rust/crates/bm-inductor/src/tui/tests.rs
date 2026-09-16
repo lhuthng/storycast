@@ -12,7 +12,7 @@ use super::layout::{Size, size_class, cols, width_of, MIN_W, MIN_H, FULL_W, FULL
 use super::model::*;
 use super::screen::*;
 use super::style::*;
-use bm_proto::{Machine, MachineState, Op, OpRequest, Roster, Stage, Task, TaskState, VoiceInfo};
+use bm_proto::{Heartbeat, Machine, MachineState, Op, OpRequest, Roster, Stage, Task, TaskState, VoiceInfo};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Color;
@@ -885,6 +885,80 @@ use std::collections::BTreeMap;
             assert!(text.contains("no workers connected"), "{w}x{h}:\n{text}");
             assert!(text.contains("nothing has happened yet"), "{w}x{h}:\n{text}");
         }
+    }
+
+    /// A beat with the fields the panes read, fresh unless told otherwise.
+    /// Hostname never echoes the addr: the workers pane falls back to addr
+    /// when it is empty, which would muddy addr-counting assertions.
+    fn beat(id: &str, addr: &str, age_secs: u64, alias: &str) -> Heartbeat {
+        Heartbeat {
+            worker_id: id.into(),
+            addr: addr.into(),
+            task_id: None,
+            stage: None,
+            chapter: None,
+            progress: 0.0,
+            activity: "idle".into(),
+            eta_secs: None,
+            ts: bm_proto::now_secs().saturating_sub(age_secs),
+            hostname: format!("host-{id}"),
+            alias: alias.into(),
+        }
+    }
+
+    #[test]
+    fn workers_pane_hides_stale_beats_and_shows_reported_aliases() {
+        // The "two hares": a dead worker rendered as an idle row next to the
+        // live one. Only fresh beats may draw; the name shown is the worker's
+        // own (kept across restarts), with the id hash as fallback for older
+        // agents that report none.
+        let mut app = App::new("http://127.0.0.1:8901");
+        app.beats = vec![
+            beat("thang-1", "192.168.2.2", 2, "quokka"),
+            beat("thang-0", "192.168.2.2", 900, "quokka"),
+            beat("localhost-9", "127.0.0.1", 3, ""),
+        ];
+        let text = render_text(&mut app, 140, 44);
+        assert_eq!(text.matches("quokka").count(), 1, "live once, stale never:\n{text}");
+        let (fallback, _) = worker_alias("localhost-9");
+        assert!(text.contains(fallback), "old agents keep the hash name:\n{text}");
+        assert!(!text.contains("no live workers"), "a live row draws:\n{text}");
+    }
+
+    #[test]
+    fn workers_pane_says_so_when_every_beat_is_stale() {
+        let mut app = App::new("http://127.0.0.1:8901");
+        app.beats = vec![beat("thang-0", "192.168.2.2", 900, "quokka")];
+        let text = render_text(&mut app, 140, 44);
+        assert!(text.contains("no live workers"), "stale is not idle:\n{text}");
+        assert!(!text.contains("quokka"), "stale rows never draw:\n{text}");
+    }
+
+    #[test]
+    fn machines_pane_counts_live_workers_instead_of_repeating_the_addr() {
+        // `id` was the addr by construction, so the column only echoed its
+        // neighbour. The useful number is how many live workers each box has.
+        let mut app = App::new("http://127.0.0.1:8901");
+        app.machines = vec![
+            Machine::new("127.0.0.1", "local", 22, None, "worker"),
+            Machine::new("192.168.2.2", "thang", 22, None, "worker"),
+        ];
+        app.beats = vec![
+            beat("localhost-9", "127.0.0.1", 2, "quokka"),
+            beat("thang-1", "192.168.2.2", 3, "wombat"),
+            beat("thang-0", "192.168.2.2", 900, "wombat"),
+        ];
+        let text = render_text(&mut app, 140, 44);
+        assert!(text.contains("workers"), "the count column is headed:\n{text}");
+        assert_eq!(
+            text.matches("192.168.2.2").count(),
+            1,
+            "the addr appears once, never echoed:\n{text}"
+        );
+        let now = bm_proto::now_secs();
+        assert_eq!(live_workers(&app.beats, "192.168.2.2", now), 1, "stale excluded");
+        assert_eq!(live_workers(&app.beats, "127.0.0.1", now), 1);
+        assert_eq!(live_workers(&app.beats, "10.0.0.9", now), 0, "unknown box");
     }
 
     #[test]

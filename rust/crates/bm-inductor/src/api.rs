@@ -866,6 +866,7 @@ mod tests {
                 eta_secs: None,
                 ts: bm_proto::now_secs(),
                 hostname: "box".into(),
+                alias: String::new(),
             }),
         )
         .await;
