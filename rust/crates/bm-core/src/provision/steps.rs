@@ -382,6 +382,35 @@ echo stopped"#,
     }
 }
 
+/// Voices a box's store holds that are declared nowhere: not a shipped
+/// preset, not in the clone manifest, not a pool sample. Assigning one works
+/// on that box and 500s everywhere else (the Suneo outage: hand-enrolled
+/// locally, offered by the picker, unknown to every other worker).
+///
+/// Reported, never deleted: erasing a voice the cast uses would break renders.
+/// The fix is named in the warning — declare it in `voices.json` (with its
+/// `refs/` clip) or drop it from the store.
+pub fn undeclared_voices(
+    store: &[String],
+    manifest: &std::collections::HashMap<String, String>,
+    pool: &crate::pool::Pool,
+    catalogue: &[String],
+) -> Vec<String> {
+    let mut out: Vec<String> = store
+        .iter()
+        .filter(|v| {
+            !v.starts_with('_')
+                && !manifest.contains_key(v.as_str())
+                && !pool.contains_key(v.as_str())
+                && !catalogue.iter().any(|c| c == *v)
+        })
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Full onboarding for one machine: probe, then push only what is missing.
 ///
 /// Returns the log lines the TUI should show, in order.
@@ -507,6 +536,31 @@ pub fn provision(
     // Re-probe so the caller records the post-provision truth.
     let after = ssh.probe();
     log.push(format!("[{}] after provision: {}", m.id, after.summary()));
+    // Single-source-of-truth check, against the fresh probe: a store holding
+    // voices nothing declares desyncs the cluster silently (renders pass here,
+    // 500 everywhere else). Warn with the fix; never delete.
+    {
+        let layout = crate::Layout::new(repo_root);
+        let engine = crate::config::Settings::load(&layout.settings()).engine;
+        let manifest: std::collections::HashMap<String, String> =
+            serde_json::from_str(
+                &std::fs::read_to_string(repo_root.join("voices.json")).unwrap_or_default(),
+            )
+            .unwrap_or_default();
+        let pool = crate::pool::load_pool(&repo_root.join("voice-pool.json"));
+        let catalogue: Vec<String> = crate::voices::offline_voices(&engine)
+            .iter()
+            .map(|v| v.name.clone())
+            .collect();
+        let strays = undeclared_voices(&after.voices, &manifest, &pool, &catalogue);
+        if !strays.is_empty() {
+            log.push(format!(
+                "[{}] voices in store but declared nowhere (not a preset, not in voices.json, not pooled): {} — add each with its refs/ clip to voices.json and provision again, or drop it from the store; remote renders 500 until then",
+                m.id,
+                strays.join(", ")
+            ));
+        }
+    }
     (after, log)
 }
 
@@ -529,6 +583,33 @@ mod tests {
         p.python_present = true;
         p.reachable = false;
         assert!(!p.configured("0.2.0"));
+    }
+
+    #[test]
+    fn undeclared_voices_names_only_the_strays() {
+        // The Suneo outage in one assertion: a hand-enrolled clone the
+        // manifest never learned must be reported; presets, manifest clones
+        // and pool samples must not be.
+        let manifest: std::collections::HashMap<String, String> =
+            [("Học Trò".to_string(), "refs/hoc-tro.mp3".to_string())]
+                .into_iter()
+                .collect();
+        let mut pool = crate::pool::Pool::new();
+        pool.insert(
+            "Pool Sample".to_string(),
+            crate::pool::PoolEntry { file: "refs/pool.wav".into(), tags: vec![] },
+        );
+        let catalogue = vec!["Thái Sơn".to_string(), "Adam".to_string()];
+        let store = vec![
+            "Thái Sơn".to_string(),
+            "Học Trò".to_string(),
+            "Pool Sample".to_string(),
+            "Suneo".to_string(),
+            "Suneo".to_string(),
+            "_note".to_string(),
+        ];
+        assert_eq!(undeclared_voices(&store, &manifest, &pool, &catalogue), vec!["Suneo"]);
+        assert!(undeclared_voices(&[], &manifest, &pool, &catalogue).is_empty());
     }
 
     #[test]

@@ -408,8 +408,14 @@ pub enum Op {
     /// Repoint one character's voice and invalidate only its cached segments.
     SwapVoice,
     /// Render a short sample of one voice so it can be auditioned before it is
-    /// assigned. Writes `data/previews/<voice>.wav` and reports the path.
+    /// assigned. Writes nothing: the wav comes back in `OpResult::audio_b64`
+    /// and the client decides where (and whether) it lands on disk.
     PreviewVoice,
+    /// Serve one already-rendered segment for a voice: no synthesis, just
+    /// bytes from the local segment cache. The sentence it speaks comes back
+    /// in `OpResult::line_text` so the client can show which line it heard
+    /// and hold it for A/B comparison.
+    Segment,
     /// Estimate wall-clock time for the remaining range.
     #[default]
     Eta,
@@ -436,6 +442,7 @@ impl Op {
             Op::Voices => "voices",
             Op::SwapVoice => "swap-voice",
             Op::PreviewVoice => "preview-voice",
+            Op::Segment => "segment",
             Op::Eta => "eta",
             Op::Requeue => "requeue",
             Op::Retry => "retry",
@@ -451,6 +458,7 @@ impl Op {
             Op::Voices,
             Op::SwapVoice,
             Op::PreviewVoice,
+            Op::Segment,
             Op::Eta,
             Op::Requeue,
             Op::Retry,
@@ -483,6 +491,12 @@ pub struct OpRequest {
     pub chapter: Option<u32>,
     #[serde(default)]
     pub force: Option<bool>,
+    /// Literal text to speak, for the ops that render speech. `None` means "the
+    /// op's own default", which for `PreviewVoice` is the sidecar's fixed
+    /// audition line — the thing that makes two voice samples comparable.
+    /// Sending text is how an operator hears a *real* line instead of a sample.
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 
@@ -490,6 +504,55 @@ pub struct OpRequest {
 pub struct OpResult {
     pub ok: bool,
     pub message: String,
+    /// The wav this op rendered, base64-encoded, when it rendered one.
+    ///
+    /// **Bytes, not a path**, and that is the whole point. The inductor renders
+    /// and the client plays, and those are different machines: a path is only
+    /// meaningful to a client that happens to share the inductor's filesystem,
+    /// which is exactly the assumption that breaks the moment the TUI is
+    /// pointed at a remote `--api`. Shipping the bytes lets the client write
+    /// the file where the *speaker* is, and leaves the inductor's disk
+    /// untouched — an audition is not a pipeline artifact and has no business
+    /// accumulating in `data/`.
+    ///
+    /// Base64 for the same reason merge reports carry base64 mp3s: this is
+    /// JSON. A voice sample is ~240 KB, so ~320 KB on the wire — nothing on a
+    /// LAN, and bounded by one sample in flight at a time.
+    #[serde(default)]
+    pub audio_b64: Option<String>,
+    /// A book line the returned audio speaks, when the op served audio it did
+    /// not render (segment audition). Lets the client show which sentence it
+    /// just heard and hold it for A/B instead of another random pick.
+    #[serde(default)]
+    pub line_text: Option<String>,
+    /// Whose line `line_text` is — the speaker of the served segment, which
+    /// is not necessarily the character the operator asked about.
+    #[serde(default)]
+    pub line_speaker: Option<String>,
+}
+
+impl OpResult {
+    pub fn ok(message: impl Into<String>) -> Self {
+        OpResult { ok: true, message: message.into(), audio_b64: None, line_text: None, line_speaker: None }
+    }
+
+    pub fn fail(message: impl Into<String>) -> Self {
+        OpResult { ok: false, message: message.into(), audio_b64: None, line_text: None, line_speaker: None }
+    }
+
+    /// Attach the rendered wav, base64, so the caller can play it.
+    pub fn with_audio_b64(mut self, b64: impl Into<String>) -> Self {
+        self.audio_b64 = Some(b64.into());
+        self
+    }
+
+    /// Attach the book line the audio speaks, so the caller can show which
+    /// sentence it just heard instead of another random pick.
+    pub fn with_line(mut self, speaker: impl Into<String>, text: impl Into<String>) -> Self {
+        self.line_speaker = Some(speaker.into());
+        self.line_text = Some(text.into());
+        self
+    }
 }
 
 #[cfg(test)]
@@ -541,6 +604,7 @@ mod tests {
             Op::Voices,
             Op::SwapVoice,
             Op::PreviewVoice,
+            Op::Segment,
             Op::Eta,
             Op::Requeue,
             Op::Retry,
@@ -550,6 +614,42 @@ mod tests {
             assert_eq!(Op::parse(op.as_str()), Some(op));
         }
         assert_eq!(Op::parse("nope"), None);
+    }
+
+    #[test]
+    fn audition_carries_text_in_and_audio_bytes_out() {
+        // The audition path: literal text in, rendered wav out.
+        let req: OpRequest =
+            serde_json::from_str(r#"{"op":"preview-voice","voice":"Đức Trí","text":"Ừm!"}"#)
+                .unwrap();
+        assert_eq!(req.text.as_deref(), Some("Ừm!"));
+        assert_eq!(req.voice.as_deref(), Some("Đức Trí"));
+
+        // Absent text is not an error: it means the sidecar's fixed sample, which
+        // is what makes two voices comparable. An older caller never sends it.
+        let bare: OpRequest =
+            serde_json::from_str(r#"{"op":"preview-voice","voice":"X"}"#).unwrap();
+        assert_eq!(bare.text, None);
+
+        // An op that rendered no audio still parses — which is what an *older
+        // inductor* looks like on the wire, since it has no such field at all.
+        // The client must be able to tell that apart from audio it failed to
+        // decode, because the two have different next moves (restart the
+        // inductor vs. report a bug).
+        let res: OpResult = serde_json::from_str(r#"{"ok":true,"message":"m"}"#).unwrap();
+        assert_eq!(res.audio_b64, None);
+        let with: OpResult =
+            serde_json::from_str(r#"{"ok":true,"message":"m","audio_b64":"UklGRg=="}"#).unwrap();
+        assert_eq!(with.audio_b64.as_deref(), Some("UklGRg=="));
+
+        // The constructors are the single place `ok` and `audio_b64` are paired,
+        // so a new op cannot forget the field and still compile.
+        assert!(OpResult::ok("m").ok && OpResult::ok("m").audio_b64.is_none());
+        assert!(!OpResult::fail("m").ok);
+        assert_eq!(
+            OpResult::ok("m").with_audio_b64("UklGRg==").audio_b64.as_deref(),
+            Some("UklGRg==")
+        );
     }
 
     #[test]

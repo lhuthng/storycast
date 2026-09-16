@@ -1,5 +1,6 @@
 //! Screens: the modal states the key chain and the painter agree on.
 use bm_proto::Stage;
+use crate::tui::audition::AuditionLine;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TextKind {
@@ -146,11 +147,13 @@ pub(crate) struct Picker {
     pub(crate) filter: String,
     pub(crate) cursor: usize,
     pub(crate) scroll: usize,
-    /// Voice with an audition in flight, if any.
-    pub(crate) previewing: Option<String>,
     /// Voices auditioned this session, so the operator can tell them apart
     /// from ones merely read about.
     pub(crate) previewed: Vec<String>,
+    /// The real line the current and candidate voice are A/B'd on. Held here so
+    /// both auditions speak the same sentence; re-picked when the character
+    /// changes or the operator asks for another.
+    pub(crate) line: Option<AuditionLine>,
 }
 
 impl Picker {
@@ -161,8 +164,8 @@ impl Picker {
             filter: String::new(),
             cursor: 0,
             scroll: 0,
-            previewing: None,
             previewed: Vec::new(),
+            line: None,
         }
     }
 }
@@ -197,11 +200,14 @@ pub(crate) struct CastView {
     pub(crate) cursor: usize,
     pub(crate) scroll: usize,
     pub(crate) filter: String,
+    /// The real line the highlighted speaker is auditioned on, held so pressing
+    /// the key twice does not hop between sentences.
+    pub(crate) line: Option<AuditionLine>,
 }
 
 impl CastView {
     pub(crate) fn new() -> Self {
-        CastView { cursor: 0, scroll: 0, filter: String::new() }
+        CastView { cursor: 0, scroll: 0, filter: String::new(), line: None }
     }
 }
 

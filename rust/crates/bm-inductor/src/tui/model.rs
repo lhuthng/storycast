@@ -9,34 +9,9 @@ use crate::tui::{app::App, style::style_of};
 
 /// Fold Vietnamese diacritics to ASCII so a filter of `thai son` matches
 /// `Thái Sơn`. Without it, filtering a Vietnamese cast means typing exact
-/// diacritics on every keystroke.
-pub(crate) fn fold_char(c: char) -> char {
-    match c {
-        'à' | 'á' | 'ạ' | 'ả' | 'ã' | 'â' | 'ầ' | 'ấ' | 'ậ' | 'ẩ' | 'ẫ' | 'ă' | 'ằ' | 'ắ'
-        | 'ặ' | 'ẳ' | 'ẵ' => 'a',
-        'À' | 'Á' | 'Ạ' | 'Ả' | 'Ã' | 'Â' | 'Ầ' | 'Ấ' | 'Ậ' | 'Ẩ' | 'Ẫ' | 'Ă' | 'Ằ' | 'Ắ'
-        | 'Ặ' | 'Ẳ' | 'Ẵ' => 'a',
-        'è' | 'é' | 'ẹ' | 'ẻ' | 'ẽ' | 'ê' | 'ề' | 'ế' | 'ệ' | 'ể' | 'ễ' => 'e',
-        'È' | 'É' | 'Ẹ' | 'Ẻ' | 'Ẽ' | 'Ê' | 'Ề' | 'Ế' | 'Ệ' | 'Ể' | 'Ễ' => 'e',
-        'ì' | 'í' | 'ị' | 'ỉ' | 'ĩ' => 'i',
-        'Ì' | 'Í' | 'Ị' | 'Ỉ' | 'Ĩ' => 'i',
-        'ò' | 'ó' | 'ọ' | 'ỏ' | 'õ' | 'ô' | 'ồ' | 'ố' | 'ộ' | 'ổ' | 'ỗ' | 'ơ' | 'ờ' | 'ớ'
-        | 'ợ' | 'ở' | 'ỡ' => 'o',
-        'Ò' | 'Ó' | 'Ọ' | 'Ỏ' | 'Õ' | 'Ô' | 'Ồ' | 'Ố' | 'Ộ' | 'Ổ' | 'Ỗ' | 'Ơ' | 'Ờ' | 'Ớ'
-        | 'Ợ' | 'Ở' | 'Ỡ' => 'o',
-        'ù' | 'ú' | 'ụ' | 'ủ' | 'ũ' | 'ư' | 'ừ' | 'ứ' | 'ự' | 'ử' | 'ữ' => 'u',
-        'Ù' | 'Ú' | 'Ụ' | 'Ủ' | 'Ũ' | 'Ư' | 'Ừ' | 'Ứ' | 'Ự' | 'Ử' | 'Ữ' => 'u',
-        'ỳ' | 'ý' | 'ỵ' | 'ỷ' | 'ỹ' => 'y',
-        'Ỳ' | 'Ý' | 'Ỵ' | 'Ỷ' | 'Ỹ' => 'y',
-        'đ' => 'd',
-        'Đ' => 'd',
-        c => c.to_ascii_lowercase(),
-    }
-}
-
-pub(crate) fn fold(s: &str) -> String {
-    s.chars().map(fold_char).collect()
-}
+/// diacritics on every keystroke. The table lives in `bm_core::util` (shared
+/// with the segment-voice matcher); this re-export keeps call sites unchanged.
+pub(crate) use bm_core::util::fold;
 
 pub(crate) fn matches(filter: &str, haystack: &str) -> bool {
     let f = fold(filter.trim());
@@ -248,10 +223,15 @@ pub(crate) fn clamp_scroll(cursor: usize, scroll: &mut usize, len: usize, height
         *scroll = 0;
         return;
     }
+    // Lookahead: keep two rows visible below the cursor when the list is long
+    // enough, so the highlight never sits on the last visible row while more
+    // items hide beneath it. Short windows shrink the padding instead of
+    // fighting them — at height 1 this is exactly the old rule.
+    let pad = 2.min(height.saturating_sub(1));
     if cursor < *scroll {
         *scroll = cursor;
-    } else if cursor >= *scroll + height {
-        *scroll = cursor + 1 - height;
+    } else if cursor + pad >= *scroll + height {
+        *scroll = cursor + 1 + pad - height;
     }
     let max = len.saturating_sub(height);
     if *scroll > max {

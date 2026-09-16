@@ -1,5 +1,6 @@
 use super::mood::{mood_cluster, mood_take, run_text, take_for_mood};
 use crate::cast::Cast;
+use crate::paths::Layout;
 use anyhow::Result;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -477,5 +478,297 @@ mod tests {
             &segs,
             "vieneu"
         ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// rendered-segment discovery (audition without synthesis)
+// ---------------------------------------------------------------------------
+
+/// One segment wav already on disk: who speaks it, in which chapter, where.
+///
+/// The mirror image of `expected_wavs` — that function names files the
+/// renderer must produce, this one reads back files it did produce.
+#[derive(Debug, Clone)]
+pub struct RenderedSegment {
+    pub speaker: String,
+    pub text: String,
+    pub path: PathBuf,
+    pub chapter: u32,
+}
+
+impl RenderedSegment {
+    /// Read the wav, with a cap against accidents (segments are KBs).
+    pub fn read_bytes(&self) -> Result<Vec<u8>, String> {
+        match std::fs::read(&self.path) {
+            Ok(b) if b.len() > 8 << 20 => Err(format!(
+                "{} MB — refusing a suspicious segment",
+                b.len() >> 20
+            )),
+            Ok(b) => Ok(b),
+            Err(e) => Err(format!("segment unreadable: {e}")),
+        }
+    }
+}
+
+/// Voice identity for file matching: folded ASCII lowercase with separators
+/// dropped, so a clone key (`pham-tuyen`), its display name (`Phạm Tuyên`)
+/// and a wav tagged with either all meet. Two voices that differ only by
+/// case, diacritics or separators are the same voice for this purpose — the
+/// bible treats them the same way when it folds aliases.
+fn norm_voice(s: &str) -> String {
+    crate::util::fold(s).chars().filter(|c| !matches!(c, '-' | '_' | ' ')).collect()
+}
+
+/// Whether `character` speaks any line in the local scripts. Answers the miss
+/// question "rendered on another box, or never rendered at all": lines here
+/// with no local wavs means the former.
+pub fn character_has_lines(layout: &Layout, character: &str) -> bool {
+    if character.trim().is_empty() {
+        return false;
+    }
+    let Ok(rd) = std::fs::read_dir(layout.data()) else {
+        return false;
+    };
+    for e in rd.flatten() {
+        let n = e.file_name().to_string_lossy().to_string();
+        let num = match n.strip_prefix("script-").and_then(|s| s.strip_suffix(".json")) {
+            Some(num) => num,
+            None => continue,
+        };
+        if num.parse::<u32>().is_err() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(e.path()) else {
+            continue;
+        };
+        let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        if doc
+            .get("segments")
+            .and_then(|s| s.as_array())
+            .map(|segs| {
+                segs.iter().any(|s| s.get("speaker").and_then(|v| v.as_str()) == Some(character))
+            })
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The candidate that speaks exactly `text` (folded comparison — the held
+/// sentence and the script agree up to case, diacritics and whitespace).
+/// Deterministic: replaying a held line replays the same audio, which is what
+/// makes Tab a test instead of another random pick. The character preference
+/// still applies first, so a shared sentence stays with its speaker.
+pub fn pick_exact<'a>(
+    cands: &'a [RenderedSegment],
+    character: &str,
+    text: &str,
+) -> Option<&'a RenderedSegment> {
+    let want = crate::util::fold(text.trim());
+    if want.is_empty() {
+        return None;
+    }
+    let hits: Vec<&RenderedSegment> = cands
+        .iter()
+        .filter(|c| crate::util::fold(c.text.trim()) == want)
+        .collect();
+    if hits.is_empty() {
+        return None;
+    }
+    if !character.is_empty() {
+        if let Some(own) = hits.iter().find(|c| c.speaker == character) {
+            return Some(own);
+        }
+    }
+    Some(hits[0])
+}
+
+/// Miss explanation for a voice with no local renders: lines here with no
+/// local wavs means those chapters rendered on another box (or not yet);
+/// no lines either means the chapters themselves live elsewhere. An exact
+/// request that misses names the render key instead — the line exists, just
+/// not in that voice.
+pub fn segment_miss(layout: &Layout, character: &str, voice: &str, exact: bool) -> String {
+    if exact {
+        return format!("that line isn't rendered in {voice} yet — Shift+Tab renders it");
+    }
+    if character_has_lines(layout, character) {
+        format!("“{character}” has lines here but nothing rendered in {voice} — those chapters rendered on another box or not yet")
+    } else if character.trim().is_empty() {
+        format!("no rendered segments for {voice} here — render first")
+    } else {
+        format!("no lines for “{character}” here — their chapters rendered elsewhere or not yet")
+    }
+}
+
+/// Every rendered segment wav for `voice` in the local cache.
+///
+/// The pool is every line *in that voice*, whoever speaks it; the caller
+/// (`pick_rendered`) prefers the requested character's own lines. Matching
+/// mirrors the renderer: stems are `{idx}_{voice}` or `{a}-{b}_{voice}` where
+/// the voice part is whatever the cast held at render time (a name or a key —
+/// both match), and filename indices count past the headline via the same
+/// `drop_headline` call. A wav whose script drifted out from under it still
+/// lists; only its text is dropped, never the audio.
+pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<RenderedSegment> {
+    let voice = voice.trim();
+    if voice.is_empty() {
+        return Vec::new();
+    }
+    let name = crate::voices::resolve_voice_name(engine, voice);
+    let key = crate::voices::key_for_name(engine, &name).unwrap_or_else(|| voice.to_string());
+    // Normalized once: catalogue keys, display names and wav tags meet after
+    // folding, whatever form each side was written in.
+    let want = [voice, &name, &key].iter().map(|s| norm_voice(s)).collect::<Vec<_>>();
+
+    // Chapters present as scripts, in order. A missing script or seg dir is
+    // skipped, not an error — the range is aspirational, the files are truth.
+    let mut chapters: Vec<u32> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(layout.data()) {
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().to_string();
+            if let Some(num) = n.strip_prefix("script-").and_then(|s| s.strip_suffix(".json")) {
+                if let Ok(c) = num.parse::<u32>() {
+                    chapters.push(c);
+                }
+            }
+        }
+    }
+    chapters.sort();
+
+    let mut out: Vec<RenderedSegment> = Vec::new();
+    for n in chapters {
+        let text = match std::fs::read_to_string(layout.script(n)) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let doc: Value = match serde_json::from_str(&text) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let all: Vec<Value> = doc
+            .get("segments")
+            .and_then(|s| s.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let eff = drop_headline(&all);
+        let rd = match std::fs::read_dir(layout.seg_dir(engine, n)) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for e in rd.flatten() {
+            let fname = e.file_name().to_string_lossy().to_string();
+            let stem = match fname.strip_suffix(".wav") {
+                Some(s) => s,
+                None => continue,
+            };
+            // Anything else (titles, strays) is not a book line.
+            let (tag, v) = match stem.split_once('_') {
+                Some((t, v)) if t.chars().next().is_some_and(|c| c.is_ascii_digit()) => (t, v),
+                _ => continue,
+            };
+            if !want.contains(&norm_voice(v)) {
+                continue;
+            }
+            let mut idxs: Vec<usize> = Vec::new();
+            let mut ok = true;
+            for part in tag.split('-') {
+                match part.parse::<usize>() {
+                    Ok(i) => idxs.push(i),
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok || idxs.is_empty() {
+                continue;
+            }
+            // `.get` everywhere: a script edited since the render must cost
+            // the text, never a panic, and never the audio.
+            let first = match eff.get(*idxs.first().unwrap()) {
+                Some(s) => s,
+                None => continue,
+            };
+            let speaker = first
+                .get("speaker")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut text = String::new();
+            for i in idxs {
+                let Some(s) = eff.get(i) else {
+                    ok = false;
+                    break;
+                };
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(seg_text(s));
+            }
+            if !ok {
+                continue;
+            }
+            out.push(RenderedSegment { speaker, text, path: e.path(), chapter: n });
+        }
+    }
+    out
+}
+
+/// One segment to play: the requested character's own lines first — hearing
+/// *them* is the point — else anything in that voice. Random every call, so
+/// Tab triages instead of repeating itself.
+pub fn pick_rendered<'a>(cands: &'a [RenderedSegment], character: &str) -> Option<&'a RenderedSegment> {
+    if cands.is_empty() {
+        return None;
+    }
+    let own: Vec<&RenderedSegment> =
+        cands.iter().filter(|c| !character.is_empty() && c.speaker == character).collect();
+    let pool: Vec<&RenderedSegment> =
+        if own.is_empty() { cands.iter().collect() } else { own };
+    static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| {
+            d.as_secs().wrapping_mul(1_000_000_000).wrapping_add(d.subsec_nanos() as u64)
+        })
+        .unwrap_or(0);
+    let seed = nanos
+        .wrapping_add(CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    Some(pool[(seed % pool.len() as u64) as usize])
+}
+
+#[cfg(test)]
+mod segment_tests {
+    use super::*;
+
+    #[test]
+    fn pick_prefers_own_lines_and_picks_something() {
+        let seg = |speaker: &str| RenderedSegment {
+            speaker: speaker.into(),
+            text: "x".into(),
+            path: PathBuf::from("x.wav"),
+            chapter: 1,
+        };
+        assert!(pick_rendered(&[], "A").is_none(), "empty pool, no pick");
+        let one = vec![seg("A")];
+        assert_eq!(pick_rendered(&one, "Z").unwrap().speaker, "A");
+        // Deterministic whenever the preferred set has exactly one member.
+        let two = vec![seg("A"), seg("B")];
+        assert_eq!(pick_rendered(&two, "B").unwrap().speaker, "B");
+    }
+
+    #[test]
+    fn norm_voice_meets_keys_names_and_wav_tags() {
+        // The three surface forms of one clone voice.
+        assert_eq!(norm_voice("pham-tuyen"), norm_voice("Phạm Tuyên"));
+        assert_eq!(norm_voice("adam"), norm_voice("Adam"));
+        assert_eq!(norm_voice("young-female-1"), norm_voice("young-female-1"));
+        assert_ne!(norm_voice("minh-duc"), norm_voice("minh-triet"));
     }
 }

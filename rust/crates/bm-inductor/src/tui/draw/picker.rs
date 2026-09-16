@@ -28,7 +28,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
 
     let inner = block.inner(area);
     f.render_widget(block, area);
-    if inner.height < 4 {
+    if inner.height < 5 {
         return;
     }
     let rows = RLayout::default()
@@ -36,6 +36,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
         .constraints([
             Constraint::Length(1), // filter
             Constraint::Length(1), // provenance / policy
+            Constraint::Length(1), // what an audition would play
             Constraint::Min(1),    // list
             Constraint::Length(2), // hints
         ])
@@ -79,8 +80,43 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
     };
     f.render_widget(Paragraph::new(provenance), rows[1]);
 
-    let height = rows[2].height as usize;
+    // What an audition would play, and what it would replace. Both matter and
+    // neither is guessable from the table: the incumbent is not in the list of
+    // candidates, and a random line is random until you are told which one it is.
+    let audition_ctx: Line = match picker.stage {
+        PickStage::Character => Line::from(Span::styled(
+            "audition keys appear once a character is chosen",
+            Style::default().fg(Color::DarkGray),
+        )),
+        PickStage::Voice => {
+            let incumbent = app
+                .roster
+                .as_ref()
+                .and_then(|r| r.cast.get(&picker.character))
+                .filter(|v| !v.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| "unassigned".into());
+            let held = match &picker.line {
+                Some(l) => format!("“{}”", bm_core::util::head_chars(&l.text, 56)),
+                None if app.lines.is_none() => "reading scripts…".to_string(),
+                None => "not picked yet — T".to_string(),
+            };
+            Line::from(vec![
+                Span::styled("current: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(incumbent, app.style(Color::Yellow)),
+                Span::styled("   line: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(held, app.style(Color::Cyan)),
+            ])
+        }
+    };
+    f.render_widget(Paragraph::new(audition_ctx), rows[2]);
+
+    let height = rows[3].height as usize;
     let colour = app.colour;
+    // Which voice is rendering right now. Read from the `App`, not the picker:
+    // the cast overview can start an audition too, so "in flight" is a property
+    // of the process and not of this screen.
+    let auditioning = app.audition.clone();
     // Precomputed so the row closures below capture plain data rather than a
     // borrow of `app`, which is also being borrowed for the roster itself.
     let cast: BTreeMap<String, String> = app
@@ -107,7 +143,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                         picker.filter.trim()
                     )
                 };
-                f.render_widget(empty_body(vec![msg]).wrap(Wrap { trim: true }), rows[2]);
+                f.render_widget(empty_body(vec![msg]).wrap(Wrap { trim: true }), rows[3]);
             } else {
                 let mut scroll = picker.scroll;
                 clamp_scroll(picker.cursor, &mut scroll, list.len(), height);
@@ -156,7 +192,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                         Line::from(spans)
                     })
                     .collect();
-                f.render_widget(Paragraph::new(items), rows[2]);
+                f.render_widget(Paragraph::new(items), rows[3]);
             }
         }
         PickStage::Voice => {
@@ -168,7 +204,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                         "Esc goes back to the character list".to_string(),
                     ])
                     .wrap(Wrap { trim: true }),
-                    rows[2],
+                    rows[3],
                 );
             } else {
                 let mut scroll = picker.scroll;
@@ -224,7 +260,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                         if v.enrolled {
                             spans.push(Span::styled("clone ", style_of(colour, Color::Magenta)));
                         }
-                        if picker.previewing.as_deref() == Some(v.name.as_str()) {
+                        if auditioning.as_deref() == Some(v.name.as_str()) {
                             spans.push(Span::styled(
                                 "auditioning… ",
                                 style_of(colour, Color::Yellow),
@@ -236,7 +272,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                         Line::from(spans)
                     })
                     .collect();
-                f.render_widget(Paragraph::new(items), rows[2]);
+                f.render_widget(Paragraph::new(items), rows[3]);
             }
         }
     }
@@ -255,14 +291,14 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
         ],
         PickStage::Voice => vec![
             Line::from(Span::styled(
-                "type to filter · ↑↓ move · Enter assign · Tab audition · Esc back",
+                "type to filter · ↑↓ move · Enter assign · Esc back",
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(Span::styled(
-                "concern voices are shown for completeness but the inductor will reject them",
+                "t incumbent · T candidate · ^T another line — none of these assign (t/T don't filter here)",
                 Style::default().fg(Color::DarkGray),
             )),
         ],
     };
-    f.render_widget(Paragraph::new(hints), rows[3]);
+    f.render_widget(Paragraph::new(hints), rows[4]);
 }

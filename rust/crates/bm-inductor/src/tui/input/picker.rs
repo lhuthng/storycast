@@ -1,17 +1,31 @@
 //! Voice picker: two-stage filter, arrows-only movement.
+//!
+//! Audition keys live here but never commit anything — `Enter` is the only key
+//! that changes the cast, and it locks the held line rather than picking a new
+//! one. Step 2 auditions on `t` / `T` / `^T` (see `input/audition.rs`): those
+//! two letters stop typing into the step-2 filter, everything else still does.
+//! `Ctrl+Tab` was the previous reroll key but the terminal owns it, so the
+//! reroll moved to `^T`.
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use bm_proto::{Op, OpRequest};
 use crate::tui::{
     app::App,
-    input::dispatch_op,
+    input::audition::{audition, current_voice, segment, shown_line},
     jobs::Job,
     model::{filtered_characters, filtered_voices},
     screen::{Confirm, ConfirmAction, PickStage, Picker, Screen},
     style::Level,
 };
 
-pub(crate) async fn key_picker(app: &mut App, picker: Picker, key: KeyEvent, http: &reqwest::Client, job_tx: &tokio::sync::mpsc::UnboundedSender<Job>) -> bool {
-        let mut p = picker;
+/// Last valid cursor for the rows on screen right now, per stage.
+fn list_len(app: &App, p: &Picker) -> usize {
+    let n = match p.stage {
+        PickStage::Character => filtered_characters(app, &p.filter).len(),
+        PickStage::Voice => filtered_voices(app, &p.filter).len(),
+    };
+    n.saturating_sub(1)
+}
+
+pub(crate) async fn key_picker(app: &mut App, picker: Picker, key: KeyEvent, http: &reqwest::Client, job_tx: &tokio::sync::mpsc::UnboundedSender<Job>) -> bool {        let mut p = picker;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
@@ -43,11 +57,21 @@ pub(crate) async fn key_picker(app: &mut App, picker: Picker, key: KeyEvent, htt
                     if chosen.is_empty() {
                         app.set_status(Level::Error, "pick a character, or type a new name first");
                     } else {
+                        // Resume on the locked sentence when this character has
+                        // one — the voice was picked on it once, so A/B starts
+                        // there instead of on another random pick.
+                        p.line = app.locked_lines.get(&chosen).cloned();
                         p.character = chosen;
                         p.stage = PickStage::Voice;
                         p.filter.clear();
                         p.cursor = 0;
                         p.scroll = 0;
+                        // Step 2 is where the audition keys live, and building the
+                        // line index is a hundred file opens. Start it here rather
+                        // than on the keypress, so the wait happens while the
+                        // operator is reading the list. Deliberately *not* on every
+                        // keystroke: a filter key must never dispatch work.
+                        app.ensure_lines(job_tx);
                         app.screen = Screen::Pick(p);
                     }
                 }
@@ -65,6 +89,12 @@ pub(crate) async fn key_picker(app: &mut App, picker: Picker, key: KeyEvent, htt
                                     ),
                                 );
                             } else {
+                                // Lock the speech the voice is picked on: the
+                                // confirm — and every later audition — keeps
+                                // this sentence instead of another random pick.
+                                if let Some(l) = &p.line {
+                                    app.locked_lines.insert(p.character.clone(), l.clone());
+                                }
                                 app.screen = Screen::Confirm(Confirm {
                                     title: "Confirm voice swap".into(),
                                     danger: true,
@@ -85,27 +115,43 @@ pub(crate) async fn key_picker(app: &mut App, picker: Picker, key: KeyEvent, htt
                     }
                 }
             },
-            KeyCode::Tab if p.stage == PickStage::Voice => {
+            // `t`: the current voice on the shown line, from cache only: what
+            // the operator is about to replace, on the sentence in front of
+            // them. The pointed voice is for `T` (render) and Enter (pick) —
+            // `t` never follows the cursor. A miss names the render key.
+            // Step 2 only: in step 1 `t` still types into the filter.
+            KeyCode::Char('t') if p.stage == PickStage::Voice && !ctrl && !alt => {
+                match current_voice(app, &p.character) {
+                    None => app.set_status(
+                        Level::Warn,
+                        format!("“{}” has no voice assigned yet — nothing to compare", p.character),
+                    ),
+                    Some(cur) => match shown_line(app, &p.character, p.line.as_ref()) {
+                        None => app.set_status(
+                            Level::Warn,
+                            "no lines in the scripts yet — nothing to test",
+                        ),
+                        Some(l) => {
+                            p.line = Some(l.clone());
+                            segment(app, job_tx, http, &p.character, &cur, &l.text);
+                        }
+                    },
+                }
+                app.screen = Screen::Pick(p);
+            }
+            // `T`: the held line, rendered with the voice under the cursor.
+            // The one deliberate generation: the only way to hear two voices
+            // on the same sentence before either is assigned.
+            KeyCode::Char('T') if p.stage == PickStage::Voice && !ctrl && !alt => {
                 let list = filtered_voices(app, &p.filter);
                 match list.get(p.cursor) {
                     None => app.set_status(Level::Warn, "nothing to audition"),
                     Some(v) => {
-                        if p.previewing.is_some() {
-                            app.set_status(Level::Warn, "an audition is already running");
-                        } else {
-                            p.previewing = Some(v.name.clone());
-                            app.set_status(Level::Info, format!("auditioning {}…", v.name));
-                            dispatch_op(
-                                app,
-                                job_tx,
-                                http,
-                                OpRequest {
-                                    op: Op::PreviewVoice,
-                                    voice: Some(v.name.clone()),
-                                    ..Default::default()
-                                },
-                            );
-                        }
+                        let (character, voice) = (p.character.clone(), v.name.clone());
+                        p.line = audition(
+                            app, job_tx, http, &character, &voice,
+                            p.line.as_ref(), false,
+                        );
                     }
                 }
                 app.screen = Screen::Pick(p);
@@ -118,7 +164,10 @@ pub(crate) async fn key_picker(app: &mut App, picker: Picker, key: KeyEvent, htt
                 app.screen = Screen::Pick(p);
             }
             KeyCode::Down => {
-                p.cursor += 1;
+                // Clamped: the highlight must never leave the list, or Down
+                // past the end silently selects nothing.
+                let last = list_len(app, &p);
+                p.cursor = (p.cursor + 1).min(last);
                 app.screen = Screen::Pick(p);
             }
             KeyCode::PageUp => {
@@ -126,7 +175,8 @@ pub(crate) async fn key_picker(app: &mut App, picker: Picker, key: KeyEvent, htt
                 app.screen = Screen::Pick(p);
             }
             KeyCode::PageDown => {
-                p.cursor += 8;
+                let last = list_len(app, &p);
+                p.cursor = (p.cursor + 8).min(last);
                 app.screen = Screen::Pick(p);
             }
             KeyCode::Backspace => {
@@ -144,6 +194,23 @@ pub(crate) async fn key_picker(app: &mut App, picker: Picker, key: KeyEvent, htt
                     }
                     'r' => {
                         app.load_roster(job_tx, http);
+                    }
+                    // `^T`: another line for the pointed voice — one random
+                    // pick may be a poor representative, and "random" you
+                    // cannot reroll is just an annoyance. Case-insensitive:
+                    // the terminal may report either case with CONTROL held.
+                    't' | 'T' if p.stage == PickStage::Voice => {
+                        let list = filtered_voices(app, &p.filter);
+                        match list.get(p.cursor) {
+                            None => app.set_status(Level::Warn, "nothing to audition"),
+                            Some(v) => {
+                                let (character, voice) = (p.character.clone(), v.name.clone());
+                                p.line = audition(
+                                    app, job_tx, http, &character, &voice,
+                                    p.line.as_ref(), true,
+                                );
+                            }
+                        }
                     }
                     _ => {}
                 }

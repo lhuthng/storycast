@@ -8,7 +8,7 @@ mod mood;
 mod plan;
 mod wav;
 
-pub use self::plan::{Run, drop_headline, plan_render, runs, segments_complete, title_speech};
+pub use self::plan::{Run, character_has_lines, drop_headline, pick_exact, pick_rendered, plan_render, rendered_segments, runs, segment_miss, segments_complete, title_speech, RenderedSegment};
 pub use self::wav::{GEMINI_RATE, VIENEU_RATE, read_wav, sample_rate_for, silent_wav};
 use self::plan::{expected_wavs, title_speech_for_script};
 use self::wav::{Wav, write_wav};

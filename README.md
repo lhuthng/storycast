@@ -165,6 +165,36 @@ first run. In the task ledger (`K`): `j/k` or arrows to move, type to filter
 (e.g. `shelved`, `digest`, `42`), `u` retry / `F` force re-run the highlighted
 row, `Enter` for the full error, `Esc`/`q` to close.
 
+#### Hearing a voice before you commit to it
+
+In the voice picker (`:s` step 2 of 2) and the cast overview (`S`) — the two screens that
+know which voice a speaker has — three keys audition and **none of them assign**.
+`Enter` is still the only key that changes the cast.
+
+| Key           | Plays                                                                                |
+| ------------- | ------------------------------------------------------------------------------------ |
+| `t`           | the held line with the **current** voice, from cache only — zero synthesis            |
+| `T`           | that same held line with the **pointed** voice (rendered)                             |
+| `Ctrl+T`      | **another** line with the **pointed** voice (rendered)                                |
+
+In the picker the character is fixed, so `t` replays the current A/B sentence
+and never rolls; in the cast overview it follows the highlighted speaker.
+The line is held per character, so the incumbent and the candidate are compared on
+one sentence rather than two. Both screens print which line is loaded and what the
+current voice is, so nothing is compared blind.
+
+The sample **plays by itself** — there is nothing to open. Playback is `afplay`,
+one sample at a time; starting one stops the last. The inductor renders and hands
+the audio back as bytes, so it is written to a single temp file on *this* machine,
+overwritten on every audition and removed when the TUI exits: nothing accumulates
+in the repo, and the file is next to the speaker even when the inductor is on
+another box. Rendering goes through the TTS sidecar exactly as the pipeline does,
+so what you hear is what will be spoken.
+
+All three keys audition, so `t`/`T` don't filter on these two screens (picker
+step 1 still types every letter) — the price of leaving the Tab family, whose
+`Ctrl+Tab` the terminal owns.
+
 ### C. "Spread it over the LAN" (cluster)
 
 ```bash

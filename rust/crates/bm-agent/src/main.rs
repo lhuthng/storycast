@@ -111,6 +111,21 @@ impl Sidecar {
             .unwrap_or(SIDECAR_PORT)
     }
 
+    /// Which interpreter spawns the sidecar: the provision-managed
+    /// `python/.venv` first, a repo-root `.venv` (dev checkouts) second,
+    /// bare `python3` last.
+    fn python(&self, layout: &Layout) -> PathBuf {
+        let managed = layout.python_dir().join(".venv/bin/python");
+        if managed.is_file() {
+            return managed;
+        }
+        let legacy = layout.root.join(".venv/bin/python");
+        if legacy.is_file() {
+            return legacy;
+        }
+        PathBuf::from("python3")
+    }
+
     /// Ensure the sidecar answers, starting it if needed. Idempotent.
     /// Verifies `/policy`, not just `/health`: a stale server from a previous
     /// deploy answers health but lacks the endpoints renders depend on.
@@ -119,10 +134,9 @@ impl Sidecar {
             return Ok(());
         }
         self.stop();
-        // The venv lives at the repo root; the TTS modules live in python/,
-        // so the server runs with cwd=python/ (`import tts_vieneu` resolves).
-        let py = layout.root.join(".venv/bin/python");
-        let py = if py.is_file() { py } else { PathBuf::from("python3") };
+        // The TTS modules live in python/, so the server runs with
+        // cwd=python/ (`import tts_vieneu` resolves).
+        let py = self.python(layout);
         let mut child = tokio::process::Command::new(&py)
             .arg("tts_server.py")
             .arg("--port")
@@ -609,4 +623,33 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_python_prefers_the_managed_venv() {
+        // The 192.168.2.2 outage: provision builds python/.venv but the agent
+        // only looked at root/.venv, so every sidecar spawn fell back to a
+        // bare python3 without the TTS modules.
+        let root =
+            std::env::temp_dir().join(format!("bmvenv{}", std::process::id()));
+        let layout = Layout::new(&root);
+        let managed = layout.python_dir().join(".venv/bin");
+        let legacy = layout.root.join(".venv/bin");
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(managed.join("python"), "").unwrap();
+        let s = Sidecar::new("http://127.0.0.1:8818");
+        assert_eq!(s.python(&layout), managed.join("python"));
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("python"), "").unwrap();
+        assert_eq!(s.python(&layout), managed.join("python"), "managed wins");
+        std::fs::remove_dir_all(layout.python_dir().join(".venv")).unwrap();
+        assert_eq!(s.python(&layout), legacy.join("python"), "legacy fallback holds");
+        std::fs::remove_dir_all(layout.root.join(".venv")).unwrap();
+        assert_eq!(s.python(&layout), PathBuf::from("python3"), "last resort");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

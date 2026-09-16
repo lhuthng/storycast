@@ -134,9 +134,17 @@ impl Inner {
         out
     }
 
-    /// Surgical invalidation for one speaker: delete only their run files
-    /// (filenames embed the OLD voice — exactly the stale set), drop the
-    /// finished mp3s, requeue render+merge. Returns touched chapters + files.
+    /// Surgical invalidation for one speaker: delete only their local run
+    /// files (filenames embed the OLD voice — exactly the stale set), drop
+    /// the finished mp3s, requeue render+merge. Returns touched chapters + files.
+    ///
+    /// A chapter counts when the speaker is heard in it, not when a stale
+    /// file happened to be deleted: renders run on workers whose segment
+    /// cache never comes home, so gating on local files silently skips every
+    /// remotely-rendered chapter (its mp3 keeps the old voice forever).
+    /// Requeueing is safe regardless — segment filenames embed the voice, so
+    /// the worker only re-synthesizes the new voice's files and the merger
+    /// (`expected_wavs`) resolves against the current cast.
     pub(crate) fn invalidate_character(
         &mut self,
         engine: &str,
@@ -151,6 +159,7 @@ impl Inner {
             let planned = bm_core::assemble::drop_headline(&segments);
             let seg_dir = self.layout.seg_dir(engine, n);
             let local = engine == "vieneu";
+            let speaks = bm_core::assemble::runs(planned).iter().any(|run| run.speaker == character);
             let mut touched = false;
             for run in bm_core::assemble::runs(planned) {
                 if run.speaker != character {
@@ -180,7 +189,9 @@ impl Inner {
                     touched = true;
                 }
             }
-            if touched {
+            // `speaks`, not `touched`, gates the requeue: the title-only
+            // Narrator case is covered by `touched`, everything else by runs.
+            if touched || speaks {
                 chapters.push(n);
                 // Stale product goes away; render+merge requeue fresh.
                 let _ = std::fs::remove_file(self.layout.final_mp3(n));

@@ -6,7 +6,7 @@ use crate::tui::{
     app::App,
     input::{dispatch, dispatch_op},
     jobs::Job,
-    screen::{Confirm, ConfirmAction, Picker, Screen, TextKind, TextPrompt},
+    screen::{CastView, Confirm, ConfirmAction, Picker, Screen, TextKind, TextPrompt},
     style::{Conn, Level},
 };
 use crate::tui::input::runconfig::run_preview;
@@ -28,6 +28,7 @@ pub(crate) enum Command {
     CrawlSetup,
     Voices,
     SwapVoice,
+    Cast,
     Eta,
     Retry,
     Reconcile,
@@ -56,6 +57,7 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
             'c' => Command::CrawlSetup,
             'v' => Command::Voices,
             's' => Command::SwapVoice,
+            'S' => Command::Cast,
             'e' => Command::Eta,
             'u' => Command::Retry,
             'm' => Command::Reconcile,
@@ -79,7 +81,7 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
         "tasks" => Command::Key(KeyCode::Char('K')),
         "voices" => Command::Voices,
         "swap" => Command::SwapVoice,
-        "cast" => Command::Key(KeyCode::Char('S')),
+        "cast" => Command::Cast,
         "eta" => Command::Eta,
         "reconcile" => Command::Reconcile,
         "refresh" => Command::Key(KeyCode::Char('r')),
@@ -246,6 +248,18 @@ pub(crate) fn do_command(
             if app.roster.is_none() {
                 app.load_roster(job_tx, http);
             }
+            // The audition keys need the line index, and building it takes
+            // seconds — start it while the operator is still on step 1.
+            app.ensure_lines(job_tx);
+        }
+        Command::Cast => {
+            app.screen = Screen::Cast(CastView::new());
+            if app.roster.is_none() {
+                app.load_roster(job_tx, http);
+            }
+            // Start the audition line index now: it is seconds of file reads, and
+            // the operator is about to want it.
+            app.ensure_lines(job_tx);
         }
         Command::Eta => {
             dispatch_op(app, job_tx, http, OpRequest { op: Op::Eta, ..Default::default() });

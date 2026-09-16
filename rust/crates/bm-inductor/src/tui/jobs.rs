@@ -1,6 +1,7 @@
 //! Background work: one `Job` at a time, off the drawing loop.
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use bm_proto::{Machine, MachineState, Op, OpRequest, Roster};
 use crate::tui::{app::App, input::{op_key, urlencode}, style::{Level, LogLine}};
 
@@ -75,6 +76,25 @@ pub(crate) enum Job {
         http: reqwest::Client,
         layout_root: std::path::PathBuf,
     },
+    /// Read every `data/script-*.json` and index the lines by speaker.
+    ///
+    /// A job rather than a keypress handler because it is a hundred file opens
+    /// (26 ms warm here, but unbounded on a cold or networked path) and because
+    /// it runs once per session — the result is cached, so the audition itself is
+    /// instant.
+    LoadLines {
+        layout_root: std::path::PathBuf,
+    },
+    /// Serve one already-rendered segment from the local checkout: the
+    /// disconnected form of `Op::Segment`. Same lookup the inductor runs,
+    /// against the TUI's own files, so listening needs no backend.
+    Segment {
+        layout_root: std::path::PathBuf,
+        character: String,
+        voice: String,
+        /// Exact sentence wanted (the shown line). Empty means triage.
+        text: String,
+    },
 }
 
 #[derive(Debug)]
@@ -86,6 +106,14 @@ pub(crate) enum DoneKind {
         key: String,
         ok: bool,
         voice: Option<String>,
+        /// The wav the op rendered, base64, if it rendered one. The TUI writes
+        /// it next to the speaker and plays it; the inductor never assumes a
+        /// speaker, and never keeps the audio either.
+        audio_b64: Option<String>,
+        /// A book line served audio speaks (segment audition): whose line and
+        /// which sentence, so the client can show it and hold it for A/B.
+        line_speaker: Option<String>,
+        line_text: Option<String>,
     },
     /// Pool changed under the roster: reload it (only if one is showing).
     ReloadRoster,
@@ -107,6 +135,8 @@ pub(crate) enum Ev {
     BackendLive { start: u32, count: u32 },
     /// Push a machine's state directly into the TUI's in-memory list.
     MachineUpdate { addr: String, state: MachineState, note: String },
+    /// The per-speaker line index, built off the UI thread.
+    Lines(Result<std::collections::HashMap<String, Vec<String>>, String>),
 }
 
 /// Bounded wait for a freshly spawned inductor to answer `/api/state`.
@@ -602,11 +632,17 @@ pub(crate) async fn job_op(tx: tokio::sync::mpsc::UnboundedSender<Ev>, api: Stri
             let op = req.op;
             let key = op_key(&req);
             let character = req.character.clone();
+            let mut audio_b64: Option<String> = None;
+            let mut line_speaker: Option<String> = None;
+            let mut line_text: Option<String> = None;
             let ok = match http.post(format!("{api}/api/op")).json(&req).send().await {
                 Ok(r) => match r.json::<bm_proto::OpResult>().await {
                     Ok(res) => {
                         let level = if res.ok { Level::Ok } else { Level::Error };
                         send(&tx, level, format!("{name}: {}", res.message));
+                        audio_b64 = res.audio_b64;
+                        line_speaker = res.line_speaker;
+                        line_text = res.line_text;
                         res.ok
                     }
                     Err(e) => {
@@ -642,7 +678,7 @@ pub(crate) async fn job_op(tx: tokio::sync::mpsc::UnboundedSender<Ev>, api: Stri
                     }
                 }
             };
-            let _ = tx.send(Ev::Done(DoneKind::Op { op, key, ok, voice }));
+            let _ = tx.send(Ev::Done(DoneKind::Op { op, key, ok, voice, audio_b64, line_speaker, line_text }));
 }
 
 pub(crate) async fn job_load_roster(tx: tokio::sync::mpsc::UnboundedSender<Ev>, api: String, http: reqwest::Client, layout_root: std::path::PathBuf) {
@@ -661,6 +697,114 @@ pub(crate) async fn job_load_roster(tx: tokio::sync::mpsc::UnboundedSender<Ev>, 
             let _ = tx.send(Ev::Done(DoneKind::Other));
 }
 
+/// Index every script's lines by speaker, off the UI thread.
+///
+/// `spawn_blocking` because this is a hundred file opens: cheap warm, but it is
+/// I/O, and the UI task is the one thing the TUI is not allowed to stall.
+pub(crate) async fn job_load_lines(tx: tokio::sync::mpsc::UnboundedSender<Ev>, layout_root: std::path::PathBuf) {
+    let res = tokio::task::spawn_blocking(move || crate::tui::audition::index_lines(&layout_root))
+        .await
+        .unwrap_or_else(|e| Err(format!("line index task failed: {e}")));
+    let _ = tx.send(Ev::Lines(res));
+    // `dispatch` counts every job and only `Done` decrements, so a job that
+    // reports its payload without one leaves the footer claiming a job is
+    // running for the rest of the session — and nothing else ever clears it.
+    // Every arm of `run_job` owes exactly one of these.
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
+/// Serve one already-rendered segment without an inductor: the same lookup
+/// `Op::Segment` runs server-side, against this checkout's files. Reports
+/// through `DoneKind::Op` with the same shape, so the Done handler — line
+/// holding, playback, marker release — cannot tell the two paths apart.
+pub(crate) async fn job_segment(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    layout_root: std::path::PathBuf,
+    character: String,
+    voice: String,
+    text: String,
+) {
+    let key = op_key(&OpRequest { op: Op::Segment, ..Default::default() });
+    let voice_job = voice.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        let layout = bm_core::Layout::new(&layout_root);
+        let engine = bm_core::config::Settings::load(&layout.settings()).engine;
+        let cands = bm_core::assemble::rendered_segments(&layout, &engine, &voice_job);
+        if cands.is_empty() {
+            let mut msg = bm_core::assemble::segment_miss(&layout, &character, &voice_job, false);
+            msg.push_str("; connect (:B) to synthesize instead");
+            return Err(msg);
+        }
+        // An exact line plays that sentence or misses honestly, like the op.
+        let want = text.trim();
+        if !want.is_empty() {
+            match bm_core::assemble::pick_exact(&cands, &character, want) {
+                Some(pick) => return serve_local_segment(pick),
+                None => {
+                    return Err(format!(
+                        "{} (needs :B to render it)",
+                        bm_core::assemble::segment_miss(&layout, &character, &voice_job, true)
+                    ))
+                }
+            }
+        }
+        let pick = bm_core::assemble::pick_rendered(&cands, &character)
+            .expect("a non-empty pool always picks");
+        serve_local_segment(pick)
+    })
+    .await;
+    match out {
+        Ok(Ok((speaker, text, b64, len))) => {
+            send(&tx, Level::Ok, format!(
+                "segment: “{speaker}” ({} KB, local — nothing synthesized)",
+                len / 1024
+            ));
+            let (line_speaker, line_text) = if text.trim().is_empty() {
+                (None, None)
+            } else {
+                (Some(speaker), Some(text))
+            };
+            let _ = tx.send(Ev::Done(DoneKind::Op {
+                op: Op::Segment,
+                key,
+                ok: true,
+                voice: Some(voice),
+                audio_b64: Some(b64),
+                line_speaker,
+                line_text,
+            }));
+        }
+        Ok(Err(msg)) => fail_segment(&tx, &key, &voice, msg),
+        Err(e) => fail_segment(&tx, &key, &voice, format!("segment task crashed: {e}")),
+    }
+}
+
+/// A picked local segment into the job's answer shape: speaker, text, base64
+/// audio and its size for the status line.
+fn serve_local_segment(
+    pick: &bm_core::assemble::RenderedSegment,
+) -> Result<(String, String, String, usize), String> {
+    let bytes = pick.read_bytes()?;
+    Ok((pick.speaker.clone(), pick.text.clone(), B64.encode(&bytes), bytes.len()))
+}
+
+fn fail_segment(
+    tx: &tokio::sync::mpsc::UnboundedSender<Ev>,
+    key: &str,
+    voice: &str,
+    msg: String,
+) {    send(tx, Level::Error, format!("segment failed: {msg}"));
+    let _ = tx.send(Ev::Done(DoneKind::Op {
+        op: Op::Segment,
+        key: key.to_string(),
+        ok: false,
+        voice: Some(voice.to_string()),
+        audio_b64: None,
+        line_speaker: None,
+        line_text: None,
+    }));
+}
+
 pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
     match job {
         Job::Provision { layout_root, api, machine, force, settings_key } => job_provision(tx, layout_root, api, machine, force, settings_key).await,
@@ -671,5 +815,7 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
         Job::DropMachine { api, http, addr } => job_drop_machine(tx, api, http, addr).await,
         Job::Op { api, http, req, layout_root } => job_op(tx, api, http, req, layout_root).await,
         Job::LoadRoster { api, http, layout_root } => job_load_roster(tx, api, http, layout_root).await,
+        Job::LoadLines { layout_root } => job_load_lines(tx, layout_root).await,
+        Job::Segment { layout_root, character, voice, text } => job_segment(tx, layout_root, character, voice, text).await,
     }
 }

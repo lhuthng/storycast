@@ -67,7 +67,7 @@ pub(crate) const COMPACT_FOOTER_H: u16 = 4;
 /// every key is described in full on the help screen, which `?` opens.
 pub(crate) const KEYS_FULL: [&str; 2] = [
     ":a add · :p provision · :d drop · :t translate · :c crawl · :e eta · i inspect",
-    ":u retry · :m rec · :B back · :X stop · :s swap · :v voices · S cast · K tasks · r · ? · C · q",
+    ":u retry · :m rec · :B back · :X stop · :s swap · :v voices · :S cast · K tasks · r · ? · C · q",
 ];
 
 pub(crate) const KEYS_COMPACT: [&str; 2] = [
