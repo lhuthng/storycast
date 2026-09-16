@@ -30,7 +30,7 @@ fresh clone is a valid empty state:
 | `voices.json`, `voice-pool.json`, `refs/`    | Your cloned voices and reference clips (skip entirely to use the catalogue voices)                                 |
 | `data/`, `output/`                           | Scripts, character bible, cached audio, finished MP3s                                                              |
 | `.bm/`                                       | Ledger, settings, machine registry, logs                                                                           |
-| `.env`                                       | Your API keys (from `.env.example`)                                                                                |
+| `.env`                                       | Your API keys (from `.env.example`) — **on the inductor only**. A worker gets the keys its current task needs with the task itself |
 
 So the same program converts any novel: the language, cast and voices all come
 from your prompt, your URL template and your voice files — the code only knows
@@ -82,6 +82,15 @@ cp .env.example .env     # then edit: put your key(s) in
 #   GEMINI_API_KEY=...      (or OPENROUTER_API_KEY, or nothing if you use opencode)
 #   TTS_ENGINE=vieneu       (default; `gemini` for the API engine)
 ```
+
+`.env` is the **single source of truth for keys, and it never leaves this
+machine.** Worker boxes are provisioned by copying files, and `.env` is
+personal and git-ignored, so it is deliberately not one of them — instead the
+inductor sends each worker the keys the offered stage will read, with the task.
+That means you set a key once, here, and a remote digest works with nothing
+configured on the box at all. It also means the keys cross your LAN in the
+task offer: keep the control API on a trusted network (it is unauthenticated
+plain HTTP, like every other sidecar call in this repo).
 
 The Python side of Vieneu lives in `python/` (`tts_vieneu.py`,
 `tts_server.py`). A virtualenv with its dependencies is created for you when

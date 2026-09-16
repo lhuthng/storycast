@@ -89,6 +89,25 @@ impl Inner {
             engine: self.settings.engine.clone(),
             model_order: self.settings.model_order.clone(),
             analyzer: self.settings.analyzer.clone(),
+            // The analyzer's *backend* travels in `analyzer` above; what that
+            // backend runs travels here. Both are needed: a provisioned worker
+            // has no `.bm/settings.json` to read (provisioning never copies
+            // `.bm/`), so without this it digests with the compiled-in
+            // `Settings::default()` — which named a model the operator had
+            // stopped using.
+            analyzer_settings: self.settings.analyzer_settings(),
+            // The inductor is the only machine whose `.env` the operator
+            // maintains: a provisioned worker has none, because `.env` is
+            // personal and git-ignored and `install_sources` copies only
+            // `prompts/`, `python/`, `assets/` and `refs/`. Shipping the key
+            // with the task is what makes a remote digest possible at all —
+            // narrowed to what this stage actually reads, so a crawl offer
+            // carries no secret.
+            credentials: bm_proto::Credentials::from_env().for_stage(
+                t.stage,
+                &self.settings.analyzer,
+                &self.settings.engine,
+            ),
             bible: if bible.is_null() { None } else { Some(bible) },
             script,
             text,

@@ -297,6 +297,161 @@ pub struct Complete {
     pub mp3_b64: Option<String>,
 }
 
+/// Provider credentials the offered stage will read, sourced from the
+/// inductor's own environment.
+///
+/// Workers are provisioned by *copying files* — `prompts/`, `python/`,
+/// `assets/`, `refs/` — and `.env` is deliberately not among them: it is
+/// personal and git-ignored, so a remote box has no key of its own. Before
+/// this, a digest offered to such a box died on `GEMINI_API_KEY missing` no
+/// matter how carefully the operator had set the inductor up, because the
+/// key never left the machine that held it.
+///
+/// The field names are the environment variables the generation backends
+/// already read (`bm-core/src/digest/llm.rs`, and `python/tts_router.py` for
+/// the TTS sidecar). That is the whole point: installing them on the worker is
+/// a loop over [`Credentials::pairs`], not a mapping table that can drift from
+/// the code that consumes them.
+///
+/// An empty string means "not configured on the inductor" and is never
+/// installed, so a worker with its own `.env` keeps working; an offer from an
+/// inductor that predates this field carries nothing at all and behaves
+/// exactly as before.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Credentials {
+    #[serde(default)]
+    pub gemini_api_key: String,
+    #[serde(default)]
+    pub openrouter_api_key: String,
+}
+
+/// Redacted on purpose. `TaskOffer` derives `Debug` and every task offer is a
+/// candidate for a log line or a panic message; a key that reaches a log file
+/// is a key that has been leaked, and nothing here needs to print one.
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn state(v: &str) -> &'static str {
+            if v.is_empty() {
+                "unset"
+            } else {
+                "set"
+            }
+        }
+        f.debug_struct("Credentials")
+            .field("gemini_api_key", &state(&self.gemini_api_key))
+            .field("openrouter_api_key", &state(&self.openrouter_api_key))
+            .finish()
+    }
+}
+
+impl Credentials {
+    /// The provider keys this process holds.
+    pub fn from_env() -> Credentials {
+        Credentials {
+            gemini_api_key: std::env::var("GEMINI_API_KEY").unwrap_or_default(),
+            openrouter_api_key: std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
+        }
+    }
+
+    /// Narrow to the keys this stage will actually read.
+    ///
+    /// A crawl offer carries no secret at all; a digest carries the analyzer's
+    /// key and nothing else. Sending the whole set on every offer would hand
+    /// every worker every credential on the cluster for no reason — the point
+    /// of narrowing is that the wire only ever carries what the receiving
+    /// stage is about to need.
+    pub fn for_stage(self, stage: Stage, analyzer: &str, engine: &str) -> Credentials {
+        // The digest backend picks its key from `analyzer`; the backends that
+        // need none (`opencode` authenticates itself, `local` is Ollama) get an
+        // empty block rather than a gratuitous secret.
+        let wanted = match stage {
+            Stage::Digest => match analyzer {
+                "gemini" => Some("GEMINI_API_KEY"),
+                "openrouter" => Some("OPENROUTER_API_KEY"),
+                _ => None,
+            },
+            // The TTS sidecar reads `GEMINI_API_KEY` from its own environment
+            // and is spawned by the worker, so it inherits whatever is
+            // installed. The local engine needs nothing.
+            Stage::Render if engine == "gemini" => Some("GEMINI_API_KEY"),
+            _ => None,
+        };
+        match wanted {
+            Some("GEMINI_API_KEY") => Credentials {
+                openrouter_api_key: String::new(),
+                ..self
+            },
+            Some("OPENROUTER_API_KEY") => Credentials {
+                gemini_api_key: String::new(),
+                ..self
+            },
+            _ => Credentials::default(),
+        }
+    }
+
+    /// `(environment variable, value)` for everything actually set — the one
+    /// place the wire field names meet the env names.
+    pub fn pairs(&self) -> Vec<(&'static str, &str)> {
+        let mut out = Vec::new();
+        if !self.gemini_api_key.is_empty() {
+            out.push(("GEMINI_API_KEY", self.gemini_api_key.as_str()));
+        }
+        if !self.openrouter_api_key.is_empty() {
+            out.push(("OPENROUTER_API_KEY", self.openrouter_api_key.as_str()));
+        }
+        out
+    }
+
+    /// Just the variable names, for a log line that must never carry a value.
+    pub fn names(&self) -> Vec<&'static str> {
+        self.pairs().into_iter().map(|(name, _)| name).collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.gemini_api_key.is_empty() && self.openrouter_api_key.is_empty()
+    }
+}
+
+/// The analyzer's model configuration, exactly as the inductor holds it.
+///
+/// [`TaskOffer::analyzer`] names the *backend*; this names what that backend
+/// runs. Both have to travel, because the worker's copy of `Settings` is not
+/// the operator's: provisioning copies `prompts/`, `python/`, `assets/` and
+/// `refs/` and never `.bm/` (that is the inductor's state), so a remote box has
+/// **no `.bm/settings.json` at all** and `Settings::load` silently returns
+/// `Settings::default()`.
+///
+/// That default is compiled in and names `gemini-3.5-flash`. A box the
+/// operator had configured for `gemini-3.5-flash-lite` therefore ran
+/// `gemini-3.5-flash` instead, and the only evidence was the model name inside
+/// a 503 — which is exactly the outage this block closes.
+///
+/// Empty strings mean "the inductor said nothing" and leave the worker's own
+/// value alone, so an older inductor's offer still behaves as before.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalyzerSettings {
+    /// The model the chain stands on when there is no chain.
+    #[serde(default)]
+    pub analyze_model: String,
+    /// The fallback chain, tried in order.
+    ///
+    /// `None` means "the inductor said nothing" (an older inductor); `Some([])`
+    /// means "no chain — `analyze_model` stands alone", which is a real
+    /// configuration and the default in `Settings::default()`. The `Option` is
+    /// what keeps those two apart, for the same reason
+    /// [`TaskOffer::render_units`] is one.
+    #[serde(default)]
+    pub analyze_models: Option<Vec<String>>,
+    #[serde(default)]
+    pub opencode_model: String,
+    #[serde(default)]
+    pub openrouter_model: String,
+    #[serde(default)]
+    pub local_model: String,
+    #[serde(default)]
+    pub ollama_url: String,
+}
+
 /// A worker asking for work.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRequest {
@@ -320,12 +475,37 @@ pub struct TaskOffer {
     #[serde(default)]
     pub tts_url: Option<String>,
     pub engine: String,
+    /// Gemini TTS fallback chain, newest first.
+    ///
+    /// **Written but not yet read.** The inductor fills it from
+    /// `Settings::model_order` and no worker consumes it: the sidecar an agent
+    /// spawns is `python/tts_server.py`, which is VieNeu-only and ignores
+    /// `engine` on `/infer`, and `python/tts_router.py` — the only code that
+    /// would ever resolve a chain, from `GEMINI_MODEL_ORDER` — is imported by
+    /// nothing (it has been orphaned since the first commit). So a render does
+    /// **not** honour this today. It is left on the wire deliberately: removing
+    /// it would break older offers, and the field is the right shape for the
+    /// day the Gemini TTS path is finished.
     #[serde(default)]
     pub model_order: Vec<String>,
     /// Digest backend: `opencode` | `openrouter` | `local` | `gemini`.
     /// Defaults to `opencode` so old inductors' offers still parse.
     #[serde(default = "default_analyzer")]
     pub analyzer: String,
+    /// What that backend runs — the model chain and the per-backend model
+    /// names. Without it a provisioned worker, which has no `.bm/settings.json`
+    /// to read, digests with the compiled-in `Settings::default()` instead of
+    /// the operator's choice. Empty means "the inductor said nothing".
+    #[serde(default)]
+    pub analyzer_settings: AnalyzerSettings,
+    /// The provider keys this stage will read, from the inductor's `.env`.
+    ///
+    /// Empty when the inductor has nothing configured — the worker then uses
+    /// whatever its own environment holds, exactly as before this field
+    /// existed. An old inductor sends nothing and an old worker ignores it, so
+    /// either side may be upgraded first.
+    #[serde(default)]
+    pub credentials: Credentials,
     /// Current bible snapshot. The worker uses it to build the prompt and
     /// mirrors it locally so the cast assigner can read voice hints; it never
     /// writes the authoritative copy back.
@@ -785,5 +965,160 @@ mod tests {
         assert_eq!(narrow.stage, Some(Stage::Render));
         assert_eq!(narrow.chapter, Some(3));
         assert_eq!(narrow.force, None, "absent force means plain retry");
+    }
+
+    fn both_keys() -> Credentials {
+        Credentials {
+            gemini_api_key: "g-key".into(),
+            openrouter_api_key: "o-key".into(),
+        }
+    }
+
+    #[test]
+    fn credentials_travel_only_to_the_stage_that_reads_them() {
+        // The digest lane takes the analyzer's key — and only that one.
+        assert_eq!(
+            both_keys().for_stage(Stage::Digest, "gemini", "vieneu"),
+            Credentials {
+                gemini_api_key: "g-key".into(),
+                openrouter_api_key: String::new(),
+            }
+        );
+        assert_eq!(
+            both_keys().for_stage(Stage::Digest, "openrouter", "vieneu"),
+            Credentials {
+                gemini_api_key: String::new(),
+                openrouter_api_key: "o-key".into(),
+            }
+        );
+        // opencode authenticates itself and Ollama is a local URL: neither
+        // reads a key, so neither gets one.
+        for analyzer in ["opencode", "local"] {
+            assert!(
+                both_keys()
+                    .for_stage(Stage::Digest, analyzer, "vieneu")
+                    .is_empty(),
+                "{analyzer} reads no key"
+            );
+        }
+        // A gemini TTS render hands the key to the sidecar the worker spawns.
+        assert_eq!(
+            both_keys()
+                .for_stage(Stage::Render, "gemini", "gemini")
+                .gemini_api_key,
+            "g-key"
+        );
+        assert!(both_keys()
+            .for_stage(Stage::Render, "gemini", "vieneu")
+            .is_empty());
+        // Crawl and merge touch no provider at all — a crawl offer that
+        // carried a key would be shipping a secret to a box that fetches a URL.
+        for stage in [Stage::Crawl, Stage::Merge] {
+            assert!(
+                both_keys().for_stage(stage, "gemini", "gemini").is_empty(),
+                "{stage} reads no key"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_pairs_name_the_variables_the_backends_read() {
+        // These two strings are the contract with `bm-core/src/digest/llm.rs`
+        // and `python/tts_router.py`: they read the environment by exactly
+        // these names, so a rename here would install nothing.
+        assert_eq!(
+            both_keys().pairs(),
+            vec![("GEMINI_API_KEY", "g-key"), ("OPENROUTER_API_KEY", "o-key")]
+        );
+        assert_eq!(
+            both_keys().names(),
+            vec!["GEMINI_API_KEY", "OPENROUTER_API_KEY"]
+        );
+        // An unset key is absent, never an empty assignment: the worker must
+        // be able to leave a box's own `.env` alone.
+        let half = Credentials {
+            gemini_api_key: String::new(),
+            openrouter_api_key: "o-key".into(),
+        };
+        assert_eq!(half.pairs(), vec![("OPENROUTER_API_KEY", "o-key")]);
+        assert!(!half.is_empty());
+        assert!(Credentials::default().pairs().is_empty());
+    }
+
+    #[test]
+    fn debug_never_prints_a_key() {
+        // `TaskOffer` is `Debug` and every offer is a candidate for a log
+        // line. A redaction that is not tested is a redaction that gets
+        // dropped in a refactor.
+        let shown = format!("{:?}", both_keys());
+        assert!(!shown.contains("g-key"), "{shown}");
+        assert!(!shown.contains("o-key"), "{shown}");
+        assert!(shown.contains("set"), "{shown}");
+        assert!(format!("{:?}", Credentials::default()).contains("unset"));
+        // And through the struct that actually gets printed.
+        let offer = TaskOffer {
+            task_id: "digest:1".into(),
+            chapter: 1,
+            stage: Stage::Digest,
+            root: "/r".into(),
+            url: None,
+            tts_url: None,
+            engine: "vieneu".into(),
+            model_order: vec![],
+            analyzer: "gemini".into(),
+            analyzer_settings: AnalyzerSettings::default(),
+            credentials: both_keys(),
+            bible: None,
+            script: None,
+            text: None,
+            gap_ms: 300,
+            speed: 1.0,
+            ambience: false,
+            render_units: None,
+            local_node: false,
+        };
+        assert!(!format!("{offer:?}").contains("g-key"));
+    }
+
+    #[test]
+    fn an_old_inductors_offer_carries_no_credentials() {
+        // The staged rollout: an inductor that predates this field sends none,
+        // and the worker must read that as "use your own environment" rather
+        // than as a malformed offer.
+        let o: TaskOffer = serde_json::from_str(
+            r#"{"task_id":"digest:1","chapter":1,"stage":"digest","root":"/r",
+                "engine":"vieneu","gap_ms":300,"speed":1.25,"ambience":true}"#,
+        )
+        .unwrap();
+        assert!(o.credentials.is_empty());
+        assert!(o.credentials.pairs().is_empty());
+        // And it carries no analyzer configuration either — the worker's own
+        // settings stand, exactly as before this block existed.
+        assert!(o.analyzer_settings.analyze_models.is_none());
+        assert_eq!(o.analyzer_settings.analyze_model, "");
+        // And an old *worker* ignores the fields entirely — the serializer
+        // emits them, the parser above proves absence is tolerated.
+        let round: TaskOffer = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+        assert_eq!(round.credentials, o.credentials);
+        assert_eq!(round.analyzer_settings, o.analyzer_settings);
+    }
+
+    #[test]
+    fn an_empty_chain_is_not_the_same_as_saying_nothing() {
+        // `Some([])` is a real configuration — "no chain, `analyze_model`
+        // stands alone" — and it is `Settings::default()`. `None` is an older
+        // inductor that has no opinion. Collapsing the two would let a worker
+        // keep a chain the operator had deliberately removed.
+        let stated: AnalyzerSettings =
+            serde_json::from_str(r#"{"analyze_model":"m","analyze_models":[]}"#).unwrap();
+        assert_eq!(stated.analyze_models, Some(vec![]));
+        let silent: AnalyzerSettings = serde_json::from_str(r#"{"analyze_model":"m"}"#).unwrap();
+        assert_eq!(silent.analyze_models, None);
+        // And both survive a round trip, which is what the worker sees.
+        for block in [stated, silent] {
+            let back: AnalyzerSettings =
+                serde_json::from_str(&serde_json::to_string(&block).unwrap()).unwrap();
+            assert_eq!(back, block);
+        }
     }
 }

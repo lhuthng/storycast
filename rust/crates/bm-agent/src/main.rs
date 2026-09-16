@@ -572,6 +572,33 @@ fn clear_task(shared: &Shared) {
     }
 }
 
+/// Install the offer's credentials into this process and return the variable
+/// names that were set — never the values, which do not belong in a log.
+///
+/// Two consumers read them straight out of the environment: the generation
+/// backends in `bm-core::digest::llm` (which is why a provisioned box used to
+/// die on `GEMINI_API_KEY missing` — `.env` is personal and git-ignored, so it
+/// is never one of the files provisioning copies), and the TTS sidecar, a
+/// child process the worker spawns for a render and which inherits this
+/// environment at `spawn()`.
+///
+/// **The inductor wins.** It holds the only copy the operator maintains, so a
+/// value it sends replaces whatever this box had — a stale key on one machine
+/// is precisely the failure this replaces. An *empty* value is skipped rather
+/// than blanked, so a worker whose own `.env` is the only place a key exists
+/// keeps working, and an offer from an inductor that has nothing configured
+/// changes nothing at all.
+///
+/// `set_var` is process-global; it runs here, before the stage is dispatched
+/// and before any child is spawned, which is the only point at which no other
+/// thread is reading the environment.
+fn install_credentials(creds: &bm_proto::Credentials) -> Vec<&'static str> {
+    for (name, value) in creds.pairs() {
+        std::env::set_var(name, value);
+    }
+    creds.names()
+}
+
 async fn run_offer(
     layout: &Layout,
     settings: &Settings,
@@ -583,6 +610,12 @@ async fn run_offer(
 ) -> Result<TaskResult> {
     use bm_proto::Stage::*;
     let n = offer.chapter;
+    // Credentials first: everything below — including the TTS sidecar this
+    // call may spawn — reads them from the environment.
+    let installed = install_credentials(&offer.credentials);
+    if !installed.is_empty() {
+        println!("[ok] credentials from inductor: {}", installed.join(", "));
+    }
     // The offer is authoritative: materialize its artifacts first so any
     // machine can run any stage without shared storage.
     if let Some(text) = &offer.text {
@@ -619,8 +652,25 @@ async fn run_offer(
             } else {
                 offer.analyzer.clone()
             };
-            let (delta, script) =
-                run_digest(layout, n, &bible, settings, &analyzer, shared, false).await?;
+            // The backend name travels in `offer.analyzer`; what it runs
+            // travels in `offer.analyzer_settings`. Both are needed here: this
+            // box may have no `.bm/settings.json` at all (provisioning copies
+            // `prompts/`, `python/`, `assets/` and `refs/`, never `.bm/` — that
+            // is the inductor's state), in which case `Settings::load` silently
+            // returns `Settings::default()` and the compiled-in model runs
+            // instead of the operator's. That is the bug that made a box
+            // configured for `gemini-3.5-flash-lite` call `gemini-3.5-flash`.
+            let digest_settings = settings.with_analyzer_settings(&offer.analyzer_settings);
+            let (delta, script) = run_digest(
+                layout,
+                n,
+                &bible,
+                &digest_settings,
+                &analyzer,
+                shared,
+                false,
+            )
+            .await?;
             Ok(TaskResult {
                 ok: true,
                 detail: format!("digest ch{n} via {analyzer}"),
@@ -1170,5 +1220,186 @@ mod tests {
         std::fs::remove_dir_all(layout.root.join(".venv")).unwrap();
         assert_eq!(s.python(&layout), PathBuf::from("python3"), "last resort");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn offered_credentials_replace_the_workers_own_and_empty_ones_do_not() {
+        // The outage this closes: `.env` is personal and git-ignored, so it is
+        // never among the files provisioning copies. A remote box therefore had
+        // no key of its own and every digest died on `GEMINI_API_KEY missing`
+        // however carefully the inductor was set up.
+        std::env::remove_var("GEMINI_API_KEY");
+        let names = install_credentials(&bm_proto::Credentials {
+            gemini_api_key: "from-inductor".into(),
+            openrouter_api_key: String::new(),
+        });
+        assert_eq!(
+            names,
+            vec!["GEMINI_API_KEY"],
+            "the log gets names, never values"
+        );
+        assert_eq!(std::env::var("GEMINI_API_KEY").unwrap(), "from-inductor");
+
+        // The inductor is the single source of truth: what it sends beats what
+        // this box already held, which is the whole point of sending it.
+        std::env::set_var("GEMINI_API_KEY", "stale-local");
+        install_credentials(&bm_proto::Credentials {
+            gemini_api_key: "from-inductor".into(),
+            openrouter_api_key: String::new(),
+        });
+        assert_eq!(std::env::var("GEMINI_API_KEY").unwrap(), "from-inductor");
+
+        // An unset key is skipped, never blanked: a worker whose own `.env` is
+        // the only place a key exists keeps working, and an old inductor's
+        // empty block changes nothing.
+        install_credentials(&bm_proto::Credentials::default());
+        assert_eq!(
+            std::env::var("GEMINI_API_KEY").unwrap(),
+            "from-inductor",
+            "an absent value must not erase a present one"
+        );
+        std::env::remove_var("GEMINI_API_KEY");
+    }
+
+    /// A one-shot HTTP fixture on loopback: records each request body, answers
+    /// with `response_body`. Returns `(base_url, bodies)`.
+    ///
+    /// The repo's own rule for this shape (ROADMAP §1.4: "pin the request shape
+    /// against a local fixture server, no real API keys in tests") — and the
+    /// only way to reach the arm under test, which is a network call by nature.
+    fn fixture_server(response_body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback bind");
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        std::thread::spawn(move || {
+            // A fixed budget rather than `incoming()`: with the fix removed no
+            // request ever arrives, and an accept loop would sit here forever.
+            for stream in listener.incoming().take(4) {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let mut body = vec![0u8; len];
+                let _ = reader.read_exact(&mut body);
+                sink.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&body).into_owned());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (url, seen)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_digest_runs_on_the_inductors_analyzer_settings_not_the_boxes_own() {
+        // The last mile of the analyzer-settings fix, and the only part a unit
+        // test can reach. Deleting the overlay in the `Digest` arm left every
+        // other test in this workspace green — the arm is a network call, so
+        // nothing else looks at it.
+        //
+        // The `local` backend is the probe: its endpoint is configurable, so
+        // this box's own settings can point at a dead port while the offer's
+        // point at a fixture server. A pass-through reaches nothing at all.
+        let (url, seen) = fixture_server(r#"{"message":{"content":"{}"}}"#);
+        let dir = std::env::temp_dir().join(format!("bm-digest-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = Layout::new(&dir);
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::create_dir_all(dir.join("prompts")).unwrap();
+        std::fs::write(
+            layout.prompt(),
+            "bible={bible_json}\nchapter={chapter_text}\n",
+        )
+        .unwrap();
+
+        // This box's own copy. On a real provisioned worker there is no
+        // `.bm/settings.json` at all, so this would be `Settings::default()`
+        // and the compiled-in model would run; a dead port makes the same
+        // point without depending on what the default happens to be.
+        let box_settings = Settings {
+            ollama_url: "http://127.0.0.1:9".into(),
+            local_model: "box-model".into(),
+            ..Settings::default()
+        };
+        let offer = TaskOffer {
+            task_id: "digest:1".into(),
+            chapter: 1,
+            stage: bm_proto::Stage::Digest,
+            root: dir.display().to_string(),
+            url: None,
+            tts_url: None,
+            engine: "vieneu".into(),
+            model_order: vec![],
+            analyzer: "local".into(),
+            analyzer_settings: bm_proto::AnalyzerSettings {
+                ollama_url: url.clone(),
+                local_model: "offer-model".into(),
+                ..Default::default()
+            },
+            credentials: bm_proto::Credentials::default(),
+            bible: None,
+            script: None,
+            text: Some("Chương 1\n\nCó một người đi qua cầu.\n".into()),
+            gap_ms: 300,
+            speed: 1.0,
+            ambience: false,
+            render_units: None,
+            local_node: false,
+        };
+        let shared: Shared = Arc::new(Mutex::new(Progress::default()));
+        let mut sidecar = Sidecar::new("http://127.0.0.1:8818");
+        // `.no_proxy()`: this is loopback, and the fixture is only reachable
+        // without a proxy.
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        // The digest itself is *expected* to fail — the fixture answers `{}`,
+        // which is not a valid digest, so the one repair attempt fails too.
+        // What is under test is where the request went and what it asked for.
+        let _ = run_offer(
+            &layout,
+            &box_settings,
+            &offer,
+            &shared,
+            &mut sidecar,
+            "http://127.0.0.1:9",
+            &http,
+        )
+        .await;
+
+        let bodies = seen.lock().unwrap().clone();
+        assert!(
+            !bodies.is_empty(),
+            "the offer's endpoint was never called — the digest ran on this \
+             box's own settings"
+        );
+        assert!(
+            bodies.iter().any(|b| b.contains("offer-model")),
+            "the offered model must be the one requested: {bodies:?}"
+        );
+        assert!(
+            !bodies.iter().any(|b| b.contains("box-model")),
+            "this box's own model must not be used: {bodies:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

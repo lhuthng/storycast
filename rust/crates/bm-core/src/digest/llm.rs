@@ -65,6 +65,22 @@ fn extract_json_object(text: &str) -> Result<String> {
     Ok(text[start..=end].to_string())
 }
 
+/// The error for a provider key this process does not hold.
+///
+/// Naming both routes is the point. On the inductor `.env` is the file to
+/// edit, but a provisioned worker has **no `.env` at all** — it is personal and
+/// git-ignored, so provisioning copies `prompts/`, `python/`, `assets/` and
+/// `refs/` and never that. "copy .env.example to .env" sent the operator
+/// looking for a file that does not exist on the box that was failing. The key
+/// normally arrives with the task (`bm_proto::Credentials`), so the fix is to
+/// set it where it travels from.
+fn missing_key(var: &str) -> GenError {
+    GenError::Fatal(anyhow!(
+        "{var} missing — the task carried no key and this machine has none in .env; \
+         set it in the inductor's .env (the copy that travels) and retry"
+    ))
+}
+
 async fn generate_opencode(prompt: &str, settings: &Settings) -> Result<String, GenError> {
     let full = format!(
         "Do not use any tools. Answer with the requested output and nothing else.\n\n{prompt}"
@@ -98,6 +114,12 @@ async fn generate_ollama(prompt: &str, settings: &Settings) -> Result<String, Ge
         "format": "json",
         "options": {"temperature": 0, "num_ctx": 16384},
     });
+    // NOTE: `ollama_url` is a loopback endpoint by default and this client
+    // honours `HTTP_PROXY`, unlike the sidecar clients (`sidecar_client()` sets
+    // `.no_proxy()`). No failure has been reproduced from that here — reqwest
+    // skips the proxy for loopback — so it is left as it is rather than
+    // "fixed" on a guess. It would matter for an operator who points
+    // `ollama_url` at a LAN box while a proxy is configured.
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(1800))
         .build()
@@ -129,8 +151,7 @@ async fn generate_ollama(prompt: &str, settings: &Settings) -> Result<String, Ge
 }
 
 async fn generate_openrouter(prompt: &str, settings: &Settings) -> Result<String, GenError> {
-    let key = std::env::var("OPENROUTER_API_KEY")
-        .map_err(|_| GenError::Fatal(anyhow!("OPENROUTER_API_KEY missing — add it to .env")))?;
+    let key = std::env::var("OPENROUTER_API_KEY").map_err(|_| missing_key("OPENROUTER_API_KEY"))?;
     let body = json!({
         "model": settings.openrouter_model,
         "messages": [{"role": "user", "content": prompt}],
@@ -190,11 +211,7 @@ async fn generate_openrouter(prompt: &str, settings: &Settings) -> Result<String
 /// provider's own delay), 5xx, transport errors, unknown-model 404s and spent
 /// day-quotas.
 async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<String, GenError> {
-    let key = std::env::var("GEMINI_API_KEY").map_err(|_| {
-        GenError::Fatal(anyhow!(
-            "GEMINI_API_KEY missing — copy .env.example to .env"
-        ))
-    })?;
+    let key = std::env::var("GEMINI_API_KEY").map_err(|_| missing_key("GEMINI_API_KEY"))?;
     let mut last = String::from("no models configured");
     for model in analyze_chain(settings) {
         match try_gemini_model(prompt, &key, &model).await {
@@ -366,9 +383,59 @@ mod tests {
             .block_on(generate_gemini("{}", &Settings::default()))
             .unwrap_err();
         assert!(err.to_string().contains("GEMINI_API_KEY missing"), "{err}");
+        // The wording is load-bearing: the old one told a provisioned worker
+        // (which has no `.env` at all) to copy a `.env.example` that is not
+        // there. Both routes have to be named — the key travels with the task.
+        assert!(err.to_string().contains("inductor"), "{err}");
+        assert!(
+            !err.to_string().contains("copy .env.example"),
+            "the instruction that sent the operator to a missing file: {err}"
+        );
         if let Some(k) = saved {
             std::env::set_var("GEMINI_API_KEY", k);
         }
+    }
+
+    #[test]
+    fn both_missing_key_errors_name_their_own_variable() {
+        // One helper, two callers: the message must not be able to drift into
+        // blaming the wrong provider, and it must stay short enough for the
+        // TUI's 200-char event line.
+        for var in ["GEMINI_API_KEY", "OPENROUTER_API_KEY"] {
+            let msg = missing_key(var).to_string();
+            assert!(msg.starts_with(var), "{msg}");
+            assert!(msg.contains("inductor"), "{msg}");
+            assert!(msg.len() < 200, "{} chars: {msg}", msg.len());
+        }
+    }
+
+    #[test]
+    fn a_worker_with_no_settings_file_runs_the_inductors_model() {
+        // The reported outage, in one assertion. A provisioned box has no
+        // `.bm/settings.json` (provisioning never copies `.bm/`), so
+        // `Settings::load` returns the compiled default — whose `analyze_model`
+        // is the literal below. The operator had switched to `-lite`, the box
+        // kept calling the old model, and the only trace was a 503 naming it.
+        let remote_box = Settings::default();
+        assert_eq!(
+            analyze_chain(&remote_box),
+            vec!["gemini-3.5-flash"],
+            "this is the compiled default that caused the outage — if you are \
+             changing it, change this test with it"
+        );
+
+        // What the offer carries now.
+        let inductor = Settings {
+            analyze_model: "gemini-3.5-flash".into(),
+            analyze_models: vec!["gemini-3.5-flash-lite".into()],
+            ..Settings::default()
+        };
+        let effective = remote_box.with_analyzer_settings(&inductor.analyzer_settings());
+        assert_eq!(analyze_chain(&effective), vec!["gemini-3.5-flash-lite"]);
+
+        // And an inductor that says nothing leaves the box exactly as it was.
+        let silent = remote_box.with_analyzer_settings(&bm_proto::AnalyzerSettings::default());
+        assert_eq!(analyze_chain(&silent), analyze_chain(&remote_box));
     }
 
     #[test]
