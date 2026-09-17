@@ -66,6 +66,57 @@ pub fn concat_wavs(files: &[PathBuf], out: &Path, gap_ms: u32) -> Result<()> {
     Ok(())
 }
 
+/// Concatenate a timeline, honouring each slot's own gap.
+///
+/// [`crate::ambience::timeline`] decided these offsets, so this writes exactly
+/// the silence the layers believe is there. That is the point of the split: the
+/// gap used to be one number read in two places (here and the span builder) and
+/// stayed correct only because it was a constant. A planned beat is not a
+/// constant, and a layers pass that assumed `gap_ms` would slide onto the wrong
+/// turns by the length of every pause before it.
+///
+/// The gap after the last slot is not written: nothing follows it, and the
+/// layer pass sizes its beds from the file it is given, so a trailing silence
+/// would only make the chapter longer than the timeline claims.
+pub fn concat_slots(slots: &[crate::ambience::Slot], out: &Path) -> Result<()> {
+    let mut params: Option<(u16, u32, u16)> = None;
+    let mut frames: Vec<u8> = Vec::new();
+
+    for (i, slot) in slots.iter().enumerate() {
+        let w = read_wav(&slot.wav)?;
+        let p = (w.channels, w.sample_rate, w.bits);
+        match params {
+            None => params = Some(p),
+            Some(prev) if prev != p => anyhow::bail!(
+                "{}: {p:?} != {prev:?} (mixed engines/rates — use per-engine seg dirs)",
+                slot.wav.display()
+            ),
+            _ => {}
+        }
+        frames.extend_from_slice(&w.data);
+        if slot.gap_ms > 0 && i + 1 < slots.len() {
+            let n = (w.sample_rate * slot.gap_ms / 1000) as usize;
+            frames.resize(
+                frames.len() + n * w.channels as usize * (w.bits as usize / 8),
+                0,
+            );
+        }
+    }
+
+    let (channels, sample_rate, bits) =
+        params.ok_or_else(|| anyhow::anyhow!("no segments to concatenate"))?;
+    write_wav(
+        out,
+        &Wav {
+            channels,
+            sample_rate,
+            bits,
+            data: frames,
+        },
+    )?;
+    Ok(())
+}
+
 fn ffmpeg_available() -> bool {
     Command::new("ffmpeg")
         .arg("-version")
@@ -90,10 +141,93 @@ fn run_ffmpeg(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Pair every wav the renderer produced with the scene, mood and speaker the
+/// layers need.
+///
+/// Built from the same grouping [`expected_wavs`] used, in the same order, so
+/// turn `i` is wav `i` by construction rather than by convention — a mismatch
+/// here would silently slide the whole chapter's sound design onto the wrong
+/// lines, so the count is checked instead of assumed.
+///
+/// The mood is resolved here rather than in the mixer because the grain differs
+/// per engine: the local engine renders one wav per *run*, so a run's mood is
+/// its majority value, while the cloud engine renders one wav per segment. Doing
+/// it here keeps `Turn` a flat statement of fact for the layer pass.
+fn plan_turns(
+    segments: &[Value],
+    wavs: &[PathBuf],
+    local: bool,
+    titled: bool,
+    cfg: &crate::ambience::SceneMap,
+) -> Result<Vec<crate::ambience::Turn>> {
+    use crate::ambience::Turn;
+    let segments = drop_headline(segments);
+    let mut out: Vec<Turn> = Vec::new();
+
+    if titled {
+        // The headline opens the chapter before any scene is established: the
+        // Narrator speaks it, and it carries no scene tag — so no reverb, no
+        // bed, no music, and a scene change at the first real turn.
+        out.push(Turn {
+            wav: wavs[0].clone(),
+            scene: String::new(),
+            music: String::new(),
+            speaker: "Narrator".into(),
+        });
+    }
+
+    if local {
+        let rs = runs(segments);
+        let scenes = crate::ambience::run_scenes(segments, &rs);
+        let musics = crate::ambience::run_music(segments, &rs, cfg);
+        for (i, run) in rs.iter().enumerate() {
+            out.push(Turn {
+                wav: wavs[i + titled as usize].clone(),
+                scene: scenes[i].clone(),
+                music: musics[i].clone(),
+                speaker: run.speaker.clone(),
+            });
+        }
+    } else {
+        for (i, s) in segments.iter().enumerate() {
+            let scene = s
+                .get("scene")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            out.push(Turn {
+                wav: wavs[i + titled as usize].clone(),
+                music: crate::ambience::resolve_music(
+                    &scene,
+                    s.get("music").and_then(|v| v.as_str()),
+                    cfg,
+                ),
+                scene,
+                speaker: s
+                    .get("speaker")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            });
+        }
+    }
+
+    if out.len() != wavs.len() {
+        anyhow::bail!(
+            "timeline has {} turns for {} rendered segments — the render plan and \
+             the timeline disagree, so the layers would land on the wrong lines",
+            out.len(),
+            wavs.len()
+        );
+    }
+    Ok(out)
+}
+
 /// Assemble cached segments into the chapter deliverable.
 ///
 /// `scratch` is a directory the caller owns and may delete afterwards. Every
-/// intermediate — the concat, the ambience pass, the tempo pass — is written
+/// intermediate — the concat, the layer pass, the tempo pass — is written
 /// there, and only the returned file is meant to survive. Pass
 /// `Layout::scratch_ch(n)` so intermediates never land in `output/`.
 ///
@@ -105,8 +239,9 @@ pub fn assemble(
     bible_path: &Path,
     seg_dir: &Path,
     scratch: &Path,
+    chapter: u32,
     gap_ms: u32,
-    ambience: bool,
+    on: crate::ambience::LayerSwitch,
     speed: f64,
     engine: &str,
     assets: &Path,
@@ -146,39 +281,35 @@ pub fn assemble(
 
     std::fs::create_dir_all(scratch)
         .with_context(|| format!("creating scratch {}", scratch.display()))?;
+
+    // The scene map is read here, not inside the layer pass, because it decides
+    // two things the *timeline* needs: where the beats go, and what mood each
+    // turn carries. A missing map degrades to "no sound design" rather than
+    // failing a dry merge; a layered merge still fails loudly in `apply_layers`.
+    let map = crate::ambience::load_map(&assets.join("scene-map.json")).unwrap_or_default();
+    let turns = plan_turns(&segments, &wavs, local, title.is_some(), &map)?;
+    // A beat is part of the sound design, so a dry chapter does not get one:
+    // both layers off is an operator asking for a plain read of the text, and
+    // silence inserted between the lines would be an edit they did not ask for.
+    let pauses = if on.none() {
+        std::collections::BTreeMap::new()
+    } else {
+        crate::ambience::plan_pauses(&turns, &map, speed)
+    };
+    let slots = crate::ambience::timeline(&turns, gap_ms, &pauses)?;
+
     let mut out_path = scratch.join("mix.wav");
-    concat_wavs(&wavs, &out_path, gap_ms)?;
+    concat_slots(&slots, &out_path)?;
 
-    if ambience {
-        let mut scenes = if local {
-            crate::ambience::run_scenes(&segments, &runs(&segments))
-        } else {
-            segments
-                .iter()
-                .map(|s| {
-                    s.get("scene")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string()
-                })
-                .collect()
-        };
-        if title.is_some() {
-            // The headline run leads the wav list; keep scenes aligned with
-            // a dry span so ambience never slides onto the wrong turn.
-            scenes.insert(0, String::new());
-        }
-        let amb_out = scratch.join("mix-amb.wav");
-        out_path = crate::ambience::apply_ambience(
-            &out_path, &scenes, &wavs, gap_ms, &amb_out, scratch, assets,
-        )?;
-    }
-
+    // Tempo the SPEECH, then place the layers on the delivered clock.
+    //
+    // `atempo` used to run last, over the finished mix, so it sped the beds and
+    // the music up along with the voice: a rain bed at 1.25x is a different
+    // rain, and a loop stretched to fill its window no longer fits it. The
+    // operator asked for faster *reading*, not a faster world.
+    let mut slots = slots;
     if (speed - 1.0).abs() > f64::EPSILON {
-        let sped = scratch.join(format!(
-            "{}-x{speed}.wav",
-            out_path.file_stem().unwrap_or_default().to_string_lossy()
-        ));
+        let sped = scratch.join("voice-sped.wav");
         run_ffmpeg(&[
             "-y",
             "-loglevel",
@@ -190,6 +321,16 @@ pub fn assemble(
             &sped.to_string_lossy(),
         ])?;
         out_path = sped;
+        // The layer pass reads `Slot::start`/`end`, so the timeline has to
+        // become the one the listener will actually hear.
+        crate::ambience::retime(&mut slots, speed);
+    }
+
+    if !on.none() {
+        let amb_out = scratch.join("mix-amb.wav");
+        out_path = crate::ambience::apply_layers(
+            &out_path, &slots, chapter, on, &amb_out, scratch, assets,
+        )?;
     }
 
     if ffmpeg_available() {

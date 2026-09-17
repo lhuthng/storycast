@@ -92,8 +92,24 @@ impl Layout {
         self.assets().join("scene-map.json")
     }
 
-    pub fn beds(&self) -> PathBuf {
-        self.assets().join("ambience")
+    /// The effect layer's clip pool. The clips themselves live in
+    /// `assets/effects/`, alongside this registry, so provisioning ships a pool
+    /// and its clips as one directory.
+    pub fn effect_pool(&self) -> PathBuf {
+        self.assets().join("effect-pool.json")
+    }
+
+    /// The music layer's clip pool, with its clips in `assets/music/`.
+    pub fn music_pool(&self) -> PathBuf {
+        self.assets().join("music-pool.json")
+    }
+
+    pub fn effects(&self) -> PathBuf {
+        self.assets().join("effects")
+    }
+
+    pub fn music(&self) -> PathBuf {
+        self.assets().join("music")
     }
 
     pub fn refs(&self) -> PathBuf {

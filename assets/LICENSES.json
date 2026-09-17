@@ -1,13 +1,13 @@
 {
-  "_note": "One entry per file in assets/ambience/. All Pixabay Content License unless noted. Fill url when known.",
+  "_note": "Provenance for the clips in assets/effects/ and assets/music/. Keys are the clip filenames as the pool registries name them; the author string in parentheses keeps the original download name, which is what the rename to <sound>-N would otherwise lose. The entries below are the original bed set; they live in assets/effects/ and were normalized there by tools/normalize-audio.sh. All Pixabay Content License unless noted. Fill url when known. The clips added from refs/temp/ are NOT listed yet — they need an entry each before this file can claim to cover the pools.",
   "files": {
-    "night-crickets.mp3": {"url": "https://pixabay.com/sound-effects/nature-night-ambience-17064", "author": "freesound_community", "license": "Pixabay Content License"},
+    "night-5.mp3": {"url": "https://pixabay.com/sound-effects/nature-night-ambience-17064", "author": "freesound_community (nature-night-ambience-17064)", "license": "Pixabay Content License"},
     "market-crowd.mp3": {"url": null, "author": "freesound_community (crowd-16932)", "license": "Pixabay Content License"},
-    "mountain-wind.mp3": {"url": null, "author": "freesound_community (mirador-montbau-53134)", "license": "Pixabay Content License"},
-    "rain-light.mp3": {"url": null, "author": "freesound_community (rain-light-6704)", "license": "Pixabay Content License"},
-    "rain-storm.mp3": {"url": null, "author": "masterandmargarita (rain-with-thunderstorm-420333)", "license": "Pixabay Content License"},
+    "wind-1.mp3": {"url": null, "author": "freesound_community (mirador-montbau-53134)", "license": "Pixabay Content License"},
+    "rain-2.mp3": {"url": null, "author": "freesound_community (rain-light-6704)", "license": "Pixabay Content License"},
+    "storm-1.mp3": {"url": null, "author": "masterandmargarita (rain-with-thunderstorm-420333)", "license": "Pixabay Content License"},
     "fire-crackle.mp3": {"url": null, "author": "dragon-studio (fire-crackling-427410)", "license": "Pixabay Content License"},
-    "forest-birds.mp3": {"url": null, "author": "freesound_community (birds-19624)", "license": "Pixabay Content License"},
+    "forest-2.mp3": {"url": null, "author": "freesound_community (birds-19624)", "license": "Pixabay Content License"},
     "cave-drip.mp3": {"url": null, "author": "dragon-studio (droplets-in-a-cave-482871)", "license": "Pixabay Content License"}
   }
 }
