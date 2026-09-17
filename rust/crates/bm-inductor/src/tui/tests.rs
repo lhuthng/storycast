@@ -423,7 +423,18 @@ fn run_preview_prefers_live_api_then_file_then_defaults() {
     assert_eq!((cfg.start, cfg.count), (5, 2));
     assert_eq!(cfg.analyzer, "gemini");
     assert_eq!(cfg.models, vec!["3.8-flash"]);
-    assert_eq!((cfg.speed, cfg.effect_volume, cfg.music_volume), (1.25, 1.0, 1.0));
+    app.settings.as_mut().unwrap()["inject_volume"] = serde_json::json!(0.25);
+    assert_eq!(run_preview(&app).inject_volume, 0.25);
+    assert_eq!(super::input::runconfig::mix_prefill(&app), "1.25 1 1 0.25");
+    assert_eq!(
+        (
+            cfg.speed,
+            cfg.effect_volume,
+            cfg.music_volume,
+            cfg.inject_volume
+        ),
+        (1.25, 1.0, 1.0, 1.0)
+    );
 
     // Down backend: the saved file is what the next boot will use.
     let dir = std::env::temp_dir().join("bm-runconfig-preview");
@@ -449,21 +460,52 @@ fn run_preview_prefers_live_api_then_file_then_defaults() {
     assert!(!cfg.live);
     assert!(!cfg.saved);
     assert_eq!((cfg.start, cfg.count), (1, 1));
-    assert_eq!((cfg.speed, cfg.effect_volume, cfg.music_volume), (1.25, 1.0, 1.0));
+    assert_eq!(
+        (
+            cfg.speed,
+            cfg.effect_volume,
+            cfg.music_volume,
+            cfg.inject_volume
+        ),
+        (1.25, 1.0, 1.0, 1.0)
+    );
 }
 
 #[test]
 fn mix_config_parses_ranges_and_rejects_garbage() {
     // The prompt validates; the op itself saves, so a typo keeps the prompt
     // open and never dispatches.
-    assert_eq!(parse_mix_config("1.25 1.0 1.0").unwrap(), (1.25, 1.0, 1.0));
-    assert_eq!(parse_mix_config("0.5 0 2").unwrap(), (0.5, 0.0, 2.0));
-    assert!(parse_mix_config("1.25 1.0").unwrap_err().contains("expected"));
-    assert!(parse_mix_config("0.4 1 1").unwrap_err().contains("speed"));
-    assert!(parse_mix_config("2.1 1 1").unwrap_err().contains("speed"));
-    assert!(parse_mix_config("1 3 1").unwrap_err().contains("fx"));
-    assert!(parse_mix_config("1 1 -0.1").unwrap_err().contains("music"));
-    assert!(parse_mix_config("1 x 1").unwrap_err().contains("not a number"));
+    assert_eq!(
+        parse_mix_config("1.25 1.0 1.0 0.5").unwrap(),
+        (1.25, 1.0, 1.0, Some(0.5))
+    );
+    assert_eq!(
+        parse_mix_config("0.5 0 2 1").unwrap(),
+        (0.5, 0.0, 2.0, Some(1.0))
+    );
+    assert!(parse_mix_config("1.25 1.0")
+        .unwrap_err()
+        .contains("expected"));
+    assert_eq!(
+        parse_mix_config("1.25 1.0 1.0").unwrap(),
+        (1.25, 1.0, 1.0, None)
+    );
+    for input in ["1 1 1 -0.1", "1 1 1 NaN", "1 1 1 inf"] {
+        assert!(parse_mix_config(input).unwrap_err().contains("inject"));
+    }
+    assert!(parse_mix_config("1 1 1 1 1")
+        .unwrap_err()
+        .contains("expected"));
+    assert!(parse_mix_config("0.4 1 1 1").unwrap_err().contains("speed"));
+    assert!(parse_mix_config("2.1 1 1 1").unwrap_err().contains("speed"));
+    assert!(parse_mix_config("1 3 1 1").unwrap_err().contains("fx"));
+    assert!(parse_mix_config("1 1 -0.1 1")
+        .unwrap_err()
+        .contains("music"));
+    assert!(parse_mix_config("1 1 1 3").unwrap_err().contains("inject"));
+    assert!(parse_mix_config("1 x 1 1")
+        .unwrap_err()
+        .contains("not a number"));
 }
 
 #[tokio::test]

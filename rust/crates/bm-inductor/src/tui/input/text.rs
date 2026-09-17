@@ -94,7 +94,7 @@ pub(crate) async fn key_text(
                 // the API, offline against the files when the inductor is
                 // down — so this branch dispatches instead of writing.
                 match parse_mix_config(&p.buf) {
-                    Ok((speed, fx, music)) => {
+                    Ok((speed, fx, music, inj)) => {
                         app.screen = Screen::Normal;
                         app.set_status(Level::Ok, format!("submitted: {}", p.buf.trim()));
                         dispatch(
@@ -108,6 +108,7 @@ pub(crate) async fn key_text(
                                     speed: Some(speed),
                                     effect_volume: Some(fx),
                                     music_volume: Some(music),
+                                    inject_volume: inj,
                                     ..Default::default()
                                 },
                             ),

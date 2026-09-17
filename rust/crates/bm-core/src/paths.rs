@@ -80,8 +80,18 @@ impl Layout {
         self.root.join("output")
     }
 
+    /// The digest's first pass: read the chapter, report the cast and the story.
+    ///
+    /// Also the repo-root marker (`find_root` looks for this exact file), so it
+    /// keeps its name even though it is now one of two prompts.
     pub fn prompt(&self) -> PathBuf {
         self.root.join("prompts/analyze.txt")
+    }
+
+    /// The digest's second pass: the cast is already resolved, so this one only
+    /// has to split the chapter and tag it.
+    pub fn script_prompt(&self) -> PathBuf {
+        self.root.join("prompts/script.txt")
     }
 
     pub fn assets(&self) -> PathBuf {
@@ -218,17 +228,36 @@ impl Layout {
 
     /// Chapter title for the output filename, ported from `main._chapter_title`.
     ///
-    /// The first line of the chapter text is normally `Chương 12: Some Title`;
-    /// we keep the part after the colon and scrub it into something every
-    /// filesystem accepts.
+    /// **The script's own `title` wins.** The crawled headline is the site's
+    /// auto-excerpt of the chapter — `Chương 9: Tê! Thật là khủng khiếp dao
+    /// phay`, `Chương 10: Tiền bối đối với dao phay yêu cầu đều cao như vậy?` —
+    /// a sentence out of the prose with the punctuation still on it, which then
+    /// lands on the cover of the mp3. It is a title only in the sense that the
+    /// site put it on the first line. The digest has read the chapter and can
+    /// name it, so its `title` is the one used; the headline stays as the
+    /// fallback for a chapter that was digested before the field existed.
+    ///
+    /// Both routes end in the same scrub, so a title from either source is a
+    /// legal filename and the spoken headline and the file agree.
     pub fn chapter_title(&self, n: u32) -> String {
-        let raw = std::fs::read_to_string(self.chapter_txt(n)).unwrap_or_default();
-        let first = raw.lines().next().unwrap_or("").trim().to_string();
-        let title = match first.split_once(':') {
-            Some((_, rest)) => rest.to_string(),
-            None => first,
-        };
-        let mut title = squeeze_ws(&title);
+        let from_script = crate::read_json::<serde_json::Value>(&self.script(n))
+            .ok()
+            .and_then(|d| {
+                d.get("title")
+                    .and_then(|t| t.as_str())
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(String::from)
+            });
+        let raw = from_script.unwrap_or_else(|| {
+            let raw = std::fs::read_to_string(self.chapter_txt(n)).unwrap_or_default();
+            let first = raw.lines().next().unwrap_or("").trim().to_string();
+            match first.split_once(':') {
+                Some((_, rest)) => rest.to_string(),
+                None => first,
+            }
+        });
+        let mut title = squeeze_ws(&raw);
         // trailing dot-runs: ". . ." / "..." / "…"
         title = title.trim_end_matches([' ', '.', '…']).to_string();
         // windows-illegal filename characters
@@ -287,6 +316,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(l.chapter_title(3), "Kiếm khí xung thiên");
+    }
+
+    /// The crawled headline is a word-for-word machine translation of the
+    /// Chinese title, and it is what the mp3 is named after. The digest reads
+    /// the chapter and names it, so its `title` is the one that wins — for the
+    /// filename *and* for the spoken headline, which is the whole point of
+    /// routing both through this one function.
+    #[test]
+    fn chapter_title_prefers_the_digests_own_title_over_the_mt_headline() {
+        let root = fixture_root("title-script");
+        let l = Layout::new(&root);
+        std::fs::create_dir_all(l.chapters()).unwrap();
+        std::fs::write(
+            l.chapter_txt(9),
+            "Chương 9: Tê! Thật là khủng khiếp dao phay\n\nbody\n",
+        )
+        .unwrap();
+        // No script yet: the headline is all there is.
+        assert_eq!(l.chapter_title(9), "Tê! Thật là khủng khiếp dao phay");
+        // A script with a title: it wins, and the headline is not consulted.
+        std::fs::write(
+            l.script(9),
+            r#"{"title":"Bí Ẩn Dao Phay Trong Phòng Bếp","segments":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(l.chapter_title(9), "Bí Ẩn Dao Phay Trong Phòng Bếp");
+        // An empty or whitespace title falls back rather than naming the file "".
+        std::fs::write(l.script(9), r#"{"title":"   ","segments":[]}"#).unwrap();
+        assert_eq!(l.chapter_title(9), "Tê! Thật là khủng khiếp dao phay");
+        // And a script that predates the field does too.
+        std::fs::write(l.script(9), r#"{"segments":[]}"#).unwrap();
+        assert_eq!(l.chapter_title(9), "Tê! Thật là khủng khiếp dao phay");
     }
 
     #[test]

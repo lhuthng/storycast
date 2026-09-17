@@ -27,10 +27,10 @@
 
 set -euo pipefail
 
-I_TARGET=-26      # integrated loudness, LUFS
-TP_TARGET=-3      # true peak ceiling, dBTP
+I_TARGET=${I_TARGET:--26}      # integrated loudness, LUFS (-20 for foreground injects)
+TP_TARGET=${TP_TARGET:--3}      # true peak ceiling, dBTP
 LRA_TARGET=11     # loudness range the normalizer is allowed to work with
-BITRATE=64k       # mono 48 kHz mp3; smaller pool files with acceptable bed quality
+BITRATE=${BITRATE:-64k}       # mono 48 kHz mp3; smaller pool files with acceptable bed quality
 TRIM_FLOOR=-50dB  # what counts as silence at either end
 
 src=${1:?usage: normalize-audio.sh <src-dir> <dest-dir>}
@@ -96,6 +96,33 @@ for f in "$src"/*.mp3 "$src"/*.wav "$src"/*.m4a "$src"/*.ogg "$src"/*.flac; do
     -ac 1 -ar 48000 -c:a pcm_s16le "$trimmed"
 
   # 2. measure, then 3. apply as a linear gain.
+  dur_trim=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$trimmed")
+  if awk -v d="$dur_trim" 'BEGIN { exit (d < 0.5) ? 0 : 1 }'; then
+    # A clip under half a second is shorter than loudnorm's measurement window,
+    # so it measures -inf and the linear pass refuses to run. Peak-normalize
+    # instead: for a 0.2 s hit the peak *is* the loudness, and TP_TARGET lands
+    # it in the same territory as the voice peaks.
+    peak=$(ffmpeg -hide_banner -nostats -i "$trimmed" \
+      -af volumedetect -f null - 2>&1 | awk '/max_volume/ { print $5 }')
+    if ! awk -v p="$peak" 'BEGIN { exit (p + 0 == p) ? 0 : 1 }' 2>/dev/null; then
+      printf '  SKIP  %-42s trimmed to digital silence (%s)\n' "$name" "$f"
+      rm -f "$trimmed"
+      continue
+    fi
+    gain=$(awk -v t="$TP_TARGET" -v p="$peak" 'BEGIN { printf "%.2f", t - p }')
+    ffmpeg -y -hide_banner -loglevel error -i "$trimmed" \
+      -af "volume=${gain}dB,aresample=48000" \
+      -ac 1 -ar 48000 -c:a libmp3lame -b:a "$BITRATE" \
+      -write_xing 0 -id3v2_version 0 -map_metadata -1 "$out"
+    mode=peak
+    got=$(lufs "$out")
+    dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$out")
+    printf '  ok    %-42s %6.1fs  %6.2f LUFS  %-7s (%s)\n' \
+      "$name" "$dur" "$got" "$mode" "$f"
+    rm -f "$trimmed"
+    n=$((n + 1))
+    continue
+  fi
   read -r mi mtp mlra mthr moff <<<"$(measure "$trimmed")"
   apply() { # $1 = linear|false, $2 = output
     ffmpeg -y -hide_banner -loglevel error -i "$trimmed" \

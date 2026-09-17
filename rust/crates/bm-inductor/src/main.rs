@@ -111,6 +111,29 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Ask the analyzer for ONE chapter and print what it said.
+    ///
+    /// This is the digest stage's question with none of its consequences: no
+    /// render is queued, no merge runs, no ledger task is touched, and the
+    /// bible is not merged. Nothing is written at all unless `--write` is
+    /// passed, and even then it is only the script file — the same function the
+    /// digest worker calls, so what you read here is exactly what a run would
+    /// have produced.
+    Digest {
+        /// Chapter number (needs `data/chapters/chNN.txt`).
+        chapter: u32,
+        /// Analyzer to use. Default: the `analyzer` value in `.bm/settings.json`.
+        #[arg(long)]
+        analyzer: Option<String>,
+        /// Also write `data/script-NN.json`. Nothing else happens: caches are
+        /// NOT invalidated and nothing is requeued, so a hand-written script
+        /// can disagree with segments already on disk.
+        #[arg(long)]
+        write: bool,
+        /// Print the whole script object instead of a one-line summary.
+        #[arg(long)]
+        json: bool,
+    },
     /// Link a machine by name: remembers how to reach it so `provision --box`
     /// needs no flags. Writes `.bm/machines.json`, which is ignored.
     Link {
@@ -436,8 +459,9 @@ async fn main() -> anyhow::Result<()> {
     bm_core::config::load_dotenv(&layout.root.join(".env"));
     let settings = Settings::load(&layout.settings());
     // `roster` is local JSON work: requiring ssh/rsync/ffmpeg to rewrite a cast
-    // file would make it unusable on exactly the machine that needs it.
-    if !matches!(&cli.cmd, Cmd::Roster { .. }) {
+    // file would make it unusable on exactly the machine that needs it. Same for
+    // `digest`, which is one HTTP call to an analyzer and touches no worker.
+    if !matches!(&cli.cmd, Cmd::Roster { .. } | Cmd::Digest { .. }) {
         check_bins()?;
     }
     match cli.cmd {
@@ -505,6 +529,22 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Retag { api, dry_run } => cmd_retag(&api, dry_run).await,
+        Cmd::Digest {
+            chapter,
+            analyzer,
+            write,
+            json,
+        } => {
+            cmd_digest(
+                &layout,
+                &settings,
+                chapter,
+                analyzer.as_deref(),
+                write,
+                json,
+            )
+            .await
+        }
         Cmd::Link {
             name,
             addr,
@@ -538,4 +578,76 @@ async fn main() -> anyhow::Result<()> {
             }
         },
     }
+}
+
+/// `digest` — the analyzer's answer for one chapter, and nothing else.
+///
+/// Deliberately not routed through the control API: a request to a running
+/// inductor is a request to the *pipeline*, and the whole point of this command
+/// is to ask the question without waking it. It reads the chapter text and the
+/// bible, calls [`bm_core::digest::analyze_chapter`] — the same function the
+/// digest worker calls — and prints the result.
+async fn cmd_digest(
+    layout: &Layout,
+    settings: &Settings,
+    chapter: u32,
+    analyzer: Option<&str>,
+    write: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let analyzer = analyzer.unwrap_or(settings.analyzer.as_str()).to_string();
+    let txt = layout.chapter_txt(chapter);
+    if !txt.is_file() {
+        anyhow::bail!(
+            "no chapter text at {} — crawl it first (`serve`), or pass a chapter that exists",
+            txt.display()
+        );
+    }
+    let bible = bm_core::digest::load_bible(&layout.bible());
+    let mut progress = |_f: f32, s: String| eprintln!("{s}");
+    let out = bm_core::digest::analyze_chapter(
+        layout,
+        chapter,
+        &bible,
+        settings,
+        &analyzer,
+        &mut progress,
+    )
+    .await?;
+
+    for line in &out.log {
+        eprintln!("{line}");
+    }
+    for w in &out.warnings {
+        eprintln!("WARN: {w}");
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&out.script)?);
+    } else {
+        let sounds = out
+            .script
+            .get("segments")
+            .and_then(|s| s.as_array())
+            .map(|segs| {
+                segs.iter()
+                    .filter(|i| bm_core::util::is_sound_item(i))
+                    .count()
+            })
+            .unwrap_or(0);
+        let lines = out.segments.saturating_sub(sounds);
+        println!(
+            "ch{chapter} via {analyzer}: {lines} lines, {sounds} sound items, {} warnings",
+            out.warnings.len()
+        );
+    }
+    if write {
+        let path = layout.script(chapter);
+        bm_core::atomic_write(&path, &serde_json::to_string_pretty(&out.script)?)?;
+        eprintln!(
+            "wrote {} — caches NOT invalidated and nothing requeued, so segments on disk \
+             may no longer match this script; `serve` reconciles that when you next run it",
+            path.display()
+        );
+    }
+    Ok(())
 }

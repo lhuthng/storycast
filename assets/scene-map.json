@@ -1,71 +1,402 @@
 {
-  "_note": "Sound design under the voice, in two independent layers with one field each. PLACE -> `rules`: the script's per-segment `scene` label picks a rule (first match wins, ordered specific -> general) and the rule names effect TAGS, matched against assets/effect-pool.json. MOOD -> `music_palette`: the script's per-segment `music` value is a key of the palette, and the palette names the tags for assets/music-pool.json. The two are deliberately separate fields: a place is where we are, a mood is what it feels like, and one string doing both is how a shop at dawn came out with a hearth under it. A rule names tags, never files, so adding a clip to a pool is how the mix gains a new sound. `level` is a linear gain over a clip normalized to -26 LUFS, so it means the same thing for every clip. `pause_before_s` is a beat held before this scene's first line, in delivered seconds — see the `pause` block. Every knob these layers read lives here and nowhere else.",
+  "_note": "Sound design under the voice, in three independent layers with one field each. PLACE -> `rules`: the script's per-segment `scene` label picks a rule (first match wins, ordered specific -> general) and the rule names effect TAGS, matched against assets/effect-pool.json. MOOD -> `music_palette`: the script's per-segment `music` value is a key of the palette, and the palette names the tags for assets/music-pool.json. The two are deliberately separate fields: a place is where we are, a mood is what it feels like, and one string doing both is how a shop at dawn came out with a hearth under it. A rule names tags, never files, so adding a clip to a pool is how the mix gains a new sound. `level` is a linear gain over a clip normalized to -26 LUFS, so it means the same thing for every clip. `pause_before_s` is a beat held before this scene's first line, in delivered seconds — see the `pause` block. Every knob these layers read lives here and nowhere else.",
   "rules": [
-    {"match": ["storm", "thunder"], "effect": ["rain", "storm"], "level": 0.22, "reverb": null},
-    {"match": ["rain"], "effect": ["rain"], "level": 0.18, "reverb": null},
-    {"match": ["night", "evening", "sunset", "dusk"], "effect": ["night"], "level": 0.15, "reverb": null},
-    {"match": ["market", "stall", "shopfront", "street", "road", "corner"], "effect": ["market"], "level": 0.16, "reverb": null, "pause_before_s": 1.5},
-    {"match": ["forge", "fire", "kitchen", "hearth"], "effect": ["fire"], "level": 0.14, "reverb": null},
-    {"match": ["mountain", "peak", "gate", "summit", "cliff"], "effect": ["mountain"], "level": 0.16, "reverb": null},
-    {"match": ["forest", "woods", "garden", "grove"], "effect": ["forest"], "level": 0.14, "reverb": null},
-    {"match": ["cave", "grotto", "cellar", "cavern"], "effect": ["cave"], "level": 0.18, "reverb": "cave"},
-    {"match": ["hall", "sect", "temple", "shrine", "palace"], "effect": [], "level": 0.0, "reverb": "hall", "pause_before_s": 1.5},
-    {"match": ["river", "lake", "stream", "brook"], "effect": ["river"], "level": 0.14, "reverb": null},
-    {"match": ["battle", "fight", "duel", "clash", "blade", "ambush", "war"], "effect": ["battle", "sword"], "level": 0.20, "reverb": null},
-    {"match": ["tavern", "inn", "banquet", "drinking"], "effect": ["market"], "level": 0.14, "reverb": null},
-    {"match": ["day", "morning", "dawn", "noon", "afternoon"], "effect": ["day", "calm"], "level": 0.12, "reverb": null}
+    {
+      "match": [
+        "storm",
+        "thunder"
+      ],
+      "effect": [
+        "rain",
+        "storm"
+      ],
+      "level": 0.22,
+      "reverb": null
+    },
+    {
+      "match": [
+        "rain"
+      ],
+      "effect": [
+        "rain"
+      ],
+      "level": 0.18,
+      "reverb": null
+    },
+    {
+      "match": [
+        "night",
+        "evening",
+        "sunset",
+        "dusk"
+      ],
+      "effect": [
+        "night"
+      ],
+      "level": 0.15,
+      "reverb": null
+    },
+    {
+      "match": [
+        "market",
+        "stall",
+        "shopfront",
+        "street",
+        "road",
+        "corner"
+      ],
+      "effect": [
+        "market"
+      ],
+      "level": 0.16,
+      "reverb": null,
+      "pause_before_s": 1.5
+    },
+    {
+      "match": [
+        "forge",
+        "fire",
+        "kitchen",
+        "hearth"
+      ],
+      "effect": [
+        "fire"
+      ],
+      "level": 0.14,
+      "reverb": null
+    },
+    {
+      "match": [
+        "mountain",
+        "peak",
+        "gate",
+        "summit",
+        "cliff"
+      ],
+      "effect": [
+        "mountain"
+      ],
+      "level": 0.16,
+      "reverb": null
+    },
+    {
+      "match": [
+        "forest",
+        "woods",
+        "garden",
+        "grove"
+      ],
+      "effect": [
+        "forest"
+      ],
+      "level": 0.14,
+      "reverb": null
+    },
+    {
+      "match": [
+        "cave",
+        "grotto",
+        "cellar",
+        "cavern"
+      ],
+      "effect": [
+        "cave"
+      ],
+      "level": 0.18,
+      "reverb": "cave"
+    },
+    {
+      "match": [
+        "hall",
+        "sect",
+        "temple",
+        "shrine",
+        "palace"
+      ],
+      "effect": [],
+      "level": 0.0,
+      "reverb": "hall",
+      "pause_before_s": 1.5
+    },
+    {
+      "match": [
+        "river",
+        "lake",
+        "stream",
+        "brook"
+      ],
+      "effect": [
+        "river"
+      ],
+      "level": 0.14,
+      "reverb": null
+    },
+    {
+      "match": [
+        "battle",
+        "fight",
+        "duel",
+        "clash",
+        "blade",
+        "ambush",
+        "war"
+      ],
+      "effect": [
+        "battle",
+        "sword"
+      ],
+      "level": 0.2,
+      "reverb": null
+    },
+    {
+      "match": [
+        "tavern",
+        "inn",
+        "banquet",
+        "drinking"
+      ],
+      "effect": [
+        "market"
+      ],
+      "level": 0.14,
+      "reverb": null
+    },
+    {
+      "match": [
+        "day",
+        "morning",
+        "dawn",
+        "noon",
+        "afternoon"
+      ],
+      "effect": [
+        "day",
+        "calm"
+      ],
+      "level": 0.12,
+      "reverb": null
+    }
   ],
-  "default": {"effect": [], "level": 0.0, "reverb": null},
-
+  "default": {
+    "effect": [],
+    "level": 0.0,
+    "reverb": null
+  },
   "music_palette": {
     "_note": "The closed vocabulary the digest may emit as a segment's `music`. Closed on purpose: a free-text mood label matched by keyword is how 345 scene labels ended up fighting 14 rules. Every value but `none` must be answerable by a clip in assets/music-pool.json, so 'this mood has no track' cannot happen — and if a pool loses its last clip for a mood, that stretch is simply silent rather than filled with something wrong. This block is what build_prompt injects into prompts/analyze.txt, so the prompt and the pool cannot drift apart.",
-    "quiet": {"tags": ["soft", "calm"], "note": "low and unobtrusive — the default under narration, reflection, ordinary talk"},
-    "warm": {"tags": ["warm", "indoor"], "note": "hearth, home, tavern, friendly company, a meal"},
-    "busy": {"tags": ["market", "busy"], "note": "crowds, streets, shops, public bustle"},
-    "battle": {"tags": ["battle", "intense"], "note": "combat, pursuit, immediate danger"},
-    "grand": {"tags": ["energetic", "upbeat"], "note": "triumph, revelation, awe, a turning point"},
-    "none": {"tags": [], "note": "silence — a death, a shock, a line that must land dry"}
+    "quiet": {
+      "tags": [
+        "soft",
+        "calm"
+      ],
+      "note": "low and unobtrusive — the default under narration, reflection, ordinary talk"
+    },
+    "warm": {
+      "tags": [
+        "warm",
+        "indoor"
+      ],
+      "note": "hearth, home, tavern, friendly company, a meal"
+    },
+    "busy": {
+      "tags": [
+        "market",
+        "busy"
+      ],
+      "note": "crowds, streets, shops, public bustle"
+    },
+    "battle": {
+      "tags": [
+        "battle",
+        "intense"
+      ],
+      "note": "combat, pursuit, immediate danger"
+    },
+    "grand": {
+      "tags": [
+        "energetic",
+        "upbeat"
+      ],
+      "note": "triumph, revelation, awe, a turning point"
+    },
+    "none": {
+      "tags": [],
+      "note": "silence — a death, a shock, a line that must land dry"
+    }
   },
-
   "legacy_scene_music": {
     "_note": "Migration shim, not the design. Scripts digested before segments carried `music` are scored by the old keyword rules over their `scene` label; this is that mapping, in the old rule order, each old music-tag set reduced to the nearest palette value. Where the old tags answered no clip at all — `tense` for storms, `dark` for caves, which is why those scenes were silent before — it maps to `none`, so a re-merge reproduces the old intent rather than inventing music the chapter never had. It exists so the ~200 chapters already on disk keep merging; a freshly digested script declares `music` per segment and never reads this. Delete the block once every script on disk carries the field.",
     "rules": [
-      {"match": ["storm", "thunder"], "music": "none"},
-      {"match": ["rain"], "music": "quiet"},
-      {"match": ["night", "evening", "sunset", "dusk"], "music": "quiet"},
-      {"match": ["market", "stall", "shopfront", "street", "road", "corner"], "music": "busy"},
-      {"match": ["forge", "fire", "kitchen", "hearth"], "music": "warm"},
-      {"match": ["mountain", "peak", "gate", "summit", "cliff"], "music": "grand"},
-      {"match": ["forest", "woods", "garden", "grove"], "music": "quiet"},
-      {"match": ["cave", "grotto", "cellar", "cavern"], "music": "none"},
-      {"match": ["hall", "sect", "temple", "shrine", "palace"], "music": "quiet"},
-      {"match": ["courtyard", "house", "home", "dining"], "music": "quiet"},
-      {"match": ["river", "lake", "stream", "brook"], "music": "quiet"},
-      {"match": ["battle", "fight", "duel", "clash", "blade", "ambush", "war"], "music": "battle"},
-      {"match": ["tavern", "inn", "banquet", "drinking"], "music": "warm"},
-      {"match": ["day", "morning", "dawn", "noon", "afternoon"], "music": "quiet"}
+      {
+        "match": [
+          "storm",
+          "thunder"
+        ],
+        "music": "none"
+      },
+      {
+        "match": [
+          "rain"
+        ],
+        "music": "quiet"
+      },
+      {
+        "match": [
+          "night",
+          "evening",
+          "sunset",
+          "dusk"
+        ],
+        "music": "quiet"
+      },
+      {
+        "match": [
+          "market",
+          "stall",
+          "shopfront",
+          "street",
+          "road",
+          "corner"
+        ],
+        "music": "busy"
+      },
+      {
+        "match": [
+          "forge",
+          "fire",
+          "kitchen",
+          "hearth"
+        ],
+        "music": "warm"
+      },
+      {
+        "match": [
+          "mountain",
+          "peak",
+          "gate",
+          "summit",
+          "cliff"
+        ],
+        "music": "grand"
+      },
+      {
+        "match": [
+          "forest",
+          "woods",
+          "garden",
+          "grove"
+        ],
+        "music": "quiet"
+      },
+      {
+        "match": [
+          "cave",
+          "grotto",
+          "cellar",
+          "cavern"
+        ],
+        "music": "none"
+      },
+      {
+        "match": [
+          "hall",
+          "sect",
+          "temple",
+          "shrine",
+          "palace"
+        ],
+        "music": "quiet"
+      },
+      {
+        "match": [
+          "courtyard",
+          "house",
+          "home",
+          "dining"
+        ],
+        "music": "quiet"
+      },
+      {
+        "match": [
+          "river",
+          "lake",
+          "stream",
+          "brook"
+        ],
+        "music": "quiet"
+      },
+      {
+        "match": [
+          "battle",
+          "fight",
+          "duel",
+          "clash",
+          "blade",
+          "ambush",
+          "war"
+        ],
+        "music": "battle"
+      },
+      {
+        "match": [
+          "tavern",
+          "inn",
+          "banquet",
+          "drinking"
+        ],
+        "music": "warm"
+      },
+      {
+        "match": [
+          "day",
+          "morning",
+          "dawn",
+          "noon",
+          "afternoon"
+        ],
+        "music": "quiet"
+      }
     ],
-    "default": {"music": "none"}
+    "default": {
+      "music": "none"
+    }
   },
-
   "layers": {
-    "_note": "effect: the layer that must stay sparse. A window opens on a scene that names effect tags and lasts at least min_span_s, is clipped to max_window_s, waits cooldown_s of silence after the previous window closed, and the chapter may not spend more than max_coverage of its runtime on the layer. `trim` is the layer's one master gain, multiplied into each rule's own `level`: a rule's `level` says how a storm balances against a hearth, `trim` says the whole layer is too hot, and keeping those separate is what makes retuning it one edit instead of thirteen. music: continuous, deliberately below the effect layer's loud scenes, lifted to pause_level inside a planned pause. ramp_s is how long that lift takes and must stay well under the shortest pause, or the lift never arrives. xfade_s is the crossfade where the track changes — and a track changes exactly where the script changes its `music` value, so that knob is what makes an in-chapter change audible as a change rather than a cut. NOTE ON `speed`: the merge tempoes the SPEECH only, then places both layers against the delivered clock, so nothing here is ever heard at atempo.",
-    "effect": {"max_coverage": 0.35, "cooldown_s": 45.0, "min_span_s": 20.0, "max_window_s": 75.0, "fade_s": 0.3, "trim": 0.5},
-    "music": {"level": 0.06, "pause_level": 0.085, "fade_s": 0.3, "xfade_s": 2.0, "ramp_s": 0.6}
+    "_note": "effect: the layer that must stay sparse. A window opens on a scene that names effect tags and lasts at least min_span_s, is clipped to max_window_s, waits cooldown_s of silence after the previous window closed, and the chapter may not spend more than max_coverage of its runtime on the layer. `trim` is the layer's one master gain, multiplied into each rule's own `level`: a rule's `level` says how a storm balances against a hearth, `trim` says the whole layer is too hot, and keeping those separate is what makes retuning it one edit instead of thirteen. music: continuous, deliberately below the effect layer's loud scenes, lifted to pause_level inside a planned pause. ramp_s is how long that lift takes and must stay well under the shortest pause, or the lift never arrives. xfade_s is the crossfade where the track changes — and a track changes exactly where the script changes its `music` value, so that knob is what makes an in-chapter change audible as a change rather than a cut. inject: spot effects the script places itself — a hit holds its whole clip as silence, an overlap costs no time and runs under the following speech, a trail holds `default_hold_s` solo and tails under it; a stop fades a running tail over `stop_fade_s` (3 s — a shorter fade reads as a cut), a retrigger over `fade_s`, a natural tail-end over `tail_fade_s` (1 s, clamped to half the clip — a tail, not a third of the sound); a `looped` bed is filled by repeating the clip with a `loop_xfade_s` crossfade at each seam. NOTE ON `speed`: the merge tempoes the SPEECH only, then places both layers against the delivered clock, so nothing here is ever heard at atempo.",
+    "effect": {
+      "max_coverage": 0.35,
+      "cooldown_s": 45.0,
+      "min_span_s": 20.0,
+      "max_window_s": 75.0,
+      "fade_s": 0.3,
+      "trim": 0.5
+    },
+    "music": {
+      "level": 0.06,
+      "pause_level": 0.085,
+      "fade_s": 0.3,
+      "xfade_s": 2.0,
+      "ramp_s": 0.6
+    },
+    "inject": {
+      "level": 1.0,
+      "fade_s": 0.3,
+      "stop_fade_s": 3.0,
+      "default_hold_s": 2.0,
+      "tail_fade_s": 1.0,
+      "loop_xfade_s": 0.25
+    }
   },
-
   "pause": {
     "_note": "A beat is held before a scene's first line only where a scene change is narrated: the incoming or outgoing turn must be the Narrator, and narration resuming (incoming) beats narration handing off. At most max_per_chapter of them; the longest declared pause_before_s wins, ties go to the earliest. The duration is in DELIVERED seconds — the merge scales it by `speed` before writing it, so a 1.5 s beat is still 1.5 s at atempo 1.25. Keep it comfortably longer than duck.release (400 ms): the music's lift inside the pause IS the sidechain releasing, so a beat shorter than the release never lifts at all.",
     "pause_s": 1.5,
     "max_per_chapter": 1,
     "require_narration": true
   },
-
   "reverb_presets": {
     "hall": "aecho=0.8:0.65:40|60:0.35|0.25",
     "cave": "aecho=0.8:0.55:120|200:0.5|0.4"
   },
-
   "duck": {
     "_note": "One sidechain compressor, keyed on the voice track, applied to both layers as a single bus — so 'every layer drops whenever anyone speaks' is a property of the signal path rather than a rule each layer has to remember. The key is the whole voice track, which is why the narrator ducks them exactly as a character does.",
     "threshold": 0.02,

@@ -1,6 +1,6 @@
-//! Post-process: the two sound-design layers under the voice mix.
+//! Post-process: the three sound-design layers under the voice mix.
 //!
-//! Exactly two layers, and the split is the point:
+//! Exactly three layers, and the split is the point:
 //!
 //! * **effect** — per-scene beds and one-shot stingers, deliberately *sparse*.
 //!   A window opens on a scene that names effect tags, lasts at most
@@ -11,12 +11,20 @@
 //!   scene with no music tags, or with `music_off`, or whose tags match nothing
 //!   in the pool, gets no music at all: silence is a valid answer here, not a
 //!   failure to be papered over.
+//! * **inject** — spot effects the script places itself, as their own items
+//!   between the lines: a blood spatter after the blow lands, a page turn after
+//!   the reading. The script splits the sentence it belongs to and puts the
+//!   sound between the halves, so the sound item carries no text and no
+//!   renderer can ever be handed it. A *hit* holds its whole clip as silence, an
+//!   *overlap* costs no time and runs under the following speech, a *trail*
+//!   holds a few seconds solo and tails under it; a *stop* fades a running tail
+//!   out, never a cut.
 //!
 //! A third thing the scene map controls — room reverb — is *not* a layer. It is
 //! applied to the voice before the layers exist, and it is left alone here.
 //!
-//! Both layers are ducked by **one** sidechain compressor keyed on the voice
-//! track, applied to them as a single bus. That makes "every layer drops
+//! All three layers are ducked by **one** sidechain compressor keyed on the
+//! voice track, applied to them as a single bus. That makes "every layer drops
 //! whenever anybody speaks" a property of the signal path rather than a rule
 //! each layer has to remember — and because the key is the whole voice track,
 //! the narrator ducks them exactly as a character does. The lift the music gets
@@ -326,6 +334,71 @@ pub struct Layers {
     pub effect: EffectLayer,
     #[serde(default)]
     pub music: MusicLayer,
+    /// Spot effects the script places itself. A map section like the other
+    /// two, so the whole layer retunes in one place.
+    #[serde(default)]
+    pub inject: InjectLayer,
+}
+
+/// Knobs for the inject layer: script-placed spot effects on their own track.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InjectLayer {
+    /// Master gain over the -20 LUFS foreground contract. 1.0 speaks hits at
+    /// voice level; the operator's `inject_volume` multiplies this.
+    #[serde(default = "d_inject_level")]
+    pub level: f64,
+    /// Fade that ends a retriggered instance when its sound starts again.
+    #[serde(default = "d_fade")]
+    pub fade_s: f64,
+    /// Fade a `stop` takes to silence its sound. A stop is an ending, and
+    /// endings fade — never a cut. Three seconds, not one and a half: at 1.5 s
+    /// a sizzle bed's end read as a cut, which is the one thing a stop exists
+    /// to avoid.
+    #[serde(default = "d_stop_fade")]
+    pub stop_fade_s: f64,
+    /// `trail` hold when the directive names none: how long the solo part
+    /// lasts before the tail ducks under the speech.
+    #[serde(default = "d_hold")]
+    pub default_hold_s: f64,
+    /// Fade at the natural end of every tail, against a click. Clamped to half
+    /// the clip, so it stays a *tail*: at 3 s a 6.9 s bed spent 44% of its life
+    /// fading and read as though it had stopped early. A deliberate ending is
+    /// [`Self::stop_fade_s`], which is the long one on purpose.
+    #[serde(default = "d_tail_fade")]
+    pub tail_fade_s: f64,
+    /// Crossfade at each seam of a looped bed. Short on purpose — it is there
+    /// to hide the join, not to be heard. Clamped to a quarter of the clip.
+    #[serde(default = "d_loop_xfade")]
+    pub loop_xfade_s: f64,
+}
+
+fn d_inject_level() -> f64 {
+    1.0
+}
+fn d_stop_fade() -> f64 {
+    3.0
+}
+fn d_hold() -> f64 {
+    2.0
+}
+fn d_tail_fade() -> f64 {
+    1.0
+}
+fn d_loop_xfade() -> f64 {
+    0.25
+}
+
+impl Default for InjectLayer {
+    fn default() -> Self {
+        InjectLayer {
+            level: d_inject_level(),
+            fade_s: d_fade(),
+            stop_fade_s: d_stop_fade(),
+            default_hold_s: d_hold(),
+            tail_fade_s: d_tail_fade(),
+            loop_xfade_s: d_loop_xfade(),
+        }
+    }
 }
 
 /// Which of the two layers are on for this chapter.
@@ -336,21 +409,33 @@ pub struct Layers {
 /// The two switches are independent on purpose: a book can want the effect beds
 /// and no music, which is `Settings::ambience` and `Settings::music` doing
 /// exactly what they say.
+///
+/// Injects ride with the effects switch: they are sound design, so an operator
+/// asking for a plain read gets neither beds nor spot effects. Their volume is
+/// independent — a third gain, not a third switch.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerSwitch {
     pub effects: bool,
     pub music: bool,
     pub effect_volume: f64,
     pub music_volume: f64,
+    pub inject_volume: f64,
 }
 
 impl LayerSwitch {
-    pub fn new(effects: bool, music: bool, effect_volume: f64, music_volume: f64) -> Self {
+    pub fn new(
+        effects: bool,
+        music: bool,
+        effect_volume: f64,
+        music_volume: f64,
+        inject_volume: f64,
+    ) -> Self {
         LayerSwitch {
             effects,
             music,
             effect_volume: effect_volume.max(0.0),
             music_volume: music_volume.max(0.0),
+            inject_volume: inject_volume.max(0.0),
         }
     }
 
@@ -563,6 +648,8 @@ pub struct Turn {
     /// script's own `music` field, or from the legacy shim.
     pub music: String,
     pub speaker: String,
+    /// Script-placed spot effects, anchored at this turn's end.
+    pub injects: Vec<Inject>,
 }
 
 /// One position in the mix: what plays, when it starts and ends, and how much
@@ -580,6 +667,8 @@ pub struct Slot {
     pub scene: String,
     pub music: String,
     pub speaker: String,
+    /// Script-placed spot effects, anchored at this slot's end.
+    pub injects: Vec<Inject>,
     pub start: f64,
     pub end: f64,
     /// Silence written after this turn: the uniform gap plus any beat.
@@ -587,6 +676,15 @@ pub struct Slot {
     /// How much of `gap_ms` is a planned beat, held between this turn and the
     /// next. The layers need the beat on its own — it is where the music lifts.
     pub pause_ms: u32,
+    /// How much of `gap_ms` is the injects' own solo time, in pre-tempo
+    /// milliseconds — the room a hit or a trail's hold plays in.
+    ///
+    /// Tracked separately because it is the one part of a gap that outlives the
+    /// last slot: an inject anchored at the final line's end has nowhere else
+    /// to sound, so the concat writes this much silence after it even though it
+    /// writes no bare gap there. Without that the hit is placed past the end of
+    /// the mix and dropped in silence, with the plan log still claiming it ran.
+    pub inject_ms: u32,
 }
 
 /// Lay the turns out on the mix clock, inserting the planned pauses.
@@ -620,10 +718,12 @@ pub fn timeline(turns: &[Turn], gap_ms: u32, pauses: &BTreeMap<usize, u32>) -> R
             scene: turn.scene.clone(),
             music: turn.music.clone(),
             speaker: turn.speaker.clone(),
+            injects: turn.injects.clone(),
             start: t,
             end: t + dur,
             gap_ms: gap_ms + pause_ms,
             pause_ms,
+            inject_ms: 0,
         });
         t += dur + (gap_ms + pause_ms) as f64 / 1000.0;
     }
@@ -652,6 +752,7 @@ pub fn retime(slots: &mut [Slot], speed: f64) {
         s.end /= speed;
         s.gap_ms = (s.gap_ms as f64 / speed).round() as u32;
         s.pause_ms = (s.pause_ms as f64 / speed).round() as u32;
+        s.inject_ms = (s.inject_ms as f64 / speed).round() as u32;
     }
 }
 
@@ -962,6 +1063,538 @@ pub fn plan_music(
 }
 
 // ---------------------------------------------------------------------------
+// injects: script-placed spot effects
+// ---------------------------------------------------------------------------
+
+/// How one injected sound sits on the timeline. Per *directive*, not per
+/// sound: the same boil can underscore one scene (`overlap`) and punctuate
+/// another (`trail`), and the filename never says which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectMode {
+    /// Inline: the narration waits out the whole clip.
+    Hit,
+    /// Parallel: zero timeline time, runs under the following speech until the
+    /// clip ends or a `stop` fades it.
+    Overlap,
+    /// Both: `hold_s` of solo time, then the tail runs under the speech.
+    Trail,
+}
+
+/// One inject directive: start a sound at the place it was cut into, or fade
+/// out a running one from there.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Inject {
+    Start {
+        sound: String,
+        mode: InjectMode,
+        hold_s: f64,
+        level: f64,
+    },
+    Stop {
+        sound: String,
+    },
+}
+
+/// The directives that fire at one place on the timeline, in listed order.
+///
+/// A directive is the script's own **sound item** — `{"sound": "page-turn"}` —
+/// a sibling of the lines rather than a field on one, and one
+/// [`crate::assemble::Planned`] has already separated out of the speech. All it
+/// carries is the *name*; **how the sound behaves comes from the pool**, because
+/// that is a property of the clip and not of the chapter. A script that had to
+/// restate `mode` per use was a second source of truth, and the analyzer guessed
+/// at it: it once `overlap`ped a water spell under a kitchen sink because a
+/// per-chapter mode is not something a reader of prose can know.
+///
+/// Lenient on purpose: the digest validator is the strict gate (it can ask the
+/// analyzer for a repair), while a merge must survive a hand edit the way it
+/// survives a missing clip — malformed entries are skipped, and an unknown
+/// sound resolves to no take at [`plan_inject_takes`] with one warning rather
+/// than a dead chapter.
+pub fn injects_of(directives: &[Value], pool: &ClipPool, default_hold: f64) -> Vec<Inject> {
+    let mut out = Vec::new();
+    for e in directives {
+        let Some(obj) = e.as_object() else { continue };
+        if let Some(stop) = obj.get("stop").and_then(|v| v.as_str()).map(str::trim) {
+            if !stop.is_empty() {
+                out.push(Inject::Stop {
+                    sound: stop.to_string(),
+                });
+            }
+            continue;
+        }
+        let Some(sound) = obj.get("sound").and_then(|v| v.as_str()).map(str::trim) else {
+            continue;
+        };
+        if sound.is_empty() {
+            continue;
+        }
+        // An unknown sound is not the mixer's problem to guess at: it has no
+        // entry, so it has no mode either, and `plan_inject_takes` warns once
+        // and plays nothing. Defaulting it to `hit` here would give a sound
+        // nobody registered a length of silence nobody asked for.
+        let Some(entry) = pool.get(sound) else {
+            continue;
+        };
+        let Some(mode) = (match entry.mode.as_deref().unwrap_or("hit") {
+            "hit" => Some(InjectMode::Hit),
+            "overlap" => Some(InjectMode::Overlap),
+            "trail" => Some(InjectMode::Trail),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let hold_s = entry.hold.filter(|h| *h > 0.0).unwrap_or(default_hold);
+        let level = entry.level.filter(|l| *l > 0.0).unwrap_or(1.0);
+        out.push(Inject::Start {
+            sound: sound.to_string(),
+            mode,
+            hold_s,
+            level,
+        });
+    }
+    out
+}
+
+/// The inject registry rendered for the digest prompt:
+/// `sound (mode; tags; Ns)`.
+///
+/// Everything the analyzer needs to choose a sound and nothing it has to
+/// decide: the *name* it writes, the mode so it knows whether the narration
+/// will pause for it (`hit`) or carry on over it (`overlap`/`trail`), the tags
+/// that say what it sounds like, and the length. The mode is rendered rather
+/// than left to the analyzer because it is a property of the clip — the script
+/// says *which* sound and *where*, never how it behaves.
+pub fn inject_prompt(pool: &ClipPool) -> String {
+    pool.iter()
+        .map(|(name, s)| {
+            let mut inner = s.mode.clone().unwrap_or_else(|| "hit".into());
+            if let Some(h) = s.hold.filter(|h| *h > 0.0) {
+                inner.push_str(&format!(" {}s", trim_num(h)));
+            }
+            // `loop` is the one piece of behaviour the analyzer has to *act* on
+            // beyond naming the sound: a looped bed runs until it is stopped, so
+            // starting one without a `stop` means it plays once.
+            if s.looped {
+                inner.push_str(", loop");
+            }
+            inner.push_str("; ");
+            inner.push_str(&s.tags.join(", "));
+            if let Some(d) = s.dur_s {
+                inner.push_str(&format!("; {}s", trim_num(d)));
+            }
+            format!("{name} ({inner})")
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// `0.6` and `51.3` read better than `0.600000` and `51.300000` in a prompt.
+fn trim_num(v: f64) -> String {
+    if v >= 10.0 {
+        format!("{v:.0}")
+    } else {
+        format!("{v:.1}")
+    }
+}
+
+/// Which take of an injected sound plays at one slot.
+///
+/// A direct registry lookup, not a tag pick: the analyzer names the *sound*,
+/// and sounds are disjoint by construction, so scoring tags could only answer
+/// a question nobody asked. The take rolls on the chapter, the slot and the
+/// sound — a re-merge reproduces it, and neighbouring chapters vary. `None`
+/// is an unknown sound (a hand edit past the validator), warned once here so
+/// the chapter degrades to skipping it rather than dying on it.
+pub fn inject_take(
+    pool: &ClipPool,
+    chapter: u32,
+    slot: usize,
+    sound: &str,
+) -> Option<audio_pool::Picked> {
+    let entry = pool.get(sound)?;
+    if entry.files.is_empty() {
+        return None;
+    }
+    let seed = audio_pool::seed(chapter, slot, &[sound.to_string()]);
+    let file = entry.files[(seed % entry.files.len() as u64) as usize].clone();
+    Some(audio_pool::Picked {
+        sound: sound.to_string(),
+        file,
+        looped: entry.looped,
+    })
+}
+
+/// The take each slot's directives resolve to, slot for slot. Computed once
+/// and shared by the hold planner and the event planner, so the silence the
+/// concat writes and the sounds the layers place agree on which take plays.
+pub fn plan_inject_takes(
+    slots: &[Slot],
+    pool: &ClipPool,
+    chapter: u32,
+) -> Vec<Vec<Option<audio_pool::Picked>>> {
+    let mut warned: Vec<String> = Vec::new();
+    slots
+        .iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            slot.injects
+                .iter()
+                .map(|inj| match inj {
+                    Inject::Stop { .. } => None,
+                    Inject::Start { sound, .. } => {
+                        let take = inject_take(pool, chapter, i, sound);
+                        if take.is_none() && !warned.contains(sound) {
+                            warned.push(sound.clone());
+                            eprintln!("inject: sound {sound:?} not in the pool -> skipped");
+                        }
+                        take
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Durations of the takes one chapter's injects picked, by pool path. One
+/// ffprobe per file; a file gone missing since the registry was written is
+/// absent from the map, and both planners read absence as zero with a warning
+/// — a renamed clip degrades to a skipped inject, not a dead merge.
+pub fn probe_inject_durs(
+    takes: &[Vec<Option<audio_pool::Picked>>],
+    assets: &Path,
+) -> BTreeMap<String, f64> {
+    let mut out = BTreeMap::new();
+    let mut missing: Vec<String> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    for slot in takes {
+        for take in slot.iter().flatten() {
+            if !files.contains(&take.file) {
+                files.push(take.file.clone());
+            }
+        }
+    }
+    for file in files {
+        let p = clip_path(assets, &file);
+        let dur = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "csv=p=0",
+                &p.to_string_lossy(),
+            ])
+            .output()
+            .ok()
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+            })
+            .filter(|d| *d > 0.0);
+        match dur {
+            Some(d) => {
+                out.insert(file, d);
+            }
+            None => {
+                if !missing.contains(&file) {
+                    missing.push(file.clone());
+                    eprintln!("inject: cannot probe {file} -> its holds are zero");
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Solo time each slot's injects need, written into the gap that follows the
+/// slot — the same place a planned pause goes, in the same pre-tempo
+/// milliseconds, so [`retime`] keeps them honest for free. Hits cost their
+/// whole clip, trails their hold (never more than the clip), overlaps nothing.
+/// Multiple directives queue in listed order; the event planner replays the
+/// same queue, so the silence and the sounds agree.
+///
+/// The gaps are *not* the whole story, and treating them as if they were is
+/// how this layer went inaudible once. Writing a hold makes the concat longer,
+/// so every slot after it starts later than the clock [`timeline`] laid out —
+/// and every layer, this one included, is placed by reading `Slot::start` and
+/// `Slot::end`. A 0.6 s hit early in a chapter therefore slid everything after
+/// it 0.6 s late while the layers stayed on the old clock: the last line's
+/// blood spatter was planned into silence the timeline believed in and played
+/// on top of the last six words instead. So the timeline is re-laid here, in
+/// the same call that moved it, and a caller cannot have the gaps without the
+/// clock that matches them.
+pub fn plan_inject_holds(
+    slots: &mut [Slot],
+    takes: &[Vec<Option<audio_pool::Picked>>],
+    durs: &BTreeMap<String, f64>,
+    speed: f64,
+) {
+    for (slot, slot_takes) in slots.iter_mut().zip(takes.iter()) {
+        let mut solo = 0.0f64;
+        for (inj, take) in slot.injects.iter().zip(slot_takes.iter()) {
+            let (mode, hold_s) = match inj {
+                Inject::Start { mode, hold_s, .. } => (*mode, *hold_s),
+                Inject::Stop { .. } => continue,
+            };
+            let dur = take
+                .as_ref()
+                .and_then(|t| durs.get(&t.file))
+                .copied()
+                .unwrap_or(0.0);
+            solo += match mode {
+                InjectMode::Hit => dur,
+                InjectMode::Trail => hold_s.min(dur),
+                InjectMode::Overlap => 0.0,
+            };
+        }
+        if solo > 0.0 {
+            let ms = (solo * speed * 1000.0).round() as u32;
+            slot.gap_ms += ms;
+            // Kept on its own too: the concat writes no bare gap after the last
+            // slot, and this is the part of it that has to survive that.
+            slot.inject_ms = ms;
+        }
+    }
+    relayout(slots);
+}
+
+/// Re-accumulate `start`/`end` from each slot's own duration and gap.
+///
+/// A slot's duration is `end - start` — the only copy of it the struct holds,
+/// and the one thing a gap can never change. [`timeline`] lays the clock out
+/// once; this is what re-lays it after something moves the gaps, so the two
+/// cannot disagree about where a slot begins.
+fn relayout(slots: &mut [Slot]) {
+    let mut t = 0.0f64;
+    for s in slots.iter_mut() {
+        let dur = s.end - s.start;
+        s.start = t;
+        s.end = t + dur;
+        t = s.end + s.gap_ms as f64 / 1000.0;
+    }
+}
+
+/// One placed inject: what plays, when, and how it ends. The level is the
+/// directive's own; the layer and operator gains are applied at render.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InjectEvent {
+    pub sound: String,
+    pub file: String,
+    pub start: f64,
+    pub end: f64,
+    pub level: f64,
+    pub mode: InjectMode,
+    pub fade_in: f64,
+    pub fade_out: f64,
+    /// The pool says this sound is a bed, so the window it was given is filled
+    /// by repeating it rather than by playing once and leaving silence. False
+    /// for every one-shot, and false for a bed with no `stop` — see
+    /// [`loop_copies`].
+    pub looped: bool,
+}
+
+/// A running overlap/trail tail (and, transiently, a hit): what is sounding,
+/// and when the mix stops hearing it.
+struct InjectActive {
+    sound: String,
+    file: String,
+    start: f64,
+    end: f64,
+    level: f64,
+    mode: InjectMode,
+    fade_out: f64,
+    looped: bool,
+}
+
+/// How many copies of a clip a crossfaded loop needs to fill `window`.
+///
+/// `n` copies joined by `n-1` crossfades of `xfade` seconds run
+/// `n*clip - (n-1)*xfade`, so solving that for `>= window` gives
+/// `n >= (window - xfade) / (clip - xfade)`. `None` when one play already
+/// covers the window: a one-shot is not a loop, and a clip that needs no repeat
+/// must not be handed a seam it never had.
+///
+/// A window only exists when something ends the sound — the `stop` in the
+/// script. A bed with no `stop` gets the clip's own length and is therefore
+/// never looped, which is why the digest has to place one.
+pub fn loop_copies(window: f64, clip: f64, xfade: f64) -> Option<usize> {
+    if clip <= 0.0 || window <= clip {
+        return None;
+    }
+    // A crossfade a quarter of the clip long is already a blend, not a seam.
+    let x = xfade.clamp(0.0, clip / 4.0);
+    let step = (clip - x).max(1e-6);
+    Some((((window - x) / step).ceil().max(1.0) as usize).max(2))
+}
+
+/// The filter graph that turns input 0 into a crossfaded loop of `copies`.
+///
+/// The seam is the whole point: a hard repeat of a sizzle clicks at every join,
+/// and a bed that clicks four times a minute is worse than no bed. `acrossfade`
+/// overlaps each pair into a short equal-power blend — `c1=tri:c2=tri` is
+/// ffmpeg's default curve, which is what a short seam wants. The caller
+/// truncates with an output `-t`, so the loop is allowed to run past the window
+/// and no `atrim` is needed here.
+pub fn loop_filter(copies: usize, xfade: f64, volume: f64) -> String {
+    let ins: String = (0..copies).map(|i| format!("[c{i}]")).collect();
+    let mut f = format!("[0:a]asplit={copies}{ins}");
+    let mut prev = "c0".to_string();
+    for i in 1..copies {
+        let out = format!("o{i}");
+        f.push_str(&format!(
+            ";[{prev}][c{i}]acrossfade=d={xfade:.3}:c1=tri:c2=tri[{out}]"
+        ));
+        prev = out;
+    }
+    format!(
+        "{f};[{prev}]volume={volume:.4},aformat=sample_rates=48000:channel_layouts=mono[out]"
+    )
+}
+
+/// End every still-sounding instance of `sound` at `at + fade`, eased rather
+/// than cut. A stop for a sound with nothing running, or one already over, is
+/// a no-op: the script outliving its sounds is ordinary, not an error.
+fn stop_actives(actives: &mut [InjectActive], sound: &str, at: f64, fade: f64) {
+    for a in actives.iter_mut().filter(|a| a.sound == sound) {
+        if at >= a.end {
+            continue;
+        }
+        let end = a.end.min(at + fade);
+        a.end = end;
+        a.fade_out = (end - at).max(0.0);
+    }
+}
+/// Lay a chapter's injects on the delivered clock.
+///
+/// Every directive anchors at its slot's end — it plays when the segment's
+/// speech ends — in listed order, hits queuing inside the silence
+/// [`plan_inject_holds`] already wrote. Overlap and trail tails keep sounding
+/// under the following speech until the clip ends or a `stop` names them: a
+/// stop fades from its anchor over `stop_fade_s`, and starting a sound
+/// retriggers it (the old instance fades in `fade_s`, so two boils never
+/// stack +6 dB). A tail nobody stops ends with the clip, eased by
+/// `tail_fade_s` against a click.
+pub fn plan_injects(
+    slots: &[Slot],
+    takes: &[Vec<Option<audio_pool::Picked>>],
+    durs: &BTreeMap<String, f64>,
+    cfg: &InjectLayer,
+) -> Vec<InjectEvent> {
+    let mut actives: Vec<InjectActive> = Vec::new();
+    for (slot, slot_takes) in slots.iter().zip(takes.iter()) {
+        let mut cursor = slot.end;
+        for (inj, take) in slot.injects.iter().zip(slot_takes.iter()) {
+            match inj {
+                Inject::Stop { sound } => {
+                    stop_actives(&mut actives, sound, cursor, cfg.stop_fade_s);
+                }
+                Inject::Start {
+                    sound,
+                    mode,
+                    hold_s,
+                    level,
+                } => {
+                    let Some(take) = take else { continue };
+                    let dur = durs.get(&take.file).copied().unwrap_or(0.0);
+                    if dur <= 0.0 {
+                        continue;
+                    }
+                    // The queue is serial: every directive anchors at the
+                    // cursor, and hits and trails advance it by their solo
+                    // time. That is the only anchor that keeps the sounds
+                    // where the silence is — `plan_inject_holds` wrote the
+                    // *sum* of those solos into the gap, so a trail that
+                    // started back at `slot.end` would play its hold under a
+                    // queued hit and leave its own tail in dead air.
+                    let anchor = cursor;
+                    // Retrigger: the old instance gets out of the way before
+                    // the new one starts, so the same sound never stacks.
+                    stop_actives(&mut actives, sound, anchor, cfg.fade_s);
+                    // A looped bed has no natural end: the clip is a length of
+                    // texture, not a statement, and the script's `stop` is what
+                    // says when the scene moved on. So it opens *unbounded* —
+                    // `stop_actives` can only shorten, and a stop that arrives
+                    // past the clip's own end would otherwise be ignored, which
+                    // is exactly how a 7 s bed ended in a 142 s kitchen.
+                    let open_end = if take.looped {
+                        f64::INFINITY
+                    } else {
+                        anchor + dur
+                    };
+                    match mode {
+                        InjectMode::Hit => {
+                            actives.push(InjectActive {
+                                sound: sound.clone(),
+                                file: take.file.clone(),
+                                start: anchor,
+                                end: open_end,
+                                level: *level,
+                                mode: *mode,
+                                fade_out: cfg.tail_fade_s,
+                                looped: take.looped,
+                            });
+                            cursor += dur;
+                        }
+                        InjectMode::Overlap => {
+                            actives.push(InjectActive {
+                                sound: sound.clone(),
+                                file: take.file.clone(),
+                                start: anchor,
+                                end: open_end,
+                                level: *level,
+                                mode: *mode,
+                                fade_out: cfg.tail_fade_s,
+                                looped: take.looped,
+                            });
+                        }
+                        InjectMode::Trail => {
+                            let solo = hold_s.min(dur);
+                            actives.push(InjectActive {
+                                sound: sound.clone(),
+                                file: take.file.clone(),
+                                start: anchor,
+                                end: open_end,
+                                level: *level,
+                                mode: *mode,
+                                fade_out: cfg.tail_fade_s,
+                                looped: take.looped,
+                            });
+                            cursor += solo;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Anything still open never met its `stop`. Fall back to one play — the
+    // behaviour a bed had before looping existed, so a chapter that forgets the
+    // stop loses the loop, not the sound.
+    for a in actives.iter_mut().filter(|a| a.end.is_infinite()) {
+        a.end = a.start + durs.get(&a.file).copied().unwrap_or(0.0);
+        a.looped = false;
+    }
+    actives
+        .into_iter()
+        .filter(|a| a.end - a.start > 0.01)
+        .map(|a| InjectEvent {
+            sound: a.sound,
+            file: a.file,
+            start: a.start,
+            looped: a.looped,
+            end: a.end,
+            level: a.level,
+            mode: a.mode,
+            fade_in: if a.mode == InjectMode::Hit { 0.0 } else { 0.05 },
+            fade_out: a.fade_out,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // ffmpeg
 // ---------------------------------------------------------------------------
 
@@ -1159,11 +1792,13 @@ pub fn apply_layers(
     out: &Path,
     work: &Path,
     assets: &Path,
+    inj_durs: &BTreeMap<String, f64>,
 ) -> Result<PathBuf> {
     let mut cfg = load_map(&assets.join("scene-map.json"))?;
     cfg.layers.effect.trim *= on.effect_volume.max(0.0);
     cfg.layers.music.level *= on.music_volume.max(0.0);
     cfg.layers.music.pause_level *= on.music_volume.max(0.0);
+    cfg.layers.inject.level *= on.inject_volume.max(0.0);
     let effect_pool = audio_pool::load_pool(&assets.join("effect-pool.json"));
     let music_pool = audio_pool::load_pool(&assets.join("music-pool.json"));
     let spans = build_spans(slots, &cfg);
@@ -1366,14 +2001,125 @@ pub fn apply_layers(
         Some(p)
     };
 
-    // 4. one duck for both layers, keyed on the voice.
-    let layers: Vec<&PathBuf> = [effect_mix.as_ref(), music_mix.as_ref()]
+    // 4. the inject layer: script-placed spot effects on their own track.
+    //    Planned against the same delivered clock the other layers read, so a
+    //    hit lands in the silence `plan_inject_holds` wrote for it and a tail
+    //    runs under the speech that follows. Takes are re-picked here rather
+    //    than threaded through: the pick is a pure function of the chapter,
+    //    the slot and the sound, so this is the same answer, not a second one.
+    let events: Vec<InjectEvent> = if on.effects {
+        let pool = audio_pool::load_pool(&assets.join("inject-pool.json"));
+        let takes = plan_inject_takes(slots, &pool, chapter);
+        plan_injects(slots, &takes, inj_durs, &cfg.layers.inject)
+    } else {
+        Vec::new()
+    };
+    let inject_mix: Option<PathBuf> = match events.is_empty() {
+        true => None,
+        false => {
+            let mut ij_slices: Vec<Slice> = Vec::new();
+            for (n, e) in events.iter().enumerate() {
+                let dur = e.end - e.start;
+                if dur <= 0.01 {
+                    continue;
+                }
+                let src = clip_path(assets, &e.file);
+                if !src.is_file() {
+                    eprintln!("inject: pooled clip missing ({}) -> skipped", e.file);
+                    continue;
+                }
+                let p = work.join(format!("ij{n}.wav"));
+                let vol = e.level * cfg.layers.inject.level;
+                let clip_s = inj_durs.get(&e.file).copied().unwrap_or(0.0);
+                // A bed the pool marks `looped` fills its window by repeating,
+                // with a short crossfade at each seam. The window is only longer
+                // than the clip when a `stop` ended it — with no stop there is
+                // nothing to fill and `loop_copies` returns None, so the sound
+                // plays once exactly as it did before.
+                let copies = if e.looped {
+                    loop_copies(dur, clip_s, cfg.layers.inject.loop_xfade_s)
+                } else {
+                    None
+                };
+                match copies {
+                    Some(k) => {
+                        let graph = loop_filter(k, cfg.layers.inject.loop_xfade_s, vol);
+                        ffmpeg(&[
+                            "-y".into(),
+                            "-loglevel".into(),
+                            "error".into(),
+                            "-i".into(),
+                            s(src.display()),
+                            "-filter_complex".into(),
+                            graph,
+                            "-map".into(),
+                            "[out]".into(),
+                            "-t".into(),
+                            format!("{dur:.3}"),
+                            s(p.display()),
+                        ])?;
+                    }
+                    None => {
+                        ffmpeg(&[
+                            "-y".into(),
+                            "-loglevel".into(),
+                            "error".into(),
+                            "-i".into(),
+                            s(src.display()),
+                            "-t".into(),
+                            format!("{dur:.3}"),
+                            "-af".into(),
+                            format!("volume={vol:.4},aformat=sample_rates=48000:channel_layouts=mono"),
+                            s(p.display()),
+                        ])?;
+                    }
+                }
+                ij_slices.push(Slice {
+                    path: p,
+                    start: e.start,
+                    dur,
+                    fade_in: e.fade_in,
+                    fade_out: e.fade_out,
+                });
+            }
+            if ij_slices.is_empty() {
+                None
+            } else {
+                let p = work.join("inject.wav");
+                // The track is at least as long as what it carries, never
+                // shorter: an event past the voice's end would otherwise be
+                // delayed off the end of its own track and vanish, with the
+                // plan log still naming it. The concat writes the silence this
+                // normally lands in; this is the net under that.
+                let end = ij_slices
+                    .iter()
+                    .map(|s| s.start + s.dur)
+                    .fold(total, f64::max);
+                place(&ij_slices, &p, end)?;
+                Some(p)
+            }
+        }
+    };
+
+    // 5. one duck for the beds, keyed on the voice — and the inject layer
+    //    mixed in *after* it.
+    //
+    //    The inject registry's own contract is foreground: `-20 LUFS / -3 dBTP`,
+    //    "voice territory, not the -26 bed contract". It was riding the beds'
+    //    ducked bus anyway, and the duck keys on the voice while a spot effect
+    //    fires at the instant the voice stops — so the compressor was at full
+    //    reduction with a 400 ms release exactly when the sound began. Measured
+    //    on ch9: a `cooking` bed the script asked for played at **-34.8 dB**,
+    //    15 dB under the speech, and was inaudible. A bed has to get out of the
+    //    way of the voice; a spot effect is the thing the voice is getting out
+    //    of the way *for*, and `inject_volume` is the knob for balancing it.
+    let beds: Vec<&PathBuf> = [effect_mix.as_ref(), music_mix.as_ref()]
         .into_iter()
         .flatten()
         .collect();
-    if layers.is_empty() {
+    if beds.is_empty() && inject_mix.is_none() {
         eprintln!("sound design: no layer produced anything, skipped");
-        log_plan(&spans, &pauses, &fx_log, &runs, &cfg);
+        log_plan(&spans, &pauses, &fx_log, &runs, &[], &cfg);
         cleanup(&work);
         return Ok(voice_fx);
     }
@@ -1382,18 +2128,13 @@ pub fn apply_layers(
         "sidechaincompress=threshold={}:ratio={}:attack={}:release={}",
         duck.threshold, duck.ratio, duck.attack, duck.release
     );
-    let graph = if layers.len() == 1 {
-        format!("[1:a][0:a]{sc}[duck];[0:a][duck]amix=inputs=2:normalize=0[a]")
-    } else {
-        format!(
-            "[1:a][2:a]amix=inputs=2:normalize=0[under];\
-             [under][0:a]{sc}[duck];[0:a][duck]amix=inputs=2:normalize=0[a]"
-        )
-    };
+    // Input 0 is the voice key; 1..=beds are the beds in order; the inject
+    // track, when there is one, is the last input and never enters `[under]`.
+    let graph = layer_graph(beds.len(), inject_mix.is_some(), &sc);
     let mut args: Vec<String> = vec!["-y".into(), "-loglevel".into(), "error".into()];
     args.push("-i".into());
     args.push(s(voice_fx.display()));
-    for l in &layers {
+    for l in beds.iter().copied().chain(inject_mix.as_ref()) {
         args.push("-i".into());
         args.push(s(l.display()));
     }
@@ -1404,9 +2145,52 @@ pub fn apply_layers(
     args.push(s(out.display()));
     ffmpeg(&args)?;
 
-    log_plan(&spans, &pauses, &fx_log, &runs, &cfg);
+    log_plan(&spans, &pauses, &fx_log, &runs, &events, &cfg);
     cleanup(&work);
     Ok(out.to_path_buf())
+}
+
+/// The mix graph: the beds ducked under the voice, the inject layer on top, and
+/// a true-peak limiter on the sum.
+///
+/// Split out and pure because it is the one part of the signal path that is
+/// invisible in every artifact — a wrong bus assignment does not fail, it just
+/// makes a layer quiet — so it gets to be asserted on instead of eyeballed.
+/// `beds` is how many bed tracks are inputs 1..=beds; the inject track, if
+/// present, is the input right after them.
+///
+/// The limiter is not decoration. Every clip in every pool is normalized to a
+/// **-3 dBTP ceiling** and the layer gains multiply on top of that, but nothing
+/// downstream was enforcing the ceiling on the *sum*: ch9 measured **-0.11
+/// dBFS** with the inject layer switched off entirely, i.e. the mix was already
+/// over its own contract from the voice and beds alone, and there was no
+/// headroom left to raise a bed into. `alimiter` is a lookahead limiter, so it
+/// caps the peak without the distortion a clipper would add, and `level=0`
+/// keeps it from re-normalizing the output behind the operator's back.
+fn layer_graph(beds: usize, inject: bool, sc: &str) -> String {
+    let inject_in = beds + 1;
+    let lim = "alimiter=limit=0.589:attack=5:release=100:level=0";
+    let tail = |n: usize| format!("amix=inputs={n}:normalize=0[mixed];[mixed]{lim}[a]");
+    // Nothing to duck: just sum whatever is there.
+    if beds == 0 {
+        return format!("[0:a][{inject_in}:a]{}", tail(2));
+    }
+    let ins: String = (1..=beds).map(|i| format!("[{i}:a]")).collect();
+    let bed_bus = if beds == 1 {
+        // A single bed needs no summing before the compressor.
+        "[1:a]anull[under]".to_string()
+    } else {
+        format!("{ins}amix=inputs={beds}:normalize=0[under]")
+    };
+    if inject {
+        format!(
+            "{bed_bus};[under][0:a]{sc}[duck];\
+             [0:a][duck][{inject_in}:a]{}",
+            tail(3)
+        )
+    } else {
+        format!("{bed_bus};[under][0:a]{sc}[duck];[0:a][duck]{}", tail(2))
+    }
 }
 
 /// Build the plan report. The mix is otherwise invisible in the logs, and a
@@ -1428,6 +2212,7 @@ fn plan_lines(
     pauses: &[(f64, f64)],
     fx: &[FxReport],
     runs: &[MusicRun],
+    inj: &[InjectEvent],
     cfg: &SceneMap,
 ) -> Vec<String> {
     let mut out = Vec::new();
@@ -1477,6 +2262,24 @@ fn plan_lines(
             r.start, r.end, r.sound, r.mood, cfg.layers.music.level
         ));
     }
+    for e in inj {
+        let mode = match e.mode {
+            InjectMode::Hit => "hit",
+            InjectMode::Overlap => "overlap",
+            InjectMode::Trail => "trail",
+        };
+        // The take's basename, not the pool path: `blood-spatter-2`, never
+        // `injects/blood-spatter-2.mp3`. The log answers "what played", and
+        // the directory is not part of that answer.
+        let take = e.file.rsplit('/').next().unwrap_or(&e.file);
+        out.push(format!(
+            "inject [{:.1}-{:.1}s] {} ({mode}, {:.1}s, take {take})",
+            e.start,
+            e.end,
+            e.sound,
+            e.end - e.start,
+        ));
+    }
     out
 }
 
@@ -1485,9 +2288,10 @@ fn log_plan(
     pauses: &[(f64, f64)],
     fx: &[FxReport],
     runs: &[MusicRun],
+    inj: &[InjectEvent],
     cfg: &SceneMap,
 ) {
-    for line in plan_lines(spans, pauses, fx, runs, cfg) {
+    for line in plan_lines(spans, pauses, fx, runs, inj, cfg) {
         eprintln!("{line}");
     }
 }
@@ -1567,6 +2371,7 @@ mod tests {
             scene: scene.into(),
             music: String::new(),
             speaker: speaker.into(),
+            injects: Vec::new(),
         }
     }
 
@@ -1576,6 +2381,7 @@ mod tests {
             scene: scene.into(),
             music: music.into(),
             speaker: speaker.into(),
+            injects: Vec::new(),
         }
     }
 
@@ -1585,10 +2391,12 @@ mod tests {
             scene: "s".into(),
             music: music.into(),
             speaker: "A".into(),
+            injects: Vec::new(),
             start,
             end,
             gap_ms: 0,
             pause_ms: 0,
+            inject_ms: 0,
         }
     }
 
@@ -1625,18 +2433,21 @@ mod tests {
             json!({"scene": "market-morning"}),
             json!({"scene": "courtyard-evening"}),
         ];
-        let runs = crate::assemble::runs(&[
+        let runs = crate::assemble::Planned::plan(&[
             json!({"speaker": "A"}),
             json!({"speaker": "A"}),
             json!({"speaker": "A"}),
-        ]);
+        ])
+        .runs();
         assert_eq!(run_scenes(&segments, &runs), vec!["market-morning"]);
     }
 
     #[test]
     fn run_scenes_ignores_blank_tags() {
         let segments = vec![json!({"scene": ""}), json!({"scene": "  "})];
-        let runs = crate::assemble::runs(&[json!({"speaker": "A"}), json!({"speaker": "A"})]);
+        let runs =
+            crate::assemble::Planned::plan(&[json!({"speaker": "A"}), json!({"speaker": "A"})])
+                .runs();
         assert_eq!(run_scenes(&segments, &runs), vec![""]);
     }
 
@@ -1901,6 +2712,10 @@ mod tests {
                     tags: tags.iter().map(|s| s.to_string()).collect(),
                     files: files.iter().map(|s| s.to_string()).collect(),
                     looped: true,
+                    dur_s: None,
+                    mode: None,
+                    hold: None,
+                    level: None,
                 },
             );
         }
@@ -1980,7 +2795,7 @@ mod tests {
         assert_eq!(spans.len(), 1, "one place, so one span: {spans:?}");
         let runs = plan_music(&slots, &[], 1, &pool, &cfg.music_palette);
 
-        let lines = plan_lines(&spans, &[], &[], &runs, &cfg);
+        let lines = plan_lines(&spans, &[], &[], &runs, &[], &cfg);
         let music: Vec<&String> = lines.iter().filter(|l| l.starts_with("music ")).collect();
         assert_eq!(music.len(), 3, "{lines:#?}");
         assert!(music[0].contains("quiet"), "{music:#?}");
@@ -1997,7 +2812,7 @@ mod tests {
         // `none` emits no run, so the report has to say that explicitly rather
         // than print an empty section the reader has to interpret.
         let cfg = scene_map();
-        let lines = plan_lines(&[], &[], &[], &[], &cfg);
+        let lines = plan_lines(&[], &[], &[], &[], &[], &cfg);
         assert_eq!(lines, vec!["music none — no cue resolved for this chapter"]);
     }
 
@@ -2046,7 +2861,7 @@ mod tests {
                 one_shot: false,
             },
         ];
-        let lines = plan_lines(&spans, &[], &fx, &[], &cfg);
+        let lines = plan_lines(&spans, &[], &fx, &[], &[], &cfg);
         let effects: Vec<&String> = lines.iter().filter(|l| l.starts_with("effect ")).collect();
         assert_eq!(effects.len(), 2, "{lines:#?}");
         assert!(effects[1].starts_with("effect [120-195s]"), "{effects:#?}");
@@ -2083,6 +2898,10 @@ mod tests {
                 tags: vec!["soft".into(), "calm".into()],
                 files: vec!["music/soft-bg-1.mp3".into()],
                 looped: true,
+                dur_s: None,
+                mode: None,
+                hold: None,
+                level: None,
             },
         );
         let runs = plan_music(
@@ -2182,7 +3001,9 @@ mod tests {
                 .map(|(s, m)| json!({"speaker": "A", "scene": s, "music": m}))
                 .collect()
         };
-        let runs_of = |n: usize| crate::assemble::runs(&vec![json!({"speaker": "A"}); n]);
+        let runs_of = |n: usize| {
+            crate::assemble::Planned::plan(&vec![json!({"speaker": "A"}); n]).runs()
+        };
 
         // Declared values are used as-is.
         let segs = build(&[("street-morning", "battle"), ("street-morning", "battle")]);
@@ -2423,8 +3244,11 @@ mod tests {
 
     #[test]
     fn negative_volumes_mute_instead_of_inverting() {
-        let on = LayerSwitch::new(true, true, -1.0, -2.0);
-        assert_eq!((on.effect_volume, on.music_volume), (0.0, 0.0));
+        let on = LayerSwitch::new(true, true, -1.0, -2.0, -3.0);
+        assert_eq!(
+            (on.effect_volume, on.music_volume, on.inject_volume),
+            (0.0, 0.0, 0.0)
+        );
     }
 
     #[test]
@@ -2438,5 +3262,412 @@ mod tests {
             (dur - fo).max(0.0) > 0.0,
             "the fade-out must start inside the slice"
         );
+    }
+
+    fn inject_pool() -> ClipPool {
+        serde_json::from_value(json!({
+            "blood": {"tags": ["blood"], "files": ["injects/blood-1.mp3", "injects/blood-2.mp3"], "looped": false, "dur_s": 1.1, "mode": "hit"},
+            "boil": {"tags": ["water", "boiling"], "files": ["injects/boil-1.mp3"], "looped": false, "dur_s": 51.0, "mode": "overlap"},
+            "rumble": {"tags": ["deep"], "files": ["injects/rumble-1.mp3"], "looped": true, "dur_s": 9.0, "mode": "trail", "hold": 3.0, "level": 0.5},
+            "bare": {"tags": ["plain"], "files": ["injects/bare-1.mp3"], "looped": false, "dur_s": 0.4},
+            "empty": {"tags": ["ghost"], "files": []},
+        }))
+        .unwrap()
+    }
+
+    fn durs() -> BTreeMap<String, f64> {
+        BTreeMap::from([
+            ("injects/blood-1.mp3".to_string(), 0.5),
+            ("injects/blood-2.mp3".to_string(), 1.1),
+            ("injects/boil-1.mp3".to_string(), 51.0),
+            ("injects/rumble-1.mp3".to_string(), 9.0),
+        ])
+    }
+
+    fn islot(start: f64, end: f64, injects: &[Value]) -> Slot {
+        Slot {
+            wav: PathBuf::from("x.wav"),
+            scene: "s".into(),
+            music: String::new(),
+            speaker: "A".into(),
+            injects: injects_of(injects, &inject_pool(), 2.0),
+            start,
+            end,
+            gap_ms: 300,
+            pause_ms: 0,
+            inject_ms: 0,
+        }
+    }
+
+    /// The script names the sound; **the pool says how it behaves**. A
+    /// directive that tries to restate `mode` is ignored, not honoured — that
+    /// is the whole point of moving it out of the JSON, and it is asserted here
+    /// because a silent "the script won" would reintroduce the second source of
+    /// truth without anything failing.
+    #[test]
+    fn injects_of_takes_the_sounds_behaviour_from_the_pool_not_the_script() {
+        let pool = inject_pool();
+        let got = injects_of(
+            &[
+                json!({"sound": "blood"}),
+                json!({"sound": "boil"}),
+                json!({"sound": "rumble"}),
+                json!({"sound": "bare"}),
+                json!({"stop": "boil"}),
+            ],
+            &pool,
+            2.0,
+        );
+        assert_eq!(
+            got,
+            vec![
+                Inject::Start { sound: "blood".into(), mode: InjectMode::Hit, hold_s: 2.0, level: 1.0 },
+                Inject::Start { sound: "boil".into(), mode: InjectMode::Overlap, hold_s: 2.0, level: 1.0 },
+                // `hold` and `level` come from the entry too, not the layer default.
+                Inject::Start { sound: "rumble".into(), mode: InjectMode::Trail, hold_s: 3.0, level: 0.5 },
+                // No `mode` in the entry: the one default left is `hit`.
+                Inject::Start { sound: "bare".into(), mode: InjectMode::Hit, hold_s: 2.0, level: 1.0 },
+                Inject::Stop { sound: "boil".into() },
+            ],
+            "{got:?}"
+        );
+        // A directive restating the behaviour changes nothing.
+        assert_eq!(
+            injects_of(&[json!({"sound": "boil", "mode": "trail", "hold": 3.0, "level": 0.5})], &pool, 2.0),
+            vec![Inject::Start { sound: "boil".into(), mode: InjectMode::Overlap, hold_s: 2.0, level: 1.0 }],
+        );
+        // Absent, empty, malformed and unknown entries are silence, not errors —
+        // the digest validator is the strict gate, the merge survives hand edits.
+        assert!(injects_of(&[], &pool, 2.0).is_empty());
+        assert!(injects_of(
+            &[json!("blood"), json!({"sound": ""}), json!({"mode": "loud"}), json!({})],
+            &pool,
+            2.0
+        )
+        .is_empty());
+        assert!(
+            injects_of(&[json!({"sound": "not-in-the-pool"})], &pool, 2.0).is_empty(),
+            "an unregistered sound has no mode either, so it is not guessed at"
+        );
+        // A registered sound with no takes resolves here and is dropped later
+        // with one warning, so the plan and the mix agree on what was asked for.
+        assert_eq!(injects_of(&[json!({"sound": "empty"})], &pool, 2.0).len(), 1);
+    }
+
+    #[test]
+    fn inject_takes_name_the_sound_and_roll_with_the_slot() {
+        let pool = inject_pool();
+        // Direct registry lookup: the analyzer names the sound, the pool rolls
+        // the take — tag scoring could only answer a question nobody asked.
+        for slot in 0..8 {
+            let t = inject_take(&pool, 1, slot, "blood").unwrap();
+            assert_eq!(t.sound, "blood");
+            assert!(t.file.starts_with("injects/blood-"), "{}", t.file);
+        }
+        assert!(inject_take(&pool, 1, 0, "thunderstorm").is_none());
+        assert!(inject_take(&pool, 1, 0, "empty").is_none());
+        // Same chapter re-merges to the same take; chapters vary.
+        let a = inject_take(&pool, 1, 3, "blood").unwrap();
+        assert_eq!(a, inject_take(&pool, 1, 3, "blood").unwrap());
+        let over: Vec<String> = (1..=8)
+            .map(|c| inject_take(&pool, c, 3, "blood").unwrap().file)
+            .collect();
+        assert!(over.iter().any(|f| *f != over[0]), "{over:?}");
+    }
+
+    #[test]
+    fn the_prompt_names_sounds_tags_and_lengths() {
+        let rendered = inject_prompt(&inject_pool());
+        // mode first, because it is what the analyzer cannot choose and must
+        // know: a `hit` pauses the narration, an `overlap` runs under it.
+        assert!(rendered.contains("blood (hit; blood; 1.1s)"), "{rendered}");
+        assert!(
+            rendered.contains("boil (overlap; water, boiling; 51s)"),
+            "{rendered}"
+        );
+        // a trail renders its hold
+        assert!(rendered.contains("rumble (trail 3.0s, loop; deep; 9.0s)"), "{rendered}");
+        // a one-shot must NOT claim to loop
+        assert!(!rendered.contains("blood (hit, loop"), "{rendered}");
+    }
+
+    /// Hits queue in the silence their holds wrote, an overlap costs no time,
+    /// a trail holds its solo and tails under the speech, and a stop fades —
+    /// never cuts — from its anchor. Every mode here comes from the pool entry,
+    /// because that is where a clip's behaviour lives.
+    #[test]
+    fn inject_events_hit_queue_overlap_tails_and_stops_fade() {
+        let pool = inject_pool();
+        let durs = durs();
+        let cfg = InjectLayer::default();
+        let slots = vec![
+            islot(0.0, 10.0, &[json!({"sound": "blood"}), json!({"sound": "boil"})]),
+            islot(
+                12.0,
+                20.0,
+                &[
+                    json!({"sound": "boil"}),          // retriggers the first one
+                    json!({"sound": "rumble"}),        // trail, hold 3.0 from the pool
+                    json!({"stop": "rumble"}),         // fades it from the cursor
+                ],
+            ),
+        ];
+        let takes = plan_inject_takes(&slots, &pool, 1);
+        let holds_before = slots[0].gap_ms;
+        let mut held = slots.clone();
+        plan_inject_holds(&mut held, &takes, &durs, 1.0);
+        let blood_dur = durs[&takes[0][0].as_ref().unwrap().file];
+        assert_eq!(held[0].gap_ms, holds_before + (blood_dur * 1000.0) as u32);
+        // Slot 1's trail adds its 3 s hold after slot 1 ends at 20.0.
+        assert_eq!(held[1].gap_ms, holds_before + 3000);
+
+        let ev = plan_injects(&slots, &takes, &durs, &cfg);
+        assert_eq!(ev.len(), 4, "{ev:?}");
+        // The hit queues first at slot 0 end (10.0).
+        assert_eq!(ev[0].mode, InjectMode::Hit);
+        assert!((ev[0].start - 10.0).abs() < 1e-9);
+        assert!((ev[0].end - (10.0 + blood_dur)).abs() < 1e-9);
+        assert_eq!(ev[0].fade_in, 0.0);
+        // The overlap starts at the same cursor (after the hit) and costs no
+        // time; the retrigger at slot 1 end (20.0) fades it over `fade_s`.
+        assert_eq!(ev[1].mode, InjectMode::Overlap);
+        assert!((ev[1].start - (10.0 + blood_dur)).abs() < 1e-9);
+        assert!((ev[1].end - (20.0 + 0.3)).abs() < 1e-9, "{ev:?}");
+        // The retriggered instance runs from 20.0 for the clip's own length.
+        assert_eq!(ev[2].mode, InjectMode::Overlap);
+        assert!((ev[2].start - 20.0).abs() < 1e-9);
+        assert!((ev[2].end - (20.0 + 51.0)).abs() < 1e-9, "{ev:?}");
+        // The trail starts at 20.0 too, holds 3 s solo, then the stop fades it
+        // from 23.0 over `stop_fade_s` = 3 s — an ending, not a cut.
+        assert_eq!(ev[3].mode, InjectMode::Trail);
+        assert!((ev[3].start - 20.0).abs() < 1e-9);
+        assert!((ev[3].end - (23.0 + 3.0)).abs() < 1e-9, "{ev:?}");
+        assert!((ev[3].fade_out - 3.0).abs() < 1e-9, "stop_fade_s");
+    }
+
+    #[test]
+    fn a_retrigger_fades_the_old_instance_and_a_stop_for_nothing_is_silence() {
+        let pool = inject_pool();
+        let durs = durs();
+        let cfg = InjectLayer::default();
+        let slots = vec![
+            islot(0.0, 10.0, &[json!({"sound": "boil"})]),
+            islot(
+                20.0,
+                30.0,
+                &[json!({"sound": "boil"}), json!({"stop": "ghost"})],
+            ),
+        ];
+        let takes = plan_inject_takes(&slots, &pool, 1);
+        let ev = plan_injects(&slots, &takes, &durs, &cfg);
+        assert_eq!(ev.len(), 2, "{ev:?}");
+        // Same sound starting again fades the old instance in fade_s.
+        assert!((ev[0].end - (30.0 + 0.3)).abs() < 1e-9, "{ev:?}");
+        assert!((ev[0].fade_out - 0.3).abs() < 1e-9);
+        assert!((ev[1].start - 30.0).abs() < 1e-9);
+        assert!((ev[1].end - (30.0 + 51.0)).abs() < 1e-9, "{ev:?}");
+    }
+
+    #[test]
+    fn holds_are_authored_delivered_and_written_pre_tempo() {
+        // Like a planned pause: authored in delivered seconds, scaled by speed
+        // for the concat, divided back by `retime`.
+        let pool = inject_pool();
+        let durs = durs();
+        let slots = vec![islot(0.0, 10.0, &[json!({"sound": "rumble"})])];
+        let takes = plan_inject_takes(&slots, &pool, 1);
+        let mut held = slots.clone();
+        plan_inject_holds(&mut held, &takes, &durs, 1.25);
+        assert_eq!(held[0].gap_ms, 300 + 3750, "{held:?}");
+    }
+
+    /// A wrong bus assignment does not fail — it makes a layer quiet, which is
+    /// how the inject layer went inaudible. So the graph is asserted on.
+    #[test]
+    fn the_inject_layer_is_mixed_after_the_duck_and_the_beds_are_not() {
+        let sc = "sidechaincompress=threshold=0.02:ratio=6:attack=20:release=400";
+        let ducked = format!("[under][0:a]{sc}[duck]");
+        let lim = "alimiter=limit=0.589:attack=5:release=100:level=0[a]";
+        let tail2 = format!("[0:a][duck]amix=inputs=2:normalize=0[mixed];[mixed]{lim}");
+        let tail3 = format!("[0:a][duck][3:a]amix=inputs=3:normalize=0[mixed];[mixed]{lim}");
+        // Beds only: they sum, they duck, they mix with the voice, and the sum
+        // is limited. No third input.
+        let g = layer_graph(2, false, sc);
+        assert!(g.contains("[1:a][2:a]amix=inputs=2"), "{g}");
+        assert!(g.contains(&ducked), "{g}");
+        assert!(g.ends_with(&tail2), "{g}");
+        // With an inject track, it is input 3 and it enters *after* the duck:
+        // never inside `[under]`, or the voice's own compressor eats it.
+        let g = layer_graph(2, true, sc);
+        assert!(g.contains("[1:a][2:a]amix=inputs=2:normalize=0[under]"), "{g}");
+        assert!(g.contains(&ducked), "{g}");
+        assert!(
+            g.ends_with(&tail3),
+            "the inject track must be summed with the ducked mix, not ducked: {g}"
+        );
+        assert!(
+            !g.contains("[1:a][2:a][3:a]"),
+            "the inject track must not join the ducked bus: {g}"
+        );
+        // A single bed needs no summing before the compressor.
+        let g = layer_graph(1, true, sc);
+        assert!(g.contains("[1:a]anull[under]"), "{g}");
+        assert!(g.contains("[0:a][duck][2:a]amix=inputs=3"), "{g}");
+        // No beds at all: nothing to duck, so no compressor in the graph.
+        let g = layer_graph(0, true, sc);
+        assert!(g.starts_with("[0:a][1:a]amix=inputs=2:normalize=0[mixed]"), "{g}");
+        assert!(!g.contains("sidechain"), "{g}");
+        // ...but the limiter is on every arm. The ceiling is the contract, and
+        // nothing else in the path holds it: ch9 measured -0.11 dBFS with the
+        // inject layer switched off entirely.
+        for (b, i) in [(0usize, true), (1, false), (1, true), (2, false), (2, true), (3, true)] {
+            let g = layer_graph(b, i, sc);
+            assert!(g.contains("alimiter=limit=0.589"), "beds={b} inject={i}: {g}");
+            assert!(g.ends_with("[a]"), "beds={b} inject={i}: {g}");
+        }
+    }
+
+    /// A loop is only worth making if the arithmetic is right: too few copies
+    /// leave silence at the end of the window, too many waste decode time, and
+    /// a seam that overlaps too far is audible as a pump.
+    #[test]
+    fn loop_copies_solves_for_the_window_and_refuses_a_single_play() {
+        // A 6.86 s bed in a 7 s window: one more copy covers it.
+        assert_eq!(loop_copies(7.0, 6.86, 0.25), Some(2));
+        // A window no longer than the clip is not a loop at all — this is the
+        // path a bed with no `stop` takes, and it must stay a single play.
+        assert_eq!(loop_copies(6.86, 6.86, 0.25), None);
+        assert_eq!(loop_copies(3.0, 6.86, 0.25), None);
+        assert_eq!(loop_copies(7.0, 0.0, 0.25), None);
+        // 142 s of kitchen out of a 6.86 s clip. n copies run
+        // n*6.86 - (n-1)*0.25 >= 142, so n = 22.
+        let n = loop_copies(142.0, 6.86, 0.25).unwrap();
+        assert_eq!(n, 22, "{n}");
+        assert!(
+            n as f64 * 6.86 - (n as f64 - 1.0) * 0.25 >= 142.0,
+            "the loop must cover the window"
+        );
+        assert!(
+            (n as f64 - 1.0) * 6.86 - (n as f64 - 2.0) * 0.25 < 142.0,
+            "one copy fewer must fall short, or the count is not minimal"
+        );
+        // A crossfade as long as the clip cannot be honoured: it is clamped.
+        assert_eq!(loop_copies(20.0, 1.0, 5.0), Some(27));
+    }
+
+    #[test]
+    fn loop_filter_crossfades_every_seam_and_ends_on_the_volume() {
+        let g = loop_filter(3, 0.25, 0.8);
+        // Three copies split off the one input...
+        assert!(g.starts_with("[0:a]asplit=3[c0][c1][c2]"), "{g}");
+        // ...joined by two crossfades, chained, never a hard splice.
+        assert_eq!(g.matches("acrossfade=").count(), 2, "{g}");
+        assert!(g.contains("[c0][c1]acrossfade=d=0.250"), "{g}");
+        assert!(g.contains("[o1][c2]acrossfade=d=0.250"), "{g}");
+        // ...and the gain rides on the tail, before the output label.
+        assert!(g.ends_with("volume=0.8000,aformat=sample_rates=48000:channel_layouts=mono[out]"), "{g}");
+        // Every copy is consumed exactly once.
+        for i in 0..3 {
+            assert_eq!(g.matches(&format!("[c{i}]")).count(), 2, "copy {i} in {g}");
+        }
+    }
+
+    /// The inject pool must state `looped` on every entry.
+    ///
+    /// `Sound::looped` defaults to `true` because the *effect* pool is mostly
+    /// beds and the default is what makes a hand-written rule work. The inject
+    /// pool is the opposite — mostly one-shots — so the same default silently
+    /// turns an entry that forgot the key into a looping bed. The shipped pool
+    /// states it everywhere, and this is what keeps that true: read the raw JSON
+    /// rather than the parsed pool, because the parsed one cannot tell "absent"
+    /// from "true".
+    #[test]
+    fn every_shipped_inject_entry_states_looped_explicitly() {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets");
+        let raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(assets.join("inject-pool.json")).unwrap())
+                .unwrap();
+        let mut missing = Vec::new();
+        for (name, entry) in raw.as_object().unwrap() {
+            if name.starts_with('_') {
+                continue;
+            }
+            if entry.get("looped").is_none() {
+                missing.push(name.clone());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these inject entries omit `looped`, and the default is `true` (a looping bed): {missing:?}"
+        );
+    }
+
+    /// Every shipped inject sound resolves to a real take, or the registry is
+    /// decoration the prompt offers anyway.
+    #[test]
+    fn every_shipped_inject_sound_has_takes_and_a_length() {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets");
+        let pool = audio_pool::load_pool(&assets.join("inject-pool.json"));
+        assert!(!pool.is_empty(), "the inject pool must load");
+        for (sound, entry) in &pool {
+            assert!(
+                !entry.files.is_empty(),
+                "sound {sound:?} has no takes, so it can never play"
+            );
+            assert!(
+                entry.dur_s.unwrap_or(0.0) > 0.0,
+                "sound {sound:?} needs dur_s — the prompt renders it and the validator judges hits by it"
+            );
+            for file in &entry.files {
+                assert!(
+                    clip_path(&assets, file).is_file(),
+                    "sound {sound:?} names {file:?}, which is not on disk"
+                );
+            }
+            let take = inject_take(&pool, 1, 0, sound).unwrap();
+            assert_eq!(take.sound, *sound);
+        }
+    }
+
+    /// A hold is silence *inserted* into the chapter, and inserting it makes
+    /// every later slot start later. Every layer — the effects, the music and
+    /// the injects themselves — is placed by reading `Slot::start`/`end`, so a
+    /// clock that did not move puts them all on top of speech that has shifted
+    /// out from under them. That is not a near miss: it is the difference
+    /// between a blood spatter in the silence reserved for it and the same
+    /// spatter buried under the last six words of the chapter.
+    #[test]
+    fn a_hit_hold_moves_every_later_slot_and_the_layers_with_it() {
+        let pool = inject_pool();
+        let durs = durs();
+        // Slot 0 carries a 1.1 s hit; slot 1 is the next thing spoken.
+        let mut slots = vec![
+            islot(0.0, 1.0, &[json!({"sound": "blood"})]),
+            islot(1.3, 2.2, &[]),
+        ];
+        let takes = plan_inject_takes(&slots, &pool, 1);
+        plan_inject_holds(&mut slots, &takes, &durs, 1.0);
+        assert_eq!(slots[0].gap_ms, 300 + 1100, "the hit's whole clip");
+        assert_eq!(slots[0].inject_ms, 1100);
+        // The clock moved with it: slot 1 starts after the silence, not after
+        // the gap that was there before the hold was written.
+        assert!(
+            (slots[1].start - 2.4).abs() < 1e-9,
+            "slot 1 starts at {:.3}, not 1.3 — the hold is real audio",
+            slots[1].start
+        );
+        assert!((slots[1].end - 3.3).abs() < 1e-9, "{:?}", slots[1]);
+        // And the slot's own duration is untouched — a hold is silence *after*
+        // a line, never a change to the line.
+        assert!((slots[1].end - slots[1].start - 0.9).abs() < 1e-9);
+        // An overlap costs no time, so nothing moves.
+        let mut quiet = vec![
+            islot(0.0, 1.0, &[json!({"sound": "boil", "mode": "overlap"})]),
+            islot(1.3, 2.2, &[]),
+        ];
+        let takes = plan_inject_takes(&quiet, &pool, 1);
+        plan_inject_holds(&mut quiet, &takes, &durs, 1.0);
+        assert_eq!(quiet[0].gap_ms, 300);
+        assert!((quiet[1].start - 1.3).abs() < 1e-9);
     }
 }

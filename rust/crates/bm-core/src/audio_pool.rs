@@ -35,7 +35,7 @@ use std::path::Path;
 pub use crate::pool::parse_sample_tags;
 
 /// One pooled sound: every file that answers for it, and how they play.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Sound {
     /// What a scene or a palette entry matches on.
     #[serde(default)]
@@ -49,6 +49,28 @@ pub struct Sound {
     /// take of a bed is a bed.
     #[serde(default = "loops")]
     pub looped: bool,
+    /// Longest take in seconds, post-trim. Only the inject registry sets it:
+    /// the digest prompt renders it so the analyzer never `hit`s a 51 s boil,
+    /// and the validator refuses one that tries. A whole-clip number, not
+    /// per-take precision — the merge probes the actual take it picked.
+    #[serde(default)]
+    pub dur_s: Option<f64>,
+    /// `hit` | `overlap` | `trail`. Only the inject registry sets it, and it is
+    /// the reason the script does not: how a clip behaves is a property of the
+    /// *clip* — a splat punctuates, a rustle runs under, a bed keeps going —
+    /// and a per-chapter copy of it was a second source of truth the analyzer
+    /// had to guess at (and got wrong: a water spell `overlap`ped under a
+    /// kitchen sink). Kept as a string here because the mixer owns the enum;
+    /// `ambience::injects_of` is the one place it is parsed.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Solo seconds before a `trail`'s tail ducks under the speech. `None`
+    /// falls back to `layers.inject.default_hold_s`.
+    #[serde(default)]
+    pub hold: Option<f64>,
+    /// Optional trim over the foreground contract. `None` is 1.0.
+    #[serde(default)]
+    pub level: Option<f64>,
 }
 
 fn loops() -> bool {
@@ -209,6 +231,10 @@ mod tests {
                     "effects/day-3.mp3".into(),
                 ],
                 looped: true,
+                dur_s: None,
+                mode: None,
+                hold: None,
+                level: None,
             },
         );
         p.insert(
@@ -217,6 +243,10 @@ mod tests {
                 tags: tags(&["night"]),
                 files: vec!["effects/night-1.mp3".into()],
                 looped: true,
+                dur_s: None,
+                mode: None,
+                hold: None,
+                level: None,
             },
         );
         p.insert(
@@ -225,6 +255,10 @@ mod tests {
                 tags: tags(&["rain", "calm"]),
                 files: vec!["effects/rain-1.mp3".into()],
                 looped: true,
+                dur_s: None,
+                mode: None,
+                hold: None,
+                level: None,
             },
         );
         p.insert(
@@ -233,6 +267,10 @@ mod tests {
                 tags: tags(&["battle", "sword"]),
                 files: vec!["effects/sword-fight-1.mp3".into()],
                 looped: false,
+                dur_s: None,
+                mode: None,
+                hold: None,
+                level: None,
             },
         );
         p
@@ -301,6 +339,10 @@ mod tests {
                     tags: tags(t),
                     files: vec![format!("effects/{name}.mp3")],
                     looped: true,
+                    dur_s: None,
+                    mode: None,
+                    hold: None,
+                    level: None,
                 },
             );
         }
@@ -324,6 +366,10 @@ mod tests {
                 tags: tags(&["day"]),
                 files: vec![],
                 looped: true,
+                dur_s: None,
+                mode: None,
+                hold: None,
+                level: None,
             },
         );
         assert!(pick(&p, &tags(&["day"]), 0).is_none());

@@ -428,8 +428,10 @@ mod tests {
         inner.tasks.insert("render:5".into(), t);
         inner.workers.insert("w-local".into(), "127.0.0.1".into());
 
+        inner.settings.inject_volume = 0.25;
         let offer = inner.offer("w-local").expect("local worker renders");
         assert!(offer.local_node);
+        assert_eq!(offer.inject_volume, 0.25);
         for addr in ["127.0.0.1", "localhost", "::1"] {
             assert!(bm_core::is_local_node(addr), "{addr}");
         }
@@ -498,16 +500,17 @@ mod tests {
             std::fs::write(&mp3, b"old mix").unwrap();
         }
         let msg = inner
-            .op_remix(Some(1.5), Some(0.5), Some(0.0))
+            .op_remix(Some(1.5), Some(0.5), Some(0.0), Some(0.25))
             .expect("valid mix");
         assert!(msg.contains("1.5"), "{msg}");
         assert_eq!(
             (
                 inner.settings.speed,
                 inner.settings.effect_volume,
-                inner.settings.music_volume
+                inner.settings.music_volume,
+                inner.settings.inject_volume
             ),
-            (1.5, 0.5, 0.0)
+            (1.5, 0.5, 0.0, 0.25)
         );
         for t in inner.tasks.values() {
             if t.stage == Stage::Merge {
@@ -518,8 +521,23 @@ mod tests {
                 assert_eq!(t.state, TaskState::Done, "renders keep cache");
             }
         }
-        assert!(inner.op_remix(Some(9.0), Some(1.0), Some(1.0)).is_err());
-        assert!(inner.op_remix(None, Some(1.0), Some(1.0)).is_err());
+        assert!(inner
+            .op_remix(Some(9.0), Some(1.0), Some(1.0), None)
+            .is_err());
+        assert!(inner.op_remix(None, Some(1.0), Some(1.0), None).is_err());
+        for inject in [-0.1, 2.1, f64::NAN, f64::INFINITY] {
+            assert!(inner
+                .op_remix(Some(1.0), Some(1.0), Some(1.0), Some(inject))
+                .is_err());
+            assert_eq!(inner.settings.inject_volume, 0.25);
+            assert_eq!(inner.settings.speed, 1.5);
+        }
+        inner
+            .op_remix(Some(1.0), Some(1.0), Some(1.0), None)
+            .unwrap();
+        assert_eq!(inner.settings.inject_volume, 0.25);
+        let saved = Settings::load(&inner.layout.settings());
+        assert_eq!(saved.inject_volume, 0.25);
     }
 
     #[test]

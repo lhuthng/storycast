@@ -132,7 +132,9 @@ impl Sidecar {
     /// Which interpreter spawns the sidecar: the shared venv order, bare
     /// `python3` last.
     fn python(&self, layout: &Layout) -> PathBuf {
-        layout.venv_python().unwrap_or_else(|| PathBuf::from("python3"))
+        layout
+            .venv_python()
+            .unwrap_or_else(|| PathBuf::from("python3"))
     }
 
     /// Ensure the sidecar answers, starting it if needed. Idempotent.
@@ -418,13 +420,14 @@ async fn run_render(
     let policy = bm_core::cast::policy_for_bible(engine, &layout.bible())?;
     let cast = bm_core::cast::load_cast(&script_path, &cast_path, &layout.bible(), &policy, true)?;
     let local = engine == "vieneu";
-    let planned = bm_core::assemble::drop_headline(&segments);
+    let planned = bm_core::assemble::Planned::plan(&segments);
     let first = planned
+        .speech
         .first()
         .map(|s| s.get("text").and_then(|t| t.as_str()).unwrap_or(""))
         .unwrap_or("");
     let title = bm_core::assemble::title_speech(layout, n, &cast, first);
-    let units = bm_core::assemble::plan_render(planned, &cast, &seg_dir, local, title.as_ref())?;
+    let units = bm_core::assemble::plan_render(&planned, &cast, &seg_dir, local, title.as_ref())?;
     let todo: Vec<_> = units
         .into_iter()
         .filter(|u| {
@@ -435,7 +438,11 @@ async fn run_render(
     std::fs::create_dir_all(&seg_dir)?;
     // No accent gate: any voice the sidecar can synthesize is allowed. If the
     // engine itself rejects a voice, that failure surfaces from /infer.
-    let manifest = layout.output().join("render-manifest.jsonl");
+    // The render audit log belongs with the rest of the state, not in
+    // `output/`. `output/` holds deliverables and nothing else — a machine
+    // -readable record of TTS calls sitting beside the mp3s is a stray
+    // intermediate in the one directory an operator actually looks at.
+    let manifest = layout.bm_state().join("render-manifest.jsonl");
     for (i, u) in todo.iter().enumerate() {
         set_progress(
             shared,
@@ -724,6 +731,7 @@ async fn run_offer(
                     offer.music,
                     offer.effect_volume,
                     offer.music_volume,
+                    offer.inject_volume,
                 ),
                 shared,
             )
@@ -1078,6 +1086,7 @@ async fn main() -> Result<()> {
                             settings.music,
                             settings.effect_volume,
                             settings.music_volume,
+                            settings.inject_volume,
                         ),
                         &shared,
                     )
@@ -1377,6 +1386,7 @@ mod tests {
             music: false,
             effect_volume: 1.0,
             music_volume: 1.0,
+            inject_volume: 1.0,
             render_units: None,
             local_node: false,
         };

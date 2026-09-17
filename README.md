@@ -124,7 +124,7 @@ dramatization style, `prompts/analyze.txt`).
 
 Chapters don't have to be dry voices. The dramatization prompt tags every segment
 with two independent things, and the merge stage turns each into its own layer
-under the voice:
+under the voice — plus a third layer the script places by hand:
 
 - **`scene` is the place** (`"market-stall-morning"`, `"forest-night"`) and drives
   **effects**, which are sparse and deliberate. Consecutive same-speaker lines
@@ -149,6 +149,33 @@ under the voice:
   morning`) once came out with a hearth crackling under it: the keyword `shop`
   matched a fire rule that sat *before* the daylight rule, so `morning` never got
   a say.
+- **`sound` is a spot effect, and it lives *between* the lines.** A `segments`
+  array holds two kinds of item: a **line** (`speaker` + `text`) and a **sound**
+  (`{"sound": "page-turn", "mode": "overlap"}`, or `{"stop": "boiling-water"}`).
+  The injection is a *split* — the script writes the sentence's two halves as two
+  lines and the sound as a third item between them, so the effect lands where the
+  prose stages it rather than at the end of a line:
+
+  ```json
+  {"speaker": "Narrator", "text": "Nàng lau mồ hôi trên trán, siết chặt cuốn võ thư trong tay"},
+  {"sound": "page-turn", "mode": "overlap"},
+  {"speaker": "Narrator", "text": ", như nhặt được báu vật."}
+  ```
+
+  A sound item has no `text` and no `speaker`, which is the whole point: the
+  renderer is handed the lines, so **no TTS call can ever be given the syntax**.
+  Modes are `hit` (the narration waits out the clip), `overlap` (zero timeline
+  time, running under the following speech) and `trail` (a solo `hold` seconds,
+  then the tail ducks under the speech); `stop` fades a running one, never cuts
+  it. Names come from `assets/inject-pool.json`, whose entries also carry
+  `dur_s` — a `hit` on a 51 s clip is refused at digest time, because that is 51 s
+  of dead air. The layer rides the `effects` switch and has its own
+  `inject_volume` in `.bm/settings.json`.
+- **`digest` can be asked on its own.** `bm-inductor digest <n>` prints the
+  analyzer's answer for one chapter and does nothing else — no render, no merge,
+  no ledger task, no bible merge, and no file at all unless `--write` is passed.
+  It is the same `analyze_chapter` the digest worker calls, so what you see is
+  what a run would have produced.
 - **A beat where a scene changes.** At most `pause.max_per_chapter` per chapter,
   placed only where the change is *narrated*, with narration resuming outranking
   narration handing off. The music lifts to `pause_level` inside it — which is

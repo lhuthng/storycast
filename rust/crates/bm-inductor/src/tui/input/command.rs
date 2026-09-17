@@ -255,7 +255,7 @@ pub(crate) fn do_command(
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::Mix,
                 "Mix — story speed and layer volumes",
-                "as <speed 0.5-2.0> <fx 0-2> <music 0-2>, e.g. 1.25 1.0 1.0 (0 mutes)",
+                "as <speed 0.5-2.0> <fx 0-2> <music 0-2> [inject 0-2], e.g. 1.25 1.0 1.0 1.0 (0 mutes)",
                 &crate::tui::input::runconfig::mix_prefill(app),
             ));
         }

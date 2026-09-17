@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde_json::Value;
 use std::path::Path;
 
 /// Crash-safe write: write a sibling temp file, then rename over the target.
@@ -23,6 +24,33 @@ pub fn atomic_write(path: &Path, text: &str) -> Result<()> {
     std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
     Ok(())
+}
+
+/// Whether a `segments` item is a sound rather than a line of speech.
+///
+/// A `segments` array is a sequence of items, and an item is one of two kinds:
+/// a line (`speaker` + `text`) or a **sound** (`sound`, or `stop`). The
+/// injection is "half a sentence, the sound, the other half", so a sound is
+/// written as its own item between the two halves and carries no `text` at all
+/// — which is the point, because a renderer is handed the lines and there is no
+/// syntax inside one for it to read.
+///
+/// This lives in `util` rather than beside either caller because the digest
+/// validator and the render planner both need the same answer, and a script
+/// shape two layers disagree about is how a chapter merges with the sound
+/// silently missing.
+///
+/// An item carrying both is malformed — the digest validator refuses it — and
+/// `text` wins here, loudly: losing a line of speech is the worse failure.
+pub fn is_sound_item(item: &Value) -> bool {
+    let names_a_sound = item.get("sound").is_some() || item.get("stop").is_some();
+    if names_a_sound && item.get("text").is_some() {
+        eprintln!(
+            "inject: an item carries both `text` and a sound -> speaking the text, dropping the sound"
+        );
+        return false;
+    }
+    names_a_sound
 }
 
 /// Pretty-print JSON without escaping non-ASCII, matching Python's
