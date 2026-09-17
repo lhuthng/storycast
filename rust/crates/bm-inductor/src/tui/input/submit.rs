@@ -24,6 +24,7 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
         TextKind::SshKey | TextKind::SshUser | TextKind::SshPort => {
             Err("ssh defaults save from the prompt, not submit".into())
         }
+        TextKind::Mix => Err("mix saves from the prompt, not submit".into()),
         TextKind::AddMachine => {
             // Bind tuple: `addr [user [port [key...]]]` — the key is the
             // remainder of the line so paths with spaces survive. Missing

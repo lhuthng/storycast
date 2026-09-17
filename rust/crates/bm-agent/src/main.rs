@@ -129,19 +129,10 @@ impl Sidecar {
             .unwrap_or(SIDECAR_PORT)
     }
 
-    /// Which interpreter spawns the sidecar: the provision-managed
-    /// `python/.venv` first, a repo-root `.venv` (dev checkouts) second,
-    /// bare `python3` last.
+    /// Which interpreter spawns the sidecar: the shared venv order, bare
+    /// `python3` last.
     fn python(&self, layout: &Layout) -> PathBuf {
-        let managed = layout.python_dir().join(".venv/bin/python");
-        if managed.is_file() {
-            return managed;
-        }
-        let legacy = layout.root.join(".venv/bin/python");
-        if legacy.is_file() {
-            return legacy;
-        }
-        PathBuf::from("python3")
+        layout.venv_python().unwrap_or_else(|| PathBuf::from("python3"))
     }
 
     /// Ensure the sidecar answers, starting it if needed. Idempotent.
@@ -728,10 +719,12 @@ async fn run_offer(
                 &offer.engine,
                 offer.gap_ms,
                 offer.speed,
-                bm_core::ambience::LayerSwitch {
-                    effects: offer.ambience,
-                    music: offer.music,
-                },
+                bm_core::ambience::LayerSwitch::new(
+                    offer.ambience,
+                    offer.music,
+                    offer.effect_volume,
+                    offer.music_volume,
+                ),
                 shared,
             )
             .await?;
@@ -1080,10 +1073,12 @@ async fn main() -> Result<()> {
                         &engine,
                         settings.gap_ms,
                         settings.speed,
-                        bm_core::ambience::LayerSwitch {
-                            effects: settings.ambience,
-                            music: settings.music,
-                        },
+                        bm_core::ambience::LayerSwitch::new(
+                            settings.ambience,
+                            settings.music,
+                            settings.effect_volume,
+                            settings.music_volume,
+                        ),
                         &shared,
                     )
                     .await?;
@@ -1380,6 +1375,8 @@ mod tests {
             speed: 1.0,
             ambience: false,
             music: false,
+            effect_volume: 1.0,
+            music_volume: 1.0,
             render_units: None,
             local_node: false,
         };

@@ -120,6 +120,16 @@ impl Layout {
         self.root.join("python")
     }
 
+    /// Interpreter for local voice work (enroll now, preview offline): the
+    /// provision-managed `python/.venv` first, a repo-root `.venv` second.
+    /// One order everywhere — enrollment and serving can never aim at two
+    /// different voice stores, which is exactly how a fresh voice 500s.
+    pub fn venv_python(&self) -> Option<PathBuf> {
+        [self.python_dir().join(".venv/bin/python"), self.root.join(".venv/bin/python")]
+            .into_iter()
+            .find(|p| p.is_file())
+    }
+
     /// Inductor-private state (cluster registry, settings, stats).
     pub fn bm_state(&self) -> PathBuf {
         self.root.join(".bm")

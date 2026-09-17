@@ -115,6 +115,8 @@ impl Inner {
             speed: self.settings.speed,
             ambience: self.settings.ambience,
             music: self.settings.music,
+            effect_volume: self.settings.effect_volume,
+            music_volume: self.settings.music_volume,
             // The inductor plans; the worker speaks. `None` when this chapter
             // cannot be planned here — the worker falls back to its own
             // script, exactly as before the migration.

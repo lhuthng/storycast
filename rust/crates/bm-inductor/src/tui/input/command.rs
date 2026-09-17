@@ -37,6 +37,7 @@ pub(crate) enum Command {
     SshKey,
     SshUser,
     SshPort,
+    Mix,
 }
 
 /// `:` command line → the command. A single character is a command key
@@ -93,6 +94,7 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
         "sshkey" => Command::SshKey,
         "sshuser" => Command::SshUser,
         "sshport" => Command::SshPort,
+        "mix" => Command::Mix,
         "newest" => Command::Key(KeyCode::Char('G')),
         "named" => Command::AddNamed,
         "sample" => Command::AddSample,
@@ -243,6 +245,14 @@ pub(crate) fn do_command(
                 "Default ssh port",
                 "port for machines bound without one",
                 &cur,
+            ));
+        }
+        Command::Mix => {
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::Mix,
+                "Mix — story speed and layer volumes",
+                "as <speed 0.5-2.0> <fx 0-2> <music 0-2>, e.g. 1.25 1.0 1.0 (0 mutes)",
+                &crate::tui::input::runconfig::mix_prefill(app),
             ));
         }
         Command::Voices => {

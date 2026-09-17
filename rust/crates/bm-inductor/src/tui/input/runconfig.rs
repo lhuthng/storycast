@@ -11,6 +11,9 @@ pub(crate) struct RunPreview {
     pub(crate) analyzer: String,
     pub(crate) models: Vec<String>,
     pub(crate) engine: String,
+    pub(crate) speed: f64,
+    pub(crate) effect_volume: f64,
+    pub(crate) music_volume: f64,
     pub(crate) live: bool,
     /// A settings file exists (vs compiled defaults standing in).
     pub(crate) saved: bool,
@@ -44,6 +47,15 @@ pub(crate) fn run_preview(app: &App) -> RunPreview {
                 .and_then(|v| v.as_str())
                 .unwrap_or("vieneu")
                 .to_string(),
+            speed: s.get("speed").and_then(|v| v.as_f64()).unwrap_or(1.25),
+            effect_volume: s
+                .get("effect_volume")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0),
+            music_volume: s
+                .get("music_volume")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0),
             live: true,
             saved,
         };
@@ -59,6 +71,9 @@ pub(crate) fn run_preview(app: &App) -> RunPreview {
         analyzer: s.analyzer,
         models: s.analyze_models,
         engine: s.engine,
+        speed: s.speed,
+        effect_volume: s.effect_volume,
+        music_volume: s.music_volume,
         live: false,
         saved,
     }
@@ -130,6 +145,54 @@ pub(crate) fn save_run_config(app: &App, buf: &str) -> Result<String, String> {
     Ok(format!(
         "run config saved: ch{start}×{count}, digest {analyzer}"
     ))
+}
+
+/// Parse `<speed> <effect-volume> <music-volume>` — the mix shape.
+/// Speed is the story tempo (0.5–2.0, the single-`atempo` range); volumes are
+/// master gains over the scene map's own levels (0.0–2.0, 0 mutes, 1 as authored).
+pub(crate) type MixConfig = (f64, f64, f64);
+
+pub(crate) fn parse_mix_config(buf: &str) -> Result<MixConfig, String> {
+    let parts: Vec<&str> = buf.split_whitespace().collect();
+    if parts.len() != 3 {
+        return Err("expected: <speed> <fx-vol> <music-vol>, e.g. 1.25 1.0 1.0".into());
+    }
+    let num = |s: &str, what: &str, lo: f64, hi: f64| {
+        s.parse::<f64>()
+            .map_err(|_| format!("{what} “{s}” is not a number"))
+            .and_then(|v| {
+                if v.is_finite() && (lo..=hi).contains(&v) {
+                    Ok(v)
+                } else {
+                    Err(format!("{what} must be {lo}–{hi}, got “{s}”"))
+                }
+            })
+    };
+    Ok((
+        num(parts[0], "speed", 0.5, 2.0)?,
+        num(parts[1], "fx volume", 0.0, 2.0)?,
+        num(parts[2], "music volume", 0.0, 2.0)?,
+    ))
+}
+
+/// Prefill for the `:mix` prompt from the live settings when the backend
+/// answers, else the saved file, else the compiled defaults.
+pub(crate) fn mix_prefill(app: &App) -> String {
+    if app.settings.is_some() {
+        format!(
+            "{} {} {}",
+            app.setting_f64("speed", 1.25),
+            app.setting_f64("effect_volume", 1.0),
+            app.setting_f64("music_volume", 1.0)
+        )
+    } else if app.layout_root.as_os_str().is_empty() {
+        let s = bm_core::config::Settings::default();
+        format!("{} {} {}", s.speed, s.effect_volume, s.music_volume)
+    } else {
+        let s =
+            bm_core::config::Settings::load(&bm_core::Layout::new(&app.layout_root).settings());
+        format!("{} {} {}", s.speed, s.effect_volume, s.music_volume)
+    }
 }
 
 /// Persist one app-wide ssh default to the settings file. Returns a status

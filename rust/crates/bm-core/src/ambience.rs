@@ -336,13 +336,24 @@ pub struct Layers {
 /// The two switches are independent on purpose: a book can want the effect beds
 /// and no music, which is `Settings::ambience` and `Settings::music` doing
 /// exactly what they say.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerSwitch {
     pub effects: bool,
     pub music: bool,
+    pub effect_volume: f64,
+    pub music_volume: f64,
 }
 
 impl LayerSwitch {
+    pub fn new(effects: bool, music: bool, effect_volume: f64, music_volume: f64) -> Self {
+        LayerSwitch {
+            effects,
+            music,
+            effect_volume: effect_volume.max(0.0),
+            music_volume: music_volume.max(0.0),
+        }
+    }
+
     pub fn none(&self) -> bool {
         !self.effects && !self.music
     }
@@ -1077,6 +1088,32 @@ fn clip_path(assets: &Path, file: &str) -> PathBuf {
     assets.join(file)
 }
 
+/// Effective start offset per music run, so adjacent tracks crossfade.
+///
+/// The planner covers only speech (`run.end` is the slot's end), while the
+/// renderer extends each run by `xfade_s` — leaving the two fades misaligned
+/// by the inter-slot gap and dipping the mix mid-transition. Starting the
+/// next track where the previous one's audible coverage ended aligns them.
+/// Gaps wider than the crossfade plus a beat are intentional silence (`none`,
+/// unpooled moods) and keep their hole.
+fn music_starts(runs: &[MusicRun], xfade: f64) -> Vec<f64> {
+    let mut out = Vec::with_capacity(runs.len());
+    for (n, run) in runs.iter().enumerate() {
+        let start = if n == 0 {
+            run.start
+        } else {
+            let gap = run.start - runs[n - 1].end;
+            if gap >= 0.0 && gap <= xfade.max(0.0) + 1.0 {
+                runs[n - 1].end
+            } else {
+                run.start
+            }
+        };
+        out.push(start);
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // the pass
 // ---------------------------------------------------------------------------
@@ -1100,7 +1137,10 @@ pub fn apply_layers(
     work: &Path,
     assets: &Path,
 ) -> Result<PathBuf> {
-    let cfg = load_map(&assets.join("scene-map.json"))?;
+    let mut cfg = load_map(&assets.join("scene-map.json"))?;
+    cfg.layers.effect.trim *= on.effect_volume.max(0.0);
+    cfg.layers.music.level *= on.music_volume.max(0.0);
+    cfg.layers.music.pause_level *= on.music_volume.max(0.0);
     let effect_pool = audio_pool::load_pool(&assets.join("effect-pool.json"));
     let music_pool = audio_pool::load_pool(&assets.join("music-pool.json"));
     let spans = build_spans(slots, &cfg);
@@ -1233,6 +1273,7 @@ pub fn apply_layers(
         Vec::new()
     };
     let mut mu_slices: Vec<Slice> = Vec::new();
+    let starts = music_starts(&runs, cfg.layers.music.xfade_s);
     for (n, run) in runs.iter().enumerate() {
         // The take was chosen once, in `plan_music`, and travels on the run:
         // re-picking here would be a second answer to a question already
@@ -1248,14 +1289,17 @@ pub fn apply_layers(
         let last = n + 1 == runs.len();
         // Every run but the last carries a tail long enough to overlap the next
         // one's fade-in, so a track change is a crossfade and not a hole.
+        // `starts` bridges small inter-slot gaps so the two fades align: the
+        // next track begins where the previous one's audible coverage ended.
+        let start = starts[n];
         let tail = if last { 0.0 } else { cfg.layers.music.xfade_s };
-        let dur = (run.end - run.start) + tail;
+        let dur = (run.end - run.start) + tail + (run.start - start);
         let p = work.join(format!("mu{n}.wav"));
         let expr = level_expr(
             cfg.layers.music.level,
             cfg.layers.music.pause_level,
             cfg.layers.music.ramp_s,
-            run.start,
+            start,
             &run.pauses,
         );
         ffmpeg(&[
@@ -1277,7 +1321,7 @@ pub fn apply_layers(
         ])?;
         mu_slices.push(Slice {
             path: p,
-            start: run.start,
+            start,
             dur,
             fade_in: if n == 0 {
                 cfg.layers.music.fade_s
@@ -2323,6 +2367,28 @@ mod tests {
         // No lift to make: the expression stays flat rather than emitting a
         // pair of cancelling ramps.
         assert_eq!(level_expr(0.06, 0.06, 0.6, 0.0, &[(1.0, 2.0)]), "0.060000");
+    }
+
+    #[test]
+    fn adjacent_tracks_share_one_crossfade_and_silence_keeps_its_hole() {
+        let run = |start: f64, end: f64| MusicRun {
+            mood: "m".into(),
+            sound: "s".into(),
+            file: "f".into(),
+            start,
+            end,
+            pauses: vec![],
+        };
+        let runs = vec![run(0.0, 10.0), run(10.3, 20.0)];
+        assert_eq!(music_starts(&runs, 2.0), vec![0.0, 10.0]);
+        let gapped = vec![run(0.0, 10.0), run(30.0, 40.0)];
+        assert_eq!(music_starts(&gapped, 2.0), vec![0.0, 30.0]);
+    }
+
+    #[test]
+    fn negative_volumes_mute_instead_of_inverting() {
+        let on = LayerSwitch::new(true, true, -1.0, -2.0);
+        assert_eq!((on.effect_volume, on.music_volume), (0.0, 0.0));
     }
 
     #[test]

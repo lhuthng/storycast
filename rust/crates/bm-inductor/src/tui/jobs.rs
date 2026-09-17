@@ -114,6 +114,15 @@ pub(crate) enum Job {
         /// Exact sentence wanted (the shown line). Empty means triage.
         text: String,
     },
+    /// Synthesize one line on this machine: the disconnected form of
+    /// `Op::PreviewVoice`. Same engine call the sidecar makes, so a fresh
+    /// voice auditions with no worker on — at the cost of loading the
+    /// model here, which is why the connected path stays first.
+    PreviewLocal {
+        layout_root: std::path::PathBuf,
+        voice: String,
+        text: String,
+    },
 }
 
 impl Job {
@@ -144,6 +153,7 @@ impl Job {
             Job::LoadRoster { .. } => "load roster",
             Job::LoadLines { .. } => "index audition lines",
             Job::Segment { .. } => "local segment",
+            Job::PreviewLocal { .. } => "preview voice (local)",
             Job::Tracked { .. } => unreachable!(),
         }
         .to_string()
@@ -161,6 +171,11 @@ impl Job {
             Job::Op { req, .. } => req.clone(),
             Job::Segment { voice, .. } => OpRequest {
                 op: Op::Segment,
+                voice: Some(voice.clone()),
+                ..Default::default()
+            },
+            Job::PreviewLocal { voice, .. } => OpRequest {
+                op: Op::PreviewVoice,
                 voice: Some(voice.clone()),
                 ..Default::default()
             },
@@ -991,8 +1006,8 @@ pub(crate) async fn job_op(
             }
         },
         Err(e) => {
-            // Swap-voice survives a dead inductor: same mutation against
-            // the files, guarded by inductor-down + no-local-workers.
+            // Swap-voice and remix survive a dead inductor: same mutation
+            // against the files, guarded by inductor-down + no-local-workers.
             // Every other op genuinely needs the scheduler.
             if op == Op::SwapVoice {
                 match crate::api::offline_swap(
@@ -1000,6 +1015,29 @@ pub(crate) async fn job_op(
                     &layout_root,
                     &character.clone().unwrap_or_default(),
                     &voice.clone().unwrap_or_default(),
+                )
+                .await
+                {
+                    Ok(msg) => {
+                        send(&tx, Level::Ok, format!("{name}: {msg}"));
+                        true
+                    }
+                    Err(msg) => {
+                        send(
+                            &tx,
+                            Level::Error,
+                            format!("{name}: {msg} (inductor also unreachable: {e})"),
+                        );
+                        false
+                    }
+                }
+            } else if op == Op::Remix {
+                match crate::api::offline_remix(
+                    &api,
+                    &layout_root,
+                    req.speed,
+                    req.effect_volume,
+                    req.music_volume,
                 )
                 .await
                 {
@@ -1158,6 +1196,70 @@ fn serve_local_segment(
         B64.encode(&bytes),
         bytes.len(),
     ))
+}
+
+/// Synthesize one line with this checkout's venv: the disconnected form of
+/// `Op::PreviewVoice`. Reports through the same `DoneKind::Op`, so playback,
+/// markers and the previewed checklist cannot tell it from a render.
+pub(crate) async fn job_preview_local(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    layout_root: std::path::PathBuf,
+    voice: String,
+    text: String,
+) {
+    let key = op_key(&OpRequest {
+        op: Op::PreviewVoice,
+        ..Default::default()
+    });
+    let voice_done = voice.clone();
+    let done = |ok: bool, audio_b64: Option<String>| {
+        Ev::Done(DoneKind::Op {
+            op: Op::PreviewVoice,
+            key: key.clone(),
+            ok,
+            voice: Some(voice_done.clone()),
+            audio_b64,
+            line_speaker: None,
+            line_text: None,
+        })
+    };
+    let out = tokio::task::spawn_blocking(move || {
+        let wav = std::env::temp_dir().join(format!(
+            "bm-preview-{}-{}.wav",
+            std::process::id(),
+            bm_proto::now_secs()
+        ));
+        (|| {
+            bm_core::pool::synth_preview(&layout_root, &voice, &text, &wav)
+                .map_err(|e| format!("{e:#}"))?;
+            let bytes = std::fs::read(&wav).map_err(|e| format!("reading preview wav: {e}"))?;
+            let _ = std::fs::remove_file(&wav);
+            Ok::<Vec<u8>, String>(bytes)
+        })()
+    })
+    .await;
+    match out {
+        Ok(Ok(bytes)) if !bytes.is_empty() => {
+            send(
+                &tx,
+                Level::Ok,
+                format!("preview {voice_done} (local): {} KB", bytes.len() / 1024),
+            );
+            let _ = tx.send(done(true, Some(B64.encode(&bytes))));
+        }
+        Ok(Ok(_)) => {
+            send(&tx, Level::Error, format!("preview {voice_done} (local): no audio rendered"));
+            let _ = tx.send(done(false, None));
+        }
+        Ok(Err(e)) => {
+            send(&tx, Level::Error, format!("preview {voice_done} (local): {e}"));
+            let _ = tx.send(done(false, None));
+        }
+        Err(e) => {
+            send(&tx, Level::Error, format!("preview {voice_done} (local) task failed: {e}"));
+            let _ = tx.send(done(false, None));
+        }
+    }
 }
 
 fn fail_segment(tx: &tokio::sync::mpsc::UnboundedSender<Ev>, key: &str, voice: &str, msg: String) {
@@ -1338,5 +1440,10 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
             voice,
             text,
         } => job_segment(tx, layout_root, character, voice, text).await,
+        Job::PreviewLocal {
+            layout_root,
+            voice,
+            text,
+        } => job_preview_local(tx, layout_root, voice, text).await,
     }
 }

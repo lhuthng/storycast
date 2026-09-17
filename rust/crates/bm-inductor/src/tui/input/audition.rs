@@ -9,7 +9,8 @@
 //! * **`T`** renders the held line with the pointed voice
 //!   (`Op::PreviewVoice` with text): the one deliberate generation, and the
 //!   only way to hear two voices on the same sentence before either is
-//!   assigned.
+//!   assigned. With the inductor down it synthesizes on this machine
+//!   instead — no worker needs to be on.
 //! * **`^T`** renders another line with the pointed voice: one random pick
 //!   may be a poor representative.
 //!
@@ -94,6 +95,36 @@ pub(crate) fn audition(
         }
     };
 
+    // No backend, no worker, no sidecar: synthesize on this machine instead.
+    // Same engine call the sidecar makes, so a fresh voice auditions with
+    // nothing on — at the cost of loading the model here.
+    if !matches!(app.conn, Conn::Up) {
+        if app.layout_root.as_os_str().is_empty() {
+            app.set_status(
+                Level::Warn,
+                "inductor unreachable and no local checkout — :B to connect",
+            );
+            return held.cloned();
+        }
+        app.audition = Some(voice.to_string());
+        dispatch(
+            app,
+            job_tx,
+            Job::PreviewLocal {
+                layout_root: app.layout_root.clone(),
+                voice: voice.to_string(),
+                text: l.text.clone(),
+            },
+        );
+        app.set_status(
+            Level::Info,
+            format!(
+                "rendering “{}” for “{character}” ({voice}) locally…",
+                bm_core::util::head_chars(&l.text, 48)
+            ),
+        );
+        return Some(l);
+    }
     app.audition = Some(voice.to_string());
     let dispatched = dispatch_op(
         app,

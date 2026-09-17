@@ -4,7 +4,9 @@ use super::audio::Player;
 use super::audition::AuditionLine;
 use super::draw::draw;
 use super::input::command::{command_key, Command};
-use super::input::runconfig::{parse_run_config, run_preview, save_run_config, save_ssh_setting};
+use super::input::runconfig::{
+    parse_mix_config, parse_run_config, run_preview, save_run_config, save_ssh_setting,
+};
 use super::input::submit::submit_text;
 use super::input::{handle_key, op_key, urlencode};
 use super::jobs::{job_segment, run_job, set_machine_state, DoneKind, Ev, Job};
@@ -421,6 +423,7 @@ fn run_preview_prefers_live_api_then_file_then_defaults() {
     assert_eq!((cfg.start, cfg.count), (5, 2));
     assert_eq!(cfg.analyzer, "gemini");
     assert_eq!(cfg.models, vec!["3.8-flash"]);
+    assert_eq!((cfg.speed, cfg.effect_volume, cfg.music_volume), (1.25, 1.0, 1.0));
 
     // Down backend: the saved file is what the next boot will use.
     let dir = std::env::temp_dir().join("bm-runconfig-preview");
@@ -446,6 +449,21 @@ fn run_preview_prefers_live_api_then_file_then_defaults() {
     assert!(!cfg.live);
     assert!(!cfg.saved);
     assert_eq!((cfg.start, cfg.count), (1, 1));
+    assert_eq!((cfg.speed, cfg.effect_volume, cfg.music_volume), (1.25, 1.0, 1.0));
+}
+
+#[test]
+fn mix_config_parses_ranges_and_rejects_garbage() {
+    // The prompt validates; the op itself saves, so a typo keeps the prompt
+    // open and never dispatches.
+    assert_eq!(parse_mix_config("1.25 1.0 1.0").unwrap(), (1.25, 1.0, 1.0));
+    assert_eq!(parse_mix_config("0.5 0 2").unwrap(), (0.5, 0.0, 2.0));
+    assert!(parse_mix_config("1.25 1.0").unwrap_err().contains("expected"));
+    assert!(parse_mix_config("0.4 1 1").unwrap_err().contains("speed"));
+    assert!(parse_mix_config("2.1 1 1").unwrap_err().contains("speed"));
+    assert!(parse_mix_config("1 3 1").unwrap_err().contains("fx"));
+    assert!(parse_mix_config("1 1 -0.1").unwrap_err().contains("music"));
+    assert!(parse_mix_config("1 x 1").unwrap_err().contains("not a number"));
 }
 
 #[tokio::test]
@@ -2249,6 +2267,33 @@ async fn ctrl_t_rerolls_the_pointed_voice_on_another_line() {
 }
 
 #[tokio::test]
+async fn audition_without_a_backend_synthesizes_locally() {
+    // No inductor, no worker, no sidecar: `T` still auditions, on this box.
+    // The synthesis itself is not run here (model weights, minutes) — the
+    // dispatch shape is the contract, and the job reports honestly alone.
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = audition_app();
+    app.conn = Conn::Unknown;
+    app.layout_root = std::path::PathBuf::from("/tmp/bm-offline-audition");
+
+    handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
+    match job_rx.try_recv().expect("T dispatches offline").into_bare() {
+        Job::PreviewLocal { voice, text, .. } => {
+            assert_eq!(voice, "Adam", "the pointed voice");
+            assert!(!text.is_empty(), "a line is always sent");
+        }
+        other => panic!("expected a local preview job, got {other:?}"),
+    }
+    assert_eq!(app.audition.as_deref(), Some("Adam"));
+    assert!(
+        app.status.text.contains("locally"),
+        "say where it renders: {:?}",
+        app.status
+    );
+}
+
+#[tokio::test]
 async fn controlled_letters_other_than_t_u_r_do_nothing() {
     // `^T` auditions, `^U` clears, `^R` reloads; every other controlled
     // letter must leave the audio and the filter alone.
@@ -2368,6 +2413,7 @@ async fn the_cast_overview_auditions_the_highlighted_speakers_own_voice() {
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
+    app.conn = Conn::Up;
     app.roster = Some(roster_fixture());
     app.lines = Some(std::collections::HashMap::from([(
         "Narrator".to_string(),

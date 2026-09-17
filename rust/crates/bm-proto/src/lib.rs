@@ -525,6 +525,12 @@ pub struct TaskOffer {
     /// two sides agree without a version check.
     #[serde(default)]
     pub music: bool,
+    /// Master gains for the merge stage: 1.0 = as authored, 0.0 = muted.
+    /// Absent (old inductor) means 1.0, so either side may upgrade first.
+    #[serde(default = "default_volume")]
+    pub effect_volume: f64,
+    #[serde(default = "default_volume")]
+    pub music_volume: f64,
     /// Render stage: exactly the units the inductor's store lacks — the
     /// worker speaks these and nothing else. `None` (old inductor) means
     /// "plan from your own script as before"; `Some([])` means the store is
@@ -555,6 +561,10 @@ pub struct RenderUnitSpec {
 }
 
 fn default_speed() -> f64 {
+    1.0
+}
+
+fn default_volume() -> f64 {
     1.0
 }
 
@@ -653,6 +663,10 @@ pub enum Op {
     /// Rewrite written-out non-verbal sounds into engine tags across every
     /// script (`Ha ha ha!` → `[cười]`), and requeue the chapters it touches.
     Retag,
+    /// Save a new mix (story speed + layer volumes) and requeue every merge:
+    /// the finished mp3s were mixed with the old one. Render cache is kept —
+    /// tempo and layers apply at merge time, so no segment needs re-speaking.
+    Remix,
 }
 
 impl Op {
@@ -670,6 +684,7 @@ impl Op {
             Op::RetryTask => "retry-task",
             Op::Reconcile => "reconcile",
             Op::Retag => "retag",
+            Op::Remix => "remix",
         }
     }
 
@@ -687,6 +702,7 @@ impl Op {
             Op::RetryTask,
             Op::Reconcile,
             Op::Retag,
+            Op::Remix,
         ]
         .into_iter()
         .find(|o| o.as_str() == s)
@@ -724,6 +740,14 @@ pub struct OpRequest {
     /// would change and write nothing.
     #[serde(default)]
     pub dry_run: Option<bool>,
+    /// The new mix, for `remix`: story speed plus the two layer volumes.
+    /// `None` is "not sent" — the op refuses rather than guessing.
+    #[serde(default)]
+    pub speed: Option<f64>,
+    #[serde(default)]
+    pub effect_volume: Option<f64>,
+    #[serde(default)]
+    pub music_volume: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -849,6 +873,7 @@ mod tests {
             Op::RetryTask,
             Op::Reconcile,
             Op::Retag,
+            Op::Remix,
         ] {
             assert_eq!(Op::parse(op.as_str()), Some(op));
         }
@@ -918,6 +943,8 @@ mod tests {
         .unwrap();
         assert!(o.ambience, "the old field still means what it always did");
         assert!(!o.music);
+        assert_eq!(o.effect_volume, 1.0);
+        assert_eq!(o.music_volume, 1.0);
     }
 
     #[test]
@@ -1090,6 +1117,8 @@ mod tests {
             speed: 1.0,
             ambience: false,
             music: false,
+            effect_volume: 1.0,
+            music_volume: 1.0,
             render_units: None,
             local_node: false,
         };
