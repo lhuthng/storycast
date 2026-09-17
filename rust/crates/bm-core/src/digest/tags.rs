@@ -80,7 +80,10 @@ pub(crate) fn normalise_tags(v: Option<&Value>) -> Vec<String> {
     out
 }
 
-pub fn validate(data: &Value, bible: &Value) -> Result<()> {
+/// `palette` is the closed music vocabulary from the scene map
+/// (`ambience::palette_names`). Pass it empty to skip the music check — a map
+/// that declares no palette cannot be used to judge a value.
+pub fn validate(data: &Value, bible: &Value, palette: &[String]) -> Result<()> {
     if !data.is_object() {
         anyhow::bail!("top-level must be a JSON object");
     }
@@ -128,6 +131,33 @@ pub fn validate(data: &Value, bible: &Value) -> Result<()> {
             if !ALLOWED_INLINE_TAGS.contains(&tag.to_lowercase().as_str()) {
                 anyhow::bail!(
                     "segment {i}: [{tag}] is not a voice tag ([cười]/[thở dài]/[hắng giọng] only)"
+                );
+            }
+        }
+    }
+
+    // The music field is the *only* thing that decides a track, so it is a
+    // closed vocabulary rather than a hint: a value outside the palette is
+    // rejected here, where the digest can still ask for a repair, instead of
+    // being silently mixed down to nothing. A script where no segment declares
+    // one at all predates the field — those keep merging through the legacy
+    // shim, so the ~200 chapters already on disk are not stranded.
+    let music: Vec<&str> = segments
+        .iter()
+        .map(|s| s.get("music").and_then(|m| m.as_str()).unwrap_or("").trim())
+        .collect();
+    if music.iter().any(|m| !m.is_empty()) && !palette.is_empty() {
+        for (i, m) in music.iter().enumerate() {
+            if m.is_empty() {
+                anyhow::bail!(
+                    "segment {i}: missing `music` — when any segment declares one, every \
+                     segment must (use \"none\" where silence is right)"
+                );
+            }
+            if !palette.iter().any(|p| p == m) {
+                anyhow::bail!(
+                    "segment {i}: music {m:?} is not in the palette ({})",
+                    palette.join(", ")
                 );
             }
         }
@@ -512,6 +542,15 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A stand-in palette: the shipped map's values, which is what the digest
+    /// passes in. Tests that care about the music check pass their own.
+    fn pal() -> Vec<String> {
+        ["quiet", "warm", "busy", "battle", "grand", "none"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
     fn bible_with(name: &str, aliases: &[&str]) -> Value {
         json!({"characters": [{
             "name": name,
@@ -536,13 +575,18 @@ mod tests {
                 "roster": ["Narrator"]
             })
         };
-        validate(&tagged("Hắn [cười]."), &json!({"characters": []})).unwrap();
-        validate(&tagged("Nàng [CƯỜI]."), &json!({"characters": []})).unwrap();
-        validate(&tagged("Hắn [sigh]."), &json!({"characters": []})).unwrap();
-        let err = validate(&tagged("Dừng [pause] lại."), &json!({"characters": []})).unwrap_err();
+        validate(&tagged("Hắn [cười]."), &json!({"characters": []}), &pal()).unwrap();
+        validate(&tagged("Nàng [CƯỜI]."), &json!({"characters": []}), &pal()).unwrap();
+        validate(&tagged("Hắn [sigh]."), &json!({"characters": []}), &pal()).unwrap();
+        let err = validate(
+            &tagged("Dừng [pause] lại."),
+            &json!({"characters": []}),
+            &pal(),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("[pause]"), "{err}");
         // Invented tags are read aloud downstream — that is why they fail here.
-        let err = validate(&tagged("Hắn [khóc]."), &json!({"characters": []})).unwrap_err();
+        let err = validate(&tagged("Hắn [khóc]."), &json!({"characters": []}), &pal()).unwrap_err();
         assert!(err.to_string().contains("voice tag"), "{err}");
     }
 
@@ -625,7 +669,7 @@ mod tests {
             "segments": [{"speaker": "Ghost", "text": "hi", "direction": "Say calm in Vietnamese: hi"}],
             "roster": ["Narrator"]
         });
-        let err = validate(&data, &json!({"characters": []})).unwrap_err();
+        let err = validate(&data, &json!({"characters": []}), &pal()).unwrap_err();
         assert!(err.to_string().contains("unknown speaker"), "{err}");
     }
 
@@ -637,14 +681,14 @@ mod tests {
             "segments": [{"speaker": "Narrator", "text": "hi"}],
             "roster": ["Narrator"]
         });
-        validate(&no_dir, &json!({"characters": []})).unwrap();
+        validate(&no_dir, &json!({"characters": []}), &pal()).unwrap();
 
         let bad_hint = json!({
             "segments": [{"speaker": "Narrator", "text": "hi"}],
             "roster": ["Narrator"],
             "new_characters": [{"name": "X", "voice_hint": "mysterious"}]
         });
-        let err = validate(&bad_hint, &json!({"characters": []})).unwrap_err();
+        let err = validate(&bad_hint, &json!({"characters": []}), &pal()).unwrap_err();
         assert!(err.to_string().contains("gender/age"), "{err}");
     }
 
@@ -657,7 +701,7 @@ mod tests {
             "new_characters": [{"name": "Lão Trần", "voice_hint": "elderly male, gruff", "tags": ["old", "male"]}],
             "segments": [{"speaker": "Narrator", "text": "Trời sáng.", "direction": "Say calm in Vietnamese: Trời sáng."}]
         });
-        validate(&data, &json!({"characters": []})).unwrap();
+        validate(&data, &json!({"characters": []}), &pal()).unwrap();
     }
 
     #[test]
@@ -671,20 +715,64 @@ mod tests {
         // Missing key entirely.
         let mut no_tags = base();
         no_tags["new_characters"] = json!([{"name": "X", "voice_hint": "adult male, gruff"}]);
-        assert!(validate(&no_tags, &json!({"characters": []})).is_err());
+        assert!(validate(&no_tags, &json!({"characters": []}), &pal()).is_err());
 
         // A sentence is not a tag.
         let mut sloppy = base();
         sloppy["new_characters"] =
             json!([{"name": "X", "voice_hint": "adult male, gruff", "tags": ["old man"]}]);
-        let err = validate(&sloppy, &json!({"characters": []})).unwrap_err();
+        let err = validate(&sloppy, &json!({"characters": []}), &pal()).unwrap_err();
         assert!(err.to_string().contains("single tokens"), "{err}");
 
         // `[]` is the honest answer for the ageless — and it validates.
         let mut ageless = base();
         ageless["new_characters"] =
             json!([{"name": "X", "voice_hint": "elderly male, flat", "tags": []}]);
-        validate(&ageless, &json!({"characters": []})).unwrap();
+        validate(&ageless, &json!({"characters": []}), &pal()).unwrap();
+    }
+
+    #[test]
+    fn validate_closes_the_music_vocabulary_and_keeps_old_scripts_mergeable() {
+        let one = |music: &str| {
+            json!({
+                "segments": [{"speaker": "Narrator", "text": "x", "music": music}],
+                "roster": ["Narrator"]
+            })
+        };
+        let bible = json!({"characters": []});
+
+        validate(&one("quiet"), &bible, &pal()).unwrap();
+        // `none` is a value, not an absence.
+        validate(&one("none"), &bible, &pal()).unwrap();
+
+        // Out of the palette: rejected, and the message names it so the repair
+        // round has something to repair *to*.
+        let err = validate(&one("melancholy"), &bible, &pal()).unwrap_err();
+        assert!(err.to_string().contains("palette"), "{err}");
+        assert!(err.to_string().contains("quiet"), "{err}");
+
+        // Half-declared is rejected: the field is a statement about every
+        // segment, or about none of them.
+        let mixed = json!({
+            "segments": [
+                {"speaker": "Narrator", "text": "x", "music": "quiet"},
+                {"speaker": "Narrator", "text": "y"}
+            ],
+            "roster": ["Narrator"]
+        });
+        let err = validate(&mixed, &bible, &pal()).unwrap_err();
+        assert!(err.to_string().contains("missing `music`"), "{err}");
+
+        // No value anywhere: a script from before the field existed. It still
+        // validates, because the scene map's legacy shim gives it a mood.
+        let legacy = json!({
+            "segments": [{"speaker": "Narrator", "text": "x", "scene": "street-day"}],
+            "roster": ["Narrator"]
+        });
+        validate(&legacy, &bible, &pal()).unwrap();
+
+        // A map with no palette cannot judge a value, so it does not try.
+        validate(&one("melancholy"), &bible, &[]).unwrap();
     }
 
     #[test]

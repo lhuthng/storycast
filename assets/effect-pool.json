@@ -1,0 +1,54 @@
+{
+  "_note": "Effect pool: sound -> {tags, files, looped}. A key is a SOUND, not a file, and a take is not a sound: `night` holds night-1..night-5, `rain` holds rain-1 and rain-2, `forest` holds forest-1 and forest-2. The number in a filename is a file index inside the family and nothing in the mix reads it, so a take must never be promoted to its own key — that makes the index part of the name and forces an invented tag to tell the siblings apart. `crickets`, `birds` and `light` were exactly that kind of tag and are gone with the keys that carried them: the crickets recording is simply another night take. Files are named `<sound>-N`, matching the key, so a registry line reads as what it is. `tags` is what a scene matches on and is the union of what the sound IS, not what it is called — `wind` keeps the `mountain` tag because the scene map asks for `mountain`, and `storm` keeps `rain` because the storm rule asks for both; dropping either would silently make those scenes score zero and go quiet. The scene map names *tags*, never files or sounds, so a scene asks for 'rain' and the pool decides which rain sound answers. `files` paths are relative to assets/ — the merge resolves them against the same directory the scene map comes from. Clips live in effects/ and are normalized by tools/normalize-audio.sh to -23 LUFS / -3 dBTP mono 48 kHz, so a scene map's `level` is a gain over a known source rather than a lottery. `looped: false` marks a one-shot: it plays once at the head of its window and the window then falls silent. Omit `looped` for a bed. The three keys still spelled `cave-drip`, `fire-crackle` and `market-crowd` are the last compound names: unlike `forest-birds`, which folded into an existing plain-named key, they would each need a NEW name chosen, and the two examples given (`mountain-wind` -> `wind`, the phenomenon; `night-crickets` -> `night`, the place) point in opposite directions. Left as-is pending that call.",
+  "cave-drip": {
+    "tags": ["cave", "drip", "dark"],
+    "files": ["effects/cave-drip.mp3"]
+  },
+  "day": {
+    "tags": ["day", "calm"],
+    "files": ["effects/day-1.mp3", "effects/day-2.mp3", "effects/day-3.mp3"]
+  },
+  "fire-crackle": {
+    "tags": ["fire", "indoor", "warm"],
+    "files": ["effects/fire-crackle.mp3"]
+  },
+  "forest": {
+    "tags": ["forest", "birds", "day"],
+    "files": ["effects/forest-1.mp3", "effects/forest-2.mp3"]
+  },
+  "market-crowd": {
+    "tags": ["market", "crowd", "street", "day"],
+    "files": ["effects/market-crowd.mp3"]
+  },
+  "night": {
+    "tags": ["night"],
+    "files": [
+      "effects/night-1.mp3",
+      "effects/night-2.mp3",
+      "effects/night-3.mp3",
+      "effects/night-4.mp3",
+      "effects/night-5.mp3"
+    ]
+  },
+  "rain": {
+    "tags": ["rain", "calm"],
+    "files": ["effects/rain-1.mp3", "effects/rain-2.mp3"]
+  },
+  "river": {
+    "tags": ["river", "water"],
+    "files": ["effects/river-1.mp3", "effects/river-2.mp3"]
+  },
+  "storm": {
+    "tags": ["rain", "storm", "tense"],
+    "files": ["effects/storm-1.mp3"]
+  },
+  "sword-fight": {
+    "tags": ["battle", "sword"],
+    "files": ["effects/sword-fight-1.mp3"],
+    "looped": false
+  },
+  "wind": {
+    "tags": ["mountain", "wind", "cold"],
+    "files": ["effects/wind-1.mp3"]
+  }
+}

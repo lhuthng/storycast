@@ -38,7 +38,9 @@ impl ProvisionStamp {
 ///
 /// * `sources_hash` — `prompts/` by signature, plus the *content* of the small
 ///   manifests the worker must match exactly (`requirements.txt`, the cast
-///   files, the scene map), plus the agent version so a rebuild redeploys.
+///   files, the scene map and the two clip-pool registries), plus the effect
+///   and music clip directories by signature, plus the agent version so a
+///   rebuild redeploys.
 /// * `voices_hash` — `voices.json` by content (a rename with identical clips
 ///   must re-enroll) and `refs/` by signature only: those clips are megabytes,
 ///   and reading them would cost more than the enrollment we are avoiding.
@@ -52,6 +54,12 @@ pub fn compute_provision_stamp(repo_root: &Path, agent_version: &str) -> Provisi
         "data/cast-vieneu.json",
         "data/cast.json",
         "assets/scene-map.json",
+        // The pools are manifests, not media: the registry decides which clip
+        // answers a scene, so a worker left holding a stale one would mix a
+        // different chapter than the inductor previewed — same script, same
+        // seed, different audio, and nothing on either side to say why.
+        "assets/effect-pool.json",
+        "assets/music-pool.json",
     ] {
         let p = repo_root.join(rel);
         if let Ok(bytes) = std::fs::read(&p) {
@@ -60,6 +68,15 @@ pub fn compute_provision_stamp(repo_root: &Path, agent_version: &str) -> Provisi
             sources.update(&bytes);
             sources.update([0]);
         }
+    }
+    // …and the clips themselves by signature, exactly like `refs/`: a pool
+    // registry is only as good as the files it names, so adding a clip has to
+    // resync even though no manifest changed.
+    for rel in ["assets/effects", "assets/music"] {
+        sources.update(rel.as_bytes());
+        sources.update([0]);
+        sources.update(signature_of_dir(&repo_root.join(rel)).as_bytes());
+        sources.update([0]);
     }
 
     let mut voices = Sha256::new();
@@ -206,6 +223,44 @@ mod tests {
         assert!(
             base.sources_in_sync(&added),
             "refs/ is not part of the sources hash"
+        );
+    }
+
+    #[test]
+    fn the_clip_pools_are_sources_and_resync_when_a_clip_is_added() {
+        let root = stamp_fixture("pools");
+        std::fs::create_dir_all(root.join("assets/effects")).unwrap();
+        std::fs::create_dir_all(root.join("assets/music")).unwrap();
+        std::fs::write(root.join("assets/effects/rain-1.mp3"), vec![1u8; 32]).unwrap();
+        std::fs::write(
+            root.join("assets/music-pool.json"),
+            r#"{"soft-1":{"file":"assets/music/soft-1.mp3","tags":["soft"]}}"#,
+        )
+        .unwrap();
+        let base = compute_provision_stamp(&root, "0.2.0");
+
+        // Re-running with nothing touched must not resync — otherwise every
+        // provision would push the clip directories for no reason.
+        assert!(base.sources_in_sync(&compute_provision_stamp(&root, "0.2.0")));
+
+        // The registry is a manifest: editing it changes what a scene means,
+        // so the worker has to receive it.
+        std::fs::write(
+            root.join("assets/music-pool.json"),
+            r#"{"soft-1":{"file":"assets/music/soft-1.mp3","tags":["calm"]}}"#,
+        )
+        .unwrap();
+        let edited = compute_provision_stamp(&root, "0.2.0");
+        assert!(
+            !base.sources_in_sync(&edited),
+            "a pool edit must resync sources"
+        );
+
+        // A new clip resyncs too, even though no manifest moved.
+        std::fs::write(root.join("assets/music/soft-1.mp3"), vec![2u8; 32]).unwrap();
+        assert!(
+            !edited.sources_in_sync(&compute_provision_stamp(&root, "0.2.0")),
+            "a new clip must resync sources"
         );
     }
 

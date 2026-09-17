@@ -147,9 +147,9 @@ echo "probe=done"
     /// Create the worker root skeleton.
     pub fn ensure_root(&self) -> Result<()> {
         let script = format!(
-            "mkdir -p $HOME/{d}/python $HOME/{d}/prompts $HOME/{d}/assets/ambience \
-             $HOME/{d}/refs $HOME/{d}/data/chapters $HOME/{d}/data/audio $HOME/{d}/output \
-             && echo READY",
+            "mkdir -p $HOME/{d}/python $HOME/{d}/prompts $HOME/{d}/assets/effects \
+             $HOME/{d}/assets/music $HOME/{d}/refs $HOME/{d}/data/chapters \
+             $HOME/{d}/data/audio $HOME/{d}/output && echo READY",
             d = REMOTE_DIR
         );
         let (code, stdout, stderr) = self.run(&script, 30)?;

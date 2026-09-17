@@ -24,8 +24,14 @@ pub struct Settings {
     /// Final-mix tempo and inter-line silence.
     pub speed: f64,
     pub gap_ms: u32,
-    /// Per-scene ambience beds + reverb under the voice mix.
+    /// Per-scene sound design under the voice mix: the effect layer's beds and
+    /// stingers. Off means no effect windows at all; room reverb is part of
+    /// this layer's scene treatment and goes with it.
     pub ambience: bool,
+    /// The background-music layer, independently switchable: a book can want
+    /// effects and no music, and the mix should not have to be edited to say so.
+    /// Scenes may also opt out individually (`music_off` in the scene map).
+    pub music: bool,
     /// `opencode` | `openrouter` | `local` | `gemini`.
     pub analyzer: String,
     pub opencode_model: String,
@@ -82,6 +88,7 @@ impl Default for Settings {
             speed: 1.25,
             gap_ms: 300,
             ambience: true,
+            music: true,
             analyzer: "opencode".into(),
             opencode_model: "opencode/muse-spark-1.3-contributor-free".into(),
             openrouter_model: "google/gemma-4-31b-it:free".into(),

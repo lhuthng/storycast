@@ -475,7 +475,7 @@ async fn run_merge(
     engine: &str,
     gap_ms: u32,
     speed: f64,
-    ambience: bool,
+    on: bm_core::ambience::LayerSwitch,
     shared: &Shared,
 ) -> Result<String> {
     set_progress(shared, 0.1, format!("merge ch{n}"));
@@ -490,19 +490,20 @@ async fn run_merge(
         engine.to_string(),
         gap_ms,
         speed,
-        ambience,
+        on,
         scratch.clone(),
     );
     let assembled = tokio::task::spawn_blocking(move || {
-        let (layout, n, engine, gap_ms, speed, ambience, scratch) = params;
+        let (layout, n, engine, gap_ms, speed, on, scratch) = params;
         bm_core::assemble::assemble(
             &layout.script(n),
             &layout.cast(&engine),
             &layout.bible(),
             &layout.seg_dir(&engine, n),
             &scratch,
+            n,
             gap_ms,
-            ambience,
+            on,
             speed,
             &engine,
             &layout.assets(),
@@ -727,7 +728,10 @@ async fn run_offer(
                 &offer.engine,
                 offer.gap_ms,
                 offer.speed,
-                offer.ambience,
+                bm_core::ambience::LayerSwitch {
+                    effects: offer.ambience,
+                    music: offer.music,
+                },
                 shared,
             )
             .await?;
@@ -1076,7 +1080,10 @@ async fn main() -> Result<()> {
                         &engine,
                         settings.gap_ms,
                         settings.speed,
-                        settings.ambience,
+                        bm_core::ambience::LayerSwitch {
+                            effects: settings.ambience,
+                            music: settings.music,
+                        },
                         &shared,
                     )
                     .await?;
@@ -1331,6 +1338,15 @@ mod tests {
             "bible={bible_json}\nchapter={chapter_text}\n",
         )
         .unwrap();
+        // The digest reads the music palette out of the scene map — it is the
+        // vocabulary the prompt offers and the validator accepts — so a worker
+        // with no `assets/` cannot be handed a chapter to digest at all.
+        std::fs::create_dir_all(layout.assets()).unwrap();
+        std::fs::write(
+            layout.assets().join("scene-map.json"),
+            r#"{"music_palette":{"quiet":{"tags":["soft"]},"none":{"tags":[]}}}"#,
+        )
+        .unwrap();
 
         // This box's own copy. On a real provisioned worker there is no
         // `.bm/settings.json` at all, so this would be `Settings::default()`
@@ -1363,6 +1379,7 @@ mod tests {
             gap_ms: 300,
             speed: 1.0,
             ambience: false,
+            music: false,
             render_units: None,
             local_node: false,
         };

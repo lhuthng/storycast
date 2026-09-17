@@ -59,8 +59,9 @@ URL ──crawl──▶ clean text ──digest──▶ script-NN.json ──r
 - **render** — speaks every segment through the TTS engine using the voice
   assigned to that segment's speaker. Each finished segment is cached, so a
   crash costs seconds, not a chapter.
-- **merge** — concatenates the segments (gaps + optional ambience beds) into
-  the final `Ch.N - Title.mp3` in `output/`.
+- **merge** — concatenates the segments (gaps, plus the optional effect and
+  music layers and the beats between scenes) into the final `Ch.N - Title.mp3`
+  in `output/`.
 
 A scheduler — the **inductor** — owns this state and hands chapters to workers
 (**agents**), on this machine and on any boxes you add over SSH.
@@ -119,27 +120,61 @@ dramatization style, `prompts/analyze.txt`).
 - Add nothing and the engine's built-in catalogue voices are used; a per-engine
   accent policy assigns a voice to each character automatically.
 
-### Give it atmosphere (ambience)
+### Give it atmosphere (sound design)
 
-Chapters don't have to be dry voices. The dramatization prompt tags every
-segment with a `scene` label (`"market-stall-morning"`, `"forest-night"`), and
-the merge stage turns those labels into background sound:
+Chapters don't have to be dry voices. The dramatization prompt tags every segment
+with two independent things, and the merge stage turns each into its own layer
+under the voice:
 
-- Consecutive same-speaker lines form a *run*; the run's majority scene label
-  is matched against ordered keyword rules in `assets/scene-map.json` — first
-  match wins. `"storm"` lays `rain-storm.mp3` under the mix at 22% volume,
-  `"night"` gets crickets, `"market"` gets a crowd, and so on (8 beds ship in
-  `assets/ambience/`).
-- The bed loops for the whole run and is **ducked automatically** whenever
-  someone speaks (ffmpeg sidechain: the bed drops away under the voice and
-  swells back in the pauses). Rules can also attach a reverb preset for room
-  feel.
-- A missing bed file is not an error — that span just plays dry voice.
-- To customize: drop your own loops into `assets/ambience/`, add or reorder
-  rules in `assets/scene-map.json` (`match` keywords, `bed`, `level`, optional
-  `reverb`), or turn the whole thing off with `"ambience": false` in
-  `.bm/settings.json` (the stock TUI run screen doesn't yet expose it, but the
-  setting is read at merge time).
+- **`scene` is the place** (`"market-stall-morning"`, `"forest-night"`) and drives
+  **effects**, which are sparse and deliberate. Consecutive same-speaker lines
+  form a *run*; the run's majority scene label is matched against ordered keyword
+  rules in `assets/scene-map.json` (first match wins), and a rule names *tags*,
+  never files. A window opens on a scene that names effect tags, lasts at least
+  `min_span_s`, waits `cooldown_s` after the previous window closed, and the
+  chapter may not spend more than `max_coverage` of its runtime on the layer — so
+  a bed marks the scene instead of running under the whole chapter.
+- **`music` is the mood**, and drives **background music**. It is one value from
+  a *closed* palette declared in `assets/scene-map.json` (`quiet`, `warm`, `busy`,
+  `battle`, `grand`, `none`), and the palette names the tags the music pool
+  matches on. Consecutive segments sharing a value are one cue, so **a chapter can
+  change its background music as often as its feeling changes** — a change of
+  value is where the track crossfades. The layer is quiet on purpose (`level:
+  0.06` against the effects' `0.08`–`0.22`), and `none` — or a mood the pool
+  cannot answer — plays **no music at all**; there is no silent filler track.
+  Because the vocabulary is closed and validated at digest time, "this mood has
+  no track" cannot happen by accident.
+- **The two are separate on purpose.** A place is where we are, a mood is what it
+  feels like. One string doing both jobs is how a shop at dawn (`martial-shop-
+  morning`) once came out with a hearth crackling under it: the keyword `shop`
+  matched a fire rule that sat *before* the daylight rule, so `morning` never got
+  a say.
+- **A beat where a scene changes.** At most `pause.max_per_chapter` per chapter,
+  placed only where the change is *narrated*, with narration resuming outranking
+  narration handing off. The music lifts to `pause_level` inside it — which is
+  the sidechain releasing, so a beat shorter than `duck.release` never lifts at
+  all.
+- **Everything is ducked.** One sidechain compressor, keyed on the whole voice
+  track, sits on both layers as a single bus — so "the layers drop whenever
+  anyone speaks" is a property of the signal path rather than a rule each layer
+  has to remember, and the narrator ducks them exactly as a character does.
+  Rules can also attach a reverb preset for room feel.
+- To customize: add clips to `assets/effects/` or `assets/music/` and register
+  them in `assets/effect-pool.json` / `assets/music-pool.json` — the registry is
+  the truth: one key per *sound* with its takes under `files`, and `tags` is what
+  a scene matches on (written by hand, not derived from the filename), so
+  `looped: false` marks a one-shot stinger; add or retune a **mood** in `scene-map.json`'s
+  `music_palette` (the digest prompt is rendered from it, so the analyzer can
+  offer it immediately), or reorder the place rules; or switch a layer off with
+  `"ambience": false` / `"music": false` in `.bm/settings.json` (the stock TUI run
+  screen doesn't yet expose either, but both are read at merge time). Normalize
+  new clips with `tools/normalize-audio.sh <src> <dest>` first: the scene map's
+  `level` is a gain over a −23 LUFS source, and that only holds if every clip in
+  a pool was brought to the same spec.
+- Chapters digested before segments carried `music` keep merging through the
+  `legacy_scene_music` shim in `scene-map.json`, which scores their `scene` label
+  to a palette value. It is a migration shim, not the design — delete it once
+  every script on disk carries the field.
 
 ---
 
@@ -239,7 +274,7 @@ git-ignored — see the two tables at the top for the tracked/ignored split.
 | Path                                        | What it is                                                                                  |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | `prompts/analyze.txt`                       | **The dramatization prompt — your main customization point** (tracked; an example you edit) |
-| `assets/ambience/`, `assets/scene-map.json` | Ambience loops and scene labels (tracked)                                                   |
+| `assets/effects/`, `assets/music/`, `assets/*-pool.json`, `assets/scene-map.json`, `assets/LICENSES.json` | Sound-design clips, the pools that name them, the scene labels, and clip provenance (tracked) |
 | `voices.default.json`                       | The built-in catalogue voices (tracked)                                                     |
 | `output/Ch.N - Title.mp3`                   | **The finished audiobook chapters**                                                         |
 | `data/chapters/NN.txt`                      | Crawled, cleaned chapter text                                                               |
@@ -250,7 +285,7 @@ git-ignored — see the two tables at the top for the tracked/ignored split.
 | `voices.json`                               | Character → reference clip (clone voices)                                                   |
 | `voice-pool.json`                           | Tagged sample pool for automatic voice assignment                                           |
 | `refs/`                                     | Your voice clips                                                                            |
-| `.bm/settings.json`                         | Run config: url_template, engine, start/count, speed, gap_ms, ambience, analyzer, models    |
+| `.bm/settings.json`                         | Run config: url_template, engine, start/count, speed, gap_ms, ambience, music, analyzer, models |
 | `.bm/ledger.json`                           | The task ledger — which chapter/stage is in which state; survives restarts                  |
 | `.bm/machines.json`                         | Linked machines (addr, ssh user/port/key)                                                   |
 | `~/.bm-worker/`                             | A worker's whole world on any machine: agent binary, venv, sources, `.provision_stamp.json` |

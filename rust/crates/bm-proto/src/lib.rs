@@ -525,6 +525,11 @@ pub struct TaskOffer {
     pub speed: f64,
     #[serde(default)]
     pub ambience: bool,
+    /// The background-music layer, independently switchable. Absent means no
+    /// music — an inductor that predates this field never offered any, so the
+    /// two sides agree without a version check.
+    #[serde(default)]
+    pub music: bool,
     /// Render stage: exactly the units the inductor's store lacks — the
     /// worker speaks these and nothing else. `None` (old inductor) means
     /// "plan from your own script as before"; `Some([])` means the store is
@@ -906,6 +911,21 @@ mod tests {
     }
 
     #[test]
+    fn an_offer_without_music_means_no_music_layer() {
+        // The rollout: an inductor that predates the music layer sends no
+        // `music`, and the worker must read that as "mix what I always mixed"
+        // rather than as a malformed offer or as music-on. Absent is off, so
+        // neither side needs to know the other's version.
+        let o: TaskOffer = serde_json::from_str(
+            r#"{"task_id":"merge:1","chapter":1,"stage":"merge","root":"/r",
+                "engine":"vieneu","gap_ms":300,"speed":1.25,"ambience":true}"#,
+        )
+        .unwrap();
+        assert!(o.ambience, "the old field still means what it always did");
+        assert!(!o.music);
+    }
+
+    #[test]
     fn roster_deserialises_with_optional_flags_absent() {
         // The picker must survive a payload from an older inductor that never
         // learned about `enrolled`/`allowed`.
@@ -1074,6 +1094,7 @@ mod tests {
             gap_ms: 300,
             speed: 1.0,
             ambience: false,
+            music: false,
             render_units: None,
             local_node: false,
         };

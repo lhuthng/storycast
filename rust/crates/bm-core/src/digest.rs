@@ -91,11 +91,34 @@ fn strip_fences(raw: &str) -> &str {
 // the stage entry point
 // ---------------------------------------------------------------------------
 
+/// Read the scene map, refusing a map that declares no music palette: without
+/// it the prompt would offer the analyzer an empty vocabulary and every emitted
+/// `music` value would be rejected. One read, feeding both the prompt and the
+/// validator, so the two cannot disagree about what is allowed.
+fn load_map(layout: &Layout) -> Result<crate::ambience::SceneMap> {
+    let path = layout.assets().join("scene-map.json");
+    let map = crate::ambience::load_map(&path)?;
+    if map.music_palette.is_empty() {
+        anyhow::bail!(
+            "{} declares no `music_palette`, so the digest prompt has no \
+             vocabulary to offer and no value it emits could be accepted",
+            path.display()
+        );
+    }
+    Ok(map)
+}
+
 pub fn build_prompt(layout: &Layout, bible: &Value, chapter_text: &str) -> Result<String> {
     let template = std::fs::read_to_string(layout.prompt())
         .with_context(|| format!("reading prompt template {}", layout.prompt().display()))?;
+    // The palette is rendered from the map rather than written into the
+    // template, so adding a mood (and the clip that answers it) is one edit to
+    // one file. A prompt that listed its own vocabulary would drift the moment
+    // the pool changed, and the drift would be silent.
+    let palette = crate::ambience::palette_prompt(&load_map(layout)?);
     Ok(template
         .replace("{bible_json}", &bible_context(bible))
+        .replace("{music_palette}", &palette)
         .replace("{chapter_text}", chapter_text))
 }
 
@@ -113,6 +136,10 @@ pub async fn digest_chapter(
     let text = std::fs::read_to_string(&chapter_path)
         .with_context(|| format!("reading {}", chapter_path.display()))?;
     let prompt = build_prompt(layout, bible, &text)?;
+    // The same map `build_prompt` rendered, read once more for the validator:
+    // one file, so the vocabulary offered and the vocabulary accepted are the
+    // same vocabulary by construction.
+    let palette = crate::ambience::palette_names(&load_map(layout)?);
 
     progress(0.10, format!("digest ch{n} via {analyzer}"));
     let mut raw: Option<String> = None;
@@ -141,7 +168,7 @@ pub async fn digest_chapter(
     })?;
 
     progress(0.60, "validating digest".to_string());
-    let parsed = parse_and_validate(&raw, bible);
+    let parsed = parse_and_validate(&raw, bible, &palette);
     let data = match parsed {
         Ok(d) => d,
         Err(e) => {
@@ -157,7 +184,7 @@ pub async fn digest_chapter(
                 Err(GenError::Fatal(e2)) => return Err(e2),
             };
             raw = second;
-            match parse_and_validate(&raw, bible) {
+            match parse_and_validate(&raw, bible, &palette) {
                 Ok(d) => d,
                 Err(e2) => {
                     let dump = layout.data().join(".last-analyze-raw.json");
@@ -248,10 +275,10 @@ pub async fn digest_chapter(
     })
 }
 
-fn parse_and_validate(raw: &str, bible: &Value) -> Result<Value> {
+fn parse_and_validate(raw: &str, bible: &Value, palette: &[String]) -> Result<Value> {
     let cleaned = strip_fences(raw);
     let data: Value = serde_json::from_str(cleaned).context("not valid JSON")?;
-    validate(&data, bible)?;
+    validate(&data, bible, palette)?;
     Ok(data)
 }
 
