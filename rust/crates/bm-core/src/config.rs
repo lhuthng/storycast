@@ -38,11 +38,7 @@ pub struct Settings {
     pub openrouter_model: String,
     pub local_model: String,
     pub ollama_url: String,
-    pub analyze_model: String,
-    /// Gemini fallback chain, first tried first. When empty (the default) the
-    /// single `analyze_model` above stands alone — which keeps every existing
-    /// settings file parsing exactly as before.
-    #[serde(default)]
+    /// Gemini fallback chain, first tried first.
     pub analyze_models: Vec<String>,
     /// Gemini TTS fallback chain, newest first.
     pub model_order: Vec<String>,
@@ -94,8 +90,7 @@ impl Default for Settings {
             openrouter_model: "google/gemma-4-31b-it:free".into(),
             local_model: "gemma-4-12b".into(),
             ollama_url: "http://localhost:11434".into(),
-            analyze_model: "gemini-3.5-flash".into(),
-            analyze_models: Vec::new(),
+            analyze_models: vec!["gemini-3.5-flash".into()],
             model_order: vec![
                 "gemini-3.1-flash-tts-preview".into(),
                 "gemini-2.5-pro-preview-tts".into(),
@@ -127,10 +122,6 @@ impl Settings {
     /// with a task offer.
     pub fn analyzer_settings(&self) -> bm_proto::AnalyzerSettings {
         bm_proto::AnalyzerSettings {
-            analyze_model: self.analyze_model.clone(),
-            // `Some`, not `None`: this inductor *has* an opinion, even when the
-            // opinion is "no chain". `None` is reserved for an inductor that
-            // never sent the field at all.
             analyze_models: Some(self.analyze_models.clone()),
             opencode_model: self.opencode_model.clone(),
             openrouter_model: self.openrouter_model.clone(),
@@ -147,7 +138,7 @@ impl Settings {
     /// has **no `.bm/settings.json`** — provisioning copies `prompts/`,
     /// `python/`, `assets/` and `refs/` and never `.bm/`, which is the
     /// inductor's state — so `Settings::load` falls back to
-    /// `Settings::default()` and the *compiled-in* `analyze_model` ran instead
+    /// `Settings::default()` and the *compiled-in* `analyze_models` ran instead
     /// of the operator's. That showed up as a 503 naming a model the operator
     /// had stopped using.
     ///
@@ -156,9 +147,6 @@ impl Settings {
     /// business and stay where they are.
     pub fn with_analyzer_settings(&self, a: &bm_proto::AnalyzerSettings) -> Settings {
         let mut s = self.clone();
-        if !a.analyze_model.is_empty() {
-            s.analyze_model = a.analyze_model.clone();
-        }
         // `Some` replaces outright — including `Some([])`, which is a
         // deliberate "no chain". `None` is silence, not an instruction to
         // clear.
@@ -238,6 +226,26 @@ mod tests {
     }
 
     #[test]
+    fn analyzer_models_default_only_when_omitted() {
+        let omitted: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(omitted.analyze_models, vec!["gemini-3.5-flash"]);
+        let explicit_empty = bm_proto::AnalyzerSettings {
+            analyze_models: Some(vec![]),
+            ..Default::default()
+        };
+        let effective = omitted.with_analyzer_settings(&explicit_empty);
+        assert!(effective.analyze_models.is_empty());
+        assert_eq!(effective.analyzer_settings().analyze_models, Some(vec![]));
+        for models in [vec![], vec!["first", "second"]] {
+            let settings: Settings =
+                serde_json::from_value(serde_json::json!({"analyze_models": models})).unwrap();
+            assert_eq!(settings.analyze_models, models);
+            let saved = serde_json::to_value(&settings).unwrap();
+            assert_eq!(saved["analyze_models"], serde_json::json!(models));
+        }
+    }
+
+    #[test]
     fn chapter_url_substitutes_every_n() {
         let s = Settings {
             url_template: "https://x/chuong-{n}?page={n}".into(),
@@ -294,14 +302,12 @@ mod tests {
         // never `.bm/` — so `Settings::load` hands back the compiled default.
         let remote_box = Settings::default();
         let inductor = Settings {
-            analyze_model: "gemini-3.5-flash".into(),
             analyze_models: vec!["gemini-3.5-flash-lite".into()],
             opencode_model: "opencode/other".into(),
             ..Settings::default()
         };
         let effective = remote_box.with_analyzer_settings(&inductor.analyzer_settings());
         assert_eq!(effective.analyze_models, vec!["gemini-3.5-flash-lite"]);
-        assert_eq!(effective.analyze_model, "gemini-3.5-flash");
         assert_eq!(effective.opencode_model, "opencode/other");
     }
 
@@ -310,22 +316,17 @@ mod tests {
         // An older inductor sends no block at all. Every local value survives,
         // which is what keeps either side upgradable on its own.
         let boxed = Settings {
-            analyze_model: "mine".into(),
             analyze_models: vec!["mine-1".into(), "mine-2".into()],
             ollama_url: "http://elsewhere:11434".into(),
             ..Settings::default()
         };
         let same = boxed.with_analyzer_settings(&bm_proto::AnalyzerSettings::default());
-        assert_eq!(same.analyze_model, "mine");
         assert_eq!(same.analyze_models, vec!["mine-1", "mine-2"]);
         assert_eq!(same.ollama_url, "http://elsewhere:11434");
     }
 
     #[test]
     fn a_deliberately_empty_chain_clears_the_boxes_own() {
-        // `Some([])` is an instruction — "no chain, `analyze_model` alone".
-        // `None` is silence. Collapsing them would make it impossible for an
-        // operator to *remove* a chain from a box that has one.
         let boxed = Settings {
             analyze_models: vec!["stale-1".into()],
             ..Settings::default()
