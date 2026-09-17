@@ -531,6 +531,8 @@ pub struct TaskOffer {
     pub effect_volume: f64,
     #[serde(default = "default_volume")]
     pub music_volume: f64,
+    #[serde(default = "default_volume")]
+    pub inject_volume: f64,
     /// Render stage: exactly the units the inductor's store lacks — the
     /// worker speaks these and nothing else. `None` (old inductor) means
     /// "plan from your own script as before"; `Some([])` means the store is
@@ -751,14 +753,15 @@ pub struct OpRequest {
     /// would change and write nothing.
     #[serde(default)]
     pub dry_run: Option<bool>,
-    /// The new mix, for `remix`: story speed plus the two layer volumes.
-    /// `None` is "not sent" — the op refuses rather than guessing.
+    /// The new mix, for `remix`: story speed plus the three layer volumes.
     #[serde(default)]
     pub speed: Option<f64>,
     #[serde(default)]
     pub effect_volume: Option<f64>,
     #[serde(default)]
     pub music_volume: Option<f64>,
+    #[serde(default)]
+    pub inject_volume: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -958,6 +961,22 @@ mod tests {
         assert!(!o.music);
         assert_eq!(o.effect_volume, 1.0);
         assert_eq!(o.music_volume, 1.0);
+        assert_eq!(o.inject_volume, 1.0);
+    }
+
+    #[test]
+    fn remix_inject_volume_is_optional_and_roundtrips() {
+        let mut req: OpRequest = serde_json::from_str(
+            r#"{"op":"remix","speed":1.25,"effect_volume":0.5,"music_volume":0.0}"#,
+        )
+        .unwrap();
+        assert_eq!(req.inject_volume, None);
+        for volume in [None, Some(0.0), Some(0.25), Some(2.0)] {
+            req.inject_volume = volume;
+            let back: OpRequest =
+                serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+            assert_eq!(back.inject_volume, volume);
+        }
     }
 
     #[test]
@@ -1132,6 +1151,7 @@ mod tests {
             music: false,
             effect_volume: 1.0,
             music_volume: 1.0,
+            inject_volume: 1.0,
             render_units: None,
             local_node: false,
         };

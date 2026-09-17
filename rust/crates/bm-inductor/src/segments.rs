@@ -150,8 +150,9 @@ pub(crate) fn expected_names(
     .ok()?;
     let local = engine == "vieneu";
     let title = bm_core::assemble::title_speech_for_script(&script_path, &cast, segments);
+    let planned = bm_core::assemble::Planned::plan(segments);
     let wavs = bm_core::assemble::expected_wavs(
-        segments,
+        &planned,
         &cast,
         &layout.seg_dir(engine, chapter),
         local,

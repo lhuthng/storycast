@@ -117,6 +117,7 @@ impl Inner {
             music: self.settings.music,
             effect_volume: self.settings.effect_volume,
             music_volume: self.settings.music_volume,
+            inject_volume: self.settings.inject_volume,
             // The inductor plans; the worker speaks. `None` when this chapter
             // cannot be planned here — the worker falls back to its own
             // script, exactly as before the migration.
@@ -163,8 +164,9 @@ impl Inner {
         let local = engine == "vieneu";
         let title = bm_core::assemble::title_speech_for_script(&script_path, &cast, segments);
         let seg_dir = self.layout.seg_dir(&engine, chapter);
+        let planned = bm_core::assemble::Planned::plan(segments);
         let units =
-            bm_core::assemble::plan_render(segments, &cast, &seg_dir, local, title.as_ref())
+            bm_core::assemble::plan_render(&planned, &cast, &seg_dir, local, title.as_ref())
                 .ok()?;
         Some(
             units

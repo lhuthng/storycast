@@ -14,6 +14,7 @@ pub(crate) struct RunPreview {
     pub(crate) speed: f64,
     pub(crate) effect_volume: f64,
     pub(crate) music_volume: f64,
+    pub(crate) inject_volume: f64,
     pub(crate) live: bool,
     /// A settings file exists (vs compiled defaults standing in).
     pub(crate) saved: bool,
@@ -56,6 +57,10 @@ pub(crate) fn run_preview(app: &App) -> RunPreview {
                 .get("music_volume")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(1.0),
+            inject_volume: s
+                .get("inject_volume")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0),
             live: true,
             saved,
         };
@@ -74,6 +79,7 @@ pub(crate) fn run_preview(app: &App) -> RunPreview {
         speed: s.speed,
         effect_volume: s.effect_volume,
         music_volume: s.music_volume,
+        inject_volume: s.inject_volume,
         live: false,
         saved,
     }
@@ -147,15 +153,18 @@ pub(crate) fn save_run_config(app: &App, buf: &str) -> Result<String, String> {
     ))
 }
 
-/// Parse `<speed> <effect-volume> <music-volume>` — the mix shape.
-/// Speed is the story tempo (0.5–2.0, the single-`atempo` range); volumes are
-/// master gains over the scene map's own levels (0.0–2.0, 0 mutes, 1 as authored).
-pub(crate) type MixConfig = (f64, f64, f64);
+/// Parse `<speed> <effect-volume> <music-volume> <inject-volume>` — the mix
+/// shape. Speed is the story tempo (0.5–2.0, the single-`atempo` range);
+/// volumes are master gains over the scene map's own levels (0.0–2.0, 0 mutes,
+/// 1 as authored).
+pub(crate) type MixConfig = (f64, f64, f64, Option<f64>);
 
 pub(crate) fn parse_mix_config(buf: &str) -> Result<MixConfig, String> {
     let parts: Vec<&str> = buf.split_whitespace().collect();
-    if parts.len() != 3 {
-        return Err("expected: <speed> <fx-vol> <music-vol>, e.g. 1.25 1.0 1.0".into());
+    if !(3..=4).contains(&parts.len()) {
+        return Err(
+            "expected: <speed> <fx-vol> <music-vol> [inject-vol], e.g. 1.25 1.0 1.0 1.0".into(),
+        );
     }
     let num = |s: &str, what: &str, lo: f64, hi: f64| {
         s.parse::<f64>()
@@ -172,6 +181,10 @@ pub(crate) fn parse_mix_config(buf: &str) -> Result<MixConfig, String> {
         num(parts[0], "speed", 0.5, 2.0)?,
         num(parts[1], "fx volume", 0.0, 2.0)?,
         num(parts[2], "music volume", 0.0, 2.0)?,
+        parts
+            .get(3)
+            .map(|s| num(s, "inject volume", 0.0, 2.0))
+            .transpose()?,
     ))
 }
 
@@ -180,18 +193,24 @@ pub(crate) fn parse_mix_config(buf: &str) -> Result<MixConfig, String> {
 pub(crate) fn mix_prefill(app: &App) -> String {
     if app.settings.is_some() {
         format!(
-            "{} {} {}",
+            "{} {} {} {}",
             app.setting_f64("speed", 1.25),
             app.setting_f64("effect_volume", 1.0),
-            app.setting_f64("music_volume", 1.0)
+            app.setting_f64("music_volume", 1.0),
+            app.setting_f64("inject_volume", 1.0)
         )
     } else if app.layout_root.as_os_str().is_empty() {
         let s = bm_core::config::Settings::default();
-        format!("{} {} {}", s.speed, s.effect_volume, s.music_volume)
+        format!(
+            "{} {} {} {}",
+            s.speed, s.effect_volume, s.music_volume, s.inject_volume
+        )
     } else {
-        let s =
-            bm_core::config::Settings::load(&bm_core::Layout::new(&app.layout_root).settings());
-        format!("{} {} {}", s.speed, s.effect_volume, s.music_volume)
+        let s = bm_core::config::Settings::load(&bm_core::Layout::new(&app.layout_root).settings());
+        format!(
+            "{} {} {} {}",
+            s.speed, s.effect_volume, s.music_volume, s.inject_volume
+        )
     }
 }
 

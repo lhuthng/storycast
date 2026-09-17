@@ -38,9 +38,9 @@ impl ProvisionStamp {
 ///
 /// * `sources_hash` — `prompts/` by signature, plus the *content* of the small
 ///   manifests the worker must match exactly (`requirements.txt`, the cast
-///   files, the scene map and the two clip-pool registries), plus the effect
-///   and music clip directories by signature, plus the agent version so a
-///   rebuild redeploys.
+///   files, the scene map and the three clip-pool registries), plus the effect,
+///   music and inject clip directories by signature, plus the agent version so
+///   a rebuild redeploys.
 /// * `voices_hash` — `voices.json` by content (a rename with identical clips
 ///   must re-enroll) and `refs/` by signature only: those clips are megabytes,
 ///   and reading them would cost more than the enrollment we are avoiding.
@@ -60,6 +60,7 @@ pub fn compute_provision_stamp(repo_root: &Path, agent_version: &str) -> Provisi
         // seed, different audio, and nothing on either side to say why.
         "assets/effect-pool.json",
         "assets/music-pool.json",
+        "assets/inject-pool.json",
     ] {
         let p = repo_root.join(rel);
         if let Ok(bytes) = std::fs::read(&p) {
@@ -72,7 +73,7 @@ pub fn compute_provision_stamp(repo_root: &Path, agent_version: &str) -> Provisi
     // …and the clips themselves by signature, exactly like `refs/`: a pool
     // registry is only as good as the files it names, so adding a clip has to
     // resync even though no manifest changed.
-    for rel in ["assets/effects", "assets/music"] {
+    for rel in ["assets/effects", "assets/music", "assets/injects"] {
         sources.update(rel.as_bytes());
         sources.update([0]);
         sources.update(signature_of_dir(&repo_root.join(rel)).as_bytes());

@@ -193,16 +193,16 @@ impl Inner {
                 .and_then(|s| s.as_array())
                 .cloned()
                 .unwrap_or_default();
-            let planned = bm_core::assemble::drop_headline(&segments);
+            let planned = bm_core::assemble::Planned::plan(&segments);
             let seg_dir = bm_core::segments::SegmentStore::dir(&store, engine, n);
             let local = engine == "vieneu";
             let is_them = |run: &bm_core::assemble::Run| {
                 run.speaker == character
                     || bm_core::digest::resolve_speaker(&bible, &run.speaker) == character
             };
-            let speaks = bm_core::assemble::runs(planned).iter().any(is_them);
+            let speaks = planned.runs().iter().any(is_them);
             let mut touched = false;
-            for run in bm_core::assemble::runs(planned) {
+            for run in planned.runs() {
                 if !is_them(&run) {
                     continue;
                 }

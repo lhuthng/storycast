@@ -736,8 +736,14 @@ mod tests {
         );
         // And the planner — which only ever sees that spelling — plans.
         let segs = vec![json!({"speaker": "Nam tử bị thương", "text": "Cứu ta."})];
-        let units = crate::assemble::plan_render(&segs, &cast, Path::new("segs"), true, None)
-            .expect("a variant speaker must plan");
+        let units = crate::assemble::plan_render(
+            &crate::assemble::Planned::plan(&segs),
+            &cast,
+            Path::new("segs"),
+            true,
+            None,
+        )
+        .expect("a variant speaker must plan");
         assert_eq!(units.len(), 1);
         assert_eq!(&units[0].voice, voice);
     }

@@ -269,16 +269,19 @@ impl Inner {
         speed: Option<f64>,
         effect_volume: Option<f64>,
         music_volume: Option<f64>,
+        inject_volume: Option<f64>,
     ) -> anyhow::Result<String> {
         self.ensure_idle()?;
         let (speed, fx, music) = match (speed, effect_volume, music_volume) {
             (Some(s), Some(f), Some(m)) => (s, f, m),
             _ => anyhow::bail!("remix needs speed + fx + music volumes"),
         };
+        let inj = inject_volume.unwrap_or(self.settings.inject_volume);
         for (v, what, lo, hi) in [
             (speed, "speed", 0.5, 2.0),
             (fx, "fx volume", 0.0, 2.0),
             (music, "music volume", 0.0, 2.0),
+            (inj, "inject volume", 0.0, 2.0),
         ] {
             if !v.is_finite() || v < lo || v > hi {
                 anyhow::bail!("{what} must be {lo}–{hi}, got {v}");
@@ -287,11 +290,12 @@ impl Inner {
         self.settings.speed = speed;
         self.settings.effect_volume = fx;
         self.settings.music_volume = music;
+        self.settings.inject_volume = inj;
         self.settings.save(&self.layout.settings())?;
         let n = self.requeue_stage(Stage::Merge, "requeued: mix changed", now_secs());
         self.save();
         Ok(format!(
-            "mix saved: speed {speed}, fx {fx}, music {music}; {n} merge(s) requeued"
+            "mix saved: speed {speed}, fx {fx}, music {music}, inject {inj}; {n} merge(s) requeued"
         ))
     }
 
@@ -486,24 +490,42 @@ impl Inner {
                 .and_then(|s| s.as_array())
                 .cloned()
                 .unwrap_or_default();
+            let planned = bm_core::assemble::Planned::plan(&edited);
             let title = bm_core::assemble::title_speech_for_script(&sp, &cast, &edited);
             let seg_dir = self.layout.seg_dir(&engine, n);
-            let wavs =
-                bm_core::assemble::expected_wavs(&edited, &cast, &seg_dir, local, title.as_ref())
-                    .unwrap_or_default();
+            let wavs = bm_core::assemble::expected_wavs(
+                &planned,
+                &cast,
+                &seg_dir,
+                local,
+                title.as_ref(),
+            )
+            .unwrap_or_default();
             let at = if title.is_some() { 1 } else { 0 };
+            // Raw item index -> planned piece index, through `origin`. It is
+            // not the identity and not an offset: `speech` has the headline
+            // dropped and the sound items lifted out, so a raw index walks off
+            // the end of `wavs` as soon as a chapter places one sound.
+            let piece_of = |raw: usize| -> Option<usize> {
+                planned.origin.iter().position(|o| o + skip == raw)
+            };
             let targets: Vec<std::path::PathBuf> = if local {
-                bm_core::assemble::runs(bm_core::assemble::drop_headline(&edited))
+                // One wav per run, so a touched piece costs its whole run —
+                // the run's wav is the file that holds the edited text.
+                let hit: Vec<usize> = touched.iter().filter_map(|r| piece_of(*r)).collect();
+                planned
+                    .runs()
                     .iter()
                     .enumerate()
-                    .filter(|(_, run)| run.idx.iter().any(|i| touched.contains(&(i + skip))))
+                    .filter(|(_, run)| run.idx.iter().any(|i| hit.contains(i)))
                     .filter_map(|(r, _)| wavs.get(at + r).cloned())
                     .collect()
             } else {
+                // One wav per piece in the cloud, so the piece is the target.
                 touched
                     .iter()
-                    .map(|i| i - skip)
-                    .filter_map(|i| wavs.get(at + i).cloned())
+                    .filter_map(|r| piece_of(*r))
+                    .filter_map(|p| wavs.get(at + p).cloned())
                     .collect()
             };
             for w in targets {

@@ -80,8 +80,8 @@ pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
         kv(
             "mix",
             format!(
-                "speed {} · fx {} · music {}",
-                cfg.speed, cfg.effect_volume, cfg.music_volume
+                "speed {} · fx {} · music {} · inject {}",
+                cfg.speed, cfg.effect_volume, cfg.music_volume, cfg.inject_volume
             ),
         ),
     ];

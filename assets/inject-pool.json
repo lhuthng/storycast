@@ -1,0 +1,332 @@
+{
+  "_note": "Third layer: injected spot effects the script places by name between the two halves of a line it splits (see prompts/analyze.txt rule 12). Foreground contract I=-20 LUFS / TP=-3 dBTP — voice territory, not the -26 bed contract. **`mode` and `hold` live here, per sound, and are NOT written in the script**: how a clip behaves is a property of the clip (a splat punctuates, a rustle runs under, a bed keeps going), and a per-chapter copy of it was a second source of truth the analyzer had to guess. `hit` holds the whole clip as silence, `overlap` costs no timeline time and runs under the following speech, `trail` holds `hold` seconds solo then tails under. `level` is an optional trim (default 1.0). Sparse transients (coin, swoosh, wood-chop) read several LU low on integrated loudness; that number does not describe them, their peaks sit with the voice peaks. The ceiling is applied to the sample peak before encoding, and a 64k mono mp3 overshoots on a transient, so the reconstructed true peak reads up to ~1.6 dB above -3 dBTP on the shortest takes (swoosh, sword-slash-3/4) while the sample peak sits on it. looped=true on the two kitchen beds only: a bed the script s is filled by repeating the clip with a short crossfade at each seam (loop_xfade_s), so its length follows the scene rather than the take. Every one-shot stays false — a coin plays once. A bed with no  has no window to fill and plays once too, which is why the digest has to place the stop. dur_s is the longest take, post-trim — the prompt renders it so the analyzer never `hit`s a 51 s boil.",
+  "arrow-twang": {
+    "tags": [
+      "arrow",
+      "bow",
+      "shoot",
+      "twang"
+    ],
+    "files": [
+      "injects/arrow-twang.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 0.6
+  },
+  "blood-spatter": {
+    "tags": [
+      "blood",
+      "gore",
+      "wound",
+      "spit"
+    ],
+    "files": [
+      "injects/blood-spatter-1.mp3",
+      "injects/blood-spatter-2.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 1.1
+  },
+  "boiling-water": {
+    "tags": [
+      "water",
+      "boiling",
+      "pot",
+      "cooking"
+    ],
+    "files": [
+      "injects/boiling-water-1.mp3",
+      "injects/boiling-water-2.mp3"
+    ],
+    "mode": "overlap",
+    "level": 0.8,
+    "looped": true,
+    "dur_s": 51.3
+  },
+  "broom-sweep": {
+    "tags": [
+      "sweep",
+      "broom",
+      "chores",
+      "cleaning"
+    ],
+    "files": [
+      "injects/broom-sweep.mp3"
+    ],
+    "mode": "overlap",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 0.9
+  },
+  "coin": {
+    "tags": [
+      "coin",
+      "money",
+      "metal",
+      "clink"
+    ],
+    "files": [
+      "injects/coin-1.mp3",
+      "injects/coin-2.mp3",
+      "injects/coin-3.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 1.4
+  },
+  "cooking": {
+    "tags": [
+      "cooking",
+      "food",
+      "wok",
+      "fire"
+    ],
+    "files": [
+      "injects/cooking-1.mp3",
+      "injects/cooking-2.mp3"
+    ],
+    "mode": "overlap",
+    "level": 0.8,
+    "looped": true,
+    "dur_s": 21.9
+  },
+  "explosion": {
+    "tags": [
+      "explosion",
+      "blast",
+      "battle"
+    ],
+    "files": [
+      "injects/explosion-1.mp3",
+      "injects/explosion-2.mp3"
+    ],
+    "mode": "trail",
+    "hold": 1.5,
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 3.9
+  },
+  "fire-spell": {
+    "tags": [
+      "fire",
+      "spell",
+      "magic",
+      "flame"
+    ],
+    "files": [
+      "injects/fire-spell-1.mp3",
+      "injects/fire-spell-2.mp3"
+    ],
+    "mode": "trail",
+    "hold": 1.5,
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 4.3
+  },
+  "flyby": {
+    "tags": [
+      "whoosh",
+      "flyby",
+      "pass",
+      "movement"
+    ],
+    "files": [
+      "injects/flyby.mp3"
+    ],
+    "mode": "overlap",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 1.4
+  },
+  "food-prep": {
+    "tags": [
+      "prep",
+      "kitchen",
+      "chop",
+      "board"
+    ],
+    "files": [
+      "injects/food-prep.mp3"
+    ],
+    "mode": "overlap",
+    "level": 0.05,
+    "looped": true,
+    "dur_s": 25.2
+  },
+  "light-spell": {
+    "tags": [
+      "light",
+      "spell",
+      "magic",
+      "heal"
+    ],
+    "files": [
+      "injects/light-spell.mp3"
+    ],
+    "mode": "overlap",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 7.6
+  },
+  "lightning-spell": {
+    "tags": [
+      "lightning",
+      "thunder",
+      "spell",
+      "magic"
+    ],
+    "files": [
+      "injects/lightning-spell.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 0.8
+  },
+  "metal-hit": {
+    "tags": [
+      "metal",
+      "clang",
+      "strike",
+      "hit"
+    ],
+    "files": [
+      "injects/metal-hit-1.mp3",
+      "injects/metal-hit-2.mp3",
+      "injects/metal-hit-3.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 1.0
+  },
+  "metal-punch": {
+    "tags": [
+      "punch",
+      "impact",
+      "metal",
+      "blow"
+    ],
+    "files": [
+      "injects/metal-punch.mp3"
+    ],
+    "mode": "trail",
+    "hold": 1.2,
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 3.4
+  },
+  "page-turn": {
+    "tags": [
+      "paper",
+      "page",
+      "book",
+      "flip"
+    ],
+    "files": [
+      "injects/page-turn.mp3"
+    ],
+    "mode": "overlap",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 0.6
+  },
+  "swoosh": {
+    "tags": [
+      "whoosh",
+      "swing",
+      "movement"
+    ],
+    "files": [
+      "injects/swoosh.mp3"
+    ],
+    "mode": "overlap",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 0.3
+  },
+  "sword-slash": {
+    "tags": [
+      "sword",
+      "slash",
+      "blade",
+      "battle"
+    ],
+    "files": [
+      "injects/sword-slash-1.mp3",
+      "injects/sword-slash-2.mp3",
+      "injects/sword-slash-3.mp3",
+      "injects/sword-slash-4.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 0.5
+  },
+  "tree-hit": {
+    "tags": [
+      "wood",
+      "tree",
+      "crash",
+      "hit"
+    ],
+    "files": [
+      "injects/tree-hit-1.mp3",
+      "injects/tree-hit-2.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 0.5
+  },
+  "underwater-explosion": {
+    "tags": [
+      "explosion",
+      "water",
+      "muffled",
+      "blast"
+    ],
+    "files": [
+      "injects/underwater-explosion.mp3"
+    ],
+    "mode": "trail",
+    "hold": 2.0,
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 6.0
+  },
+  "water-spell": {
+    "tags": [
+      "water",
+      "spell",
+      "magic"
+    ],
+    "files": [
+      "injects/water-spell-1.mp3",
+      "injects/water-spell-2.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 1.5
+  },
+  "wood-chop": {
+    "tags": [
+      "wood",
+      "chop",
+      "axe"
+    ],
+    "files": [
+      "injects/wood-chop.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 0.6
+  }
+}

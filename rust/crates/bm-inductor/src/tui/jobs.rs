@@ -1038,6 +1038,7 @@ pub(crate) async fn job_op(
                     req.speed,
                     req.effect_volume,
                     req.music_volume,
+                    req.inject_volume,
                 )
                 .await
                 {
@@ -1248,15 +1249,27 @@ pub(crate) async fn job_preview_local(
             let _ = tx.send(done(true, Some(B64.encode(&bytes))));
         }
         Ok(Ok(_)) => {
-            send(&tx, Level::Error, format!("preview {voice_done} (local): no audio rendered"));
+            send(
+                &tx,
+                Level::Error,
+                format!("preview {voice_done} (local): no audio rendered"),
+            );
             let _ = tx.send(done(false, None));
         }
         Ok(Err(e)) => {
-            send(&tx, Level::Error, format!("preview {voice_done} (local): {e}"));
+            send(
+                &tx,
+                Level::Error,
+                format!("preview {voice_done} (local): {e}"),
+            );
             let _ = tx.send(done(false, None));
         }
         Err(e) => {
-            send(&tx, Level::Error, format!("preview {voice_done} (local) task failed: {e}"));
+            send(
+                &tx,
+                Level::Error,
+                format!("preview {voice_done} (local) task failed: {e}"),
+            );
             let _ = tx.send(done(false, None));
         }
     }

@@ -348,7 +348,12 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
         }
         bm_proto::Op::Remix => {
             let mut inner = st.lock().await;
-            match inner.op_remix(req.speed, req.effect_volume, req.music_volume) {
+            match inner.op_remix(
+                req.speed,
+                req.effect_volume,
+                req.music_volume,
+                req.inject_volume,
+            ) {
                 Ok(msg) => Json(OpResult::ok(msg)),
                 Err(e) => Json(OpResult::fail(format!("remix failed: {e:#}"))),
             }
@@ -658,6 +663,7 @@ pub(crate) async fn offline_remix(
     speed: Option<f64>,
     effect_volume: Option<f64>,
     music_volume: Option<f64>,
+    inject_volume: Option<f64>,
 ) -> Result<String, String> {
     if super::backend::inductor_up(api).await {
         return Err(
@@ -667,7 +673,13 @@ pub(crate) async fn offline_remix(
     if super::backend::local_workers_alive() {
         return Err("local workers still running — X first, then remix".into());
     }
-    offline_remix_apply(layout_root, speed, effect_volume, music_volume)
+    offline_remix_apply(
+        layout_root,
+        speed,
+        effect_volume,
+        music_volume,
+        inject_volume,
+    )
 }
 
 fn offline_remix_apply(
@@ -675,13 +687,14 @@ fn offline_remix_apply(
     speed: Option<f64>,
     effect_volume: Option<f64>,
     music_volume: Option<f64>,
+    inject_volume: Option<f64>,
 ) -> Result<String, String> {
     let layout = bm_core::Layout::new(layout_root);
     let settings = bm_core::config::Settings::load(&layout.settings());
     let mut inner = Inner::new(layout, settings);
     inner.load_ledger();
     inner
-        .op_remix(speed, effect_volume, music_volume)
+        .op_remix(speed, effect_volume, music_volume, inject_volume)
         .map(|m| format!("{m} [offline — inductor was down]"))
         .map_err(|e| e.to_string())
 }
@@ -1244,15 +1257,25 @@ mod tests {
         )
         .unwrap();
 
-        let msg = offline_remix_apply(d.path(), Some(1.5), Some(0.5), Some(0.0))
+        let msg = offline_remix_apply(d.path(), Some(1.5), Some(0.5), Some(0.0), Some(0.25))
             .expect("offline remix");
         assert!(msg.contains("1.5"), "{msg}");
         assert!(msg.contains("offline"), "{msg}");
         assert!(!layout.final_mp3(1).exists(), "stale mp3 must go");
         let settings = bm_core::config::Settings::load(&layout.settings());
         assert_eq!(
-            (settings.speed, settings.effect_volume, settings.music_volume),
-            (1.5, 0.5, 0.0)
+            (
+                settings.speed,
+                settings.effect_volume,
+                settings.music_volume,
+                settings.inject_volume
+            ),
+            (1.5, 0.5, 0.0, 0.25)
+        );
+        offline_remix_apply(d.path(), Some(1.0), Some(1.0), Some(1.0), None).unwrap();
+        assert_eq!(
+            bm_core::config::Settings::load(&layout.settings()).inject_volume,
+            0.25
         );
         let ledger: serde_json::Value =
             bm_core::read_json(&layout.bm_state().join("ledger.json")).unwrap();
