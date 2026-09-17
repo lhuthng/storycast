@@ -98,28 +98,25 @@ impl Layout {
         self.root.join("assets")
     }
 
+    /// The scene map: the rules, the palette and the layer knobs.
     pub fn scene_map(&self) -> PathBuf {
         self.assets().join("scene-map.json")
     }
 
-    /// The effect layer's clip pool. The clips themselves live in
-    /// `assets/effects/`, alongside this registry, so provisioning ships a pool
-    /// and its clips as one directory.
-    pub fn effect_pool(&self) -> PathBuf {
-        self.assets().join("effect-pool.json")
+    /// One layer's clip registry.
+    ///
+    /// The three registries used to be spelled here one method at a time, which
+    /// meant a fourth layer was an edit in every file that named a pool. The
+    /// spelling now lives in [`crate::audio_pool::PoolKind`] alone — this just
+    /// joins it to `assets/`, which is also what provisioning ships, so a clip
+    /// and its registry travel together.
+    pub fn pool(&self, kind: crate::audio_pool::PoolKind) -> PathBuf {
+        self.assets().join(kind.registry())
     }
 
-    /// The music layer's clip pool, with its clips in `assets/music/`.
-    pub fn music_pool(&self) -> PathBuf {
-        self.assets().join("music-pool.json")
-    }
-
-    pub fn effects(&self) -> PathBuf {
-        self.assets().join("effects")
-    }
-
-    pub fn music(&self) -> PathBuf {
-        self.assets().join("music")
+    /// The directory one layer's clips live in, under `assets/`.
+    pub fn pool_dir(&self, kind: crate::audio_pool::PoolKind) -> PathBuf {
+        self.assets().join(kind.dir())
     }
 
     pub fn refs(&self) -> PathBuf {

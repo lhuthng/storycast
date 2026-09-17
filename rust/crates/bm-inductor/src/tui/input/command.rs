@@ -38,6 +38,7 @@ pub(crate) enum Command {
     SshUser,
     SshPort,
     Mix,
+    Sound,
     Rerender,
     Remerge,
 }
@@ -97,6 +98,7 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
         "sshuser" => Command::SshUser,
         "sshport" => Command::SshPort,
         "mix" => Command::Mix,
+        "sound" | "sounds" | "pools" => Command::Sound,
         "rerender" => Command::Rerender,
         "remerge" => Command::Remerge,
         "newest" => Command::Key(KeyCode::Char('G')),
@@ -255,9 +257,17 @@ pub(crate) fn do_command(
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::Mix,
                 "Mix — story speed and layer volumes",
-                "as <speed 0.5-2.0> <fx 0-2> <music 0-2> [inject 0-2], e.g. 1.25 1.0 1.0 1.0 (0 mutes)",
+                "as <speed 0.5-2.0> <fx 0-2> <music 0-2> [inject 0-2], e.g. 1.25 1.0 1.0 1.0 (0 mutes). \
+                 These are the whole layers; per-sound trims and the pools themselves are :sound",
                 &crate::tui::input::runconfig::mix_prefill(app),
             ));
+        }
+        Command::Sound => {
+            // The editor is a screen, not a prompt: it reads three registries
+            // and the scripts to know what is safe to remove, which is a
+            // background load rather than something to do between keystrokes.
+            app.screen = Screen::Sound(crate::tui::sound::SoundView::new());
+            app.load_sound(job_tx);
         }
         Command::Rerender => {
             // Full re-speak: worth one Enter, like every other destructive

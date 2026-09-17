@@ -10,6 +10,7 @@ mod machines;
 mod picker;
 mod prompt;
 mod run;
+mod sound;
 mod task_detail;
 mod tasks;
 mod workers;
@@ -152,6 +153,7 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Screen::Jobs { scroll, .. } => jobs::draw_jobs(f, app, scroll),
         Screen::Tasks(v) => tasks::draw_tasks_screen(f, app, &v),
         Screen::TaskDetail(d) => task_detail::draw_task_detail(f, app, &d),
+        Screen::Sound(v) => sound::draw_sound(f, app, &v),
         _ => {}
     }
 }

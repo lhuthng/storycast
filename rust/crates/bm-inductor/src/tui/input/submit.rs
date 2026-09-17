@@ -25,6 +25,11 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
             Err("ssh defaults save from the prompt, not submit".into())
         }
         TextKind::Mix => Err("mix saves from the prompt, not submit".into()),
+        // The sound-design prompts write a registry and launch nothing, so
+        // reaching dispatch means a bug — same as the two above.
+        TextKind::SoundAdd(_) | TextKind::SoundEdit(..) | TextKind::SoundLevel(..) => {
+            Err("sound pools save from the prompt, not submit".into())
+        }
         TextKind::AddMachine => {
             // Bind tuple: `addr [user [port [key...]]]` — the key is the
             // remainder of the line so paths with spaces survive. Missing
