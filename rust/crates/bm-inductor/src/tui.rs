@@ -21,6 +21,7 @@ pub(crate) mod jobs;
 pub(crate) mod layout;
 pub(crate) mod model;
 pub(crate) mod screen;
+pub(crate) mod sound;
 pub(crate) mod style;
 #[cfg(test)]
 mod tests;

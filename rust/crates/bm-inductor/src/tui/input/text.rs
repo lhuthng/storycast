@@ -81,10 +81,26 @@ pub(crate) async fn key_text(
                 p.kind,
                 TextKind::SshKey | TextKind::SshUser | TextKind::SshPort
             ) {
-                match save_ssh_setting(app, p.kind, &p.buf) {
+                match save_ssh_setting(app, p.kind.clone(), &p.buf) {
                     Ok(msg) => {
                         app.screen = Screen::Normal;
                         app.set_status(Level::Ok, msg);
+                    }
+                    Err(msg) => app.set_status(Level::Error, msg),
+                }
+            } else if matches!(
+                p.kind,
+                TextKind::SoundAdd(_) | TextKind::SoundEdit(..) | TextKind::SoundLevel(..)
+            ) {
+                // The three sound-design prompts all write a registry and launch
+                // nothing. Validated in one place so a typo keeps the prompt
+                // open with the operator's own typing still in it, and so the
+                // three paths cannot disagree about what they check.
+                match crate::tui::input::sound::submit(app, &p.kind, &p.buf) {
+                    Ok((msg, view)) => {
+                        app.log_at(Level::Ok, msg.clone());
+                        app.set_status(Level::Ok, msg);
+                        app.screen = Screen::Sound(view);
                     }
                     Err(msg) => app.set_status(Level::Error, msg),
                 }

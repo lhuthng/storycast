@@ -1,8 +1,9 @@
 //! Screens: the modal states the key chain and the painter agree on.
 use crate::tui::audition::AuditionLine;
+use crate::tui::sound::SoundView;
 use bm_proto::Stage;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TextKind {
     AddMachine,
     /// Pooled sample: tags come from the filename, the voice auto-rolls.
@@ -21,6 +22,15 @@ pub(crate) enum TextKind {
     /// Mix levels (`:mix`): story speed plus the two layer volumes, saved to
     /// the settings file like the run config. Launches nothing.
     Mix,
+    /// One sound-design pool entry (`:sound` → `a`): the whole entry as a
+    /// `key=value` line, saved to that layer's registry. Launches nothing.
+    SoundAdd(bm_core::audio_pool::PoolKind),
+    /// The same line for an entry already in the pool, carrying its name: the
+    /// name is the registry's key, so the prompt has to know which key it is
+    /// rewriting rather than reading it out of the buffer.
+    SoundEdit(bm_core::audio_pool::PoolKind, String),
+    /// One pooled sound's own trim. Empty clears it.
+    SoundLevel(bm_core::audio_pool::PoolKind, String),
     Translate,
     CrawlTemplate,
     /// `:` command line: the buffer names a key (`m`) or a word
@@ -173,6 +183,18 @@ impl Picker {
     }
 }
 
+/// One entry's removal, and the screen it was asked from.
+///
+/// A named struct rather than three fields on the variant: the confirmation
+/// carries where to *return to* as well as what to do, and spelling that inline
+/// made the whole `ConfirmAction` enum too wide to stay on one line per variant.
+#[derive(Debug, Clone)]
+pub(crate) struct SoundRemoval {
+    pub(crate) layer: bm_core::audio_pool::PoolKind,
+    pub(crate) name: String,
+    pub(crate) view: crate::tui::sound::SoundView,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum ConfirmAction {
     Quit,
@@ -182,6 +204,10 @@ pub(crate) enum ConfirmAction {
     StopBackend,
     Reconcile,
     Rerender,
+    /// Take one entry out of a sound-design pool. Carries the view it was
+    /// asked from, so answering the dialog returns to the same tab and row
+    /// instead of dumping the operator back on the dashboard.
+    SoundRemove(SoundRemoval),
 }
 
 #[derive(Debug, Clone)]
@@ -297,6 +323,9 @@ pub(crate) enum Screen {
     TaskDetail(TaskDetail),
     /// System overview: backend, config, voices, tasks — Enter launches.
     Run,
+    /// The three sound-design pools, one tab each: add, edit, remove, retune.
+    /// Removal is refused for anything the mix still reaches; see `sound.rs`.
+    Sound(SoundView),
     Confirm(Confirm),
     /// Machine detail, keyed by address so a refresh can never retarget it.
     Machine(String),

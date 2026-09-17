@@ -111,7 +111,11 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         ),
         (
             ":mix",
-            "story speed and fx/music volumes — requeues every merge",
+            "story speed and fx/music/inject volumes — requeues every merge",
+        ),
+        (
+            ":sound",
+            "the three clip pools: add, edit, retune, remove (also :pools, :sounds)",
         ),
         (
             ":remerge",
@@ -189,6 +193,36 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         "single temp file that each audition overwrites and exiting removes. The",
         "repo is never touched, and the file sits next to the speaker even when",
         "the inductor is on another box.",
+    ] {
+        lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
+    }
+
+    section(&mut lines, "Sound design (:sound)");
+    for v in [
+        "Three layers, one tab each: effects (place beds, picked by the scene",
+        "map's rules), music (tracks, picked by the palette) and injects (spot",
+        "effects the script places by name). ←→ or Tab switches tab.",
+        "a adds an entry, e edits the whole entry, l retunes its own level, and",
+        "d removes it. The line you type is key=value and is prefilled with the",
+        "values actually in force: name=, files=, tags=, plus the fields the",
+        "layer has — looped on effects, mode/hold/dur_s on injects. An inject's",
+        "dur_s is re-probed from the clip rather than typed, because it is a",
+        "fact about the clip and a typed number drifts from the file.",
+        "REMOVE IS DISABLED FOR ANYTHING STILL IN USE. A scene names tags, not",
+        "sounds, so a sound the scene map can still reach would go quiet rather",
+        "than fail if it were dropped — the status column and the line under the",
+        "table name every rule, palette value or chapter that still reaches the",
+        "highlighted entry, and the action bar marks d as unavailable. Clear the",
+        "reference (scene-map.json, or re-digest the script) and it becomes",
+        "removable. Removing never deletes a clip: the registry is the pool.",
+        "A level here is the third rung of a ladder: the sound's own trim × the",
+        "layer's master (shown in the header) × the :mix volume. An absent level",
+        "is 1.0, so a pool written before the field existed mixes as it did.",
+        "The registries are hand-formatted and their _note is documentation, so",
+        "an edit rewrites only the entry it touched and leaves the rest of the",
+        "file byte for byte. The merge runs here and picks the change up at",
+        "once; a worker running a digest uses the copy it was provisioned with,",
+        "so re-provision a box whose pools have changed.",
     ] {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }

@@ -177,6 +177,8 @@ tui/model.rs  pure view-model helpers (folding, filtering, sorting, rollups)
 tui/jobs.rs   background jobs (Job, run_job) — one sequential worker
 tui/audio.rs  the speaker: one reused temp file, played by afplay
 tui/audition.rs the line index and the chooser behind "hear a real line"
+tui/sound.rs  the three clip pools, what each entry is used for, and the
+              prompt/registry edits — pure, so the guard is testable
 tui/input.rs  the modal key chain, in order, then normal::normal_key
 tui/input/    one file per modal block; `audition.rs` is the shared
               four-key audition decision both voice screens call
@@ -187,6 +189,20 @@ tui/tests.rs  every test
 
 To follow a key press: `input.rs` → `input/<screen>.rs` → `jobs.rs` →
 `app.rs` → `draw.rs` → `draw/<pane>.rs`.
+
+**The sound-design editor (`:sound`) is a screen because its guard needs a
+load.** Three registries, the scene map and every `data/script-*.json` decide
+what may be removed, so it is a `Job` like the audition index rather than a
+keypress handler — and it is re-run after every save, because the guard is read
+off it. The rule it enforces is the one this pipeline keeps having to relearn:
+a scene names *tags*, not sounds, so dropping a sound a rule can still reach
+makes the scene score zero and go *quiet* instead of failing. "In use" is
+therefore a reference — a rule, a palette value, or a chapter's script — and
+never "a merge happens to be running", which is a different question with a
+different answer. `save_pool` rewrites only the entry that changed: the
+registries are hand-formatted and their `_note` is the only written record of
+why a pool is shaped the way it is, so an untouched pool round-trips byte for
+byte.
 
 **Auditioning a voice is the one place the TUI makes a sound.** The split is
 deliberate and worth keeping: the *inductor* renders (`Op::PreviewVoice` calls the

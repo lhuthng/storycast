@@ -100,6 +100,42 @@ pub(crate) const CAST_COLS_WIDE: [u16; 5] = [24, 20, 7, 14, 27];
 /// `speaker, voice, accent, status`
 pub(crate) const CAST_COLS_NARROW: [u16; 4] = [18, 16, 13, 23];
 
+/// The sound-design overlay's own size, when the terminal can hold it. Named
+/// because the column sets below are chosen against it: a table wider than
+/// `SOUND_OVERLAY_W - 2` would be a set that can never be selected, which is
+/// how a "wide" layout quietly becomes dead code.
+pub(crate) const SOUND_OVERLAY_W: u16 = 104;
+
+pub(crate) const SOUND_OVERLAY_H: u16 = 28;
+
+/// Column widths for the sound-design table: `sound, tags, takes, shape,
+/// status`.
+///
+/// Two sets for the same reason the cast table has two: the overlay is
+/// `SOUND_OVERLAY_W` when the terminal can hold it and shrinks to the frame
+/// minus its own padding when it cannot, and a squeezed table clips every
+/// column at once. The narrow set is what fits the 72-column overlay a
+/// minimum-width terminal gives it — `MIN_W` minus the 2-column pad each side.
+pub(crate) const SOUND_COLS_WIDE: [u16; 5] = [20, 30, 5, 23, 22];
+
+pub(crate) const SOUND_COLS_NARROW: [u16; 5] = [16, 20, 5, 13, 14];
+
+/// The sound-design action bar, in the pieces the draw styles separately.
+///
+/// The remove key is the only one whose availability is a fact about the
+/// highlighted entry, so it is the only one drawn differently — and the bar is
+/// the one place the screen states that a key is dead, so it must not clip.
+/// Split rather than written inline for exactly that reason: the guard below
+/// measures the longest form, and a clipped warning is no warning. The `d`
+/// itself is pushed by the draw, between the head and the remove piece.
+pub(crate) const SOUND_KEYS_HEAD: &str = "↑↓ · ←→ tab · a add · e edit · l level · ";
+
+pub(crate) const SOUND_KEYS_REMOVE: &str = " remove · ";
+
+pub(crate) const SOUND_KEYS_REMOVE_DEAD: &str = " remove ✗ in use · ";
+
+pub(crate) const SOUND_KEYS_TAIL: &str = "R · Esc close";
+
 /// Sum of a column list, in a form `const` evaluation accepts.
 pub(crate) const fn cols(xs: &[u16]) -> u16 {
     let mut i = 0;
@@ -164,4 +200,22 @@ const _: () = assert!(
 const _: () = assert!(
     cols(&CAST_COLS_NARROW) + 4 <= MIN_W,
     "the narrow cast table plus two sets of borders must fit the smallest terminal"
+);
+const _: () = assert!(
+    cols(&SOUND_COLS_NARROW) + 2 <= MIN_W - 4,
+    "the narrow sound-design table must fit the overlay a minimum-width terminal gives it"
+);
+const _: () = assert!(
+    cols(&SOUND_COLS_WIDE) + 2 <= SOUND_OVERLAY_W - 2,
+    "the wide sound-design table must fit the overlay it is only chosen on — \
+     otherwise the wide set is unreachable and the table is always narrow"
+);
+const _: () = assert!(
+    width_of(SOUND_KEYS_HEAD)
+        + 1 // the `d` the draw pushes between the two pieces
+        + width_of(SOUND_KEYS_REMOVE_DEAD)
+        + width_of(SOUND_KEYS_TAIL)
+        <= MIN_W as usize - 2,
+    "the sound-design action bar must fit the overlay at the minimum width, \
+     warning and all — a clipped `✗ in use` is no warning"
 );

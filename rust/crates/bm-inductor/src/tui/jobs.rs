@@ -104,6 +104,15 @@ pub(crate) enum Job {
     LoadLines {
         layout_root: std::path::PathBuf,
     },
+    /// Read the three sound-design registries, the scene map and every script,
+    /// and work out what each pooled sound is still used for.
+    ///
+    /// A job for the same reason as `LoadLines` — it is a hundred file opens —
+    /// and one more: the removal guard is read off this data, so it is also
+    /// re-run after every save rather than cached for the session.
+    LoadSounds {
+        layout_root: std::path::PathBuf,
+    },
     /// Serve one already-rendered segment from the local checkout: the
     /// disconnected form of `Op::Segment`. Same lookup the inductor runs,
     /// against the TUI's own files, so listening needs no backend.
@@ -152,6 +161,7 @@ impl Job {
             Job::Op { req, .. } => req.op.as_str(),
             Job::LoadRoster { .. } => "load roster",
             Job::LoadLines { .. } => "index audition lines",
+            Job::LoadSounds { .. } => "load sound design",
             Job::Segment { .. } => "local segment",
             Job::PreviewLocal { .. } => "preview voice (local)",
             Job::Tracked { .. } => unreachable!(),
@@ -182,6 +192,7 @@ impl Job {
             Job::StartBackend { .. } => return DoneKind::StartDone,
             Job::LoadRoster { .. } => return DoneKind::RosterDone,
             Job::LoadLines { .. } => return DoneKind::LinesDone,
+            Job::LoadSounds { .. } => return DoneKind::SoundsDone,
             _ => return DoneKind::Other,
         };
         DoneKind::Op {
@@ -200,6 +211,7 @@ impl Job {
 pub(crate) enum DoneKind {
     RosterDone,
     LinesDone,
+    SoundsDone,
     Op {
         op: Op,
         /// The in-flight key this job was dispatched under, so completion frees
@@ -251,6 +263,8 @@ pub(crate) enum Ev {
     },
     /// The per-speaker line index, built off the UI thread.
     Lines(Result<std::collections::HashMap<String, Vec<String>>, String>),
+    /// The sound-design pools, the scene map and each entry's usage.
+    Sounds(Result<crate::tui::sound::SoundData, String>),
 }
 
 /// Bounded wait for a freshly spawned inductor to answer `/api/state`.
@@ -1112,6 +1126,21 @@ pub(crate) async fn job_load_lines(
     let _ = tx.send(Ev::Done(DoneKind::Other));
 }
 
+/// Read the sound-design pools and what each entry is used for, off the UI
+/// thread. Same `spawn_blocking` reasoning as `job_load_lines`: a hundred file
+/// opens, and the UI task is the one thing the TUI may not stall.
+pub(crate) async fn job_load_sounds(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    layout_root: std::path::PathBuf,
+) {
+    let res = tokio::task::spawn_blocking(move || crate::tui::sound::load(&layout_root))
+        .await
+        .unwrap_or_else(|e| Err(format!("sound design task failed: {e}")));
+    let _ = tx.send(Ev::Sounds(res));
+    // Every arm of `run_job` owes exactly one of these; see `job_load_lines`.
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
 /// Serve one already-rendered segment without an inductor: the same lookup
 /// `Op::Segment` runs server-side, against this checkout's files. Reports
 /// through `DoneKind::Op` with the same shape, so the Done handler — line
@@ -1447,6 +1476,7 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
             layout_root,
         } => job_load_roster(tx, api, http, layout_root).await,
         Job::LoadLines { layout_root } => job_load_lines(tx, layout_root).await,
+        Job::LoadSounds { layout_root } => job_load_sounds(tx, layout_root).await,
         Job::Segment {
             layout_root,
             character,

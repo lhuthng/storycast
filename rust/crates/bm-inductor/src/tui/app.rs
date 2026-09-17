@@ -6,6 +6,7 @@ use crate::tui::{
     jobs::{fetch_state, BackgroundJob, DoneKind, Ev, Job},
     model::{cast_rows, registry_machines, CastRow},
     screen::Screen,
+    sound::SoundData,
     style::{level_from_str, style_bold_of, style_of, Conn, Level, LogLine},
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -80,6 +81,13 @@ pub(crate) struct App {
     /// session by a background job and never rebuilt: a full scan is seconds.
     pub(crate) lines: Option<std::collections::HashMap<String, Vec<String>>>,
     pub(crate) lines_loading: bool,
+    /// The three sound-design pools, the scene map and what each entry is
+    /// still used for. Built when the editor opens and rebuilt after every
+    /// save, so the screen and the registry on disk cannot disagree about
+    /// whether an entry is removable.
+    pub(crate) sound: Option<SoundData>,
+    pub(crate) sound_loading: bool,
+    pub(crate) sound_error: Option<String>,
     /// The speaker on this desk. Owns the audio process, not the audio.
     pub(crate) player: Player,
 }
@@ -125,6 +133,9 @@ impl App {
             locked_lines: HashMap::new(),
             lines: None,
             lines_loading: false,
+            sound: None,
+            sound_loading: false,
+            sound_error: None,
             player: Player::new(),
         }
     }
@@ -143,6 +154,29 @@ impl App {
             self,
             job_tx,
             Job::LoadLines {
+                layout_root: self.layout_root.clone(),
+            },
+        );
+    }
+
+    /// Load the sound-design pools unless they are already here or on their way.
+    ///
+    /// Called when the editor opens. Unlike the audition line index this is not
+    /// once per session: every save changes what is on disk, and the removal
+    /// guard is read off this data — a stale copy would offer a remove key for
+    /// an entry that has just been referenced, which is the one thing the guard
+    /// exists to prevent.
+    pub(crate) fn load_sound(&mut self, job_tx: &tokio::sync::mpsc::UnboundedSender<Job>) {
+        if self.sound_loading {
+            self.set_status(Level::Warn, "pool reload already running — watch events");
+            return;
+        }
+        self.sound_loading = true;
+        self.sound_error = None;
+        dispatch(
+            self,
+            job_tx,
+            Job::LoadSounds {
                 layout_root: self.layout_root.clone(),
             },
         );
@@ -486,6 +520,32 @@ impl App {
                     }
                 }
             }
+            Ev::Sounds(res) => {
+                self.sound_loading = false;
+                match res {
+                    Ok(data) => {
+                        let counts: Vec<String> = bm_core::audio_pool::PoolKind::ALL
+                            .iter()
+                            .map(|k| format!("{} {}", data.pools[k].len(), k.label()))
+                            .collect();
+                        self.log_at(
+                            Level::Info,
+                            format!("sound design loaded: {}", counts.join(" · ")),
+                        );
+                        self.sound_error = None;
+                        self.sound = Some(data);
+                    }
+                    // Not fatal to the TUI, fatal to the editor: the screen
+                    // renders the reason rather than an empty pool, because an
+                    // empty pool and an unreadable one look the same and only
+                    // one of them is safe to edit.
+                    Err(e) => {
+                        self.sound = None;
+                        self.sound_error = Some(e.clone());
+                        self.log_at(Level::Error, format!("sound design: {e}"));
+                    }
+                }
+            }
             // A poller snapshot, applied the moment it arrives: nothing here
             // waits on the network, which is what keeps the drawing loop moving
             // even when the inductor is slow to answer.
@@ -500,6 +560,7 @@ impl App {
                     }
                     DoneKind::RosterDone => self.roster_loading = false,
                     DoneKind::LinesDone => self.lines_loading = false,
+                    DoneKind::SoundsDone => self.sound_loading = false,
                     DoneKind::Op {
                         op,
                         key,

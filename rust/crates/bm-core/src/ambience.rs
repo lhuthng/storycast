@@ -521,6 +521,128 @@ pub fn effect_tags(pool: &ClipPool) -> Vec<String> {
     out.into_iter().collect()
 }
 
+// ---------------------------------------------------------------------------
+// what a pool is still being used for
+// ---------------------------------------------------------------------------
+
+/// One reason a pooled sound cannot be removed: a thing that names it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UseOf {
+    /// The scene map's rule or palette value, or `ch09` for a script.
+    pub by: String,
+    /// The tags that reach the sound. Empty for a script, which names the sound
+    /// itself rather than a tag.
+    pub tags: Vec<String>,
+}
+
+impl UseOf {
+    /// `mountain rule [mountain, wind]` — what a screen shows beside the entry.
+    pub fn label(&self) -> String {
+        if self.tags.is_empty() {
+            self.by.clone()
+        } else {
+            format!("{} [{}]", self.by, self.tags.join(", "))
+        }
+    }
+}
+
+/// Sounds at least one tag set can reach, and the tag sets that reach them.
+///
+/// A scene names *tags*; the pool answers with a *sound*. So "is this sound in
+/// use" is a question about the tag sets the map names, not about the sound's
+/// own name: `wind` is in use because the mountain rule asks for `mountain`,
+/// and the map never says `wind` anywhere. Deleting it would make every
+/// mountain scene score zero and go quiet — the failure the effect pool's own
+/// note warns about — so the editor refuses, and this is what it refuses on.
+///
+/// The test is the weakest one `pick` applies before narrowing: at least one
+/// tag in common. A one-tag sound may lose the overlap contest on most
+/// chapters and still win on a thin one, and a guard that lets you delete
+/// something that sometimes plays is not a guard.
+fn reachable(pool: &ClipPool, sets: impl Iterator<Item = (String, Vec<String>)>) -> Usage {
+    let mut out: Usage = BTreeMap::new();
+    for (by, tags) in sets {
+        if tags.is_empty() {
+            continue;
+        }
+        for (name, sound) in pool {
+            if sound.tags.iter().any(|t| tags.contains(t)) {
+                out.entry(name.clone()).or_default().push(UseOf {
+                    by: by.clone(),
+                    tags: tags.clone(),
+                });
+            }
+        }
+    }
+    for uses in out.values_mut() {
+        uses.sort();
+        uses.dedup();
+    }
+    out
+}
+
+/// Sound -> what the scene map's rules still reach. See [`reachable`].
+pub fn effect_usage(map: &SceneMap, pool: &ClipPool) -> Usage {
+    let named = map.rules.iter().map(|r| {
+        (
+            format!("scene rule {:?}", r.matches.join(", ")),
+            r.effect.clone(),
+        )
+    });
+    let dflt = std::iter::once(("scene default".to_string(), map.default.effect.clone()));
+    reachable(pool, named.chain(dflt))
+}
+
+/// Sound -> what the palette still reaches. See [`reachable`].
+pub fn music_usage(map: &SceneMap, pool: &ClipPool) -> Usage {
+    reachable(
+        pool,
+        map.music_palette
+            .iter()
+            .map(|(mood, e)| (format!("palette {mood:?}"), e.tags.clone())),
+    )
+}
+
+/// Sound -> the chapters whose script places it.
+///
+/// Unlike the other two layers this one is a direct lookup, because the script
+/// names the *sound* — `{"sound": "coin"}` — rather than a tag. An item is a
+/// sound when it carries `sound` or `stop` and no `text`
+/// ([`crate::util::is_sound_item`]); a `stop` counts, because it is placed for
+/// the same sound and would be left fading nothing.
+pub fn inject_usage(scripts: &[(u32, Value)]) -> BTreeMap<String, Vec<u32>> {
+    let mut out: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+    for (chapter, doc) in scripts {
+        let Some(items) = doc.get("segments").and_then(|s| s.as_array()) else {
+            continue;
+        };
+        for item in items {
+            if !crate::util::is_sound_item(item) {
+                continue;
+            }
+            for key in ["sound", "stop"] {
+                let Some(name) = item.get(key).and_then(|v| v.as_str()).map(str::trim) else {
+                    continue;
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                let chapters = out.entry(name.to_string()).or_default();
+                if !chapters.contains(chapter) {
+                    chapters.push(*chapter);
+                }
+            }
+        }
+    }
+    for chapters in out.values_mut() {
+        chapters.sort_unstable();
+    }
+    out
+}
+
+/// Sound -> every reason it is still in use, per layer.
+pub type Usage = BTreeMap<String, Vec<UseOf>>;
+
 pub fn load_map(path: &Path) -> Result<SceneMap> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading scene map {}", path.display()))?;
@@ -970,6 +1092,10 @@ pub struct MusicRun {
     /// implementation detail of the pick, so the mix reads it from here rather
     /// than looking the sound up a second time — one lookup, one answer.
     pub file: String,
+    /// The sound's own trim (`Sound::level`), carried the same way and for the
+    /// same reason as `file`: the mix multiplies it into the layer level, and
+    /// re-looking it up would be a second answer to a question already asked.
+    pub level: f64,
     /// Audible coverage ends here; the slice may extend past it into a
     /// crossfade with the next run.
     pub start: f64,
@@ -1050,6 +1176,7 @@ pub fn plan_music(
                 mood: mood.to_string(),
                 sound: picked.sound,
                 file: picked.file,
+                level: picked.level,
                 start: slot.start,
                 end: slot.end,
                 pauses: inside,
@@ -1222,6 +1349,7 @@ pub fn inject_take(
         sound: sound.to_string(),
         file,
         looped: entry.looped,
+        level: audio_pool::sound_level(entry),
     })
 }
 
@@ -1450,9 +1578,7 @@ pub fn loop_filter(copies: usize, xfade: f64, volume: f64) -> String {
         ));
         prev = out;
     }
-    format!(
-        "{f};[{prev}]volume={volume:.4},aformat=sample_rates=48000:channel_layouts=mono[out]"
-    )
+    format!("{f};[{prev}]volume={volume:.4},aformat=sample_rates=48000:channel_layouts=mono[out]")
 }
 
 /// End every still-sounding instance of `sound` at `at + fade`, eased rather
@@ -1862,6 +1988,12 @@ pub fn apply_layers(
             continue;
         }
         let dur = w.end - w.start;
+        // Three rungs, multiplied: the rule's balance against other scenes, the
+        // layer's own trim, and this sound's trim. A sound with no `level` is
+        // 1.0, so a registry that predates the field mixes byte for byte as it
+        // did — which `the_shipped_registries_are_all_at_unity_today` keeps
+        // honest.
+        let vol = w.level * clip.level;
         let p = work.join(format!("fx{n}.wav"));
         let mut args: Vec<String> = vec!["-y".into(), "-loglevel".into(), "error".into()];
         if clip.looped {
@@ -1878,13 +2010,13 @@ pub fn apply_layers(
         let af = if clip.looped {
             format!(
                 "volume={:.4},aformat=sample_rates=48000:channel_layouts=mono",
-                w.level
+                vol
             )
         } else {
             format!(
                 "volume={:.4},areverse,afade=t=in:st=0:d=0.4,areverse,\
                  aformat=sample_rates=48000:channel_layouts=mono",
-                w.level
+                vol
             )
         };
         args.push("-af".into());
@@ -1909,7 +2041,9 @@ pub fn apply_layers(
             // The sound's name, not the take's: `day`, never `day-2`. The log
             // is read by a human asking which sound answered.
             name: clip.sound.clone(),
-            level: w.level,
+            // What was actually applied, not the rule's share of it: the report
+            // is read against the audio that came out.
+            level: vol,
             one_shot: !clip.looped,
         });
     }
@@ -1954,8 +2088,10 @@ pub fn apply_layers(
         let dur = (run.end - run.start) + tail + (run.start - start);
         let p = work.join(format!("mu{n}.wav"));
         let expr = level_expr(
-            cfg.layers.music.level,
-            cfg.layers.music.pause_level,
+            // Both levels carry the run's own trim, so a track that sits quiet
+            // still lifts inside a pause by the same ratio as every other.
+            cfg.layers.music.level * run.level,
+            cfg.layers.music.pause_level * run.level,
             cfg.layers.music.ramp_s,
             start,
             &run.pauses,
@@ -2069,7 +2205,9 @@ pub fn apply_layers(
                             "-t".into(),
                             format!("{dur:.3}"),
                             "-af".into(),
-                            format!("volume={vol:.4},aformat=sample_rates=48000:channel_layouts=mono"),
+                            format!(
+                                "volume={vol:.4},aformat=sample_rates=48000:channel_layouts=mono"
+                            ),
                             s(p.display()),
                         ])?;
                     }
@@ -2257,9 +2395,17 @@ fn plan_lines(
         out.push("music none — no cue resolved for this chapter".into());
     }
     for r in runs {
+        // The level that was actually applied — the layer's, times this track's
+        // own trim — so the log reads the same way the effect line above it
+        // does, and a per-sound trim is visible in the one place a human looks
+        // to ask what the mix did.
         out.push(format!(
             "music [{:.0}-{:.0}s] {} <- {}@{:.3}",
-            r.start, r.end, r.sound, r.mood, cfg.layers.music.level
+            r.start,
+            r.end,
+            r.sound,
+            r.mood,
+            cfg.layers.music.level * r.level
         ));
     }
     for e in inj {
@@ -2408,6 +2554,241 @@ mod tests {
             scene: "s".into(),
             start,
             end,
+        }
+    }
+
+    fn sound(tags: &[&str], files: &[&str], level: Option<f64>) -> ClipPool {
+        let mut p = ClipPool::new();
+        p.insert(
+            "x".into(),
+            crate::audio_pool::Sound {
+                tags: tags.iter().map(|t| t.to_string()).collect(),
+                files: files.iter().map(|f| f.to_string()).collect(),
+                looped: true,
+                dur_s: None,
+                mode: None,
+                hold: None,
+                level,
+            },
+        );
+        p
+    }
+
+    // -----------------------------------------------------------------------
+    // what a pool is still being used for
+    // -----------------------------------------------------------------------
+
+    /// The point of the whole usage query: the scene map never says `wind`, and
+    /// `wind` is exactly what a mountain scene plays. A guard keyed on names
+    /// would call it unused and let it be deleted.
+    #[test]
+    fn effect_usage_reaches_by_tag_not_by_name() {
+        let map: SceneMap = serde_json::from_str(
+            r#"{
+              "rules": [
+                {"match": ["mountain"], "effect": ["mountain"], "level": 0.2},
+                {"match": ["night"], "effect": ["night"], "level": 0.15}
+              ],
+              "default": {"effect": ["default-bed"], "level": 0.05}
+            }"#,
+        )
+        .unwrap();
+        let mut pool = ClipPool::new();
+        for (name, tags) in [
+            ("wind", vec!["mountain", "wind"]),
+            ("night", vec!["night"]),
+            ("catch-all", vec!["default-bed"]),
+            ("orphan", vec!["nobody-asks-for-this"]),
+        ] {
+            pool.insert(
+                name.into(),
+                crate::audio_pool::Sound {
+                    tags: tags.iter().map(|t| t.to_string()).collect(),
+                    files: vec![format!("effects/{name}-1.mp3")],
+                    looped: true,
+                    dur_s: None,
+                    mode: None,
+                    hold: None,
+                    level: None,
+                },
+            );
+        }
+        let usage = effect_usage(&map, &pool);
+        // `wind` is reached by a tag the map asks for and never names it.
+        let wind = usage.get("wind").expect("the mountain rule reaches wind");
+        assert_eq!(wind.len(), 1);
+        assert!(wind[0].label().contains("mountain"), "{wind:?}");
+        assert!(usage.contains_key("night"));
+        // The catch-all counts too: every scene the rules do not match is
+        // answered by it, so it is the most-used sound in the pool.
+        assert!(usage["catch-all"][0].by.contains("default"));
+        assert!(
+            !usage.contains_key("orphan"),
+            "nothing names the orphan's tags: {usage:?}"
+        );
+
+        // And against the map that actually ships: every sound in the shipped
+        // effect pool is reachable, or a rule is silently scoring zero.
+        let shipped = shipped_map();
+        let shipped_pool = crate::audio_pool::load_pool(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets/effect-pool.json"),
+        );
+        assert!(!shipped_pool.is_empty());
+        let usage = effect_usage(&shipped, &shipped_pool);
+        for name in shipped_pool.keys() {
+            assert!(
+                usage.contains_key(name),
+                "{name} is in the shipped pool and no shipped rule reaches it"
+            );
+        }
+    }
+
+    #[test]
+    fn music_usage_names_the_palette_value_that_reaches_it() {
+        let mut pool = ClipPool::new();
+        for (name, tags) in [
+            ("soft-relax", vec!["soft", "relax"]),
+            ("tavern", vec!["tavern", "warm"]),
+            ("unused", vec!["polka"]),
+        ] {
+            pool.insert(
+                name.into(),
+                crate::audio_pool::Sound {
+                    tags: tags.iter().map(|t| t.to_string()).collect(),
+                    files: vec![format!("music/{name}-1.mp3")],
+                    looped: true,
+                    dur_s: None,
+                    mode: None,
+                    hold: None,
+                    level: None,
+                },
+            );
+        }
+        let usage = music_usage(&scene_map(), &pool);
+        // `quiet` asks for [soft, calm], so it reaches soft-relax.
+        assert!(usage["soft-relax"]
+            .iter()
+            .any(|u| u.by == "palette \"quiet\""));
+        // `warm` asks for [warm], so it reaches tavern.
+        assert!(usage["tavern"].iter().any(|u| u.by == "palette \"warm\""));
+        assert!(!usage.contains_key("unused"), "{usage:?}");
+    }
+
+    /// A `stop` is placed *for* a sound — dropping the sound leaves the stop
+    /// fading nothing, which is the same defect as a scene gone quiet.
+    #[test]
+    fn inject_usage_reads_the_scripts_and_counts_a_stop() {
+        let scripts = vec![
+            (
+                9u32,
+                json!({"segments": [
+                    {"speaker": "A", "text": "hi"},
+                    {"sound": "coin"},
+                    {"speaker": "A", "text": "there"},
+                    {"stop": "cooking"},
+                    {"sound": "coin"}
+                ]}),
+            ),
+            (
+                10u32,
+                json!({"segments": [{"sound": "coin"}, {"sound": "sword-slash"}]}),
+            ),
+            // A malformed item is skipped, never counted.
+            (11u32, json!({"segments": [{"sound": "  "}, {"sound": 7}]})),
+        ];
+        let usage = inject_usage(&scripts);
+        assert_eq!(usage["coin"], vec![9, 10]);
+        assert_eq!(usage["cooking"], vec![9]);
+        assert_eq!(usage["sword-slash"], vec![10]);
+        assert_eq!(usage.len(), 3, "{usage:?}");
+    }
+
+    /// The two guards a removal can hit, side by side: one sound is named by
+    /// the map, the other is not, and nothing else differs between them.
+    #[test]
+    fn a_sound_nothing_names_has_no_usage_and_one_the_map_reaches_does() {
+        let mut pool = ClipPool::new();
+        for name in ["night", "spare"] {
+            let tags: Vec<String> = if name == "night" {
+                vec!["night".into()]
+            } else {
+                vec!["spare".into()]
+            };
+            pool.insert(
+                name.into(),
+                crate::audio_pool::Sound {
+                    tags,
+                    files: vec![format!("effects/{name}-1.mp3")],
+                    looped: true,
+                    dur_s: None,
+                    mode: None,
+                    hold: None,
+                    level: None,
+                },
+            );
+        }
+        let usage = effect_usage(&scene_map(), &pool);
+        assert!(usage.contains_key("night"));
+        assert!(!usage.contains_key("spare"));
+    }
+
+    /// The music layer's third rung: a track's own trim rides on the run, and
+    /// a track with none is 1.0 — so nothing already on disk changes.
+    #[test]
+    fn plan_music_carries_the_sounds_own_level() {
+        let cfg = scene_map();
+        let mut pool = music_pool();
+        let slots = vec![slot("quiet", 0.0, 5.0)];
+        let runs = plan_music(&slots, &[], 1, &pool, &cfg.music_palette);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].level, 1.0, "no level set means unity");
+
+        for sound in pool.values_mut() {
+            sound.level = Some(0.4);
+        }
+        let runs = plan_music(&slots, &[], 1, &pool, &cfg.music_palette);
+        assert_eq!(runs[0].level, 0.4);
+
+        // A trim of zero reads as unset, not as a mute.
+        let mut pool = music_pool();
+        for sound in pool.values_mut() {
+            sound.level = Some(0.0);
+        }
+        let runs = plan_music(&slots, &[], 1, &pool, &cfg.music_palette);
+        assert_eq!(runs[0].level, 1.0);
+    }
+
+    /// And the effect layer's, which reaches the pick the same way.
+    #[test]
+    fn an_effects_own_level_reaches_the_pick() {
+        let pool = sound(&["night"], &["effects/night-1.mp3"], Some(0.3));
+        let seed = crate::audio_pool::seed(4, 0, &["night".to_string()]);
+        let clip = crate::audio_pool::pick(&pool, &["night".to_string()], seed).unwrap();
+        assert_eq!(clip.level, 0.3);
+    }
+
+    /// The shipped registries are all at unity, so the two new multiplication
+    /// sites are no-ops on every chapter that exists today.
+    #[test]
+    fn the_shipped_effect_and_music_pools_change_no_existing_mix() {
+        for kind in [
+            crate::audio_pool::PoolKind::Effect,
+            crate::audio_pool::PoolKind::Music,
+        ] {
+            let pool = crate::audio_pool::load_pool(
+                &Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../assets")
+                    .join(kind.registry()),
+            );
+            assert!(!pool.is_empty());
+            for (name, s) in &pool {
+                assert_eq!(
+                    crate::audio_pool::sound_level(s),
+                    1.0,
+                    "{}/{name} is not at unity",
+                    kind.registry()
+                );
+            }
         }
     }
 
@@ -3001,9 +3382,8 @@ mod tests {
                 .map(|(s, m)| json!({"speaker": "A", "scene": s, "music": m}))
                 .collect()
         };
-        let runs_of = |n: usize| {
-            crate::assemble::Planned::plan(&vec![json!({"speaker": "A"}); n]).runs()
-        };
+        let runs_of =
+            |n: usize| crate::assemble::Planned::plan(&vec![json!({"speaker": "A"}); n]).runs();
 
         // Declared values are used as-is.
         let segs = build(&[("street-morning", "battle"), ("street-morning", "battle")]);
@@ -3232,6 +3612,7 @@ mod tests {
             mood: "m".into(),
             sound: "s".into(),
             file: "f".into(),
+            level: 1.0,
             start,
             end,
             pauses: vec![],
@@ -3321,26 +3702,62 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                Inject::Start { sound: "blood".into(), mode: InjectMode::Hit, hold_s: 2.0, level: 1.0 },
-                Inject::Start { sound: "boil".into(), mode: InjectMode::Overlap, hold_s: 2.0, level: 1.0 },
+                Inject::Start {
+                    sound: "blood".into(),
+                    mode: InjectMode::Hit,
+                    hold_s: 2.0,
+                    level: 1.0
+                },
+                Inject::Start {
+                    sound: "boil".into(),
+                    mode: InjectMode::Overlap,
+                    hold_s: 2.0,
+                    level: 1.0
+                },
                 // `hold` and `level` come from the entry too, not the layer default.
-                Inject::Start { sound: "rumble".into(), mode: InjectMode::Trail, hold_s: 3.0, level: 0.5 },
+                Inject::Start {
+                    sound: "rumble".into(),
+                    mode: InjectMode::Trail,
+                    hold_s: 3.0,
+                    level: 0.5
+                },
                 // No `mode` in the entry: the one default left is `hit`.
-                Inject::Start { sound: "bare".into(), mode: InjectMode::Hit, hold_s: 2.0, level: 1.0 },
-                Inject::Stop { sound: "boil".into() },
+                Inject::Start {
+                    sound: "bare".into(),
+                    mode: InjectMode::Hit,
+                    hold_s: 2.0,
+                    level: 1.0
+                },
+                Inject::Stop {
+                    sound: "boil".into()
+                },
             ],
             "{got:?}"
         );
         // A directive restating the behaviour changes nothing.
         assert_eq!(
-            injects_of(&[json!({"sound": "boil", "mode": "trail", "hold": 3.0, "level": 0.5})], &pool, 2.0),
-            vec![Inject::Start { sound: "boil".into(), mode: InjectMode::Overlap, hold_s: 2.0, level: 1.0 }],
+            injects_of(
+                &[json!({"sound": "boil", "mode": "trail", "hold": 3.0, "level": 0.5})],
+                &pool,
+                2.0
+            ),
+            vec![Inject::Start {
+                sound: "boil".into(),
+                mode: InjectMode::Overlap,
+                hold_s: 2.0,
+                level: 1.0
+            }],
         );
         // Absent, empty, malformed and unknown entries are silence, not errors —
         // the digest validator is the strict gate, the merge survives hand edits.
         assert!(injects_of(&[], &pool, 2.0).is_empty());
         assert!(injects_of(
-            &[json!("blood"), json!({"sound": ""}), json!({"mode": "loud"}), json!({})],
+            &[
+                json!("blood"),
+                json!({"sound": ""}),
+                json!({"mode": "loud"}),
+                json!({})
+            ],
             &pool,
             2.0
         )
@@ -3351,7 +3768,10 @@ mod tests {
         );
         // A registered sound with no takes resolves here and is dropped later
         // with one warning, so the plan and the mix agree on what was asked for.
-        assert_eq!(injects_of(&[json!({"sound": "empty"})], &pool, 2.0).len(), 1);
+        assert_eq!(
+            injects_of(&[json!({"sound": "empty"})], &pool, 2.0).len(),
+            1
+        );
     }
 
     #[test]
@@ -3386,7 +3806,10 @@ mod tests {
             "{rendered}"
         );
         // a trail renders its hold
-        assert!(rendered.contains("rumble (trail 3.0s, loop; deep; 9.0s)"), "{rendered}");
+        assert!(
+            rendered.contains("rumble (trail 3.0s, loop; deep; 9.0s)"),
+            "{rendered}"
+        );
         // a one-shot must NOT claim to loop
         assert!(!rendered.contains("blood (hit, loop"), "{rendered}");
     }
@@ -3401,14 +3824,18 @@ mod tests {
         let durs = durs();
         let cfg = InjectLayer::default();
         let slots = vec![
-            islot(0.0, 10.0, &[json!({"sound": "blood"}), json!({"sound": "boil"})]),
+            islot(
+                0.0,
+                10.0,
+                &[json!({"sound": "blood"}), json!({"sound": "boil"})],
+            ),
             islot(
                 12.0,
                 20.0,
                 &[
-                    json!({"sound": "boil"}),          // retriggers the first one
-                    json!({"sound": "rumble"}),        // trail, hold 3.0 from the pool
-                    json!({"stop": "rumble"}),         // fades it from the cursor
+                    json!({"sound": "boil"}),   // retriggers the first one
+                    json!({"sound": "rumble"}), // trail, hold 3.0 from the pool
+                    json!({"stop": "rumble"}),  // fades it from the cursor
                 ],
             ),
         ];
@@ -3499,7 +3926,10 @@ mod tests {
         // With an inject track, it is input 3 and it enters *after* the duck:
         // never inside `[under]`, or the voice's own compressor eats it.
         let g = layer_graph(2, true, sc);
-        assert!(g.contains("[1:a][2:a]amix=inputs=2:normalize=0[under]"), "{g}");
+        assert!(
+            g.contains("[1:a][2:a]amix=inputs=2:normalize=0[under]"),
+            "{g}"
+        );
         assert!(g.contains(&ducked), "{g}");
         assert!(
             g.ends_with(&tail3),
@@ -3515,14 +3945,27 @@ mod tests {
         assert!(g.contains("[0:a][duck][2:a]amix=inputs=3"), "{g}");
         // No beds at all: nothing to duck, so no compressor in the graph.
         let g = layer_graph(0, true, sc);
-        assert!(g.starts_with("[0:a][1:a]amix=inputs=2:normalize=0[mixed]"), "{g}");
+        assert!(
+            g.starts_with("[0:a][1:a]amix=inputs=2:normalize=0[mixed]"),
+            "{g}"
+        );
         assert!(!g.contains("sidechain"), "{g}");
         // ...but the limiter is on every arm. The ceiling is the contract, and
         // nothing else in the path holds it: ch9 measured -0.11 dBFS with the
         // inject layer switched off entirely.
-        for (b, i) in [(0usize, true), (1, false), (1, true), (2, false), (2, true), (3, true)] {
+        for (b, i) in [
+            (0usize, true),
+            (1, false),
+            (1, true),
+            (2, false),
+            (2, true),
+            (3, true),
+        ] {
             let g = layer_graph(b, i, sc);
-            assert!(g.contains("alimiter=limit=0.589"), "beds={b} inject={i}: {g}");
+            assert!(
+                g.contains("alimiter=limit=0.589"),
+                "beds={b} inject={i}: {g}"
+            );
             assert!(g.ends_with("[a]"), "beds={b} inject={i}: {g}");
         }
     }
@@ -3565,7 +4008,10 @@ mod tests {
         assert!(g.contains("[c0][c1]acrossfade=d=0.250"), "{g}");
         assert!(g.contains("[o1][c2]acrossfade=d=0.250"), "{g}");
         // ...and the gain rides on the tail, before the output label.
-        assert!(g.ends_with("volume=0.8000,aformat=sample_rates=48000:channel_layouts=mono[out]"), "{g}");
+        assert!(
+            g.ends_with("volume=0.8000,aformat=sample_rates=48000:channel_layouts=mono[out]"),
+            "{g}"
+        );
         // Every copy is consumed exactly once.
         for i in 0..3 {
             assert_eq!(g.matches(&format!("[c{i}]")).count(), 2, "copy {i} in {g}");
@@ -3584,9 +4030,10 @@ mod tests {
     #[test]
     fn every_shipped_inject_entry_states_looped_explicitly() {
         let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets");
-        let raw: Value =
-            serde_json::from_str(&std::fs::read_to_string(assets.join("inject-pool.json")).unwrap())
-                .unwrap();
+        let raw: Value = serde_json::from_str(
+            &std::fs::read_to_string(assets.join("inject-pool.json")).unwrap(),
+        )
+        .unwrap();
         let mut missing = Vec::new();
         for (name, entry) in raw.as_object().unwrap() {
             if name.starts_with('_') {

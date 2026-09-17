@@ -10,6 +10,7 @@ mod normal;
 mod picker;
 mod run;
 pub(crate) mod runconfig;
+pub(crate) mod sound;
 pub(crate) mod submit;
 mod tasks;
 mod text;
@@ -152,6 +153,9 @@ pub(crate) async fn handle_key(
     }
     if let Screen::Run = app.screen.clone() {
         return run::key_run(app, key, http, job_tx).await;
+    }
+    if let Screen::Sound(view) = app.screen.clone() {
+        return sound::key_sound(app, view, key, http, job_tx).await;
     }
     normal::normal_key(app, key, http, job_tx).await
 }
