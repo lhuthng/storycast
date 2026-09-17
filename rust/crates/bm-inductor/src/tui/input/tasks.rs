@@ -4,7 +4,7 @@ use crate::tui::{
     input::{dispatch_op, op_key},
     jobs::Job,
     model::filtered_tasks,
-    screen::{Screen, TaskDetail, TasksView, TextKind, TextPrompt},
+    screen::{Confirm, Screen, TaskDetail, TasksView, TextKind, TextPrompt},
     style::Level,
 };
 use bm_proto::{Op, OpRequest, Task};
@@ -121,6 +121,26 @@ pub(crate) async fn key_tasks(
                 None => app.set_status(Level::Warn, "no task selected"),
             }
         }
+        KeyCode::Char('R') => {
+            // Bulk requeue, row-independent: every merge back to pending,
+            // the render cache untouched. Same op as `:remerge`, no
+            // confirm — the finished mp3s rebuild from cache, like `:mix`.
+            dispatch_op(
+                app,
+                job_tx,
+                http,
+                OpRequest {
+                    op: Op::Remerge,
+                    ..Default::default()
+                },
+            );
+            app.set_status(Level::Info, "requeueing every merge — render cache kept");
+        }
+        KeyCode::Char('E') => {
+            // Bulk re-speak: worth one Enter, like every other destructive
+            // action. Same confirm as `:rerender`.
+            app.screen = Screen::Confirm(Confirm::rerender());
+        }
         KeyCode::Char(':') => {
             // A global command from the ledger. `u` stays a row-scoped
             // direct key here; `:u` reaches the global retry instead.
@@ -128,7 +148,7 @@ pub(crate) async fn key_tasks(
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::Command,
                 ":",
-                "command — u/F stay row-scoped here, everything else is global",
+                "command — u/F/R/E act on the ledger here, everything else is global",
                 "",
             ));
             app.set_status(Level::Info, "command mode — Enter runs it, Esc closes");

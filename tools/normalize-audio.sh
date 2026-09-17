@@ -11,9 +11,9 @@
 #
 #   * leading/trailing silence trimmed (a clip that opens with 2 s of nothing
 #     reads as a 2 s hole in the mix)
-#   * loudness normalized, two-pass, to I=-23 LUFS / TP=-3 dBTP
-#     (-23 LUFS is the EBU R128 speech target; TP=-3 leaves the headroom the
-#     ducking and the final mp3 encode both need)
+#   * loudness normalized, two-pass, to I=-26 LUFS / TP=-3 dBTP
+#     (-26 LUFS keeps the effect beds below the voice while preserving headroom;
+#     TP=-3 leaves room for ducking and the final mp3 encode)
 #   * mono 48 kHz — the merge works in mono 48 kHz end to end, so stereo here
 #     is bytes that are thrown away at the first `aformat`
 #   * all metadata dropped (`-map_metadata -1`, no Xing/LAME header, no ID3v2)
@@ -27,10 +27,10 @@
 
 set -euo pipefail
 
-I_TARGET=-23      # integrated loudness, LUFS
+I_TARGET=-26      # integrated loudness, LUFS
 TP_TARGET=-3      # true peak ceiling, dBTP
 LRA_TARGET=11     # loudness range the normalizer is allowed to work with
-BITRATE=96k       # mono 48 kHz mp3; the deliverable itself is 64k mono
+BITRATE=64k       # mono 48 kHz mp3; smaller pool files with acceptable bed quality
 TRIM_FLOOR=-50dB  # what counts as silence at either end
 
 src=${1:?usage: normalize-audio.sh <src-dir> <dest-dir>}

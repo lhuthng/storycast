@@ -105,6 +105,18 @@ pub(crate) async fn key_confirm(
                         "reconciling duplicate characters — watch events",
                     );
                 }
+                ConfirmAction::Rerender => {
+                    dispatch_op(
+                        app,
+                        job_tx,
+                        http,
+                        OpRequest {
+                            op: Op::Rerender,
+                            ..Default::default()
+                        },
+                    );
+                    app.set_status(Level::Info, "re-rendering everything — watch events");
+                }
             }
         }
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {

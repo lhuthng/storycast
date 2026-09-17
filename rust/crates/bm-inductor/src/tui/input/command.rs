@@ -38,6 +38,8 @@ pub(crate) enum Command {
     SshUser,
     SshPort,
     Mix,
+    Rerender,
+    Remerge,
 }
 
 /// `:` command line → the command. A single character is a command key
@@ -95,6 +97,8 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
         "sshuser" => Command::SshUser,
         "sshport" => Command::SshPort,
         "mix" => Command::Mix,
+        "rerender" => Command::Rerender,
+        "remerge" => Command::Remerge,
         "newest" => Command::Key(KeyCode::Char('G')),
         "named" => Command::AddNamed,
         "sample" => Command::AddSample,
@@ -255,6 +259,12 @@ pub(crate) fn do_command(
                 &crate::tui::input::runconfig::mix_prefill(app),
             ));
         }
+        Command::Rerender => {
+            // Full re-speak: worth one Enter, like every other destructive
+            // action. Mix-only changes belong on `:mix`, which keeps the
+            // render cache.
+            app.screen = Screen::Confirm(Confirm::rerender());
+        }
         Command::Voices => {
             dispatch_op(
                 app,
@@ -305,6 +315,20 @@ pub(crate) fn do_command(
                     ..Default::default()
                 },
             );
+        }
+        Command::Remerge => {
+            // Same blast radius as `:mix` (finished mp3s rebuild from cache),
+            // so no confirm — unlike `:rerender`, nothing is deleted for good.
+            dispatch_op(
+                app,
+                job_tx,
+                http,
+                OpRequest {
+                    op: Op::Remerge,
+                    ..Default::default()
+                },
+            );
+            app.set_status(Level::Info, "requeueing every merge — render cache kept");
         }
         Command::Reconcile => {
             // Reconcile rewrites cast + scripts and re-renders losers: worth

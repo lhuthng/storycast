@@ -219,6 +219,34 @@ fn has_diacritic(word: &str) -> bool {
     word.chars().any(|c| VI_DIACRITICS.contains(c))
 }
 
+/// Effect tags ride on segments for a later merge pass to score; this one
+/// only checks they name real pool tags. Absent everywhere is an old digest
+/// and still validates — the merge keeps scoring `scene` keywords until the
+/// pool-tag path lands, so yesterday's scripts are not stranded.
+pub fn validate_effect_tags(data: &Value, effect_tags: &[String]) -> Result<()> {
+    let Some(segments) = data.get("segments").and_then(|s| s.as_array()) else {
+        return Ok(());
+    };
+    for (i, s) in segments.iter().enumerate() {
+        let Some(fx) = s.get("effect") else {
+            continue;
+        };
+        let Some(arr) = fx.as_array() else {
+            anyhow::bail!("segment {i}: `effect` must be an array of pool tags");
+        };
+        for t in arr {
+            let t = t.as_str().unwrap_or("");
+            if !effect_tags.iter().any(|e| e == t) {
+                anyhow::bail!(
+                    "segment {i}: effect tag {t:?} is not a pool tag ({})",
+                    effect_tags.join(", ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// EN policy is trust-based; flag obvious violations for the review gate.
 pub fn warn_vietnamese(data: &Value, bible: &Value) -> Vec<String> {
     let mut skip: Vec<String> = [
@@ -773,6 +801,33 @@ mod tests {
 
         // A map with no palette cannot judge a value, so it does not try.
         validate(&one("melancholy"), &bible, &[]).unwrap();
+    }
+
+    #[test]
+    fn validate_effect_tags_accepts_pool_tags_and_old_digests() {
+        let fx = ["rain".to_string(), "night".to_string()];
+        let seg = |effect: Value| {
+            json!({
+                "segments": [{"speaker": "Narrator", "text": "x", "effect": effect}],
+                "roster": ["Narrator"]
+            })
+        };
+        validate_effect_tags(&seg(json!(["rain", "night"])), &fx).unwrap();
+        validate_effect_tags(&seg(json!([])), &fx).unwrap();
+        // No `effect` anywhere: a digest from before the field existed.
+        validate_effect_tags(
+            &json!({
+                "segments": [{"speaker": "Narrator", "text": "x"}],
+                "roster": ["Narrator"]
+            }),
+            &fx,
+        )
+        .unwrap();
+        let err =
+            validate_effect_tags(&seg(json!(["rain", "thunderstorm"])), &fx).unwrap_err();
+        assert!(err.to_string().contains("thunderstorm"), "{err}");
+        let err = validate_effect_tags(&seg(json!("rain")), &fx).unwrap_err();
+        assert!(err.to_string().contains("must be an array"), "{err}");
     }
 
     #[test]

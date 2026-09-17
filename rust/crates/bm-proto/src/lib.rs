@@ -667,6 +667,13 @@ pub enum Op {
     /// the finished mp3s were mixed with the old one. Render cache is kept —
     /// tempo and layers apply at merge time, so no segment needs re-speaking.
     Remix,
+    /// Requeue every render task and its merge, deleting cached segments and
+    /// finished mp3s: a full re-speak of the book. Mix-only changes use
+    /// `Remix` instead — this one re-synthesizes every voice.
+    Rerender,
+    /// Requeue every merge without touching the mix or the render cache:
+    /// effect clips, the scene map and the pools all apply at merge time.
+    Remerge,
 }
 
 impl Op {
@@ -685,6 +692,8 @@ impl Op {
             Op::Reconcile => "reconcile",
             Op::Retag => "retag",
             Op::Remix => "remix",
+            Op::Rerender => "rerender",
+            Op::Remerge => "remerge",
         }
     }
 
@@ -703,6 +712,8 @@ impl Op {
             Op::Reconcile,
             Op::Retag,
             Op::Remix,
+            Op::Rerender,
+            Op::Remerge,
         ]
         .into_iter()
         .find(|o| o.as_str() == s)
@@ -874,6 +885,8 @@ mod tests {
             Op::Reconcile,
             Op::Retag,
             Op::Remix,
+            Op::Rerender,
+            Op::Remerge,
         ] {
             assert_eq!(Op::parse(op.as_str()), Some(op));
         }

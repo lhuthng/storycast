@@ -16,13 +16,12 @@ TASK: return STRICT JSON only (no markdown, no commentary) with this shape:
  "mentions": {"<exact surface form seen in THIS chapter>": "<canonical name>"},
   "new_characters": [{"name": "canonical proper name", "personality": "ENGLISH, 1 sentence voice-relevant trait", "voice_hint": "MUST start with gender/age: adult male | adult female | boy | girl | elderly male | elderly female — then trait", "tags": ["lowercase voice tags: pick from young old male female strong weak plus anything fitting, e.g. sly; [] only for the ageless"], "proper_aliases": ["other proper-name forms of the SAME person seen here"], "evidence": "short Vietnamese quote proving who they are"}],
  "new_aliases": {"<known canonical name>": ["new proper-name forms seen here"]},
-  "segments": [{"speaker": "canonical name (must be in roster)", "text": "exact speakable text, keep original Vietnamese, no added words (rule 9 governs non-verbal sounds)", "mood": "1-3 words, reuse this palette when it fits: neutral, calm, amused, excited, smug, sad, angry, cold, stern, urgent, surprised, reflective, grand, sarcastic, gossipy (only coin a new word if none fits)", "scene": "short ENGLISH label naming the PLACE and, when it is audible, the TIME OF DAY, e.g. market-stall-morning, forge-night; the sound map keys its beds on both, and a label that names neither gets no sound at all; keep the SAME label while location, time and cast stay put, new label on any change", "music": "one token from the MUSIC palette in rule 10, copied exactly"}],
- "fixes": [{"before": "exact source substring", "after": "corrected text used in segments"}]}
+  "segments": [{"speaker": "canonical name (must be in roster)", "text": "exact speakable text, keep original Vietnamese, no added words (rule 9 governs non-verbal sounds)", "mood": "1-3 words, reuse this palette when it fits: neutral, calm, amused, excited, smug, sad, angry, cold, stern, urgent, surprised, reflective, grand, sarcastic, gossipy (only coin a new word if none fits)", "scene": "short ENGLISH label naming the PLACE and, when it is audible, the TIME OF DAY, e.g. market-stall-morning, forge-night; the sound map keys its beds on both, and a label that names neither gets no sound at all; keep the SAME label while location, time and cast stay put, new label on any change", "music": "one token from the MUSIC palette in rule 10, copied exactly", "effect": ["effect tags from the EFFECT palette in rule 11, copied exactly — what is AUDIBLE besides the voice, [] when nothing is"]}], "fixes": [{"before": "exact source substring", "after": "corrected text used in segments"}]}
 
 RULES:
 1. Split on speaker turns: every quoted dialogue run + surrounding narration become separate segments, in original order. Never merge two speakers into one segment.
    Never emit the chapter headline ("Chương N: ...") as a segment, glued or otherwise — the pipeline speaks it separately. Start segments at the first real content line.
-2. Attribute quotes via dialogue tags and context (noi, hoi, quat, day do, cam than, tu an ui...). Pronouns han/nang + nearby names/titles resolve to that character. Tag every segment with its scene; consecutive segments in one place/time share one label. Name the place AND the time of day in that label whenever the time is audible (dawn/morning/noon/afternoon/dusk/night) — the sound map matches its beds on those words, so `martial-arts-shop` alone picks up nothing while `martial-arts-shop-morning` gets a daylight bed.
+2. Attribute quotes via dialogue tags and context (noi, hoi, quat, day do, cam than, tu an ui...). Pronouns han/nang + nearby names/titles resolve to that character. Tag every segment with its scene; consecutive segments in one place/time share one label. Name the place AND the time of day in that label whenever the time is audible (dawn/morning/noon/afternoon/dusk/night) — the sound map matches its beds on those words, so `martial-arts-shop` alone picks up nothing while `martial-arts-shop-morning` gets a daylight bed. Prefer the EFFECT palette words of rule 11 for the place part (rain, night, market, forest...) — a label built from real tags resolves to a real bed, a synonym resolves to silence.
 3. mentions records EVERY surface form used for a speaker in this chapter (pronouns han/nang/ta, titles ty ty, descriptive phrases) — it is chapter-local context, never global identity.
 4. new_characters / new_aliases are for PROPER NAMES ONLY (real names, stable unambiguous titles). Never propose pronouns, generic nouns (pham nhan, con...), or verb phrases there — those belong in mentions.
    A KNOWN name plus decoration is NOT a new person: "Huyền Vũ lão tổ" is Huyền Vũ with a title, "Mao Ý (thanh niên mặc hoa phục)" is Mao Ý with a description, "Sở Cuồng sư" is "Sở Cuồng Sư" with different casing. Report every such form in new_aliases under the bare bible name — NEVER as a new_character. Speaker labels are bare names only, no parentheticals.
@@ -75,8 +74,19 @@ RULES:
    fault. When you are torn between two tracks, keep the one already playing
    rather than dropping to `none` — a chapter with too little music reads better
    than one with too much, but a track that flickers reads worse than either.
-   NEVER invent a value outside the palette; an unknown token fails the whole
-   chapter.
+    NEVER invent a value outside the palette; an unknown token fails the whole
+    chapter.
+11. EFFECT: every segment carries an `effect` array — the sound effects
+    AUDIBLE under the line, as tags copied exactly from this palette, which is
+    the whole vocabulary:
+
+      {effect_tags}
+
+    It is what plays besides the voice, and nothing else. [] when nothing is
+    audible but speech. Keep the SAME tags while the soundscape holds, however
+    many segments and speakers that takes; CHANGE them where it turns, because
+    that is where the bed changes. NEVER invent a tag outside the palette; an
+    unknown tag fails the whole chapter.
 
 ---BIBLE---
 {bible_json}

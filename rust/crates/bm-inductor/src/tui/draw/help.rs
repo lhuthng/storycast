@@ -114,6 +114,14 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
             "story speed and fx/music volumes — requeues every merge",
         ),
         (
+            ":remerge",
+            "requeue every merge — render cache kept, no confirm",
+        ),
+        (
+            ":rerender",
+            "requeue every render + merge — full re-speak, asks first",
+        ),
+        (
             ":X  :stop",
             "stop everything everywhere: local backend plus workers on all machines",
         ),
@@ -133,6 +141,8 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         "Filter with a few letters, Enter for the full failure reason.",
         "u retries the highlighted row; F force re-runs it. Both are direct",
         "keys here — this screen is read-only navigation otherwise.",
+        "R requeues every merge (render cache kept); E re-renders everything,",
+        "asking first. Capitals, so lowercase keeps typing into the filter.",
     ] {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }

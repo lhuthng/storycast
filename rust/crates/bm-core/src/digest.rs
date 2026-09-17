@@ -28,7 +28,7 @@ pub use canon::{
 };
 pub use llm::{generate, parse_retry_delay, GenError};
 pub use reconcile::{cast_only_folds, parse_reconcile_merges, reconcile_plan, ReconcilePlan};
-pub use tags::{retag_text, tags_of, validate, warn_vietnamese};
+pub use tags::{retag_text, tags_of, validate, validate_effect_tags, warn_vietnamese};
 
 /// What a digest produces: the per-chapter script plus the bible delta.
 #[derive(Debug, Clone)]
@@ -115,10 +115,14 @@ pub fn build_prompt(layout: &Layout, bible: &Value, chapter_text: &str) -> Resul
     // template, so adding a mood (and the clip that answers it) is one edit to
     // one file. A prompt that listed its own vocabulary would drift the moment
     // the pool changed, and the drift would be silent.
-    let palette = crate::ambience::palette_prompt(&load_map(layout)?);
+    let map = load_map(layout)?;
+    let palette = crate::ambience::palette_prompt(&map);
+    let pool = crate::audio_pool::load_pool(&layout.assets().join("effect-pool.json"));
+    let effects = crate::ambience::effect_tags(&pool).join(", ");
     Ok(template
         .replace("{bible_json}", &bible_context(bible))
         .replace("{music_palette}", &palette)
+        .replace("{effect_tags}", &effects)
         .replace("{chapter_text}", chapter_text))
 }
 
@@ -168,7 +172,9 @@ pub async fn digest_chapter(
     })?;
 
     progress(0.60, "validating digest".to_string());
-    let parsed = parse_and_validate(&raw, bible, &palette);
+    let pool = crate::audio_pool::load_pool(&layout.assets().join("effect-pool.json"));
+    let effects = crate::ambience::effect_tags(&pool);
+    let parsed = parse_and_validate(&raw, bible, &palette, &effects);
     let data = match parsed {
         Ok(d) => d,
         Err(e) => {
@@ -184,7 +190,7 @@ pub async fn digest_chapter(
                 Err(GenError::Fatal(e2)) => return Err(e2),
             };
             raw = second;
-            match parse_and_validate(&raw, bible, &palette) {
+            match parse_and_validate(&raw, bible, &palette, &effects) {
                 Ok(d) => d,
                 Err(e2) => {
                     let dump = layout.data().join(".last-analyze-raw.json");
@@ -275,10 +281,16 @@ pub async fn digest_chapter(
     })
 }
 
-fn parse_and_validate(raw: &str, bible: &Value, palette: &[String]) -> Result<Value> {
+fn parse_and_validate(
+    raw: &str,
+    bible: &Value,
+    palette: &[String],
+    effect_tags: &[String],
+) -> Result<Value> {
     let cleaned = strip_fences(raw);
     let data: Value = serde_json::from_str(cleaned).context("not valid JSON")?;
     validate(&data, bible, palette)?;
+    validate_effect_tags(&data, effect_tags)?;
     Ok(data)
 }
 
@@ -310,5 +322,74 @@ mod tests {
     fn load_bible_defaults_when_missing_or_corrupt() {
         let missing = load_bible(Path::new("/nonexistent/bible.json"));
         assert_eq!(missing, json!({"characters": []}));
+    }
+
+    #[test]
+    fn build_prompt_renders_both_vocabularies() {
+        let dir = std::env::temp_dir().join("bm-prompt-tags");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("prompts")).unwrap();
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(
+            dir.join("prompts/analyze.txt"),
+            "{music_palette}|{effect_tags}",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("assets/scene-map.json"),
+            r#"{"music_palette": {"quiet": {"tags": ["soft"], "note": "low"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("assets/effect-pool.json"),
+            r#"{"night": {"tags": ["night"], "files": ["effects/night-1.mp3"]}}"#,
+        )
+        .unwrap();
+        let p = build_prompt(&Layout::new(&dir), &json!({"characters": []}), "text").unwrap();
+        assert!(p.contains("quiet (soft; low)"), "{p}");
+        assert!(p.contains("night"), "{p}");
+        assert!(!p.contains("{effect_tags}"), "placeholder leaked: {p}");
+        assert!(!p.contains("{music_palette}"), "placeholder leaked: {p}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The template and the renderer must agree: a placeholder the code never
+    /// fills reaches the analyzer literally, and a vocabulary the prompt never
+    /// names might as well not exist.
+    #[test]
+    fn shipped_prompt_renders_every_placeholder() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let layout = Layout::new(&root);
+        let bible: Value = crate::read_json(&layout.bible()).unwrap_or(json!({"characters": []}));
+        let text = std::fs::read_to_string(layout.chapter_txt(51)).unwrap();
+        let p = build_prompt(&layout, &bible, &text).unwrap();
+        for ph in ["{music_palette}", "{effect_tags}", "{bible_json}", "{chapter_text}"] {
+            assert!(!p.contains(ph), "placeholder leaked: {ph}");
+        }
+        assert!(p.contains("quiet (soft, calm;"), "{p}");
+        assert!(p.contains("battle, birds, calm"), "{p}");
+        println!("{p}");
+    }
+
+    /// Manual gate, not CI: runs a real digest of ch51 through the analyzer
+    /// and prints the resulting script, so a prompt change can be eyeballed
+    /// before anything downstream reads the new fields. Writes
+    /// `data/script-51.json`, exactly like a worker completion would.
+    /// Run with `BM_LIVE_DIGEST=1` and the keys from `.env` in the environment.
+    #[tokio::test]
+    #[ignore]
+    async fn live_digest_ch51_prints_script() {
+        if std::env::var("BM_LIVE_DIGEST").is_err() {
+            return;
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let layout = Layout::new(&root);
+        let bible = load_bible(&layout.bible());
+        let settings = crate::config::Settings::load(&layout.settings());
+        let mut progress = |_f: f32, _s: String| {};
+        let out = digest_chapter(&layout, 51, &bible, &settings, "gemini", &mut progress)
+            .await
+            .unwrap();
+        println!("{}", serde_json::to_string_pretty(&out.script).unwrap());
     }
 }
