@@ -288,24 +288,90 @@ impl Inner {
         self.settings.effect_volume = fx;
         self.settings.music_volume = music;
         self.settings.save(&self.layout.settings())?;
-        let now = now_secs();
+        let n = self.requeue_stage(Stage::Merge, "requeued: mix changed", now_secs());
+        self.save();
+        Ok(format!(
+            "mix saved: speed {speed}, fx {fx}, music {music}; {n} merge(s) requeued"
+        ))
+    }
+
+    /// Reset every task of one stage to pending, dropping finished mp3s for
+    /// merges so the stage re-runs end-to-end. Returns tasks touched.
+    fn requeue_stage(&mut self, stage: Stage, detail: &str, now: u64) -> u32 {
         let mut n = 0u32;
         for t in self.tasks.values_mut() {
-            if t.stage != Stage::Merge {
+            if t.stage != stage {
                 continue;
             }
-            let _ = std::fs::remove_file(self.layout.final_mp3(t.chapter));
+            if stage == Stage::Merge {
+                let _ = std::fs::remove_file(self.layout.final_mp3(t.chapter));
+            }
             t.state = TaskState::Pending;
             t.attempts = 0;
             t.assigned_to = None;
             t.lease_until = None;
-            t.detail = "requeued: mix changed".into();
+            t.detail = detail.into();
             t.updated = now;
             n += 1;
         }
+        n
+    }
+
+    /// Requeue every merge without touching the mix or the render cache:
+    /// effect clips, the scene map and the pools all apply at merge time.
+    /// Refused while workers are mid-play, like every other cache surgery.
+    pub fn op_remerge_all(&mut self) -> anyhow::Result<String> {
+        self.ensure_idle()?;
+        let n = self.requeue_stage(Stage::Merge, "requeued: remerge", now_secs());
+        self.save();
+        Ok(format!("remerge: {n} merge(s) requeued, render cache kept"))
+    }
+
+    /// Requeue every render task and its merge, deleting cached segments and
+    /// finished mp3s: a full re-speak. Refused while workers are mid-play,
+    /// like every other cache surgery. This is the expensive path — mix-only
+    /// changes (speed, volumes, effect clips) requeue merges via `op_remix`
+    /// and keep the render cache instead.
+    pub fn op_rerender_all(&mut self) -> anyhow::Result<String> {
+        self.ensure_idle()?;
+        let engine = self.settings.engine.clone();
+        let store = bm_core::segments::LocalStore::new(self.layout.clone());
+        let mut chapters: Vec<u32> = self
+            .tasks
+            .values()
+            .filter(|t| t.stage == Stage::Render)
+            .map(|t| t.chapter)
+            .collect();
+        chapters.sort_unstable();
+        chapters.dedup();
+        let now = now_secs();
+        for n in &chapters {
+            let _ =
+                std::fs::remove_dir_all(bm_core::segments::SegmentStore::dir(&store, &engine, *n));
+            let _ = std::fs::remove_file(self.layout.final_mp3(*n));
+            for stage in [Stage::Render, Stage::Merge] {
+                let key = format!("{stage}:{n}");
+                match self.tasks.get_mut(&key) {
+                    Some(t) => {
+                        t.state = TaskState::Pending;
+                        t.attempts = 0;
+                        t.assigned_to = None;
+                        t.lease_until = None;
+                        t.detail = "requeued: rerender".into();
+                        t.updated = now;
+                    }
+                    None => {
+                        let mut t = Task::new(*n, stage);
+                        t.updated = now;
+                        self.tasks.insert(key, t);
+                    }
+                }
+            }
+        }
         self.save();
         Ok(format!(
-            "mix saved: speed {speed}, fx {fx}, music {music}; {n} merge(s) requeued"
+            "rerender: {} render(s) requeued with their merges",
+            chapters.len()
         ))
     }
 

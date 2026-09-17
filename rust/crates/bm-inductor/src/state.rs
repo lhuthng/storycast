@@ -523,6 +523,71 @@ mod tests {
     }
 
     #[test]
+    fn rerender_all_requeues_every_render_with_its_merge() {
+        let (_d, mut inner) = fixture();
+        inner.settings.engine = "vieneu".into();
+        for n in [1u32, 2] {
+            for stage in [Stage::Render, Stage::Merge] {
+                let mut t = Task::new(n, stage);
+                t.state = TaskState::Done;
+                inner.tasks.insert(t.id(), t);
+            }
+            let seg = inner.layout.seg_dir("vieneu", n);
+            std::fs::create_dir_all(&seg).unwrap();
+            std::fs::write(seg.join("0000_Adam.wav"), vec![0u8; 2000]).unwrap();
+            std::fs::write(inner.layout.final_mp3(n), vec![0u8; 2000]).unwrap();
+        }
+        let mut d = Task::new(1, Stage::Digest);
+        d.state = TaskState::Done;
+        inner.tasks.insert(d.id(), d);
+
+        let msg = inner.op_rerender_all().expect("idle rerender");
+        assert!(msg.contains("2 render(s)"), "{msg}");
+        for n in [1u32, 2] {
+            for stage in [Stage::Render, Stage::Merge] {
+                let t = &inner.tasks[&format!("{stage}:{n}")];
+                assert_eq!(t.state, TaskState::Pending, "{}", t.id());
+                assert_eq!(t.attempts, 0);
+                assert_eq!(t.detail, "requeued: rerender");
+            }
+            assert!(
+                !inner.layout.seg_dir("vieneu", n).exists(),
+                "segment cache goes, or reconcile marks it done"
+            );
+            assert!(!inner.layout.final_mp3(n).exists(), "stale product goes");
+        }
+        assert_eq!(inner.tasks["digest:1"].state, TaskState::Done);
+    }
+
+    #[test]
+    fn remerge_all_requeues_only_merges_and_keeps_renders() {
+        let (_d, mut inner) = fixture();
+        for n in [1u32, 2] {
+            for stage in [Stage::Render, Stage::Merge] {
+                let mut t = Task::new(n, stage);
+                t.state = TaskState::Done;
+                inner.tasks.insert(t.id(), t);
+            }
+            std::fs::write(inner.layout.final_mp3(n), vec![0u8; 2000]).unwrap();
+        }
+
+        let msg = inner.op_remerge_all().expect("idle remerge");
+        assert!(msg.contains("2 merge(s)"), "{msg}");
+        for n in [1u32, 2] {
+            let m = &inner.tasks[&format!("merge:{n}")];
+            assert_eq!(m.state, TaskState::Pending, "{}", m.id());
+            assert_eq!(m.attempts, 0);
+            assert_eq!(m.detail, "requeued: remerge");
+            assert!(!inner.layout.final_mp3(n).exists(), "stale product goes");
+            assert_eq!(
+                inner.tasks[&format!("render:{n}")].state,
+                TaskState::Done,
+                "render cache kept"
+            );
+        }
+    }
+
+    #[test]
     fn a_digest_offer_carries_the_inductors_analyzer_chain() {
         // The other half of the same defect. The backend *name* already
         // travelled in `analyzer`, but the model chain did not, so a

@@ -353,6 +353,20 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                 Err(e) => Json(OpResult::fail(format!("remix failed: {e:#}"))),
             }
         }
+        bm_proto::Op::Rerender => {
+            let mut inner = st.lock().await;
+            match inner.op_rerender_all() {
+                Ok(msg) => Json(OpResult::ok(msg)),
+                Err(e) => Json(OpResult::fail(format!("rerender failed: {e:#}"))),
+            }
+        }
+        bm_proto::Op::Remerge => {
+            let mut inner = st.lock().await;
+            match inner.op_remerge_all() {
+                Ok(msg) => Json(OpResult::ok(msg)),
+                Err(e) => Json(OpResult::fail(format!("remerge failed: {e:#}"))),
+            }
+        }
     }
 }
 

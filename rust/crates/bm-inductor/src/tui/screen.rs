@@ -181,6 +181,7 @@ pub(crate) enum ConfirmAction {
     SwapVoice { character: String, voice: String },
     StopBackend,
     Reconcile,
+    Rerender,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +190,27 @@ pub(crate) struct Confirm {
     pub(crate) body: Vec<String>,
     pub(crate) action: ConfirmAction,
     pub(crate) danger: bool,
+}
+
+impl Confirm {
+    /// Full re-speak behind one Enter: every render back to pending with
+    /// its merge, caches deleted. Shared by `:rerender` and the Tasks
+    /// screen's `E`, so the two paths cannot disagree about the cost.
+    pub(crate) fn rerender() -> Self {
+        Confirm {
+            title: "Re-render everything?".into(),
+            danger: true,
+            body: vec![
+                "Every render task goes back to pending, with its merge.".into(),
+                "Cached segments and finished mp3s are deleted, so every".into(),
+                "voice is re-synthesized from scratch — slow and costly.".into(),
+                String::new(),
+                "For mix-only changes (speed, volumes, effect clips) use".into(),
+                ":mix instead: it requeues merges and keeps this cache.".into(),
+            ],
+            action: ConfirmAction::Rerender,
+        }
+    }
 }
 
 /// Read-only overview of the whole cast: who speaks with what, which voices

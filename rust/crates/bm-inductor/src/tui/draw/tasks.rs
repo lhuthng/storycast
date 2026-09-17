@@ -296,7 +296,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
                     format!("{}  {}", t.id(), t.state.as_str()),
                     app.style_bold(state_color(t.state.as_str())),
                 ),
-                Span::styled("  ·  Enter details  ·  u retry  ·  F force re-run", dim),
+                Span::styled("  ·  Enter details  ·  u retry  ·  F force re-run  ·  R remerge all  ·  E rerender all", dim),
             ]),
             Line::from(Span::styled(
                 "j/k or ↑/↓ move · PgUp/PgDn page · type to filter · Backspace widens · Esc/q close",

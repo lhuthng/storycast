@@ -54,7 +54,7 @@ pub struct SceneRule {
     /// rain clip answers. Empty means dry voice.
     #[serde(default)]
     pub effect: Vec<String>,
-    /// Linear gain over a clip normalized to -23 LUFS, so it means the same
+    /// Linear gain over a clip normalized to -26 LUFS, so it means the same
     /// thing for every clip in the pool.
     #[serde(default)]
     pub level: f64,
@@ -393,24 +393,47 @@ pub fn palette_names(map: &SceneMap) -> Vec<String> {
     map.music_palette.keys().cloned().collect()
 }
 
-/// The palette rendered for the digest prompt: `name (gloss), ...`.
+/// The palette rendered for the digest prompt: `name (tags; gloss), ...`.
 ///
 /// Built from the map rather than written into the prompt text, so adding a
 /// value (and the clip that answers it) is one edit to one file. A prompt that
-/// listed its own vocabulary would drift the moment the pool changed.
+/// listed its own vocabulary would drift the moment the pool changed. The tags
+/// ride along so the analyzer sees what each mood *means* in pool terms — the
+/// merge scores those same tags, so a mood picked for its tags resolves to the
+/// track the analyzer had in mind.
 pub fn palette_prompt(map: &SceneMap) -> String {
     map.music_palette
         .iter()
         .map(|(name, e)| {
+            let mut parts = Vec::new();
+            if !e.tags.is_empty() {
+                parts.push(e.tags.join(", "));
+            }
             let note = e.note.trim();
-            if note.is_empty() {
+            if !note.is_empty() {
+                parts.push(note.to_string());
+            }
+            if parts.is_empty() {
                 name.clone()
             } else {
-                format!("{name} ({note})")
+                format!("{name} ({})", parts.join("; "))
             }
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Every tag any effect-pool sound answers to, sorted and deduped: the effect
+/// vocabulary the digest prompt offers the analyzer. A scene built from these
+/// words resolves to a pooled sound by tag overlap instead of by keyword luck.
+pub fn effect_tags(pool: &ClipPool) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for sound in pool.values() {
+        for t in &sound.tags {
+            out.insert(t.clone());
+        }
+    }
+    out.into_iter().collect()
 }
 
 pub fn load_map(path: &Path) -> Result<SceneMap> {
@@ -2189,11 +2212,24 @@ mod tests {
         );
         let rendered = palette_prompt(&cfg);
         assert!(
-            rendered.contains("quiet (low and unobtrusive)"),
+            rendered.contains("quiet (soft, calm; low and unobtrusive)"),
             "{rendered}"
         );
         assert!(rendered.contains("none (silence)"), "{rendered}");
         assert!(!rendered.contains("_note"), "{rendered}");
+    }
+
+    #[test]
+    fn the_effect_vocabulary_is_the_sorted_union_of_pool_tags() {
+        let pool: ClipPool = serde_json::from_value(json!({
+            "night": {"tags": ["night", "calm"], "files": ["effects/night-1.mp3"]},
+            "rain": {"tags": ["rain", "calm"], "files": ["effects/rain-1.mp3"]},
+            "empty": {"tags": ["ghost"], "files": []},
+        }))
+        .unwrap();
+        // Sorted, deduped, and drawn from sounds — even one with no files,
+        // because the vocabulary describes the pool, not one pick.
+        assert_eq!(effect_tags(&pool), vec!["calm", "ghost", "night", "rain"]);
     }
 
     /// The defect that started this: chapter 1 opened with a hearth crackling

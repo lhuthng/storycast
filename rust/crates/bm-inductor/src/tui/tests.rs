@@ -954,6 +954,8 @@ fn command_line_maps_keys_and_words() {
     );
     assert_eq!(command_key("r"), Some(Command::Key(KeyCode::Char('r'))));
     assert_eq!(command_key("reconcile"), Some(Command::Reconcile));
+    assert_eq!(command_key("rerender"), Some(Command::Rerender));
+    assert_eq!(command_key("remerge"), Some(Command::Remerge));
     assert_eq!(command_key("backend"), Some(Command::Backend));
     assert_eq!(command_key("stop"), Some(Command::Stop));
     assert_eq!(command_key("quit"), Some(Command::Key(KeyCode::Char('q'))));
@@ -1754,6 +1756,42 @@ async fn retry_from_the_list_targets_the_highlighted_task_only() {
 }
 
 #[tokio::test]
+async fn tasks_bulk_keys_remerge_direct_and_rerender_asks_first() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = tasks_app();
+    app.screen = Screen::Tasks(TasksView::new());
+
+    // R needs no row and no confirm: every merge requeues at once.
+    handle_key(&mut app, key(KeyCode::Char('R')), &http, &job_tx).await;
+    match job_rx.try_recv().map(Job::into_bare) {
+        Ok(Job::Op { req, .. }) => assert_eq!(req.op, Op::Remerge),
+        other => panic!("expected a remerge op, got {other:?}"),
+    }
+    assert!(
+        app.status.text.contains("render cache kept"),
+        "{}",
+        app.status.text
+    );
+
+    // E is the destructive one: confirm first, op only on Enter.
+    handle_key(&mut app, key(KeyCode::Char('E')), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Confirm(_)),
+        "E opens a confirm, not an op"
+    );
+    assert!(
+        job_rx.try_recv().is_err(),
+        "nothing dispatches before confirm"
+    );
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    match job_rx.try_recv().map(Job::into_bare) {
+        Ok(Job::Op { req, .. }) => assert_eq!(req.op, Op::Rerender),
+        other => panic!("expected a rerender op, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn m_asks_first_and_confirms_into_a_reconcile_op() {
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
@@ -1795,6 +1833,34 @@ async fn m_asks_first_and_confirms_into_a_reconcile_op() {
         app2.status.text
     );
     assert!(rx2.try_recv().is_err(), "a stray m must never dispatch");
+}
+
+#[tokio::test]
+async fn rerender_asks_first_and_confirms_into_a_rerender_op() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    handle_key(&mut app, key(KeyCode::Char(':')), &http, &job_tx).await;
+    app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "rerender"));
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Confirm(_)),
+        ":rerender opens a confirm, not an op"
+    );
+    assert!(
+        job_rx.try_recv().is_err(),
+        "nothing dispatches before confirm"
+    );
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    match job_rx.try_recv().map(Job::into_bare) {
+        Ok(Job::Op { req, .. }) => assert_eq!(req.op, Op::Rerender),
+        other => panic!("expected a rerender op, got {other:?}"),
+    }
+    assert!(
+        app.status.text.contains("re-rendering"),
+        "{}",
+        app.status.text
+    );
 }
 
 #[tokio::test]
