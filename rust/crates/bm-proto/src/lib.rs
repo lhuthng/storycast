@@ -426,20 +426,15 @@ impl Credentials {
 /// `gemini-3.5-flash` instead, and the only evidence was the model name inside
 /// a 503 — which is exactly the outage this block closes.
 ///
-/// Empty strings mean "the inductor said nothing" and leave the worker's own
-/// value alone, so an older inductor's offer still behaves as before.
+/// An absent `analyze_models` means "the inductor said nothing" and leaves the
+/// worker's own value alone, so an older inductor's offer still behaves as
+/// before.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalyzerSettings {
-    /// The model the chain stands on when there is no chain.
-    #[serde(default)]
-    pub analyze_model: String,
     /// The fallback chain, tried in order.
     ///
     /// `None` means "the inductor said nothing" (an older inductor); `Some([])`
-    /// means "no chain — `analyze_model` stands alone", which is a real
-    /// configuration and the default in `Settings::default()`. The `Option` is
-    /// what keeps those two apart, for the same reason
-    /// [`TaskOffer::render_units`] is one.
+    /// means "explicitly no Gemini models".
     #[serde(default)]
     pub analyze_models: Option<Vec<String>>,
     #[serde(default)]
@@ -1116,7 +1111,6 @@ mod tests {
         // And it carries no analyzer configuration either — the worker's own
         // settings stand, exactly as before this block existed.
         assert!(o.analyzer_settings.analyze_models.is_none());
-        assert_eq!(o.analyzer_settings.analyze_model, "");
         // And an old *worker* ignores the fields entirely — the serializer
         // emits them, the parser above proves absence is tolerated.
         let round: TaskOffer = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
@@ -1126,14 +1120,9 @@ mod tests {
 
     #[test]
     fn an_empty_chain_is_not_the_same_as_saying_nothing() {
-        // `Some([])` is a real configuration — "no chain, `analyze_model`
-        // stands alone" — and it is `Settings::default()`. `None` is an older
-        // inductor that has no opinion. Collapsing the two would let a worker
-        // keep a chain the operator had deliberately removed.
-        let stated: AnalyzerSettings =
-            serde_json::from_str(r#"{"analyze_model":"m","analyze_models":[]}"#).unwrap();
+        let stated: AnalyzerSettings = serde_json::from_str(r#"{"analyze_models":[]}"#).unwrap();
         assert_eq!(stated.analyze_models, Some(vec![]));
-        let silent: AnalyzerSettings = serde_json::from_str(r#"{"analyze_model":"m"}"#).unwrap();
+        let silent: AnalyzerSettings = serde_json::from_str(r#"{}"#).unwrap();
         assert_eq!(silent.analyze_models, None);
         // And both survive a round trip, which is what the worker sees.
         for block in [stated, silent] {

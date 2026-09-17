@@ -294,6 +294,23 @@ The pipeline is **restart-safe**: all of the above is on disk. Kill anything at
 any time — the inductor picks up exactly where the ledger says, and cached
 segments are never re-rendered.
 
+### Clear all tasks
+
+Tasks are stored in **`.bm/ledger.json`**. To remove every task (including
+pending, running, failed, and completed tasks):
+
+1. Stop the inductor and workers first (`X` in the TUI, confirm, and wait for
+   shutdown), then quit the TUI. A running inductor can overwrite your edits
+   with its in-memory task list.
+2. In `.bm/ledger.json`, replace the entire `"tasks"` array with `"tasks": []`.
+   Keep the other fields unchanged to preserve machine and worker runtime records.
+3. Reopen the TUI. Starting a new run creates tasks for the selected chapter range;
+   `make serve` also recreates tasks for its `START`/`COUNT` range on startup.
+
+Do **not** delete `.bm/` or clear `.bm/settings.json` or `.bm/machines.json`.
+Clearing tasks does not delete chapter text, scripts, cast assignments, cached
+segment audio, or finished MP3s under `data/` and `output/`; future runs can reuse them.
+
 ---
 
 ## 5. When something fails (the short version)

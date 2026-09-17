@@ -494,7 +494,6 @@ mod tests {
         std::fs::create_dir_all(layout.chapters()).unwrap();
         std::fs::write(layout.chapter_txt(1), "Chương 1: X\n\nbody\n").unwrap();
         inner.settings.analyzer = "gemini".into();
-        inner.settings.analyze_model = "gemini-3.5-flash".into();
         inner.settings.analyze_models = vec!["gemini-3.5-flash-lite".into()];
         inner.enqueue_translate(1, 1);
         inner
@@ -509,7 +508,6 @@ mod tests {
             Some(vec!["gemini-3.5-flash-lite".to_string()]),
             "the chain the worker must run"
         );
-        assert_eq!(offer.analyzer_settings.analyze_model, "gemini-3.5-flash");
     }
 
     #[test]

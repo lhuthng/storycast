@@ -201,10 +201,6 @@ async fn generate_openrouter(prompt: &str, settings: &Settings) -> Result<String
 
 /// Gemini model chain over REST, ending in opencode as the last resort.
 ///
-/// `analyze_models` (when set) IS the chain; otherwise the legacy single
-/// `analyze_model` stands alone, which is today's behavior. Each model gets a
-/// few attempts, then the next one, then opencode.
-///
 /// Skipped fast, never retried: 401/403 (the key is wrong for every model)
 /// and 400 (the request itself is bad) — retrying those anywhere is burning
 /// quota for nothing. Everything else walks on: 429s (after sleeping the
@@ -316,19 +312,13 @@ async fn try_gemini_model(prompt: &str, key: &str, model: &str) -> ModelNext {
     ModelNext::Skip(last)
 }
 
-/// Models to try, in order: `analyze_models` when set, else the legacy single.
 fn analyze_chain(settings: &Settings) -> Vec<String> {
-    let chain: Vec<String> = settings
+    settings
         .analyze_models
         .iter()
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty())
-        .collect();
-    if chain.is_empty() {
-        vec![settings.analyze_model.clone()]
-    } else {
-        chain
-    }
+        .collect()
 }
 
 /// One generation attempt against the configured backend.
@@ -353,10 +343,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn analyze_chain_defaults_to_the_single_model() {
+    fn analyze_chain_uses_only_configured_models() {
         let plain = Settings::default();
-        assert!(plain.analyze_models.is_empty());
-        assert_eq!(analyze_chain(&plain), vec![plain.analyze_model.clone()]);
+        assert_eq!(analyze_chain(&plain), vec!["gemini-3.5-flash"]);
+        for models in [vec![], vec![" ".into()]] {
+            let empty = Settings {
+                analyze_models: models,
+                ..Settings::default()
+            };
+            assert!(analyze_chain(&empty).is_empty());
+        }
 
         let chained = Settings {
             analyze_models: vec![
@@ -413,7 +409,7 @@ mod tests {
     fn a_worker_with_no_settings_file_runs_the_inductors_model() {
         // The reported outage, in one assertion. A provisioned box has no
         // `.bm/settings.json` (provisioning never copies `.bm/`), so
-        // `Settings::load` returns the compiled default — whose `analyze_model`
+        // `Settings::load` returns the compiled default — whose `analyze_models`
         // is the literal below. The operator had switched to `-lite`, the box
         // kept calling the old model, and the only trace was a 503 naming it.
         let remote_box = Settings::default();
@@ -426,7 +422,6 @@ mod tests {
 
         // What the offer carries now.
         let inductor = Settings {
-            analyze_model: "gemini-3.5-flash".into(),
             analyze_models: vec!["gemini-3.5-flash-lite".into()],
             ..Settings::default()
         };
