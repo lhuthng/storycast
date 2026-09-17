@@ -260,6 +260,55 @@ impl Inner {
         ))
     }
 
+    /// Save a new mix and requeue every merge: the finished mp3s were mixed
+    /// with the old one. Render cache is kept — tempo and layer volumes apply
+    /// at merge time, so no segment needs re-speaking. Refused while workers
+    /// are mid-play, like every other cache surgery.
+    pub fn op_remix(
+        &mut self,
+        speed: Option<f64>,
+        effect_volume: Option<f64>,
+        music_volume: Option<f64>,
+    ) -> anyhow::Result<String> {
+        self.ensure_idle()?;
+        let (speed, fx, music) = match (speed, effect_volume, music_volume) {
+            (Some(s), Some(f), Some(m)) => (s, f, m),
+            _ => anyhow::bail!("remix needs speed + fx + music volumes"),
+        };
+        for (v, what, lo, hi) in [
+            (speed, "speed", 0.5, 2.0),
+            (fx, "fx volume", 0.0, 2.0),
+            (music, "music volume", 0.0, 2.0),
+        ] {
+            if !v.is_finite() || v < lo || v > hi {
+                anyhow::bail!("{what} must be {lo}–{hi}, got {v}");
+            }
+        }
+        self.settings.speed = speed;
+        self.settings.effect_volume = fx;
+        self.settings.music_volume = music;
+        self.settings.save(&self.layout.settings())?;
+        let now = now_secs();
+        let mut n = 0u32;
+        for t in self.tasks.values_mut() {
+            if t.stage != Stage::Merge {
+                continue;
+            }
+            let _ = std::fs::remove_file(self.layout.final_mp3(t.chapter));
+            t.state = TaskState::Pending;
+            t.attempts = 0;
+            t.assigned_to = None;
+            t.lease_until = None;
+            t.detail = "requeued: mix changed".into();
+            t.updated = now;
+            n += 1;
+        }
+        self.save();
+        Ok(format!(
+            "mix saved: speed {speed}, fx {fx}, music {music}; {n} merge(s) requeued"
+        ))
+    }
+
     /// Enqueue crawl+digest for chapters missing scripts (idempotent).
     pub fn enqueue_translate(&mut self, start: u32, count: u32) -> (usize, usize) {
         let (mut crawls, mut digests) = (0, 0);

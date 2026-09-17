@@ -481,6 +481,48 @@ mod tests {
     }
 
     #[test]
+    fn remix_saves_the_mix_and_requeues_only_merges() {
+        let (_d, mut inner) = fixture();
+        for (n, stage, state) in [
+            (1, Stage::Merge, TaskState::Done),
+            (2, Stage::Render, TaskState::Done),
+            (3, Stage::Merge, TaskState::Shelved),
+        ] {
+            let mut t = Task::new(n, stage);
+            t.state = state;
+            inner.tasks.insert(t.id(), t);
+            let mp3 = inner.layout.final_mp3(n);
+            if let Some(parent) = mp3.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&mp3, b"old mix").unwrap();
+        }
+        let msg = inner
+            .op_remix(Some(1.5), Some(0.5), Some(0.0))
+            .expect("valid mix");
+        assert!(msg.contains("1.5"), "{msg}");
+        assert_eq!(
+            (
+                inner.settings.speed,
+                inner.settings.effect_volume,
+                inner.settings.music_volume
+            ),
+            (1.5, 0.5, 0.0)
+        );
+        for t in inner.tasks.values() {
+            if t.stage == Stage::Merge {
+                assert_eq!(t.state, TaskState::Pending, "{}", t.id());
+                assert_eq!(t.attempts, 0);
+                assert!(!inner.layout.final_mp3(t.chapter).is_file());
+            } else {
+                assert_eq!(t.state, TaskState::Done, "renders keep cache");
+            }
+        }
+        assert!(inner.op_remix(Some(9.0), Some(1.0), Some(1.0)).is_err());
+        assert!(inner.op_remix(None, Some(1.0), Some(1.0)).is_err());
+    }
+
+    #[test]
     fn a_digest_offer_carries_the_inductors_analyzer_chain() {
         // The other half of the same defect. The backend *name* already
         // travelled in `analyzer`, but the model chain did not, so a

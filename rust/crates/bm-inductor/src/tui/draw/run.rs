@@ -77,6 +77,13 @@ pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
         ),
         kv("digest", format!("{} ({models})", cfg.analyzer)),
         kv("engine", cfg.engine.clone()),
+        kv(
+            "mix",
+            format!(
+                "speed {} · fx {} · music {}",
+                cfg.speed, cfg.effect_volume, cfg.music_volume
+            ),
+        ),
     ];
     match &app.roster {
         None if app.roster_loading => {
@@ -114,6 +121,10 @@ pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
     )));
     lines.push(Line::from(Span::styled(
         "e edits range, analyzer and model chain (saved to settings)",
+        dim,
+    )));
+    lines.push(Line::from(Span::styled(
+        ":mix edits speed and fx/music volumes, requeues every merge",
         dim,
     )));
 

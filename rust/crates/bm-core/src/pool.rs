@@ -310,12 +310,17 @@ pub fn add_sample(
     Ok(log)
 }
 
-/// Enroll one sample into THIS machine's voice store (`root/.venv`), so
-/// renders use it immediately. Skips cleanly with no local venv — provision
-/// enrolls from `voices.json` then.
+/// Enroll one sample into THIS machine's voice store, so renders use it
+/// immediately. Skips cleanly with no local venv — provision enrolls from
+/// `voices.json` then.
 pub fn enroll_local(root: &Path, name: &str, file: &str) -> anyhow::Result<Vec<String>> {
-    let py = root.join(".venv/bin/python");
-    if !py.is_file() || !root.join("python/tts_vieneu.py").is_file() {
+    let layout = crate::Layout::new(root);
+    let Some(py) = layout.venv_python() else {
+        return Ok(vec![
+            "no local voice store — enrolled on next provision".to_string()
+        ]);
+    };
+    if !root.join("python/tts_vieneu.py").is_file() {
         return Ok(vec![
             "no local voice store — enrolled on next provision".to_string()
         ]);
@@ -352,6 +357,55 @@ pub fn enroll_local(root: &Path, name: &str, file: &str) -> anyhow::Result<Vec<S
         anyhow::bail!(
             "{} ({})",
             lines.pop().unwrap_or_else(|| "enroll failed".into()),
+            crate::util::head_chars(err.trim(), 160)
+        );
+    }
+    Ok(lines)
+}
+
+/// Synthesize `text` with `voice` on THIS machine, for an offline audition:
+/// no inductor, no worker, no sidecar. Same engine call the sidecar makes
+/// (`temperature`/`silence_p` are its defaults), so the sample sounds like
+/// the render would. Needs the model weights (downloaded on first use) and
+/// the voice enrolled in the local store (`:A` does that) — otherwise the
+/// error names what is missing instead of 500ing through HTTP.
+pub fn synth_preview(
+    root: &Path,
+    voice: &str,
+    text: &str,
+    dest: &Path,
+) -> anyhow::Result<Vec<String>> {
+    let layout = crate::Layout::new(root);
+    let Some(py) = layout.venv_python() else {
+        anyhow::bail!("no local voice store — :B to connect, or provision this box first");
+    };
+    let script = [
+        "import sys, tts_vieneu as vn",
+        "voice, text, dest = sys.argv[1], sys.argv[2], sys.argv[3]",
+        "tts = vn.engine()",
+        "tts.save(tts.infer(text, voice=voice, temperature=0.8, silence_p=0.15), dest)",
+        "print('previewed ' + voice, flush=True)",
+    ]
+    .join("\n");
+    let out = std::process::Command::new(&py)
+        .arg("-c")
+        .arg(&script)
+        .arg(voice)
+        .arg(text)
+        .arg(dest)
+        .current_dir(root)
+        .env("PYTHONPATH", root.join("python"))
+        .output()?;
+    let mut lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!(
+            "{} ({})",
+            lines.pop().unwrap_or_else(|| "preview failed".into()),
             crate::util::head_chars(err.trim(), 160)
         );
     }
@@ -530,6 +584,35 @@ mod tests {
             again.iter().any(|l| l.contains("already in place")),
             "{again:?}"
         );
+    }
+
+    #[test]
+    fn venv_order_prefers_the_managed_store() {
+        // Enrollment and serving must resolve the same interpreter, or a
+        // fresh voice enrolls into a store nobody reads and previews 500.
+        let d = std::env::temp_dir().join("bm-pool-venvs");
+        let _ = std::fs::remove_dir_all(&d);
+        let managed = d.join("python/.venv/bin/python");
+        let legacy = d.join(".venv/bin/python");
+        std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&managed, b"x").unwrap();
+        std::fs::write(&legacy, b"x").unwrap();
+        let layout = crate::Layout::new(&d);
+        assert_eq!(layout.venv_python().as_deref(), Some(managed.as_path()));
+        std::fs::remove_file(&managed).unwrap();
+        assert_eq!(layout.venv_python().as_deref(), Some(legacy.as_path()));
+        std::fs::remove_file(&legacy).unwrap();
+        assert_eq!(layout.venv_python(), None);
+    }
+
+    #[test]
+    fn preview_without_a_venv_says_so_instead_of_500ing() {
+        let d = std::env::temp_dir().join("bm-pool-no-venv-preview");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let err = synth_preview(&d, "Đức Trí", "xin chào", &d.join("p.wav")).unwrap_err();
+        assert!(err.to_string().contains("no local voice store"), "{err}");
     }
 
     #[test]

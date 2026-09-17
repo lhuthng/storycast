@@ -4,11 +4,12 @@ use crate::tui::{
     input::{
         command::{command_key, do_command, Command},
         dispatch,
+        runconfig::parse_mix_config,
         runconfig::save_run_config,
         runconfig::save_ssh_setting,
         submit::submit_text,
     },
-    jobs::Job,
+    jobs::{op_job, Job},
     screen::{Screen, TextKind, TextPrompt},
     style::Level,
 };
@@ -84,6 +85,33 @@ pub(crate) async fn key_text(
                     Ok(msg) => {
                         app.screen = Screen::Normal;
                         app.set_status(Level::Ok, msg);
+                    }
+                    Err(msg) => app.set_status(Level::Error, msg),
+                }
+            } else if p.kind == TextKind::Mix {
+                // Validated here so a typo keeps the prompt open; the op
+                // itself saves the mix and requeues every merge — live via
+                // the API, offline against the files when the inductor is
+                // down — so this branch dispatches instead of writing.
+                match parse_mix_config(&p.buf) {
+                    Ok((speed, fx, music)) => {
+                        app.screen = Screen::Normal;
+                        app.set_status(Level::Ok, format!("submitted: {}", p.buf.trim()));
+                        dispatch(
+                            app,
+                            job_tx,
+                            op_job(
+                                app,
+                                http,
+                                bm_proto::OpRequest {
+                                    op: bm_proto::Op::Remix,
+                                    speed: Some(speed),
+                                    effect_volume: Some(fx),
+                                    music_volume: Some(music),
+                                    ..Default::default()
+                                },
+                            ),
+                        );
                     }
                     Err(msg) => app.set_status(Level::Error, msg),
                 }

@@ -18,6 +18,9 @@ pub(crate) enum TextKind {
     SshKey,
     SshUser,
     SshPort,
+    /// Mix levels (`:mix`): story speed plus the two layer volumes, saved to
+    /// the settings file like the run config. Launches nothing.
+    Mix,
     Translate,
     CrawlTemplate,
     /// `:` command line: the buffer names a key (`m`) or a word

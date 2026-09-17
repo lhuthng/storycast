@@ -285,7 +285,7 @@ git-ignored — see the two tables at the top for the tracked/ignored split.
 | `voices.json`                               | Character → reference clip (clone voices)                                                   |
 | `voice-pool.json`                           | Tagged sample pool for automatic voice assignment                                           |
 | `refs/`                                     | Your voice clips                                                                            |
-| `.bm/settings.json`                         | Run config: url_template, engine, start/count, speed, gap_ms, ambience, music, analyzer, models |
+| `.bm/settings.json`                         | Run config: url_template, engine, start/count, speed, gap_ms, ambience, music, effect/music volumes, analyzer, models (`:mix` edits speed + volumes) |
 | `.bm/ledger.json`                           | The task ledger — which chapter/stage is in which state; survives restarts                  |
 | `.bm/machines.json`                         | Linked machines (addr, ssh user/port/key)                                                   |
 | `~/.bm-worker/`                             | A worker's whole world on any machine: agent binary, venv, sources, `.provision_stamp.json` |

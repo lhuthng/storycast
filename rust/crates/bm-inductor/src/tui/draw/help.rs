@@ -110,6 +110,10 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
             "backend up now, machines provision in background and join as ready",
         ),
         (
+            ":mix",
+            "story speed and fx/music volumes — requeues every merge",
+        ),
+        (
             ":X  :stop",
             "stop everything everywhere: local backend plus workers on all machines",
         ),
@@ -161,7 +165,8 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         "the highlighted speaker.",
         "`T` renders that same held line with the pointed voice: the one",
         "deliberate generation, and the only way to hear two voices on the",
-        "same sentence before either is assigned.",
+        "same sentence before either is assigned. Inductor down: this box",
+        "synthesizes it instead, so no worker needs to be on.",
         "`^T` renders another line with the pointed voice; the chosen one",
         "is shown above the list.",
         "Enter on a voice locks that sentence: later auditions keep it instead of",

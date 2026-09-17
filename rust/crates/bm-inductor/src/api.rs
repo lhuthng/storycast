@@ -346,6 +346,13 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                 Err(e) => Json(OpResult::fail(format!("retag failed: {e:#}"))),
             }
         }
+        bm_proto::Op::Remix => {
+            let mut inner = st.lock().await;
+            match inner.op_remix(req.speed, req.effect_volume, req.music_volume) {
+                Ok(msg) => Json(OpResult::ok(msg)),
+                Err(e) => Json(OpResult::fail(format!("remix failed: {e:#}"))),
+            }
+        }
     }
 }
 
@@ -624,6 +631,43 @@ fn offline_swap_apply(
     inner.load_ledger();
     inner
         .op_swap_voice(character, voice)
+        .map(|m| format!("{m} [offline — inductor was down]"))
+        .map_err(|e| e.to_string())
+}
+
+/// Remix with no scheduler: the same `op_remix` against a throwaway Inner,
+/// which persists settings + ledger itself. Same guards as the swap path —
+/// the inductor API must be down and no local worker alive.
+pub(crate) async fn offline_remix(
+    api: &str,
+    layout_root: &std::path::Path,
+    speed: Option<f64>,
+    effect_volume: Option<f64>,
+    music_volume: Option<f64>,
+) -> Result<String, String> {
+    if super::backend::inductor_up(api).await {
+        return Err(
+            "inductor is back — remix normally (this path is for inductor-down only)".into(),
+        );
+    }
+    if super::backend::local_workers_alive() {
+        return Err("local workers still running — X first, then remix".into());
+    }
+    offline_remix_apply(layout_root, speed, effect_volume, music_volume)
+}
+
+fn offline_remix_apply(
+    layout_root: &std::path::Path,
+    speed: Option<f64>,
+    effect_volume: Option<f64>,
+    music_volume: Option<f64>,
+) -> Result<String, String> {
+    let layout = bm_core::Layout::new(layout_root);
+    let settings = bm_core::config::Settings::load(&layout.settings());
+    let mut inner = Inner::new(layout, settings);
+    inner.load_ledger();
+    inner
+        .op_remix(speed, effect_volume, music_volume)
         .map(|m| format!("{m} [offline — inductor was down]"))
         .map_err(|e| e.to_string())
 }
@@ -1168,6 +1212,37 @@ mod tests {
         );
         let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
         assert_eq!(cast["A"], "Minh Triết");
+    }
+
+    #[tokio::test]
+    async fn offline_remix_applies_the_same_invalidation_as_live() {
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        std::fs::create_dir_all(layout.output()).unwrap();
+        std::fs::write(layout.final_mp3(1), b"old mix").unwrap();
+        bm_core::write_json(
+            &layout.bm_state().join("ledger.json"),
+            &serde_json::json!({"tasks": [
+                {"chapter": 1, "stage": "merge", "state": "done",
+                 "attempts": 0, "assigned_to": null, "lease_until": null,
+                 "detail": "", "updated": 0},
+            ]}),
+        )
+        .unwrap();
+
+        let msg = offline_remix_apply(d.path(), Some(1.5), Some(0.5), Some(0.0))
+            .expect("offline remix");
+        assert!(msg.contains("1.5"), "{msg}");
+        assert!(msg.contains("offline"), "{msg}");
+        assert!(!layout.final_mp3(1).exists(), "stale mp3 must go");
+        let settings = bm_core::config::Settings::load(&layout.settings());
+        assert_eq!(
+            (settings.speed, settings.effect_volume, settings.music_volume),
+            (1.5, 0.5, 0.0)
+        );
+        let ledger: serde_json::Value =
+            bm_core::read_json(&layout.bm_state().join("ledger.json")).unwrap();
+        assert_eq!(ledger["tasks"][0]["state"], "pending");
     }
 
     /// Every entry under `root`, so "the op wrote nothing" can be asserted on

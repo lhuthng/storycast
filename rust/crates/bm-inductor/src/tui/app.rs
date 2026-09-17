@@ -234,6 +234,14 @@ impl App {
             .unwrap_or(default)
     }
 
+    pub(crate) fn setting_f64(&self, key: &str, default: f64) -> f64 {
+        self.settings
+            .as_ref()
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(default)
+    }
+
     pub(crate) fn setting_str(&self, key: &str, default: &str) -> String {
         self.settings
             .as_ref()

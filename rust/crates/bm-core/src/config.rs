@@ -32,6 +32,12 @@ pub struct Settings {
     /// effects and no music, and the mix should not have to be edited to say so.
     /// Scenes may also opt out individually (`music_off` in the scene map).
     pub music: bool,
+    /// Master gains for the two layers, 1.0 = as authored, 0.0 = muted.
+    /// They multiply the scene map's own levels (`layers.effect.trim`,
+    /// `layers.music.level`), so retuning the whole mix is two numbers in the
+    /// run config instead of an edit per rule. Range 0.0–2.0.
+    pub effect_volume: f64,
+    pub music_volume: f64,
     /// `opencode` | `openrouter` | `local` | `gemini`.
     pub analyzer: String,
     pub opencode_model: String,
@@ -85,6 +91,8 @@ impl Default for Settings {
             gap_ms: 300,
             ambience: true,
             music: true,
+            effect_volume: 1.0,
+            music_volume: 1.0,
             analyzer: "opencode".into(),
             opencode_model: "opencode/muse-spark-1.3-contributor-free".into(),
             openrouter_model: "google/gemma-4-31b-it:free".into(),
