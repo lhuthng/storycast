@@ -11,6 +11,7 @@ mod picker;
 mod prompt;
 mod run;
 mod sound;
+mod stats;
 mod task_detail;
 mod tasks;
 mod workers;
@@ -135,7 +136,15 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         events::draw_events(f, app, root[2]);
         footer::draw_footer(f, app, root[3], true);
     } else {
-        tasks::draw_tasks(f, app, root[2]);
+        // The tasks row splits: the queue summary keeps the left, the new
+        // Stats matrix (workers × stages plus TUI-side ETA) takes a fixed
+        // 46 on the right — 38 of columns, 6 of gaps, 2 of border.
+        let task_row = RLayout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(30), Constraint::Length(46)])
+            .split(root[2]);
+        tasks::draw_tasks(f, app, task_row[0]);
+        stats::draw_stats(f, app, task_row[1]);
         events::draw_events(f, app, root[3]);
         footer::draw_footer(f, app, root[4], false);
     }

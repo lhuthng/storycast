@@ -69,6 +69,51 @@ pub struct Inner {
     /// Drain-then-exit arm: when set, the latch above fires on its own the
     /// moment no unfinished task remains. Same memory-only rule.
     pub shutdown_when_idle: bool,
+    /// Completed-task ledger behind the Stats pane: per-worker per-stage
+    /// counts plus recent per-stage durations for the TUI-side ETA.
+    /// In-memory like the beats — a fresh window beats stale history,
+    /// the same reason the file estimator only reads the last 20.
+    pub stats: StatsAgg,
+}
+
+/// Per-worker per-stage completions, with a capped run of durations.
+#[derive(Debug, Default)]
+pub struct StatsAgg {
+    counts: HashMap<String, HashMap<String, u64>>,
+    durations: HashMap<String, Vec<f64>>,
+}
+
+/// Recent samples feeding one stage average. Same window as the file
+/// estimator, but truly recent (insertion order, not sorted).
+const STATS_WINDOW: usize = 20;
+
+impl StatsAgg {
+    pub fn record(&mut self, worker: &str, stage: Stage, secs: f64) {
+        *self
+            .counts
+            .entry(worker.to_string())
+            .or_default()
+            .entry(stage.as_str().to_string())
+            .or_insert(0) += 1;
+        if secs > 0.0 {
+            let d = self.durations.entry(stage.as_str().to_string()).or_default();
+            d.push(secs);
+            if d.len() > STATS_WINDOW {
+                d.remove(0);
+            }
+        }
+    }
+
+    pub fn summary(&self) -> serde_json::Value {
+        let avg: HashMap<_, _> = Stage::ALL
+            .iter()
+            .filter_map(|st| {
+                let d = self.durations.get(st.as_str())?;
+                bm_core::eta::median(d).map(|m| (st.as_str().to_string(), m))
+            })
+            .collect();
+        serde_json::json!({ "counts": self.counts, "avg_task_secs": avg })
+    }
 }
 
 #[cfg(test)]
@@ -1170,6 +1215,9 @@ mod tests {
                 ts: now_secs(),
                 hostname: "box".into(),
                 alias: String::new(),
+                cpu_pct: None,
+                mem_pct: None,
+                mem_gb: None,
             },
         );
         (d, inner)
@@ -1253,6 +1301,43 @@ mod tests {
     }
 
     #[test]
+    fn completions_feed_the_stats_pane_ledger() {
+        // Only genuine completions count: the Done path records worker +
+        // stage + duration, failures and stale reports record nothing.
+        let (_d, mut inner) = fixture();
+        let mut t = Task::new(1, Stage::Digest);
+        t.state = TaskState::Assigned;
+        t.assigned_to = Some("w1".into());
+        inner.tasks.insert("digest:1".into(), t);
+        let done = |task: &str, worker: &str, ok: bool| Complete {
+            worker_id: worker.into(),
+            task_id: task.into(),
+            ok,
+            detail: String::new(),
+            duration_secs: 30.0,
+            bible_delta: None,
+            units: 0,
+            script: None,
+            text: None,
+            mp3_b64: None,
+        };
+        let msg = inner.complete(&done("digest:1", "w1", true));
+        assert!(msg.contains("done"), "{msg}");
+        let summary = inner.stats.summary();
+        assert_eq!(summary["counts"]["w1"]["digest"], 1);
+        assert_eq!(summary["avg_task_secs"]["digest"], 30.0);
+        // A failure on the next chapter moves the task, not the ledger.
+        let mut t = Task::new(2, Stage::Digest);
+        t.state = TaskState::Assigned;
+        t.assigned_to = Some("w1".into());
+        inner.tasks.insert("digest:2".into(), t);
+        inner.complete(&done("digest:2", "w1", false));
+        let summary = inner.stats.summary();
+        assert_eq!(summary["counts"]["w1"]["digest"], 1, "failures count nothing");
+        assert!(summary["counts"]["w1"].get("crawl").is_none());
+    }
+
+    #[test]
     fn reap_frees_dead_workers_tasks_but_not_after_a_reboot() {
         let (_d, mut inner) = fixture();
         let now = now_secs();
@@ -1292,6 +1377,9 @@ mod tests {
                 ts: now_secs(),
                 hostname: "box".into(),
                 alias: String::new(),
+                cpu_pct: None,
+                mem_pct: None,
+                mem_gb: None,
             },
         );
         assert!(inner.reap().is_empty(), "live worker untouched");
@@ -1326,6 +1414,9 @@ mod tests {
                 ts: now,
                 hostname: "box".into(),
                 alias: String::new(),
+                cpu_pct: None,
+                mem_pct: None,
+                mem_gb: None,
             },
         );
         let msg = inner.op_requeue_orphans();

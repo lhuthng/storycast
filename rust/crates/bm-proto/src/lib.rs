@@ -268,6 +268,17 @@ pub struct Heartbeat {
     /// Machine identity reported by the agent, for the TUI's machine column.
     #[serde(default)]
     pub hostname: String,
+    /// Box load reported by the agent, for the workers pane (`5.2%`,
+    /// `38% 6.1G`). `None` from older agents — the pane shows a dash.
+    /// `Option` (not a bare 0.0) so a genuinely idle box is told apart
+    /// from one that never measured.
+    #[serde(default)]
+    pub cpu_pct: Option<f32>,
+    #[serde(default)]
+    pub mem_pct: Option<f32>,
+    /// Used RAM in GiB.
+    #[serde(default)]
+    pub mem_gb: Option<f32>,
     /// Stable display name chosen by the worker at startup and kept in its
     /// root (`worker.alias`). Empty from older agents — the TUI falls back to
     /// hashing the worker id, which churns on every restart.

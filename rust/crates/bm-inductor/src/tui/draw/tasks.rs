@@ -35,7 +35,7 @@ pub(crate) fn draw_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::DarkGray),
             )));
             lines.push(Line::from(Span::styled(
-                "press t to enqueue a chapter range",
+                ":translate enqueues a chapter range",
                 Style::default().fg(Color::DarkGray),
             )));
         }

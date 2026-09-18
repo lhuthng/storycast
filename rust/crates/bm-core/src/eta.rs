@@ -51,12 +51,23 @@ pub fn read_stats(path: &Path) -> Vec<StatRecord> {
         .collect()
 }
 
-/// Median seconds per work unit for a stage, from the most recent samples.
+/// Median of a small sample set. Shared by the per-unit estimator below
+/// and the inductor's per-task averages behind the Stats pane.
 ///
 /// Median rather than mean: one chapter that hit a rate limit for 10 minutes
 /// would otherwise poison every estimate after it.
+pub fn median(samples: &[f64]) -> Option<f64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(sorted[sorted.len() / 2])
+}
+
+/// Median seconds per work unit for a stage, from the most recent samples.
 pub fn secs_per_unit(path: &Path, stage: Stage) -> Option<f64> {
-    let mut samples: Vec<f64> = read_stats(path)
+    let samples: Vec<f64> = read_stats(path)
         .into_iter()
         .filter(|r| r.stage == stage.as_str() && r.units > 0 && r.secs > 0.0)
         .map(|r| r.secs / r.units as f64)
@@ -64,10 +75,10 @@ pub fn secs_per_unit(path: &Path, stage: Stage) -> Option<f64> {
     if samples.is_empty() {
         return None;
     }
-    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = samples.len().min(WINDOW);
-    let recent = &samples[samples.len() - n..];
-    Some(recent[recent.len() / 2])
+    let mut sorted = samples;
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted.len().min(WINDOW);
+    median(&sorted[sorted.len() - n..])
 }
 
 /// Per-stage ETA for a batch of work, spread across `workers` machines.

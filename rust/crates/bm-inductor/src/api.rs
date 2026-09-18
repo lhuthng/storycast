@@ -612,6 +612,9 @@ async fn state(State(st): State<Shared>) -> impl IntoResponse {
         "machines": inner.machines.values().collect::<Vec<_>>(),
         "beats": inner.beats.values().collect::<Vec<_>>(),
         "counts": inner.counts(),
+        // Per-worker per-stage completions plus per-stage task averages —
+        // the Stats pane's matrix and its TUI-side ETA.
+        "stats": inner.stats.summary(),
         // Settings ride along so the TUI can prefill prompts with the values
         // that are actually in force instead of hardcoded guesses. API keys
         // stay in .env; the SSH key is a path (config, in machines.json and
@@ -1307,6 +1310,9 @@ mod tests {
                 ts: bm_proto::now_secs(),
                 hostname: "box".into(),
                 alias: String::new(),
+                cpu_pct: None,
+                mem_pct: None,
+                mem_gb: None,
             }),
         )
         .await;
@@ -1395,6 +1401,9 @@ mod tests {
             ts: bm_proto::now_secs(),
             hostname: "thang".into(),
             alias: "marmot".into(),
+            cpu_pct: None,
+            mem_pct: None,
+            mem_gb: None,
         };
         heartbeat(State(st.clone()), Json(beat())).await;
         {

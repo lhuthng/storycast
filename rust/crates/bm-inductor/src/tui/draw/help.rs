@@ -171,6 +171,20 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }
 
+    section(&mut lines, "Workers and Stats (dashboard)");
+    for v in [
+        "Workers lists every live box: alias, machine, stage, chapter,",
+        "progress, cpu %, ram % + used GiB (a dash until the agent measures).",
+        "Stats sits beside Tasks: rows are workers, columns the four stages,",
+        "each number completed tasks of that stage on that worker. The eta",
+        "column is measured here, not reported — the stage's median task",
+        "duration scaled by the beat's unworked fraction, a dash with no",
+        "history yet. Both panes are full-tier only; the compact tier keeps",
+        "Logs readable instead.",
+    ] {
+        lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
+    }
+
     section(&mut lines, "Notes");
     for v in [
         "Swap voice deletes only that speaker's cached segments, drops the stale",

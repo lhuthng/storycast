@@ -522,6 +522,45 @@ async fn run_merge(
 
 /// True when a heartbeat answer carries the shutdown command.
 ///
+/// Box load for the heartbeat: CPU % plus RAM % and used GiB, sampled on
+/// the beat. sysinfo needs two CPU refreshes to form a delta, so the first
+/// beat reports `None` (the pane shows a dash) and every beat after is a
+/// ~2s average — the cadence heartbeats already run at, no extra timer.
+struct LoadProbe {
+    sys: sysinfo::System,
+    primed: bool,
+}
+
+impl LoadProbe {
+    fn new() -> Self {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_cpu_all();
+        sys.refresh_memory();
+        Self { sys, primed: false }
+    }
+
+    /// `(cpu_pct, mem_pct, mem_used_gib)`. `None` until the second sample:
+    /// a CPU delta needs two refreshes, and reporting 0.0 would read as
+    /// idle rather than unknown.
+    fn sample(&mut self) -> (Option<f32>, Option<f32>, Option<f32>) {
+        self.sys.refresh_cpu_all();
+        self.sys.refresh_memory();
+        if !self.primed {
+            self.primed = true;
+            return (None, None, None);
+        }
+        let total = self.sys.total_memory() as f64;
+        let used = self.sys.used_memory() as f64;
+        let mem_pct = if total > 0.0 {
+            Some((100.0 * used / total) as f32)
+        } else {
+            None
+        };
+        let mem_gb = Some((used / 1_073_741_824.0) as f32);
+        (Some(self.sys.global_cpu_usage()), mem_pct, mem_gb)
+    }
+}
+
 /// Tolerant by design: an old inductor answers just `{"ok": true}` (no
 /// `shutdown` key, so the default keeps us running), and a non-JSON answer
 /// is ignored rather than acted on.
@@ -541,8 +580,10 @@ async fn heartbeat_loop(
     shared: Shared,
 ) {
     let url = format!("{inductor}/api/heartbeat");
+    let mut probe = LoadProbe::new();
     loop {
         let p = shared.lock().map(|p| p.clone()).unwrap_or_default();
+        let (cpu_pct, mem_pct, mem_gb) = probe.sample();
         let body = Heartbeat {
             worker_id: worker_id.clone(),
             addr: addr.clone(),
@@ -555,6 +596,9 @@ async fn heartbeat_loop(
             ts: bm_proto::now_secs(),
             hostname: hostname.clone(),
             alias: alias.clone(),
+            cpu_pct,
+            mem_pct,
+            mem_gb,
         };
         // The inductor's only command channel: a shutdown latch read on
         // every answer. Exiting here strands nothing — the inductor
@@ -1148,6 +1192,22 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_probe_reports_nothing_then_sane_values() {
+        // First sample primes the CPU delta (a 0.0 would read as idle,
+        // not unknown); the second must be real percentages on any box.
+        let mut probe = LoadProbe::new();
+        assert_eq!(probe.sample(), (None, None, None));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let (cpu, mem, gb) = probe.sample();
+        let cpu = cpu.expect("second sample measures");
+        let mem = mem.expect("memory always measures");
+        let gb = gb.expect("memory always measures");
+        assert!((0.0..=100.0).contains(&cpu), "cpu pct: {cpu}");
+        assert!((0.0..=100.0).contains(&mem), "mem pct: {mem}");
+        assert!(gb >= 0.0, "mem gib: {gb}");
+    }
 
     #[test]
     fn segment_manifest_wire_format_round_trips() {
