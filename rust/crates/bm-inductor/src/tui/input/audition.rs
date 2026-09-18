@@ -1,22 +1,24 @@
 //! Auditioning a voice: play it, never commit to it.
 //!
-//! Three keys — `t`, `T`, `^T` — answering three questions.
+//! Three `:` words — `:current`, `:try`, `:another` — answering three
+//! questions, run from the command line on the picker step 2 and cast
+//! screens (see `audition_word`).
 //!
-//! * **`t`** plays an already-rendered segment (`Op::Segment`): the held line
-//!   with the current voice, zero synthesis. In the picker the character is
-//!   fixed so the line never rolls; in the cast overview it follows the
-//!   highlighted speaker.
-//! * **`T`** renders the held line with the pointed voice
+//! * **`:current`** plays an already-rendered segment (`Op::Segment`): the
+//!   held line with the current voice, zero synthesis. In the picker the
+//!   character is fixed so the line never rolls; in the cast overview it
+//!   follows the highlighted speaker.
+//! * **`:try`** renders the held line with the pointed voice
 //!   (`Op::PreviewVoice` with text): the one deliberate generation, and the
 //!   only way to hear two voices on the same sentence before either is
 //!   assigned. With the inductor down it synthesizes on this machine
 //!   instead — no worker needs to be on.
-//! * **`^T`** renders another line with the pointed voice: one random pick
-//!   may be a poor representative.
+//! * **`:another`** renders another line with the pointed voice: one random
+//!   pick may be a poor representative.
 //!
-//! `t`/`T` don't reach the filter on the picker step 2 and cast screens (the
-//! Tab family was unusable — the terminal owns `Ctrl+Tab`); picker step 1
-//! still types every letter.
+//! Every letter types into the filter on both screens — the words run from
+//! the `:` line instead of stealing keys (the old `t` / `T` / `^T` did, and
+//! blocked the filter).
 //!
 //! The held line lives on the screen; `Enter` on a voice additionally locks it
 //! per character (`App::locked_lines`), so reopening the picker resumes on the
@@ -271,4 +273,170 @@ pub(crate) fn current_voice(app: &App, character: &str) -> Option<String> {
         .get(character)
         .filter(|v| !v.trim().is_empty())
         .cloned()
+}
+
+/// Which `:…` audition word is running: the held line on the current voice
+/// (cache only), or on the pointed voice — the held line, or another one.
+pub(crate) enum AuditionKind {
+    Current,
+    Pointed { reroll: bool },
+}
+
+/// Run a `:current` / `:try` / `:another` word from the command line: the
+/// same three auditions the old `t` / `T` / `^T` keys ran, before those
+/// letters were given back to the filter. Needs the voice list (picker
+/// step 2) or the cast overview — anywhere else names the way there.
+pub(crate) fn audition_word(
+    app: &mut App,
+    job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
+    http: &reqwest::Client,
+    kind: AuditionKind,
+) {
+    use crate::tui::screen::{PickStage, Screen};
+    if let Screen::Pick(mut p) = app.screen.clone() {
+        if p.stage != PickStage::Voice {
+            app.set_status(
+                Level::Info,
+                "pick a character first (Enter) — :current / :try / :another need the voice list",
+            );
+            return;
+        }
+        match kind {
+            AuditionKind::Current => pick_current(app, job_tx, http, &mut p),
+            AuditionKind::Pointed { reroll } => pick_pointed(app, job_tx, http, &mut p, reroll),
+        }
+        app.screen = Screen::Pick(p);
+    } else if let Screen::Cast(mut v) = app.screen.clone() {
+        match kind {
+            AuditionKind::Current => cast_current(app, job_tx, http, &mut v),
+            AuditionKind::Pointed { reroll } => cast_pointed(app, job_tx, http, &mut v, reroll),
+        }
+        app.screen = Screen::Cast(v);
+    } else {
+        app.set_status(
+            Level::Info,
+            "audition needs the voice picker (:s) or the cast overview (S)",
+        );
+    }
+}
+
+/// `:current` on the picker: the current voice on the shown line, from
+/// cache only — what the operator is about to replace, on the sentence in
+/// front of them. The pointed voice is for `:try` (render) and Enter
+/// (pick) — `:current` never follows the cursor. A miss names the render
+/// word.
+fn pick_current(
+    app: &mut App,
+    job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
+    http: &reqwest::Client,
+    p: &mut crate::tui::screen::Picker,
+) {
+    match current_voice(app, &p.character) {
+        None => app.set_status(
+            Level::Warn,
+            format!(
+                "“{}” has no voice assigned yet — nothing to compare",
+                p.character
+            ),
+        ),
+        Some(cur) => match shown_line(app, &p.character, p.line.as_ref()) {
+            None => {
+                app.set_status(Level::Warn, "no lines in the scripts yet — nothing to test")
+            }
+            Some(l) => {
+                p.line = Some(l.clone());
+                segment(app, job_tx, http, &p.character, &cur, &l.text);
+            }
+        },
+    }
+}
+
+/// `:try` / `:another` on the picker: the held line — or another one —
+/// rendered with the voice under the cursor. The one deliberate
+/// generation: the only way to hear two voices on the same sentence
+/// before either is assigned.
+fn pick_pointed(
+    app: &mut App,
+    job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
+    http: &reqwest::Client,
+    p: &mut crate::tui::screen::Picker,
+    reroll: bool,
+) {
+    let list = crate::tui::model::filtered_voices(app, &p.filter);
+    match list.get(p.cursor) {
+        None => app.set_status(Level::Warn, "nothing to audition"),
+        Some(v) => {
+            let (character, voice) = (p.character.clone(), v.name.clone());
+            p.line = audition(
+                app,
+                job_tx,
+                http,
+                &character,
+                &voice,
+                p.line.as_ref(),
+                reroll,
+            );
+        }
+    }
+}
+
+/// `:current` on the cast overview: the speaker's current voice on the
+/// shown line, from cache only — never synthesis. A miss names the render
+/// word instead of playing something nearby.
+fn cast_current(
+    app: &mut App,
+    job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
+    http: &reqwest::Client,
+    v: &mut crate::tui::screen::CastView,
+) {
+    let rows = app.cast_rows();
+    let list = crate::tui::model::filtered_cast_rows(&rows, &v.filter);
+    match list.get(v.cursor) {
+        None => app.set_status(Level::Warn, "nothing to audition"),
+        Some(row) if row.voice.is_empty() => app.set_status(
+            Level::Warn,
+            format!("“{}” has no voice assigned yet", row.character),
+        ),
+        Some(row) => match shown_line(app, &row.character, v.line.as_ref()) {
+            None => {
+                app.set_status(Level::Warn, "no lines in the scripts yet — nothing to test")
+            }
+            Some(l) => {
+                v.line = Some(l.clone());
+                segment(app, job_tx, http, &row.character, &row.voice, &l.text);
+            }
+        },
+    }
+}
+
+/// `:try` / `:another` on the cast overview: the held line — or another
+/// one — rendered with the highlighted speaker's voice.
+fn cast_pointed(
+    app: &mut App,
+    job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
+    http: &reqwest::Client,
+    v: &mut crate::tui::screen::CastView,
+    reroll: bool,
+) {
+    let rows = app.cast_rows();
+    let list = crate::tui::model::filtered_cast_rows(&rows, &v.filter);
+    match list.get(v.cursor) {
+        None => app.set_status(Level::Warn, "nothing to audition"),
+        Some(row) if row.voice.is_empty() => app.set_status(
+            Level::Warn,
+            format!("“{}” has no voice assigned yet", row.character),
+        ),
+        Some(row) => {
+            let (character, voice) = (row.character.clone(), row.voice.clone());
+            v.line = audition(
+                app,
+                job_tx,
+                http,
+                &character,
+                &voice,
+                v.line.as_ref(),
+                reroll,
+            );
+        }
+    }
 }

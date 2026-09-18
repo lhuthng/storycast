@@ -3,7 +3,7 @@ use super::app::App;
 use super::audio::Player;
 use super::audition::AuditionLine;
 use super::draw::draw;
-use super::input::command::{command_key, Command};
+use super::input::command::{command_key, do_command, Command};
 use super::input::runconfig::{
     parse_mix_config, parse_run_config, run_preview, save_run_config, save_ssh_setting,
 };
@@ -1002,6 +1002,20 @@ fn command_line_maps_keys_and_words() {
     assert_eq!(command_key("backend"), Some(Command::Backend));
     assert_eq!(command_key("stop"), Some(Command::Stop));
     assert_eq!(command_key("quit"), Some(Command::Key(KeyCode::Char('q'))));
+    assert_eq!(command_key("exit"), Some(Command::Key(KeyCode::Char('q'))));
+    assert_eq!(command_key("q"), Some(Command::Key(KeyCode::Char('q'))));
+    assert_eq!(command_key("prov"), Some(Command::Provision { force: false }));
+    assert_eq!(command_key("reprov"), Some(Command::Provision { force: true }));
+    assert_eq!(command_key("remove"), Some(Command::DropMachine));
+    assert_eq!(command_key("ADD"), Some(Command::AddMachine));
+    assert_eq!(command_key("current"), Some(Command::AuditionCurrent));
+    assert_eq!(command_key("cur"), Some(Command::AuditionCurrent));
+    assert_eq!(command_key("try"), Some(Command::AuditionTry));
+    assert_eq!(command_key("test"), Some(Command::AuditionTry));
+    assert_eq!(command_key("another"), Some(Command::AuditionAnother));
+    assert_eq!(command_key("change"), Some(Command::AuditionAnother));
+    assert_eq!(command_key("next"), Some(Command::AuditionAnother));
+    assert_eq!(command_key("drain"), Some(Command::ShutdownWhenIdle));
     assert_eq!(
         command_key("colour"),
         Some(Command::Key(KeyCode::Char('C')))
@@ -2256,16 +2270,16 @@ fn finish_audition(app: &mut App, voice: &str) {
 }
 
 #[tokio::test]
-async fn t_tests_the_current_voice_on_the_shown_line() {
+async fn current_word_tests_the_current_voice_on_the_shown_line() {
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
 
-    // `t`: the current voice on the shown line, from cache only. The
-    // cursor sits on Adam, but `t` never follows it — that is what
-    // `T` (render) and Enter (pick) are for.
-    handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
-    let req = last_op(&mut job_rx).expect("t must dispatch a segment fetch");
+    // `:current`: the current voice on the shown line, from cache only. The
+    // cursor sits on Adam, but it never follows it — that is what `:try`
+    // (render) and Enter (pick) are for.
+    do_command(&mut app, Command::AuditionCurrent, &http, &job_tx);
+    let req = last_op(&mut job_rx).expect(":current must dispatch a segment fetch");
     assert_eq!(req.op, Op::Segment);
     assert_eq!(
         req.voice.as_deref(),
@@ -2273,7 +2287,7 @@ async fn t_tests_the_current_voice_on_the_shown_line() {
         "the current voice, not the pointed one"
     );
     assert_eq!(req.character.as_deref(), Some("Narrator"));
-    let text = req.text.clone().expect("t always names the shown line");
+    let text = req.text.clone().expect(":current always names the shown line");
     assert_eq!(
         app.audition.as_deref(),
         Some("Đức Trí"),
@@ -2281,17 +2295,17 @@ async fn t_tests_the_current_voice_on_the_shown_line() {
     );
     match &app.screen {
         Screen::Pick(p) => {
-            assert_eq!(p.filter, "adam", "t auditions in step 2 and must not type");
+            assert_eq!(p.filter, "adam", ":current must not touch the filter");
             assert_eq!(
                 p.line.as_ref().map(|l| l.text.clone()),
                 Some(text.clone()),
                 "the shown line is held before the audio arrives"
             );
         }
-        other => panic!("t must not assign, got {other:?}"),
+        other => panic!(":current must not assign, got {other:?}"),
     }
 
-    // The served sentence is held and shown, so `T` renders it exactly.
+    // The served sentence is held and shown, so `:try` renders it exactly.
     let seg_key = op_key(&OpRequest {
         op: Op::Segment,
         ..Default::default()
@@ -2316,10 +2330,10 @@ async fn t_tests_the_current_voice_on_the_shown_line() {
         other => panic!("{other:?}"),
     }
 
-    // `T`: that exact served sentence, rendered with the pointed voice.
+    // `:try`: that exact served sentence, rendered with the pointed voice.
     finish_audition(&mut app, "Đức Trí");
-    handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
-    let req = last_op(&mut job_rx).expect("T must dispatch an audition");
+    do_command(&mut app, Command::AuditionTry, &http, &job_tx);
+    let req = last_op(&mut job_rx).expect(":try must dispatch an audition");
     assert_eq!(req.op, Op::PreviewVoice);
     assert_eq!(req.voice.as_deref(), Some("Adam"), "the pointed voice");
     let text = req.text.clone().expect("the line is sent as literal text");
@@ -2337,7 +2351,7 @@ async fn t_tests_the_current_voice_on_the_shown_line() {
     assert_eq!(held.text, text);
 
     finish_audition(&mut app, "Adam");
-    handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
+    do_command(&mut app, Command::AuditionTry, &http, &job_tx);
     let again = last_op(&mut job_rx).expect("a second audition dispatches too");
     assert_eq!(
         again.text.as_deref(),
@@ -2347,22 +2361,21 @@ async fn t_tests_the_current_voice_on_the_shown_line() {
 }
 
 #[tokio::test]
-async fn ctrl_t_rerolls_the_pointed_voice_on_another_line() {
+async fn another_word_rerolls_the_pointed_voice_on_another_line() {
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
 
     // Hear the candidate, which also picks and holds the line.
-    handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
+    do_command(&mut app, Command::AuditionTry, &http, &job_tx);
     let candidate = last_op(&mut job_rx).expect("dispatched");
     assert_eq!(candidate.voice.as_deref(), Some("Adam"));
     finish_audition(&mut app, "Adam");
 
-    // `^T`: the pointed voice again, re-rolled — a render, never a
+    // `:another`: the pointed voice again, re-rolled — a render, never a
     // cache-only segment fetch.
-    let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
-    handle_key(&mut app, ctrl_t, &http, &job_tx).await;
-    let reroll = last_op(&mut job_rx).expect("^T must dispatch");
+    do_command(&mut app, Command::AuditionAnother, &http, &job_tx);
+    let reroll = last_op(&mut job_rx).expect(":another must dispatch");
     assert_eq!(reroll.op, Op::PreviewVoice);
     assert_eq!(reroll.voice.as_deref(), Some("Adam"), "the pointed voice");
     assert_eq!(reroll.character.as_deref(), Some("Narrator"));
@@ -2377,7 +2390,7 @@ async fn ctrl_t_rerolls_the_pointed_voice_on_another_line() {
 
 #[tokio::test]
 async fn audition_without_a_backend_synthesizes_locally() {
-    // No inductor, no worker, no sidecar: `T` still auditions, on this box.
+    // No inductor, no worker, no sidecar: `:try` still auditions, on this box.
     // The synthesis itself is not run here (model weights, minutes) — the
     // dispatch shape is the contract, and the job reports honestly alone.
     let http = reqwest::Client::new();
@@ -2386,8 +2399,8 @@ async fn audition_without_a_backend_synthesizes_locally() {
     app.conn = Conn::Unknown;
     app.layout_root = std::path::PathBuf::from("/tmp/bm-offline-audition");
 
-    handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
-    match job_rx.try_recv().expect("T dispatches offline").into_bare() {
+    do_command(&mut app, Command::AuditionTry, &http, &job_tx);
+    match job_rx.try_recv().expect(":try dispatches offline").into_bare() {
         Job::PreviewLocal { voice, text, .. } => {
             assert_eq!(voice, "Adam", "the pointed voice");
             assert!(!text.is_empty(), "a line is always sent");
@@ -2403,9 +2416,9 @@ async fn audition_without_a_backend_synthesizes_locally() {
 }
 
 #[tokio::test]
-async fn controlled_letters_other_than_t_u_r_do_nothing() {
-    // `^T` auditions, `^U` clears, `^R` reloads; every other controlled
-    // letter must leave the audio and the filter alone.
+async fn controlled_letters_other_than_u_r_do_nothing() {
+    // `^U` clears, `^R` reloads; every other controlled letter must leave
+    // the audio and the filter alone. (`^T` used to reroll — now `:another`.)
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
@@ -2432,7 +2445,7 @@ async fn a_second_audition_while_one_renders_is_refused_by_name() {
     let mut app = audition_app();
     app.audition = Some("Đức Trí".into());
 
-    handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+    do_command(&mut app, Command::AuditionCurrent, &http, &job_tx);
     assert!(job_rx.try_recv().is_err(), "one render at a time");
     assert!(
         app.status.text.contains("Đức Trí"),
@@ -2459,7 +2472,7 @@ async fn a_refused_audition_does_not_leave_the_screen_wedged() {
         ..Default::default()
     }));
 
-    handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+    do_command(&mut app, Command::AuditionCurrent, &http, &job_tx);
     assert!(job_rx.try_recv().is_err(), "nothing was dispatched");
     assert!(
         app.audition.is_none(),
@@ -2474,8 +2487,8 @@ async fn a_refused_audition_does_not_leave_the_screen_wedged() {
 
 #[tokio::test]
 async fn plain_o_and_n_still_type_into_the_filter() {
-    // `t`/`T` audition on these screens; every other bare letter is a
-    // filter letter — o and n stand in for all of them here.
+    // Every bare letter is a filter letter — o and n stand in for all of
+    // them here (auditioning moved to `:current` / `:try` / `:another`).
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
@@ -2495,8 +2508,8 @@ async fn plain_o_and_n_still_type_into_the_filter() {
 
 #[tokio::test]
 async fn t_still_types_in_picker_step_1() {
-    // The audition binding is step-2-only: picking a character still
-    // needs every letter, `t` included.
+    // Picking a character needs every letter, `t` included (and step 2
+    // types everything too, now that auditioning is `:words`).
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
@@ -2518,6 +2531,26 @@ async fn t_still_types_in_picker_step_1() {
 }
 
 #[tokio::test]
+async fn letters_type_in_step_2_now_that_audition_is_words() {
+    // The reason for the word commands: `t`/`T` used to audition here and
+    // never reached the filter. Now every letter types.
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = audition_app();
+    if let Screen::Pick(p) = &mut app.screen {
+        p.filter.clear();
+    }
+    for c in ['t', 'T'] {
+        handle_key(&mut app, key(KeyCode::Char(c)), &http, &job_tx).await;
+    }
+    match &app.screen {
+        Screen::Pick(p) => assert_eq!(p.filter, "tT", "t must type in step 2"),
+        other => panic!("t must type in step 2, got {other:?}"),
+    }
+    assert!(job_rx.try_recv().is_err(), "typing must not dispatch");
+}
+
+#[tokio::test]
 async fn the_cast_overview_auditions_the_highlighted_speakers_own_voice() {
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
@@ -2531,16 +2564,16 @@ async fn the_cast_overview_auditions_the_highlighted_speakers_own_voice() {
     app.screen = Screen::Cast(CastView::new());
 
     // Narrator leads the table and is cast to Đức Trí: no candidate voice
-    // exists here, so the key plays what the speaker already has.
-    handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
-    let req = last_op(&mut job_rx).expect("T must dispatch");
+    // exists here, so the word plays what the speaker already has.
+    do_command(&mut app, Command::AuditionTry, &http, &job_tx);
+    let req = last_op(&mut job_rx).expect(":try must dispatch");
     assert_eq!(req.voice.as_deref(), Some("Đức Trí"));
     assert_eq!(req.character.as_deref(), Some("Narrator"));
     assert!(req.text.is_some(), "the line came from the scripts");
 }
 
 #[tokio::test]
-async fn t_in_the_cast_overview_tests_the_current_voice_on_the_shown_line() {
+async fn current_word_in_the_cast_overview_tests_the_current_voice_on_the_shown_line() {
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
@@ -2552,8 +2585,8 @@ async fn t_in_the_cast_overview_tests_the_current_voice_on_the_shown_line() {
     )]));
     app.screen = Screen::Cast(CastView::new());
 
-    handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
-    let req = last_op(&mut job_rx).expect("t must dispatch a segment fetch");
+    do_command(&mut app, Command::AuditionCurrent, &http, &job_tx);
+    let req = last_op(&mut job_rx).expect(":current must dispatch a segment fetch");
     assert_eq!(req.op, Op::Segment);
     assert_eq!(
         req.voice.as_deref(),
@@ -2563,7 +2596,7 @@ async fn t_in_the_cast_overview_tests_the_current_voice_on_the_shown_line() {
     assert_eq!(req.character.as_deref(), Some("Narrator"));
     assert!(
         req.text.as_deref().is_some_and(|t| !t.is_empty()),
-        "t always names the shown line"
+        ":current always names the shown line"
     );
 }
 
@@ -2580,7 +2613,7 @@ async fn the_cast_overview_will_not_audition_an_unassigned_speaker() {
     if let Screen::Cast(v) = &mut app.screen {
         v.filter = "moi".into();
     }
-    handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+    do_command(&mut app, Command::AuditionCurrent, &http, &job_tx);
     assert!(
         job_rx.try_recv().is_err(),
         "an empty voice is nothing to play"
@@ -2598,7 +2631,7 @@ async fn a_failed_line_index_says_which_half_is_out() {
     app.lines = None;
     app.lines_loading = true;
     app.apply(Ev::Lines(Err(
-        "no data/script-*.json under /r — run t (translate) first".into(),
+        "no data/script-*.json under /r — run :translate first".into(),
     )));
     assert!(
         !app.lines_loading,
@@ -2613,7 +2646,7 @@ async fn a_failed_line_index_says_which_half_is_out() {
     assert!(
         app.status
             .text
-            .contains("t (rendered segments) still plays"),
+            .contains(":current (rendered segments) still plays"),
         "the half that still works must be stated: {:?}",
         app.status
     );
@@ -2737,7 +2770,7 @@ async fn the_line_index_releases_the_in_flight_count() {
 }
 
 #[tokio::test]
-async fn the_picker_shows_the_incumbent_the_held_line_and_the_keys() {
+async fn the_picker_shows_the_incumbent_the_held_line_and_the_words() {
     let mut app = audition_app();
     if let Screen::Pick(p) = &mut app.screen {
         p.line = Some(AuditionLine {
@@ -2756,11 +2789,11 @@ async fn the_picker_shows_the_incumbent_the_held_line_and_the_keys() {
         "the held line must be shown:\n{text}"
     );
     assert!(
-        text.contains("T candidate"),
-        "the keys must be advertised:\n{text}"
+        text.contains(":try candidate"),
+        "the words must be advertised:\n{text}"
     );
     assert!(
-        text.contains("^T another line"),
+        text.contains(":another new line"),
         "the reroll must be advertised:\n{text}"
     );
 }
@@ -2783,7 +2816,7 @@ async fn the_cast_overview_shows_the_line_it_will_audition() {
     );
     assert!(
         text.contains("assigns nothing"),
-        "the keys must say they are harmless:\n{text}"
+        "the words must say they are harmless:\n{text}"
     );
 }
 
@@ -2962,6 +2995,42 @@ async fn cast_opens_only_from_the_command_line() {
 }
 
 #[tokio::test]
+async fn quit_word_quits_from_the_picker_command_line() {
+    // The filter owns every letter on picker/cast, so a bare `q` types —
+    // but `:quit` must still quit from there, not type another letter.
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = audition_app();
+    app.pending = 0;
+    let pick = app.screen.clone();
+    app.command_return = Some(pick);
+    app.screen = Screen::Text(TextPrompt::new(
+        TextKind::Command,
+        ":",
+        "",
+        "quit",
+    ));
+    let quit = handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(quit, ":quit from the picker must quit");
+}
+
+#[tokio::test]
+async fn audition_words_need_the_picker_or_cast() {
+    // From anywhere else they name the way there instead of dispatching.
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    assert!(matches!(app.screen, Screen::Normal));
+    do_command(&mut app, Command::AuditionTry, &http, &job_tx);
+    assert!(job_rx.try_recv().is_err(), "nothing to audition on");
+    assert!(
+        app.status.text.contains(":s") || app.status.text.contains("picker"),
+        "name the way there: {:?}",
+        app.status
+    );
+}
+
+#[tokio::test]
 async fn enter_in_the_cast_overview_goes_nowhere() {
     // The overview is read-only: swapping happens only in the picker.
     let http = reqwest::Client::new();
@@ -2984,7 +3053,7 @@ async fn enter_on_a_voice_locks_its_sentence_for_later() {
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
     // Hear the candidate on a real line first.
-    handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
+    do_command(&mut app, Command::AuditionTry, &http, &job_tx);
     let line = last_op(&mut job_rx)
         .expect("dispatched")
         .text
@@ -3570,8 +3639,8 @@ fn local_cache_layout() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[tokio::test]
-async fn t_while_disconnected_reads_the_local_cache() {
-    // No backend: t serves the same lookup from this checkout's files
+async fn current_word_while_disconnected_reads_the_local_cache() {
+    // No backend: :current serves the same lookup from this checkout's files
     // instead of the API. Listening needs no :B.
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
@@ -3579,10 +3648,10 @@ async fn t_while_disconnected_reads_the_local_cache() {
     let mut app = audition_app();
     app.conn = Conn::Down("inductor down".into());
     app.layout_root = root.clone();
-    handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+    do_command(&mut app, Command::AuditionCurrent, &http, &job_tx);
     match job_rx
         .try_recv()
-        .expect("t must dispatch while disconnected")
+        .expect(":current must dispatch while disconnected")
         .into_bare()
     {
         Job::Segment {
@@ -3594,11 +3663,11 @@ async fn t_while_disconnected_reads_the_local_cache() {
             assert_eq!(character, "Narrator");
             assert_eq!(
                 voice, "Đức Trí",
-                "t tests the current voice, never the pointed one"
+                ":current tests the current voice, never the pointed one"
             );
-            assert!(!text.is_empty(), "t always names the shown line");
+            assert!(!text.is_empty(), ":current always names the shown line");
         }
-        other => panic!("offline t must be a Segment job, got {other:?}"),
+        other => panic!("offline :current must be a Segment job, got {other:?}"),
     }
     assert_eq!(app.audition.as_deref(), Some("Đức Trí"));
 
@@ -3644,13 +3713,13 @@ async fn t_while_disconnected_reads_the_local_cache() {
 }
 
 #[tokio::test]
-async fn t_with_no_backend_and_no_checkout_says_so() {
+async fn current_word_with_no_backend_and_no_checkout_says_so() {
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
     app.conn = Conn::Down("inductor down".into());
     app.layout_root = std::path::PathBuf::new();
-    handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+    do_command(&mut app, Command::AuditionCurrent, &http, &job_tx);
     assert!(
         job_rx.try_recv().is_err(),
         "nothing to read from, nothing dispatched"

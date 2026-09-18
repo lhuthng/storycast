@@ -38,7 +38,7 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
                 body.push(e.clone());
                 body.push("press R to run the system (B backend only)".into());
             }
-            _ => body.push("press a to add one by IP or hostname".into()),
+            _ => body.push("type :add to add one by IP or hostname".into()),
         }
         f.render_widget(empty_body(body).block(block), area);
         return;

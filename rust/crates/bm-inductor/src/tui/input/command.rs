@@ -2,7 +2,7 @@
 use crate::tui::input::runconfig::run_preview;
 use crate::tui::{
     app::App,
-    input::{dispatch, dispatch_op},
+    input::{audition, dispatch, dispatch_op},
     jobs::Job,
     screen::{CastView, Confirm, ConfirmAction, Picker, Screen, TextKind, TextPrompt},
     style::{Conn, Level},
@@ -42,73 +42,91 @@ pub(crate) enum Command {
     Rerender,
     Remerge,
     ShutdownWhenIdle,
+    AuditionCurrent,
+    AuditionTry,
+    AuditionAnother,
 }
 
+/// One `:`-addressable command: its single-char form, its words, and its
+/// one-line explanation.
+///
+/// This table is the whole word layer — parsing (`command_key`) and `:help`
+/// both read it, so a word and its explanation cannot drift apart. The
+/// canonical word comes first; the rest are aliases. `desc` is `None` for
+/// the read-only navigations, which `:help` covers in their own sections.
+///
+/// Deliberate non-aliases, because the words are taken: `:swap` stays the
+/// voice picker and `:sample` stays pool-a-clip, so the auditions are
+/// `:current` / `:try` / `:another` instead.
+pub(crate) struct Word {
+    /// `:x` single-char form, if the command has one.
+    pub key: Option<char>,
+    /// Canonical word first, then aliases. Matched case-insensitively.
+    pub names: &'static [&'static str],
+    /// One line for `:help`, or `None` when another section explains it.
+    pub desc: Option<&'static str>,
+    pub cmd: Command,
+}
+
+pub(crate) static WORDS: &[Word] = &[
+    Word { key: Some('a'), names: &["add"], desc: Some("add a machine by IP or hostname"), cmd: Command::AddMachine },
+    Word { key: Some('A'), names: &["sample"], desc: Some("pool a clip — tags from the filename, enrolled locally"), cmd: Command::AddSample },
+    Word { key: Some('N'), names: &["named"], desc: Some("a `path as Name` voice — manual assignment only"), cmd: Command::AddNamed },
+    Word { key: Some('p'), names: &["provision", "prov"], desc: Some("provision the selected machine"), cmd: Command::Provision { force: false } },
+    Word { key: Some('P'), names: &["reprovision", "reprov"], desc: Some("re-provision it, forcing past the skip-if-configured check"), cmd: Command::Provision { force: true } },
+    Word { key: Some('d'), names: &["drop", "remove"], desc: Some("drop the selected machine from the cluster registry"), cmd: Command::DropMachine },
+    Word { key: Some('t'), names: &["translate"], desc: Some("enqueue crawl + digest for a chapter range"), cmd: Command::Translate },
+    Word { key: Some('c'), names: &["crawl"], desc: Some("save the URL template, then probe-crawl one chapter"), cmd: Command::CrawlSetup },
+    Word { key: Some('v'), names: &["voices"], desc: Some("re-read the roster, enforce the accent policy, refill gaps"), cmd: Command::Voices },
+    Word { key: Some('s'), names: &["swap"], desc: Some("repoint one character — destructive, see below"), cmd: Command::SwapVoice },
+    Word { key: Some('S'), names: &["cast"], desc: Some("cast overview: every speaker × voice, read-only"), cmd: Command::Cast },
+    Word { key: Some('e'), names: &["eta"], desc: Some("estimate the remaining wall-clock time"), cmd: Command::Eta },
+    Word { key: Some('u'), names: &["retry"], desc: Some("requeue every shelved task — strikes reset"), cmd: Command::Retry },
+    Word { key: Some('m'), names: &["reconcile"], desc: Some("fold duplicates — asks first; certain folds apply, ambiguous only listed"), cmd: Command::Reconcile },
+    Word { key: Some('B'), names: &["backend"], desc: Some("backend up now, machines provision in background and join as ready"), cmd: Command::Backend },
+    Word { key: None, names: &["mix"], desc: Some("story speed and fx/music/inject volumes — requeues every merge"), cmd: Command::Mix },
+    Word { key: None, names: &["sound", "sounds", "pools"], desc: Some("the three clip pools: add, edit, retune, remove"), cmd: Command::Sound },
+    Word { key: None, names: &["remerge"], desc: Some("requeue every merge — render cache kept, no confirm"), cmd: Command::Remerge },
+    Word { key: None, names: &["rerender"], desc: Some("requeue every render + merge — full re-speak, asks first"), cmd: Command::Rerender },
+    Word { key: None, names: &["shutdown-when-idle", "drain"], desc: Some("workers exit on their own once the queue drains — restart with :B"), cmd: Command::ShutdownWhenIdle },
+    Word { key: Some('X'), names: &["stop"], desc: Some("stop everything everywhere: local backend plus workers on all machines"), cmd: Command::Stop },
+    Word { key: None, names: &["sshkey"], desc: None, cmd: Command::SshKey },
+    Word { key: None, names: &["sshuser"], desc: None, cmd: Command::SshUser },
+    Word { key: None, names: &["sshport"], desc: None, cmd: Command::SshPort },
+    Word { key: Some('q'), names: &["quit", "exit", "q"], desc: None, cmd: Command::Key(KeyCode::Char('q')) },
+    Word { key: None, names: &["inspect"], desc: None, cmd: Command::Key(KeyCode::Char('i')) },
+    Word { key: None, names: &["tasks"], desc: None, cmd: Command::Key(KeyCode::Char('K')) },
+    Word { key: None, names: &["jobs"], desc: None, cmd: Command::Key(KeyCode::Char('J')) },
+    Word { key: None, names: &["refresh"], desc: None, cmd: Command::Key(KeyCode::Char('r')) },
+    Word { key: None, names: &["colour", "color"], desc: None, cmd: Command::Key(KeyCode::Char('C')) },
+    Word { key: None, names: &["run"], desc: None, cmd: Command::Key(KeyCode::Char('R')) },
+    Word { key: None, names: &["newest"], desc: None, cmd: Command::Key(KeyCode::Char('G')) },
+    Word { key: None, names: &["help"], desc: None, cmd: Command::Key(KeyCode::Char('?')) },
+    Word { key: None, names: &["current", "cur"], desc: Some("play the held line with the current voice, from cache only"), cmd: Command::AuditionCurrent },
+    Word { key: None, names: &["try", "test"], desc: Some("render the held line with the pointed voice"), cmd: Command::AuditionTry },
+    Word { key: None, names: &["another", "change", "next"], desc: Some("render another line with the pointed voice"), cmd: Command::AuditionAnother },
+];
+
 /// `:` command line → the command. A single character is a command key
-/// (`:m` is reconcile); longer words are the readable form (`:reconcile`
-/// is too). Unknown input stays an error in the prompt.
+/// (`:m` is reconcile); longer words are the readable form, aliases
+/// included (`:prov` is provision, `:drain` is shutdown-when-idle).
+/// Unknown input stays an error in the prompt.
 pub(crate) fn command_key(input: &str) -> Option<Command> {
     let word = input.trim();
     if word.chars().count() == 1 {
         let c = word.chars().next().filter(|c| *c != ':')?;
-        return Some(match c {
-            'a' => Command::AddMachine,
-            'A' => Command::AddSample,
-            'N' => Command::AddNamed,
-            'p' => Command::Provision { force: false },
-            'P' => Command::Provision { force: true },
-            'd' => Command::DropMachine,
-            't' => Command::Translate,
-            'c' => Command::CrawlSetup,
-            'v' => Command::Voices,
-            's' => Command::SwapVoice,
-            'S' => Command::Cast,
-            'e' => Command::Eta,
-            'u' => Command::Retry,
-            'm' => Command::Reconcile,
-            'B' => Command::Backend,
-            'X' => Command::Stop,
-            // Read-only keys keep their Normal-mode arms, so the command
-            // presses the key and every context behaves like it was typed.
-            _ => Command::Key(KeyCode::Char(c)),
-        });
+        if let Some(w) = WORDS.iter().find(|w| w.key == Some(c)) {
+            return Some(w.cmd);
+        }
+        // Read-only keys keep their Normal-mode arms, so the command
+        // presses the key and every context behaves like it was typed.
+        return Some(Command::Key(KeyCode::Char(c)));
     }
-    Some(match word.to_ascii_lowercase().as_str() {
-        "quit" => Command::Key(KeyCode::Char('q')),
-        "add" => Command::AddMachine,
-        "drop" => Command::DropMachine,
-        "inspect" => Command::Key(KeyCode::Char('i')),
-        "provision" => Command::Provision { force: false },
-        "reprovision" => Command::Provision { force: true },
-        "translate" => Command::Translate,
-        "crawl" => Command::CrawlSetup,
-        "retry" => Command::Retry,
-        "tasks" => Command::Key(KeyCode::Char('K')),
-        "jobs" => Command::Key(KeyCode::Char('J')),
-        "voices" => Command::Voices,
-        "swap" => Command::SwapVoice,
-        "cast" => Command::Cast,
-        "eta" => Command::Eta,
-        "reconcile" => Command::Reconcile,
-        "refresh" => Command::Key(KeyCode::Char('r')),
-        "colour" | "color" => Command::Key(KeyCode::Char('C')),
-        "backend" => Command::Backend,
-        "run" => Command::Key(KeyCode::Char('R')),
-        "stop" => Command::Stop,
-        "sshkey" => Command::SshKey,
-        "sshuser" => Command::SshUser,
-        "sshport" => Command::SshPort,
-        "mix" => Command::Mix,
-        "sound" | "sounds" | "pools" => Command::Sound,
-        "rerender" => Command::Rerender,
-        "remerge" => Command::Remerge,
-        "shutdown-when-idle" => Command::ShutdownWhenIdle,
-        "newest" => Command::Key(KeyCode::Char('G')),
-        "named" => Command::AddNamed,
-        "sample" => Command::AddSample,
-        "help" => Command::Key(KeyCode::Char('?')),
-        _ => return None,
-    })
+    let lower = word.to_ascii_lowercase();
+    WORDS
+        .iter()
+        .find(|w| w.names.iter().any(|n| *n == lower))
+        .map(|w| w.cmd)
 }
 
 /// Run a `:` operator command. `Command::Key` never arrives here — the caller
@@ -159,7 +177,7 @@ pub(crate) fn do_command(
             ));
         }
         Command::Provision { force } => match app.selected_machine() {
-            None => app.set_status(Level::Warn, "no machine selected — :a adds one first"),
+            None => app.set_status(Level::Warn, "no machine selected — :add adds one first"),
             Some(m) => {
                 app.screen = Screen::Confirm(Confirm {
                     title: if force {
@@ -341,6 +359,15 @@ pub(crate) fn do_command(
                 },
             );
             app.set_status(Level::Info, "requeueing every merge — render cache kept");
+        }
+        Command::AuditionCurrent => {
+            audition::audition_word(app, job_tx, http, audition::AuditionKind::Current);
+        }
+        Command::AuditionTry => {
+            audition::audition_word(app, job_tx, http, audition::AuditionKind::Pointed { reroll: false });
+        }
+        Command::AuditionAnother => {
+            audition::audition_word(app, job_tx, http, audition::AuditionKind::Pointed { reroll: true });
         }
         Command::ShutdownWhenIdle => {
             // Graceful and reversible (nothing deleted, `:B` brings workers

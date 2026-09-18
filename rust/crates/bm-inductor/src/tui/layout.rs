@@ -66,13 +66,13 @@ pub(crate) const COMPACT_FOOTER_H: u16 = 4;
 /// The compact tier gets shorter labels because it has 76 columns to work with;
 /// every key is described in full on the help screen, which `?` opens.
 pub(crate) const KEYS_FULL: [&str; 2] = [
-    ":a add · :p provision · :d drop · :t translate · :c crawl · :e eta · i inspect",
-    ":u retry · :m rec · :B back · :X stop · :s swap · :v voices · :S cast · K tasks · J jobs · r · ? · q",
+    ":add · :prov · :drop · :translate · :crawl · :eta · i inspect",
+    ":retry · :reconcile · :backend · :stop · :swap · :voices · :S cast · K tasks · J jobs · r · ? · q",
 ];
 
 pub(crate) const KEYS_COMPACT: [&str; 2] = [
-    ":a add · :p prov · :d drop · :t trans · :c crawl · :B back · :X stop",
-    ":u · :m · :v voices · :s swap · :S cast · K tasks · r · ? · q quit · : cmd",
+    ":add · :prov · :drop · :translate · :crawl · :stop",
+    ":retry · :reconcile · :swap · :voices · :S cast · K tasks · ? · q · : cmd",
 ];
 
 /// Compact-tier column widths. The full tier has slack and keeps its widths

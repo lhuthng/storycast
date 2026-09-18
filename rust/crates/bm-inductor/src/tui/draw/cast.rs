@@ -286,7 +286,7 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(Span::styled(
-            "t test · T line · ^T another line — t plays rendered audio, assigns nothing (t/T don't filter)",
+            ":current cached test · :try this line · :another new line — each assigns nothing; every letter filters",
             Style::default().fg(Color::DarkGray),
         )),
     ];
