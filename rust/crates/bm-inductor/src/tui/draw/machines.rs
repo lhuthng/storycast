@@ -57,11 +57,12 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
         .map(|(i, m)| {
             let idx = start + i;
             let cursor = if idx == selected { "▸ " } else { "  " };
-            // `id` is the addr by construction, so the column only repeated
-            // the neighbour. Live workers per box is the useful number here:
-            // the operator's actual question is "is this box doing anything".
+            // The registry handle when the box has one (`hawk` — the word
+            // the provision log and the workers pane use), else the address.
+            // `id` is the addr by construction, so it would only repeat this.
+            let handle = if m.name.is_empty() { m.addr.clone() } else { m.name.clone() };
             let mut cells = vec![
-                cell(format!("{cursor}{}", m.addr)),
+                cell(format!("{cursor}{handle}")),
                 cell(live_workers(&app.beats, &m.addr, bm_proto::now_secs()).to_string()),
                 cell(m.role.clone()),
                 state_cell(colour, m.state.as_str()),
@@ -81,7 +82,7 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
         })
         .collect();
 
-    let mut header = vec!["addr", "workers", "role", "state"];
+    let mut header = vec!["machine", "workers", "role", "state"];
     let mut widths: Vec<Constraint> = if compact {
         // Taken from the constant the compile-time guard checks.
         COMPACT_MACHINE_COLS[..4]

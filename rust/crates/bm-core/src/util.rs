@@ -180,6 +180,7 @@ mod tests {
 
     #[test]
     fn expand_tilde_grows_only_a_leading_bare_tilde() {
+        let _env = crate::ENV_LOCK.lock().unwrap();
         let home = std::env::var("HOME").unwrap();
         assert_eq!(expand_tilde("~"), std::path::PathBuf::from(&home));
         assert_eq!(

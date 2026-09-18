@@ -1402,15 +1402,15 @@ fn the_log_pane_has_one_title_aliases_and_local_time() {
     let text = render_text(&mut app, 140, 44);
     assert!(text.contains("Logs"), "pane renamed:\n{text}");
     assert!(!text.contains("Events"), "no stale title anywhere:\n{text}");
-    let (alias, _) = worker_alias("192.168.2.2");
+    // Address heads are box-level lines: shown as written, never hashed
+    // into a phantom worker name.
     assert!(
-        text.contains(&format!("[{alias}]")),
-        "machine line aliased:\n{text}"
+        text.contains("[192.168.2.2]"),
+        "machine line verbatim:\n{text}"
     );
-    let (walias, _) = worker_alias("localhost-99");
     assert!(
-        text.contains(&format!("[{walias}]")),
-        "worker line aliased:\n{text}"
+        text.contains("[localhost-99]"),
+        "unknown worker id verbatim:\n{text}"
     );
     assert!(
         text.contains("reconcile: nothing certain"),
@@ -1431,12 +1431,33 @@ fn log_lines_use_reported_aliases_when_beats_carry_them() {
         text.contains("[marmot]"),
         "the reported alias wins:\n{text}"
     );
+    // ...but an id no beat knows stays itself. Hashing it once minted
+    // `[hawk]` for the address `192.168.2.2` — a worker that never
+    // existed, hunted across every pane.
     app.log_at(Level::Ok, "[ghost-1] render:24 done");
     let text = render_text(&mut app, 140, 44);
-    let (fallback, _) = worker_alias("ghost-1");
     assert!(
-        text.contains(&format!("[{fallback}]")),
-        "ids no beat knows keep the hash:\n{text}"
+        text.contains("[ghost-1]"),
+        "unknown ids stay verbatim:\n{text}"
+    );
+}
+
+#[test]
+fn an_address_head_never_becomes_a_phantom_worker() {
+    // The exact confusion: provision lines are tagged with the box
+    // address while its worker beats as `thang-marmot`. The log must
+    // show the address, not hash it into a third name.
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.beats = vec![beat("thang-marmot", "192.168.2.2", 2, "marmot")];
+    app.log_at(Level::Ok, "[192.168.2.2] already configured (agent 0.2.3 + tts sidecar)");
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains("[192.168.2.2]"),
+        "the address stays an address:\n{text}"
+    );
+    assert!(
+        !text.contains("[hawk]"),
+        "no phantom worker is minted:\n{text}"
     );
 }
 
@@ -1576,6 +1597,45 @@ fn workers_pane_says_so_when_every_beat_is_stale() {
         "stale is not idle:\n{text}"
     );
     assert!(!text.contains("quokka"), "stale rows never draw:\n{text}");
+}
+
+fn named_machine(addr: &str, name: &str) -> Machine {
+    let mut m = Machine::new(addr, "thang", 22, None, "worker");
+    m.name = name.into();
+    m
+}
+
+#[test]
+fn machine_name_prefers_the_registry_handle() {
+    use super::model::machine_name;
+    let machines = vec![named_machine("192.168.2.2", "hawk")];
+    // Known box: the handle the provision log used, not the OS hostname.
+    let b = beat("thang-marmot", "192.168.2.2", 2, "marmot");
+    assert_eq!(machine_name(&machines, &b), "hawk");
+    // Unnamed box: the reported hostname, then the address.
+    let machines = vec![Machine::new("192.168.2.2", "thang", 22, None, "worker")];
+    assert_eq!(machine_name(&machines, &b), "host-thang-marmot");
+    let mut nohost = b.clone();
+    nohost.hostname.clear();
+    assert_eq!(machine_name(&machines, &nohost), "192.168.2.2");
+    // Unknown box entirely: same fallbacks, never empty.
+    assert_eq!(machine_name(&[], &b), "host-thang-marmot");
+    assert_eq!(machine_name(&[], &nohost), "192.168.2.2");
+}
+
+#[test]
+fn both_panes_call_a_known_box_by_its_handle() {
+    // The hawk hunt: provision says one name, panes must agree with it.
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.machines = vec![named_machine("192.168.2.2", "hawk")];
+    app.beats = vec![beat("thang-marmot", "192.168.2.2", 2, "marmot")];
+    let text = render_text(&mut app, 140, 44);
+    assert!(text.contains("marmot"), "the worker keeps its alias:\n{text}");
+    assert!(text.contains("hawk"), "both panes use the handle:\n{text}");
+    assert!(
+        !text.contains("host-thang-marmot"),
+        "the OS hostname steps aside where a handle exists:\n{text}"
+    );
 }
 
 #[test]

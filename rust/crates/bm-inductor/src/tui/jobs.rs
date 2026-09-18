@@ -492,14 +492,14 @@ pub(crate) async fn job_provision(
                             send_update(
                                 &tx,
                                 MachineState::Error,
-                                "provisioned but the worker would not start — press p again",
+                                "provisioned but the worker would not start — :prov again",
                             );
                             set_machine_state(
                                 &api,
                                 &layout_root,
                                 &addr,
                                 MachineState::Error,
-                                "provisioned but the worker would not start — press p again",
+                                "provisioned but the worker would not start — :prov again",
                             )
                             .await;
                             let _ = tx.send(Ev::Done(DoneKind::Other));
@@ -514,14 +514,14 @@ pub(crate) async fn job_provision(
                             send_update(
                                 &tx,
                                 MachineState::Error,
-                                "provisioned but the worker start crashed — press p again",
+                                "provisioned but the worker start crashed — :prov again",
                             );
                             set_machine_state(
                                 &api,
                                 &layout_root,
                                 &addr,
                                 MachineState::Error,
-                                "provisioned but the worker start crashed — press p again",
+                                "provisioned but the worker start crashed — :prov again",
                             )
                             .await;
                             let _ = tx.send(Ev::Done(DoneKind::Other));
@@ -552,7 +552,7 @@ pub(crate) async fn job_provision(
                 send(
                     &tx,
                     Level::Error,
-                    format!("[{addr}] {reason} — fix it and press p again"),
+                    format!("[{addr}] {reason} — fix it and run :prov again"),
                 );
             }
         }
@@ -565,14 +565,14 @@ pub(crate) async fn job_provision(
             send_update(
                 &tx,
                 MachineState::Error,
-                "provision task crashed — press p again",
+                "provision task crashed — :prov again",
             );
             set_machine_state(
                 &api,
                 &layout_root,
                 &addr,
                 MachineState::Error,
-                "provision task crashed — press p again",
+                "provision task crashed — :prov again",
             )
             .await;
             send(
@@ -601,7 +601,7 @@ pub(crate) async fn job_add_machine(
         Ok(r) if r.status().is_success() => send(
             &tx,
             Level::Ok,
-            format!("machine {addr} added — press p to provision"),
+            format!("machine {addr} added — :prov provisions it"),
         ),
         Ok(r) => send(
             &tx,
@@ -829,10 +829,10 @@ pub(crate) async fn job_start_backend(
                         &layout_root,
                         &addr,
                         MachineState::Error,
-                        "catch-up failed — select it and press p to retry",
+                        "catch-up failed — select it and run :prov to retry",
                     )
                     .await;
-                    send(&tx, Level::Error, format!("[{addr}] catch-up failed — cluster runs without it; select it and press p to retry"));
+                    send(&tx, Level::Error, format!("[{addr}] catch-up failed — cluster runs without it; select it and run :prov to retry"));
                     continue;
                 }
             }
@@ -843,7 +843,7 @@ pub(crate) async fn job_start_backend(
                     &layout_root,
                     &addr,
                     MachineState::Error,
-                    "catch-up task crashed — press p to retry",
+                        "catch-up task crashed — :prov to retry",
                 )
                 .await;
                 send(
@@ -885,13 +885,13 @@ pub(crate) async fn job_start_backend(
                         &layout_root,
                         &addr,
                         MachineState::Error,
-                        "provisioned but the worker would not start — press p to retry",
+                        "provisioned but the worker would not start — :prov to retry",
                     )
                     .await;
                     send(
                         &tx,
                         Level::Error,
-                        format!("[{addr}] worker start failed — press p to retry"),
+                        format!("[{addr}] worker start failed — :prov to retry"),
                     );
                     continue;
                 }
@@ -902,7 +902,7 @@ pub(crate) async fn job_start_backend(
                         &layout_root,
                         &addr,
                         MachineState::Error,
-                        "worker start task crashed — press p to retry",
+                        "worker start task crashed — :prov to retry",
                     )
                     .await;
                     send(
@@ -937,7 +937,7 @@ pub(crate) async fn job_start_backend(
             &tx,
             Level::Warn,
             format!(
-                "{} machine(s) in Error — cluster runs degraded; select one and press p",
+                "{} machine(s) in Error — cluster runs degraded; select one and run :prov",
                 failed.len()
             ),
         );

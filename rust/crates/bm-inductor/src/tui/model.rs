@@ -295,6 +295,34 @@ pub(crate) fn live_workers(beats: &[Heartbeat], addr: &str, now: u64) -> usize {
         .count()
 }
 
+/// Display name for a beat's box: the registry handle the provision log
+/// used (`hawk`), so the workers pane agrees with the events pane. Falls
+/// back to the reported OS hostname, then the address — a box the registry
+/// never saw still renders something true.
+pub(crate) fn machine_name<'a>(machines: &'a [Machine], beat: &'a Heartbeat) -> &'a str {
+    machines
+        .iter()
+        .find(|m| m.addr == beat.addr)
+        .map(|m| {
+            if m.name.is_empty() {
+                if beat.hostname.is_empty() {
+                    beat.addr.as_str()
+                } else {
+                    beat.hostname.as_str()
+                }
+            } else {
+                m.name.as_str()
+            }
+        })
+        .unwrap_or_else(|| {
+            if beat.hostname.is_empty() {
+                beat.addr.as_str()
+            } else {
+                beat.hostname.as_str()
+            }
+        })
+}
+
 /// `(state, count)` in `TaskState::ALL` order, zeroes skipped.
 pub(crate) fn task_state_counts(tasks: &[Task]) -> Vec<(TaskState, usize)> {
     TaskState::ALL

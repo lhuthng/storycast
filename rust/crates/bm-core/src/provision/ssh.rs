@@ -433,6 +433,7 @@ mod tests {
 
     #[test]
     fn ssh_argv_expands_tilde_in_the_key_for_both_transports() {
+        let _env = crate::ENV_LOCK.lock().unwrap();
         // The ledger held `~/.ssh/ssh-key-my-wsl` verbatim; ssh (no shell)
         // failed it while rsync (shell) expanded it. Both now go through
         // expand_tilde, so `-i` always names a real path.
@@ -469,6 +470,7 @@ mod tests {
 
     #[test]
     fn resolve_key_prefers_box_then_settings_then_ssh_default() {
+        let _env = crate::ENV_LOCK.lock().unwrap();
         let home = std::env::var("HOME").unwrap();
         let (p, src) = resolve_key(Some("~/.ssh/box-k"), Some("~/.ssh/app-k"));
         assert_eq!(

@@ -419,6 +419,7 @@ mod tests {
     #[test]
     fn resolve_clip_expands_tilde_and_falls_back_to_the_root() {
         // `~` without a shell.
+        let _env = crate::ENV_LOCK.lock().unwrap();
         let home = std::env::temp_dir().join("bm-clip-home");
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();

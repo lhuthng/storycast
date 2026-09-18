@@ -2,7 +2,7 @@
 use crate::tui::{
     app::App,
     layout::COMPACT_WORKER_COLS,
-    model::{live_beats, reported_alias},
+    model::{live_beats, machine_name, reported_alias},
     style::{bar, cell, empty_body, stage_color, style_bold_of, style_of, worker_alias},
 };
 use ratatui::{
@@ -57,14 +57,12 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compac
                 .to_string();
             let tint = worker_alias(&name).1;
             let mut cells = vec![Line::from(Span::styled(name, style_of(colour, tint)))];
-            // The machine column is derivable from the Machines pane; the
-            // activity string is not, so the machine column goes first.
+            // The registry handle when the box is known (`hawk`, the same
+            // word the provision log used) — the reported OS hostname
+            // otherwise. Never the raw "localhost" fallback alone next to
+            // a known box: one box, one name on every pane.
             if !compact {
-                cells.push(cell(if b.hostname.is_empty() {
-                    b.addr.clone()
-                } else {
-                    b.hostname.clone()
-                }));
+                cells.push(cell(machine_name(&app.machines, b).to_string()));
             }
             cells.extend([
                 stage_line,

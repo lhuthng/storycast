@@ -48,6 +48,16 @@ impl Inner {
         self.layout.bm_state().join("ledger.json")
     }
 
+    /// Registry handle for an address: the stored box name, else the
+    /// fallback. Display only — keys stay addresses everywhere.
+    pub fn box_name(&self, addr: &str, fallback: &str) -> String {
+        load_boxes(&self.layout.machines())
+            .iter()
+            .find(|b| b.addr == addr)
+            .map(|b| b.name.clone())
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
     /// Persist one in-memory machine's connection config to `machines.json`.
     /// `fallback_name` (hostname, address) applies only when the box has no
     /// stored name yet. Runtime still goes through `save()`.
@@ -55,11 +65,7 @@ impl Inner {
         let Some(m) = self.machines.get(addr) else {
             return;
         };
-        let name = load_boxes(&self.layout.machines())
-            .iter()
-            .find(|b| b.addr == addr)
-            .map(|b| b.name.clone())
-            .unwrap_or_else(|| fallback_name.to_string());
+        let name = self.box_name(addr, fallback_name);
         let (bxo, _) = split_machine(m, &name);
         let _ = save_box(&self.layout.machines(), &bxo);
     }
