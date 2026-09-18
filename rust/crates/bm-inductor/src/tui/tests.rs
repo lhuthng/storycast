@@ -657,6 +657,48 @@ fn the_run_screen_renders_without_a_roster_or_backend() {
     assert!(text.contains("DOWN"), "no backend is attached:\n{text}");
 }
 
+#[tokio::test]
+async fn a_cold_start_names_the_fix_instead_of_reqwest_prose() {
+    // The complaint this answers: starting the TUI with no inductor up
+    // logged `inductor unreachable at …: error sending request for url …`
+    // as an ERROR. A refused connection is the normal cold start, so the
+    // poll verdict names `:B` and fits on one line.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let api = format!("http://127.0.0.1:{port}");
+    let http = reqwest::Client::new();
+    let err = super::jobs::fetch_state(&http, &api)
+        .await
+        .expect_err("nothing listens there");
+    assert!(err.contains("inductor is down"), "names the state: {err}");
+    assert!(err.contains(":B"), "names the fix: {err}");
+    assert!(
+        !err.contains("error sending request"),
+        "no reqwest prose: {err}"
+    );
+}
+
+#[test]
+fn a_dead_inductor_warns_once_on_the_transition_down() {
+    let mut app = App::new("http://127.0.0.1:8901");
+    let down = "inductor is down at http://127.0.0.1:8901 — :B to start it";
+    let before = app.events.len();
+    app.state_failed(down.into());
+    assert!(matches!(app.conn, Conn::Down(_)));
+    assert_eq!(app.events.len(), before + 1, "the transition is logged");
+    let line = app.events.back().unwrap();
+    assert!(
+        matches!(line.level, Level::Warn),
+        "a cold start is not an error: {:?}",
+        line.level
+    );
+    app.state_failed(down.into());
+    assert_eq!(app.events.len(), before + 1, "repeats stay quiet");
+}
+
 #[test]
 fn backend_live_parks_the_range_until_the_next_refresh() {
     let mut app = App::new("http://x");

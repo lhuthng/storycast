@@ -34,9 +34,10 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
     if app.machines.is_empty() {
         let mut body = vec!["no machines in the cluster".to_string()];
         match &app.conn {
-            Conn::Down(e) => {
-                body.push(e.clone());
-                body.push("press R to run the system (B backend only)".into());
+            Conn::Down(_) => {
+                // The poll verdict is already the log line — the pane only
+                // needs the way back up, which works from right here.
+                body.push("inductor is down — :B to start it".into());
             }
             _ => body.push("type :add to add one by IP or hostname".into()),
         }

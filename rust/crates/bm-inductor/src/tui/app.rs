@@ -398,10 +398,11 @@ impl App {
 
     /// Record a failed poll. The message is only logged on the *transition* into
     /// being down: a dead inductor would otherwise fill the pane with the same
-    /// line every 800 ms.
+    /// line every 800 ms. Warn, not Error — a down inductor at startup is the
+    /// normal cold start (the message itself names `:B`), not a failure.
     pub(crate) fn state_failed(&mut self, e: String) {
         if self.conn != Conn::Down(e.clone()) {
-            self.log_at(Level::Error, e.clone());
+            self.log_at(Level::Warn, e.clone());
         }
         self.conn = Conn::Down(e);
     }
