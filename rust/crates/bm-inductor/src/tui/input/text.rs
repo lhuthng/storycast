@@ -44,10 +44,16 @@ pub(crate) async fn key_text(
                 }
                 return match command_key(&buf) {
                     // Read-only commands press a still-live key, so a
-                    // context (task list, picker) reacts exactly as if it
-                    // had been typed there. Operator actions run directly
-                    // via `do_command` — their keys were removed.
+                    // context (task list) reacts exactly as if it had been
+                    // typed there. Operator actions run directly via
+                    // `do_command` — their keys were removed.
+                    // From the picker/cast the filter owns every letter, so
+                    // a global key (`q` `?` `K` …) would type instead of
+                    // acting — run those via Normal first.
                     Some(Command::Key(code)) => {
+                        if matches!(app.screen, Screen::Pick(_) | Screen::Cast(_)) {
+                            app.screen = Screen::Normal;
+                        }
                         Box::pin(super::handle_key(
                             app,
                             KeyEvent::new(code, KeyModifiers::empty()),

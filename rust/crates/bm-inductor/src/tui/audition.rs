@@ -59,7 +59,7 @@ pub(crate) fn index_lines(root: &Path) -> Result<HashMap<String, Vec<String>>, S
     let files = script_files(root);
     if files.is_empty() {
         return Err(format!(
-            "no data/script-*.json under {} — run t (translate) first",
+            "no data/script-*.json under {} — run :translate first",
             root.display()
         ));
     }

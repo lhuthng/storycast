@@ -1,16 +1,14 @@
 //! Cast overview: filterable table, read-only.
 //!
 //! Nothing here assigns anything — swapping happens in the picker (`:s`), and
-//! this screen deliberately offers no shortcut to it. `t` tests the speaker's
-//! current voice on the shown line, from cache only; `T` renders the held
-//! line, `^T` re-rolls it. Those two letters don't type here; every other
-//! letter still filters.
+//! this screen deliberately offers no shortcut to it. Auditioning lives on
+//! the `:` command line (`:current` / `:try` / `:another`), so every letter
+//! types into the filter.
 use crate::tui::{
     app::App,
-    input::audition::{audition, segment, shown_line},
     jobs::Job,
     model::filtered_cast_rows,
-    screen::{CastView, Screen},
+    screen::{CastView, Screen, TextKind, TextPrompt},
     style::Level,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -32,55 +30,18 @@ pub(crate) async fn key_cast(
             app.screen = Screen::Normal;
         }
         KeyCode::Char('R') => app.load_roster(job_tx, http),
-        // `t`: the speaker's current voice on the shown line, from cache
-        // only — never synthesis. A miss names the render key instead of
-        // playing something nearby.
-        KeyCode::Char('t') if !ctrl && !alt => {
-            let rows = app.cast_rows();
-            let list = filtered_cast_rows(&rows, &v.filter);
-            match list.get(v.cursor) {
-                None => app.set_status(Level::Warn, "nothing to audition"),
-                Some(row) if row.voice.is_empty() => app.set_status(
-                    Level::Warn,
-                    format!("“{}” has no voice assigned yet", row.character),
-                ),
-                Some(row) => match shown_line(app, &row.character, v.line.as_ref()) {
-                    None => {
-                        app.set_status(Level::Warn, "no lines in the scripts yet — nothing to test")
-                    }
-                    Some(l) => {
-                        v.line = Some(l.clone());
-                        segment(app, job_tx, http, &row.character, &row.voice, &l.text);
-                    }
-                },
-            }
-            app.screen = Screen::Cast(v);
-        }
-        // `T`: the held line, rendered — the deliberate generation behind
-        // the cache-only `t` above.
-        KeyCode::Char('T') if !ctrl && !alt => {
-            let rows = app.cast_rows();
-            let list = filtered_cast_rows(&rows, &v.filter);
-            match list.get(v.cursor) {
-                None => app.set_status(Level::Warn, "nothing to audition"),
-                Some(row) if row.voice.is_empty() => app.set_status(
-                    Level::Warn,
-                    format!("“{}” has no voice assigned yet", row.character),
-                ),
-                Some(row) => {
-                    let (character, voice) = (row.character.clone(), row.voice.clone());
-                    v.line = audition(
-                        app,
-                        job_tx,
-                        http,
-                        &character,
-                        &voice,
-                        v.line.as_ref(),
-                        false,
-                    );
-                }
-            }
-            app.screen = Screen::Cast(v);
+        KeyCode::Char(':') => {
+            // The command line works here too — `:current` / `:try` /
+            // `:another` audition from the highlighted speaker, now that
+            // every letter types into the filter.
+            app.command_return = Some(Screen::Cast(v));
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::Command,
+                ":",
+                "command — :current :try :another audition, or any word (:help)",
+                "",
+            ));
+            app.set_status(Level::Info, "command mode — Enter runs it, Esc closes");
         }
         KeyCode::Up => {
             v.cursor = v.cursor.saturating_sub(1);
@@ -125,23 +86,6 @@ pub(crate) async fn key_cast(
                 v.filter.clear();
                 v.cursor = 0;
                 v.scroll = 0;
-            } else if c == 't' || c == 'T' {
-                // `^T`: another line, same voice. Case-insensitive — the
-                // terminal may report either case with CONTROL held.
-                let rows = app.cast_rows();
-                let list = filtered_cast_rows(&rows, &v.filter);
-                match list.get(v.cursor) {
-                    None => app.set_status(Level::Warn, "nothing to audition"),
-                    Some(row) if row.voice.is_empty() => app.set_status(
-                        Level::Warn,
-                        format!("“{}” has no voice assigned yet", row.character),
-                    ),
-                    Some(row) => {
-                        let (character, voice) = (row.character.clone(), row.voice.clone());
-                        v.line =
-                            audition(app, job_tx, http, &character, &voice, v.line.as_ref(), true);
-                    }
-                }
             }
             app.screen = Screen::Cast(v);
         }

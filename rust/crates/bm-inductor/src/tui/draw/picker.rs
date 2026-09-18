@@ -93,7 +93,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
     // candidates, and a random line is random until you are told which one it is.
     let audition_ctx: Line = match picker.stage {
         PickStage::Character => Line::from(Span::styled(
-            "audition keys appear once a character is chosen",
+            "audition with :current :try :another once a character is chosen",
             Style::default().fg(Color::DarkGray),
         )),
         PickStage::Voice => {
@@ -107,7 +107,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
             let held = match &picker.line {
                 Some(l) => format!("“{}”", bm_core::util::head_chars(&l.text, 56)),
                 None if app.lines.is_none() => "reading scripts…".to_string(),
-                None => "not picked yet — T".to_string(),
+                None => "not picked yet — :try".to_string(),
             };
             Line::from(vec![
                 Span::styled("current: ", Style::default().fg(Color::DarkGray)),
@@ -307,7 +307,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(Span::styled(
-                "t incumbent · T candidate · ^T another line — none of these assign (t/T don't filter here)",
+                ":current incumbent · :try candidate · :another new line — none of these assign",
                 Style::default().fg(Color::DarkGray),
             )),
         ],

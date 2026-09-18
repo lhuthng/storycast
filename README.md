@@ -229,7 +229,7 @@ make tui
 
 | Key                    | Does                                                                                                                                  |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `:`                    | **Command line — every operator action runs here**: `:a` add machine, `:p`/`:P` provision/force, `:d` drop, `:t` translate, `:v` voices, `:s` swap, `:e` eta, `:u` retry, `:m` reconcile, `:B` backend, `:shutdown-when-idle` drain-then-exit, `:X` stop. Words work too (`:reconcile`, `:backend`, `:quit`); actions that need input open their prompt after `Enter`. No single key can fire anything destructive. |
+| `:`                    | **Command line — every operator action runs here, by word**: `:add`, `:prov`, `:drop`/`:remove`, `:translate`, `:voices`, `:swap`, `:eta`, `:retry`, `:reconcile`, `:backend`, `:drain`, `:quit`/`:exit`, `:X` stop. Single letters still work (`:m` is `:reconcile`); aliases in `:help`. Actions that need input open their prompt after `Enter`. No single key can fire anything destructive. |
 | **R** / **K** / **S**  | Read-only screens — system overview (`Enter` launches) / **task ledger** / cast overview                                             |
 | **i**                  | Inspect the selected machine (probe output, capabilities)                                                                              |
 | **arrows / k j**       | Move the selection · **PgUp PgDn** scroll the log · **G** pin to newest                                                               |
@@ -242,17 +242,20 @@ row, `Enter` for the full error, `Esc`/`q` to close.
 
 #### Hearing a voice before you commit to it
 
-In the voice picker (`:s` step 2 of 2) and the cast overview (`S`) — the two screens that
-know which voice a speaker has — three keys audition and **none of them assign**.
+In the voice picker (`:swap` step 2 of 2) and the cast overview (`:cast`) — the two screens that
+know which voice a speaker has — three words audition and **none of them assign**.
 `Enter` is still the only key that changes the cast.
 
-| Key           | Plays                                                                                |
-| ------------- | ------------------------------------------------------------------------------------ |
-| `t`           | the held line with the **current** voice, from cache only — zero synthesis            |
-| `T`           | that same held line with the **pointed** voice (rendered)                             |
-| `Ctrl+T`      | **another** line with the **pointed** voice (rendered)                                |
+| Word                          | Plays                                                                                |
+| ----------------------------- | ------------------------------------------------------------------------------------ |
+| `:current`                    | the held line with the **current** voice, from cache only — zero synthesis            |
+| `:try` (`:test`)              | that same held line with the **pointed** voice (rendered)                             |
+| `:another` (`:change`, `:next`) | **another** line with the **pointed** voice (rendered)                               |
 
-In the picker the character is fixed, so `t` replays the current A/B sentence
+Every letter types into the filter on both screens — the words above run from
+the `:` command line instead of stealing keys.
+
+In the picker the character is fixed, so `:current` replays the current A/B sentence
 and never rolls; in the cast overview it follows the highlighted speaker.
 The line is held per character, so the incumbent and the candidate are compared on
 one sentence rather than two. Both screens print which line is loaded and what the
@@ -265,10 +268,6 @@ overwritten on every audition and removed when the TUI exits: nothing accumulate
 in the repo, and the file is next to the speaker even when the inductor is on
 another box. Rendering goes through the TTS sidecar exactly as the pipeline does,
 so what you hear is what will be spoken.
-
-All three keys audition, so `t`/`T` don't filter on these two screens (picker
-step 1 still types every letter) — the price of leaving the Tab family, whose
-`Ctrl+Tab` the terminal owns.
 
 ### C. "Spread it over the LAN" (cluster)
 

@@ -34,14 +34,14 @@ pub(crate) async fn normal_key(
         }
         KeyCode::Char('?') => app.screen = Screen::Help { scroll: 0 },
         KeyCode::Char(':') => {
-            // Command mode: every operator key behind a prompt, so a stray
+            // Command mode: every operator action behind a prompt, so a stray
             // keypress can never provision, reconcile or stop anything.
-            // `:m` is `m`, `:reconcile` is `m` spelled out.
+            // Words first (`:reconcile`), single letters still work (`:m`).
             app.command_return = Some(Screen::Normal);
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::Command,
                 ":",
-                "command — a key (m B X) or a word (reconcile backend stop quit)",
+                "command — a word (:add :prov :reconcile :quit) or a letter (:m :B :X)",
                 "",
             ));
             app.set_status(Level::Info, "command mode — Enter runs it, Esc closes");
@@ -143,7 +143,8 @@ pub(crate) async fn normal_key(
                     | 't'
                     | 'c'
                     | 'v'
-                    | 's'
+                    |                 's'
+                    | 'S'
                     | 'e'
                     | 'u'
                     | 'm'

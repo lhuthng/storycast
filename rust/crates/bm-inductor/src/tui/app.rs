@@ -515,7 +515,7 @@ impl App {
                     Err(e) => {
                         self.set_status(
                             Level::Warn,
-                            format!("audition lines unavailable: {e} — t (rendered segments) still plays"),
+                            format!("audition lines unavailable: {e} — :current (rendered segments) still plays"),
                         );
                     }
                 }

@@ -51,92 +51,33 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
 
     section(&mut lines, "The command line");
     for v in [
-        "`:` opens the command line: `:m`, `:B`, `:X`, or words like :reconcile, :backend, :stop",
-        "or :quit. Every action runs from here — no single key can fire",
-        "anything destructive, so a stray keypress is always safe.",
+        "`:` opens the command line: words like :add :reconcile :backend :stop",
+        "or :quit (letters like :m :B :X still work). Every action runs from",
+        "here — no single key can fire anything destructive, so a stray",
+        "keypress is always safe.",
         "Actions that need more input (add machine, provision, translate, crawl)",
         "open their normal prompt or confirm after Enter.",
     ] {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }
     section(&mut lines, "Commands");
-    for (k, v) in [
-        (":a  :add", "add a machine by IP or hostname"),
-        (
-            ":A  :sample",
-            "pool a clip — tags from the filename, enrolled locally",
-        ),
-        (
-            ":N  :named",
-            "a `path as Name` voice — manual assignment only",
-        ),
-        (":p  :provision", "provision the selected machine"),
-        (
-            ":P  :reprovision",
-            "re-provision it, forcing past the skip-if-configured check",
-        ),
-        (
-            ":d  :drop",
-            "drop the selected machine from the cluster registry",
-        ),
-        (
-            ":t  :translate",
-            "enqueue crawl + digest for a chapter range",
-        ),
-        (
-            ":c  :crawl",
-            "save the URL template, then probe-crawl one chapter",
-        ),
-        (
-            ":v  :voices",
-            "re-read the roster, enforce the accent policy, refill gaps",
-        ),
-        (
-            ":s  :swap",
-            "repoint one character — destructive, see below",
-        ),
-        (
-            ":S  :cast",
-            "cast overview: every speaker × voice, read-only",
-        ),
-        (":e  :eta", "estimate the remaining wall-clock time"),
-        (":u  :retry", "requeue every shelved task — strikes reset"),
-        (
-            ":m  :reconcile",
-            "fold duplicates — asks first; certain folds apply, ambiguous only listed",
-        ),
-        (
-            ":B  :backend",
-            "backend up now, machines provision in background and join as ready",
-        ),
-        (
-            ":mix",
-            "story speed and fx/music/inject volumes — requeues every merge",
-        ),
-        (
-            ":sound",
-            "the three clip pools: add, edit, retune, remove (also :pools, :sounds)",
-        ),
-        (
-            ":remerge",
-            "requeue every merge — render cache kept, no confirm",
-        ),
-        (
-            ":rerender",
-            "requeue every render + merge — full re-speak, asks first",
-        ),
-        (
-            ":shutdown-when-idle",
-            "workers exit on their own once the queue drains — restart with :B",
-        ),
-        (
-            ":X  :stop",
-            "stop everything everywhere: local backend plus workers on all machines",
-        ),
-    ] {
+    // Rendered from the word table, so a word and its explanation cannot
+    // drift apart — add the word (and its aliases) in input/command.rs and
+    // it shows up here with its own line.
+    for w in crate::tui::input::command::WORDS
+        .iter()
+        .filter(|w| w.desc.is_some())
+    {
+        let mut head = match w.key {
+            Some(k) => format!(":{k}  :{}", w.names[0]),
+            None => format!(":{}", w.names[0]),
+        };
+        for a in &w.names[1..] {
+            head.push_str(&format!(" :{a}"));
+        }
         lines.push(Line::from(vec![
-            Span::styled(format!("  {k:<16}"), app.style(Color::Cyan)),
-            Span::raw(v.to_string()),
+            Span::styled(format!("  {head:<30}"), app.style(Color::Cyan)),
+            Span::raw(w.desc.unwrap_or("").to_string()),
         ]));
     }
     lines.push(Line::from(Span::styled(
@@ -159,9 +100,8 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
     for v in [
         "Step 1 picks a character, step 2 picks a voice. :S shows the whole",
         "cast at once, read-only — swapping happens only in the picker.",
-        "Type to filter. Accents are ignored, so \"thai son\" finds \"Thái Sơn\".",
-        "Movement is arrow keys only, so letters reach the filter — except",
-        "`t`/`T` on step 2 and the cast overview, which audition instead.",
+        "Type to filter, every letter on every step. Accents are ignored,",
+        "so \"thai son\" finds \"Thái Sơn\".",
         "Every voice is listed with gender, accent, language and style, plus whether",
         "it is already in use and whether the accent policy permits it.",
         "Pooled samples show their tags (pool: young, female) — type one to filter.",
@@ -175,18 +115,18 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         "Auditioning a voice (picker step 2 and cast overview)",
     );
     for v in [
-        "`t`, `T` and `^T` audition and nothing else — the two letters don't",
-        "filter on these two screens (step 1 still types everything). `t`",
-        "plays the held line with the current voice, from cache only: zero",
-        "synthesis. A miss plays nothing and names the render key. In the",
-        "picker `t` never follows the cursor; in the cast overview it follows",
-        "the highlighted speaker.",
-        "`T` renders that same held line with the pointed voice: the one",
+        "Three words, on the `:` command line, and nothing else — every",
+        "letter types into the filter. `:current` plays the held line with",
+        "the current voice, from cache only: zero synthesis. A miss plays",
+        "nothing and names the render word. In the picker `:current` never",
+        "follows the cursor; in the cast overview it follows the highlighted",
+        "speaker.",
+        "`:try` renders that same held line with the pointed voice: the one",
         "deliberate generation, and the only way to hear two voices on the",
         "same sentence before either is assigned. Inductor down: this box",
         "synthesizes it instead, so no worker needs to be on.",
-        "`^T` renders another line with the pointed voice; the chosen one",
-        "is shown above the list.",
+        "`:another` renders another line with the pointed voice; the chosen",
+        "one is shown above the list.",
         "Enter on a voice locks that sentence: later auditions keep it instead of",
         "another random pick. None of these assign anything — only the confirm",
         "after Enter changes the cast.",
