@@ -242,10 +242,14 @@ fn worker_kill_script() -> String {
 
 /// Same for the per-render TTS sidecar: orphaned servers hold the port and
 /// gigabytes of weights, and the next worker would just inherit the stale one.
+/// Both patterns: the Python server is retired but a stray may outlive the
+/// migration, and `bm-tts` is what everything spawns now. (`-x` matches the
+/// process name only, so unlike the worker's `-f` pattern it cannot match the
+/// shell running this script — no bracket dodge needed.)
 fn sidecar_kill_script() -> String {
-    "pkill -f 'tts_server\\.p[y]' 2>/dev/null; sleep 1; \
-     pkill -9 -f 'tts_server\\.p[y]' 2>/dev/null; sleep 1; \
-     echo left=$(pgrep -f 'tts_server\\.p[y]' 2>/dev/null | wc -l)"
+    "pkill -f 'tts_server\\.p[y]' 2>/dev/null; pkill -x bm-tts 2>/dev/null; sleep 1; \
+     pkill -9 -f 'tts_server\\.p[y]' 2>/dev/null; pkill -9 -x bm-tts 2>/dev/null; sleep 1; \
+     echo left=$(($(pgrep -f 'tts_server\\.p[y]' 2>/dev/null | wc -l) + $(pgrep -x bm-tts 2>/dev/null | wc -l)))"
         .into()
 }
 

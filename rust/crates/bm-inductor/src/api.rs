@@ -282,8 +282,9 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             // No lock taken: rendering a sample reads no scheduler state, and
             // holding the lock across a sidecar call would freeze the whole
             // dashboard for as long as the render takes.
+            let layout = st.lock().await.layout.clone();
             let voice = req.voice.clone().unwrap_or_default();
-            Json(op_preview_voice(&voice, req.text.as_deref()).await)
+            Json(op_preview_voice(&layout, &voice, req.text.as_deref()).await)
         }
         bm_proto::Op::Segment => {
             // Files only, no lock beyond cloning two small values: the whole
@@ -825,6 +826,81 @@ async fn build_roster(
     }
 }
 
+/// Health plus capability, mirroring the agent's sidecar gate: the server
+/// must serve the policy endpoint the agent was built against, or a stale
+/// server from a previous deploy answers health but lacks `/preview`.
+async fn sidecar_serving(base: &str) -> bool {
+    let Ok(http) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .no_proxy()
+        .build()
+    else {
+        return false;
+    };
+    let health = http
+        .get(format!("{base}/health"))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+    if !health {
+        return false;
+    }
+    let Ok(resp) = http.get(format!("{base}/policy")).send().await else {
+        return false;
+    };
+    let text = resp.text().await.unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|p| p.get("allowed_voices").cloned())
+        .and_then(|v| v.as_array().cloned())
+        .is_some()
+}
+
+/// Start the local sidecar for audition duty unless one already answers.
+///
+/// Preview/audition is the one path that needs TTS with no render task
+/// running — and since the sidecar's lifecycle went per-task, idle means
+/// down. So the first audition of a quiet cluster boots the server (model
+/// load takes minutes) and leaves it up: stopping it after every sample
+/// would make every audition pay the load again. The binary and argv are
+/// the agent's own (`Layout::sidecar_command`), so the two can never name
+/// different servers.
+async fn ensure_sidecar(layout: &bm_core::Layout) -> anyhow::Result<()> {
+    if sidecar_serving(SIDECAR).await {
+        return Ok(());
+    }
+    let port = SIDECAR
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.trim_end_matches('/').parse().ok())
+        .unwrap_or(8818);
+    let (bin, args) = layout.sidecar_command(port);
+    if !bin.is_file() {
+        anyhow::bail!(
+            "no TTS sidecar at {} — build it (`make build`) or provision this box",
+            bin.display()
+        );
+    }
+    // Detached by dropping the handle: this is audition duty, not a render
+    // task, so no per-task owner exists to reap it. It lives until the box
+    // reboots or `X` sweeps it, exactly like the provision-started one did.
+    let _ = tokio::process::Command::new(&bin)
+        .args(&args)
+        .env("LD_LIBRARY_PATH", layout.tts_lib_dir())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        if sidecar_serving(SIDECAR).await {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("TTS sidecar started but never answered /health")
+}
+
 /// Render one voice's speech so it can be auditioned before it is assigned.
 ///
 /// Without `text` this is the voice *sample*: the sidecar's fixed audition line,
@@ -838,10 +914,15 @@ async fn build_roster(
 /// file on: a path is useless to a client that does not share this filesystem,
 /// and an audition that lands in `data/` accumulates one clip per voice
 /// auditioned. The client owns the file, because the client owns the speaker.
-async fn op_preview_voice(voice: &str, text: Option<&str>) -> OpResult {
+async fn op_preview_voice(layout: &bm_core::Layout, voice: &str, text: Option<&str>) -> OpResult {
     let voice = voice.trim();
     if voice.is_empty() {
         return OpResult::fail("preview needs a voice name");
+    }
+    // Audition is the one path that needs TTS with no render task running:
+    // boot the sidecar here rather than failing onto an idle box.
+    if let Err(e) = ensure_sidecar(layout).await {
+        return OpResult::fail(format!("preview {voice}: {e:#}"));
     }
     // Two routes into the sidecar, and the difference is the point. No text
     // means `/preview`, which speaks the sidecar's fixed audition line — the
@@ -1015,6 +1096,56 @@ mod tests {
         std::fs::create_dir_all(layout.output()).unwrap();
         std::fs::write(layout.bible(), r#"{"characters":[]}"#).unwrap();
         d
+    }
+
+    /// A stub sidecar: 200 on `/health`, and on `/policy` whatever body the
+    /// test hands it. Returns the base URL.
+    async fn stub_sidecar(policy_body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 4096];
+                let Ok(n) = s.read(&mut buf).await else {
+                    continue;
+                };
+                let req: String = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let body: String = if path.starts_with("/policy") {
+                    policy_body.into()
+                } else {
+                    r#"{"ok":true}"#.into()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn sidecar_check_demands_health_plus_policy() {
+        // Healthy server with the policy endpoint: serving.
+        let up = stub_sidecar(r#"{"allowed_voices":[]}"#).await;
+        assert!(sidecar_serving(&up).await);
+        // Healthy but stale (a server from before `/policy` existed): not
+        // serving — the agent would refuse it too, so preview must not use it.
+        let stale = stub_sidecar(r#"{"ok":true}"#).await;
+        assert!(!sidecar_serving(&stale).await);
+        // Nothing there at all: not serving (and fast — no 5-minute wait).
+        assert!(!sidecar_serving("http://127.0.0.1:9").await);
     }
 
     /// A plannable chapter: one run by A, so `0000_Adam.wav` is the whole
