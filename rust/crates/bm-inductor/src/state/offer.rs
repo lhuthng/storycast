@@ -378,6 +378,8 @@ impl Inner {
                 return self.fail_task(&c.task_id, &c.worker_id, c.detail.clone());
             }
         }
+        // A completion may have drained the queue — trip the armed latch.
+        self.maybe_auto_shutdown();
         format!(
             "{}: {} {} ({})",
             c.worker_id,
@@ -422,6 +424,8 @@ impl Inner {
             ),
         );
         self.save();
+        // A shelving may have drained the queue — trip the armed latch.
+        self.maybe_auto_shutdown();
         format!(
             "{worker_id}: {task_id} failed ({})",
             bm_core::util::head_chars(&detail, 120)

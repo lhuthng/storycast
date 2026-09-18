@@ -5,10 +5,18 @@ members = [
     "crates/bm-core",
     "crates/bm-agent",
     "crates/bm-inductor",
+    "crates/bm-tts",
 ]
 
+# Vendored third-party source, patched (see vendor/sea-g2p/VENDORED.md). It
+# declares its own `[workspace]`, which cargo refuses to see inside another
+# workspace root unless it is excluded here. Excluded, not a member: it must
+# not be built by `cargo build --workspace` with its default features, and its
+# upstream test suite needs the 60 MB dictionary that is not in the repo.
+exclude = ["vendor/sea-g2p"]
+
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"

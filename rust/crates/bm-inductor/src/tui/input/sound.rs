@@ -211,9 +211,7 @@ pub(crate) fn submit(
         }
         _ => return Err("not a sound-design prompt".into()),
     };
-    if let Err(e) = loaded(app) {
-        return Err(e);
-    }
+    loaded(app)?;
     let data = app.sound.as_mut().expect("checked by `loaded`");
 
     let (msg, focus) = match kind {

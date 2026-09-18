@@ -127,14 +127,61 @@ impl Layout {
         self.root.join("python")
     }
 
+    /// The TTS sidecar binary, `bm-tts`, at the worker root.
+    ///
+    /// The same spelling on the inductor and on a worker: `root` is the repo
+    /// locally and `~/bm-worker` remotely, so one method serves both. This is
+    /// what `provision::Probe` looks for and what the agent spawns.
+    pub fn tts_binary(&self) -> PathBuf {
+        self.root.join("bm-tts")
+    }
+
+    /// The baked model directory: one flat directory, codec included.
+    ///
+    /// Deliberately *not* the Hugging Face cache layout — `bake-models.py`
+    /// flattens it so provisioning can rsync bytes and a worker needs no
+    /// `huggingface_hub` and no internet.
+    pub fn models_dir(&self) -> PathBuf {
+        self.root.join("models")
+    }
+
+    /// Where `libonnxruntime.so.1` sits — beside the binary, at the root.
+    ///
+    /// This is the directory `LD_LIBRARY_PATH` has to name. The SONAME matters:
+    /// the file must be reachable as `libonnxruntime.so.1`, not only under its
+    /// versioned filename, or the binary dies at startup with "error while
+    /// loading shared libraries".
+    pub fn tts_lib_dir(&self) -> PathBuf {
+        self.root.clone()
+    }
+
+    /// The G2P dictionary inside the model directory.
+    pub fn tts_dict(&self) -> PathBuf {
+        self.models_dir().join("sea_g2p.bin")
+    }
+
+    /// The voice store the Rust server reads: the shipped presets *and* every
+    /// enrolled clone, which is why the bake copies it rather than shipping a
+    /// separate roster.
+    pub fn tts_voices(&self) -> PathBuf {
+        self.models_dir().join("voices.json")
+    }
+
     /// Interpreter for local voice work (enroll now, preview offline): the
     /// provision-managed `python/.venv` first, a repo-root `.venv` second.
     /// One order everywhere — enrollment and serving can never aim at two
     /// different voice stores, which is exactly how a fresh voice 500s.
+    ///
+    /// **Being retired.** Serving no longer uses this; only voice enrollment
+    /// still does, and that is the last Python dependency in the project. It
+    /// goes when enrollment is ported to Rust.
     pub fn venv_python(&self) -> Option<PathBuf> {
-        [self.python_dir().join(".venv/bin/python"), self.root.join(".venv/bin/python")]
-            .into_iter()
-            .find(|p| p.is_file())
+        [
+            self.python_dir().join(".venv/bin/python"),
+            self.root.join(".venv/bin/python"),
+        ]
+        .into_iter()
+        .find(|p| p.is_file())
     }
 
     /// Inductor-private state (cluster registry, settings, stats).

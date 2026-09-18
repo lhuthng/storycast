@@ -1,0 +1,25 @@
+[package]
+name = "sea-g2p-rs"
+version = "0.9.1"
+edition = "2021"
+
+[workspace]
+
+[lib]
+name = "sea_g2p_rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+# Optional on purpose: the core is a plain Rust library. Only the wheel needs
+# the bindings, and only the wheel turns them on.
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310", "generate-import-lib"], optional = true }
+regex = "1.10"
+fancy-regex = "0.13"
+once_cell = "1.19"
+memmap2 = "0.9"
+rayon = "1.10"
+unicode-normalization = "0.1"

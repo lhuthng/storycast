@@ -533,7 +533,7 @@ impl App {
                             format!("sound design loaded: {}", counts.join(" · ")),
                         );
                         self.sound_error = None;
-                        self.sound = Some(data);
+                        self.sound = Some(*data);
                     }
                     // Not fatal to the TUI, fatal to the editor: the screen
                     // renders the reason rather than an empty pool, because an

@@ -268,6 +268,18 @@ pub struct Heartbeat {
     pub alias: String,
 }
 
+/// The heartbeat's answer: the only inductor→worker command channel.
+///
+/// `shutdown` defaults off so a new agent against an old inductor (whose
+/// answer is just `{"ok": true}`) keeps working — and an old agent against a
+/// new inductor ignores the answer entirely and is swept the old way.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatAck {
+    pub ok: bool,
+    #[serde(default)]
+    pub shutdown: bool,
+}
+
 /// Sent when a task finishes (successfully or not).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Complete {
@@ -676,6 +688,14 @@ pub enum Op {
     /// Requeue every merge without touching the mix or the render cache:
     /// effect clips, the scene map and the pools all apply at merge time.
     Remerge,
+    /// Tell every beating worker to exit on its next heartbeat (2s). The
+    /// graceful half of the cluster stop: in-flight tasks are reaped or
+    /// requeued without strikes, and whatever stays behind (a dead box, the
+    /// detached TTS sidecar) is still swept over ssh.
+    ShutdownWorkers,
+    /// Arm drain-then-exit: workers stop on their own once no unfinished
+    /// task remains. Fires at once when the queue is already drained.
+    ShutdownWhenIdle,
 }
 
 impl Op {
@@ -696,6 +716,8 @@ impl Op {
             Op::Remix => "remix",
             Op::Rerender => "rerender",
             Op::Remerge => "remerge",
+            Op::ShutdownWorkers => "shutdown-workers",
+            Op::ShutdownWhenIdle => "shutdown-when-idle",
         }
     }
 
@@ -716,6 +738,8 @@ impl Op {
             Op::Remix,
             Op::Rerender,
             Op::Remerge,
+            Op::ShutdownWorkers,
+            Op::ShutdownWhenIdle,
         ]
         .into_iter()
         .find(|o| o.as_str() == s)
@@ -1192,5 +1216,20 @@ mod tests {
                 serde_json::from_str(&serde_json::to_string(&block).unwrap()).unwrap();
             assert_eq!(back, block);
         }
+    }
+
+    #[test]
+    fn an_old_inductors_heartbeat_answer_means_stay() {
+        // The shutdown latch rides the heartbeat answer. An inductor that
+        // predates it answers just `{"ok": true}` — the missing key must
+        // default to "keep running", which is what makes either side
+        // upgradable on its own.
+        let old: HeartbeatAck = serde_json::from_str(r#"{"ok": true}"#).unwrap();
+        assert!(old.ok && !old.shutdown);
+        let told: HeartbeatAck =
+            serde_json::from_str(r#"{"ok":true,"shutdown":true}"#).unwrap();
+        assert!(told.shutdown);
+        assert_eq!(Op::parse("shutdown-workers"), Some(Op::ShutdownWorkers));
+        assert_eq!(Op::ShutdownWorkers.as_str(), "shutdown-workers");
     }
 }

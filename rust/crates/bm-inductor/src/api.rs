@@ -83,7 +83,13 @@ async fn heartbeat(State(st): State<Shared>, Json(h): Json<Heartbeat>) -> impl I
         }
     }
     inner.beats.insert(h.worker_id.clone(), h);
-    Json(serde_json::json!({"ok": true}))
+    Json(
+        serde_json::to_value(&bm_proto::HeartbeatAck {
+            ok: true,
+            shutdown: inner.shutdown_requested,
+        })
+        .unwrap_or(serde_json::json!({"ok": true})),
+    )
 }
 
 async fn task(State(st): State<Shared>, Query(q): Query<TaskQuery>) -> impl IntoResponse {
@@ -371,6 +377,14 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                 Ok(msg) => Json(OpResult::ok(msg)),
                 Err(e) => Json(OpResult::fail(format!("remerge failed: {e:#}"))),
             }
+        }
+        bm_proto::Op::ShutdownWorkers => {
+            let mut inner = st.lock().await;
+            Json(OpResult::ok(inner.op_shutdown_workers()))
+        }
+        bm_proto::Op::ShutdownWhenIdle => {
+            let mut inner = st.lock().await;
+            Json(OpResult::ok(inner.op_shutdown_when_idle()))
         }
     }
 }
