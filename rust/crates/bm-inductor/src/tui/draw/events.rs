@@ -53,19 +53,30 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             ];
             match log_head(&l.text) {
                 Some(id) => {
-                    // The reported alias when a beat carries one for this id
-                    // — the same name the Workers pane shows — else the id
-                    // hash. Without the lookup the log and the pane name the
-                    // same worker differently.
+                    // The reported alias when a beat carries one for this
+                    // worker id — the same name the Workers pane shows.
+                    // Anything else renders VERBATIM, never hashed: an
+                    // address head like `192.168.2.2` once hashed to
+                    // `[hawk]`, a worker that never existed, and the
+                    // operator hunted it across every pane. A box-level
+                    // line stays box-level; the Workers pane links it to
+                    // its worker by address, not by a minted name.
                     let display = reported_alias(&app.beats, id)
-                        .unwrap_or_else(|| worker_alias(id).0)
-                        .to_string();
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| id.to_string());
                     let tint = worker_alias(&display).1;
                     spans.push(Span::styled(
                         format!("[{display}] "),
                         style_of(colour, tint),
                     ));
-                    spans.push(Span::styled(l.text.clone(), body_style));
+                    // Name it once: a `[192.168.2.2] …` line already carries
+                    // its head, so repeating it after the display tag reads
+                    // as two names for one thing.
+                    let prefix = format!("[{id}] ");
+                    spans.push(Span::styled(
+                        l.text.strip_prefix(&prefix).unwrap_or(&l.text).to_string(),
+                        body_style,
+                    ));
                 }
                 None => spans.push(Span::styled(l.text.clone(), body_style)),
             }

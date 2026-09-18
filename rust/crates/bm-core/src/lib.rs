@@ -40,6 +40,13 @@ pub fn is_local_node(addr: &str) -> bool {
     matches!(addr, "127.0.0.1" | "localhost" | "::1")
 }
 
+/// Serializes the tests that touch process-global `HOME`: `pool`'s tilde
+/// test overrides it while `ssh`/`util` tilde tests read it, and libtest
+/// runs them on parallel threads — without this the ssh argv test
+/// intermittently expands against the pool test's temp dir.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use crate::is_local_node;

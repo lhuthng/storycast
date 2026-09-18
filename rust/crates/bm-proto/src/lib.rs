@@ -181,6 +181,12 @@ impl MachineState {
 pub struct Machine {
     pub id: String,
     pub addr: String,
+    /// Registry handle (`hawk`) from machines.json. Empty for boxes the
+    /// inductor learned from a beat before ever seeing the registry —
+    /// renderers fall back to the address. `id` stays the address: it is
+    /// the map key everywhere, the name is display only.
+    #[serde(default)]
+    pub name: String,
     pub ssh_user: String,
     pub ssh_port: u16,
     #[serde(default)]
@@ -208,6 +214,7 @@ impl Machine {
         Machine {
             id: addr.to_string(),
             addr: addr.to_string(),
+            name: String::new(),
             ssh_user: ssh_user.to_string(),
             ssh_port,
             ssh_key,

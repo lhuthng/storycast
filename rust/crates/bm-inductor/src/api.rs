@@ -47,6 +47,20 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
     if let Some(m) = inner.machines.get_mut(&addr) {
         m.state = MachineState::Online;
     }
+    // Carry the registry handle (not the OS hostname) to the panes: the
+    // provision log says `hawk`, so the machines/workers panes must say it
+    // too. Kept when set — a beat never renames a box.
+    if inner
+        .machines
+        .get(&addr)
+        .map(|m| m.name.is_empty())
+        .unwrap_or(false)
+    {
+        let name = inner.box_name(&addr, &r.hostname);
+        if let Some(m) = inner.machines.get_mut(&addr) {
+            m.name = name;
+        }
+    }
     inner.workers.insert(r.worker_id.clone(), addr.clone());
     inner
         .caps
@@ -80,6 +94,15 @@ async fn heartbeat(State(st): State<Shared>, Json(h): Json<Heartbeat>) -> impl I
         if let Some(m) = inner.machines.get_mut(&addr) {
             m.last_seen = bm_proto::now_secs();
             m.state = MachineState::Online;
+            // A beating worker refutes the provision-time verdict: without
+            // this the pane keeps saying "would not start" under a live
+            // worker row. One-shot — the match is on the stale wording.
+            if m.note.contains("would not start")
+                || m.note.contains("worker start failed")
+                || m.note.contains("worker start crashed")
+            {
+                m.note = "worker is beating — earlier start verdict was stale".into();
+            }
         }
     }
     inner.beats.insert(h.worker_id.clone(), h);
@@ -178,6 +201,11 @@ async fn put_segment(
 async fn add_machine(State(st): State<Shared>, Json(m): Json<Machine>) -> impl IntoResponse {
     let mut inner = st.lock().await;
     let addr = m.addr.clone();
+    let mut m = m;
+    // A bind without a stored handle shows the address, like register.
+    if m.name.is_empty() {
+        m.name = inner.box_name(&addr, &addr);
+    }
     inner.machines.insert(addr.clone(), m);
     // Operator bind: config goes to machines.json, runtime stays in the ledger.
     inner.persist_box(&addr, &addr);
@@ -1287,6 +1315,108 @@ mod tests {
             let m = &inner.machines["192.168.2.2"];
             assert_eq!(m.state, MachineState::Online);
             assert!(m.last_seen > 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn register_carries_the_registry_handle_to_the_panes() {
+        // The hawk hunt, server side: provision logs the registry handle
+        // while beats carry the OS hostname — the panes can only agree if
+        // register keeps the handle on the machine.
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        bm_core::provision::save_box(
+            &layout.machines(),
+            &bm_core::provision::LinkedBox {
+                name: "hawk".into(),
+                addr: "192.168.2.2".into(),
+                user: "thang".into(),
+                port: 22,
+                key: None,
+                role: "worker".into(),
+            },
+        )
+        .unwrap();
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+            layout,
+            bm_core::config::Settings::default(),
+        )));
+        register(
+            State(st.clone()),
+            Json(Register {
+                worker_id: "thang-marmot".into(),
+                addr: "192.168.2.2".into(),
+                hostname: "thang".into(),
+                capabilities: vec!["render-segments".into()],
+                tts_url: None,
+                version: "0.2.3".into(),
+            }),
+        )
+        .await;
+        {
+            let inner = st.lock().await;
+            assert_eq!(
+                inner.machines["192.168.2.2"].name, "hawk",
+                "panes must say what provision said"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_beating_worker_clears_a_stale_would_not_start_note() {
+        // Provision's verdict outlives its launch: the worker did start
+        // (via :B, by hand) but the pane kept saying it would not. The
+        // first beat with a pulse refutes exactly that wording — and a
+        // live note is left alone.
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+            layout,
+            bm_core::config::Settings::default(),
+        )));
+        {
+            let mut inner = st.lock().await;
+            let mut m = Machine::new("192.168.2.2", "thang", 22, None, "worker");
+            m.note = "provisioned but the worker would not start — :prov to retry".into();
+            inner.machines.insert("192.168.2.2".into(), m);
+            inner
+                .workers
+                .insert("thang-marmot".into(), "192.168.2.2".into());
+        }
+        let beat = || Heartbeat {
+            worker_id: "thang-marmot".into(),
+            addr: "192.168.2.2".into(),
+            task_id: None,
+            stage: None,
+            chapter: None,
+            progress: 0.0,
+            activity: "idle".into(),
+            eta_secs: None,
+            ts: bm_proto::now_secs(),
+            hostname: "thang".into(),
+            alias: "marmot".into(),
+        };
+        heartbeat(State(st.clone()), Json(beat())).await;
+        {
+            let inner = st.lock().await;
+            let note = &inner.machines["192.168.2.2"].note;
+            assert!(
+                !note.contains("would not start"),
+                "a live worker refutes it: {note}"
+            );
+        }
+        {
+            let mut inner = st.lock().await;
+            inner.machines.get_mut("192.168.2.2").unwrap().note =
+                "ready — Online on its first beat".into();
+        }
+        heartbeat(State(st.clone()), Json(beat())).await;
+        {
+            let inner = st.lock().await;
+            assert_eq!(
+                inner.machines["192.168.2.2"].note,
+                "ready — Online on its first beat"
+            );
         }
     }
 

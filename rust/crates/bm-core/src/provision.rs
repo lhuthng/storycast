@@ -158,6 +158,9 @@ pub fn split_machine(m: &Machine, name: &str) -> (LinkedBox, MachineRuntime) {
 pub fn join_machine(bxo: &LinkedBox, rt: Option<&MachineRuntime>) -> Machine {
     let rt = rt.cloned().unwrap_or_default();
     let mut m = Machine::new(&bxo.addr, &bxo.user, bxo.port, bxo.key.clone(), &bxo.role);
+    // The one human-chosen handle for this box. `id` stays the address
+    // (map key); everything display reads `name` and falls back to addr.
+    m.name = bxo.name.clone();
     m.state = rt.state;
     m.last_seen = rt.last_seen;
     m.note = rt.note;
@@ -279,5 +282,16 @@ mod tests {
         assert_eq!(joined.state, bm_proto::MachineState::Unknown);
         let joined = super::join_machine(&bxo, Some(&rt));
         assert_eq!(joined.ssh_target(), "thang@192.168.2.2");
+    }
+
+    #[test]
+    fn join_carries_the_registry_handle_id_stays_the_address() {
+        // The panes can only agree with the provision log if the handle
+        // survives the join. Keys stay addresses: only display reads name.
+        let m = bm_proto::Machine::new("192.168.2.2", "thang", 22, None, "worker");
+        let (bxo, rt) = super::split_machine(&m, "hawk");
+        let joined = super::join_machine(&bxo, Some(&rt));
+        assert_eq!(joined.id, "192.168.2.2");
+        assert_eq!(joined.name, "hawk");
     }
 }

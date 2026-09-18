@@ -28,8 +28,13 @@ pub(crate) fn draw_machine_info(f: &mut ratatui::Frame, app: &App, addr: &str) {
             Span::raw(v),
         ])
     };
-    let mut lines = vec![
-        kv("addr", m.addr.clone()),
+    let mut lines = vec![kv("addr", m.addr.clone())];
+    // The registry handle the provision log uses — without it the detail
+    // screen cannot answer "is this the box `[hawk]` was about".
+    if !m.name.is_empty() {
+        lines.push(kv("name", m.name.clone()));
+    }
+    lines.extend([
         kv("role", m.role.clone()),
         kv("state", m.state.as_str().to_string()),
         kv("ssh", m.ssh_target()),
@@ -58,10 +63,10 @@ pub(crate) fn draw_machine_info(f: &mut ratatui::Frame, app: &App, addr: &str) {
             "  note (probe / provision output)",
             app.style_bold(Color::White),
         )),
-    ];
+    ]);
     if m.note.trim().is_empty() {
         lines.push(Line::from(Span::styled(
-            "  — nothing recorded yet; press p to provision",
+            "  — nothing recorded yet; :prov provisions it",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
