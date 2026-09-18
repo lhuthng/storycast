@@ -357,6 +357,11 @@ pub(crate) async fn fetch_state(
             .json::<serde_json::Value>()
             .await
             .map_err(|e| format!("bad state payload: {e}")),
+        // Nothing listening is the normal cold start, not a failure worth
+        // reqwest's full prose — name the fix instead. Anything else (a
+        // timeout, a reset) keeps the detail, it may be a sick inductor
+        // rather than an absent one.
+        Err(e) if e.is_connect() => Err(format!("inductor is down at {api} — :B to start it")),
         Err(e) => Err(format!("inductor unreachable at {api}: {e}")),
     }
 }
