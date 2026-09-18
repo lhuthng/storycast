@@ -1,5 +1,5 @@
 {
-  "_note": "Third layer: injected spot effects the script places by name between the two halves of a line it splits (see prompts/analyze.txt rule 12). Foreground contract I=-20 LUFS / TP=-3 dBTP — voice territory, not the -26 bed contract. **`mode` and `hold` live here, per sound, and are NOT written in the script**: how a clip behaves is a property of the clip (a splat punctuates, a rustle runs under, a bed keeps going), and a per-chapter copy of it was a second source of truth the analyzer had to guess. `hit` holds the whole clip as silence, `overlap` costs no timeline time and runs under the following speech, `trail` holds `hold` seconds solo then tails under. `level` is an optional trim (default 1.0). Sparse transients (coin, swoosh, wood-chop) read several LU low on integrated loudness; that number does not describe them, their peaks sit with the voice peaks. The ceiling is applied to the sample peak before encoding, and a 64k mono mp3 overshoots on a transient, so the reconstructed true peak reads up to ~1.6 dB above -3 dBTP on the shortest takes (swoosh, sword-slash-3/4) while the sample peak sits on it. looped=true on the two kitchen beds only: a bed the script s is filled by repeating the clip with a short crossfade at each seam (loop_xfade_s), so its length follows the scene rather than the take. Every one-shot stays false — a coin plays once. A bed with no  has no window to fill and plays once too, which is why the digest has to place the stop. dur_s is the longest take, post-trim — the prompt renders it so the analyzer never `hit`s a 51 s boil.",
+  "_note": "Third layer: injected spot effects the script places by name between the two halves of a line it splits (see prompts/analyze.txt rule 12). Foreground contract I=-20 LUFS / TP=-3 dBTP — voice territory, not the -26 bed contract. **`mode` and `hold` live here, per sound, and are NOT written in the script**: how a clip behaves is a property of the clip (a splat punctuates, a rustle runs under, a bed keeps going), and a per-chapter copy of it was a second source of truth the analyzer had to guess. `hit` holds the whole clip as silence, `overlap` costs no timeline time and runs under the following speech, `trail` holds `hold` seconds solo then tails under. `level` is an optional trim (default 1.0). Sparse transients (coin, swoosh, wood-chop) read several LU low on integrated loudness; that number does not describe them, their peaks sit with the voice peaks. The ceiling is applied to the sample peak before encoding, and a 64k mono mp3 overshoots on a transient, so the reconstructed true peak reads up to ~1.6 dB above -3 dBTP on the shortest takes (swoosh, sword-slash-3/4) while the sample peak sits on it. looped=true on beds only (kitchen beds, footstep loops): a bed the script s is filled by repeating the clip with a short crossfade at each seam (loop_xfade_s), so its length follows the scene rather than the take. Every one-shot stays false — a coin plays once. A bed with no  has no window to fill and plays once too, which is why the digest has to place the stop. dur_s is the longest take, post-trim — the prompt renders it so the analyzer never `hit`s a 51 s boil.",
   "arrow-twang": {
     "tags": [
       "arrow",
@@ -14,6 +14,22 @@
     "level": 1.0,
     "looped": false,
     "dur_s": 0.6
+  },
+  "bark": {
+    "tags": [
+      "bark",
+      "dog",
+      "woof",
+      "guard"
+    ],
+    "files": [
+      "injects/bark.mp3",
+      "injects/bark-2.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 1.3
   },
   "blood-spatter": {
     "tags": [
@@ -31,6 +47,22 @@
     "looped": false,
     "dur_s": 1.1
   },
+  "body-thud": {
+    "tags": [
+      "thud",
+      "body",
+      "fall",
+      "collapse"
+    ],
+    "files": [
+      "injects/body-thud.mp3",
+      "injects/body-thud-2.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 0.6
+  },
   "boiling-water": {
     "tags": [
       "water",
@@ -47,6 +79,23 @@
     "looped": true,
     "dur_s": 51.3
   },
+  "bone-crush": {
+    "tags": [
+      "crush",
+      "bone",
+      "crunch",
+      "gore"
+    ],
+    "files": [
+      "injects/bone-crush.mp3",
+      "injects/bone-crush-2.mp3",
+      "injects/bone-crush-3.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 1.0
+  },
   "broom-sweep": {
     "tags": [
       "sweep",
@@ -61,6 +110,37 @@
     "level": 1.0,
     "looped": false,
     "dur_s": 0.9
+  },
+  "burp": {
+    "tags": [
+      "burp",
+      "belch",
+      "stomach"
+    ],
+    "files": [
+      "injects/burp-female.mp3",
+      "injects/burp-male.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 1.3
+  },
+  "cloth-flutter": {
+    "tags": [
+      "cloth",
+      "flutter",
+      "sleeve",
+      "cloak",
+      "robe"
+    ],
+    "files": [
+      "injects/cloth-flutter.mp3"
+    ],
+    "mode": "overlap",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 1.7
   },
   "coin": {
     "tags": [
@@ -94,6 +174,38 @@
     "level": 0.8,
     "looped": true,
     "dur_s": 21.9
+  },
+  "crowd-cheer": {
+    "tags": [
+      "cheer",
+      "crowd",
+      "shout",
+      "celebrate"
+    ],
+    "files": [
+      "injects/crowd-cheer.mp3",
+      "injects/crowd-cheer-2.mp3"
+    ],
+    "mode": "trail",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 4.4
+  },
+  "door-knock": {
+    "tags": [
+      "knock",
+      "door",
+      "kowtow",
+      "rap"
+    ],
+    "files": [
+      "injects/door-knock.mp3",
+      "injects/door-knock-2.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 1.1
   },
   "explosion": {
     "tags": [
@@ -157,6 +269,82 @@
     "level": 0.05,
     "looped": true,
     "dur_s": 25.2
+  },
+  "footstep-forest": {
+    "tags": [
+      "steps",
+      "leaves",
+      "trail",
+      "forest"
+    ],
+    "files": [
+      "injects/footstep-forest.mp3"
+    ],
+    "mode": "overlap",
+    "level": 1.0,
+    "looped": true,
+    "dur_s": 51.5
+  },
+  "footstep-stone": {
+    "tags": [
+      "steps",
+      "stone",
+      "walk",
+      "street"
+    ],
+    "files": [
+      "injects/footstep-stone.mp3"
+    ],
+    "mode": "overlap",
+    "level": 1.0,
+    "looped": true,
+    "dur_s": 7.4
+  },
+  "footstep-wood": {
+    "tags": [
+      "steps",
+      "wood",
+      "floor",
+      "indoor"
+    ],
+    "files": [
+      "injects/footstep-wood.mp3"
+    ],
+    "mode": "overlap",
+    "level": 1.0,
+    "looped": true,
+    "dur_s": 16.8
+  },
+  "gulp": {
+    "tags": [
+      "gulp",
+      "swallow",
+      "drink",
+      "throat"
+    ],
+    "files": [
+      "injects/gulp.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 1.1
+  },
+  "howl": {
+    "tags": [
+      "howl",
+      "wolf",
+      "dog",
+      "moon"
+    ],
+    "files": [
+      "injects/howl.mp3",
+      "injects/howl-2.mp3"
+    ],
+    "mode": "trail",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 7.7
   },
   "light-spell": {
     "tags": [
@@ -236,6 +424,82 @@
     "looped": false,
     "dur_s": 0.6
   },
+  "pour": {
+    "tags": [
+      "pour",
+      "water",
+      "liquid",
+      "drink"
+    ],
+    "files": [
+      "injects/pour.mp3"
+    ],
+    "mode": "overlap",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 3.5
+  },
+  "rock-break": {
+    "tags": [
+      "rock",
+      "stone",
+      "break",
+      "crash",
+      "shatter"
+    ],
+    "files": [
+      "injects/rock-break.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 3.2
+  },
+  "slap": {
+    "tags": [
+      "slap",
+      "cheek",
+      "face",
+      "smack"
+    ],
+    "files": [
+      "injects/slap.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 0.7
+  },
+  "snore": {
+    "tags": [
+      "snore",
+      "sleep",
+      "snoring"
+    ],
+    "files": [
+      "injects/snore.mp3"
+    ],
+    "mode": "trail",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 4.1
+  },
+  "stomach-growl": {
+    "tags": [
+      "growl",
+      "stomach",
+      "hungry",
+      "belly"
+    ],
+    "files": [
+      "injects/stomach-growl-1.mp3",
+      "injects/stomach-growl-2.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 2.8
+  },
   "swoosh": {
     "tags": [
       "whoosh",
@@ -314,6 +578,21 @@
     "level": 1.0,
     "looped": false,
     "dur_s": 1.5
+  },
+  "wood-break": {
+    "tags": [
+      "wood",
+      "break",
+      "crash",
+      "splinter"
+    ],
+    "files": [
+      "injects/wood-break.mp3"
+    ],
+    "mode": "hit",
+    "level": 1.0,
+    "looped": false,
+    "dur_s": 1.6
   },
   "wood-chop": {
     "tags": [

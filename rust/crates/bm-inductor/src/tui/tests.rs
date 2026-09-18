@@ -3084,7 +3084,7 @@ fn the_sound_editor_marks_remove_unavailable_where_it_is() {
     // The three tabs, with their sizes.
     assert!(text.contains("effects 11"), "tabs missing:\n{text}");
     assert!(text.contains("music 6"), "{text}");
-    assert!(text.contains("injects 21"), "{text}");
+    assert!(text.contains("injects 39"), "{text}");
     // Every shipped effect sound answers a shipped rule, so the first row is
     // in use and the remove key is drawn as unavailable, with the reason.
     assert!(text.contains("in use"), "{text}");
@@ -3104,7 +3104,7 @@ fn the_sound_editor_marks_remove_unavailable_where_it_is() {
         scroll: 0,
     });
     let text = render_text(&mut inject, 120, 40);
-    assert!(text.contains("21 removable"), "{text}");
+    assert!(text.contains("39 removable"), "{text}");
     assert!(
         text.contains(" remove · "),
         "the live key is not offered:\n{text}"
@@ -3236,7 +3236,7 @@ async fn remove_is_refused_by_name_for_an_entry_still_in_use() {
         free.sound.as_ref().unwrap(),
         bm_core::audio_pool::PoolKind::Inject,
     );
-    assert_eq!(left.len(), 20);
+    assert_eq!(left.len(), 38);
     assert!(
         !left.iter().any(|r| r.name == name),
         "{name} is still there"
