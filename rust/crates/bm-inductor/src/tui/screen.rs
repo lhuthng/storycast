@@ -198,9 +198,17 @@ pub(crate) struct SoundRemoval {
 #[derive(Debug, Clone)]
 pub(crate) enum ConfirmAction {
     Quit,
-    Provision { addr: String, force: bool },
-    DropMachine { addr: String },
-    SwapVoice { character: String, voice: String },
+    Provision {
+        addr: String,
+        force: bool,
+    },
+    DropMachine {
+        addr: String,
+    },
+    SwapVoice {
+        character: String,
+        voice: String,
+    },
     StopBackend,
     Reconcile,
     Rerender,

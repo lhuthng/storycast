@@ -5,21 +5,37 @@ use std::path::Path;
 /// Manifest stamp recorded on a target machine to detect whether sources/voices changed.
 ///
 /// Written to `~/{REMOTE_DIR}/.provision_stamp.json` at the end of every
-/// provision, and read back by the *next* probe. When both hashes still match,
-/// the slow work is skipped: `ensure_voices` (which boots Python and imports
-/// PyTorch) and the redundant source sync. A stale or missing stamp is never an
-/// error — it just means the full path runs, which is what it did before.
+/// provision, and read back by the *next* probe. When the hashes still match,
+/// the slow work is skipped: pushing `models/` (668 MB) and the redundant source
+/// sync. A stale or missing stamp is never an error — it just means the full
+/// path runs, which is what it did before.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProvisionStamp {
     pub agent_version: String,
     pub sources_hash: String,
     pub voices_hash: String,
+    /// The sidecar's own artifacts: the baked `models/` directory and the
+    /// `bm-tts` binary. Separate from `sources_hash` so a cast or prompt edit
+    /// does not look like a reason to re-send 668 MB of weights.
+    ///
+    /// This is also what covers the **voice store**, which now travels inside
+    /// `models/voices.json` — enrollment moved off the worker, so there is no
+    /// separate voices step to skip.
+    ///
+    /// `#[serde(default)]` so a stamp written before this field existed still
+    /// parses — an unreadable stamp would force the full slow path on every
+    /// probe, which is the failure this whole mechanism exists to avoid.
+    #[serde(default)]
+    pub tts_hash: String,
 }
 
 impl ProvisionStamp {
-    /// Whether the voices enrolled on this box still match the ones we would
-    /// push. A mismatch means `ensure_voices` must run — that is the step that
-    /// costs seconds, so it is the one worth skipping.
+    /// Whether the voice store on this box still matches the one we would push.
+    ///
+    /// Kept for the stamp's own round-trip, but **no longer consulted by
+    /// provisioning**: the store travels inside `models/`, so [`Self::tts_in_sync`]
+    /// is what decides. Removing the field would invalidate every stamp already
+    /// on a box for no gain.
     pub fn voices_in_sync(&self, want: &ProvisionStamp) -> bool {
         self.voices_hash == want.voices_hash
     }
@@ -28,6 +44,15 @@ impl ProvisionStamp {
     /// the agent build itself) still match ours.
     pub fn sources_in_sync(&self, want: &ProvisionStamp) -> bool {
         self.sources_hash == want.sources_hash && self.agent_version == want.agent_version
+    }
+
+    /// Whether the Rust sidecar's artifacts still match ours.
+    ///
+    /// An empty hash on either side means "this box does not use them", so a
+    /// worker on the Python path never reports drift here and never gets the
+    /// models pushed at it.
+    pub fn tts_in_sync(&self, want: &ProvisionStamp) -> bool {
+        self.tts_hash == want.tts_hash
     }
 }
 
@@ -38,12 +63,14 @@ impl ProvisionStamp {
 ///
 /// * `sources_hash` — `prompts/` by signature, plus the *content* of the small
 ///   manifests the worker must match exactly (`requirements.txt`, the cast
-///   files, the scene map and the three clip-pool registries), plus the effect,
-///   music and inject clip directories by signature, plus the agent version so
-///   a rebuild redeploys.
+///   files, the clone manifest `voices.json`, the scene map and the three
+///   clip-pool registries), plus the effect, music and inject clip
+///   directories by signature, plus the agent version so a rebuild redeploys.
 /// * `voices_hash` — `voices.json` by content (a rename with identical clips
 ///   must re-enroll) and `refs/` by signature only: those clips are megabytes,
 ///   and reading them would cost more than the enrollment we are avoiding.
+///   Kept alongside `sources_hash` (which also covers the manifest) because
+///   the stamp payload round-trips it and older stamps are still out there.
 pub fn compute_provision_stamp(repo_root: &Path, agent_version: &str) -> ProvisionStamp {
     let mut sources = Sha256::new();
     sources.update(agent_version.as_bytes());
@@ -53,6 +80,7 @@ pub fn compute_provision_stamp(repo_root: &Path, agent_version: &str) -> Provisi
         "python/requirements.txt",
         "data/cast-vieneu.json",
         "data/cast.json",
+        "voices.json",
         "assets/scene-map.json",
         // The pools are manifests, not media: the registry decides which clip
         // answers a scene, so a worker left holding a stale one would mix a
@@ -80,6 +108,42 @@ pub fn compute_provision_stamp(repo_root: &Path, agent_version: &str) -> Provisi
         sources.update([0]);
     }
 
+    // The Rust sidecar's artifacts. Hashed by *signature*, not content: `models/`
+    // is 668 MB and a single clip-sized read of it would cost more than the
+    // provisioning this is meant to skip. `manifest.json` is read by content
+    // because it is the authoritative statement of what the models *are* — a
+    // swapped file under an unchanged manifest is exactly the drift worth
+    // catching, and the directory signature catches it too, but only if the
+    // mtime moved.
+    let mut tts = Sha256::new();
+    if let Ok(bytes) = std::fs::read(repo_root.join("models/manifest.json")) {
+        tts.update(b"models/manifest.json");
+        tts.update([0]);
+        tts.update(&bytes);
+        tts.update([0]);
+    }
+    tts.update(signature_of_dir(&repo_root.join("models")).as_bytes());
+    tts.update([0]);
+    // The binary, if it has been built here. Absent is not an error: the models
+    // can be baked on a machine that never builds the Rust sidecar.
+    for rel in ["rust/target/release/bm-tts", "rust/target/debug/bm-tts"] {
+        let p = repo_root.join(rel);
+        if let Ok(meta) = std::fs::metadata(&p) {
+            tts.update(rel.as_bytes());
+            tts.update([0]);
+            tts.update(meta.len().to_string().as_bytes());
+            tts.update([0]);
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            tts.update(mtime.to_string().as_bytes());
+            tts.update([0]);
+        }
+    }
+
     let mut voices = Sha256::new();
     if let Ok(bytes) = std::fs::read(repo_root.join("voices.json")) {
         voices.update(&bytes);
@@ -91,6 +155,7 @@ pub fn compute_provision_stamp(repo_root: &Path, agent_version: &str) -> Provisi
         agent_version: agent_version.to_string(),
         sources_hash: hex_digest(sources.finalize()),
         voices_hash: hex_digest(voices.finalize()),
+        tts_hash: hex_digest(tts.finalize()),
     }
 }
 
@@ -208,13 +273,15 @@ mod tests {
         let base = compute_provision_stamp(&root, "0.2.0");
 
         // A rename in voices.json must re-enroll even though the clip is
-        // identical: enrollment is keyed by name, not by file.
+        // identical: enrollment is keyed by name, not by file. The manifest
+        // also rides the sources sync now, so the worker's copy never drifts
+        // behind the declaration the inductor's warnings are computed against.
         std::fs::write(root.join("voices.json"), r#"{"Storyteller":"refs/n.wav"}"#).unwrap();
         let renamed = compute_provision_stamp(&root, "0.2.0");
         assert!(!base.voices_in_sync(&renamed), "a rename must re-enroll");
         assert!(
-            base.sources_in_sync(&renamed),
-            "voices.json is not a source"
+            !base.sources_in_sync(&renamed),
+            "a rename must resync the manifest"
         );
 
         // A new clip changes the refs signature without touching the manifest.
@@ -222,7 +289,7 @@ mod tests {
         let added = compute_provision_stamp(&root, "0.2.0");
         assert!(!renamed.voices_in_sync(&added), "a new clip must re-enroll");
         assert!(
-            base.sources_in_sync(&added),
+            renamed.sources_in_sync(&added),
             "refs/ is not part of the sources hash"
         );
     }
@@ -265,12 +332,58 @@ mod tests {
         );
     }
 
+    /// A stamp written before `tts_hash` existed must still parse. Forcing the
+    /// full slow path on every probe is the exact failure the stamp prevents.
+    #[test]
+    fn an_older_stamp_without_a_tts_hash_still_parses() {
+        let old = r#"{"agent_version":"0.2.0","sources_hash":"aa","voices_hash":"bb"}"#;
+        let s = parse_stamp(old).expect("an older payload must not read as garbage");
+        assert_eq!(s.agent_version, "0.2.0");
+        assert_eq!(s.tts_hash, "", "an absent field means 'this box has none'");
+    }
+
+    /// The Rust sidecar's artifacts are their own hash: a box on the Python path
+    /// must not be re-provisioned because the models were re-baked.
+    #[test]
+    fn the_tts_artifacts_are_tracked_separately_from_the_sources() {
+        let root = stamp_fixture("tts");
+        let without = compute_provision_stamp(&root, "0.2.0");
+        assert_eq!(without.tts_hash.len(), 64);
+        assert!(
+            without.sources_in_sync(&without),
+            "a stamp is always in sync with itself"
+        );
+
+        // Baking the models moves only the TTS hash.
+        std::fs::create_dir_all(root.join("models")).unwrap();
+        std::fs::write(root.join("models/manifest.json"), r#"{"files":{}}"#).unwrap();
+        let baked = compute_provision_stamp(&root, "0.2.0");
+        assert!(
+            without.sources_in_sync(&baked),
+            "baking models must not resync the Python path's sources"
+        );
+        assert!(
+            !without.tts_in_sync(&baked),
+            "baking models must be visible to a box that uses them"
+        );
+
+        // …and swapping a model file under an unchanged manifest is drift too.
+        std::fs::write(root.join("models/vieneu_prefill.onnx"), vec![1u8; 64]).unwrap();
+        let swapped = compute_provision_stamp(&root, "0.2.0");
+        assert!(!baked.tts_in_sync(&swapped), "a swapped model must resync");
+        assert!(
+            baked.sources_in_sync(&swapped),
+            "…and must not touch sources"
+        );
+    }
+
     #[test]
     fn a_stamp_payload_parses_and_garbage_does_not() {
         let s = ProvisionStamp {
             agent_version: "0.2.0".into(),
             sources_hash: "a".repeat(64),
             voices_hash: "b".repeat(64),
+            tts_hash: "c".repeat(64),
         };
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(parse_stamp(&text).unwrap(), s, "a real payload round-trips");

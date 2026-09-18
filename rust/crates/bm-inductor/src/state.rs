@@ -62,6 +62,13 @@ pub struct Inner {
     /// Ring buffer of scheduler events surfaced to the TUI.
     pub events: VecDeque<EventRecord>,
     next_event_id: u64,
+    /// Graceful-stop latch, set by the shutdown op and read on every
+    /// heartbeat answer. In-memory only (never in the ledger): a reboot
+    /// clears it, so a fresh backend never murders its own workers.
+    pub shutdown_requested: bool,
+    /// Drain-then-exit arm: when set, the latch above fires on its own the
+    /// moment no unfinished task remains. Same memory-only rule.
+    pub shutdown_when_idle: bool,
 }
 
 #[cfg(test)]
@@ -1481,6 +1488,68 @@ mod tests {
             last.text
         );
         assert_eq!(inner.tasks["digest:4"].state, TaskState::Shelved);
+    }
+
+    #[test]
+    fn shutdown_op_latches_the_flag_the_next_heartbeat_reads() {
+        let (_d, mut inner) = fixture();
+        assert!(!inner.shutdown_requested, "a fresh backend asks nothing");
+        let msg = inner.op_shutdown_workers();
+        assert!(inner.shutdown_requested);
+        assert!(msg.contains("shutdown"), "{msg}");
+        // In-memory only: the ledger save carries tasks/machines/workers,
+        // so a reboot clears the latch instead of murdering new workers.
+        std::fs::create_dir_all(inner.layout.bm_state()).unwrap();
+        inner.save();
+        let ledger = std::fs::read_to_string(inner.layout.bm_state().join("ledger.json")).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&ledger).unwrap();
+        assert!(doc.get("shutdown_requested").is_none());
+    }
+
+    #[test]
+    fn drain_latch_fires_only_on_an_empty_queue_and_only_once() {
+        let (_d, mut inner) = fixture();
+        // Armed with nothing unfinished: fires at once (an idle backend has
+        // no completion left to trip it).
+        assert_eq!(
+            inner.op_shutdown_when_idle(),
+            "queue already drained — workers exiting on next beat"
+        );
+        assert!(inner.shutdown_requested);
+        assert!(!inner.shutdown_when_idle, "one-shot: the arm disarms as it fires");
+
+        // Rearm with work outstanding: a pending task blocks the fire.
+        inner.shutdown_requested = false;
+        let mut t = Task::new(4, Stage::Digest);
+        inner.tasks.insert("digest:4".into(), t.clone());
+        t.state = TaskState::Done;
+        inner.op_shutdown_when_idle();
+        assert!(!inner.shutdown_requested, "a pending task must block");
+        assert!(inner.shutdown_when_idle, "the arm survives");
+
+        // Shelved is parked, not work: it must not block.
+        t.state = TaskState::Shelved;
+        inner.tasks.insert("digest:4".into(), t);
+        inner.maybe_auto_shutdown();
+        assert!(inner.shutdown_requested);
+        assert!(!inner.shutdown_when_idle);
+    }
+
+    #[test]
+    fn the_last_completion_trips_the_armed_latch() {
+        let (_d, mut inner) = fixture();
+        // A merge is the last stage: completing it with its mp3 on disk
+        // leaves nothing unfinished, so the armed latch must fire.
+        std::fs::create_dir_all(inner.layout.bm_state()).unwrap();
+        let mut t = Task::new(4, Stage::Merge);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w1".into());
+        inner.tasks.insert("merge:4".into(), t);
+        std::fs::write(inner.layout.final_mp3(4), b"fake-mp3").unwrap();
+        inner.op_shutdown_when_idle();
+        assert!(!inner.shutdown_requested, "a running task must block");
+        inner.complete(&completion("w1", "merge:4", true, "merge ch4 -> out.mp3"));
+        assert!(inner.shutdown_requested, "the draining completion must fire it");
     }
 
     #[test]

@@ -14,8 +14,8 @@ The repo is the _machine_, not the _material_. A fresh clone contains:
 
 | In the repo                           | What it is                                                                                                                                                                                                            |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rust/` (four crates)                 | The pipeline: scheduler, workers, dashboard, provisioning                                                                                                                                                             |
-| `python/`                             | The TTS sidecar — **Vieneu** by default (local voice-clone TTS), with a **Gemini TTS** engine also built in                                                                                                           |
+| `rust/` (five crates)                 | The pipeline: scheduler, workers, dashboard, provisioning — plus `bm-tts`, the Rust TTS sidecar (Vieneu voices, local, unlimited) |
+| `python/`                             | Voice-enrollment tooling and the retired Python sidecar (kept for reference); serving no longer uses it — the last Python dependency is enrollment, until that is ported too |
 | `prompts/analyze.txt`                 | An **example** dramatization prompt (written for Vietnamese web novels). This is the main thing you edit for another language or genre — the program only requires that it returns the JSON shape described inside it |
 | `voices.default.json`                 | The built-in catalogue voices the engine ships with                                                                                                                                                                   |
 | `assets/`, `Makefile`, `.env.example` | Scene maps, ambience loops, one-command operations, config template                                                                                                                                                   |
@@ -70,7 +70,8 @@ A scheduler — the **inductor** — owns this state and hands chapters to worke
 
 ## 2. Install
 
-Requirements: **Rust** (1.75+), **Python 3** (for the Vieneu TTS sidecar), and
+Requirements: **Rust** (1.75+), **zig** (for the `bm-tts` cross-build), **Python 3**
+(only to bake the model weights once and to enroll clone voices), and
 an analyzer of your choice: a Gemini API key, [opencode](https://opencode.ai),
 an OpenRouter key, or a local Ollama.
 
@@ -78,6 +79,7 @@ an OpenRouter key, or a local Ollama.
 git clone lhuthng/storycast.git
 cd storycast
 make build               # compiles the Rust workspace
+make tts                 # cross-builds the bm-tts sidecar + stages its ONNX runtime
 
 cp .env.example .env     # then edit: put your key(s) in
 #   GEMINI_API_KEY=...      (or OPENROUTER_API_KEY, or nothing if you use opencode)
@@ -93,9 +95,11 @@ configured on the box at all. It also means the keys cross your LAN in the
 task offer: keep the control API on a trusted network (it is unauthenticated
 plain HTTP, like every other sidecar call in this repo).
 
-The Python side of Vieneu lives in `python/` (`tts_vieneu.py`,
-`tts_server.py`). A virtualenv with its dependencies is created for you when
-needed — the first build downloads ~1.7 GB of model weights, once.
+The Vieneu TTS sidecar is `bm-tts` (`rust/crates/bm-tts`), served over HTTP on
+each worker. The weights arrive once from Hugging Face and are flattened by
+`python3 tools/bake-models.py` into `models/` (plus a manifest `--check` can
+re-verify); provisioning pushes those bytes, so a worker needs no internet and
+no Python to speak. Clone voices are enrolled on the inductor at bake time.
 
 ### Tell it about your novel
 
@@ -225,7 +229,7 @@ make tui
 
 | Key                    | Does                                                                                                                                  |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `:`                    | **Command line — every operator action runs here**: `:a` add machine, `:p`/`:P` provision/force, `:d` drop, `:t` translate, `:v` voices, `:s` swap, `:e` eta, `:u` retry, `:m` reconcile, `:B` backend, `:X` stop. Words work too (`:reconcile`, `:backend`, `:quit`); actions that need input open their prompt after `Enter`. No single key can fire anything destructive. |
+| `:`                    | **Command line — every operator action runs here**: `:a` add machine, `:p`/`:P` provision/force, `:d` drop, `:t` translate, `:v` voices, `:s` swap, `:e` eta, `:u` retry, `:m` reconcile, `:B` backend, `:shutdown-when-idle` drain-then-exit, `:X` stop. Words work too (`:reconcile`, `:backend`, `:quit`); actions that need input open their prompt after `Enter`. No single key can fire anything destructive. |
 | **R** / **K** / **S**  | Read-only screens — system overview (`Enter` launches) / **task ledger** / cast overview                                             |
 | **i**                  | Inspect the selected machine (probe output, capabilities)                                                                              |
 | **arrows / k j**       | Move the selection · **PgUp PgDn** scroll the log · **G** pin to newest                                                               |
@@ -275,8 +279,8 @@ make link NAME=box-1 ADDR=192.168.2.2
 #    …or skip `link` and onboard straight by address:
 #    make provision ADDR=192.168.2.2 KEY=~/.ssh/your-key
 
-# 2. Onboard it over SSH: pushes sources, builds the Python venv, enrolls your
-#    clone voices, starts the TTS sidecar. Cheap to re-run — a content stamp
+# 2. Onboard it over SSH: pushes sources, the bm-tts sidecar + runtime and the
+#    baked models, starts the TTS sidecar. Cheap to re-run — a content stamp
 #    makes a nothing-changed run finish in under a second.
 make provision BOX=box-1
 
@@ -315,7 +319,7 @@ git-ignored — see the two tables at the top for the tracked/ignored split.
 | `.bm/settings.json`                         | Run config: url_template, engine, start/count, speed, gap_ms, ambience, music, effect/music volumes, analyzer, models (`:mix` edits speed + volumes) |
 | `.bm/ledger.json`                           | The task ledger — which chapter/stage is in which state; survives restarts                  |
 | `.bm/machines.json`                         | Linked machines (addr, ssh user/port/key)                                                   |
-| `~/.bm-worker/`                             | A worker's whole world on any machine: agent binary, venv, sources, `.provision_stamp.json` |
+| `~/.bm-worker/`                             | A worker's whole world on any machine: agent binary, `bm-tts` + ONNX runtime, baked `models/`, sources, `.provision_stamp.json` |
 
 The pipeline is **restart-safe**: all of the above is on disk. Kill anything at
 any time — the inductor picks up exactly where the ledger says, and cached

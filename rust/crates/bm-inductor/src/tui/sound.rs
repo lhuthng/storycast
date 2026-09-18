@@ -620,7 +620,7 @@ pub(crate) fn check_files(root: &Path, layer: PoolKind, files: &[String]) -> Res
 
 /// The takes an edit adds to an entry, i.e. the ones worth checking. Every take
 /// of a brand-new entry is one of them.
-pub(crate) fn introduced<'a>(old: Option<&Sound>, new: &'a Sound) -> Vec<String> {
+pub(crate) fn introduced(old: Option<&Sound>, new: &Sound) -> Vec<String> {
     new.files
         .iter()
         .filter(|f| !old.map(|o| o.files.contains(f)).unwrap_or(false))

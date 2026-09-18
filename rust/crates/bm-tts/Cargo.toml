@@ -1,0 +1,83 @@
+[package]
+name = "bm-tts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local TTS server: VieNeu-TTS v3 Turbo on ONNX Runtime, no Python"
+
+# NOT `rust-version.workspace = true`: the workspace floor is 1.75 and `ort`
+# needs 1.88. Declaring 1.75 here would be a lie the toolchain only catches on
+# an old machine — say the real number instead.
+rust-version = "1.88"
+
+[[bin]]
+name = "bm-tts"
+path = "src/main.rs"
+
+# The engine lives in a library so the three dev binaries can share it and so
+# the port can be unit-tested without going through the server.
+[lib]
+name = "bm_tts"
+path = "src/lib.rs"
+
+# The gate, and a permanent one: "does this model dir load and run on this box"
+# is the first question every worker brings. Declared rather than auto-discovered
+# so its name is part of the contract provisioning copies around.
+[[bin]]
+name = "bm-tts-probe"
+path = "src/bin/probe.rs"
+
+# The reference half of the G2P parity check (`tools/g2p-parity.py`). A separate
+# binary because the check is run against a corpus, not inside a unit test.
+[[bin]]
+name = "bm-tts-g2p"
+path = "src/bin/g2p.rs"
+
+# The generator half of the frame parity check (`tools/frames-parity.py`).
+[[bin]]
+name = "bm-tts-frames"
+path = "src/bin/frames.rs"
+
+# Runs the audio-reading helpers against jobs from Python, for
+# `tools/audio-utils-parity.py`.
+[[bin]]
+name = "bm-tts-check"
+path = "src/bin/check.rs"
+
+# The whole pipeline: text in, wav out. The end-to-end half of
+# `tools/render-parity.py`.
+[[bin]]
+name = "bm-tts-render"
+path = "src/bin/render.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+
+# The accent policy and the roster-label parsing live here, because `bm-core` is
+# the offline authority for both. The sidecar is the runtime authority, and
+# restating its pools in the server would be a third copy of the same list.
+bm-core = { workspace = true }
+bm-proto = { workspace = true }
+
+# `download-binaries` + `copy-dylibs` (both on by default) fetch ONNX Runtime
+# 1.28 and stage its shared library next to the binary, which is exactly what
+# provisioning needs to push to a worker: no ONNX Runtime installed there.
+ort = "2.0.0-rc.13"
+
+# Vietnamese normalization + G2P. Vendored rather than depended on: it is not
+# published to crates.io, and its default features pull PyO3, which cannot link
+# into a standalone binary. See vendor/sea-g2p/VENDORED.md for the patch.
+# `default-features = false` is load-bearing — the default feature *is* PyO3.
+sea-g2p-rs = { path = "../../vendor/sea-g2p", default-features = false }
+
+# The same library `vieneu` uses, loading the same `tokenizer.json`. Pinned to
+# the version the wheel resolves so the ids cannot drift under us.
+tokenizers = "0.23.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

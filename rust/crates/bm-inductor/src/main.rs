@@ -199,6 +199,19 @@ pub fn provision_machine(
     key: Option<String>,
     force: bool,
 ) -> (bool, Vec<String>) {
+    if bm_core::is_local_node(addr) {
+        // No mirror to fill: the local worker runs in place from this repo —
+        // prompts, assets, models and binaries are read where they stand, so
+        // syncing a `~/bm-worker` copy would only spend disk and let a stale
+        // copy fail the readiness gate below. Launching the worker stays the
+        // caller's job (`:B` catch-up, `make agent`).
+        return (
+            true,
+            vec![format!(
+                "[{addr}] local machine — runs from the repo, nothing to provision"
+            )],
+        );
+    }
     use bm_core::provision::{provision, Ssh};
     let mut log = Vec::new();
     let probe_ssh = Ssh {
@@ -217,12 +230,22 @@ pub fn provision_machine(
         }
     };
     log.push(format!("[{addr}] agent binary: {}", binary.display()));
+    let tts = match tts_binary_for(pre.arch.as_str(), layout) {
+        Ok(b) => b,
+        Err(e) => {
+            log.push(format!("[{addr}] {e}"));
+            return (false, log);
+        }
+    };
+    log.push(format!("[{addr}] tts sidecar: {}", tts.display()));
     let mut m = Machine::new(addr, user, port, key, "worker");
     m.tts_url = Some("http://127.0.0.1:8818".into());
     let (after, mut flow) = provision(
         &m,
         &layout.root,
         &binary,
+        &tts,
+        &tts_runtime_dir(layout),
         env!("CARGO_PKG_VERSION"),
         force,
         Some(pre),
@@ -281,6 +304,32 @@ async fn cmd_serve(
 
 /// Pick the agent binary matching the target arch. Cross builds live next to
 /// the native one; a missing cross binary is a build error, not a guess.
+/// Pick the TTS sidecar binary for the target arch.
+///
+/// Unlike [`agent_binary_for`], this one is a **release** build: bm-tts's hot
+/// loop is a hand-written SIMD matvec, and a debug build would give all of that
+/// back. Missing is a build error, not a guess — `make tts` produces it.
+fn tts_binary_for(arch: &str, layout: &Layout) -> anyhow::Result<std::path::PathBuf> {
+    let dir = layout.root.join("rust/target");
+    let cand = if arch == "x86_64" {
+        dir.join("x86_64-unknown-linux-gnu/release/bm-tts")
+    } else {
+        dir.join("release/bm-tts")
+    };
+    if cand.is_file() {
+        return Ok(cand);
+    }
+    anyhow::bail!(
+        "no TTS sidecar binary for arch {arch} at {} (run `make tts`)",
+        cand.display()
+    )
+}
+
+/// Where `make runtime` staged the shared ONNX Runtime to push alongside it.
+fn tts_runtime_dir(layout: &Layout) -> std::path::PathBuf {
+    layout.root.join("rust/target/ort-linux-x64")
+}
+
 fn agent_binary_for(arch: &str, layout: &Layout) -> anyhow::Result<std::path::PathBuf> {
     let dir = layout.root.join("rust/target");
     let cand = if arch == "x86_64" {
@@ -650,4 +699,28 @@ async fn cmd_digest(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provisioning_localhost_syncs_nothing_and_reports_ready() {
+        // The local worker runs in place from the repo, so there is no
+        // mirror to fill — and crucially no readiness gate to fail: a
+        // missing (or stale) `~/bm-worker` must never park localhost in
+        // Error during `:B` catch-up.
+        let dir = std::env::temp_dir().join(format!("bm-local-prov{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let layout = bm_core::Layout::new(&dir);
+        for addr in ["127.0.0.1", "localhost", "::1"] {
+            let (ready, lines) = provision_machine(&layout, addr, "thang", 22, None, false);
+            assert!(ready, "{addr} must always be ready");
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(lines[0].contains("nothing to provision"), "{}", lines[0]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

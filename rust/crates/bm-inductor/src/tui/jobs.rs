@@ -264,7 +264,13 @@ pub(crate) enum Ev {
     /// The per-speaker line index, built off the UI thread.
     Lines(Result<std::collections::HashMap<String, Vec<String>>, String>),
     /// The sound-design pools, the scene map and each entry's usage.
-    Sounds(Result<crate::tui::sound::SoundData, String>),
+    ///
+    /// Boxed because this is the only large variant — `SoundData` is ~512 bytes
+    /// against a 144-byte runner-up — and the channel is *unbounded*, so every
+    /// message pays for the largest variant. `JobStarted(u64)` is eight bytes of
+    /// payload allocating a 512-byte node. A reload is rare and one allocation
+    /// is nothing; a progress tick is neither.
+    Sounds(Result<Box<crate::tui::sound::SoundData>, String>),
 }
 
 /// Bounded wait for a freshly spawned inductor to answer `/api/state`.
@@ -944,6 +950,37 @@ pub(crate) async fn job_stop_backend(
     // Cluster-wide stop, off the UI task: ssh sweeps take seconds per
     // box and must never freeze the dashboard. Keyless boxes fall back
     // to the app-wide default, like every other ssh flow.
+    //
+    // Graceful first: the shutdown op latches the inductor, whose next
+    // heartbeat answer (2s) tells every worker to exit on its own — no
+    // ssh needed for the living. The sweep below stays as the fallback
+    // for what cannot hear it: dead boxes, old agents, and the detached
+    // TTS sidecar, which is nobody's child.
+    if let Ok(http) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        match http
+            .post(format!("{}/api/op", api.trim_end_matches('/')))
+            .json(&serde_json::json!({"op": "shutdown-workers"}))
+            .send()
+            .await
+        {
+            Ok(_) => {
+                send(
+                    &tx,
+                    Level::Info,
+                    "shutdown asked — workers exit on next beat, sweeping strays…".into(),
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+            }
+            Err(e) => send(
+                &tx,
+                Level::Warn,
+                format!("shutdown op unreachable ({e}) — falling back to ssh sweep"),
+            ),
+        }
+    }
     let machines: Vec<Machine> = machines
         .into_iter()
         .map(|mut m| {
@@ -1136,7 +1173,7 @@ pub(crate) async fn job_load_sounds(
     let res = tokio::task::spawn_blocking(move || crate::tui::sound::load(&layout_root))
         .await
         .unwrap_or_else(|e| Err(format!("sound design task failed: {e}")));
-    let _ = tx.send(Ev::Sounds(res));
+    let _ = tx.send(Ev::Sounds(res.map(Box::new)));
     // Every arm of `run_job` owes exactly one of these; see `job_load_lines`.
     let _ = tx.send(Ev::Done(DoneKind::Other));
 }

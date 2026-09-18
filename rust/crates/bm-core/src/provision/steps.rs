@@ -20,6 +20,17 @@ pub struct Probe {
     pub agent_version: Option<String>,
     /// A usable Python interpreter with the TTS deps installed.
     pub python_present: bool,
+    /// The Rust sidecar binary, `~/{REMOTE_DIR}/bm-tts`.
+    ///
+    /// Both sidecars can be present at once, and the two flags are separate on
+    /// purpose: which one a box *runs* is a provisioning choice, not something
+    /// to infer from what happens to be on disk. `#[serde(default)]` so a
+    /// machine record written before this field still reads.
+    #[serde(default)]
+    pub tts_bin_present: bool,
+    /// A baked `~/{REMOTE_DIR}/models/` — the Rust sidecar's weights.
+    #[serde(default)]
+    pub models_present: bool,
     /// Enrolled clone-voice names parsed from the voice store (no model load).
     #[serde(default)]
     pub voices: Vec<String>,
@@ -32,9 +43,27 @@ pub struct Probe {
 
 impl Probe {
     /// A machine is ready to take work when it is reachable, runs the exact
-    /// agent build we are scheduling with, and has the TTS sidecar's Python.
+    /// agent build we are scheduling with, and has the TTS sidecar.
+    ///
+    /// There is one sidecar now. `python_present` is still reported by the probe
+    /// but is no longer consulted: a box that happens to have a virtualenv is not
+    /// thereby able to render.
     pub fn configured(&self, want_version: &str) -> bool {
-        self.reachable && self.agent_version.as_deref() == Some(want_version) && self.python_present
+        self.reachable && self.agent_version.as_deref() == Some(want_version) && self.rust_ready()
+    }
+
+    /// The TTS sidecar is installed and has its weights.
+    pub fn rust_ready(&self) -> bool {
+        self.tts_bin_present && self.models_present
+    }
+
+    /// Which sidecar this box would run, for the TUI's summary line.
+    pub fn sidecar(&self) -> &'static str {
+        if self.rust_ready() {
+            "rust"
+        } else {
+            "none"
+        }
     }
 
     /// One-line summary for the TUI machine pane.
@@ -45,13 +74,13 @@ impl Probe {
         // A count, not the list: 50 enrolled names wrapped the Logs pane for
         // screens. Which voices enrolled is already on the `enrolled …` lines.
         format!(
-            "{} · {} cpu · {} MB ram · {} · agent={} · python={} · voices={} · tts={}",
+            "{} · {} cpu · {} MB ram · {} · agent={} · sidecar={} · voices={} · tts={}",
             self.hostname,
             self.nproc,
             self.mem_mb,
             self.arch,
             self.agent_version.as_deref().unwrap_or("absent"),
-            if self.python_present { "yes" } else { "no" },
+            self.sidecar(),
             if self.voices.is_empty() {
                 "-".into()
             } else {
@@ -81,7 +110,21 @@ if [ -x "$HOME/{dir}/python/.venv/bin/python" ]; then
 else
   echo "python=absent"
 fi
-echo "voices=$(for f in $HOME/{dir}/python/.venv/lib/*/site-packages/vieneu/assets/voices_v3_turbo.json; do [ -f "$f" ] && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(chr(31).join(d.get('presets', d).keys()))" "$f"; done 2>/dev/null)"
+if [ -x "$HOME/{dir}/bm-tts" ]; then
+  echo "tts_bin=present"
+else
+  echo "tts_bin=absent"
+fi
+if [ -f "$HOME/{dir}/models/manifest.json" ]; then
+  echo "models=present"
+else
+  echo "models=absent"
+fi
+# Whichever layout is here. The Rust bake puts the store beside the weights; the
+# Python one keeps it inside the venv, so a rebuild vaporizes it.
+STORE="$HOME/{dir}/models/voices.json"
+[ -f "$STORE" ] || STORE=$(ls $HOME/{dir}/python/.venv/lib/*/site-packages/vieneu/assets/voices_v3_turbo.json 2>/dev/null | head -n 1)
+echo "voices=$([ -n "$STORE" ] && [ -f "$STORE" ] && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(chr(31).join(d.get('presets', d).keys()))" "$STORE" 2>/dev/null)"
 if [ -f "$HOME/{dir}/.provision_stamp.json" ]; then
   echo "stamp=$(tr '\n' ' ' < "$HOME/{dir}/.provision_stamp.json" 2>/dev/null)"
 fi
@@ -120,6 +163,8 @@ echo "probe=done"
                         "disk_mb" => probe.disk_free_mb = v.parse().unwrap_or(0),
                         "agent" if v != "absent" => probe.agent_version = Some(v.to_string()),
                         "python" => probe.python_present = v == "present",
+                        "tts_bin" => probe.tts_bin_present = v == "present",
+                        "models" => probe.models_present = v == "present",
                         "voices" => {
                             // Names contain spaces ("Minh Triết") — the probe
                             // joins them with \x1f, never whitespace.
@@ -147,7 +192,7 @@ echo "probe=done"
     /// Create the worker root skeleton.
     pub fn ensure_root(&self) -> Result<()> {
         let script = format!(
-            "mkdir -p $HOME/{d}/python $HOME/{d}/prompts $HOME/{d}/assets/effects \
+            "mkdir -p $HOME/{d}/models $HOME/{d}/prompts $HOME/{d}/assets/effects \
              $HOME/{d}/assets/music $HOME/{d}/refs $HOME/{d}/data/chapters \
              $HOME/{d}/data/audio $HOME/{d}/output && echo READY",
             d = REMOTE_DIR
@@ -181,14 +226,22 @@ echo "probe=done"
                 self.rsync_push(&src, rel, true)?;
             }
         }
-        let py = repo_root.join("python");
-        if py.exists() {
-            self.rsync_push(&py, "python", false)?;
-        }
+        // `python/` used to be pushed here. It is not any more: the sidecar is
+        // `bm-tts`, and the one thing a worker still needed Python for —
+        // enrolling a clone — now happens on the inductor, whose store travels
+        // inside `models/voices.json`.
+        //
         // Voice assignments travel with sources (additive only — a worker's
         // segment cache is keyed by voice, so clobbering mid-render would
         // strand it; the voices op is the writer, this is just transport).
-        for rel in ["data/cast-vieneu.json", "data/cast.json"] {
+        // The clone manifest travels too: nothing on a worker reads it yet,
+        // but the inductor's warnings are computed against it, so a box
+        // holding a different declaration is a silent desync.
+        for rel in [
+            "data/cast-vieneu.json",
+            "data/cast.json",
+            "voices.json",
+        ] {
             let src = repo_root.join(rel);
             if src.exists() {
                 self.rsync_push(&src, rel, false)?;
@@ -197,113 +250,87 @@ echo "probe=done"
         Ok(())
     }
 
-    /// Create the TTS virtualenv and install the sidecar's dependencies.
-    /// Only runs when the probe says the interpreter is missing, because the
-    /// VieNeu weights are ~1.7 GB and this is the slow part of onboarding.
-    /// A missing `python3` (or venv module) is named with its fix, not left as
-    /// a bare remote traceback: provisioning never installs python itself.
-    pub fn ensure_python(&self, force: bool) -> Result<String> {
+    /// Push the TTS sidecar binary and the shared ONNX Runtime it links.
+    ///
+    /// Replaces `ensure_python`, which built a 647 MB virtualenv on every
+    /// worker. Two files and a symlink do the same job now.
+    ///
+    /// The library is pushed under **every** name it is known by — the linker
+    /// wants the plain `libonnxruntime.so`, the loader wants the SONAME
+    /// `libonnxruntime.so.1`, and the versioned file is what those two point at.
+    /// Shipping only one of them produces a failure that names none of this.
+    pub fn install_tts_runtime(&self, tts_binary: &Path, runtime_dir: &Path) -> Result<String> {
+        self.rsync_push(tts_binary, "bm-tts", false)?;
+        // Whatever the make target staged, rather than a version hardcoded here:
+        // the pin lives in the Makefile, and two copies of it would drift.
+        let mut libs: Vec<std::path::PathBuf> = std::fs::read_dir(runtime_dir)
+            .with_context(|| format!("reading the runtime dir {}", runtime_dir.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("libonnxruntime.so"))
+            })
+            .collect();
+        libs.sort();
+        if libs.is_empty() {
+            anyhow::bail!(
+                "no libonnxruntime.so* in {} — run `make runtime` first",
+                runtime_dir.display()
+            );
+        }
+        for lib in &libs {
+            let name = lib.file_name().expect("filtered on a file name");
+            self.rsync_push(lib, &name.to_string_lossy(), false)?;
+        }
+
         let script = format!(
             r#"set -e
-D="$HOME/{d}/python"
-if [ {force} -eq 0 ] && [ -x "$D/.venv/bin/python" ]; then
-  echo "PYTHON-OK (existing venv)"
-  exit 0
-fi
-command -v python3 >/dev/null 2>&1 || {{ echo "python3 missing on this box — install it, e.g. sudo apt install -y python3 python3-venv" >&2; exit 4; }}
-set +e
-python3 -m venv "$D/.venv" 2>"$D/venv.err"
-VENV_RC=$?
-set -e
-[ $VENV_RC -eq 0 ] || {{ echo "venv build failed: $(head -1 "$D/venv.err") — install the venv module, e.g. sudo apt install -y python3-venv" >&2; exit 5; }}
-"$D/.venv/bin/python" -m pip install -q --upgrade pip
-"$D/.venv/bin/python" -m pip install -q -r "$D/requirements.txt"
-echo "PYTHON-OK (fresh venv)"
+D="$HOME/{d}"
+cd "$D"
+chmod +x bm-tts
+LD_LIBRARY_PATH="$D" ./bm-tts --version >/dev/null 2>&1 || \
+  {{ echo "bm-tts would not run — missing libonnxruntime.so.1 beside it?" >&2; exit 7; }}
+echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
 "#,
-            d = REMOTE_DIR,
-            force = if force { 1 } else { 0 }
+            d = REMOTE_DIR
         );
-        let (code, stdout, stderr) = self.run(&script, 3600)?;
+        let (code, stdout, stderr) = self.run(&script, 60)?;
         if code != 0 {
             anyhow::bail!(
-                "python provisioning failed (exit {code}): {}",
+                "installing the TTS runtime failed (exit {code}): {}",
                 crate::util::head_chars(stderr.trim(), 300)
             );
         }
         Ok(stdout.trim().to_string())
     }
 
-    /// Enroll the clone voices from `voices.json`. The voice store lives
-    /// inside the venv, so a venv rebuild vaporizes it — this step re-enrolls
-    /// whatever the probe did not find. Skips the model load entirely when
-    /// everything is already enrolled.
+    /// Push the baked `models/` directory — the weights the sidecar reads.
     ///
-    /// `voices.json` and `refs/` are personal and git-ignored (see
-    /// `.gitignore`), so a fresh clone legitimately has neither. Absence means
-    /// "this machine has no clones", not "provisioning failed" — and there is
-    /// nothing to enroll without the reference clips anyway.
-    pub fn ensure_voices(&self, repo_root: &Path) -> Result<String> {
-        let manifest_src = repo_root.join("voices.json");
-        if !manifest_src.exists() {
-            return Ok("VOICES-OK (no voices.json — no clones to enroll)".to_string());
+    /// 668 MB, and content-addressed by the stamp's `tts_hash`, so a re-provision
+    /// with nothing changed costs one rsync delta rather than a transfer.
+    pub fn install_models(&self, repo_root: &Path) -> Result<String> {
+        let src = repo_root.join("models");
+        if !src.is_dir() {
+            anyhow::bail!(
+                "no {} — run the bake first (`python3 tools/bake-models.py`)",
+                src.display()
+            );
         }
-        // Parsed (and discarded) as validation: a malformed manifest must fail
-        // here with the file named, not deep inside the remote python.
-        let _manifest: std::collections::HashMap<String, String> = serde_json::from_str(
-            &std::fs::read_to_string(&manifest_src)
-                .with_context(|| format!("reading {}", manifest_src.display()))?,
-        )
-        .context("parsing voices.json (name -> refs/*.wav)")?;
-        self.rsync_push(&repo_root.join("refs"), "refs", false)?;
-        self.rsync_push(&manifest_src, "voices.json", false)?;
-        // The missing-set is computed in python, not the shell: voice names
-        // contain spaces ("Châu Tinh Trì"), and every shell word-split turned
-        // them into fragments that matched nothing — enrollment died on the
-        // first multi-word name with `manifest[name]` KeyError, enrolling zero
-        // voices. `voices.json` is already on the target, so python reads the
-        // want-list straight from it; no name list crosses the shell at all.
+        self.rsync_push(&src, "models", true)?;
         let script = format!(
-            r#"set -e
-D="$HOME/{d}"
-V="$D/python/.venv/bin/python"
-STORE=$(ls $D/python/.venv/lib/*/site-packages/vieneu/assets/voices_v3_turbo.json 2>/dev/null | head -n 1)
-[ -n "$STORE" ] || {{ echo "voice store not found (venv broken?)" >&2; exit 6; }}
-cd "$D"
-PYTHONPATH="$D/python" "$V" -c "
-import json
-import tts_vieneu as vn
-manifest = json.load(open('voices.json'))
-store = json.load(open('$STORE'))
-have = set(store.get('presets', store).keys())
-missing = sorted(n for n in manifest if not n.startswith('_') and n not in have)
-if not missing:
-    print('VOICES-OK (already enrolled)')
-else:
-    print('enrolling: ' + ', '.join(missing), flush=True)
-    tts = vn.engine()
-    failed = []
-    for name in missing:
-        try:
-            tts.add_voice(name, manifest[name])
-            print('enrolled', name, flush=True)
-        except Exception as e:
-            # One bad clip (missing/corrupt ref file) must not vaporize the
-            # rest: report it, keep going, save whoever enrolled.
-            print('SKIP', name, type(e).__name__, str(e)[:160], flush=True)
-            failed.append(name)
-    tts.save_voices()
-    if failed:
-        print('VOICES-PARTIAL (saved the rest, failed: ' + ', '.join(failed) + ')', flush=True)
-        raise SystemExit('voice enrollment failed for: ' + ', '.join(failed))
-    print('VOICES-OK (all enrolled)')
-"
+            r#"D="$HOME/{d}/models"
+n=$(ls "$D" | wc -l)
+[ -f "$D/manifest.json" ] || {{ echo "models/manifest.json missing — incomplete bake" >&2; exit 8; }}
+echo "MODELS-OK ($n files)"
 "#,
-            d = REMOTE_DIR,
+            d = REMOTE_DIR
         );
-        let (code, stdout, stderr) = self.run(&script, 1800)?;
+        let (code, stdout, stderr) = self.run(&script, 60)?;
         if code != 0 {
             anyhow::bail!(
-                "voice enrollment failed (exit {code}): {}",
+                "installing models failed (exit {code}): {}",
                 crate::util::head_chars(stderr.trim(), 300)
             );
         }
@@ -327,13 +354,15 @@ npm i -g --prefix "$HOME/.local" opencode-ai >/dev/null 2>&1 && echo "OPENCODE-O
     /// Start the TTS sidecar detached, unless it is already answering.
     pub fn start_tts(&self) -> Result<String> {
         let script = format!(
-            r#"D="$HOME/{d}/python"
+            r#"D="$HOME/{d}"
 if curl -s -o /dev/null --max-time 3 http://127.0.0.1:{port}/health >/dev/null 2>&1; then
   echo "TTS-ALREADY-UP"; exit 0
 fi
 cd "$D" || exit 5
-nohup "$D/.venv/bin/python" tts_server.py --port {port} --bind 0.0.0.0 > "$HOME/{d}/tts.log" 2>&1 &
-echo $! > "$HOME/{d}/tts.pid"
+LD_LIBRARY_PATH="$D" nohup "$D/bm-tts" --models models --codec models \
+  --dict models/sea_g2p.bin --voices models/voices.json \
+  --port {port} --bind 0.0.0.0 > "$D/tts.log" 2>&1 &
+echo $! > "$D/tts.pid"
 sleep 3
 curl -s -o /dev/null --max-time 10 http://127.0.0.1:{port}/health >/dev/null 2>&1 && echo "TTS-STARTED" || echo "TTS-STARTING (model loading)"
 "#,
@@ -352,8 +381,11 @@ curl -s -o /dev/null --max-time 10 http://127.0.0.1:{port}/health >/dev/null 2>&
 
     pub fn stop_tts(&self) -> Result<()> {
         let script = format!(
+            // `pkill -x`, never `-f`: the pattern for a command-line match is
+            // contained in the ssh wrapper's own argv, so `-f` kills the wrapper
+            // running this script. `-x` matches the process name only.
             r#"if [ -f "$HOME/{d}/tts.pid" ]; then kill "$(cat "$HOME/{d}/tts.pid")" 2>/dev/null || true; rm -f "$HOME/{d}/tts.pid"; fi
-pkill -f "tts_server.py" 2>/dev/null || true
+pkill -x bm-tts 2>/dev/null || true
 echo stopped"#,
             d = REMOTE_DIR
         );
@@ -421,10 +453,13 @@ pub fn undeclared_voices(
 /// Full onboarding for one machine: probe, then push only what is missing.
 ///
 /// Returns the log lines the TUI should show, in order.
+#[allow(clippy::too_many_arguments)]
 pub fn provision(
     m: &Machine,
     repo_root: &Path,
     agent_binary: &Path,
+    tts_binary: &Path,
+    tts_runtime: &Path,
     agent_version: &str,
     force: bool,
     initial_probe: Option<Probe>,
@@ -456,14 +491,16 @@ pub fn provision(
         && remote_stamp
             .map(|s| s.sources_in_sync(&local_stamp))
             .unwrap_or(false);
-    let voices_match = !force
+    // The voice store now travels inside `models/`, so `tts_hash` covers it and
+    // there is no separate voices check.
+    let models_match = !force
         && remote_stamp
-            .map(|s| s.voices_in_sync(&local_stamp))
+            .map(|s| s.tts_in_sync(&local_stamp))
             .unwrap_or(false);
 
     if probe.configured(agent_version) && !force {
         log.push(format!(
-            "[{}] already configured (agent {} + python)",
+            "[{}] already configured (agent {} + tts sidecar)",
             m.id, agent_version
         ));
         if sources_match {
@@ -493,22 +530,22 @@ pub fn provision(
 
         if sources_match {
             log.push(format!(
-                "[{}] prompts/assets/refs/python in sync (cache match)",
+                "[{}] prompts/assets/refs in sync (cache match)",
                 m.id
             ));
         } else {
             match ssh.install_sources(repo_root) {
-                Ok(()) => log.push(format!("[{}] prompts/assets/refs/python distributed", m.id)),
+                Ok(()) => log.push(format!("[{}] prompts/assets/refs distributed", m.id)),
                 Err(e) => log.push(format!("[{}] source distribution failed: {e}", m.id)),
             }
         }
 
-        if !probe.python_present || force {
+        if !probe.tts_bin_present || force {
             log.push(format!(
-                "[{}] installing TTS venv (slow: downloads ~1.7 GB of weights on first use)",
+                "[{}] installing the TTS sidecar binary + runtime",
                 m.id
             ));
-            match ssh.ensure_python(force) {
+            match ssh.install_tts_runtime(tts_binary, tts_runtime) {
                 Ok(v) => log.push(format!("[{}] {v}", m.id)),
                 Err(e) => {
                     log.push(format!("[{}] {e}", m.id));
@@ -516,24 +553,56 @@ pub fn provision(
                 }
             }
         } else {
-            log.push(format!("[{}] TTS venv already present — skipped", m.id));
+            log.push(format!(
+                "[{}] TTS sidecar binary already present — skipped",
+                m.id
+            ));
+        }
+
+        // 668 MB, and the reason `tts_hash` exists: a re-provision with nothing
+        // changed must not re-send it.
+        if models_match {
+            log.push(format!("[{}] models in sync (cache match)", m.id));
+        } else {
+            log.push(format!("[{}] pushing models (~668 MB)", m.id));
+            match ssh.install_models(repo_root) {
+                Ok(v) => log.push(format!("[{}] {v}", m.id)),
+                Err(e) => {
+                    log.push(format!("[{}] {e}", m.id));
+                    return (probe, log);
+                }
+            }
         }
     }
 
-    // Voice enrollment runs only when voices changed, or on first venv build / force.
-    if voices_match && probe.python_present {
-        log.push(format!(
-            "[{}] clone voices in sync (cache match, skipped PyTorch init)",
-            m.id
-        ));
-    } else {
-        match ssh.ensure_voices(repo_root) {
-            Ok(v) => {
-                for line in v.lines() {
-                    log.push(format!("[{}] {line}", m.id));
-                }
+    // Enrollment moved off the worker — it needs the encoder, which is not on a
+    // worker any more. A clone declared in `voices.json` but absent from the
+    // pushed store therefore cannot render anywhere, and the old flow would
+    // have quietly enrolled it on first use. Say so instead.
+    {
+        let manifest: std::collections::HashMap<String, String> = serde_json::from_str(
+            &std::fs::read_to_string(repo_root.join("voices.json")).unwrap_or_default(),
+        )
+        .unwrap_or_default();
+        if !manifest.is_empty() {
+            let store: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(repo_root.join("models/voices.json")).unwrap_or_default(),
+            )
+            .unwrap_or(serde_json::Value::Null);
+            let presets = store.get("presets").and_then(|v| v.as_object());
+            let missing: Vec<&str> = manifest
+                .keys()
+                .filter(|n| !n.starts_with('_'))
+                .filter(|n| presets.is_none_or(|p| !p.contains_key(*n)))
+                .map(|s| s.as_str())
+                .collect();
+            if !missing.is_empty() {
+                log.push(format!(
+                    "[{}] declared in voices.json but missing from models/voices.json: {} — enroll on this machine and re-bake, or a render naming one will fail here",
+                    m.id,
+                    missing.join(", ")
+                ));
             }
-            Err(e) => log.push(format!("[{}] voice enrollment failed: {e}", m.id)),
         }
     }
 
@@ -585,11 +654,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configured_requires_matching_version_and_python() {
+    fn configured_requires_a_matching_agent_and_the_tts_sidecar() {
         let mut p = Probe {
             reachable: true,
             agent_version: Some("0.2.0".into()),
-            python_present: true,
+            tts_bin_present: true,
+            models_present: true,
             ..Default::default()
         };
         assert!(p.configured("0.2.0"));
@@ -597,11 +667,17 @@ mod tests {
             !p.configured("0.3.0"),
             "stale agent must trigger a redeploy"
         );
-        p.python_present = false;
-        assert!(!p.configured("0.2.0"));
-        p.python_present = true;
         p.reachable = false;
         assert!(!p.configured("0.2.0"));
+
+        // A Python virtualenv is no longer a reason to call a box ready. This
+        // is the assertion that changed: the field is still probed and
+        // reported, but it decides nothing.
+        p.reachable = true;
+        p.tts_bin_present = false;
+        p.models_present = false;
+        p.python_present = true;
+        assert!(!p.configured("0.2.0"), "a venv cannot render");
     }
 
     #[test]
@@ -663,25 +739,44 @@ mod tests {
         assert!(p.summary().contains("ssh exit 255"));
     }
 
+    /// The sidecar needs *both* the binary and its weights — a binary with no
+    /// models cannot render, and reads as ready right up until the first task.
     #[test]
-    fn a_missing_voices_manifest_is_not_a_failure() {
-        // `voices.json` and `refs/` are personal and git-ignored, so a fresh
-        // clone has neither. Provisioning must read that as "no clones" rather
-        // than as a failure — and it must decide that without reaching for ssh.
-        // The target below is TEST-NET-1, so any attempt to connect fails.
-        let ssh = Ssh {
-            target: "nobody@192.0.2.1".into(),
-            port: 22,
-            key: None,
-            local: false,
+    fn the_tts_sidecar_needs_the_binary_and_the_weights() {
+        let mut p = Probe {
+            reachable: true,
+            agent_version: Some("0.2.0".into()),
+            ..Default::default()
         };
-        let empty = std::env::temp_dir().join("bm-provision-no-voices");
-        let _ = std::fs::remove_dir_all(&empty);
-        std::fs::create_dir_all(&empty).unwrap();
+        assert!(!p.configured("0.2.0"), "nothing installed is not ready");
+        assert_eq!(p.sidecar(), "none");
 
-        let out = ssh
-            .ensure_voices(&empty)
-            .expect("a missing manifest is a valid state, not an error");
-        assert!(out.contains("no voices.json"), "got: {out}");
+        p.tts_bin_present = true;
+        assert!(!p.rust_ready(), "a binary with no models cannot render");
+        assert!(!p.configured("0.2.0"));
+
+        p.models_present = true;
+        assert!(p.configured("0.2.0"));
+        assert_eq!(p.sidecar(), "rust");
+
+        assert!(!p.configured("0.3.0"), "a stale agent is never configured");
+    }
+
+    /// The two flags are independent, so a box can report both without either
+    /// implying the other.
+    #[test]
+    fn both_sidecars_can_be_present_at_once() {
+        let p = Probe {
+            reachable: true,
+            agent_version: Some("0.2.0".into()),
+            python_present: true,
+            tts_bin_present: true,
+            models_present: true,
+            ..Default::default()
+        };
+        assert!(p.configured("0.2.0"));
+        // Rust wins the summary when it is ready, because that is what a switch
+        // would put in charge.
+        assert_eq!(p.sidecar(), "rust");
     }
 }

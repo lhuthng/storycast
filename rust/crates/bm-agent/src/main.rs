@@ -104,6 +104,56 @@ fn set_progress(shared: &Shared, frac: f32, activity: String) {
 // TTS sidecar lifecycle: started per render task, stopped after.
 // ---------------------------------------------------------------------------
 
+/// The binary and argv for the sidecar on this machine.
+///
+/// Factored out of [`Sidecar::ensure`] so a test can assert the paths without
+/// spawning a model. Everything is derived from `Layout`, so the inductor and a
+/// worker resolve the same tree — `root` is the repo locally and `~/bm-worker`
+/// remotely.
+/// The sidecar binary to spawn: the provisioned copy at the worker root
+/// first, then the workspace's own debug/release builds beside it.
+///
+/// The local worker runs from the repo, where no provision ever installs
+/// `bm-tts` — but `cargo build --workspace` keeps `target/debug/bm-tts`
+/// fresh. Without the fallback a dead sidecar is fatal locally even
+/// though a working binary sits one directory over; every past local
+/// render survived on a long-lived sidecar that `ensure` merely reused.
+/// Order is load-bearing only in that the provisioned copy wins where it
+/// exists, so remote behaviour is unchanged.
+fn sidecar_binary(layout: &Layout) -> PathBuf {
+    let root = &layout.root;
+    [
+        root.join("bm-tts"),
+        root.join("rust/target/debug/bm-tts"),
+        root.join("rust/target/release/bm-tts"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+    .unwrap_or_else(|| layout.tts_binary())
+}
+
+fn sidecar_command(layout: &Layout, port: u16) -> (PathBuf, Vec<String>) {
+    let models = layout.models_dir();
+    (
+        sidecar_binary(layout),
+        vec![
+            "--models".into(),
+            models.display().to_string(),
+            // One directory, codec included — see `tools/bake-models.py`.
+            "--codec".into(),
+            models.display().to_string(),
+            "--dict".into(),
+            layout.tts_dict().display().to_string(),
+            "--voices".into(),
+            layout.tts_voices().display().to_string(),
+            "--port".into(),
+            port.to_string(),
+            "--bind".into(),
+            "127.0.0.1".into(),
+        ],
+    )
+}
+
 struct Sidecar {
     tts_url: String,
     child: Option<tokio::process::Child>,
@@ -129,14 +179,6 @@ impl Sidecar {
             .unwrap_or(SIDECAR_PORT)
     }
 
-    /// Which interpreter spawns the sidecar: the shared venv order, bare
-    /// `python3` last.
-    fn python(&self, layout: &Layout) -> PathBuf {
-        layout
-            .venv_python()
-            .unwrap_or_else(|| PathBuf::from("python3"))
-    }
-
     /// Ensure the sidecar answers, starting it if needed. Idempotent.
     /// Verifies `/policy`, not just `/health`: a stale server from a previous
     /// deploy answers health but lacks the endpoints renders depend on.
@@ -145,19 +187,23 @@ impl Sidecar {
             return Ok(());
         }
         self.stop();
-        // The TTS modules live in python/, so the server runs with
-        // cwd=python/ (`import tts_vieneu` resolves).
-        let py = self.python(layout);
-        let mut child = tokio::process::Command::new(&py)
-            .arg("tts_server.py")
-            .arg("--port")
-            .arg(self.port().to_string())
-            .current_dir(layout.python_dir())
-            .env("PYTHONPATH", layout.python_dir())
+        let (bin, args) = sidecar_command(layout, self.port());
+        if !bin.is_file() {
+            anyhow::bail!(
+                "no TTS sidecar at {} — build it (`make build`) or provision this box (`make provision BOX=…`)",
+                bin.display()
+            );
+        }
+        let mut child = tokio::process::Command::new(&bin)
+            .args(&args)
+            // The SONAME is `libonnxruntime.so.1`, and it sits beside the binary
+            // at the worker root. Without this the spawn dies with "error while
+            // loading shared libraries", which reads as a missing model.
+            .env("LD_LIBRARY_PATH", layout.tts_lib_dir())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .with_context(|| format!("spawning TTS sidecar via {}", py.display()))?;
+            .with_context(|| format!("spawning TTS sidecar {}", bin.display()))?;
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_secs(5)).await;
             if self.serving_current().await {
@@ -521,6 +567,17 @@ async fn run_merge(
 // worker loop against the inductor API
 // ---------------------------------------------------------------------------
 
+/// True when a heartbeat answer carries the shutdown command.
+///
+/// Tolerant by design: an old inductor answers just `{"ok": true}` (no
+/// `shutdown` key, so the default keeps us running), and a non-JSON answer
+/// is ignored rather than acted on.
+fn wants_shutdown(body: &[u8]) -> bool {
+    serde_json::from_slice::<bm_proto::HeartbeatAck>(body)
+        .map(|a| a.shutdown)
+        .unwrap_or(false)
+}
+
 async fn heartbeat_loop(
     http: reqwest::Client,
     inductor: String,
@@ -546,7 +603,18 @@ async fn heartbeat_loop(
             hostname: hostname.clone(),
             alias: alias.clone(),
         };
-        let _ = http.post(&url).json(&body).send().await;
+        // The inductor's only command channel: a shutdown latch read on
+        // every answer. Exiting here strands nothing — the inductor
+        // reaps the lease (no strike) or requeues the ledger on its way
+        // down, and an old inductor's `{"ok": true}` parses as "stay".
+        if let Ok(resp) = http.post(&url).json(&body).send().await {
+            if let Ok(bytes) = resp.bytes().await {
+                if wants_shutdown(&bytes) {
+                    println!("inductor asked for shutdown — exiting");
+                    std::process::exit(0);
+                }
+            }
+        }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
@@ -1024,6 +1092,16 @@ fn worker_alias_for(root: &std::path::Path) -> String {
     name
 }
 
+/// The default worker id: stable per root, not per process. The old
+/// `{hostname}-{pid}` minted a new identity on every restart, so the
+/// ledger's caps/workers/beats maps grew a row per restart and events
+/// renamed every worker. The alias is drawn once and kept in
+/// `worker.alias`, so `{hostname}-{alias}` survives restarts; an explicit
+/// `--worker-id` still wins.
+fn default_worker_id(root: &std::path::Path) -> String {
+    format!("{}-{}", hostname_simple(), worker_alias_for(root))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -1101,8 +1179,7 @@ async fn main() -> Result<()> {
             addr,
             tts_url,
         } => {
-            let worker_id = worker_id
-                .unwrap_or_else(|| format!("{}-{}", hostname_simple(), std::process::id()));
+            let worker_id = worker_id.unwrap_or_else(|| default_worker_id(&layout.root));
             let addr = addr.unwrap_or_else(|| "127.0.0.1".into());
             let tts_url = tts_url.unwrap_or_else(|| "http://127.0.0.1:8818".into());
             worker_loop(layout, settings, inductor, worker_id, addr, tts_url).await?;
@@ -1189,6 +1266,58 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_is_read_off_the_heartbeat_answer() {
+        // New inductor, command set and clear.
+        assert!(wants_shutdown(br#"{"ok":true,"shutdown":true}"#));
+        assert!(!wants_shutdown(br#"{"ok":true,"shutdown":false}"#));
+        // Old inductor: no `shutdown` key at all — the default keeps us
+        // running, which is what makes either side upgradable on its own.
+        assert!(!wants_shutdown(br#"{"ok": true}"#));
+        // Garbage is ignored, never acted on.
+        assert!(!wants_shutdown(b"not json"));
+        assert!(!wants_shutdown(b""));
+    }
+
+    #[test]
+    fn default_worker_id_is_stable_per_root_not_per_process() {
+        // The naming fix: restarts must keep their identity, or the
+        // ledger grows a row per restart and events rename every worker.
+        let root = std::env::temp_dir().join(format!("bmid{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let first = default_worker_id(&root);
+        assert!(first.starts_with(&format!("{}-", hostname_simple())));
+        assert_eq!(
+            default_worker_id(&root),
+            first,
+            "a restart keeps its id (the alias file persists it)"
+        );
+        assert!(root.join("worker.alias").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_sidecar_prefers_the_provisioned_copy_then_the_workspace_build() {
+        // The local worker runs from the repo, where no provision ever
+        // installs `bm-tts` — but `cargo build` keeps the debug binary
+        // fresh, so a dead sidecar must fall back to it, not fail the
+        // render. The provisioned copy still wins where it exists, so
+        // remote behaviour is unchanged.
+        let root = std::env::temp_dir().join(format!("bmtts-fb{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let layout = Layout::new(&root);
+        assert_eq!(sidecar_binary(&layout), root.join("bm-tts"), "absent everywhere reports the canonical path");
+        let debug = root.join("rust/target/debug/bm-tts");
+        std::fs::create_dir_all(debug.parent().unwrap()).unwrap();
+        std::fs::write(&debug, b"fake").unwrap();
+        assert_eq!(sidecar_binary(&layout), debug);
+        let provisioned = root.join("bm-tts");
+        std::fs::write(&provisioned, b"fake").unwrap();
+        assert_eq!(sidecar_binary(&layout), provisioned);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn worker_alias_is_drawn_once_then_kept() {
         let root = std::env::temp_dir().join(format!("bmalias{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1207,29 +1336,39 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_python_prefers_the_managed_venv() {
-        // The 192.168.2.2 outage: provision builds python/.venv but the agent
-        // only looked at root/.venv, so every sidecar spawn fell back to a
-        // bare python3 without the TTS modules.
-        let root = std::env::temp_dir().join(format!("bmvenv{}", std::process::id()));
+    fn the_sidecar_argv_points_at_this_box_s_own_tree() {
+        // Was `sidecar_python_prefers_the_managed_venv`. The venv order is gone
+        // — there is one binary and one model directory now, and both hang off
+        // the root, so the inductor and a worker resolve the same paths.
+        let root = std::env::temp_dir().join(format!("bmtts{}", std::process::id()));
         let layout = Layout::new(&root);
-        let managed = layout.python_dir().join(".venv/bin");
-        let legacy = layout.root.join(".venv/bin");
-        std::fs::create_dir_all(&managed).unwrap();
-        std::fs::write(managed.join("python"), "").unwrap();
-        let s = Sidecar::new("http://127.0.0.1:8818");
-        assert_eq!(s.python(&layout), managed.join("python"));
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("python"), "").unwrap();
-        assert_eq!(s.python(&layout), managed.join("python"), "managed wins");
-        std::fs::remove_dir_all(layout.python_dir().join(".venv")).unwrap();
+        let (bin, args) = sidecar_command(&layout, 8818);
+
+        assert_eq!(bin, root.join("bm-tts"));
+        assert_eq!(args[0], "--models");
+        assert_eq!(args[1], root.join("models").display().to_string());
+
+        let value_of = |flag: &str| -> Option<String> {
+            args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
+        };
+        // The dictionary and the voice store live inside the model directory,
+        // and the codec shares it — one directory, not three.
         assert_eq!(
-            s.python(&layout),
-            legacy.join("python"),
-            "legacy fallback holds"
+            value_of("--codec"),
+            Some(root.join("models").display().to_string())
         );
-        std::fs::remove_dir_all(layout.root.join(".venv")).unwrap();
-        assert_eq!(s.python(&layout), PathBuf::from("python3"), "last resort");
+        assert_eq!(
+            value_of("--dict"),
+            Some(root.join("models/sea_g2p.bin").display().to_string())
+        );
+        assert_eq!(
+            value_of("--voices"),
+            Some(root.join("models/voices.json").display().to_string())
+        );
+        assert_eq!(value_of("--port"), Some("8818".into()));
+        // Loopback: the agent is the only caller, and the port is not
+        // authenticated.
+        assert_eq!(value_of("--bind"), Some("127.0.0.1".into()));
         let _ = std::fs::remove_dir_all(&root);
     }
 

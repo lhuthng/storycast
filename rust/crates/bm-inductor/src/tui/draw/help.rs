@@ -126,6 +126,10 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
             "requeue every render + merge — full re-speak, asks first",
         ),
         (
+            ":shutdown-when-idle",
+            "workers exit on their own once the queue drains — restart with :B",
+        ),
+        (
             ":X  :stop",
             "stop everything everywhere: local backend plus workers on all machines",
         ),

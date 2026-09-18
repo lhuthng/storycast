@@ -2,6 +2,60 @@ use super::Inner;
 use bm_proto::{now_secs, Stage, Task, TaskState};
 
 impl Inner {
+    /// Ask every beating worker to exit on its next heartbeat (2s). The
+    /// graceful half of the cluster stop: workers die on their own, no ssh.
+    /// In-flight tasks are stranded, not failed — the stop flow requeues
+    /// them (attempts kept), and lease expiry reaps them if it doesn't.
+    /// Whatever stays behind (a dead box, the detached TTS sidecar) is
+    /// still swept over ssh afterwards.
+    pub fn op_shutdown_workers(&mut self) -> String {
+        self.shutdown_requested = true;
+        let n = self
+            .beats
+            .values()
+            .filter(|b| now_secs().saturating_sub(b.ts) < 90)
+            .count();
+        let msg = format!("shutdown asked of {n} live worker(s) — exiting on next beat");
+        self.push_event("warn", msg.clone());
+        msg
+    }
+
+    /// Arm drain-then-exit: workers stop on their own once the queue drains.
+    /// Fires at once when nothing is unfinished (all done, or an idle
+    /// backend) — otherwise the arm would sit forever with no completion
+    /// left to trip it.
+    pub fn op_shutdown_when_idle(&mut self) -> String {
+        self.shutdown_when_idle = true;
+        self.maybe_auto_shutdown();
+        if self.shutdown_requested {
+            return "queue already drained — workers exiting on next beat".into();
+        }
+        let msg = "shutdown armed — workers exit once the queue drains".to_string();
+        self.push_event("info", msg.clone());
+        msg
+    }
+
+    /// Fire the drain-then-exit latch when nothing is unfinished.
+    /// One-shot: the arm disarms as it fires, so work enqueued afterwards
+    /// waits for the next backend start instead of murdering fresh workers.
+    /// Shelved tasks don't block — they're parked for an operator, not work.
+    pub(crate) fn maybe_auto_shutdown(&mut self) {        if !self.shutdown_when_idle {
+            return;
+        }
+        let busy = self.tasks.values().any(|t| {
+            matches!(
+                t.state,
+                TaskState::Pending | TaskState::Assigned | TaskState::Running
+            )
+        });
+        if busy {
+            return;
+        }
+        self.shutdown_when_idle = false;
+        self.shutdown_requested = true;
+        self.push_event("warn", "queue drained — workers exiting on next beat".into());
+    }
+
     /// Manual trigger for the same orphan logic `reap` runs automatically:
     /// requeue assignments with no live beat. Live workers' tasks are
     /// untouched. Attempts are kept.
@@ -493,14 +547,9 @@ impl Inner {
             let planned = bm_core::assemble::Planned::plan(&edited);
             let title = bm_core::assemble::title_speech_for_script(&sp, &cast, &edited);
             let seg_dir = self.layout.seg_dir(&engine, n);
-            let wavs = bm_core::assemble::expected_wavs(
-                &planned,
-                &cast,
-                &seg_dir,
-                local,
-                title.as_ref(),
-            )
-            .unwrap_or_default();
+            let wavs =
+                bm_core::assemble::expected_wavs(&planned, &cast, &seg_dir, local, title.as_ref())
+                    .unwrap_or_default();
             let at = if title.is_some() { 1 } else { 0 };
             // Raw item index -> planned piece index, through `origin`. It is
             // not the identity and not an offset: `speech` has the headline

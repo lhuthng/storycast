@@ -19,6 +19,8 @@ impl Inner {
             started_at: now_secs(),
             events: VecDeque::new(),
             next_event_id: 0,
+            shutdown_requested: false,
+            shutdown_when_idle: false,
         }
     }
 

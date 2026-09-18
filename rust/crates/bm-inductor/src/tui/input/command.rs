@@ -41,6 +41,7 @@ pub(crate) enum Command {
     Sound,
     Rerender,
     Remerge,
+    ShutdownWhenIdle,
 }
 
 /// `:` command line → the command. A single character is a command key
@@ -101,6 +102,7 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
         "sound" | "sounds" | "pools" => Command::Sound,
         "rerender" => Command::Rerender,
         "remerge" => Command::Remerge,
+        "shutdown-when-idle" => Command::ShutdownWhenIdle,
         "newest" => Command::Key(KeyCode::Char('G')),
         "named" => Command::AddNamed,
         "sample" => Command::AddSample,
@@ -339,6 +341,20 @@ pub(crate) fn do_command(
                 },
             );
             app.set_status(Level::Info, "requeueing every merge — render cache kept");
+        }
+        Command::ShutdownWhenIdle => {
+            // Graceful and reversible (nothing deleted, `:B` brings workers
+            // back), so no confirm — but command-line only, never a key.
+            dispatch_op(
+                app,
+                job_tx,
+                http,
+                OpRequest {
+                    op: Op::ShutdownWhenIdle,
+                    ..Default::default()
+                },
+            );
+            app.set_status(Level::Info, "shutdown armed — workers exit once the queue drains");
         }
         Command::Reconcile => {
             // Reconcile rewrites cast + scripts and re-renders losers: worth
