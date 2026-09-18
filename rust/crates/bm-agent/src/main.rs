@@ -103,56 +103,9 @@ fn set_progress(shared: &Shared, frac: f32, activity: String) {
 // ---------------------------------------------------------------------------
 // TTS sidecar lifecycle: started per render task, stopped after.
 // ---------------------------------------------------------------------------
-
-/// The binary and argv for the sidecar on this machine.
-///
-/// Factored out of [`Sidecar::ensure`] so a test can assert the paths without
-/// spawning a model. Everything is derived from `Layout`, so the inductor and a
-/// worker resolve the same tree — `root` is the repo locally and `~/bm-worker`
-/// remotely.
-/// The sidecar binary to spawn: the provisioned copy at the worker root
-/// first, then the workspace's own debug/release builds beside it.
-///
-/// The local worker runs from the repo, where no provision ever installs
-/// `bm-tts` — but `cargo build --workspace` keeps `target/debug/bm-tts`
-/// fresh. Without the fallback a dead sidecar is fatal locally even
-/// though a working binary sits one directory over; every past local
-/// render survived on a long-lived sidecar that `ensure` merely reused.
-/// Order is load-bearing only in that the provisioned copy wins where it
-/// exists, so remote behaviour is unchanged.
-fn sidecar_binary(layout: &Layout) -> PathBuf {
-    let root = &layout.root;
-    [
-        root.join("bm-tts"),
-        root.join("rust/target/debug/bm-tts"),
-        root.join("rust/target/release/bm-tts"),
-    ]
-    .into_iter()
-    .find(|p| p.is_file())
-    .unwrap_or_else(|| layout.tts_binary())
-}
-
-fn sidecar_command(layout: &Layout, port: u16) -> (PathBuf, Vec<String>) {
-    let models = layout.models_dir();
-    (
-        sidecar_binary(layout),
-        vec![
-            "--models".into(),
-            models.display().to_string(),
-            // One directory, codec included — see `tools/bake-models.py`.
-            "--codec".into(),
-            models.display().to_string(),
-            "--dict".into(),
-            layout.tts_dict().display().to_string(),
-            "--voices".into(),
-            layout.tts_voices().display().to_string(),
-            "--port".into(),
-            port.to_string(),
-            "--bind".into(),
-            "127.0.0.1".into(),
-        ],
-    )
-}
+// Spawn paths live on `Layout` (`sidecar_binary`, `sidecar_command`) so the
+// inductor's preview path resolves the same tree without a second copy to
+// drift.
 
 struct Sidecar {
     tts_url: String,
@@ -187,7 +140,7 @@ impl Sidecar {
             return Ok(());
         }
         self.stop();
-        let (bin, args) = sidecar_command(layout, self.port());
+        let (bin, args) = layout.sidecar_command(self.port());
         if !bin.is_file() {
             anyhow::bail!(
                 "no TTS sidecar at {} — build it (`make build`) or provision this box (`make provision BOX=…`)",
@@ -1297,27 +1250,6 @@ mod tests {
     }
 
     #[test]
-    fn the_sidecar_prefers_the_provisioned_copy_then_the_workspace_build() {
-        // The local worker runs from the repo, where no provision ever
-        // installs `bm-tts` — but `cargo build` keeps the debug binary
-        // fresh, so a dead sidecar must fall back to it, not fail the
-        // render. The provisioned copy still wins where it exists, so
-        // remote behaviour is unchanged.
-        let root = std::env::temp_dir().join(format!("bmtts-fb{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let layout = Layout::new(&root);
-        assert_eq!(sidecar_binary(&layout), root.join("bm-tts"), "absent everywhere reports the canonical path");
-        let debug = root.join("rust/target/debug/bm-tts");
-        std::fs::create_dir_all(debug.parent().unwrap()).unwrap();
-        std::fs::write(&debug, b"fake").unwrap();
-        assert_eq!(sidecar_binary(&layout), debug);
-        let provisioned = root.join("bm-tts");
-        std::fs::write(&provisioned, b"fake").unwrap();
-        assert_eq!(sidecar_binary(&layout), provisioned);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
     fn worker_alias_is_drawn_once_then_kept() {
         let root = std::env::temp_dir().join(format!("bmalias{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1342,7 +1274,7 @@ mod tests {
         // the root, so the inductor and a worker resolve the same paths.
         let root = std::env::temp_dir().join(format!("bmtts{}", std::process::id()));
         let layout = Layout::new(&root);
-        let (bin, args) = sidecar_command(&layout, 8818);
+        let (bin, args) = layout.sidecar_command(8818);
 
         assert_eq!(bin, root.join("bm-tts"));
         assert_eq!(args[0], "--models");

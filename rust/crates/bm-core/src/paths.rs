@@ -167,6 +167,53 @@ impl Layout {
         self.models_dir().join("voices.json")
     }
 
+    /// The sidecar binary to spawn: the provisioned copy at the worker root
+    /// first, then the workspace's own debug/release builds beside it.
+    ///
+    /// The local worker runs from the repo, where no provision ever installs
+    /// `bm-tts` — but `cargo build --workspace` keeps `target/debug/bm-tts`
+    /// fresh. Without the fallback a dead sidecar is fatal locally even
+    /// though a working binary sits one directory over. Order matters only
+    /// in that the provisioned copy wins where it exists, so remote
+    /// behaviour is unchanged.
+    pub fn sidecar_binary(&self) -> PathBuf {
+        [
+            self.root.join("bm-tts"),
+            self.root.join("rust/target/debug/bm-tts"),
+            self.root.join("rust/target/release/bm-tts"),
+        ]
+        .into_iter()
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| self.tts_binary())
+    }
+
+    /// The binary and argv for the sidecar on this machine.
+    ///
+    /// Everything is derived from `Layout`, so the inductor and a worker
+    /// resolve the same tree — `root` is the repo locally and `~/bm-worker`
+    /// remotely.
+    pub fn sidecar_command(&self, port: u16) -> (PathBuf, Vec<String>) {
+        let models = self.models_dir();
+        (
+            self.sidecar_binary(),
+            vec![
+                "--models".into(),
+                models.display().to_string(),
+                // One directory, codec included — see `tools/bake-models.py`.
+                "--codec".into(),
+                models.display().to_string(),
+                "--dict".into(),
+                self.tts_dict().display().to_string(),
+                "--voices".into(),
+                self.tts_voices().display().to_string(),
+                "--port".into(),
+                port.to_string(),
+                "--bind".into(),
+                "127.0.0.1".into(),
+            ],
+        )
+    }
+
     /// Interpreter for local voice work (enroll now, preview offline): the
     /// provision-managed `python/.venv` first, a repo-root `.venv` second.
     /// One order everywhere — enrollment and serving can never aim at two
@@ -334,6 +381,34 @@ mod tests {
         std::fs::create_dir_all(dir.join("prompts")).unwrap();
         std::fs::write(dir.join("prompts/analyze.txt"), "x").unwrap();
         dir
+    }
+
+    #[test]
+    fn the_sidecar_prefers_the_provisioned_copy_then_the_workspace_build() {
+        // Moved with the fallback itself: the local worker runs from the
+        // repo, where no provision ever installs `bm-tts` — but `cargo
+        // build` keeps the debug binary fresh, so a dead sidecar must fall
+        // back to it, not fail the render. The provisioned copy still wins
+        // where it exists, so remote behaviour is unchanged.
+        let root = std::env::temp_dir().join(format!("bm-sidecar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let layout = Layout::new(&root);
+        assert_eq!(
+            layout.sidecar_binary(),
+            root.join("bm-tts"),
+            "absent everywhere reports the canonical path"
+        );
+        let debug = root.join("rust/target/debug/bm-tts");
+        std::fs::create_dir_all(debug.parent().unwrap()).unwrap();
+        std::fs::write(&debug, b"fake").unwrap();
+        assert_eq!(layout.sidecar_binary(), debug);
+        let provisioned = root.join("bm-tts");
+        std::fs::write(&provisioned, b"fake").unwrap();
+        assert_eq!(layout.sidecar_binary(), provisioned);
+        let (bin, args) = layout.sidecar_command(8818);
+        assert_eq!(bin, provisioned);
+        assert!(args.windows(2).any(|w| w[0] == "--port" && w[1] == "8818"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
