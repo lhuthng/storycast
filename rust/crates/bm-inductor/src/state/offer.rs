@@ -358,6 +358,9 @@ impl Inner {
                     c.duration_secs,
                     &c.worker_id,
                 );
+                // Same completion feeds the Stats pane: per-worker counts
+                // plus the durations the TUI-side ETA averages.
+                self.stats.record(&c.worker_id, stage, c.duration_secs);
                 self.push_event(
                     "ok",
                     format!(

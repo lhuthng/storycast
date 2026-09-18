@@ -240,6 +240,12 @@ first run. In the task ledger (`K`): `j/k` or arrows to move, type to filter
 (e.g. `shelved`, `digest`, `42`), `u` retry / `F` force re-run the highlighted
 row, `Enter` for the full error, `Esc`/`q` to close.
 
+The dashboard's Workers pane shows each live box with cpu % and ram % +
+used GiB from its heartbeats. Beside Tasks sits Stats: rows are workers,
+columns the four stages, each number completed tasks of that stage on that
+worker — plus a TUI-measured eta per worker (median task duration for the
+stage, scaled by the unworked fraction; a dash until anything completes).
+
 #### Hearing a voice before you commit to it
 
 In the voice picker (`:swap` step 2 of 2) and the cast overview (`:cast`) — the two screens that

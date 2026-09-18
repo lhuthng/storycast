@@ -68,28 +68,46 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compac
                 stage_line,
                 cell(ch),
                 cell(format!("{} {:>3}%", bar(b.progress, 10), pct)),
-                cell(if b.activity.is_empty() {
-                    "—".into()
-                } else {
-                    b.activity.clone()
-                }),
-                cell(
-                    b.eta_secs
-                        .map(bm_core::eta::human)
-                        .unwrap_or_else(|| "—".into()),
-                ),
             ]);
+            // Box load from the heartbeat (`5.2%`, `38% 6.1G`) — a dash
+            // while the agent never measured (older agents, first beat).
+            // Full tier only: the compact tier has no room to spare.
+            // The worker-reported ETA column this replaces always showed
+            // a dash (agents never send it); ETA now lives in Stats,
+            // measured TUI-side from completion history.
+            if !compact {
+                cells.extend([
+                    cell(
+                        b.cpu_pct
+                            .map(|c| format!("{c:.1}%"))
+                            .unwrap_or_else(|| "—".into()),
+                    ),
+                    cell(match (b.mem_pct, b.mem_gb) {
+                        (Some(p), Some(g)) => format!("{p:.0}% {g:.1}G"),
+                        _ => "—".into(),
+                    }),
+                ]);
+            }
+            cells.push(cell(if b.activity.is_empty() {
+                "—".into()
+            } else {
+                b.activity.clone()
+            }));
             Row::new(cells)
         })
         .collect();
 
     let mut header = vec!["worker"];
-    let mut widths: Vec<Constraint> = vec![Constraint::Length(14)];
+    let mut widths: Vec<Constraint> = vec![Constraint::Length(11)];
     if !compact {
         header.push("machine");
         widths.push(Constraint::Length(14));
     }
-    header.extend(["stage", "ch", "progress", "activity", "eta"]);
+    header.extend(["stage", "ch", "progress"]);
+    if !compact {
+        header.extend(["cpu", "ram"]);
+    }
+    header.push("activity");
     if compact {
         // From the constant the compile-time guard checks; the activity column
         // is the one that absorbs any slack on a wider terminal.
@@ -105,8 +123,9 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compac
             Constraint::Length(8),
             Constraint::Length(5),
             Constraint::Length(17),
+            Constraint::Length(6),
+            Constraint::Length(10),
             Constraint::Min(20),
-            Constraint::Length(8),
         ]);
     }
 

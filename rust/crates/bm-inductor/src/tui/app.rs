@@ -4,7 +4,7 @@ use crate::tui::{
     audio::Player,
     input::dispatch,
     jobs::{fetch_state, BackgroundJob, DoneKind, Ev, Job},
-    model::{cast_rows, registry_machines, CastRow},
+    model::{cast_rows, parse_stats, registry_machines, CastRow, WorkerStats},
     screen::Screen,
     sound::SoundData,
     style::{level_from_str, style_bold_of, style_of, Conn, Level, LogLine},
@@ -26,6 +26,9 @@ pub(crate) struct App {
     pub(crate) beats: Vec<Heartbeat>,
     pub(crate) tasks: Vec<Task>,
     pub(crate) counts: serde_json::Value,
+    /// Stats pane data: per-worker per-stage completions plus per-stage
+    /// task averages, for the matrix and the TUI-side ETA.
+    pub(crate) stats: WorkerStats,
     pub(crate) settings: Option<serde_json::Value>,
     pub(crate) events: VecDeque<LogLine>,
     pub(crate) selected: usize,
@@ -102,6 +105,7 @@ impl App {
             beats: Vec::new(),
             tasks: Vec::new(),
             counts: serde_json::Value::Null,
+            stats: WorkerStats::default(),
             settings: None,
             events: VecDeque::with_capacity(EVENT_CAP),
             selected: 0,
@@ -382,6 +386,7 @@ impl App {
         self.beats = beats;
         self.tasks = tasks;
         self.counts = v.get("counts").cloned().unwrap_or_default();
+        self.stats = parse_stats(v.get("stats"));
         self.settings = v.get("settings").cloned();
         self.ingest_events(v.get("events"));
         if self.selected >= self.machines.len() {

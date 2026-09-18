@@ -1555,6 +1555,9 @@ fn beat(id: &str, addr: &str, age_secs: u64, alias: &str) -> Heartbeat {
         ts: bm_proto::now_secs().saturating_sub(age_secs),
         hostname: format!("host-{id}"),
         alias: alias.into(),
+        cpu_pct: None,
+        mem_pct: None,
+        mem_gb: None,
     }
 }
 
@@ -1573,8 +1576,8 @@ fn workers_pane_hides_stale_beats_and_shows_reported_aliases() {
     let text = render_text(&mut app, 140, 44);
     assert_eq!(
         text.matches("quokka").count(),
-        1,
-        "live once, stale never:\n{text}"
+        2,
+        "live once per pane (Workers, Stats), stale never:\n{text}"
     );
     let (fallback, _) = worker_alias("localhost-9");
     assert!(
@@ -1636,6 +1639,63 @@ fn both_panes_call_a_known_box_by_its_handle() {
         !text.contains("host-thang-marmot"),
         "the OS hostname steps aside where a handle exists:\n{text}"
     );
+}
+
+fn stats_app() -> App {
+    // One worker mid-render (half done), one idle; history says a render
+    // task takes 100s, a digest 40s.
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.machines = vec![named_machine("192.168.2.2", "hawk")];
+    let mut busy = beat("thang-marmot", "192.168.2.2", 2, "marmot");
+    busy.stage = Some(Stage::Render);
+    busy.chapter = Some(7);
+    busy.progress = 0.5;
+    busy.cpu_pct = Some(25.0);
+    busy.mem_pct = Some(40.0);
+    busy.mem_gb = Some(4.5);
+    let idle = beat("localhost-caracal", "127.0.0.1", 2, "caracal");
+    app.beats = vec![busy, idle];
+    app.stats = super::model::parse_stats(Some(&serde_json::json!({
+        "counts": {"thang-marmot": {"render": 3, "digest": 1}},
+        "avg_task_secs": {"render": 100.0, "digest": 40.0},
+    })));
+    app
+}
+
+#[test]
+fn stats_pane_counts_completions_and_estimates_the_remainder() {
+    let mut app = stats_app();
+    let text = render_text(&mut app, 140, 44);
+    assert!(text.contains("Stats"), "the panel exists:\n{text}");
+    assert!(text.contains("marmot"), "rows are workers:\n{text}");
+    // Half of a 100s render remains: the TUI-side ETA, not a report.
+    assert!(text.contains("50s"), "remainder from history × progress:\n{text}");
+    // Idle with no active stage estimates nothing; unknown load dashes.
+    assert!(text.contains("caracal"), "idle workers list too:\n{text}");
+    assert!(text.contains("—"), "dashes where nothing is known:\n{text}");
+    // The 100-column floor still fits the split row, not just wide terms.
+    let narrow = render_text(&mut app, 100, 32);
+    assert!(narrow.contains("Stats"), "panel survives the floor:\n{narrow}");
+    assert!(narrow.contains("50s"), "eta survives the floor:\n{narrow}");
+}
+
+#[test]
+fn workers_pane_shows_load_where_measured() {
+    let mut app = stats_app();
+    let text = render_text(&mut app, 140, 44);
+    assert!(text.contains("25.0%"), "cpu pct:\n{text}");
+    assert!(text.contains("40% 4.5G"), "mem pct + gib:\n{text}");
+}
+
+#[test]
+fn task_eta_scales_history_by_the_unworked_fraction() {
+    use super::model::task_eta;
+    assert_eq!(task_eta(Some(100.0), 0.5), Some(50));
+    assert_eq!(task_eta(Some(100.0), 0.0), Some(100));
+    assert_eq!(task_eta(Some(100.0), 1.0), Some(0));
+    assert_eq!(task_eta(None, 0.5), None, "no history, no number");
+    assert_eq!(task_eta(Some(0.0), 0.5), None, "no zero-duration average");
+    assert_eq!(task_eta(Some(100.0), 9.9), Some(0), "clamped progress");
 }
 
 #[test]

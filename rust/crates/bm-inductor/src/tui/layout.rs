@@ -82,8 +82,8 @@ pub(crate) const KEYS_COMPACT: [&str; 2] = [
 /// `addr, workers, role, state, seen` — the `tts` column is dropped.
 pub(crate) const COMPACT_MACHINE_COLS: [u16; 5] = [15, 7, 8, 13, 8];
 
-/// `worker, stage, ch, progress, activity, eta` — `machine` is dropped.
-pub(crate) const COMPACT_WORKER_COLS: [u16; 6] = [14, 8, 5, 17, 16, 8];
+/// `worker, stage, ch, progress, activity` — `machine` is dropped.
+pub(crate) const COMPACT_WORKER_COLS: [u16; 5] = [14, 8, 5, 17, 16];
 
 /// Column widths for the cast table, in two sets.
 ///

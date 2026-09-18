@@ -6,6 +6,7 @@ use ratatui::{
     text::{Line, Span},
 };
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 /// Fold Vietnamese diacritics to ASCII so a filter of `thai son` matches
 /// `Thái Sơn`. Without it, filtering a Vietnamese cast means typing exact
@@ -384,4 +385,56 @@ pub(crate) fn task_rollup(counts: &serde_json::Value, colour: bool) -> Line<'sta
     }
     spans.push(Span::styled("   · resize for per-stage detail", dim));
     Line::from(spans)
+}
+
+/// Stats pane data: completed-task counts per worker per stage, plus the
+/// median task seconds per stage the TUI-side ETA averages. Parsed from the
+/// inductor's `stats` key; a missing or partial payload parses to empty —
+/// a fresh backend has no history yet, and the pane shows zeroes and
+/// dashes, not errors.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WorkerStats {
+    pub counts: HashMap<String, HashMap<String, u64>>,
+    pub avg_task_secs: HashMap<String, f64>,
+}
+
+pub(crate) fn parse_stats(v: Option<&serde_json::Value>) -> WorkerStats {
+    let mut out = WorkerStats::default();
+    let Some(obj) = v.and_then(|v| v.as_object()) else {
+        return out;
+    };
+    if let Some(counts) = obj.get("counts").and_then(|c| c.as_object()) {
+        for (worker, stages) in counts {
+            if let Some(stages) = stages.as_object() {
+                for (stage, n) in stages {
+                    if let Some(n) = n.as_u64() {
+                        out.counts
+                            .entry(worker.clone())
+                            .or_default()
+                            .insert(stage.clone(), n);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(avg) = obj.get("avg_task_secs").and_then(|a| a.as_object()) {
+        for (stage, secs) in avg {
+            if let Some(secs) = secs.as_f64() {
+                out.avg_task_secs.insert(stage.clone(), secs);
+            }
+        }
+    }
+    out
+}
+
+/// Seconds left on one task, measured TUI-side: the stage's median task
+/// duration scaled by the unworked fraction. `None` means print a dash —
+/// no history for the stage yet, or nothing running on the worker.
+pub(crate) fn task_eta(avg_task_secs: Option<f64>, progress: f32) -> Option<u64> {
+    let avg = avg_task_secs.filter(|a| *a > 0.0)?;
+    let left = 1.0 - progress.clamp(0.0, 1.0) as f64;
+    if left <= 0.0 {
+        return Some(0);
+    }
+    Some((avg * left).round() as u64)
 }

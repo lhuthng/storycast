@@ -21,6 +21,7 @@ impl Inner {
             next_event_id: 0,
             shutdown_requested: false,
             shutdown_when_idle: false,
+            stats: super::StatsAgg::default(),
         }
     }
 
