@@ -47,6 +47,10 @@ pub struct Inner {
     pub layout: Layout,
     pub settings: Settings,
     pub tasks: HashMap<String, Task>,
+    /// The profile the ledger's tasks were created under, from the last
+    /// save. `None` means unstamped (empty or pre-profile ledger) — the next
+    /// reconcile adopts the workspace profile.
+    pub ledger_profile: Option<bm_core::profile::Pointer>,
     pub machines: HashMap<String, Machine>,
     pub workers: HashMap<String, String>,
     /// Advertised capabilities per worker, refreshed at every registration.
@@ -207,9 +211,34 @@ mod tests {
         assert_eq!(disk, disk2, "reload must not rewrite");
     }
 
+    fn ptr(name: &str, hash: &str) -> bm_core::profile::Pointer {
+        bm_core::profile::Pointer {
+            name: name.into(),
+            hash: hash.into(),
+        }
+    }
+
     #[test]
-    fn save_writes_runtime_only() {
+    fn the_serve_gate_refuses_a_foreign_ledger_and_reconcile_stamps() {
         let (_d, mut inner) = fixture();
+        // Empty ledger passes and adopts the workspace profile at reconcile.
+        inner.settings.profile = ptr("xianxia", "h1");
+        inner.check_profile().unwrap();
+        inner.reconcile(1, 0);
+        assert_eq!(inner.ledger_profile, Some(ptr("xianxia", "h1")));
+        // Tasks bound to xianxia refuse to run under noir.
+        inner.tasks.insert("crawl:1".into(), Task::new(1, Stage::Crawl));
+        inner.settings.profile = ptr("noir", "h2");
+        let err = inner.check_profile().unwrap_err();
+        assert!(err.to_string().contains("xianxia"), "{err}");
+        assert!(err.to_string().contains("noir"), "{err}");
+        // ...and pass again under the matching profile.
+        inner.settings.profile = ptr("xianxia", "h1");
+        inner.check_profile().unwrap();
+    }
+
+    #[test]
+    fn save_writes_runtime_only() {        let (_d, mut inner) = fixture();
         let layout = inner.layout.clone();
         let (bxo, rt) = bm_core::provision::split_machine(
             &bm_proto::Machine::new("10.0.0.9", "thang", 22, Some("/k".into()), "worker"),

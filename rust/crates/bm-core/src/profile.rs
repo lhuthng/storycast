@@ -37,8 +37,9 @@ fn default_version() -> String {
     "1".into()
 }
 
-/// The load pointer: which profile the live tree claims to be.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The load pointer: which profile the live tree claims to be. Empty
+/// (`Default`) means unset — a workspace that never named one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pointer {
     pub name: String,
     pub hash: String,

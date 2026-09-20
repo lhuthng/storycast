@@ -60,6 +60,11 @@ pub struct Settings {
     /// the same trick `analyze_models` below relies on.
     #[serde(default)]
     pub ssh: SshDefaults,
+    /// The profile this workspace runs under, stamped from the load pointer
+    /// when the workspace is created. A ledger holding another profile's
+    /// tasks refuses to run here rather than mixing two genres' output.
+    #[serde(default)]
+    pub profile: crate::profile::Pointer,
 }
 
 /// App-wide ssh defaults. The per-machine value in `machines.json` wins;
@@ -110,6 +115,7 @@ impl Default for Settings {
             control_port: 8901,
             advertise: "127.0.0.1".into(),
             ssh: SshDefaults::default(),
+            profile: crate::profile::Pointer::default(),
         }
     }
 }

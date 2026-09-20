@@ -9,32 +9,75 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct Layout {
     pub root: PathBuf,
+    /// The active workspace: `workspaces/<name>/`, holding this book's
+    /// settings, ledger, data and output. Equals `root` when no workspace is
+    /// selected (the implicit default) — `new()` always says that, and every
+    /// test uses it, so production entry points resolve through
+    /// [`Layout::resolve`].
+    pub work: PathBuf,
 }
 
 impl Layout {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Layout { root: root.into() }
+        let root = root.into();
+        Layout {
+            work: root.clone(),
+            root,
+        }
+    }
+
+    /// Resolve the active workspace: `.bm/active-workspace` names a directory
+    /// under `workspaces/`. No pointer means this root *is* the workspace
+    /// (the implicit default) — a fresh clone just works, and state appears
+    /// under it on demand. Only a stale pointer (naming a missing directory)
+    /// is an error: silently running at the root would scatter one book's
+    /// state where another was expected.
+    pub fn resolve(root: impl Into<PathBuf>) -> Result<Self> {
+        let root = root.into();
+        let pointer = Self::active_workspace_file(&root);
+        if !pointer.is_file() {
+            return Ok(Layout::new(root));
+        }
+        let name = std::fs::read_to_string(&pointer)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let work = root.join("workspaces").join(&name);
+        if name.is_empty() || !work.is_dir() {
+            anyhow::bail!(
+                "workspace pointer {:?} names {:?}, which is not a directory — recreate it (`workspace new {}`) or point elsewhere (`workspace use <name>`)",
+                pointer.display(),
+                work.display(),
+                name,
+            );
+        }
+        Ok(Layout { root, work })
+    }
+
+    /// The workspace pointer file. One line: the workspace name.
+    pub fn active_workspace_file(root: &Path) -> PathBuf {
+        root.join(".bm").join("active-workspace")
     }
 
     /// Walk up from the current directory looking for the repo marker
-    /// (`prompts/analyze.txt`). Lets a worker started from anywhere find home.
+    /// (`rust/Cargo.toml` — tracked, always present, unlike the ignored
+    /// live profile tree). Lets a worker started from anywhere find home.
     pub fn discover() -> Result<Self> {
         let cwd = std::env::current_dir().context("reading current dir")?;
         let mut cur: Option<&Path> = Some(cwd.as_path());
         while let Some(dir) = cur {
-            if dir.join("prompts/analyze.txt").is_file() {
-                return Ok(Layout::new(dir));
+            if dir.join("rust/Cargo.toml").is_file() {
+                return Layout::resolve(dir);
             }
             cur = dir.parent();
         }
         anyhow::bail!(
-            "no repo root found above {} (expected prompts/analyze.txt)",
+            "no repo root found above {} (expected rust/Cargo.toml)",
             cwd.display()
         )
     }
 
     pub fn data(&self) -> PathBuf {
-        self.root.join("data")
+        self.work.join("data")
     }
 
     pub fn chapters(&self) -> PathBuf {
@@ -77,13 +120,10 @@ impl Layout {
     }
 
     pub fn output(&self) -> PathBuf {
-        self.root.join("output")
+        self.work.join("output")
     }
 
     /// The digest's first pass: read the chapter, report the cast and the story.
-    ///
-    /// Also the repo-root marker (`find_root` looks for this exact file), so it
-    /// keeps its name even though it is now one of two prompts.
     pub fn prompt(&self) -> PathBuf {
         self.root.join("prompts/analyze.txt")
     }
@@ -236,12 +276,39 @@ impl Layout {
         self.root.join(".bm")
     }
 
+    /// The workspace's own state: settings, ledger, stats. Per book, so two
+    /// workspaces never share a ledger; machine-global files (machines,
+    /// roster, profile pointer) stay in [`Layout::bm_state`].
+    pub fn work_state(&self) -> PathBuf {
+        self.work.join(".bm")
+    }
+
     pub fn stats(&self) -> PathBuf {
-        self.bm_state().join("stats.jsonl")
+        self.state_file("stats.jsonl")
     }
 
     pub fn settings(&self) -> PathBuf {
-        self.bm_state().join("settings.json")
+        self.state_file("settings.json")
+    }
+
+    /// The task ledger: which chapter/stage is in which state. Per workspace,
+    /// bound to its profile (see `profile` in settings) — running a workspace
+    /// under another profile is refused rather than mixed.
+    pub fn ledger(&self) -> PathBuf {
+        self.state_file("ledger.json")
+    }
+
+    /// Workspace state file: under the workspace, except in legacy mode
+    /// (`work == root`), where state still lives in `.bm/` from before
+    /// workspaces existed. Migration shim — remove once no checkout predates
+    /// it; every legacy root migrates by moving `.bm/{settings,ledger}.json`
+    /// and `stats.jsonl` into `workspaces/<name>/`.
+    fn state_file(&self, name: &str) -> PathBuf {
+        if self.work == self.root {
+            self.root.join(".bm").join(name)
+        } else {
+            self.work.join(name)
+        }
     }
 
     /// The committed voice catalogue: every preset, its metadata, the accent
@@ -288,12 +355,17 @@ impl Layout {
 
     /// Transient working space for the merge stage.
     ///
-    /// Deliberately inside `.bm/` rather than the system temp dir. `publish`
-    /// moves the finished mp3 into `output()` with `fs::rename`, which fails
-    /// across filesystems (`EXDEV`); scratch must share a device with the
-    /// output, and `.bm/` always does because it hangs off the same root.
+    /// Deliberately next to the workspace's output rather than in the system
+    /// temp dir. `publish` moves the finished mp3 into `output()` with
+    /// `fs::rename`, which fails across filesystems (`EXDEV`); scratch must
+    /// share a device with the output, and the workspace always does because
+    /// it hangs off the same directory. Legacy mode keeps the old `.bm/tmp`.
     pub fn scratch(&self) -> PathBuf {
-        self.bm_state().join("tmp")
+        if self.work == self.root {
+            self.root.join(".bm").join("tmp")
+        } else {
+            self.work.join("tmp")
+        }
     }
 
     /// One chapter's scratch directory. Everything the merge writes — the
@@ -378,8 +450,9 @@ mod tests {
     fn fixture_root(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("bm-layout-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("prompts")).unwrap();
-        std::fs::write(dir.join("prompts/analyze.txt"), "x").unwrap();
+        // The repo marker discover() walks up to (tracked, always present).
+        std::fs::create_dir_all(dir.join("rust")).unwrap();
+        std::fs::write(dir.join("rust/Cargo.toml"), "[workspace]").unwrap();
         dir
     }
 
@@ -479,13 +552,45 @@ mod tests {
     #[test]
     fn scratch_shares_the_output_root_so_publish_can_rename() {
         let l = Layout::new("/repo");
-        assert!(l.scratch().ends_with(".bm/tmp"));
-        assert!(l.scratch_ch(7).ends_with(".bm/tmp/ch07"));
+        assert!(l.scratch().ends_with("tmp"));
+        assert!(l.scratch_ch(7).ends_with("tmp/ch07"));
         assert_eq!(l.scratch_ch(7).parent().unwrap(), l.scratch());
         // `publish` renames scratch -> output. Both must hang off the same
-        // root or the rename fails with EXDEV.
-        assert!(l.scratch().starts_with(&l.root));
-        assert!(l.output().starts_with(&l.root));
+        // workspace or the rename fails with EXDEV.
+        assert!(l.scratch().starts_with(&l.work));
+        assert!(l.output().starts_with(&l.work));
+    }
+
+    #[test]
+    fn resolve_pins_the_active_workspace_and_new_stays_legacy() {
+        // No pointer: this root is its own workspace, exactly `new()` —
+        // a fresh clone just works.
+        let l = Layout::resolve("/repo").unwrap();
+        assert_eq!(l.work, Path::new("/repo"));
+        // ...through the old `.bm/` state paths.
+        assert_eq!(
+            l.settings(),
+            Path::new("/repo/.bm/settings.json"),
+            "default workspace keeps its paths"
+        );
+        assert!(l.scratch().ends_with(".bm/tmp"));
+        // A pointer names a directory under workspaces/.
+        let dir = std::env::temp_dir().join(format!("bm-resolve{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".bm")).unwrap();
+        std::fs::create_dir_all(dir.join("workspaces/beyond-myriads")).unwrap();
+        std::fs::write(dir.join(".bm/active-workspace"), "beyond-myriads\n").unwrap();
+        let l = Layout::resolve(&dir).unwrap();
+        assert_eq!(l.work, dir.join("workspaces/beyond-myriads"));
+        assert_eq!(l.settings(), dir.join("workspaces/beyond-myriads/settings.json"));
+        assert_eq!(l.ledger(), dir.join("workspaces/beyond-myriads/ledger.json"));
+        // Machine-global files stay at the root.
+        assert_eq!(l.machines(), dir.join(".bm/machines.json"));
+        // A pointer at a missing directory is stale, not a fallback.
+        std::fs::write(dir.join(".bm/active-workspace"), "gone\n").unwrap();
+        let err = Layout::resolve(&dir).unwrap_err();
+        assert!(err.to_string().contains("gone"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

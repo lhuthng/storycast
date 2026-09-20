@@ -153,6 +153,32 @@ enum Cmd {
         #[arg(long)]
         key: Option<String>,
     },
+    /// Workspaces: one directory per book under `workspaces/`, holding its
+    /// settings, ledger, data and output. Switching only moves the
+    /// `.bm/active-workspace` pointer — nothing is wiped, nothing is mixed.
+    /// Local only — touches no worker.
+    Workspace {
+        #[command(subcommand)]
+        cmd: WorkspaceCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkspaceCmd {
+    /// Create `workspaces/<name>/` with default settings stamped to the
+    /// loaded profile, and switch to it.
+    New {
+        /// Workspace name, e.g. `beyond-myriads`.
+        name: String,
+    },
+    /// Switch the pointer to an existing workspace. Data follows the
+    /// directory, so selecting never wipes.
+    Use {
+        /// Workspace name.
+        name: String,
+    },
+    /// List workspaces, marking the active one.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -278,6 +304,7 @@ async fn cmd_serve(
 ) -> anyhow::Result<()> {
     let mut inner = state::Inner::new(layout, settings);
     inner.load_ledger();
+    inner.check_profile()?;
     inner.reconcile(start, count);
     let shared = std::sync::Arc::new(tokio::sync::Mutex::new(inner));
     // Lease reaper: expired leases return to the pool, no strike.
@@ -402,6 +429,75 @@ fn tts_candidates(os: &str, arch: &str, layout: &Layout) -> Vec<std::path::PathB
     cands
 }
 
+/// `workspace` — one directory per book. Creating switches to it; selecting
+/// only moves the pointer, so data is never wiped and ledgers never mix
+/// (the serve gate still refuses a ledger bound to another profile).
+fn cmd_workspace(root: &std::path::Path, cmd: WorkspaceCmd) -> anyhow::Result<()> {
+    let dir = |name: &str| root.join("workspaces").join(name);
+    let valid = |name: &str| {
+        !name.is_empty()
+            && name != "."
+            && name != ".."
+            && !name.contains('/')
+            && !name.contains('\0')
+    };
+    match cmd {
+        WorkspaceCmd::New { name } => {
+            if !valid(&name) {
+                anyhow::bail!("bad workspace name {name:?}");
+            }
+            if dir(&name).exists() {
+                anyhow::bail!("workspace {name:?} already exists — `workspace use {name}` to select it");
+            }
+            for d in ["data/chapters", "data/audio", "output"] {
+                std::fs::create_dir_all(dir(&name).join(d))?;
+            }
+            // A workspace is born bound to the loaded profile, so its first
+            // run cannot mix genres. No profile loaded yet is not an error —
+            // the serve gate names it when it matters.
+            let mut settings = Settings::default();
+            match bm_core::profile::read_pointer(root) {
+                Ok(p) => settings.profile = p,
+                Err(_) => println!("note: no profile loaded — `profile.sh fetch/unpack` first"),
+            }
+            settings.save(&dir(&name).join("settings.json"))?;
+            std::fs::create_dir_all(root.join(".bm"))?;
+            std::fs::write(Layout::active_workspace_file(root), format!("{name}\n"))?;
+            println!("workspace {name} created and selected");
+            Ok(())
+        }
+        WorkspaceCmd::Use { name } => {
+            if !dir(&name).is_dir() {
+                anyhow::bail!("no workspace {name:?} under workspaces/");
+            }
+            std::fs::create_dir_all(root.join(".bm"))?;
+            std::fs::write(Layout::active_workspace_file(root), format!("{name}\n"))?;
+            println!("workspace {name} selected");
+            Ok(())
+        }
+        WorkspaceCmd::List => {
+            let active = std::fs::read_to_string(Layout::active_workspace_file(root))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let mut names: Vec<String> = std::fs::read_dir(root.join("workspaces"))
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            if names.is_empty() {
+                println!("no workspaces (this root is the implicit default)");
+            }
+            for n in names {
+                println!("{} {n}", if n == active { "*" } else { " " });
+            }
+            Ok(())
+        }
+    }
+}
 /// Rewrite interjections into engine tags via the live inductor API.
 async fn cmd_retag(api: &str, dry_run: bool) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
@@ -558,15 +654,19 @@ fn cmd_roster_migrate_cast(layout: &Layout, dry_run: bool) -> anyhow::Result<()>
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let layout = match cli.root {
-        Some(r) => Layout::new(r),
+        Some(r) => Layout::resolve(r)?,
         None => Layout::discover()?,
     };
     bm_core::config::load_dotenv(&layout.root.join(".env"));
     let settings = Settings::load(&layout.settings());
-    // `roster` is local JSON work: requiring ssh/rsync/ffmpeg to rewrite a cast
-    // file would make it unusable on exactly the machine that needs it. Same for
-    // `digest`, which is one HTTP call to an analyzer and touches no worker.
-    if !matches!(&cli.cmd, Cmd::Roster { .. } | Cmd::Digest { .. }) {
+    // `roster` and `workspace` are local file work: requiring ssh/rsync/ffmpeg
+    // to rewrite JSON would make them unusable on exactly the machine that
+    // needs them. Same for `digest`, which is one HTTP call to an analyzer
+    // and touches no worker.
+    if !matches!(
+        &cli.cmd,
+        Cmd::Roster { .. } | Cmd::Digest { .. } | Cmd::Workspace { .. }
+    ) {
         check_bins()?;
     }
     match cli.cmd {
@@ -682,6 +782,7 @@ async fn main() -> anyhow::Result<()> {
                 cmd_roster_add_sample(&layout, &path, tags, name)
             }
         },
+        Cmd::Workspace { cmd } => cmd_workspace(&layout.root, cmd),
     }
 }
 
@@ -760,6 +861,39 @@ async fn cmd_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_new_use_list_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("bm-workspace{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Create switches to it, stamping the loaded profile (none here).
+        cmd_workspace(&dir, WorkspaceCmd::New { name: "demo".into() }).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(Layout::active_workspace_file(&dir)).unwrap(),
+            "demo\n"
+        );
+        assert!(dir.join("workspaces/demo/settings.json").is_file());
+        // Creating twice is an error, not a wipe.
+        assert!(cmd_workspace(&dir, WorkspaceCmd::New { name: "demo".into() }).is_err());
+        // Selecting a missing workspace is an error, not a creation.
+        assert!(cmd_workspace(&dir, WorkspaceCmd::Use { name: "gone".into() }).is_err());
+        cmd_workspace(&dir, WorkspaceCmd::Use { name: "demo".into() }).unwrap();
+        cmd_workspace(&dir, WorkspaceCmd::List).unwrap();
+        // A loaded profile stamps new workspaces at creation.
+        std::fs::create_dir_all(dir.join(".bm")).unwrap();
+        std::fs::write(
+            dir.join(".bm/profile"),
+            r#"{"name":"xianxia","hash":"h1"}"#,
+        )
+        .unwrap();
+        cmd_workspace(&dir, WorkspaceCmd::New { name: "second".into() }).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("workspaces/second/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["profile"]["name"], "xianxia");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn provisioning_localhost_syncs_nothing_and_reports_ready() {
