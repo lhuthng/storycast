@@ -528,8 +528,12 @@ pub(crate) async fn job_provision(
                     }
                 } else {
                     let port = crate::backend::api_port(&api);
+                    // The operator's advertised address, read once here: the
+                    // launcher cannot reach `settings` from inside its own
+                    // blocking task, and a box off the LAN needs it.
+                    let advertise = advertised_host(&layout);
                     match tokio::task::spawn_blocking(move || {
-                        crate::backend::start_remote_workers(&[again], port)
+                        crate::backend::start_remote_workers(&[again], port, advertise.as_deref())
                     })
                     .await
                     {
@@ -766,7 +770,8 @@ pub(crate) async fn job_start_backend(
         // is deaf to exactly these boxes: restart it LAN-wide first.
         // Workers ride through — they re-register on their own and
         // their in-flight reports still count afterwards.
-        let dark = crate::backend::lan_blackout(&targets, port).await;
+        let dark =
+            crate::backend::lan_blackout(&targets, port, advertised_host(&layout).as_deref()).await;
         if !dark.is_empty() {
             send(
                 &tx,
@@ -920,8 +925,9 @@ pub(crate) async fn job_start_backend(
         } else {
             let mut one = m.clone();
             one.ssh_key = resolve(m);
+            let advertise = advertised_host(&layout);
             match tokio::task::spawn_blocking(move || {
-                crate::backend::start_remote_workers(&[one], port)
+                crate::backend::start_remote_workers(&[one], port, advertise.as_deref())
             })
             .await
             {
@@ -1533,6 +1539,19 @@ async fn cluster_busy(api: &str) -> Option<String> {
         return Some("local workers still running — :X first, then try again".into());
     }
     None
+}
+
+/// The operator's advertised address for this cluster, if they set one.
+///
+/// From the *workspace's* settings, and read at the point of use because the
+/// launcher runs in a blocking task with no access to them. Unset is the normal
+/// case: the launcher then asks the routing table which address reaches each
+/// box, which is right on a LAN. Set it when the workers are somewhere the
+/// routing table cannot describe — anything behind NAT, including a cloud box.
+fn advertised_host(layout: &bm_core::Layout) -> Option<String> {
+    bm_core::config::Settings::load(&layout.settings())
+        .advertised_host()
+        .map(str::to_string)
 }
 
 /// List, switch or create a workspace.

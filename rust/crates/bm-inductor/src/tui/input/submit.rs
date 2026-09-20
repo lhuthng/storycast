@@ -21,8 +21,8 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
         TextKind::RunConfig => Err("run config is saved from the run screen".into()),
         // Same for the ssh defaults: text.rs saves them on Enter, so
         // reaching dispatch means a bug, and the prompt staying open says so.
-        TextKind::SshKey | TextKind::SshUser | TextKind::SshPort => {
-            Err("ssh defaults save from the prompt, not submit".into())
+        TextKind::SshKey | TextKind::SshUser | TextKind::SshPort | TextKind::Advertise => {
+            Err("app-wide settings save from the prompt, not submit".into())
         }
         TextKind::Mix => Err("mix saves from the prompt, not submit".into()),
         // The sound-design prompts write a registry and launch nothing, so

@@ -5,7 +5,7 @@ use super::audition::AuditionLine;
 use super::draw::draw;
 use super::input::command::{command_key, do_command, Command};
 use super::input::runconfig::{
-    parse_mix_config, parse_run_config, run_preview, save_run_config, save_ssh_setting,
+    parse_mix_config, parse_run_config, run_preview, save_app_setting, save_run_config,
 };
 use super::input::submit::submit_text;
 use super::input::{handle_key, op_key, urlencode};
@@ -3351,27 +3351,27 @@ fn ssh_default_commands_save_validate_and_clear() {
 
     let key = dir.join("id_def");
     std::fs::write(&key, "k").unwrap();
-    let msg = save_ssh_setting(&app, TextKind::SshKey, key.to_str().unwrap()).unwrap();
+    let msg = save_app_setting(&app, TextKind::SshKey, key.to_str().unwrap()).unwrap();
     assert!(msg.contains("saved"), "{msg}");
     assert_eq!(load().ssh.key.as_deref(), Some(key.to_str().unwrap()));
     // Clearing is a real answer: ssh decides per machine afterwards.
-    save_ssh_setting(&app, TextKind::SshKey, "  ").unwrap();
+    save_app_setting(&app, TextKind::SshKey, "  ").unwrap();
     assert_eq!(load().ssh.key, None);
     // A missing file keeps the prompt open, it never saves garbage.
-    let err = save_ssh_setting(&app, TextKind::SshKey, "/nonexistent/k").unwrap_err();
+    let err = save_app_setting(&app, TextKind::SshKey, "/nonexistent/k").unwrap_err();
     assert!(err.contains("/nonexistent/k"), "{err}");
     assert_eq!(load().ssh.key, None);
 
-    save_ssh_setting(&app, TextKind::SshUser, "worker").unwrap();
+    save_app_setting(&app, TextKind::SshUser, "worker").unwrap();
     assert_eq!(load().ssh.user, "worker");
-    assert!(save_ssh_setting(&app, TextKind::SshUser, "  ")
+    assert!(save_app_setting(&app, TextKind::SshUser, "  ")
         .unwrap_err()
         .contains("empty"));
 
-    assert!(save_ssh_setting(&app, TextKind::SshPort, "abc")
+    assert!(save_app_setting(&app, TextKind::SshPort, "abc")
         .unwrap_err()
         .contains("not a number"));
-    save_ssh_setting(&app, TextKind::SshPort, "2222").unwrap();
+    save_app_setting(&app, TextKind::SshPort, "2222").unwrap();
     assert_eq!(load().ssh.port, 2222);
 }
 

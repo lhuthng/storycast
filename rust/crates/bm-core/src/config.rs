@@ -52,7 +52,13 @@ pub struct Settings {
     pub model_order: Vec<String>,
     /// Port the inductor's control API listens on.
     pub control_port: u16,
-    /// Where the inductor is reachable from workers.
+    /// Where the inductor is reachable from workers: a hostname or address
+    /// (optionally `host:port`), as seen *from the workers*.
+    ///
+    /// Unset by default, and read through [`Settings::advertised_host`]. Left
+    /// unset the launcher asks the routing table which of this machine's
+    /// addresses reaches each box — right on a LAN, and useless from a cloud
+    /// worker, which is what this field is for.
     pub advertise: String,
     /// App-wide ssh defaults for binding machines: user, port, key path.
     /// `None` key means ssh decides (agent, `~/.ssh/config`, default keys).
@@ -184,6 +190,22 @@ impl Settings {
         }
         s
     }
+
+    /// The address to hand workers, or `None` when the operator has not set one.
+    ///
+    /// `127.0.0.1` is the sentinel for *unset*, not an address to advertise:
+    /// nobody outside this machine can reach an inductor that is only on
+    /// loopback, so treating the default as a real value would silently hand
+    /// every worker an unreachable URL. Unset falls back to the routing-table
+    /// guess, which is correct on a LAN and wrong behind NAT.
+    pub fn advertised_host(&self) -> Option<&str> {
+        let a = self.advertise.trim();
+        if a.is_empty() || matches!(a, "127.0.0.1" | "localhost" | "::1") {
+            None
+        } else {
+            Some(a)
+        }
+    }
 }
 
 /// Minimal `.env` reader: `KEY=value`, `#` comments, optional quotes.
@@ -240,6 +262,25 @@ mod tests {
         let back = Settings::load(&p);
         assert_eq!(back.ssh.key.as_deref(), Some("~/.ssh/k"));
         assert_eq!(back.ssh.user, "thang");
+    }
+
+    #[test]
+    fn an_unset_advertise_is_not_an_address_to_hand_out() {
+        // The default is the sentinel for "unset". Read as a value it would
+        // hand every worker `http://127.0.0.1:8901` — a URL that works on the
+        // inductor and nowhere else, which is the silent failure this field
+        // exists to prevent.
+        let mut s = Settings::default();
+        assert_eq!(s.advertise, "127.0.0.1");
+        assert!(s.advertised_host().is_none());
+        for unset in ["", "  ", "localhost", "::1", "127.0.0.1"] {
+            s.advertise = unset.into();
+            assert!(s.advertised_host().is_none(), "{unset:?} is not an address");
+        }
+        for set in ["box.example.com", "203.0.113.9", "box.example.com:8901"] {
+            s.advertise = set.into();
+            assert_eq!(s.advertised_host(), Some(set));
+        }
     }
 
     #[test]

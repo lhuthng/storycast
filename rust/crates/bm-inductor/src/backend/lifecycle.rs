@@ -1,4 +1,4 @@
-use super::net::{api_is_local, api_port, dial_back_ip, is_local_addr};
+use super::net::{api_is_local, api_port, is_local_addr, worker_inductor_url};
 use super::process::{
     is_alive, log_file, pid_file, read_pid, serve_args, shq, sibling_bin, signal, spawn_one,
 };
@@ -29,10 +29,16 @@ fn remote_worker_launch_script(inductor_url: &str, addr: &str) -> String {
 }
 /// Start a worker on every remote machine (blocking): skip boxes that already
 /// run one, launch the rest detached into `~/bm-worker/agent.log`. Each box
-/// gets the inductor URL on its own subnet (see `dial_back_ip`).
+/// gets the inductor URL on its own subnet, or the operator's advertised
+/// address when there is one — see [`worker_inductor_url`] for why the guess
+/// is not enough off a LAN.
 /// Returns `(all_up, lines)` — a failed launch vetoes the start like a failed
 /// provision does, so `B` never leaves a half-started cluster.
-pub fn start_remote_workers(machines: &[Machine], api_port: u16) -> (bool, Vec<String>) {
+pub fn start_remote_workers(
+    machines: &[Machine],
+    api_port: u16,
+    advertise: Option<&str>,
+) -> (bool, Vec<String>) {
     let mut lines = Vec::new();
     let mut ok = true;
     let mut remotes: Vec<&Machine> = machines
@@ -42,8 +48,8 @@ pub fn start_remote_workers(machines: &[Machine], api_port: u16) -> (bool, Vec<S
     remotes.sort_by(|a, b| a.addr.cmp(&b.addr));
     remotes.dedup_by(|a, b| a.addr == b.addr);
     for m in remotes {
-        let inductor_url = match dial_back_ip(&m.addr) {
-            Ok(ip) => format!("http://{ip}:{api_port}"),
+        let inductor_url = match worker_inductor_url(advertise, &m.addr, api_port) {
+            Ok(url) => url,
             Err(e) => {
                 lines.push(format!("[{}] no dial-back address ({e:#})", m.addr));
                 ok = false;
@@ -400,14 +406,22 @@ pub async fn stop_inductor(layout_root: &Path) -> (bool, Vec<String>) {
 /// Remote addresses whose dial-back URL does not answer: a running inductor
 /// bound to loopback (old `B`, hand start) is invisible to exactly these
 /// boxes. Empty means every remote can see the inductor.
-pub async fn lan_blackout(machines: &[Machine], api_port: u16) -> Vec<String> {
+///
+/// Probes the same URL [`start_remote_workers`] hands out, advertised address
+/// included. Checking a different address than the one the worker was given
+/// would report a blackout the worker does not have — or miss one it does.
+pub async fn lan_blackout(
+    machines: &[Machine],
+    api_port: u16,
+    advertise: Option<&str>,
+) -> Vec<String> {
     let mut ips: Vec<(String, String)> = Vec::new();
     for m in machines {
         if is_local_addr(&m.addr) {
             continue;
         }
-        match dial_back_ip(&m.addr) {
-            Ok(ip) => ips.push((m.addr.clone(), ip)),
+        match worker_inductor_url(advertise, &m.addr, api_port) {
+            Ok(url) => ips.push((m.addr.clone(), url)),
             Err(e) => ips.push((m.addr.clone(), format!("ERR {e:#}"))),
         }
     }
@@ -421,13 +435,13 @@ pub async fn lan_blackout(machines: &[Machine], api_port: u16) -> Vec<String> {
         Err(_) => return ips.into_iter().map(|(a, _)| a).collect(),
     };
     let mut dark = Vec::new();
-    for (addr, ip) in ips {
-        if ip.starts_with("ERR ") {
-            dark.push(format!("{addr} ({ip})"));
+    for (addr, url) in ips {
+        if url.starts_with("ERR ") {
+            dark.push(format!("{addr} ({url})"));
             continue;
         }
         let ok = http
-            .get(format!("http://{ip}:{api_port}/api/state"))
+            .get(format!("{url}/api/state"))
             .send()
             .await
             .map(|r| r.status().is_success())

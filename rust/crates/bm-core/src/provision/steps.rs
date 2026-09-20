@@ -37,6 +37,13 @@ pub struct Probe {
     /// A baked `~/{REMOTE_DIR}/models/` — the Rust sidecar's weights.
     #[serde(default)]
     pub models_present: bool,
+    /// `ffmpeg` on PATH. The merge stage shells out to it, so a box without it
+    /// provisions cleanly and then fails every merge it is offered — a strike
+    /// and a shelved chapter instead of a report. Reported, not gated: merge is
+    /// a small share of the work and refusing the box outright would cost more
+    /// than it saves.
+    #[serde(default)]
+    pub ffmpeg_present: bool,
     /// Enrolled clone-voice names parsed from the voice store (no model load).
     #[serde(default)]
     pub voices: Vec<String>,
@@ -99,7 +106,11 @@ impl Probe {
                 format!("{} voices", self.voices.len())
             },
             if self.tts_up { "up" } else { "down" },
-        )
+        ) + if self.ffmpeg_present {
+            ""
+        } else {
+            " · NO FFMPEG — merges will fail here"
+        }
     }
 }
 
@@ -153,6 +164,11 @@ if [ -f "$HOME/{dir}/models/manifest.json" ]; then
 else
   echo "models=absent"
 fi
+if command -v ffmpeg >/dev/null 2>&1; then
+  echo "ffmpeg=present"
+else
+  echo "ffmpeg=absent"
+fi
 # Whichever layout is here. The Rust bake puts the store beside the weights; the
 # Python one keeps it inside the venv, so a rebuild vaporizes it.
 STORE="$HOME/{dir}/models/voices.json"
@@ -199,6 +215,7 @@ echo "probe=done"
                         "python" => probe.python_present = v == "present",
                         "tts_bin" => probe.tts_bin_present = v == "present",
                         "models" => probe.models_present = v == "present",
+                        "ffmpeg" => probe.ffmpeg_present = v == "present",
                         "voices" => {
                             // Names contain spaces ("Minh Triết") — the probe
                             // joins them with \x1f, never whitespace.
@@ -716,6 +733,15 @@ pub fn provision(
     // Re-probe so the caller records the post-provision truth.
     let after = ssh.probe();
     log.push(format!("[{}] after provision: {}", m.id, after.summary()));
+    // Named on its own line, not just inside the summary: a merge offered to
+    // this box fails after a full render lease, and the operator's next stop is
+    // this log. The fix is one package manager away on every platform.
+    if !after.ffmpeg_present {
+        log.push(format!(
+            "[{}] ffmpeg is not on PATH — this box can crawl/digest/render but every merge it is offered will fail; install it (apt install ffmpeg / dnf install ffmpeg) and provision again",
+            m.id
+        ));
+    }
     // Single-source-of-truth check, against the fresh probe: a store holding
     // voices nothing declares desyncs the cluster silently (renders pass here,
     // 500 everywhere else). Warn with the fix; never delete.
@@ -819,6 +845,33 @@ mod tests {
         let s = p.summary();
         assert!(s.contains("2 voices"), "{s}");
         assert!(!s.contains("Suneo"), "names stay out of the summary: {s}");
+    }
+
+    #[test]
+    fn a_box_without_ffmpeg_says_so_before_a_merge_fails() {
+        // The failure this prevents: a box provisions cleanly, is offered a
+        // merge, and shelves the chapter after a full render lease — with
+        // nothing anywhere saying the tool was missing.
+        let present = Probe {
+            reachable: true,
+            hostname: "box".into(),
+            ffmpeg_present: true,
+            ..Default::default()
+        };
+        assert!(
+            !present.summary().contains("FFMPEG"),
+            "{}",
+            present.summary()
+        );
+        let absent = Probe {
+            ffmpeg_present: false,
+            ..present
+        };
+        assert!(
+            absent.summary().contains("NO FFMPEG"),
+            "{}",
+            absent.summary()
+        );
     }
 
     #[test]

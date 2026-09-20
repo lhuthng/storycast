@@ -216,7 +216,10 @@ pub(crate) fn mix_prefill(app: &App) -> String {
 /// Persist one app-wide ssh default to the settings file. Returns a status
 /// line; `Err` keeps the prompt open. Applies to machines bound afterwards
 /// (and to a running inductor after its next restart, like every setting).
-pub(crate) fn save_ssh_setting(
+/// Save-only prompts that write app-wide settings and launch nothing: the ssh
+/// defaults and the advertised address. Validated here so a typo keeps the
+/// prompt open with the operator's own typing still in it.
+pub(crate) fn save_app_setting(
     app: &App,
     kind: crate::tui::screen::TextKind,
     buf: &str,
@@ -261,7 +264,21 @@ pub(crate) fn save_ssh_setting(
             settings.ssh.port = port;
             format!("ssh port default saved: {port}")
         }
-        _ => return Err("not an ssh setting prompt".into()),
+        TextKind::Advertise => {
+            // Empty clears it back to the sentinel, which is the only way to
+            // undo a wrong address without hand-editing settings.json.
+            let host = buf.trim();
+            if host.is_empty() {
+                settings.advertise = "127.0.0.1".into();
+                "advertised address cleared — the launcher asks the routing table again".to_string()
+            } else if host.contains(char::is_whitespace) {
+                return Err("an address has no spaces — host or host:port".into());
+            } else {
+                settings.advertise = host.to_string();
+                format!("workers will dial http://{host} — reachable from the worker side")
+            }
+        }
+        _ => return Err("not an app setting prompt".into()),
     };
     settings
         .save(&settings_path)

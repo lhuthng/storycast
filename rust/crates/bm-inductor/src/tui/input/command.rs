@@ -37,6 +37,7 @@ pub(crate) enum Command {
     SshKey,
     SshUser,
     SshPort,
+    Advertise,
     Mix,
     Sound,
     Rerender,
@@ -97,6 +98,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["sshkey"], desc: None, cmd: Command::SshKey },
     Word { key: None, names: &["sshuser"], desc: None, cmd: Command::SshUser },
     Word { key: None, names: &["sshport"], desc: None, cmd: Command::SshPort },
+    Word { key: None, names: &["advertise", "adv"], desc: Some("the address workers dial back on — set it when they are off the LAN"), cmd: Command::Advertise },
     Word { key: Some('q'), names: &["quit", "exit", "q"], desc: None, cmd: Command::Key(KeyCode::Char('q')) },
     Word { key: None, names: &["inspect"], desc: None, cmd: Command::Key(KeyCode::Char('i')) },
     Word { key: None, names: &["tasks"], desc: None, cmd: Command::Key(KeyCode::Char('K')) },
@@ -274,6 +276,18 @@ pub(crate) fn do_command(
                 TextKind::SshPort,
                 "Default ssh port",
                 "port for machines bound without one",
+                &cur,
+            ));
+        }
+        Command::Advertise => {
+            // Prefilled with what is in force — including the `127.0.0.1`
+            // sentinel, which reads as "unset" rather than as an address.
+            let cur = app.setting_str("advertise", "127.0.0.1");
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::Advertise,
+                "Advertised address for workers",
+                "host or host:port as the *workers* see this machine — needed when they are \
+                 off the LAN (a cloud box cannot reach a NAT'd 192.168.x.x). Empty restores the guess.",
                 &cur,
             ));
         }

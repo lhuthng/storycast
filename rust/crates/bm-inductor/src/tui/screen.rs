@@ -19,6 +19,9 @@ pub(crate) enum TextKind {
     SshKey,
     SshUser,
     SshPort,
+    /// The address workers should dial (`:advertise`): save-only, like the ssh
+    /// defaults. Empty clears it back to the routing-table guess.
+    Advertise,
     /// Mix levels (`:mix`): story speed plus the two layer volumes, saved to
     /// the settings file like the run config. Launches nothing.
     Mix,
