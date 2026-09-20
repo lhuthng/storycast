@@ -2579,8 +2579,9 @@ async fn audition_without_a_backend_synthesizes_locally() {
 
 #[tokio::test]
 async fn controlled_letters_other_than_u_r_do_nothing() {
-    // `^U` clears, `^R` reloads; every other controlled letter must leave
-    // the audio and the filter alone. (`^T` used to reroll — now `:another`.)
+    // `^U` clears; every other controlled letter must leave the audio and
+    // the filter alone. (`^T` auditions and `^R` focuses — both dispatch
+    // or mark, so they are covered by the focus tests, not here.)
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
@@ -2649,8 +2650,8 @@ async fn a_refused_audition_does_not_leave_the_screen_wedged() {
 
 #[tokio::test]
 async fn plain_o_and_n_still_type_into_the_filter() {
-    // Every bare letter is a filter letter — o and n stand in for all of
-    // them here (auditioning moved to `:current` / `:try` / `:another`).
+    // Bare letters outside t/T focus the filter and type — o and n stand
+    // in for all of them here (t/T audition in audition focus).
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
@@ -2693,23 +2694,77 @@ async fn t_still_types_in_picker_step_1() {
 }
 
 #[tokio::test]
-async fn letters_type_in_step_2_now_that_audition_is_words() {
-    // The reason for the word commands: `t`/`T` used to audition here and
-    // never reached the filter. Now every letter types.
+async fn audition_focus_plays_t_while_other_letters_filter() {
+    // Step 2 opens in audition focus: t/T audition, any other letter
+    // focuses the filter and types.
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
-    if let Screen::Pick(p) = &mut app.screen {
-        p.filter.clear();
+
+    // `t` auditions and never touches the filter.
+    do_command(&mut app, Command::AuditionCurrent, &http, &job_tx);
+    let _ = last_op(&mut job_rx).expect(":current dispatches");
+    finish_audition(&mut app, "Đức Trí");
+    // Direct keys do the same without the command line.
+    handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
+    let req = last_op(&mut job_rx).expect("T dispatches an audition");
+    assert_eq!(req.op, Op::PreviewVoice);
+    match &app.screen {
+        Screen::Pick(p) => {
+            assert!(!p.filter_focus, "auditioning never focuses");
+            assert_eq!(p.filter, "adam");
+        }
+        other => panic!("must stay in the picker, got {other:?}"),
     }
+
+    // Any other letter focuses the filter and types.
+    finish_audition(&mut app, "Adam");
+    handle_key(&mut app, key(KeyCode::Char('o')), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Pick(p) => {
+            assert!(p.filter_focus, "typing focuses");
+            assert_eq!(p.filter, "adamo");
+        }
+        other => panic!("must stay in the picker, got {other:?}"),
+    }
+    assert!(job_rx.try_recv().is_err(), "typing must not dispatch");
+}
+
+#[tokio::test]
+async fn filter_focus_types_t_and_esc_blurs_back_to_audition() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = audition_app();
+    // Focus via ^R, the quiet twin of typing a letter.
+    let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+    handle_key(&mut app, ctrl_r, &http, &job_tx).await;
+    match &app.screen {
+        Screen::Pick(p) => assert!(p.filter_focus, "^R focuses"),
+        other => panic!("must stay in the picker, got {other:?}"),
+    }
+    // Focused, `t` types like every other letter — no audition.
     for c in ['t', 'T'] {
         handle_key(&mut app, key(KeyCode::Char(c)), &http, &job_tx).await;
     }
     match &app.screen {
-        Screen::Pick(p) => assert_eq!(p.filter, "tT", "t must type in step 2"),
-        other => panic!("t must type in step 2, got {other:?}"),
+        Screen::Pick(p) => assert_eq!(p.filter, "adamtT"),
+        other => panic!("must stay in the picker, got {other:?}"),
     }
-    assert!(job_rx.try_recv().is_err(), "typing must not dispatch");
+    assert!(job_rx.try_recv().is_err(), "focused typing never auditions");
+    // First Esc blurs (stays put), second Esc steps back to step 1.
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Pick(p) => {
+            assert!(!p.filter_focus, "first Esc blurs");
+            assert_eq!(p.stage, PickStage::Voice, "blurring steps nowhere");
+        }
+        other => panic!("must stay in step 2, got {other:?}"),
+    }
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Pick(p) => assert_eq!(p.stage, PickStage::Character),
+        other => panic!("second Esc steps back, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -2759,6 +2814,63 @@ async fn current_word_in_the_cast_overview_tests_the_current_voice_on_the_shown_
     assert!(
         req.text.as_deref().is_some_and(|t| !t.is_empty()),
         ":current always names the shown line"
+    );
+}
+
+fn cast_app() -> App {
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.conn = Conn::Up;
+    app.roster = Some(roster_fixture());
+    app.lines = Some(std::collections::HashMap::from([(
+        "Narrator".to_string(),
+        vec![audition_line("n")],
+    )]));
+    app.screen = Screen::Cast(CastView::new());
+    app
+}
+
+#[tokio::test]
+async fn cast_keys_play_until_the_filter_takes_focus() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = cast_app();
+
+    // `t` auditions in audition focus and never types.
+    handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+    let req = last_op(&mut job_rx).expect("t dispatches a segment fetch");
+    assert_eq!(req.op, Op::Segment);
+    match &app.screen {
+        Screen::Cast(v) => {
+            assert!(!v.filter_focus, "auditioning never focuses");
+            assert!(v.filter.is_empty(), "t never types");
+        }
+        other => panic!("must stay in the overview, got {other:?}"),
+    }
+
+    // Any other letter focuses the filter and types; focused `t` types too.
+    finish_audition(&mut app, "Đức Trí");
+    handle_key(&mut app, key(KeyCode::Char('x')), &http, &job_tx).await;
+    handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Cast(v) => {
+            assert!(v.filter_focus, "typing focuses");
+            assert_eq!(v.filter, "xt");
+        }
+        other => panic!("must stay in the overview, got {other:?}"),
+    }
+    assert!(job_rx.try_recv().is_err(), "focused typing never auditions");
+
+    // First Esc blurs (stays put), second Esc closes to Normal.
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Cast(v) => assert!(!v.filter_focus, "first Esc blurs"),
+        other => panic!("must stay in the overview, got {other:?}"),
+    }
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Normal),
+        "second Esc closes: {:?}",
+        app.screen
     );
 }
 
@@ -2932,7 +3044,7 @@ async fn the_line_index_releases_the_in_flight_count() {
 }
 
 #[tokio::test]
-async fn the_picker_shows_the_incumbent_the_held_line_and_the_words() {
+async fn the_picker_shows_the_incumbent_the_held_line_and_the_keys() {
     let mut app = audition_app();
     if let Screen::Pick(p) = &mut app.screen {
         p.line = Some(AuditionLine {
@@ -2951,11 +3063,11 @@ async fn the_picker_shows_the_incumbent_the_held_line_and_the_words() {
         "the held line must be shown:\n{text}"
     );
     assert!(
-        text.contains(":try candidate"),
-        "the words must be advertised:\n{text}"
+        text.contains("T candidate"),
+        "the keys must be advertised:\n{text}"
     );
     assert!(
-        text.contains(":another new line"),
+        text.contains("^T another line"),
         "the reroll must be advertised:\n{text}"
     );
 }
@@ -3798,6 +3910,42 @@ fn local_cache_layout() -> (tempfile::TempDir, std::path::PathBuf) {
     std::fs::create_dir_all(&seg).unwrap();
     std::fs::write(seg.join("0000_Đức Trí.wav"), b"RIFF-fake-local").unwrap();
     (dir, layout.root.clone())
+}
+
+#[tokio::test]
+async fn an_unrendered_held_line_falls_back_to_one_of_hers() {
+    // Fresh swap, rendered chapter by chapter: the held line misses in her
+    // voice, but her voice exists in the cache — play one of hers, still
+    // zero synthesis, and hold it so T compares on the same sentence.
+    let (_dir, root) = local_cache_layout();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
+    job_segment(
+        tx,
+        root,
+        "Narrator".into(),
+        "Đức Trí".into(),
+        "a line never rendered anywhere".into(),
+    )
+    .await;
+    let mut done: Option<DoneKind> = None;
+    while let Ok(ev) = rx.try_recv() {
+        if let Ev::Done(d) = ev {
+            done = Some(d);
+        }
+    }
+    match done.expect("the fallback owes exactly one Done") {
+        DoneKind::Op {
+            ok,
+            line_text,
+            audio_b64,
+            ..
+        } => {
+            assert!(ok);
+            assert_eq!(line_text.as_deref(), Some("Nar nói."));
+            assert!(audio_b64.is_some(), "plays bytes, synthesizes nothing");
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[tokio::test]

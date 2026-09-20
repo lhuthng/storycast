@@ -1,11 +1,16 @@
 //! Cast overview: filterable table, read-only.
 //!
 //! Nothing here assigns anything — swapping happens in the picker (`:s`), and
-//! this screen deliberately offers no shortcut to it. Auditioning lives on
-//! the `:` command line (`:current` / `:try` / `:another`), so every letter
-//! types into the filter.
+//! this screen deliberately offers no shortcut to it. It opens in audition
+//! focus: `t` tests the speaker's current voice on the shown line (cache
+//! only), `T` renders the held line, `^T` re-rolls it. Any other letter
+//! focuses the filter instead; while it is focused every letter types and
+//! the audition keys go quiet. `Esc` blurs back, `^R` focuses explicitly.
+//! (`q` is deliberately *not* bound either way, so it filters like any
+//! other letter.)
 use crate::tui::{
     app::App,
+    input::audition::{cast_current, cast_pointed},
     jobs::Job,
     model::filtered_cast_rows,
     screen::{CastView, Screen, TextKind, TextPrompt},
@@ -24,16 +29,39 @@ pub(crate) async fn key_cast(
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
-        // Esc closes; `q` is deliberately *not* bound here, so it can be
-        // typed into the filter like any other letter.
+        // Esc blurs the filter first; only the second Esc closes. A blurred
+        // `q` would quit Normal, but here every letter must stay typeable.
         KeyCode::Esc => {
-            app.screen = Screen::Normal;
+            if v.filter_focus {
+                v.filter_focus = false;
+                app.set_status(
+                    Level::Info,
+                    "audition keys — t current · T line · ^T another",
+                );
+            } else {
+                app.screen = Screen::Normal;
+                return false;
+            }
+            app.screen = Screen::Cast(v);
         }
-        KeyCode::Char('R') => app.load_roster(job_tx, http),
+        KeyCode::Char('R') if !ctrl && !alt => app.load_roster(job_tx, http),
+        // `t`: the speaker's current voice on the shown line, from cache
+        // only — never synthesis. A miss names the render key instead of
+        // playing something nearby. Audition focus only.
+        KeyCode::Char('t') if !v.filter_focus && !ctrl && !alt => {
+            cast_current(app, job_tx, http, &mut v);
+            app.screen = Screen::Cast(v);
+        }
+        // `T`: the held line, rendered — the deliberate generation behind
+        // the cache-only `t` above.
+        KeyCode::Char('T') if !v.filter_focus && !ctrl && !alt => {
+            cast_pointed(app, job_tx, http, &mut v, false);
+            app.screen = Screen::Cast(v);
+        }
         KeyCode::Char(':') => {
             // The command line works here too — `:current` / `:try` /
-            // `:another` audition from the highlighted speaker, now that
-            // every letter types into the filter.
+            // `:another` audition from the highlighted speaker in either
+            // focus, which is also how to audition while filtered.
             app.command_return = Some(Screen::Cast(v));
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::Command,
@@ -76,6 +104,8 @@ pub(crate) async fn key_cast(
             app.screen = Screen::Cast(v);
         }
         KeyCode::Backspace => {
+            // Editing the filter focuses it.
+            v.filter_focus = true;
             v.filter.pop();
             v.cursor = 0;
             v.scroll = 0;
@@ -86,10 +116,25 @@ pub(crate) async fn key_cast(
                 v.filter.clear();
                 v.cursor = 0;
                 v.scroll = 0;
+                v.filter_focus = true;
+            } else if c == 'r' || c == 'R' {
+                // `^R` focuses the filter explicitly. Case-insensitive —
+                // the terminal may report either case with CONTROL held.
+                v.filter_focus = true;
+                app.set_status(
+                    Level::Info,
+                    "filter focused — every letter types · Esc back to audition keys",
+                );
+            } else if (c == 't' || c == 'T') && !v.filter_focus {
+                // `^T`: another line, same voice. Audition focus only.
+                cast_pointed(app, job_tx, http, &mut v, true);
             }
             app.screen = Screen::Cast(v);
         }
         KeyCode::Char(c) if !alt => {
+            // Any other letter focuses the filter and types; `t`/`T`
+            // above already claimed theirs in audition focus.
+            v.filter_focus = true;
             v.filter.push(c);
             v.cursor = 0;
             v.scroll = 0;

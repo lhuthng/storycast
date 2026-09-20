@@ -848,7 +848,7 @@ pub fn pick_exact<'a>(
 /// not in that voice.
 pub fn segment_miss(layout: &Layout, character: &str, voice: &str, exact: bool) -> String {
     if exact {
-        return format!("that line isn't rendered in {voice} yet — Shift+Tab renders it");
+        return format!("that line isn't rendered in {voice} yet — T renders it");
     }
     if character_has_lines(layout, character) {
         format!(

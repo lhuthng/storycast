@@ -96,12 +96,13 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }
 
-    section(&mut lines, "Voice picker (:s) and cast overview (:S)");
+    section(&mut lines, "Voice picker (:swap) and cast overview (:cast)");
     for v in [
-        "Step 1 picks a character, step 2 picks a voice. :S shows the whole",
-        "cast at once, read-only — swapping happens only in the picker.",
-        "Type to filter, every letter on every step. Accents are ignored,",
-        "so \"thai son\" finds \"Thái Sơn\".",
+        "Step 1 picks a character, step 2 picks a voice. :cast shows the",
+        "whole cast at once, read-only — swapping happens only in the picker.",
+        "Step 2 and the overview open in audition focus (see below); step 1",
+        "types every letter. Accents are ignored, so \"thai son\" finds",
+        "\"Thái Sơn\".",
         "Every voice is listed with gender, accent, language and style, plus whether",
         "it is already in use and whether the accent policy permits it.",
         "Pooled samples show their tags (pool: young, female) — type one to filter.",
@@ -115,18 +116,24 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         "Auditioning a voice (picker step 2 and cast overview)",
     );
     for v in [
-        "Three words, on the `:` command line, and nothing else — every",
-        "letter types into the filter. `:current` plays the held line with",
-        "the current voice, from cache only: zero synthesis. A miss plays",
-        "nothing and names the render word. In the picker `:current` never",
-        "follows the cursor; in the cast overview it follows the highlighted",
-        "speaker.",
-        "`:try` renders that same held line with the pointed voice: the one",
+        "Three keys — `t`, `T`, `^T` — or three words — `:current`, `:try`,",
+        "`:another` — and none of them assign anything. `t` plays the held",
+        "line with the current voice, from cache only: zero synthesis. A",
+        "miss plays nothing and names the render key. In the picker `t`",
+        "never follows the cursor; in the cast overview it follows the",
+        "highlighted speaker.",
+        "`T` renders that same held line with the pointed voice: the one",
         "deliberate generation, and the only way to hear two voices on the",
         "same sentence before either is assigned. Inductor down: this box",
         "synthesizes it instead, so no worker needs to be on.",
-        "`:another` renders another line with the pointed voice; the chosen",
-        "one is shown above the list.",
+        "`^T` renders another line with the pointed voice; the chosen one",
+        "is shown above the list.",
+        "Keys or filter, never both: both screens open in audition focus,",
+        "where `t`/`T`/`^T` play and any other letter focuses the filter",
+        "instead. While the filter is focused every letter types — `t`/`T`",
+        "included — and the keys go quiet (the words still audition from",
+        "the command line). `^R` focuses explicitly; `Esc` blurs back to",
+        "the audition keys.",
         "Enter on a voice locks that sentence: later auditions keep it instead of",
         "another random pick. None of these assign anything — only the confirm",
         "after Enter changes the cast.",

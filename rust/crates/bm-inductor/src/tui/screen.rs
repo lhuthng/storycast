@@ -167,6 +167,11 @@ pub(crate) struct Picker {
     /// both auditions speak the same sentence; re-picked when the character
     /// changes or the operator asks for another.
     pub(crate) line: Option<AuditionLine>,
+    /// Filter focus on step 2: every letter types (t/T included) and the
+    /// audition keys go quiet. Off by default — the screen opens in audition
+    /// focus, where t/T/^T play and any other letter focuses the filter.
+    /// Step 1 ignores it: picking a character needs every letter.
+    pub(crate) filter_focus: bool,
 }
 
 impl Picker {
@@ -179,6 +184,7 @@ impl Picker {
             scroll: 0,
             previewed: Vec::new(),
             line: None,
+            filter_focus: false,
         }
     }
 }
@@ -262,6 +268,9 @@ pub(crate) struct CastView {
     /// The real line the highlighted speaker is auditioned on, held so pressing
     /// the key twice does not hop between sentences.
     pub(crate) line: Option<AuditionLine>,
+    /// Filter focus: every letter types (t/T included) and the audition
+    /// keys go quiet. Off by default — the screen opens in audition focus.
+    pub(crate) filter_focus: bool,
 }
 
 impl CastView {
@@ -271,6 +280,7 @@ impl CastView {
             scroll: 0,
             filter: String::new(),
             line: None,
+            filter_focus: false,
         }
     }
 }

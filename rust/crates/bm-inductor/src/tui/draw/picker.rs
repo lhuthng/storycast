@@ -47,12 +47,18 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
         ])
         .split(inner);
 
-    // Filter line.
+    // Filter line. The cursor shows exactly when typing would land:
+    // always on step 1, on step 2 only while the filter is focused
+    // (in audition focus `t` would play, not type).
+    let typing = picker.stage == PickStage::Character || picker.filter_focus;
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("filter: ", Style::default().fg(Color::DarkGray)),
             Span::styled(picker.filter.clone(), app.style(Color::White)),
-            Span::styled("▌", app.style(Color::Cyan)),
+            Span::styled(
+                if typing { "▌" } else { "" },
+                app.style(Color::Cyan),
+            ),
         ])),
         rows[0],
     );
@@ -301,13 +307,23 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                 Style::default().fg(Color::DarkGray),
             )),
         ],
-        PickStage::Voice => vec![
+        PickStage::Voice if !picker.filter_focus => vec![
             Line::from(Span::styled(
-                "type to filter · ↑↓ move · Enter assign · Esc back",
+                "t incumbent · T candidate · ^T another line — none of these assign",
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(Span::styled(
-                ":current incumbent · :try candidate · :another new line — none of these assign",
+                "other letters filter · ^R focuses filter · ↑↓ move · Enter assign · Esc back",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ],
+        PickStage::Voice => vec![
+            Line::from(Span::styled(
+                "typing — t/T filter too · :current :try :another still audition",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "↑↓ move · Enter assign · Esc back to audition keys",
                 Style::default().fg(Color::DarkGray),
             )),
         ],

@@ -1054,15 +1054,25 @@ fn op_segment(
         ));
     }
     // An exact line plays that sentence or misses honestly — never a nearby
-    // one. Without it, Tab triages on a random segment.
+    // one. Without it, T triages on a random segment.
     let exact = text.map(str::trim).filter(|t| !t.is_empty());
     if let Some(want) = exact {
         match bm_core::assemble::pick_exact(&cands, character, want) {
             Some(pick) => return serve_segment(pick),
             None => {
-                return OpResult::fail(bm_core::assemble::segment_miss(
-                    layout, character, voice, true,
-                ))
+                // The held line never rendered in this voice — the normal
+                // state for a fresh swap, which renders chapter by chapter.
+                // Fall back to one of hers that did, still zero synthesis:
+                // the served sentence is held, so T compares on it rather
+                // than another random pick.
+                match bm_core::assemble::pick_rendered(&cands, character) {
+                    Some(pick) => return serve_segment(pick),
+                    None => {
+                        return OpResult::fail(bm_core::assemble::segment_miss(
+                            layout, character, voice, true,
+                        ))
+                    }
+                }
             }
         }
     }
@@ -1675,6 +1685,16 @@ mod segment_tests {
             "say what it was: {}",
             res.message
         );
+
+        // The held line never rendered in Adam's voice, but one of Kiên's
+        // did (the fresh-swap state: rendered chapter by chapter). Play
+        // hers, still zero synthesis — and hold it, so T compares on the
+        // same sentence instead of another random pick.
+        let fallback = op_segment(&layout, "vieneu", "Kiên", "Adam", Some("a line from chapter 99"));
+        assert!(fallback.ok, "{}", fallback.message);
+        assert_eq!(fallback.line_text.as_deref(), Some("Kiên lên tiếng."));
+        assert_eq!(fallback.line_speaker.as_deref(), Some("Kiên"));
+        assert!(fallback.audio_b64.is_some(), "bytes, not synthesis");
 
         // A voice with nothing rendered fails honestly — never synthesizes.
         let miss = op_segment(&layout, "vieneu", "Vũ", "Nobody", None);
