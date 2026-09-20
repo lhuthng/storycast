@@ -53,27 +53,56 @@ impl Layout {
         Ok(Layout { root, work })
     }
 
+    /// Resolve, or fall back to the bare root when the pointer is stale.
+    ///
+    /// **Management plane only.** The dashboard and `workspace` must open on a
+    /// broken pointer — re-pointing is how it gets repaired — so they need the
+    /// root even when `resolve` refuses. The error is handed back rather than
+    /// swallowed: a stale pointer is a fact the operator has to see. Every
+    /// runner uses [`Layout::resolve`], which refuses outright.
+    pub fn resolve_or_root(root: impl Into<PathBuf>) -> (Self, Option<String>) {
+        let root = root.into();
+        match Self::resolve(&root) {
+            Ok(layout) => (layout, None),
+            Err(e) => (Layout::new(root), Some(e.to_string())),
+        }
+    }
+
     /// The workspace pointer file. One line: the workspace name.
     pub fn active_workspace_file(root: &Path) -> PathBuf {
         root.join(".bm").join("active-workspace")
     }
 
-    /// Walk up from the current directory looking for the repo marker
-    /// (`rust/Cargo.toml` — tracked, always present, unlike the ignored
-    /// live profile tree). Lets a worker started from anywhere find home.
-    pub fn discover() -> Result<Self> {
+    /// The bm root above the current directory, resolving nothing.
+    ///
+    /// Split out of [`Layout::discover`] for the management plane, which has to
+    /// start with a stale workspace pointer in hand. Two markers, because there
+    /// are two kinds of root: a checkout carries the tracked `rust/Cargo.toml`
+    /// (the live profile tree is ignored, so a fresh clone has no `prompts/` to
+    /// look for), while a provisioned worker is a flat mirror — prompts,
+    /// assets, models, binaries — with no Rust tree at all, and the
+    /// `.bm/profile` pointer provision writes is what says so. Matching only
+    /// the repo marker made every remote worker die at startup with "no repo
+    /// root found".
+    pub fn find_root() -> Result<PathBuf> {
         let cwd = std::env::current_dir().context("reading current dir")?;
         let mut cur: Option<&Path> = Some(cwd.as_path());
         while let Some(dir) = cur {
-            if dir.join("rust/Cargo.toml").is_file() {
-                return Layout::resolve(dir);
+            if dir.join("rust/Cargo.toml").is_file() || dir.join(".bm/profile").is_file() {
+                return Ok(dir.to_path_buf());
             }
             cur = dir.parent();
         }
         anyhow::bail!(
-            "no repo root found above {} (expected rust/Cargo.toml)",
+            "no bm root found above {} (expected rust/Cargo.toml in a checkout, .bm/profile on a provisioned worker)",
             cwd.display()
         )
+    }
+
+    /// Walk up from the current directory looking for a bm root, and resolve
+    /// the workspace inside it.
+    pub fn discover() -> Result<Self> {
+        Self::resolve(Self::find_root()?)
     }
 
     pub fn data(&self) -> PathBuf {
@@ -278,11 +307,8 @@ impl Layout {
 
     /// The workspace's own state: settings, ledger, stats. Per book, so two
     /// workspaces never share a ledger; machine-global files (machines,
-    /// roster, profile pointer) stay in [`Layout::bm_state`].
-    pub fn work_state(&self) -> PathBuf {
-        self.work.join(".bm")
-    }
-
+    /// roster, profile pointer) stay in [`Layout::bm_state`]. The files
+    /// themselves land directly in `work` — see [`Layout::state_file`].
     pub fn stats(&self) -> PathBuf {
         self.state_file("stats.jsonl")
     }
@@ -582,8 +608,14 @@ mod tests {
         std::fs::write(dir.join(".bm/active-workspace"), "beyond-myriads\n").unwrap();
         let l = Layout::resolve(&dir).unwrap();
         assert_eq!(l.work, dir.join("workspaces/beyond-myriads"));
-        assert_eq!(l.settings(), dir.join("workspaces/beyond-myriads/settings.json"));
-        assert_eq!(l.ledger(), dir.join("workspaces/beyond-myriads/ledger.json"));
+        assert_eq!(
+            l.settings(),
+            dir.join("workspaces/beyond-myriads/settings.json")
+        );
+        assert_eq!(
+            l.ledger(),
+            dir.join("workspaces/beyond-myriads/ledger.json")
+        );
         // Machine-global files stay at the root.
         assert_eq!(l.machines(), dir.join(".bm/machines.json"));
         // A pointer at a missing directory is stale, not a fallback.
@@ -612,18 +644,74 @@ mod tests {
         assert_ne!(l.voice_refs(), l.voice_samples());
     }
 
+    /// `discover()` reads the *process* cwd, so tests that move it have to take
+    /// turns: two of them in parallel race, and the loser resolves the other's
+    /// fixture. Poisoning is tolerated — one failing test should not fail its
+    /// neighbour for an unrelated reason.
+    fn in_dir<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir).unwrap();
+        let out = f();
+        std::env::set_current_dir(prev).unwrap();
+        out
+    }
+
+    #[test]
+    fn resolve_or_root_hands_back_the_pointer_it_could_not_follow() {
+        // The management plane opens on a broken pointer; the error rides
+        // along so it can be reported instead of swallowed.
+        let dir = std::env::temp_dir().join(format!("bm-lenient{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".bm")).unwrap();
+        std::fs::write(dir.join(".bm/active-workspace"), "gone\n").unwrap();
+        let (layout, err) = Layout::resolve_or_root(&dir);
+        assert_eq!(layout.work, dir, "falls back to the root");
+        assert!(err.unwrap().contains("gone"));
+        // And with no pointer at all there is nothing to report.
+        std::fs::remove_file(dir.join(".bm/active-workspace")).unwrap();
+        let (layout, err) = Layout::resolve_or_root(&dir);
+        assert_eq!(layout.work, dir);
+        assert!(err.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn discover_finds_repo_root_from_a_subdir() {
         let root = fixture_root("discover");
         let sub = root.join("data/audio");
         std::fs::create_dir_all(&sub).unwrap();
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&sub).unwrap();
-        let found = Layout::discover().unwrap();
-        std::env::set_current_dir(prev).unwrap();
+        let found = in_dir(&sub, Layout::discover).unwrap();
         assert_eq!(
             found.root.canonicalize().unwrap(),
             root.canonicalize().unwrap()
         );
+    }
+
+    /// A worker root is a flat mirror: prompts, assets, models, binaries — and
+    /// no `rust/` tree, so the repo marker alone would never match. Before this
+    /// the launch script's `cd ~/bm-worker && ./bm-agent worker` died at startup
+    /// with "no repo root found", which is every remote worker.
+    #[test]
+    fn discover_finds_a_provisioned_worker_root() {
+        let root = std::env::temp_dir().join(format!("bm-worker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".bm")).unwrap();
+        std::fs::write(
+            root.join(".bm/profile"),
+            r#"{"name":"fixture","hash":"00"}"#,
+        )
+        .unwrap();
+        let found = in_dir(&root, Layout::discover).unwrap();
+        // Canonicalize both sides: macOS reports `/private/var/...` for the
+        // cwd and `/var/...` for `temp_dir()`, and they are the same place.
+        assert_eq!(
+            found.root.canonicalize().unwrap(),
+            root.canonicalize().unwrap()
+        );
+        // No workspace pointer means the worker root *is* the workspace.
+        assert_eq!(found.work, found.root);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

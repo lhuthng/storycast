@@ -248,11 +248,14 @@ pub(crate) fn master_level(map: &SceneMap, layer: PoolKind) -> f64 {
 /// A job rather than a keypress handler: it is three registries, the map and
 /// every `data/script-*.json` — the same hundred file opens the audition index
 /// makes, and the same reason for keeping them off the UI task.
-pub(crate) fn load(root: &Path) -> Result<SoundData, String> {
-    if root.as_os_str().is_empty() {
+///
+/// The layout is passed whole because the two halves are read together: the
+/// registries and the scene map are profile content at the root, the scripts
+/// that say what is still in use are the workspace's.
+pub(crate) fn load(layout: &bm_core::Layout) -> Result<SoundData, String> {
+    if layout.root.as_os_str().is_empty() {
         return Err("no repo root — restart the TUI from a checkout".into());
     }
-    let layout = bm_core::Layout::new(root);
     if !layout.assets().is_dir() {
         return Err(format!(
             "no {} — the clip pools live beside the scene map",
@@ -268,12 +271,12 @@ pub(crate) fn load(root: &Path) -> Result<SoundData, String> {
     }
 
     let mut data = SoundData {
-        root: root.to_path_buf(),
+        root: layout.root.clone(),
         pools,
         map,
         usage: BTreeMap::new(),
         missing: BTreeMap::new(),
-        script_uses: read_script_uses(root),
+        script_uses: read_script_uses(layout),
     };
     data.refresh();
     Ok(data)
@@ -282,9 +285,9 @@ pub(crate) fn load(root: &Path) -> Result<SoundData, String> {
 /// Chapter -> script, for the inject layer's usage. A script that will not
 /// parse is skipped, like the audition index: one corrupt chapter must not cost
 /// the operator the whole screen.
-fn read_script_uses(root: &Path) -> BTreeMap<String, Vec<u32>> {
+fn read_script_uses(layout: &bm_core::Layout) -> BTreeMap<String, Vec<u32>> {
     let mut scripts: Vec<(u32, serde_json::Value)> = Vec::new();
-    for path in crate::tui::audition::script_files(root) {
+    for path in crate::tui::audition::script_files(layout) {
         let Some(n) = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -796,9 +799,7 @@ mod tests {
         // Placeholder clips: the editor probes takes for length, so every
         // listed take exists as an (empty) file without shipping audio.
         for kind in PoolKind::ALL {
-            let pool = bm_core::audio_pool::load_pool(
-                &dir.join("assets").join(kind.registry()),
-            );
+            let pool = bm_core::audio_pool::load_pool(&dir.join("assets").join(kind.registry()));
             for sound in pool.values() {
                 for f in &sound.files {
                     let p = dir.join("assets").join(f);
@@ -813,7 +814,7 @@ mod tests {
     #[test]
     fn an_entry_nothing_reaches_is_removable_and_one_the_map_reaches_is_not() {
         let (_d, dir) = fixture();
-        let data = load(&dir).unwrap();
+        let data = load(&bm_core::Layout::new(&dir)).unwrap();
         let effect = rows(&data, PoolKind::Effect);
         assert!(!effect.is_empty());
         // Every shipped effect sound answers a shipped rule, so none is free.
@@ -847,7 +848,7 @@ mod tests {
     #[test]
     fn the_music_layer_reads_the_palette_not_the_rules() {
         let (_d, dir) = fixture();
-        let data = load(&dir).unwrap();
+        let data = load(&bm_core::Layout::new(&dir)).unwrap();
         let music = rows(&data, PoolKind::Music);
         let tavern = music.iter().find(|r| r.name == "tavern").unwrap();
         assert!(tavern.in_use());
@@ -869,7 +870,7 @@ mod tests {
             r#"{"segments":[{"speaker":"A","text":"x"},{"sound":"coin"},{"stop":"cooking"}]}"#,
         )
         .unwrap();
-        let data = load(&dir).unwrap();
+        let data = load(&bm_core::Layout::new(&dir)).unwrap();
         let inject = rows(&data, PoolKind::Inject);
         let coin = inject.iter().find(|r| r.name == "coin").unwrap();
         assert!(coin.in_use());
@@ -896,7 +897,7 @@ mod tests {
             &pool,
         )
         .unwrap();
-        let data = load(&dir).unwrap();
+        let data = load(&bm_core::Layout::new(&dir)).unwrap();
         let effect = rows(&data, PoolKind::Effect);
         let ghost = effect.iter().find(|r| r.name == "ghost").unwrap();
         assert_eq!(ghost.missing, vec!["effects/ghost-1.mp3"]);
@@ -1086,7 +1087,7 @@ mod tests {
     #[test]
     fn a_saved_pool_reloads_with_the_same_rows() {
         let (_d, dir) = fixture();
-        let data = load(&dir).unwrap();
+        let data = load(&bm_core::Layout::new(&dir)).unwrap();
         let mut pool = data.pools[&PoolKind::Inject].clone();
         let (name, s) = parse_entry(
             PoolKind::Inject,
@@ -1098,7 +1099,7 @@ mod tests {
         assert!(matches!(apply(&mut pool, &name, s), Edit::Added));
         save(&dir, PoolKind::Inject, &pool).unwrap();
 
-        let back = load(&dir).unwrap();
+        let back = load(&bm_core::Layout::new(&dir)).unwrap();
         let rows = rows(&back, PoolKind::Inject);
         assert_eq!(rows.len(), data.pools[&PoolKind::Inject].len() + 1);
         let kettle = rows.iter().find(|r| r.name == "kettle").unwrap();
@@ -1128,7 +1129,7 @@ mod tests {
     #[test]
     fn the_header_shows_the_layers_own_master_knob() {
         let (_d, dir) = fixture();
-        let data = load(&dir).unwrap();
+        let data = load(&bm_core::Layout::new(&dir)).unwrap();
         // Read from the map, not invented: whatever ships is what is shown.
         assert_eq!(
             master_level(&data.map, PoolKind::Effect),

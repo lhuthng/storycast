@@ -2,7 +2,7 @@
 use crate::tui::{
     app::App,
     input::runconfig::parse_range,
-    jobs::{op_job, Job},
+    jobs::{op_job, Job, ProfileReq, WorkspaceReq},
     screen::{TextKind, TextPrompt},
 };
 use bm_proto::{Machine, Op, OpRequest};
@@ -97,7 +97,7 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                 return Err("path is empty — point at a clip, e.g. ~/dl/young-female-4.mp3".into());
             }
             Ok(Job::AddSample {
-                layout_root: app.layout_root.clone(),
+                layout: app.layout.clone(),
                 path,
                 name: None,
                 tags: None,
@@ -118,7 +118,7 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                 }
             };
             Ok(Job::AddSample {
-                layout_root: app.layout_root.clone(),
+                layout: app.layout.clone(),
                 path,
                 name: Some(name),
                 tags: Some(Vec::new()),
@@ -158,5 +158,59 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                 },
             ))
         }
+        TextKind::Workspace => {
+            // `new <name>` creates and switches; a bare name switches; empty
+            // lists. Parsed here so a typo is refused with the prompt still
+            // open, rather than queued as a job that fails a second later.
+            let buf = prompt.buf.trim();
+            let req = if buf.is_empty() {
+                WorkspaceReq::List
+            } else if buf == "new" {
+                return Err("`new` needs a name — `new <name>`".into());
+            } else if let Some(name) = buf.strip_prefix("new ") {
+                WorkspaceReq::New(workspace_name(name)?)
+            } else {
+                WorkspaceReq::Use(workspace_name(buf)?)
+            };
+            Ok(Job::Workspace {
+                layout: app.layout.clone(),
+                api: app.api.clone(),
+                req,
+            })
+        }
+        TextKind::Profile => {
+            // Same grammar: `pack <name>` bundles the live tree, a bare name
+            // loads it, empty lists.
+            let buf = prompt.buf.trim();
+            let req = if buf.is_empty() {
+                ProfileReq::List
+            } else if buf == "pack" {
+                return Err("`pack` needs a name — `pack <name>`".into());
+            } else if let Some(name) = buf.strip_prefix("pack ") {
+                ProfileReq::Pack(workspace_name(name)?)
+            } else {
+                ProfileReq::Load(workspace_name(buf)?)
+            };
+            Ok(Job::Profile {
+                layout: app.layout.clone(),
+                api: app.api.clone(),
+                req,
+            })
+        }
     }
+}
+
+/// A workspace or profile name: one path segment, no escapes.
+///
+/// `workspace_cmd` enforces the same rule, but by then the job is queued and
+/// the prompt is closed — the operator would have to retype it. Refusing here
+/// keeps the prompt open with the name still on screen.
+fn workspace_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0') {
+        return Err(format!(
+            "“{name}” is not a name — one path segment, no slashes"
+        ));
+    }
+    Ok(name.to_string())
 }

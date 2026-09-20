@@ -33,6 +33,14 @@ pub(crate) enum TextKind {
     SoundLevel(bm_core::audio_pool::PoolKind, String),
     Translate,
     CrawlTemplate,
+    /// `:workspace` — list, switch or create. Switching only moves the
+    /// `.bm/active-workspace` pointer, but the ledger, settings and data the
+    /// running cluster reads all move with it, so the dispatch is gated on a
+    /// quiet cluster.
+    Workspace,
+    /// `:profile` — list bundles, load one (unpack) or pack the live tree.
+    /// Loading replaces `assets/` + `prompts/`, which workers are reading.
+    Profile,
     /// `:` command line: the buffer names a key (`m`) or a word
     /// (`reconcile`) and Enter presses it for you. Never dispatched —
     /// handled inline so one keypress can open another prompt.

@@ -31,7 +31,7 @@ pub(crate) async fn key_run(
                     app,
                     job_tx,
                     Job::StartBackend {
-                        layout_root: app.layout_root.clone(),
+                        layout: app.layout.clone(),
                         api: app.api.clone(),
                         api_up: app.conn == Conn::Up,
                         start: cfg.start,

@@ -87,13 +87,26 @@ pub(crate) fn spawn_one(bin: &Path, args: &[String], log: &Path) -> anyhow::Resu
 /// uninvited. Chapters arrive only through explicit enqueue (run screen,
 /// `t`, API); a hand-run `serve --start/--count` keeps its own scope.
 /// `bind` is LAN-wide when remote workers exist, loopback for solo runs.
-pub(crate) fn serve_args(port: &str, bind: &str) -> Vec<String> {
+///
+/// `root` is passed rather than left to discovery: the child inherits this
+/// process's cwd, which is not necessarily the root the operator named with
+/// `--root`, and a backend that resolved a *different* root would reconcile a
+/// different workspace's ledger while this dashboard watched it.
+pub(crate) fn serve_args(root: &Path, port: &str, bind: &str) -> Vec<String> {
     [
-        "serve", "--port", port, "--bind", bind, "--start", "1", "--count", "0",
+        "serve".to_string(),
+        "--root".to_string(),
+        root.to_string_lossy().into_owned(),
+        "--port".to_string(),
+        port.to_string(),
+        "--bind".to_string(),
+        bind.to_string(),
+        "--start".to_string(),
+        "1".to_string(),
+        "--count".to_string(),
+        "0".to_string(),
     ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
+    .to_vec()
 }
 
 pub(crate) fn signal(pid: u32, sig: &str) {
@@ -138,11 +151,14 @@ mod tests {
     #[test]
     fn spawned_backend_reconciles_nothing() {
         // The empty count is the whole point: boot invents no work, so no
-        // default can ever auto-run chapters again.
+        // default can ever auto-run chapters again. The root travels with it
+        // for the same reason the count does — the child must not guess.
         assert_eq!(
-            serve_args("8901", "127.0.0.1"),
+            serve_args(Path::new("/repo"), "8901", "127.0.0.1"),
             vec![
                 "serve",
+                "--root",
+                "/repo",
                 "--port",
                 "8901",
                 "--bind",

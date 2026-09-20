@@ -32,8 +32,10 @@ const SIDECAR_PORT: u16 = 8818;
     about = "Pipeline worker: run stages, report progress"
 )]
 struct Cli {
-    /// Repo root (discovered via prompts/analyze.txt when omitted).
-    #[arg(long)]
+    /// Repo root (discovered when omitted: `rust/Cargo.toml` in a checkout,
+    /// `.bm/profile` on a provisioned worker). Global, so a launcher can hand
+    /// the root to the subcommand it spawns rather than let it guess from cwd.
+    #[arg(long, global = true)]
     root: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
@@ -1103,7 +1105,11 @@ fn default_worker_id(root: &std::path::Path) -> String {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let layout = match cli.root {
-        Some(r) => Layout::new(r),
+        // Same resolution the inductor does: `--root` names the *repo*, and
+        // the workspace pointer inside it decides where this book's settings,
+        // data and output live. On a worker the root is the flat mirror, which
+        // has no pointer and is therefore its own workspace.
+        Some(r) => Layout::resolve(r)?,
         None => Layout::discover()?,
     };
     bm_core::config::load_dotenv(&layout.root.join(".env"));
@@ -1179,6 +1185,15 @@ async fn main() -> Result<()> {
             let worker_id = worker_id.unwrap_or_else(|| default_worker_id(&layout.root));
             let addr = addr.unwrap_or_else(|| "127.0.0.1".into());
             let tts_url = tts_url.unwrap_or_else(|| "http://127.0.0.1:8818".into());
+            // Same gate as the inductor: a worker with no (or a drifted)
+            // profile must not take tasks it would render with the wrong
+            // voices and sound design. Provisioning writes the pointer.
+            let pointer = bm_core::profile::verify(&layout.root)?;
+            println!(
+                "profile {} ({})",
+                pointer.name,
+                &pointer.hash[..12.min(pointer.hash.len())]
+            );
             worker_loop(layout, settings, inductor, worker_id, addr, tts_url).await?;
         }
         Cmd::Segments { .. } => {

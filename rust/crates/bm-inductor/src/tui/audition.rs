@@ -12,7 +12,7 @@
 //! the UI thread, and never twice.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// A sample has to be a sentence. `data/script-01.json` really does contain
 /// `{"speaker": "Dịch Phong", "text": "Ừm!"}`, and a two-character grunt says
@@ -28,13 +28,17 @@ pub(crate) const MAX_LINE_CHARS: usize = 160;
 /// small, but a cap keeps one pathological script from being held forever.
 const PER_CHARACTER_CAP: usize = 200;
 
-/// Every `data/script-*.json` under `root`, sorted.
+/// Every `data/script-*.json` in the workspace, sorted.
+///
+/// Takes the whole [`bm_core::Layout`] rather than a root because the scripts
+/// are the *book's*: `data/` lives in the active workspace, and a root-only
+/// path would index whichever book happened to be at the top of the checkout.
 ///
 /// Sorted so the index is built in a stable order: `read_dir` order is arbitrary
 /// and reorders on insert, which would make a "random" pick differ between two
 /// runs of the same session for no reason anyone could see.
-pub(crate) fn script_files(root: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = std::fs::read_dir(root.join("data"))
+pub(crate) fn script_files(layout: &bm_core::Layout) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(layout.data())
         .map(|rd| {
             rd.filter_map(|e| e.ok().map(|x| x.path()))
                 .filter(|p| {
@@ -55,12 +59,14 @@ pub(crate) fn script_files(root: &Path) -> Vec<PathBuf> {
 /// A script that will not parse is skipped rather than failing the whole index:
 /// a half-digested run still has plenty of usable lines, and refusing to audition
 /// anything because chapter 73 is corrupt would be the wrong trade.
-pub(crate) fn index_lines(root: &Path) -> Result<HashMap<String, Vec<String>>, String> {
-    let files = script_files(root);
+pub(crate) fn index_lines(
+    layout: &bm_core::Layout,
+) -> Result<HashMap<String, Vec<String>>, String> {
+    let files = script_files(layout);
     if files.is_empty() {
         return Err(format!(
             "no data/script-*.json under {} — run :translate first",
-            root.display()
+            layout.data().display()
         ));
     }
     let mut index: HashMap<String, Vec<String>> = HashMap::new();
@@ -104,7 +110,7 @@ pub(crate) fn index_lines(root: &Path) -> Result<HashMap<String, Vec<String>>, S
         return Err(format!(
             "{} script file(s) under {} but none parsed",
             files.len(),
-            root.display()
+            layout.data().display()
         ));
     }
     Ok(index)
@@ -320,7 +326,7 @@ mod tests {
         std::fs::write(data.join("script-02.json"), "{ this is not json").unwrap();
         std::fs::write(data.join("notes.json"), r#"{"segments":[]}"#).unwrap();
 
-        let idx = index_lines(&root).unwrap();
+        let idx = index_lines(&bm_core::Layout::new(&root)).unwrap();
         // Deduplicated, and the corrupt script did not take the rest down.
         let kien = idx.get("Kiên").expect("Kiên is indexed");
         assert_eq!(kien, &vec!["một".to_string()], "the duplicate was dropped");
@@ -338,7 +344,7 @@ mod tests {
     fn an_empty_data_directory_says_what_to_do_about_it() {
         let root = std::env::temp_dir().join(format!("bmnodata{}", std::process::id()));
         std::fs::create_dir_all(root.join("data")).unwrap();
-        let err = index_lines(&root).unwrap_err();
+        let err = index_lines(&bm_core::Layout::new(&root)).unwrap_err();
         assert!(err.contains("translate"), "the fix must be named: {err}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -354,11 +360,14 @@ mod tests {
             return;
         };
         let t0 = std::time::Instant::now();
-        let index = index_lines(Path::new(&root)).expect("the real corpus must index");
+        // Through the resolver, not `new`: the corpus lives in the active
+        // workspace, and this test is the one that reads the real thing.
+        let layout = bm_core::Layout::resolve(&root).expect("BM_REAL_ROOT must resolve");
+        let index = index_lines(&layout).expect("the real corpus must index");
         println!(
             "scan took {:?} for {} files",
             t0.elapsed(),
-            script_files(Path::new(&root)).len()
+            script_files(&layout).len()
         );
         assert!(
             index.len() > 20,

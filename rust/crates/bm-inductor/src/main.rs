@@ -17,7 +17,8 @@ use clap::{Parser, Subcommand};
     about = "Cluster orchestrator for the novel pipeline"
 )]
 struct Cli {
-    /// Repo root (discovered via prompts/analyze.txt when omitted).
+    /// Repo root (discovered when omitted: `rust/Cargo.toml` in a checkout,
+    /// `.bm/profile` on a provisioned worker).
     #[arg(long, global = true)]
     root: Option<std::path::PathBuf>,
     #[command(subcommand)]
@@ -248,6 +249,20 @@ pub fn provision_machine(
     };
     let pre = probe_ssh.probe();
     log.push(format!("[{addr}] {}", pre.summary()));
+    let pointer = match bm_core::profile::read_pointer(&layout.root) {
+        Ok(p) => p,
+        Err(_) => {
+            log.push(format!(
+                "[{addr}] no local profile loaded — `profile.sh fetch/unpack` first (workers verify it at startup)"
+            ));
+            return (false, log);
+        }
+    };
+    log.push(format!(
+        "[{addr}] profile: {} ({})",
+        pointer.name,
+        &pointer.hash[..12.min(pointer.hash.len())]
+    ));
     let binary = match agent_binary_for(pre.os.as_str(), pre.arch.as_str(), layout) {
         Ok(b) => b,
         Err(e) => {
@@ -268,7 +283,7 @@ pub fn provision_machine(
     m.tts_url = Some("http://127.0.0.1:8818".into());
     let (after, mut flow) = provision(
         &m,
-        &layout.root,
+        layout,
         &binary,
         &tts,
         tts_runtime_dir(pre.os.as_str(), pre.arch.as_str(), layout).as_deref(),
@@ -303,6 +318,14 @@ async fn cmd_serve(
     count: u32,
 ) -> anyhow::Result<()> {
     let mut inner = state::Inner::new(layout, settings);
+    // No profile, no run: the live tree is ignored and may be absent or
+    // drifted — refuse before touching the ledger, naming the fix.
+    let pointer = bm_core::profile::verify(&inner.layout.root)?;
+    println!(
+        "profile {} ({})",
+        pointer.name,
+        &pointer.hash[..12.min(pointer.hash.len())]
+    );
     inner.load_ledger();
     inner.check_profile()?;
     inner.reconcile(start, count);
@@ -343,11 +366,7 @@ async fn cmd_serve(
 /// loop is a hand-written SIMD matvec, and a debug build would give all of that
 /// back. Missing is a build error, not a guess — `make tts` produces the
 /// linux/x86_64 one.
-fn tts_binary_for(
-    os: &str,
-    arch: &str,
-    layout: &Layout,
-) -> anyhow::Result<std::path::PathBuf> {
+fn tts_binary_for(os: &str, arch: &str, layout: &Layout) -> anyhow::Result<std::path::PathBuf> {
     for cand in tts_candidates(os, arch, layout) {
         if cand.is_file() {
             return Ok(cand);
@@ -366,11 +385,7 @@ fn tts_binary_for(
 /// Where `make runtime` staged the shared ONNX Runtime to push alongside the
 /// sidecar — `None` where the sidecar is self-contained (macOS links its
 /// runtime statically, so no `.so` travels).
-fn tts_runtime_dir(
-    os: &str,
-    arch: &str,
-    layout: &Layout,
-) -> Option<std::path::PathBuf> {
+fn tts_runtime_dir(os: &str, arch: &str, layout: &Layout) -> Option<std::path::PathBuf> {
     match (os, arch) {
         ("linux", "x86_64") => Some(layout.root.join("rust/target/ort-linux-x64")),
         ("linux", "aarch64") => Some(layout.root.join("rust/target/ort-linux-aarch64")),
@@ -378,11 +393,7 @@ fn tts_runtime_dir(
     }
 }
 
-fn agent_binary_for(
-    os: &str,
-    arch: &str,
-    layout: &Layout,
-) -> anyhow::Result<std::path::PathBuf> {
+fn agent_binary_for(os: &str, arch: &str, layout: &Layout) -> anyhow::Result<std::path::PathBuf> {
     for cand in agent_candidates(os, arch, layout) {
         if cand.is_file() {
             return Ok(cand);
@@ -432,7 +443,14 @@ fn tts_candidates(os: &str, arch: &str, layout: &Layout) -> Vec<std::path::PathB
 /// `workspace` — one directory per book. Creating switches to it; selecting
 /// only moves the pointer, so data is never wiped and ledgers never mix
 /// (the serve gate still refuses a ledger bound to another profile).
-fn cmd_workspace(root: &std::path::Path, cmd: WorkspaceCmd) -> anyhow::Result<()> {
+///
+/// Returns the lines to show rather than printing them: the CLI prints, the
+/// dashboard logs them into its event pane, and both are the same operation.
+pub(crate) fn workspace_cmd(
+    root: &std::path::Path,
+    cmd: WorkspaceCmd,
+) -> anyhow::Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
     let dir = |name: &str| root.join("workspaces").join(name);
     let valid = |name: &str| {
         !name.is_empty()
@@ -447,7 +465,9 @@ fn cmd_workspace(root: &std::path::Path, cmd: WorkspaceCmd) -> anyhow::Result<()
                 anyhow::bail!("bad workspace name {name:?}");
             }
             if dir(&name).exists() {
-                anyhow::bail!("workspace {name:?} already exists — `workspace use {name}` to select it");
+                anyhow::bail!(
+                    "workspace {name:?} already exists — `workspace use {name}` to select it"
+                );
             }
             for d in ["data/chapters", "data/audio", "output"] {
                 std::fs::create_dir_all(dir(&name).join(d))?;
@@ -458,13 +478,15 @@ fn cmd_workspace(root: &std::path::Path, cmd: WorkspaceCmd) -> anyhow::Result<()
             let mut settings = Settings::default();
             match bm_core::profile::read_pointer(root) {
                 Ok(p) => settings.profile = p,
-                Err(_) => println!("note: no profile loaded — `profile.sh fetch/unpack` first"),
+                Err(_) => {
+                    out.push("note: no profile loaded — `profile.sh fetch/unpack` first".into())
+                }
             }
             settings.save(&dir(&name).join("settings.json"))?;
             std::fs::create_dir_all(root.join(".bm"))?;
             std::fs::write(Layout::active_workspace_file(root), format!("{name}\n"))?;
-            println!("workspace {name} created and selected");
-            Ok(())
+            out.push(format!("workspace {name} created and selected"));
+            Ok(out)
         }
         WorkspaceCmd::Use { name } => {
             if !dir(&name).is_dir() {
@@ -472,8 +494,8 @@ fn cmd_workspace(root: &std::path::Path, cmd: WorkspaceCmd) -> anyhow::Result<()
             }
             std::fs::create_dir_all(root.join(".bm"))?;
             std::fs::write(Layout::active_workspace_file(root), format!("{name}\n"))?;
-            println!("workspace {name} selected");
-            Ok(())
+            out.push(format!("workspace {name} selected"));
+            Ok(out)
         }
         WorkspaceCmd::List => {
             let active = std::fs::read_to_string(Layout::active_workspace_file(root))
@@ -489,12 +511,12 @@ fn cmd_workspace(root: &std::path::Path, cmd: WorkspaceCmd) -> anyhow::Result<()
                 .unwrap_or_default();
             names.sort();
             if names.is_empty() {
-                println!("no workspaces (this root is the implicit default)");
+                out.push("no workspaces (this root is the implicit default)".into());
             }
             for n in names {
-                println!("{} {n}", if n == active { "*" } else { " " });
+                out.push(format!("{} {n}", if n == active { "*" } else { " " }));
             }
-            Ok(())
+            Ok(out)
         }
     }
 }
@@ -653,9 +675,17 @@ fn cmd_roster_migrate_cast(layout: &Layout, dry_run: bool) -> anyhow::Result<()>
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let layout = match cli.root {
-        Some(r) => Layout::resolve(r)?,
-        None => Layout::discover()?,
+    // The dashboard and `workspace` are the management plane: they must open
+    // on a root whose pointer is *stale*, because re-pointing is exactly how
+    // that gets repaired. Everything else resolves first and refuses. The
+    // problem is carried, not swallowed — the dashboard prints it, and
+    // `workspace list` shows which names are still there.
+    let manages = matches!(&cli.cmd, Cmd::Workspace { .. } | Cmd::Tui { .. });
+    let (layout, pointer_problem) = match cli.root {
+        Some(r) if manages => Layout::resolve_or_root(r),
+        Some(r) => (Layout::resolve(r)?, None),
+        None if manages => Layout::resolve_or_root(Layout::find_root()?),
+        None => (Layout::discover()?, None),
     };
     bm_core::config::load_dotenv(&layout.root.join(".env"));
     let settings = Settings::load(&layout.settings());
@@ -770,6 +800,12 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Tui { api, once } => {
+            // A stale pointer is why this dashboard opened on the root: say so
+            // before the alternate screen takes the terminal, or the operator
+            // sees the wrong book's panes with no explanation.
+            if let Some(problem) = &pointer_problem {
+                eprintln!("warning: {problem}");
+            }
             if once {
                 tui::snapshot(&api).await
             } else {
@@ -782,7 +818,12 @@ async fn main() -> anyhow::Result<()> {
                 cmd_roster_add_sample(&layout, &path, tags, name)
             }
         },
-        Cmd::Workspace { cmd } => cmd_workspace(&layout.root, cmd),
+        Cmd::Workspace { cmd } => {
+            for line in workspace_cmd(&layout.root, cmd)? {
+                println!("{line}");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -867,26 +908,53 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bm-workspace{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // Create switches to it, stamping the loaded profile (none here).
-        cmd_workspace(&dir, WorkspaceCmd::New { name: "demo".into() }).unwrap();
+        workspace_cmd(
+            &dir,
+            WorkspaceCmd::New {
+                name: "demo".into(),
+            },
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(Layout::active_workspace_file(&dir)).unwrap(),
             "demo\n"
         );
         assert!(dir.join("workspaces/demo/settings.json").is_file());
         // Creating twice is an error, not a wipe.
-        assert!(cmd_workspace(&dir, WorkspaceCmd::New { name: "demo".into() }).is_err());
+        assert!(workspace_cmd(
+            &dir,
+            WorkspaceCmd::New {
+                name: "demo".into()
+            }
+        )
+        .is_err());
         // Selecting a missing workspace is an error, not a creation.
-        assert!(cmd_workspace(&dir, WorkspaceCmd::Use { name: "gone".into() }).is_err());
-        cmd_workspace(&dir, WorkspaceCmd::Use { name: "demo".into() }).unwrap();
-        cmd_workspace(&dir, WorkspaceCmd::List).unwrap();
-        // A loaded profile stamps new workspaces at creation.
-        std::fs::create_dir_all(dir.join(".bm")).unwrap();
-        std::fs::write(
-            dir.join(".bm/profile"),
-            r#"{"name":"xianxia","hash":"h1"}"#,
+        assert!(workspace_cmd(
+            &dir,
+            WorkspaceCmd::Use {
+                name: "gone".into()
+            }
+        )
+        .is_err());
+        workspace_cmd(
+            &dir,
+            WorkspaceCmd::Use {
+                name: "demo".into(),
+            },
         )
         .unwrap();
-        cmd_workspace(&dir, WorkspaceCmd::New { name: "second".into() }).unwrap();
+        let listed = workspace_cmd(&dir, WorkspaceCmd::List).unwrap();
+        assert!(listed.iter().any(|l| l == "* demo"), "{listed:?}");
+        // A loaded profile stamps new workspaces at creation.
+        std::fs::create_dir_all(dir.join(".bm")).unwrap();
+        std::fs::write(dir.join(".bm/profile"), r#"{"name":"xianxia","hash":"h1"}"#).unwrap();
+        workspace_cmd(
+            &dir,
+            WorkspaceCmd::New {
+                name: "second".into(),
+            },
+        )
+        .unwrap();
         let settings: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(dir.join("workspaces/second/settings.json")).unwrap(),
         )
