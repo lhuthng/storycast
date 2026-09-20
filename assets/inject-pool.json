@@ -8,7 +8,7 @@
       "twang"
     ],
     "files": [
-      "injects/arrow-twang.mp3"
+      "injects/arrow-twang-1.mp3"
     ],
     "mode": "hit",
     "level": 1.0,
@@ -23,7 +23,7 @@
       "guard"
     ],
     "files": [
-      "injects/bark.mp3",
+      "injects/bark-1.mp3",
       "injects/bark-2.mp3"
     ],
     "mode": "hit",
@@ -35,8 +35,7 @@
     "tags": [
       "blood",
       "gore",
-      "wound",
-      "spit"
+      "wound"
     ],
     "files": [
       "injects/blood-spatter-1.mp3",
@@ -55,7 +54,7 @@
       "collapse"
     ],
     "files": [
-      "injects/body-thud.mp3",
+      "injects/body-thud-1.mp3",
       "injects/body-thud-2.mp3"
     ],
     "mode": "hit",
@@ -87,7 +86,7 @@
       "gore"
     ],
     "files": [
-      "injects/bone-crush.mp3",
+      "injects/bone-crush-1.mp3",
       "injects/bone-crush-2.mp3",
       "injects/bone-crush-3.mp3"
     ],
@@ -104,7 +103,7 @@
       "cleaning"
     ],
     "files": [
-      "injects/broom-sweep.mp3"
+      "injects/broom-sweep-1.mp3"
     ],
     "mode": "overlap",
     "level": 1.0,
@@ -135,7 +134,7 @@
       "robe"
     ],
     "files": [
-      "injects/cloth-flutter.mp3"
+      "injects/cloth-flutter-1.mp3"
     ],
     "mode": "overlap",
     "level": 1.0,
@@ -183,7 +182,7 @@
       "celebrate"
     ],
     "files": [
-      "injects/crowd-cheer.mp3",
+      "injects/crowd-cheer-1.mp3",
       "injects/crowd-cheer-2.mp3"
     ],
     "mode": "trail",
@@ -199,7 +198,7 @@
       "rap"
     ],
     "files": [
-      "injects/door-knock.mp3",
+      "injects/door-knock-1.mp3",
       "injects/door-knock-2.mp3"
     ],
     "mode": "hit",
@@ -248,7 +247,7 @@
       "movement"
     ],
     "files": [
-      "injects/flyby.mp3"
+      "injects/flyby-1.mp3"
     ],
     "mode": "overlap",
     "level": 1.0,
@@ -263,7 +262,7 @@
       "board"
     ],
     "files": [
-      "injects/food-prep.mp3"
+      "injects/food-prep-1.mp3"
     ],
     "mode": "overlap",
     "level": 0.05,
@@ -278,7 +277,7 @@
       "forest"
     ],
     "files": [
-      "injects/footstep-forest.mp3"
+      "injects/footstep-forest-1.mp3"
     ],
     "mode": "overlap",
     "level": 1.0,
@@ -293,7 +292,7 @@
       "street"
     ],
     "files": [
-      "injects/footstep-stone.mp3"
+      "injects/footstep-stone-1.mp3"
     ],
     "mode": "overlap",
     "level": 1.0,
@@ -308,7 +307,7 @@
       "indoor"
     ],
     "files": [
-      "injects/footstep-wood.mp3"
+      "injects/footstep-wood-1.mp3"
     ],
     "mode": "overlap",
     "level": 1.0,
@@ -323,7 +322,7 @@
       "throat"
     ],
     "files": [
-      "injects/gulp.mp3"
+      "injects/gulp-1.mp3"
     ],
     "mode": "hit",
     "level": 1.0,
@@ -338,7 +337,7 @@
       "moon"
     ],
     "files": [
-      "injects/howl.mp3",
+      "injects/howl-1.mp3",
       "injects/howl-2.mp3"
     ],
     "mode": "trail",
@@ -354,7 +353,7 @@
       "heal"
     ],
     "files": [
-      "injects/light-spell.mp3"
+      "injects/light-spell-1.mp3"
     ],
     "mode": "overlap",
     "level": 1.0,
@@ -369,7 +368,7 @@
       "magic"
     ],
     "files": [
-      "injects/lightning-spell.mp3"
+      "injects/lightning-spell-1.mp3"
     ],
     "mode": "hit",
     "level": 1.0,
@@ -401,7 +400,7 @@
       "blow"
     ],
     "files": [
-      "injects/metal-punch.mp3"
+      "injects/metal-punch-1.mp3"
     ],
     "mode": "trail",
     "hold": 1.2,
@@ -417,7 +416,7 @@
       "flip"
     ],
     "files": [
-      "injects/page-turn.mp3"
+      "injects/page-turn-1.mp3"
     ],
     "mode": "overlap",
     "level": 1.0,
@@ -432,7 +431,7 @@
       "drink"
     ],
     "files": [
-      "injects/pour.mp3"
+      "injects/pour-1.mp3"
     ],
     "mode": "overlap",
     "level": 1.0,
@@ -448,7 +447,7 @@
       "shatter"
     ],
     "files": [
-      "injects/rock-break.mp3"
+      "injects/rock-break-1.mp3"
     ],
     "mode": "hit",
     "level": 1.0,
@@ -463,7 +462,7 @@
       "smack"
     ],
     "files": [
-      "injects/slap.mp3"
+      "injects/slap-1.mp3"
     ],
     "mode": "hit",
     "level": 1.0,
@@ -477,7 +476,7 @@
       "snoring"
     ],
     "files": [
-      "injects/snore.mp3"
+      "injects/snore-1.mp3"
     ],
     "mode": "trail",
     "level": 1.0,
@@ -507,7 +506,7 @@
       "movement"
     ],
     "files": [
-      "injects/swoosh.mp3"
+      "injects/swoosh-1.mp3"
     ],
     "mode": "overlap",
     "level": 1.0,
@@ -556,7 +555,7 @@
       "blast"
     ],
     "files": [
-      "injects/underwater-explosion.mp3"
+      "injects/underwater-explosion-1.mp3"
     ],
     "mode": "trail",
     "hold": 2.0,
@@ -587,7 +586,7 @@
       "splinter"
     ],
     "files": [
-      "injects/wood-break.mp3"
+      "injects/wood-break-1.mp3"
     ],
     "mode": "hit",
     "level": 1.0,
@@ -601,7 +600,7 @@
       "axe"
     ],
     "files": [
-      "injects/wood-chop.mp3"
+      "injects/wood-chop-1.mp3"
     ],
     "mode": "hit",
     "level": 1.0,
