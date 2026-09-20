@@ -2648,20 +2648,21 @@ mod tests {
             "nothing names the orphan's tags: {usage:?}"
         );
 
-        // And against the map that actually ships: every sound in the shipped
-        // effect pool is reachable, or a rule is silently scoring zero.
+        // And against the fixture map: every sound in the fixture effect pool
+        // is reachable, or a rule is silently scoring zero.
         let shipped = shipped_map();
-        let shipped_pool = crate::audio_pool::load_pool(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets/effect-pool.json"),
-        );
+        let fx = fixture_live("usage-pool");
+        let shipped_pool =
+            crate::audio_pool::load_pool(&fx.join("assets/effect-pool.json"));
         assert!(!shipped_pool.is_empty());
         let usage = effect_usage(&shipped, &shipped_pool);
         for name in shipped_pool.keys() {
             assert!(
                 usage.contains_key(name),
-                "{name} is in the shipped pool and no shipped rule reaches it"
+                "{name} is in the fixture pool and no fixture rule reaches it"
             );
         }
+        let _ = std::fs::remove_dir_all(&fx);
     }
 
     #[test]
