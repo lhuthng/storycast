@@ -21,6 +21,10 @@ impl Tts {
             // Rendering a long run can take minutes on a slow CPU.
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(900))
+                // The sidecar is on loopback, so a proxy must not answer for
+                // it — the same trap `api::sidecar_client` documents, and the
+                // reason a preview can 502 while the sidecar is healthy.
+                .no_proxy()
                 .build()
                 .unwrap_or_default(),
         }

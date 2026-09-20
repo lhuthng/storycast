@@ -219,6 +219,7 @@ name = "bm-agent"
 version = "0.2.3"
 dependencies = [
  "anyhow",
+ "axum",
  "base64 0.22.1",
  "bm-core",
  "bm-proto",

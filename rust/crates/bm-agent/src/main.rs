@@ -9,6 +9,7 @@
 //! lifecycle (started per render task, stopped after) so sidecar RSS stays
 //! bounded no matter how many chapters flow through.
 
+mod push;
 mod tts;
 
 use anyhow::{Context, Result};
@@ -66,6 +67,12 @@ enum Cmd {
         addr: Option<String>,
         #[arg(long)]
         tts_url: Option<String>,
+        /// Also answer the inverted protocol on this port: `GET /status`,
+        /// and later `POST /task` / `GET /units`. Needs a cluster token in
+        /// `.bm/` — see `bm_core::token`. Off by default, so a worker started
+        /// the old way is byte-for-byte the old worker.
+        #[arg(long)]
+        serve_tasks: Option<u16>,
     },
     /// List local audio segments as JSON: the inventory half of the
     /// inductor-owned-segments migration. No scheduler involved.
@@ -572,36 +579,57 @@ fn wants_shutdown(body: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-async fn heartbeat_loop(
-    http: reqwest::Client,
-    inductor: String,
+/// Who this worker is, as every report identifies it.
+///
+/// A struct rather than four arguments because the identity is passed to two
+/// callers now — the heartbeat loop that pushes beats and the status endpoint
+/// that answers for one — and four strings in the same order is exactly the
+/// shape that gets transposed silently.
+#[derive(Debug, Clone)]
+struct WorkerIdentity {
     worker_id: String,
     addr: String,
     hostname: String,
     alias: String,
+}
+
+/// The heartbeat for right now. **One builder for both directions.**
+///
+/// The pull protocol posts this on a timer and the inverted protocol answers
+/// `GET /status` with it. Two constructions would be two chances for the
+/// inductor's liveness bookkeeping and its panes to disagree about what a
+/// worker is doing, depending on which way the report travelled.
+fn heartbeat_now(p: &Progress, who: &WorkerIdentity, probe: &mut LoadProbe) -> Heartbeat {
+    let (cpu_pct, mem_pct, mem_gb) = probe.sample();
+    Heartbeat {
+        worker_id: who.worker_id.clone(),
+        addr: who.addr.clone(),
+        task_id: p.task_id.clone(),
+        stage: p.stage.as_deref().and_then(bm_proto::Stage::parse),
+        chapter: p.chapter,
+        progress: p.frac,
+        activity: p.activity.clone(),
+        eta_secs: None,
+        ts: bm_proto::now_secs(),
+        hostname: who.hostname.clone(),
+        alias: who.alias.clone(),
+        cpu_pct,
+        mem_pct,
+        mem_gb,
+    }
+}
+
+async fn heartbeat_loop(
+    http: reqwest::Client,
+    inductor: String,
+    who: WorkerIdentity,
     shared: Shared,
 ) {
     let url = format!("{inductor}/api/heartbeat");
     let mut probe = LoadProbe::new();
     loop {
         let p = shared.lock().map(|p| p.clone()).unwrap_or_default();
-        let (cpu_pct, mem_pct, mem_gb) = probe.sample();
-        let body = Heartbeat {
-            worker_id: worker_id.clone(),
-            addr: addr.clone(),
-            task_id: p.task_id.clone(),
-            stage: p.stage.as_deref().and_then(bm_proto::Stage::parse),
-            chapter: p.chapter,
-            progress: p.frac,
-            activity: p.activity.clone(),
-            eta_secs: None,
-            ts: bm_proto::now_secs(),
-            hostname: hostname.clone(),
-            alias: alias.clone(),
-            cpu_pct,
-            mem_pct,
-            mem_gb,
-        };
+        let body = heartbeat_now(&p, &who, &mut probe);
         // The inductor's only command channel: a shutdown latch read on
         // every answer. Exiting here strands nothing — the inductor
         // reaps the lease (no strike) or requeues the ledger on its way
@@ -848,12 +876,28 @@ async fn worker_loop(
     worker_id: String,
     addr: String,
     tts_url: String,
+    serve_tasks: Option<u16>,
 ) -> Result<()> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
+        // The inductor is loopback or LAN. An ambient `HTTP_PROXY` would
+        // otherwise intercept every register/beat/task/complete and answer in
+        // its place — which surfaces as a 502 from nowhere and a worker that
+        // never joins. Same reasoning as `api::sidecar_client`.
+        //
+        // Deliberately *not* applied to `run_crawl`: a chapter URL is the one
+        // thing here that is genuinely on the internet, and a proxy is exactly
+        // what it should use.
+        .no_proxy()
         .build()?;
     let hostname = hostname_simple();
     let alias = worker_alias_for(&layout.root);
+    let who = WorkerIdentity {
+        worker_id: worker_id.clone(),
+        addr: addr.clone(),
+        hostname: hostname.clone(),
+        alias: alias.clone(),
+    };
     let shared: Shared = Arc::new(Mutex::new(Progress {
         activity: "starting".to_string(),
         ..Default::default()
@@ -861,12 +905,36 @@ async fn worker_loop(
     tokio::spawn(heartbeat_loop(
         http.clone(),
         inductor.clone(),
-        worker_id.clone(),
-        addr.clone(),
-        hostname.clone(),
-        alias.clone(),
+        who.clone(),
         shared.clone(),
     ));
+    // The inverted half of the protocol: this worker answers `GET /status`
+    // instead of only posting beats. Off unless a port is given, so a worker
+    // started the old way behaves exactly as it did.
+    if let Some(port) = serve_tasks {
+        // A worker with no token refuses to serve rather than serving openly:
+        // "authenticated or off" is the only safe pair of states for a channel
+        // that carries instructions.
+        let Some(token) = bm_core::token::read(&layout.root) else {
+            anyhow::bail!(
+                "--serve-tasks needs a cluster token at {} — the inductor generates one and provisioning ships it; without it this worker would accept instructions from anything that can reach the port",
+                layout.root.join(".bm").join(bm_core::token::FILE).display()
+            );
+        };
+        let push = std::sync::Arc::new(push::Push {
+            who: who.clone(),
+            token,
+            shared: shared.clone(),
+            probe: Mutex::new(LoadProbe::new()),
+        });
+        let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+        println!("instruction channel on 0.0.0.0:{port} (token required)");
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, push::router(push)).await {
+                eprintln!("instruction channel died: {e}");
+            }
+        });
+    }
     let reg = Register {
         worker_id: worker_id.clone(),
         addr: addr.clone(),
@@ -1181,6 +1249,7 @@ async fn main() -> Result<()> {
             worker_id,
             addr,
             tts_url,
+            serve_tasks,
         } => {
             let worker_id = worker_id.unwrap_or_else(|| default_worker_id(&layout.root));
             let addr = addr.unwrap_or_else(|| "127.0.0.1".into());
@@ -1194,7 +1263,16 @@ async fn main() -> Result<()> {
                 pointer.name,
                 &pointer.hash[..12.min(pointer.hash.len())]
             );
-            worker_loop(layout, settings, inductor, worker_id, addr, tts_url).await?;
+            worker_loop(
+                layout,
+                settings,
+                inductor,
+                worker_id,
+                addr,
+                tts_url,
+                serve_tasks,
+            )
+            .await?;
         }
         Cmd::Segments { .. } => {
             let manifest = segment_manifest(&layout.audio());

@@ -371,6 +371,12 @@ async fn cmd_serve(
         pointer.name,
         &pointer.hash[..12.min(pointer.hash.len())]
     );
+    // The cluster token, generated on first use and then stable across
+    // restarts: a worker that outlived a restart must not be locked out, and
+    // provisioning copies this file to every box it onboards. Only a
+    // fingerprint is printed — the log is not a place for a secret.
+    let token = bm_core::token::load_or_create(&inner.layout.root)?;
+    println!("cluster token {}", &token[..8.min(token.len())]);
     inner.load_ledger();
     inner.check_profile()?;
     inner.reconcile(start, count);

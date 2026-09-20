@@ -478,6 +478,30 @@ echo stopped"#,
         }
     }
 
+    /// Ship the cluster token to the worker's root.
+    ///
+    /// The inverted protocol makes a worker accept *instructions*, so it has to
+    /// be able to tell its own inductor from anything else that can reach the
+    /// port. The secret travels as a file rather than as an argument because
+    /// `argv` is visible in `ps` on every box it was typed on — and it is
+    /// rewritten on every provision so a rotated token reaches the box without
+    /// a manual step.
+    pub fn write_cluster_token(&self, token: &str) -> Result<()> {
+        // A quoted heredoc, like the profile pointer beside it: the token is hex
+        // today, but a hand-edited one must not be able to end the command early
+        // or be re-split by the shell.
+        let script = format!(
+            "mkdir -p $HOME/{d}/.bm && cat > $HOME/{d}/.bm/{f} << 'EOF'\n{token}\nEOF\nchmod 600 $HOME/{d}/.bm/{f}\n",
+            d = REMOTE_DIR,
+            f = crate::token::FILE,
+        );
+        let (code, _, stderr) = self.run(&script, 10)?;
+        if code != 0 {
+            anyhow::bail!("failed to write the cluster token: {}", stderr.trim());
+        }
+        Ok(())
+    }
+
     /// Write the load pointer the worker's agent gate checks at startup.
     ///
     /// The profile content already travels inside `install_sources`
@@ -663,6 +687,26 @@ pub fn provision(
                 }
             }
         }
+    }
+
+    // The cluster token: what lets this worker tell its own inductor from
+    // anything else that can reach its port. Shipped here rather than passed at
+    // launch so the secret never appears in `argv` (and so a rotated token
+    // reaches the box without a manual step). A worker started with
+    // `--serve-tasks` refuses to run without it.
+    match crate::token::read(&layout.root) {
+        Some(token) => match ssh.write_cluster_token(&token) {
+            Ok(()) => log.push(format!(
+                "[{}] cluster token {} (owner-only on the box)",
+                m.id,
+                &token[..8.min(token.len())]
+            )),
+            Err(e) => log.push(format!("[{}] cluster token failed: {e}", m.id)),
+        },
+        None => log.push(format!(
+            "[{}] no cluster token on this inductor — `serve` generates one; a worker started with --serve-tasks will refuse to run until it does",
+            m.id
+        )),
     }
 
     // The worker's agent gate checks this pointer at startup: sources above

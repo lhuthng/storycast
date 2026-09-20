@@ -28,6 +28,7 @@ pub mod pool;
 pub mod profile;
 pub mod provision;
 pub mod segments;
+pub mod token;
 pub mod util;
 pub mod voices;
 
