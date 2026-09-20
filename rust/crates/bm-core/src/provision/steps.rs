@@ -16,6 +16,12 @@ pub struct Probe {
     pub mem_mb: u64,
     pub disk_free_mb: u64,
     pub arch: String,
+    /// Remote OS in Rust's spelling (`std::env::consts::OS`): `linux`,
+    /// `macos`. Probed via `uname -s`; `#[serde(default)]` so a record
+    /// written before this field still reads (the summary then shows the
+    /// arch alone).
+    #[serde(default)]
+    pub os: String,
     /// Version string reported by the installed agent, if any.
     pub agent_version: Option<String>,
     /// A usable Python interpreter with the TTS deps installed.
@@ -71,6 +77,12 @@ impl Probe {
         if !self.reachable {
             return format!("unreachable: {}", self.note);
         }
+        // ponytail: one platform string, not two fields to keep in sync.
+        let platform = if self.os.is_empty() {
+            self.arch.clone()
+        } else {
+            format!("{}/{}", self.os, self.arch)
+        };
         // A count, not the list: 50 enrolled names wrapped the Logs pane for
         // screens. Which voices enrolled is already on the `enrolled …` lines.
         format!(
@@ -78,7 +90,7 @@ impl Probe {
             self.hostname,
             self.nproc,
             self.mem_mb,
-            self.arch,
+            platform,
             self.agent_version.as_deref().unwrap_or("absent"),
             self.sidecar(),
             if self.voices.is_empty() {
@@ -91,11 +103,32 @@ impl Probe {
     }
 }
 
+/// `uname -m` spelling → Rust's (`std::env::consts::ARCH`): `arm64` (macOS)
+/// and `aarch64` (Linux) are the same chip; `amd64` is `x86_64`. Unknown
+/// spellings pass through so a new platform reads as its own name, not as
+/// another platform's binary.
+pub fn normalize_arch(raw: &str) -> String {
+    match raw.trim().to_lowercase().as_str() {
+        "aarch64" | "arm64" => "aarch64".into(),
+        "x86_64" | "amd64" => "x86_64".into(),
+        other => other.into(),
+    }
+}
+
+/// `uname -s` spelling → Rust's (`std::env::consts::OS`).
+pub fn normalize_os(raw: &str) -> String {
+    match raw.trim().to_lowercase().as_str() {
+        "darwin" => "macos".into(),
+        other => other.into(),
+    }
+}
+
 impl Ssh {
     /// Ask a machine what it already has.
     pub fn probe(&self) -> Probe {
         let script = format!(
             r#"echo "hostname=$(hostname 2>/dev/null || echo unknown)"
+echo "os=$(uname -s 2>/dev/null || echo unknown)"
 echo "arch=$(uname -m 2>/dev/null || echo unknown)"
 echo "nproc=$(nproc 2>/dev/null || echo 0)"
 echo "mem_mb=$(awk '/MemTotal/{{printf "%d", $2/1024}}' /proc/meminfo 2>/dev/null || echo 0)"
@@ -157,7 +190,8 @@ echo "probe=done"
                     let v = v.trim();
                     match k.trim() {
                         "hostname" => probe.hostname = v.to_string(),
-                        "arch" => probe.arch = v.to_string(),
+                        "os" => probe.os = normalize_os(v),
+                        "arch" => probe.arch = normalize_arch(v),
                         "nproc" => probe.nproc = v.parse().unwrap_or(0),
                         "mem_mb" => probe.mem_mb = v.parse().unwrap_or(0),
                         "disk_mb" => probe.disk_free_mb = v.parse().unwrap_or(0),
@@ -259,30 +293,40 @@ echo "probe=done"
     /// wants the plain `libonnxruntime.so`, the loader wants the SONAME
     /// `libonnxruntime.so.1`, and the versioned file is what those two point at.
     /// Shipping only one of them produces a failure that names none of this.
-    pub fn install_tts_runtime(&self, tts_binary: &Path, runtime_dir: &Path) -> Result<String> {
+    ///
+    /// `runtime_dir` is `None` where the sidecar is self-contained (macOS
+    /// links its runtime statically — the native binary runs with no `.so`
+    /// beside it), so only the binary travels.
+    pub fn install_tts_runtime(
+        &self,
+        tts_binary: &Path,
+        runtime_dir: Option<&Path>,
+    ) -> Result<String> {
         self.rsync_push(tts_binary, "bm-tts", false)?;
-        // Whatever the make target staged, rather than a version hardcoded here:
-        // the pin lives in the Makefile, and two copies of it would drift.
-        let mut libs: Vec<std::path::PathBuf> = std::fs::read_dir(runtime_dir)
-            .with_context(|| format!("reading the runtime dir {}", runtime_dir.display()))?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("libonnxruntime.so"))
-            })
-            .collect();
-        libs.sort();
-        if libs.is_empty() {
-            anyhow::bail!(
-                "no libonnxruntime.so* in {} — run `make runtime` first",
-                runtime_dir.display()
-            );
-        }
-        for lib in &libs {
-            let name = lib.file_name().expect("filtered on a file name");
-            self.rsync_push(lib, &name.to_string_lossy(), false)?;
+        if let Some(runtime_dir) = runtime_dir {
+            // Whatever the make target staged, rather than a version hardcoded here:
+            // the pin lives in the Makefile, and two copies of it would drift.
+            let mut libs: Vec<std::path::PathBuf> = std::fs::read_dir(runtime_dir)
+                .with_context(|| format!("reading the runtime dir {}", runtime_dir.display()))?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("libonnxruntime.so"))
+                })
+                .collect();
+            libs.sort();
+            if libs.is_empty() {
+                anyhow::bail!(
+                    "no libonnxruntime.so* in {} — run `make runtime` first",
+                    runtime_dir.display()
+                );
+            }
+            for lib in &libs {
+                let name = lib.file_name().expect("filtered on a file name");
+                self.rsync_push(lib, &name.to_string_lossy(), false)?;
+            }
         }
 
         let script = format!(
@@ -459,7 +503,7 @@ pub fn provision(
     repo_root: &Path,
     agent_binary: &Path,
     tts_binary: &Path,
-    tts_runtime: &Path,
+    tts_runtime: Option<&Path>,
     agent_version: &str,
     force: bool,
     initial_probe: Option<Probe>,
@@ -726,6 +770,27 @@ mod tests {
         let s = p.summary();
         assert!(s.contains("2 voices"), "{s}");
         assert!(!s.contains("Suneo"), "names stay out of the summary: {s}");
+    }
+
+    #[test]
+    fn probe_normalizes_uname_spellings_to_rust_platforms() {
+        // `arm64` (macOS) and `aarch64` (Linux) are the same chip; `Darwin`
+        // is Rust's `macos`. Anything unknown passes through so a new
+        // platform reads as its own name, never as another platform's binary.
+        assert_eq!(super::normalize_arch("arm64"), "aarch64");
+        assert_eq!(super::normalize_arch("aarch64"), "aarch64");
+        assert_eq!(super::normalize_arch("amd64"), "x86_64");
+        assert_eq!(super::normalize_arch("riscv64"), "riscv64");
+        assert_eq!(super::normalize_os("Darwin"), "macos");
+        assert_eq!(super::normalize_os("Linux"), "linux");
+        let p = Probe {
+            reachable: true,
+            hostname: "mac".into(),
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            ..Default::default()
+        };
+        assert!(p.summary().contains("macos/aarch64"), "{}", p.summary());
     }
 
     #[test]
