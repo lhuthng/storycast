@@ -12,6 +12,7 @@ impl Inner {
             layout,
             settings,
             tasks: HashMap::new(),
+            ledger_profile: None,
             machines: HashMap::new(),
             workers: HashMap::new(),
             caps: HashMap::new(),
@@ -45,8 +46,26 @@ impl Inner {
         self.events.iter().skip(skip).collect()
     }
 
+    /// Workspace/profile gate: a ledger holding another profile's tasks
+    /// refuses to run here rather than mixing two genres' output. Empty or
+    /// unstamped ledgers pass and adopt the workspace profile at reconcile.
+    pub fn check_profile(&self) -> Result<()> {
+        if self.tasks.is_empty() {
+            return Ok(());
+        }
+        match &self.ledger_profile {
+            Some(stamped) if *stamped != self.settings.profile => anyhow::bail!(
+                "ledger holds {} task(s) for profile '{}' but this workspace runs '{}' — switch back (`workspace use` / `profile load`) or clear the ledger; refusing to mix",
+                self.tasks.len(),
+                stamped.name,
+                self.settings.profile.name,
+            ),
+            _ => Ok(()),
+        }
+    }
+
     fn ledger_path(&self) -> std::path::PathBuf {
-        self.layout.bm_state().join("ledger.json")
+        self.layout.ledger()
     }
 
     /// Registry handle for an address: the stored box name, else the
@@ -87,7 +106,8 @@ impl Inner {
         let doc = json!({"tasks": self.tasks.values().collect::<Vec<_>>(),
                          "machine_state": state,
                          "workers": self.workers,
-                         "caps": self.caps});
+                         "caps": self.caps,
+                         "profile": self.ledger_profile});
         let _ = bm_core::write_json(&self.ledger_path(), &doc);
     }
 
@@ -124,6 +144,9 @@ impl Inner {
                 }
             }
         }
+        self.ledger_profile = doc
+            .get("profile")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
         let boxes = load_boxes(&self.layout.machines());
         let empty = serde_json::Map::new();
         let rt = doc

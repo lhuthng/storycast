@@ -71,6 +71,9 @@ impl Inner {
                 }
             }
         }
+        // Tasks reconciled above are bound to the workspace profile from here
+        // on; the serve gate refuses to run them anywhere else.
+        self.ledger_profile = Some(self.settings.profile.clone());
         self.save();
     }
 
