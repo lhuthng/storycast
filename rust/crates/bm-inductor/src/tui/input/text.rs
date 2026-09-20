@@ -5,8 +5,8 @@ use crate::tui::{
         command::{command_key, do_command, Command},
         dispatch,
         runconfig::parse_mix_config,
+        runconfig::save_app_setting,
         runconfig::save_run_config,
-        runconfig::save_ssh_setting,
         submit::submit_text,
     },
     jobs::{op_job, Job},
@@ -85,9 +85,9 @@ pub(crate) async fn key_text(
                 }
             } else if matches!(
                 p.kind,
-                TextKind::SshKey | TextKind::SshUser | TextKind::SshPort
+                TextKind::SshKey | TextKind::SshUser | TextKind::SshPort | TextKind::Advertise
             ) {
-                match save_ssh_setting(app, p.kind.clone(), &p.buf) {
+                match save_app_setting(app, p.kind.clone(), &p.buf) {
                     Ok(msg) => {
                         app.screen = Screen::Normal;
                         app.set_status(Level::Ok, msg);

@@ -42,6 +42,36 @@ pub fn public_bind(has_remotes: bool) -> &'static str {
     }
 }
 
+/// The URL one worker should dial back on.
+///
+/// `advertise` is the operator's explicit answer and wins when set; unset falls
+/// back to [`dial_back_ip`], which asks the routing table which of this
+/// machine's addresses reaches that box. The fallback is right on a LAN and
+/// useless off it — behind NAT the address it finds is private, so a worker
+/// outside the network cannot dial it, and the box joins the cluster and then
+/// silently never gets a task.
+///
+/// `advertise` is a hostname or address, optionally with a port. A pasted URL is
+/// tolerated (the scheme is ours to add); an IPv6 literal without brackets is
+/// not — write `[::1]:8901` if that is ever what you mean.
+pub fn worker_inductor_url(
+    advertise: Option<&str>,
+    remote: &str,
+    api_port: u16,
+) -> anyhow::Result<String> {
+    let raw = match advertise {
+        Some(a) => a.trim().trim_end_matches('/').to_string(),
+        None => dial_back_ip(remote)?,
+    };
+    let host = raw.split("://").last().unwrap_or(&raw).to_string();
+    let with_port = if host.contains(':') {
+        host
+    } else {
+        format!("{host}:{api_port}")
+    };
+    Ok(format!("http://{with_port}"))
+}
+
 /// This machine's LAN address for remote workers to dial. macOS first
 /// (`ipconfig`), then the interface table itself (`ipconfig` stays silent on
 /// statically-addressed interfaces — exactly how lab NICs are configured).
@@ -177,6 +207,28 @@ mod tests {
     fn bind_follows_the_cluster_shape() {
         assert_eq!(public_bind(false), "127.0.0.1", "solo stays loopback");
         assert_eq!(public_bind(true), "0.0.0.0", "remotes need the LAN");
+    }
+
+    #[test]
+    fn an_advertised_address_wins_over_the_routing_guess() {
+        // No routing table is consulted when the operator has answered the
+        // question — which is the whole point: the guess returns a private
+        // address behind NAT, and a worker outside the network cannot dial it.
+        assert_eq!(
+            worker_inductor_url(Some("box.example.com"), "203.0.113.9", 8901).unwrap(),
+            "http://box.example.com:8901"
+        );
+        // A port already in the value is kept, not doubled.
+        assert_eq!(
+            worker_inductor_url(Some("box.example.com:9000"), "203.0.113.9", 8901).unwrap(),
+            "http://box.example.com:9000"
+        );
+        // A pasted URL is tolerated: the scheme is ours to add, and the footer
+        // is where an operator would have copied it from.
+        assert_eq!(
+            worker_inductor_url(Some("http://box.example.com/"), "203.0.113.9", 8901).unwrap(),
+            "http://box.example.com:8901"
+        );
     }
 
     #[test]
