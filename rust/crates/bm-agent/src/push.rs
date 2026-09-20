@@ -42,17 +42,25 @@
 //! A worker with no token **refuses to serve at all** rather than serving
 //! openly. "Authenticated or off" is the only safe pair of states.
 
-use crate::{heartbeat_now, LoadProbe, Shared, WorkerIdentity};
+use crate::{heartbeat_now, run_offer, LoadProbe, Shared, Sidecar, WorkerIdentity};
 use axum::{
-    extract::State,
+    body::Body,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
-    routing::get,
+    response::{IntoResponse, Response},
+    routing::{get, post},
     Json, Router,
 };
-use bm_proto::Heartbeat;
-use std::sync::{Arc, Mutex};
+use bm_core::{config::Settings, Layout};
+use bm_proto::{Complete, Heartbeat, TaskOffer};
+use serde::Deserialize;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
-/// What the server needs to answer: who this worker is, and what it is doing.
+/// What the server needs to answer: who this worker is, what it is doing, and
+/// everything a pushed task needs in order to run.
 pub(crate) struct Push {
     pub(crate) who: WorkerIdentity,
     /// The cluster token. Required on every request.
@@ -61,11 +69,31 @@ pub(crate) struct Push {
     /// Sampling state for the status answer — the CPU delta needs the previous
     /// reading, so it cannot be rebuilt per request.
     pub(crate) probe: Mutex<LoadProbe>,
+    pub(crate) layout: Layout,
+    pub(crate) settings: Settings,
+    /// The sidecar, spawned per task and stopped after it — the same lifecycle
+    /// the pull path uses, so RSS returns to the OS between chapters.
+    ///
+    /// `tokio::sync::Mutex`, not `std::sync`'s: `run_offer` takes `&mut` and is
+    /// awaited while the guard is held, and a `std::sync::MutexGuard` across an
+    /// `await` makes the whole future non-`Send` — which axum reports as an
+    /// opaque "`Handler` is not satisfied".
+    pub(crate) sidecar: tokio::sync::Mutex<Sidecar>,
+    pub(crate) http: reqwest::Client,
+    /// One task at a time, which is what the pull protocol's single task slot
+    /// gave too. A second `POST /task` while one runs gets 409 rather than a
+    /// queue: the inductor owns the schedule, and a worker holding a backlog is
+    /// a worker whose lease the inductor cannot reason about.
+    pub(crate) busy: AtomicBool,
 }
 
 /// The router the inductor talks to.
 pub(crate) fn router(push: Arc<Push>) -> Router {
-    Router::new().route("/status", get(status)).with_state(push)
+    Router::new()
+        .route("/status", get(status))
+        .route("/task", post(task))
+        .route("/unit", get(unit))
+        .with_state(push)
 }
 
 /// `GET /status` — the worker's heartbeat, on request instead of on a timer.
@@ -76,12 +104,7 @@ async fn status(
     State(push): State<Arc<Push>>,
     headers: HeaderMap,
 ) -> Result<Json<Heartbeat>, (StatusCode, String)> {
-    if !authorised(&headers, &push.token) {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "missing or wrong cluster token".into(),
-        ));
-    }
+    check(&headers, &push.token)?;
     let p = push.shared.lock().map(|p| p.clone()).unwrap_or_default();
     let mut probe = push
         .probe
@@ -93,26 +116,169 @@ async fn status(
 /// `Authorization: Bearer <token>`, compared without short-circuiting.
 ///
 /// One header, one shape, every endpoint: a per-endpoint scheme is how a
-/// forgotten check becomes a public one.
-fn authorised(headers: &HeaderMap, token: &str) -> bool {
+/// forgotten check becomes a public one. Returns a `Result` rather than a
+/// `bool` so a handler cannot forget it — the compiler asks.
+fn check(headers: &HeaderMap, token: &str) -> Result<(), (StatusCode, String)> {
+    let unauthorised = || {
+        (
+            StatusCode::UNAUTHORIZED,
+            "missing or wrong cluster token".to_string(),
+        )
+    };
     let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else {
-        return false;
+        return Err(unauthorised());
     };
     let Ok(text) = value.to_str() else {
-        return false;
+        return Err(unauthorised());
     };
     match text.strip_prefix("Bearer ") {
-        Some(presented) => bm_core::token::matches(presented.trim(), token),
-        None => false,
+        Some(presented) if bm_core::token::matches(presented.trim(), token) => Ok(()),
+        _ => Err(unauthorised()),
     }
+}
+
+/// `POST /task` — run one offer and answer with its `Complete`.
+///
+/// The response is held for as long as the stage takes, so the inductor learns
+/// the outcome on the connection it used to ask. That also makes dropping the
+/// connection a cancel, which the pull protocol had no way to express.
+async fn task(
+    State(push): State<Arc<Push>>,
+    headers: HeaderMap,
+    Json(offer): Json<TaskOffer>,
+) -> Response {
+    if let Err(e) = check(&headers, &push.token) {
+        return e.into_response();
+    }
+    // `swap` rather than load-then-store: two simultaneous posts must not both
+    // find the slot free.
+    if push.busy.swap(true, Ordering::SeqCst) {
+        let running = push
+            .shared
+            .lock()
+            .map(|p| p.task_id.clone().unwrap_or_default())
+            .unwrap_or_default();
+        return (StatusCode::CONFLICT, format!("already running {running}")).into_response();
+    }
+    let _guard = BusyGuard(&push.busy);
+
+    let mut sidecar = push.sidecar.lock().await;
+    // The inductor URL is deliberately empty: units stay on this box and the
+    // inductor collects them (`GET /unit`). Any code path that tried to dial
+    // out would fail loudly here rather than silently depending on a route
+    // that does not exist across NAT — which is the whole reason for the
+    // inversion.
+    let result = run_offer(
+        &push.layout,
+        &push.settings,
+        &offer,
+        &push.shared,
+        &mut sidecar,
+        "",
+        &push.http,
+    )
+    .await;
+    sidecar.stop();
+
+    match result {
+        Ok(done) => Json(Complete {
+            worker_id: push.who.worker_id.clone(),
+            task_id: offer.task_id.clone(),
+            ok: done.ok,
+            detail: done.detail,
+            duration_secs: 0.0,
+            bible_delta: done.delta,
+            units: done.units,
+            script: done.script,
+            text: done.text,
+            mp3_b64: done.mp3_b64,
+        })
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+    }
+}
+
+/// Clears the busy flag however the handler leaves — including on a panic in a
+/// task body, which would otherwise leave the worker permanently refusing work.
+struct BusyGuard<'a>(&'a AtomicBool);
+
+impl Drop for BusyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+#[derive(Deserialize)]
+struct UnitQuery {
+    chapter: u32,
+    engine: String,
+    name: String,
+}
+
+/// `GET /unit` — one rendered wav, from this worker's own segment directory.
+///
+/// **The inductor asks for what it knows it is missing**, so this needs no
+/// ledger, no acknowledgement and no lease: a transfer that fails simply means
+/// the next pass asks again, and a name the inductor already holds is never
+/// requested. Folding the units into the task's final answer instead would mean
+/// a render that crashes at unit 49 of 50 returns nothing, where this returns
+/// the 48 that finished.
+async fn unit(
+    State(push): State<Arc<Push>>,
+    headers: HeaderMap,
+    Query(q): Query<UnitQuery>,
+) -> Response {
+    if let Err(e) = check(&headers, &push.token) {
+        return e.into_response();
+    }
+    // The name arrives from the network, so it is checked before it is joined:
+    // `../../etc/passwd` is a legal-looking filename and `join` would happily
+    // walk out of the segment directory with it.
+    if !safe_unit_name(&q.name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("bad unit name {:?}", q.name),
+        )
+            .into_response();
+    }
+    let path = push.layout.seg_dir(&q.engine, q.chapter).join(&q.name);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "audio/wav")
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        // Absent is not an error: this worker does not have that unit — another
+        // box rendered it, or this render has not reached it yet.
+        Err(_) => (StatusCode::NOT_FOUND, format!("no {}", q.name)).into_response(),
+    }
+}
+
+/// A unit name is one `.wav` filename and nothing else.
+///
+/// The renderer names them `0007_Voice.wav` and `0007-0012_Voice.wav`, so the
+/// shape is known; anything with a separator, a parent reference or an absolute
+/// prefix is not one of ours and must never reach `Path::join`.
+fn safe_unit_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() < 256
+        && name.ends_with(".wav")
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+        && !name.starts_with('.')
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Progress;
+    use crate::{LoadProbe, Progress, Sidecar};
 
     fn push(token: &str) -> Arc<Push> {
+        push_at(token, &std::env::temp_dir().join("bm-push-unused"))
+    }
+
+    fn push_at(token: &str, root: &std::path::Path) -> Arc<Push> {
         Arc::new(Push {
             who: WorkerIdentity {
                 worker_id: "box-1".into(),
@@ -129,6 +295,11 @@ mod tests {
                 activity: "render ch7".into(),
             })),
             probe: Mutex::new(LoadProbe::new()),
+            layout: Layout::new(root),
+            settings: Settings::default(),
+            sidecar: tokio::sync::Mutex::new(Sidecar::new("http://127.0.0.1:8818")),
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            busy: AtomicBool::new(false),
         })
     }
 
@@ -148,48 +319,84 @@ mod tests {
         // "Authenticated or off" is the only safe pair of states, and the check
         // is one shape for every endpoint — a per-endpoint scheme is how a
         // forgotten check becomes a public one.
-        assert!(authorised(&headers(Some("s3cret")), "s3cret"));
-        assert!(!authorised(&headers(None), "s3cret"), "no header, no entry");
+        assert!(check(&headers(Some("s3cret")), "s3cret").is_ok());
         assert!(
-            !authorised(&headers(Some("")), "s3cret"),
+            check(&headers(None), "s3cret").is_err(),
+            "no header, no entry"
+        );
+        assert!(
+            check(&headers(Some("")), "s3cret").is_err(),
             "empty is not a token"
         );
         assert!(
-            !authorised(&headers(Some("s3cres")), "s3cret"),
+            check(&headers(Some("s3cres")), "s3cret").is_err(),
             "one byte off"
         );
         assert!(
-            !authorised(&headers(Some("s3cretx")), "s3cret"),
+            check(&headers(Some("s3cretx")), "s3cret").is_err(),
             "a longer guess is not a match"
         );
         // Padding is tolerated, because some clients add it and trimming can
-        // never turn a wrong token into a right one — it only removes bytes
-        // from the ends.
-        assert!(authorised(&headers(Some("s3cret ")), "s3cret"));
-        assert!(authorised(&headers(Some(" s3cret")), "s3cret"));
+        // never turn a wrong token into a right one.
+        assert!(check(&headers(Some("s3cret ")), "s3cret").is_ok());
+        assert!(check(&headers(Some(" s3cret")), "s3cret").is_ok());
         // A different scheme is not a bearer token.
         let mut h = HeaderMap::new();
         h.insert(
             axum::http::header::AUTHORIZATION,
             "Basic czNjcmV0".parse().unwrap(),
         );
-        assert!(!authorised(&h, "s3cret"), "Basic is not Bearer");
+        assert!(check(&h, "s3cret").is_err(), "Basic is not Bearer");
+    }
+
+    #[test]
+    fn a_unit_name_is_one_filename_or_it_is_refused() {
+        // This is the only place a name from the network reaches `Path::join`,
+        // and `join` follows `..` happily — so the guard is the difference
+        // between serving a segment and serving `/etc/passwd`.
+        for good in [
+            "0007_Voice.wav",
+            "0007-0012_Voice.wav",
+            "title_Narrator.wav",
+        ] {
+            assert!(safe_unit_name(good), "{good} is a real unit name");
+        }
+        for bad in [
+            "../../etc/passwd",
+            "..",
+            ".",
+            "/etc/passwd",
+            "a/b.wav",
+            "a\\b.wav",
+            ".hidden.wav",
+            "",
+            "0007_Voice.mp3",
+            "0007_Voice.wav\0",
+        ] {
+            assert!(!safe_unit_name(bad), "{bad:?} must not reach Path::join");
+        }
+        // Long enough to be an attack rather than a name.
+        assert!(!safe_unit_name(&format!("{}.wav", "a".repeat(300))));
+    }
+
+    /// A real socket, because the gate's value is that it applies to the route.
+    /// `no_proxy` for the same reason the production clients use it: an ambient
+    /// `HTTP_PROXY` would answer the loopback request and this test would be
+    /// asserting the shell's environment.
+    async fn serve(push: Arc<Push>) -> (String, reqwest::Client) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router(push)).await;
+        });
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        (format!("http://{addr}"), http)
     }
 
     #[tokio::test]
     async fn status_reports_the_worker_and_refuses_without_the_token() {
-        // Over a real socket, because the gate's value is that it applies to the
-        // route: testing `authorised` alone would pass with the handler never
-        // wired up. `no_proxy` for the same reason the production clients use
-        // it — an ambient HTTP_PROXY would answer for the loopback request and
-        // this test would be asserting the shell's environment.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, router(push("s3cret"))).await;
-        });
-        let http = reqwest::Client::builder().no_proxy().build().unwrap();
-        let url = format!("http://{addr}/status");
+        let (base, http) = serve(push("s3cret")).await;
+        let url = format!("{base}/status");
 
         assert_eq!(http.get(&url).send().await.unwrap().status(), 401);
         assert_eq!(
@@ -215,5 +422,87 @@ mod tests {
         assert_eq!(beat.progress, 0.5);
         assert_eq!(beat.activity, "render ch7");
         assert!(beat.ts > 0);
+    }
+
+    #[tokio::test]
+    async fn a_unit_is_served_from_disk_and_absent_is_not_an_error() {
+        // The collection half of the inversion: the inductor asks for the names
+        // it knows it is missing, so "not here" has to be a plain answer rather
+        // than a failure — a different box may have rendered it.
+        let dir = std::env::temp_dir().join(format!("bm-push-units-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let push = push_at("s3cret", &dir);
+        let seg = push.layout.seg_dir("vieneu", 7);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0007_Voice.wav"), b"RIFF-fake").unwrap();
+
+        let (base, http) = serve(push).await;
+        let url = format!("{base}/unit?chapter=7&engine=vieneu&name=0007_Voice.wav");
+
+        assert_eq!(http.get(&url).send().await.unwrap().status(), 401);
+
+        let ok = http.get(&url).bearer_auth("s3cret").send().await.unwrap();
+        assert_eq!(ok.status(), 200);
+        assert_eq!(ok.headers()["content-type"], "audio/wav");
+        assert_eq!(ok.bytes().await.unwrap().as_ref(), b"RIFF-fake");
+
+        // A name this worker does not have: 404, not 500.
+        let missing = http
+            .get(format!(
+                "{base}/unit?chapter=7&engine=vieneu&name=0008_Voice.wav"
+            ))
+            .bearer_auth("s3cret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), 404);
+
+        // And a traversal attempt is refused before it touches the filesystem.
+        let escape = http
+            .get(format!(
+                "{base}/unit?chapter=7&engine=vieneu&name=../../../../etc/passwd"
+            ))
+            .bearer_auth("s3cret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(escape.status(), 400, "a separator must never reach join");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_second_task_is_refused_while_one_runs() {
+        // One task at a time, which is what the pull protocol's single slot
+        // gave. The inductor owns the schedule; a worker holding a backlog is
+        // one whose lease the inductor cannot reason about.
+        let push = push("s3cret");
+        push.busy.store(true, Ordering::SeqCst);
+        let (base, http) = serve(push).await;
+        let offer = serde_json::json!({
+            "task_id": "render:7", "chapter": 7, "stage": "render",
+            "root": "/tmp", "engine": "vieneu",
+        });
+        let busy = http
+            .post(format!("{base}/task"))
+            .bearer_auth("s3cret")
+            .json(&offer)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(busy.status(), 409);
+        assert!(
+            busy.text().await.unwrap().contains("render:7"),
+            "the refusal names what is running"
+        );
+
+        // Without the token it is refused before the busy check, so an
+        // unauthenticated caller cannot even learn what is running.
+        let unauth = http
+            .post(format!("{base}/task"))
+            .json(&offer)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), 401);
     }
 }
