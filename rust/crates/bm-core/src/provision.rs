@@ -20,8 +20,8 @@ mod stamp;
 mod steps;
 
 pub use aws::{
-    instance_line, parse_instances, profile_object, AwsConfig, AwsInstance, DEFAULT_FILE,
-    DEFAULT_TAG,
+    describe_image_args, instance_line, parse_instances, profile_object, run_instances_args,
+    terminate_args, AwsConfig, AwsInstance, DEFAULT_FILE, DEFAULT_TAG,
 };
 pub use ssh::{resolve_key, KeySource, Ssh};
 pub use stamp::{compute_provision_stamp, ProvisionStamp};

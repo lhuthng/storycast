@@ -16,6 +16,8 @@
   "ssh_user": "ubuntu",
   "_note_keypairs": "region -> the EC2 keypair NAME in that region. Create it with `aws ec2 create-key-pair` and keep the private half at `.bm/aws/<region>.pem` (0600) — `.bm/` is already gitignored, so the material never enters the tree.",
   "keypairs": {},
+  "_note_images": "region -> the AMI ID. Explicit on purpose: the image decides what actually runs on your account, so it should be a decision you made and can see, not a 'latest' pointer that moves under you. Resolve the current Ubuntu LTS with:  aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id --region <region> --query Parameter.Value --output text    It must match ssh_user above (ubuntu on Ubuntu, ec2-user on Amazon Linux).",
+  "images": {},
   "_note_bucket": "Where the profile bundles are published, named by their manifest hash. Empty is a working configuration: every box then receives the assets by rsync from your machine, which is fine on a LAN and 668 MB per box from home.",
   "bucket": "",
   "_note_spot": "Spot is a good fit: render and merge are both idempotent and the lease reaper requeues an interrupted task, so a reclaimed box costs a retry rather than a lost chapter.",

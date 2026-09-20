@@ -186,6 +186,27 @@ enum AwsCmd {
     ///
     /// The credential and region check: if this answers, `up` can too.
     Ls,
+    /// Launch boxes and leave them running, tagged, ready to provision.
+    ///
+    /// `--dry-run` prints the exact `aws ec2 run-instances` call and stops —
+    /// the review step before anything costs money.
+    Up {
+        /// How many. Refused if it would take the pool past `max_workers`.
+        #[arg(long, default_value = "1")]
+        count: u32,
+        /// Print the call instead of making it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Terminate the boxes carrying our marker tag.
+    ///
+    /// Resolves the ids from the tag first and prints them, so the destructive
+    /// step is always over a list someone could read.
+    Down {
+        /// Print what would be terminated instead of doing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -551,7 +572,10 @@ pub(crate) fn workspace_cmd(
 /// terminates anything: `up`/`down` are the commands that spend money, and they
 /// are not written yet.
 fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
-    use bm_core::provision::{instance_line, parse_instances, AwsConfig};
+    use bm_core::provision::{
+        describe_image_args, instance_line, parse_instances, run_instances_args, terminate_args,
+        AwsConfig,
+    };
     let path = root.join(".bm").join("aws.json");
     let template = root.join(bm_core::provision::DEFAULT_FILE);
     let mut out: Vec<String> = Vec::new();
@@ -683,33 +707,170 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
             }
             Ok(out)
         }
+        AwsCmd::Up { count, dry_run } => {
+            let cfg = AwsConfig::load_layered(root);
+            let missing = cfg.missing();
+            let hash = bm_core::profile::read_pointer(root)
+                .map(|p| p.hash)
+                .unwrap_or_default();
+            if dry_run {
+                // No call at all, and that is the point: a dry run has to work
+                // *before* the account is set up, which is exactly when the
+                // permissions are missing and when seeing the call matters
+                // most. The two lookups the real path needs are shown rather
+                // than performed.
+                out.push("--dry-run: no call is made and nothing is launched.".into());
+                out.push(format!(
+                    "would run: aws {}",
+                    run_instances_args(&cfg, count, "<the AMI's root device>", &hash).join(" ")
+                ));
+                out.push(format!(
+                    "  after resolving it: aws {}",
+                    describe_image_args(&cfg, cfg.image().unwrap_or("<AMI>")).join(" ")
+                ));
+                out.push(format!(
+                    "  and counting what is live: aws ec2 describe-instances --filters Name=tag-key,Values={}",
+                    cfg.tag_key
+                ));
+                if !missing.is_empty() {
+                    out.push(String::new());
+                    out.push(format!(
+                        "{} thing(s) to set before the real run:",
+                        missing.len()
+                    ));
+                    for m in missing {
+                        out.push(format!("  - {m}"));
+                    }
+                }
+                return Ok(out);
+            }
+            if !missing.is_empty() {
+                let mut msg = String::from("the pool is not ready to launch:");
+                for m in missing {
+                    msg.push_str(&format!("\n  - {m}"));
+                }
+                anyhow::bail!("{msg}");
+            }
+            // The marker tag's value *is* the profile hash, so without one the
+            // box would be untraceable in `ls` and unprovisionable anyway —
+            // `provision` refuses without a loaded profile. Better to say so
+            // here than to rent a box that cannot be used.
+            if hash.is_empty() {
+                anyhow::bail!(
+                    "no profile loaded — the marker tag records which profile a box was built for, and provisioning refuses without one; `profile.sh fetch/unpack <name>` first"
+                );
+            }
+            // The cap is checked against the total, not against this call: a
+            // cap that only counts what one invocation asked for is not a cap.
+            let json = aws_cli_instances(&cfg.region, &cfg.tag_key)?;
+            let live = parse_instances(&json, &cfg.tag_key)
+                .ok_or_else(|| anyhow::anyhow!("the aws CLI answered something unexpected"))?
+                .iter()
+                .filter(|i| matches!(i.state.as_str(), "pending" | "running" | "stopping"))
+                .count() as u32;
+            if live + count > cfg.max_workers {
+                anyhow::bail!(
+                    "{live} box(es) already live and {count} asked for, over max_workers={} — raise it in `.bm/aws.json` or launch fewer",
+                    cfg.max_workers
+                );
+            }
+            // The mapping must name the image's own root device (`/dev/sda1` on
+            // Ubuntu, `/dev/xvda` on Amazon Linux), so it is resolved rather
+            // than assumed — otherwise `disk_gb` is silently ignored.
+            let image = cfg.image().unwrap_or_default().to_string();
+            let root_device = aws_cli_text(&describe_image_args(&cfg, &image))?;
+            let argv = run_instances_args(&cfg, count, root_device.trim(), &hash);
+            out.push(format!(
+                "{live} live, cap {}, launching {count} tagged {}",
+                cfg.max_workers, cfg.tag_key
+            ));
+            out.push(format!("aws {}", argv.join(" ")));
+            let raw = aws_cli_raw(&argv)?;
+            let launched = parse_instances(&raw, &cfg.tag_key).unwrap_or_default();
+            if launched.is_empty() {
+                out.push("the launch answered without any instances — check the account".into());
+            }
+            for i in &launched {
+                out.push(format!("launched {}", instance_line(i)));
+            }
+            out.push(String::new());
+            out.push(
+                "Next: `provision --addr <ip>` each one, then `:B` to start their workers.".into(),
+            );
+            Ok(out)
+        }
+        AwsCmd::Down { dry_run } => {
+            let cfg = AwsConfig::load_layered(root);
+            if cfg.region.trim().is_empty() {
+                anyhow::bail!("no region set — `aws init`, then fill it in");
+            }
+            let json = aws_cli_instances(&cfg.region, &cfg.tag_key)?;
+            let found = parse_instances(&json, &cfg.tag_key).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the aws CLI answered something unexpected — not terminating on a guess"
+                )
+            })?;
+            let live: Vec<_> = found
+                .iter()
+                .filter(|i| matches!(i.state.as_str(), "pending" | "running" | "stopping"))
+                .collect();
+            if live.is_empty() {
+                out.push(format!(
+                    "nothing to terminate (no live box carries {})",
+                    cfg.tag_key
+                ));
+                return Ok(out);
+            }
+            out.push(format!("{} box(es) carry {}:", live.len(), cfg.tag_key));
+            for i in &live {
+                out.push(format!("  {}", instance_line(i)));
+            }
+            let ids: Vec<String> = live.iter().map(|i| i.id.clone()).collect();
+            if dry_run {
+                out.push(String::new());
+                out.push(format!(
+                    "--dry-run: nothing terminated. Would run: aws {}",
+                    terminate_args(&cfg.region, &ids).join(" ")
+                ));
+                return Ok(out);
+            }
+            let raw = aws_cli_raw(&terminate_args(&cfg.region, &ids))?;
+            for i in parse_instances(&raw, &cfg.tag_key).unwrap_or_default() {
+                out.push(format!("terminating {} ({})", i.id, i.state));
+            }
+            Ok(out)
+        }
     }
 }
 
 /// `aws ec2 describe-instances`, filtered to the boxes we tagged.
 ///
-/// A missing CLI and missing credentials are both normal first-run states, so
-/// each gets a sentence naming the fix instead of a raw exit status. The filter
-/// is `tag-key`, not a value: it matches every box we started whatever profile
-/// it was built for, and it cannot match a stranger's instances.
+/// The filter is `tag-key`, not a value: it matches every box we started
+/// whatever profile it was built for, and it cannot match a stranger's
+/// instances.
 fn aws_cli_instances(region: &str, tag_key: &str) -> anyhow::Result<String> {
-    let filters = [
-        "Name=tag-key".to_string() + ",Values=" + tag_key,
-        "Name=instance-state-name,Values=pending,running,stopping,stopped".to_string(),
-    ];
-    let mut cmd = std::process::Command::new("aws");
-    cmd.args([
-        "ec2",
-        "describe-instances",
-        "--region",
-        region,
-        "--output",
-        "json",
-    ]);
-    for f in &filters {
-        cmd.arg("--filters").arg(f);
-    }
-    let out = match cmd.output() {
+    aws_cli_raw(&[
+        "ec2".into(),
+        "describe-instances".into(),
+        "--region".into(),
+        region.into(),
+        "--filters".into(),
+        format!("Name=tag-key,Values={tag_key}"),
+        "--filters".into(),
+        "Name=instance-state-name,Values=pending,running,stopping,stopped".into(),
+        "--output".into(),
+        "json".into(),
+    ])
+}
+
+/// Run one `aws` subcommand and hand back stdout, or an error naming the fix.
+///
+/// Shared by `ls`/`up`/`down` so the three cannot disagree about what a missing
+/// CLI, missing credentials, or a policy that forbids the call means. Those are
+/// all normal first-run states, so each gets a sentence naming the fix instead
+/// of a raw exit status.
+fn aws_cli_raw(args: &[String]) -> anyhow::Result<String> {
+    let out = match std::process::Command::new("aws").args(args).output() {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
             "the `aws` CLI is not on PATH — install the AWS CLI v2, or run `aws show` for the definition alone"
@@ -725,18 +886,30 @@ fn aws_cli_instances(region: &str, tag_key: &str) -> anyhow::Result<String> {
         let hint = if err.contains("Unable to locate credentials") {
             " — no credentials in the standard chain; `aws configure sso`, or set AWS_PROFILE"
         } else if err.contains("UnauthorizedOperation") || err.contains("not authorized") {
-            " — the credentials were found but the identity may not call EC2; it needs at least ec2:DescribeInstances (see `aws init` for the full list)"
+            " — the credentials were found but the identity may not call this; `aws init` lists the actions the pool needs"
         } else if err.contains("InvalidClientTokenId") || err.contains("ExpiredToken") {
             " — the credentials are stale; refresh them (`aws sso login`)"
         } else {
             ""
         };
         anyhow::bail!(
-            "aws describe-instances failed{hint}: {}",
+            "aws {} failed{hint}: {}",
+            args.first().map(String::as_str).unwrap_or("?"),
             bm_core::util::head_chars(err.trim(), 300)
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// One `--query`-driven value: a single line, trimmed. `None` and empty are
+/// both "the call succeeded and answered nothing", which for a root device name
+/// is a refusal rather than a default.
+fn aws_cli_text(args: &[String]) -> anyhow::Result<String> {
+    let text = aws_cli_raw(args)?.trim().to_string();
+    if text.is_empty() || text == "None" {
+        anyhow::bail!("aws {} answered nothing", args.join(" "));
+    }
+    Ok(text)
 }
 
 /// Rewrite interjections into engine tags via the live inductor API.
