@@ -4,6 +4,14 @@ output/
 __pycache__/
 *.pyc
 
+# Live profile tree (assets/ + prompts/) and workspaces: machine-local state,
+# loaded from the tracked bundles in profiles/. A fresh clone packs nothing —
+# `tools/profile.sh unpack <name>` materializes the live tree and writes the
+# .bm/profile pointer that bm-core::profile::verify gates runners on.
+/assets/
+/prompts/
+/workspaces/
+
 # Inductor state, run logs
 .bm/
 *.log

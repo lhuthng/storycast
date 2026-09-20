@@ -1,0 +1,11 @@
+Fixture dramatization prompt template. Production prompts live in the profile,
+not here; this stub exists so prompt-rendering tests assert substitution
+against the same placeholder contract. The analyzer answers in strict JSON
+with speakers, segments and per-segment music values from the scene map's
+closed palette.
+
+CHARACTERS
+{bible_json}
+
+CHAPTER
+{chapter_text}

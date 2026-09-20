@@ -1,0 +1,20 @@
+Fixture script prompt template: split the chapter into labeled segments.
+Same placeholder contract as analyze.txt.
+
+CAST
+{cast_json}
+
+CHARACTERS
+{bible_json}
+
+MOODS
+{music_palette}
+
+EFFECTS
+{effect_tags}
+
+SOUNDS
+{inject_sounds}
+
+CHAPTER
+{chapter_text}

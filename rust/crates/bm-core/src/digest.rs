@@ -957,12 +957,20 @@ mod tests {
         }
     }
 
-    /// The shipped pair, against the real pools.
+    /// The shipped pair, against the fixture pools.
     #[test]
     fn shipped_prompts_render_every_placeholder() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let layout = Layout::new(&root);
-        let bible: Value = crate::read_json(&layout.bible()).unwrap_or(json!({"characters": []}));
+        let dir = std::env::temp_dir().join("bm-prompt-fixture");
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::profile::install_fixture(&dir).expect("fixture profile");
+        let layout = Layout::new(&dir);
+        let bible: Value = json!({"characters": []});
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::write(
+            layout.chapter_txt(51),
+            "Chương 51: Fixture\n\nBody text here.\n",
+        )
+        .unwrap();
         let text = std::fs::read_to_string(layout.chapter_txt(51)).unwrap();
 
         let cast = build_prompt(&layout, &bible, &text).unwrap();

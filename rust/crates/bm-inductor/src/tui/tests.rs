@@ -3375,28 +3375,20 @@ async fn enter_on_a_voice_locks_its_sentence_for_later() {
 // the sound-design editor
 // ---------------------------------------------------------------------------
 
-/// A checkout holding the real scene map and the three real registries, with
-/// every clip they name present as an empty file.
+/// A checkout holding the fixture scene map and registries, with every clip
+/// they name present as an empty file.
 ///
-/// The registries and the map are the *shipped* ones on purpose: a fixture
-/// built from invented pools would pass while the real guard refused every
-/// entry, which is the failure that matters here. The clips are placeholders —
-/// nothing in the editor reads their contents, only whether they are there.
+/// The fixture mirrors production shapes, so the editor guards behave as they
+/// do live; the live tree itself is ignored and may be absent. The clips are
+/// placeholders — nothing in the editor reads their contents, only whether
+/// they are there.
 fn sound_layout(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let dir = tempfile::tempdir().unwrap();
     let layout = bm_core::Layout::new(dir.path());
-    std::fs::create_dir_all(layout.assets()).unwrap();
-    std::fs::create_dir_all(dir.path().join("prompts")).unwrap();
-    std::fs::write(dir.path().join("prompts/analyze.txt"), "x").unwrap();
-    std::fs::copy(repo.join("assets/scene-map.json"), layout.scene_map()).unwrap();
+    bm_core::profile::install_fixture(dir.path()).expect("fixture profile");
     for kind in bm_core::audio_pool::PoolKind::ALL {
-        // Copied byte for byte, notes and all — a fixture that round-tripped
-        // them through the writer would not have the hand formatting the
-        // "leaves the rest of the file alone" test is about.
-        std::fs::copy(repo.join("assets").join(kind.registry()), layout.pool(kind)).unwrap();
         let pool = bm_core::audio_pool::load_pool(&layout.pool(kind));
-        assert!(!pool.is_empty(), "{} shipped empty", kind.registry());
+        assert!(!pool.is_empty(), "{} empty", kind.registry());
         for sound in pool.values() {
             for f in &sound.files {
                 let p = layout.assets().join(f);
