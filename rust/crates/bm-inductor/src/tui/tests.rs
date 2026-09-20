@@ -9,7 +9,9 @@ use super::input::runconfig::{
 };
 use super::input::submit::submit_text;
 use super::input::{handle_key, op_key, urlencode};
-use super::jobs::{job_segment, run_job, set_machine_state, DoneKind, Ev, Job};
+use super::jobs::{
+    job_segment, run_job, set_machine_state, DoneKind, Ev, Job, ProfileReq, WorkspaceReq,
+};
 use super::layout::{
     cols, size_class, width_of, Size, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H, COMPACT_MACHINES_H,
     COMPACT_MACHINE_COLS, COMPACT_WORKERS_H, COMPACT_WORKER_COLS, FULL_EVENTS_MIN_H, FULL_FOOTER_H,
@@ -55,7 +57,7 @@ async fn tracked_jobs_keep_lifecycle_serial_and_commands_live() {
     }));
     let mut app = App::new("http://unused");
     let start = Job::StartBackend {
-        layout_root: Default::default(),
+        layout: bm_core::Layout::new(""),
         api: "unused".into(),
         api_up: false,
         start: 1,
@@ -70,7 +72,7 @@ async fn tracked_jobs_keep_lifecycle_serial_and_commands_live() {
         &mut app,
         &job_tx,
         Job::StopBackend {
-            layout_root: Default::default(),
+            layout: bm_core::Layout::new(""),
             machines: vec![],
             api: "unused".into(),
             settings_key: None,
@@ -80,7 +82,7 @@ async fn tracked_jobs_keep_lifecycle_serial_and_commands_live() {
         &mut app,
         &job_tx,
         Job::LoadLines {
-            layout_root: Default::default()
+            layout: bm_core::Layout::new("")
         }
     ));
     assert_eq!(
@@ -136,7 +138,7 @@ fn tracked_activity_and_cleanup_use_identity_not_queue_order() {
             &mut app,
             &tx,
             Job::LoadLines {
-                layout_root: Default::default(),
+                layout: bm_core::Layout::new(""),
             },
         );
     }
@@ -185,7 +187,7 @@ async fn tracked_crashes_and_missing_done_release_markers() {
         &mut app,
         &job_tx,
         Job::StartBackend {
-            layout_root: Default::default(),
+            layout: bm_core::Layout::new(""),
             api: "unused".into(),
             api_up: false,
             start: 1,
@@ -257,7 +259,7 @@ async fn cancelled_start_never_touches_backend() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     super::jobs::job_start_backend(
         tx,
-        Default::default(),
+        bm_core::Layout::new(""),
         "unused".into(),
         false,
         1,
@@ -390,7 +392,7 @@ fn run_config_save_persists_everything_it_parsed() {
     let dir = std::env::temp_dir().join("bm-runconfig-save");
     let _ = std::fs::remove_dir_all(&dir);
     let mut app = App::new("http://x");
-    app.layout_root = dir.clone();
+    app.layout = bm_core::Layout::new(&dir);
 
     let msg = save_run_config(&app, "1 1 gemini 3.8-flash,3.7-flash").unwrap();
     assert!(msg.contains("ch1"), "{msg}");
@@ -449,7 +451,7 @@ fn run_preview_prefers_live_api_then_file_then_defaults() {
         .save(&bm_core::Layout::new(&dir).settings())
         .unwrap();
     let mut app = App::new("http://x");
-    app.layout_root = dir;
+    app.layout = bm_core::Layout::new(dir);
     let cfg = run_preview(&app);
     assert!(!cfg.live);
     assert!(cfg.saved, "a settings file exists");
@@ -574,49 +576,67 @@ async fn run_screen_enters_and_launches_with_previewed_values() {
 }
 
 #[tokio::test]
-async fn machine_state_falls_back_to_the_ledger_file_while_down() {
+async fn machine_state_falls_back_to_the_workspace_ledger_while_down() {
     // Nothing answers on port 9 (discard): the API post fails fast and
     // the ledger patch carries the phase instead.
+    //
+    // With a workspace selected the *book's* ledger is the live one. Patching
+    // `<root>/.bm/ledger.json` — which is what a root-only layout did — wrote
+    // a file no scheduler reads, so the phase silently never appeared.
     let d = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(d.path().join(".bm")).unwrap();
+    std::fs::create_dir_all(d.path().join("workspaces/beyond-myriads")).unwrap();
+    std::fs::write(d.path().join(".bm/active-workspace"), "beyond-myriads\n").unwrap();
+    let layout = bm_core::Layout::resolve(d.path()).unwrap();
     std::fs::write(
-            d.path().join(".bm/ledger.json"),
-            r#"{"tasks": [], "machines": [
+        layout.ledger(),
+        r#"{"tasks": [], "machines": [
                 {"id": "a", "addr": "a", "ssh_user": "u", "ssh_port": 22, "role": "worker", "state": "unknown", "last_seen": 0, "note": ""}
             ]}"#,
-        )
-        .unwrap();
+    )
+    .unwrap();
     set_machine_state(
         "http://127.0.0.1:9",
-        d.path(),
+        &layout,
         "a",
         MachineState::Provisioning,
         "catching up",
     )
     .await;
     let doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(d.path().join(".bm/ledger.json")).unwrap())
-            .unwrap();
+        serde_json::from_str(&std::fs::read_to_string(layout.ledger()).unwrap()).unwrap();
     assert_eq!(doc["machines"][0]["state"], "provisioning");
     assert_eq!(doc["machines"][0]["note"], "catching up");
+    assert!(
+        !d.path().join(".bm/ledger.json").exists(),
+        "the root ledger is not the live file any more"
+    );
 }
 
 #[test]
-fn machine_targets_fall_back_to_the_ledger_file() {
+fn machine_targets_fall_back_to_the_workspace_ledger_file() {
     // The trap: fresh TUI + dead inductor leaves app.machines empty, and
     // B used to default to local-only, silently dropping remotes. The
     // registry file (addr + ssh credentials) stands in instead.
+    //
+    // With a workspace selected that file is the *workspace's* ledger: reading
+    // `<root>/.bm/ledger.json` found nothing, so the fallback quietly returned
+    // local-only and the remotes were dropped again — the same bug, one layer
+    // down.
     let d = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(d.path().join(".bm")).unwrap();
+    std::fs::create_dir_all(d.path().join("workspaces/beyond-myriads")).unwrap();
+    std::fs::write(d.path().join(".bm/active-workspace"), "beyond-myriads\n").unwrap();
+    let layout = bm_core::Layout::resolve(d.path()).unwrap();
     std::fs::write(
-            d.path().join(".bm").join("ledger.json"),
-            r#"{"tasks": [], "machines": [
+        layout.ledger(),
+        r#"{"tasks": [], "machines": [
                 {"id": "192.168.2.2", "addr": "192.168.2.2", "ssh_user": "thang", "ssh_port": 22, "ssh_key": "/k", "role": "worker", "state": "unknown", "last_seen": 0, "note": ""},
                 {"id": "127.0.0.1", "addr": "127.0.0.1", "ssh_user": "local", "ssh_port": 22, "role": "worker", "state": "unknown", "last_seen": 0, "note": ""}
             ]}"#,
-        )
-        .unwrap();
-    let found = registry_machines(d.path());
+    )
+    .unwrap();
+    let found = registry_machines(&layout);
     assert_eq!(found.len(), 2);
     assert_eq!(found[1].addr, "192.168.2.2");
     assert_eq!(
@@ -626,7 +646,7 @@ fn machine_targets_fall_back_to_the_ledger_file() {
     );
 
     let mut app = App::new("http://x");
-    app.layout_root = d.path().to_path_buf();
+    app.layout = layout;
     assert_eq!(
         app.effective_machines().len(),
         2,
@@ -641,7 +661,7 @@ fn machine_targets_fall_back_to_the_ledger_file() {
 
     let nowhere = std::path::Path::new("/nonexistent-root-xyz");
     assert!(
-        registry_machines(nowhere).is_empty(),
+        registry_machines(&bm_core::Layout::new(nowhere)).is_empty(),
         "missing file means local-only, not a crash"
     );
 }
@@ -669,7 +689,11 @@ async fn a_cold_start_names_the_fix_instead_of_reqwest_prose() {
         .unwrap()
         .port();
     let api = format!("http://127.0.0.1:{port}");
-    let http = reqwest::Client::new();
+    // `no_proxy`, like the client `run_loop` builds: with `HTTP_PROXY` set in
+    // the environment an ambient proxy answers the loopback request and the
+    // verdict becomes "bad state payload" — the test would then be asserting
+    // the shell's environment rather than the dashboard's behaviour.
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
     let err = super::jobs::fetch_state(&http, &api)
         .await
         .expect_err("nothing listens there");
@@ -769,6 +793,97 @@ fn crawl_template_requires_the_chapter_placeholder() {
 }
 
 #[test]
+fn workspace_prompt_parses_list_use_and_new() {
+    // One prompt, three verbs — parsed at submit so a typo keeps the prompt
+    // open with the operator's own text still in it.
+    let mut app = App::new("http://x");
+    let prompt = |buf: &str| TextPrompt::new(TextKind::Workspace, "t", "h", buf);
+
+    assert!(matches!(
+        submit_text(&mut app, &prompt("")),
+        Ok(Job::Workspace {
+            req: WorkspaceReq::List,
+            ..
+        })
+    ));
+    assert!(matches!(
+        submit_text(&mut app, &prompt("  beyond-myriads  ")),
+        Ok(Job::Workspace {
+            req: WorkspaceReq::Use(ref n),
+            ..
+        }) if n == "beyond-myriads"
+    ));
+    assert!(matches!(
+        submit_text(&mut app, &prompt("new second-book")),
+        Ok(Job::Workspace {
+            req: WorkspaceReq::New(ref n),
+            ..
+        }) if n == "second-book"
+    ));
+    // A name is one path segment: `../x` would escape workspaces/.
+    for bad in ["../x", "a/b", "new ", "."] {
+        assert!(
+            submit_text(&mut app, &prompt(bad)).is_err(),
+            "“{bad}” must be refused"
+        );
+    }
+}
+
+#[test]
+fn profile_prompt_parses_list_load_and_pack() {
+    let mut app = App::new("http://x");
+    let prompt = |buf: &str| TextPrompt::new(TextKind::Profile, "t", "h", buf);
+
+    assert!(matches!(
+        submit_text(&mut app, &prompt("")),
+        Ok(Job::Profile {
+            req: ProfileReq::List,
+            ..
+        })
+    ));
+    // A bare name loads — the common case needs no verb.
+    assert!(matches!(
+        submit_text(&mut app, &prompt("xianxia")),
+        Ok(Job::Profile {
+            req: ProfileReq::Load(ref n),
+            ..
+        }) if n == "xianxia"
+    ));
+    assert!(matches!(
+        submit_text(&mut app, &prompt("pack xianxia")),
+        Ok(Job::Profile {
+            req: ProfileReq::Pack(ref n),
+            ..
+        }) if n == "xianxia"
+    ));
+    assert!(submit_text(&mut app, &prompt("pack ")).is_err());
+}
+
+#[test]
+fn the_footer_names_the_active_workspace_and_the_loaded_profile() {
+    // `default` is the implicit root workspace, not a missing name: a fresh
+    // clone with no pointer runs there and the footer has to say so.
+    let l = bm_core::Layout::new("/repo");
+    assert_eq!(super::model::workspace_label(&l), "default");
+    let named = bm_core::Layout {
+        root: "/repo".into(),
+        work: "/repo/workspaces/beyond-myriads".into(),
+    };
+    assert_eq!(super::model::workspace_label(&named), "beyond-myriads");
+    // No profile is the state every runner refuses to start in, so it is
+    // reported plainly rather than left blank.
+    assert_eq!(super::model::profile_label(None), "none");
+    let p = bm_core::profile::Pointer {
+        name: "xianxia".into(),
+        hash: "0123456789abcdef".into(),
+    };
+    assert_eq!(
+        super::model::profile_label(Some(&p)),
+        "xianxia (0123456789ab)"
+    );
+}
+
+#[test]
 fn add_sample_rejects_an_empty_path() {
     let mut app = App::new("http://x");
     let p = TextPrompt::new(TextKind::AddSample, "t", "h", "  ");
@@ -833,7 +948,7 @@ async fn add_sample_success_reloads_the_roster() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
     run_job(
         Job::AddSample {
-            layout_root: dir,
+            layout: bm_core::Layout::new(&dir),
             path: src.display().to_string(),
             name: None,
             tags: None,
@@ -860,7 +975,7 @@ async fn add_sample_success_reloads_the_roster() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
     run_job(
         Job::AddSample {
-            layout_root: std::env::temp_dir().join("bm-addsample-reload"),
+            layout: bm_core::Layout::new(std::env::temp_dir().join("bm-addsample-reload")),
             path: "/nonexistent/clip.mp3".into(),
             name: None,
             tags: None,
@@ -1046,8 +1161,14 @@ fn command_line_maps_keys_and_words() {
     assert_eq!(command_key("quit"), Some(Command::Key(KeyCode::Char('q'))));
     assert_eq!(command_key("exit"), Some(Command::Key(KeyCode::Char('q'))));
     assert_eq!(command_key("q"), Some(Command::Key(KeyCode::Char('q'))));
-    assert_eq!(command_key("prov"), Some(Command::Provision { force: false }));
-    assert_eq!(command_key("reprov"), Some(Command::Provision { force: true }));
+    assert_eq!(
+        command_key("prov"),
+        Some(Command::Provision { force: false })
+    );
+    assert_eq!(
+        command_key("reprov"),
+        Some(Command::Provision { force: true })
+    );
     assert_eq!(command_key("remove"), Some(Command::DropMachine));
     assert_eq!(command_key("ADD"), Some(Command::AddMachine));
     assert_eq!(command_key("current"), Some(Command::AuditionCurrent));
@@ -1449,7 +1570,10 @@ fn an_address_head_never_becomes_a_phantom_worker() {
     // show the address, not hash it into a third name.
     let mut app = App::new("http://127.0.0.1:8901");
     app.beats = vec![beat("thang-marmot", "192.168.2.2", 2, "marmot")];
-    app.log_at(Level::Ok, "[192.168.2.2] already configured (agent 0.2.3 + tts sidecar)");
+    app.log_at(
+        Level::Ok,
+        "[192.168.2.2] already configured (agent 0.2.3 + tts sidecar)",
+    );
     let text = render_text(&mut app, 140, 44);
     assert!(
         text.contains("[192.168.2.2]"),
@@ -1633,7 +1757,10 @@ fn both_panes_call_a_known_box_by_its_handle() {
     app.machines = vec![named_machine("192.168.2.2", "hawk")];
     app.beats = vec![beat("thang-marmot", "192.168.2.2", 2, "marmot")];
     let text = render_text(&mut app, 140, 44);
-    assert!(text.contains("marmot"), "the worker keeps its alias:\n{text}");
+    assert!(
+        text.contains("marmot"),
+        "the worker keeps its alias:\n{text}"
+    );
     assert!(text.contains("hawk"), "both panes use the handle:\n{text}");
     assert!(
         !text.contains("host-thang-marmot"),
@@ -1669,13 +1796,19 @@ fn stats_pane_counts_completions_and_estimates_the_remainder() {
     assert!(text.contains("Stats"), "the panel exists:\n{text}");
     assert!(text.contains("marmot"), "rows are workers:\n{text}");
     // Half of a 100s render remains: the TUI-side ETA, not a report.
-    assert!(text.contains("50s"), "remainder from history × progress:\n{text}");
+    assert!(
+        text.contains("50s"),
+        "remainder from history × progress:\n{text}"
+    );
     // Idle with no active stage estimates nothing; unknown load dashes.
     assert!(text.contains("caracal"), "idle workers list too:\n{text}");
     assert!(text.contains("—"), "dashes where nothing is known:\n{text}");
     // The 100-column floor still fits the split row, not just wide terms.
     let narrow = render_text(&mut app, 100, 32);
-    assert!(narrow.contains("Stats"), "panel survives the floor:\n{narrow}");
+    assert!(
+        narrow.contains("Stats"),
+        "panel survives the floor:\n{narrow}"
+    );
     assert!(narrow.contains("50s"), "eta survives the floor:\n{narrow}");
 }
 
@@ -2449,7 +2582,10 @@ async fn current_word_tests_the_current_voice_on_the_shown_line() {
         "the current voice, not the pointed one"
     );
     assert_eq!(req.character.as_deref(), Some("Narrator"));
-    let text = req.text.clone().expect(":current always names the shown line");
+    let text = req
+        .text
+        .clone()
+        .expect(":current always names the shown line");
     assert_eq!(
         app.audition.as_deref(),
         Some("Đức Trí"),
@@ -2559,10 +2695,14 @@ async fn audition_without_a_backend_synthesizes_locally() {
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
     app.conn = Conn::Unknown;
-    app.layout_root = std::path::PathBuf::from("/tmp/bm-offline-audition");
+    app.layout = bm_core::Layout::new("/tmp/bm-offline-audition");
 
     do_command(&mut app, Command::AuditionTry, &http, &job_tx);
-    match job_rx.try_recv().expect(":try dispatches offline").into_bare() {
+    match job_rx
+        .try_recv()
+        .expect(":try dispatches offline")
+        .into_bare()
+    {
         Job::PreviewLocal { voice, text, .. } => {
             assert_eq!(voice, "Adam", "the pointed voice");
             assert!(!text.is_empty(), "a line is always sent");
@@ -3205,7 +3345,7 @@ fn ssh_default_commands_save_validate_and_clear() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let mut app = App::new("http://x");
-    app.layout_root = dir.clone();
+    app.layout = bm_core::Layout::new(&dir);
     let settings_path = dir.join(".bm").join("settings.json");
     let load = || bm_core::config::Settings::load(&settings_path);
 
@@ -3278,12 +3418,7 @@ async fn quit_word_quits_from_the_picker_command_line() {
     app.pending = 0;
     let pick = app.screen.clone();
     app.command_return = Some(pick);
-    app.screen = Screen::Text(TextPrompt::new(
-        TextKind::Command,
-        ":",
-        "",
-        "quit",
-    ));
+    app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "quit"));
     let quit = handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
     assert!(quit, ":quit from the picker must quit");
 }
@@ -3405,8 +3540,9 @@ fn sound_layout(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
 /// finds them.
 fn sound_app(root: &std::path::Path) -> App {
     let mut app = App::new("http://unused");
-    app.layout_root = root.to_path_buf();
-    app.sound = Some(sound::load(root).expect("the fixture loads"));
+    let layout = bm_core::Layout::new(root);
+    app.sound = Some(sound::load(&layout).expect("the fixture loads"));
+    app.layout = layout;
     app.screen = Screen::Sound(SoundView::new());
     app
 }
@@ -3613,7 +3749,7 @@ async fn the_guard_is_re_read_when_the_confirmation_is_answered() {
         format!(r#"{{"segments":[{{"sound":"{name}"}}]}}"#),
     )
     .unwrap();
-    app.sound = Some(sound::load(&root).unwrap());
+    app.sound = Some(sound::load(&bm_core::Layout::new(&root)).unwrap());
 
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
     assert!(
@@ -3886,7 +4022,7 @@ async fn an_entry_whose_clip_is_gone_can_still_be_retagged() {
 
 /// A checkout with one chapter's script and one rendered segment in it, for
 /// the paths that read the local cache instead of the API.
-fn local_cache_layout() -> (tempfile::TempDir, std::path::PathBuf) {
+fn local_cache_layout() -> (tempfile::TempDir, bm_core::Layout) {
     let dir = tempfile::tempdir().unwrap();
     let layout = bm_core::Layout::new(dir.path());
     std::fs::create_dir_all(layout.data()).unwrap();
@@ -3901,7 +4037,7 @@ fn local_cache_layout() -> (tempfile::TempDir, std::path::PathBuf) {
     let seg = layout.seg_dir("vieneu", 1);
     std::fs::create_dir_all(&seg).unwrap();
     std::fs::write(seg.join("0000_Đức Trí.wav"), b"RIFF-fake-local").unwrap();
-    (dir, layout.root.clone())
+    (dir, layout)
 }
 
 #[tokio::test]
@@ -3909,11 +4045,11 @@ async fn an_unrendered_held_line_falls_back_to_one_of_hers() {
     // Fresh swap, rendered chapter by chapter: the held line misses in her
     // voice, but her voice exists in the cache — play one of hers, still
     // zero synthesis, and hold it so T compares on the same sentence.
-    let (_dir, root) = local_cache_layout();
+    let (_dir, layout) = local_cache_layout();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
     job_segment(
         tx,
-        root,
+        layout,
         "Narrator".into(),
         "Đức Trí".into(),
         "a line never rendered anywhere".into(),
@@ -3946,10 +4082,10 @@ async fn current_word_while_disconnected_reads_the_local_cache() {
     // instead of the API. Listening needs no :B.
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
-    let (_dir, root) = local_cache_layout();
+    let (_dir, layout) = local_cache_layout();
     let mut app = audition_app();
     app.conn = Conn::Down("inductor down".into());
-    app.layout_root = root.clone();
+    app.layout = layout.clone();
     do_command(&mut app, Command::AuditionCurrent, &http, &job_tx);
     match job_rx
         .try_recv()
@@ -3978,7 +4114,7 @@ async fn current_word_while_disconnected_reads_the_local_cache() {
     let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel::<Ev>();
     job_segment(
         tx2,
-        root,
+        layout,
         "Narrator".into(),
         "Đức Trí".into(),
         "Nar nói.".into(),
@@ -4020,7 +4156,7 @@ async fn current_word_with_no_backend_and_no_checkout_says_so() {
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
     app.conn = Conn::Down("inductor down".into());
-    app.layout_root = std::path::PathBuf::new();
+    app.layout = bm_core::Layout::new("");
     do_command(&mut app, Command::AuditionCurrent, &http, &job_tx);
     assert!(
         job_rx.try_recv().is_err(),

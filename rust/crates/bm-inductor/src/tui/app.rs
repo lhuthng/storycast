@@ -18,8 +18,21 @@ use std::time::Instant;
 
 pub(crate) struct App {
     pub(crate) api: String,
-    /// Repo root — a provision job needs a `Layout` to run against.
-    pub(crate) layout_root: std::path::PathBuf,
+    /// The root this dashboard was started on, *with* the workspace the
+    /// pointer named. Both halves are needed and they are not the same thing:
+    /// machines, roster, profile and the asset pools hang off `root`, while
+    /// the ledger, settings, `data/` and `output/` belong to the book in
+    /// `work`. A bare root here read the wrong ledger the moment a workspace
+    /// was selected.
+    pub(crate) layout: bm_core::Layout,
+    /// The profile the live `assets/` + `prompts/` tree claims to be, read from
+    /// `.bm/profile` at startup and after every load. `None` means none is
+    /// loaded — which is a state the dashboard must be able to show, because
+    /// every runner refuses to start in it.
+    ///
+    /// Cached rather than read per frame: it is a file open, and the footer is
+    /// redrawn on every keystroke.
+    pub(crate) profile: Option<bm_core::profile::Pointer>,
     /// Shared HTTP client for the inductor API.
     pub(crate) http: reqwest::Client,
     pub(crate) machines: Vec<Machine>,
@@ -99,7 +112,8 @@ impl App {
     pub(crate) fn new(api: &str) -> Self {
         App {
             api: api.trim_end_matches('/').to_string(),
-            layout_root: std::path::PathBuf::new(),
+            layout: bm_core::Layout::new(""),
+            profile: None,
             http: reqwest::Client::new(),
             machines: Vec::new(),
             beats: Vec::new(),
@@ -158,7 +172,7 @@ impl App {
             self,
             job_tx,
             Job::LoadLines {
-                layout_root: self.layout_root.clone(),
+                layout: self.layout.clone(),
             },
         );
     }
@@ -181,7 +195,7 @@ impl App {
             self,
             job_tx,
             Job::LoadSounds {
-                layout_root: self.layout_root.clone(),
+                layout: self.layout.clone(),
             },
         );
     }
@@ -313,7 +327,7 @@ impl App {
         if !self.machines.is_empty() {
             return self.machines.clone();
         }
-        registry_machines(&self.layout_root)
+        registry_machines(&self.layout)
     }
 
     /// Any screen other than the dashboard. Used by the size guard to say when
@@ -347,9 +361,58 @@ impl App {
             Job::LoadRoster {
                 api: self.api.clone(),
                 http: http.clone(),
-                layout_root: self.layout_root.clone(),
+                layout: self.layout.clone(),
             },
         );
+    }
+
+    /// Re-read everything that depends on *which* workspace or profile is
+    /// active, after a `:workspace` switch or a `:profile` load lands.
+    ///
+    /// The layout, the profile pointer and every cached file index belong to
+    /// the old one until this runs — and none of it is visible from here: the
+    /// switch happened in a background job, on disk. Dropping the caches is
+    /// what makes the next read go to the new tree instead of showing the old
+    /// book's lines and pools under the new book's name.
+    pub(crate) fn relayout(
+        &mut self,
+        job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
+        http: &reqwest::Client,
+    ) {
+        if self.layout.root.as_os_str().is_empty() {
+            return;
+        }
+        let (layout, problem) = bm_core::Layout::resolve_or_root(&self.layout.root);
+        self.layout = layout;
+        self.profile = bm_core::profile::read_pointer(&self.layout.root).ok();
+        // Cached file indexes: all of them belong to the workspace that was.
+        self.lines = None;
+        self.lines_loading = false;
+        self.sound = None;
+        self.sound_loading = false;
+        self.roster = None;
+        self.roster_loading = false;
+        self.locked_lines.clear();
+        // The polled view is per-workspace too, and a switch happens with the
+        // inductor *down* — so nothing will refresh it. Left alone, the footer
+        // would keep reporting the previous book's engine and chapter range and
+        // the Tasks pane its chapters: the exact lie this whole change is
+        // about. Blank is honest; the next `:B` fills them.
+        self.tasks.clear();
+        self.counts = serde_json::Value::Null;
+        self.settings = None;
+        match &problem {
+            Some(e) => self.log_at(Level::Warn, format!("workspace pointer: {e}")),
+            None => self.log_at(
+                Level::Info,
+                format!(
+                    "now on workspace {} · profile {}",
+                    crate::tui::model::workspace_label(&self.layout),
+                    crate::tui::model::profile_label(self.profile.as_ref()),
+                ),
+            ),
+        }
+        self.load_roster(job_tx, http);
     }
 
     pub(crate) fn machine_by_addr(&self, addr: &str) -> Option<&Machine> {

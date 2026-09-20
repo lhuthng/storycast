@@ -647,15 +647,14 @@ async fn roster(State(st): State<Shared>) -> Json<Roster> {
 /// TUI uses this when the inductor is down (X stops it) so picking voices
 /// never needs the control plane. Sidecar-dependent parts degrade exactly as
 /// they do for a live inductor with a dead sidecar.
-pub(crate) async fn offline_roster(layout_root: &std::path::Path) -> Roster {
-    let layout = bm_core::Layout::new(layout_root);
+pub(crate) async fn offline_roster(layout: &bm_core::Layout) -> Roster {
     let settings = bm_core::config::Settings::load(&layout.settings());
     let engine = settings.engine.clone();
     let mut inner = Inner::new(layout.clone(), settings);
     inner.load_ledger();
     let characters = inner.known_characters();
     let cast = inner.cast_snapshot();
-    build_roster(&layout, &engine, characters, cast).await
+    build_roster(layout, &engine, characters, cast).await
 }
 
 /// Swap with no scheduler: the same `op_swap_voice` against a throwaway
@@ -666,7 +665,7 @@ pub(crate) async fn offline_roster(layout_root: &std::path::Path) -> Roster {
 /// responsibility — the supported flow is X (which sweeps them), then swap.
 pub(crate) async fn offline_swap(
     api: &str,
-    layout_root: &std::path::Path,
+    layout: &bm_core::Layout,
     character: &str,
     voice: &str,
 ) -> Result<String, String> {
@@ -678,7 +677,7 @@ pub(crate) async fn offline_swap(
     if super::backend::local_workers_alive() {
         return Err("local workers still running — X first, then swap".into());
     }
-    offline_swap_apply(layout_root, character, voice)
+    offline_swap_apply(layout, character, voice)
 }
 
 /// The file mutation itself, minus the guards: throwaway Inner over disk
@@ -686,13 +685,12 @@ pub(crate) async fn offline_swap(
 /// ledger itself). Split out so tests can run it without a scheduler, a
 /// network, or a worker-shaped hole in the room.
 fn offline_swap_apply(
-    layout_root: &std::path::Path,
+    layout: &bm_core::Layout,
     character: &str,
     voice: &str,
 ) -> Result<String, String> {
-    let layout = bm_core::Layout::new(layout_root);
     let settings = bm_core::config::Settings::load(&layout.settings());
-    let mut inner = Inner::new(layout, settings);
+    let mut inner = Inner::new(layout.clone(), settings);
     inner.load_ledger();
     inner
         .op_swap_voice(character, voice)
@@ -705,7 +703,7 @@ fn offline_swap_apply(
 /// the inductor API must be down and no local worker alive.
 pub(crate) async fn offline_remix(
     api: &str,
-    layout_root: &std::path::Path,
+    layout: &bm_core::Layout,
     speed: Option<f64>,
     effect_volume: Option<f64>,
     music_volume: Option<f64>,
@@ -719,25 +717,18 @@ pub(crate) async fn offline_remix(
     if super::backend::local_workers_alive() {
         return Err("local workers still running — X first, then remix".into());
     }
-    offline_remix_apply(
-        layout_root,
-        speed,
-        effect_volume,
-        music_volume,
-        inject_volume,
-    )
+    offline_remix_apply(layout, speed, effect_volume, music_volume, inject_volume)
 }
 
 fn offline_remix_apply(
-    layout_root: &std::path::Path,
+    layout: &bm_core::Layout,
     speed: Option<f64>,
     effect_volume: Option<f64>,
     music_volume: Option<f64>,
     inject_volume: Option<f64>,
 ) -> Result<String, String> {
-    let layout = bm_core::Layout::new(layout_root);
     let settings = bm_core::config::Settings::load(&layout.settings());
-    let mut inner = Inner::new(layout, settings);
+    let mut inner = Inner::new(layout.clone(), settings);
     inner.load_ledger();
     inner
         .op_remix(speed, effect_volume, music_volume, inject_volume)
@@ -1495,7 +1486,7 @@ mod tests {
             r#"{"roster":["A"],"segments":[{"speaker":"A","text":"x"}]}"#,
         )
         .unwrap();
-        let r = offline_roster(d.path()).await;
+        let r = offline_roster(&layout).await;
         assert_eq!(r.cast.get("A").map(|s| s.as_str()), Some("Đức Trí"));
         assert!(
             r.characters.contains(&"A".to_string()),
@@ -1520,7 +1511,7 @@ mod tests {
         std::fs::write(seg.join("0000_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
         std::fs::write(seg.join("0001_Adam.wav"), vec![0u8; 2000]).unwrap();
 
-        let msg = offline_swap_apply(d.path(), "A", "Minh Triết").expect("offline swap");
+        let msg = offline_swap_apply(&layout, "A", "Minh Triết").expect("offline swap");
         assert!(msg.contains("Đức Trí -> Minh Triết"), "{msg}");
         assert!(msg.contains("offline"), "{msg}");
         assert!(
@@ -1542,7 +1533,7 @@ mod tests {
         std::fs::create_dir_all(layout.output()).unwrap();
         std::fs::write(layout.final_mp3(1), b"old mix").unwrap();
         bm_core::write_json(
-            &layout.bm_state().join("ledger.json"),
+            &layout.ledger(),
             &serde_json::json!({"tasks": [
                 {"chapter": 1, "stage": "merge", "state": "done",
                  "attempts": 0, "assigned_to": null, "lease_until": null,
@@ -1551,7 +1542,7 @@ mod tests {
         )
         .unwrap();
 
-        let msg = offline_remix_apply(d.path(), Some(1.5), Some(0.5), Some(0.0), Some(0.25))
+        let msg = offline_remix_apply(&layout, Some(1.5), Some(0.5), Some(0.0), Some(0.25))
             .expect("offline remix");
         assert!(msg.contains("1.5"), "{msg}");
         assert!(msg.contains("offline"), "{msg}");
@@ -1566,7 +1557,14 @@ mod tests {
             ),
             (1.5, 0.5, 0.0, 0.25)
         );
-        offline_remix_apply(d.path(), Some(1.0), Some(1.0), Some(1.0), None).unwrap();
+        offline_remix_apply(
+            &bm_core::Layout::new(d.path()),
+            Some(1.0),
+            Some(1.0),
+            Some(1.0),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             bm_core::config::Settings::load(&layout.settings()).inject_volume,
             0.25
@@ -1690,7 +1688,13 @@ mod segment_tests {
         // did (the fresh-swap state: rendered chapter by chapter). Play
         // hers, still zero synthesis — and hold it, so T compares on the
         // same sentence instead of another random pick.
-        let fallback = op_segment(&layout, "vieneu", "Kiên", "Adam", Some("a line from chapter 99"));
+        let fallback = op_segment(
+            &layout,
+            "vieneu",
+            "Kiên",
+            "Adam",
+            Some("a line from chapter 99"),
+        );
         assert!(fallback.ok, "{}", fallback.message);
         assert_eq!(fallback.line_text.as_deref(), Some("Kiên lên tiếng."));
         assert_eq!(fallback.line_speaker.as_deref(), Some("Kiên"));

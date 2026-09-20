@@ -23,12 +23,15 @@ pub(crate) fn matches(filter: &str, haystack: &str) -> bool {
 /// liveness. The fallback behind `effective_machines` when the inductor is
 /// unreachable. Reads both shapes: the current `machine_state` + machines.json
 /// join, and the pre-migration `machines` array.
-pub(crate) fn registry_machines(layout_root: &std::path::Path) -> Vec<Machine> {
-    if layout_root.as_os_str().is_empty() {
+///
+/// Takes the layout, not a root: the machine states live in the *workspace's*
+/// ledger while `machines.json` stays at the root, so a root-only path read a
+/// file that no longer exists the moment a workspace was selected.
+pub(crate) fn registry_machines(layout: &bm_core::Layout) -> Vec<Machine> {
+    if layout.root.as_os_str().is_empty() {
         return Vec::new();
     }
-    let bm = layout_root.join(".bm");
-    let text = match std::fs::read_to_string(bm.join("ledger.json")) {
+    let text = match std::fs::read_to_string(layout.ledger()) {
         Ok(t) => t,
         Err(_) => return Vec::new(),
     };
@@ -44,13 +47,38 @@ pub(crate) fn registry_machines(layout_root: &std::path::Path) -> Vec<Machine> {
         out.sort_by(|a, b| a.addr.cmp(&b.addr));
         return out;
     }
-    let boxes = bm_core::provision::load_boxes(&bm.join("machines.json"));
+    let boxes = bm_core::provision::load_boxes(&layout.machines());
     let empty = serde_json::Map::new();
     let rt = doc
         .get("machine_state")
         .and_then(|v| v.as_object())
         .unwrap_or(&empty);
     bm_core::provision::join_all(boxes, rt)
+}
+
+/// What to call the active workspace in the footer: its directory name, or
+/// `default` for the implicit root workspace (no pointer, `work == root`).
+pub(crate) fn workspace_label(layout: &bm_core::Layout) -> String {
+    if layout.work == layout.root {
+        return "default".into();
+    }
+    layout
+        .work
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| layout.work.display().to_string())
+}
+
+/// What to call the loaded profile in the footer. `none` is not a placeholder
+/// for "unknown": it is the state every runner refuses to start in, so the
+/// footer says so plainly.
+pub(crate) fn profile_label(profile: Option<&bm_core::profile::Pointer>) -> String {
+    match profile {
+        Some(p) if !p.name.is_empty() => {
+            format!("{} ({})", p.name, &p.hash[..12.min(p.hash.len())])
+        }
+        _ => "none".into(),
+    }
 }
 
 pub(crate) fn filtered_characters(app: &App, filter: &str) -> Vec<String> {

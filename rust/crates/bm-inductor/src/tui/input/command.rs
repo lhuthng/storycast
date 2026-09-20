@@ -42,6 +42,8 @@ pub(crate) enum Command {
     Rerender,
     Remerge,
     ShutdownWhenIdle,
+    Workspace,
+    Profile,
     AuditionCurrent,
     AuditionTry,
     AuditionAnother,
@@ -89,6 +91,8 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["remerge"], desc: Some("requeue every merge — render cache kept, no confirm"), cmd: Command::Remerge },
     Word { key: None, names: &["rerender"], desc: Some("requeue every render + merge — full re-speak, asks first"), cmd: Command::Rerender },
     Word { key: None, names: &["shutdown-when-idle", "drain"], desc: Some("workers exit on their own once the queue drains — restart with :B"), cmd: Command::ShutdownWhenIdle },
+    Word { key: None, names: &["workspace", "ws"], desc: Some("list, switch or create a workspace — one per book; only with the cluster stopped"), cmd: Command::Workspace },
+    Word { key: None, names: &["profile"], desc: Some("list, load or pack a genre profile — loading replaces assets/ + prompts/, so only with the cluster stopped"), cmd: Command::Profile },
     Word { key: Some('X'), names: &["stop"], desc: Some("stop everything everywhere: local backend plus workers on all machines"), cmd: Command::Stop },
     Word { key: None, names: &["sshkey"], desc: None, cmd: Command::SshKey },
     Word { key: None, names: &["sshuser"], desc: None, cmd: Command::SshUser },
@@ -289,6 +293,31 @@ pub(crate) fn do_command(
             app.screen = Screen::Sound(crate::tui::sound::SoundView::new());
             app.load_sound(job_tx);
         }
+        Command::Workspace => {
+            // Prefilled with what is in force, like every other prompt: the
+            // operator sees the active name before editing it, and an empty
+            // line lists instead of switching.
+            let cur = crate::tui::model::workspace_label(&app.layout);
+            let initial = if cur == "default" { "" } else { cur.as_str() };
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::Workspace,
+                "Workspace — one directory per book",
+                "<name> to switch · `new <name>` to create and switch · empty to list. \
+                 Only with the cluster stopped (:X): the ledger, settings and data all move.",
+                initial,
+            ));
+        }
+        Command::Profile => {
+            let cur = crate::tui::model::profile_label(app.profile.as_ref());
+            let initial = if cur == "none" { "" } else { cur.as_str() };
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::Profile,
+                "Profile — the genre bundle behind assets/ + prompts/",
+                "<name> to load · `pack <name>` to bundle the live tree · empty to list. \
+                 Loading replaces the live tree every worker reads, so only with the cluster stopped (:X).",
+                initial,
+            ));
+        }
         Command::Rerender => {
             // Full re-speak: worth one Enter, like every other destructive
             // action. Mix-only changes belong on `:mix`, which keeps the
@@ -364,10 +393,20 @@ pub(crate) fn do_command(
             audition::audition_word(app, job_tx, http, audition::AuditionKind::Current);
         }
         Command::AuditionTry => {
-            audition::audition_word(app, job_tx, http, audition::AuditionKind::Pointed { reroll: false });
+            audition::audition_word(
+                app,
+                job_tx,
+                http,
+                audition::AuditionKind::Pointed { reroll: false },
+            );
         }
         Command::AuditionAnother => {
-            audition::audition_word(app, job_tx, http, audition::AuditionKind::Pointed { reroll: true });
+            audition::audition_word(
+                app,
+                job_tx,
+                http,
+                audition::AuditionKind::Pointed { reroll: true },
+            );
         }
         Command::ShutdownWhenIdle => {
             // Graceful and reversible (nothing deleted, `:B` brings workers
@@ -381,7 +420,10 @@ pub(crate) fn do_command(
                     ..Default::default()
                 },
             );
-            app.set_status(Level::Info, "shutdown armed — workers exit once the queue drains");
+            app.set_status(
+                Level::Info,
+                "shutdown armed — workers exit once the queue drains",
+            );
         }
         Command::Reconcile => {
             // Reconcile rewrites cast + scripts and re-renders losers: worth
@@ -413,7 +455,7 @@ pub(crate) fn do_command(
                     app,
                     job_tx,
                     Job::StartBackend {
-                        layout_root: app.layout_root.clone(),
+                        layout: app.layout.clone(),
                         api: app.api.clone(),
                         api_up: app.conn == Conn::Up,
                         start: cfg.start,

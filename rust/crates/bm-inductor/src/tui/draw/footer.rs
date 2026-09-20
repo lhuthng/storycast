@@ -67,6 +67,27 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
             Style::default().fg(Color::DarkGray),
         ));
     }
+    // Which book, and which genre — the two things every path below this line
+    // is derived from, and the two that can now be switched at runtime. Shown
+    // always, like the chapter range: a default nobody looked at is exactly how
+    // work lands in the wrong workspace.
+    spans.push(Span::styled(
+        format!("   ws: {}", crate::tui::model::workspace_label(&app.layout)),
+        Style::default().fg(Color::DarkGray),
+    ));
+    spans.push(Span::styled(
+        format!(
+            "   profile: {}",
+            crate::tui::model::profile_label(app.profile.as_ref())
+        ),
+        // A missing profile is not decoration: every runner refuses to start
+        // without one, so it reads as the problem it is.
+        if app.profile.is_some() {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            app.style(Color::Yellow)
+        },
+    ));
     if let Some(engine) = app
         .settings
         .as_ref()

@@ -33,7 +33,7 @@ pub(crate) async fn key_confirm(
                             app,
                             job_tx,
                             Job::Provision {
-                                layout_root: app.layout_root.clone(),
+                                layout: app.layout.clone(),
                                 api: app.api.clone(),
                                 machine: m,
                                 force,
@@ -83,7 +83,7 @@ pub(crate) async fn key_confirm(
                         app,
                         job_tx,
                         Job::StopBackend {
-                            layout_root: app.layout_root.clone(),
+                            layout: app.layout.clone(),
                             machines: app.effective_machines(),
                             api: app.api.clone(),
                             settings_key: app.ssh_defaults().key,

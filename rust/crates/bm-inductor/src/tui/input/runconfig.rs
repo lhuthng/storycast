@@ -21,8 +21,7 @@ pub(crate) struct RunPreview {
 }
 
 pub(crate) fn run_preview(app: &App) -> RunPreview {
-    let saved = !app.layout_root.as_os_str().is_empty()
-        && bm_core::Layout::new(&app.layout_root).settings().is_file();
+    let saved = !app.layout.root.as_os_str().is_empty() && app.layout.settings().is_file();
     if let Some(s) = &app.settings {
         let models = s
             .get("analyze_models")
@@ -65,10 +64,10 @@ pub(crate) fn run_preview(app: &App) -> RunPreview {
             saved,
         };
     }
-    let s = if app.layout_root.as_os_str().is_empty() {
+    let s = if app.layout.root.as_os_str().is_empty() {
         bm_core::config::Settings::default()
     } else {
-        bm_core::config::Settings::load(&bm_core::Layout::new(&app.layout_root).settings())
+        bm_core::config::Settings::load(&app.layout.settings())
     };
     RunPreview {
         start: s.start,
@@ -132,10 +131,10 @@ pub(crate) fn parse_run_config(buf: &str, current_analyzer: &str) -> Result<RunC
 pub(crate) fn save_run_config(app: &App, buf: &str) -> Result<String, String> {
     let (start, count, analyzer, models) =
         parse_run_config(buf, &app.setting_str("analyzer", "opencode"))?;
-    if app.layout_root.as_os_str().is_empty() {
+    if app.layout.root.as_os_str().is_empty() {
         return Err("no repo root — restart the TUI from a checkout".into());
     }
-    let settings_path = bm_core::Layout::new(&app.layout_root).settings();
+    let settings_path = app.layout.settings();
     let mut settings = bm_core::config::Settings::load(&settings_path);
     // Everything on the line is saved: the file is the single source the run
     // screen previews, the footer shows and the next backend boots with.
@@ -199,14 +198,14 @@ pub(crate) fn mix_prefill(app: &App) -> String {
             app.setting_f64("music_volume", 1.0),
             app.setting_f64("inject_volume", 1.0)
         )
-    } else if app.layout_root.as_os_str().is_empty() {
+    } else if app.layout.root.as_os_str().is_empty() {
         let s = bm_core::config::Settings::default();
         format!(
             "{} {} {} {}",
             s.speed, s.effect_volume, s.music_volume, s.inject_volume
         )
     } else {
-        let s = bm_core::config::Settings::load(&bm_core::Layout::new(&app.layout_root).settings());
+        let s = bm_core::config::Settings::load(&app.layout.settings());
         format!(
             "{} {} {} {}",
             s.speed, s.effect_volume, s.music_volume, s.inject_volume
@@ -223,10 +222,10 @@ pub(crate) fn save_ssh_setting(
     buf: &str,
 ) -> Result<String, String> {
     use crate::tui::screen::TextKind;
-    if app.layout_root.as_os_str().is_empty() {
+    if app.layout.root.as_os_str().is_empty() {
         return Err("no repo root — restart the TUI from a checkout".into());
     }
-    let settings_path = bm_core::Layout::new(&app.layout_root).settings();
+    let settings_path = app.layout.settings();
     let mut settings = bm_core::config::Settings::load(&settings_path);
     let msg = match kind {
         TextKind::SshKey => {

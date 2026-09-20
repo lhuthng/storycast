@@ -253,11 +253,27 @@ echo "probe=done"
     }
 
     /// Push the source files the worker needs (never the inductor's state).
-    pub fn install_sources(&self, repo_root: &Path) -> Result<()> {
+    ///
+    /// Two halves, from two different places. `prompts`, `assets` and `refs`
+    /// are profile content and live at the root. The cast files are the
+    /// *book's* — `data/` is in the active workspace — so they are read
+    /// through the layout; naming them root-relative shipped no cast at all
+    /// the moment a workspace was selected, and the worker then rendered with
+    /// the catalogue's default voices.
+    pub fn install_sources(&self, layout: &crate::Layout) -> Result<()> {
         for rel in ["prompts", "assets", "refs"] {
-            let src = repo_root.join(rel);
+            let src = layout.root.join(rel);
             if src.exists() {
                 self.rsync_push(&src, rel, true)?;
+            }
+        }
+        for (engine, rel) in [
+            ("vieneu", "data/cast-vieneu.json"),
+            ("gemini", "data/cast.json"),
+        ] {
+            let src = layout.cast(engine);
+            if src.exists() {
+                self.rsync_push(&src, rel, false)?;
             }
         }
         // `python/` used to be pushed here. It is not any more: the sidecar is
@@ -271,15 +287,9 @@ echo "probe=done"
         // The clone manifest travels too: nothing on a worker reads it yet,
         // but the inductor's warnings are computed against it, so a box
         // holding a different declaration is a silent desync.
-        for rel in [
-            "data/cast-vieneu.json",
-            "data/cast.json",
-            "voices.json",
-        ] {
-            let src = repo_root.join(rel);
-            if src.exists() {
-                self.rsync_push(&src, rel, false)?;
-            }
+        let manifest = layout.root.join("voices.json");
+        if manifest.exists() {
+            self.rsync_push(&manifest, "voices.json", false)?;
         }
         Ok(())
     }
@@ -354,8 +364,8 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
     ///
     /// 668 MB, and content-addressed by the stamp's `tts_hash`, so a re-provision
     /// with nothing changed costs one rsync delta rather than a transfer.
-    pub fn install_models(&self, repo_root: &Path) -> Result<String> {
-        let src = repo_root.join("models");
+    pub fn install_models(&self, root: &Path) -> Result<String> {
+        let src = root.join("models");
         if !src.is_dir() {
             anyhow::bail!(
                 "no {} — run the bake first (`python3 tools/bake-models.py`)",
@@ -451,6 +461,25 @@ echo stopped"#,
         }
     }
 
+    /// Write the load pointer the worker's agent gate checks at startup.
+    ///
+    /// The profile content already travels inside `install_sources`
+    /// (prompts + assets ride the sources sync), so this is one small JSON
+    /// file — but without it the worker cannot tell a complete profile from
+    /// a half-rsynced one, which is exactly what `verify` refuses to run on.
+    pub fn write_profile_pointer(&self, pointer: &crate::profile::Pointer) -> Result<()> {
+        let json = serde_json::to_string_pretty(pointer)?;
+        let script = format!(
+            "mkdir -p $HOME/{d}/.bm && cat > $HOME/{d}/.bm/profile << 'EOF'\n{json}\nEOF\n",
+            d = REMOTE_DIR
+        );
+        let (code, _, stderr) = self.run(&script, 10)?;
+        if code != 0 {
+            anyhow::bail!("failed to write profile pointer: {}", stderr.trim());
+        }
+        Ok(())
+    }
+
     pub fn write_provision_stamp(&self, stamp: &ProvisionStamp) -> Result<()> {
         let json = serde_json::to_string(stamp)?;
         let script = format!(
@@ -500,7 +529,7 @@ pub fn undeclared_voices(
 #[allow(clippy::too_many_arguments)]
 pub fn provision(
     m: &Machine,
-    repo_root: &Path,
+    layout: &crate::Layout,
     agent_binary: &Path,
     tts_binary: &Path,
     tts_runtime: Option<&Path>,
@@ -528,7 +557,7 @@ pub fn provision(
         return (probe, log);
     }
 
-    let local_stamp = compute_provision_stamp(repo_root, agent_version);
+    let local_stamp = compute_provision_stamp(&layout.root, agent_version);
     let remote_stamp = probe.stamp.as_ref();
 
     let sources_match = !force
@@ -552,7 +581,7 @@ pub fn provision(
         } else {
             // Sources still sync: cast/asset/prompt updates must reach workers
             // without a venv rebuild. Cheap rsync deltas when nothing changed.
-            match ssh.install_sources(repo_root) {
+            match ssh.install_sources(layout) {
                 Ok(()) => log.push(format!("[{}] sources in sync", m.id)),
                 Err(e) => log.push(format!("[{}] source sync failed: {e}", m.id)),
             }
@@ -578,7 +607,7 @@ pub fn provision(
                 m.id
             ));
         } else {
-            match ssh.install_sources(repo_root) {
+            match ssh.install_sources(layout) {
                 Ok(()) => log.push(format!("[{}] prompts/assets/refs distributed", m.id)),
                 Err(e) => log.push(format!("[{}] source distribution failed: {e}", m.id)),
             }
@@ -609,7 +638,7 @@ pub fn provision(
             log.push(format!("[{}] models in sync (cache match)", m.id));
         } else {
             log.push(format!("[{}] pushing models (~668 MB)", m.id));
-            match ssh.install_models(repo_root) {
+            match ssh.install_models(&layout.root) {
                 Ok(v) => log.push(format!("[{}] {v}", m.id)),
                 Err(e) => {
                     log.push(format!("[{}] {e}", m.id));
@@ -619,18 +648,39 @@ pub fn provision(
         }
     }
 
+    // The worker's agent gate checks this pointer at startup: sources above
+    // carry the profile content, the pointer says what it claims to be.
+    // Written every provision (one small file) so a re-pointed inductor
+    // cannot leave a worker verifying yesterday's profile.
+    match crate::profile::read_pointer(&layout.root) {
+        Ok(pointer) => match ssh.write_profile_pointer(&pointer) {
+            Ok(()) => log.push(format!(
+                "[{}] profile pointer: {} ({})",
+                m.id,
+                pointer.name,
+                &pointer.hash[..12.min(pointer.hash.len())]
+            )),
+            Err(e) => log.push(format!("[{}] profile pointer failed: {e}", m.id)),
+        },
+        Err(_) => log.push(format!(
+            "[{}] no local profile pointer — `profile.sh unpack <name>` first, or this worker will refuse to start",
+            m.id
+        )),
+    }
+
     // Enrollment moved off the worker — it needs the encoder, which is not on a
     // worker any more. A clone declared in `voices.json` but absent from the
     // pushed store therefore cannot render anywhere, and the old flow would
     // have quietly enrolled it on first use. Say so instead.
     {
         let manifest: std::collections::HashMap<String, String> = serde_json::from_str(
-            &std::fs::read_to_string(repo_root.join("voices.json")).unwrap_or_default(),
+            &std::fs::read_to_string(layout.root.join("voices.json")).unwrap_or_default(),
         )
         .unwrap_or_default();
         if !manifest.is_empty() {
             let store: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(repo_root.join("models/voices.json")).unwrap_or_default(),
+                &std::fs::read_to_string(layout.root.join("models/voices.json"))
+                    .unwrap_or_default(),
             )
             .unwrap_or(serde_json::Value::Null);
             let presets = store.get("presets").and_then(|v| v.as_object());
@@ -670,13 +720,12 @@ pub fn provision(
     // voices nothing declares desyncs the cluster silently (renders pass here,
     // 500 everywhere else). Warn with the fix; never delete.
     {
-        let layout = crate::Layout::new(repo_root);
         let engine = crate::config::Settings::load(&layout.settings()).engine;
         let manifest: std::collections::HashMap<String, String> = serde_json::from_str(
-            &std::fs::read_to_string(repo_root.join("voices.json")).unwrap_or_default(),
+            &std::fs::read_to_string(layout.root.join("voices.json")).unwrap_or_default(),
         )
         .unwrap_or_default();
-        let pool = crate::pool::load_pool(&repo_root.join("voice-pool.json"));
+        let pool = crate::pool::load_pool(&layout.root.join("voice-pool.json"));
         let catalogue: Vec<String> = crate::voices::offline_voices(&engine)
             .iter()
             .map(|v| v.name.clone())

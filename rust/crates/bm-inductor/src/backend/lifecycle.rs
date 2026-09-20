@@ -3,6 +3,7 @@ use super::process::{
     is_alive, log_file, pid_file, read_pid, serve_args, shq, sibling_bin, signal, spawn_one,
 };
 use bm_core::provision::{Ssh, REMOTE_DIR};
+use bm_core::Layout;
 use bm_proto::Machine;
 use std::path::Path;
 
@@ -20,7 +21,7 @@ fn remote_worker_check_script() -> String {
 
 fn remote_worker_launch_script(inductor_url: &str, addr: &str) -> String {
     format!(
-        "cd \"$HOME/{d}\" && nohup ./bm-agent worker --inductor {} --addr {} >> agent.log 2>&1 & echo STARTED:$!",
+        "cd \"$HOME/{d}\" && nohup ./bm-agent --root \"$HOME/{d}\" worker --inductor {} --addr {} >> agent.log 2>&1 & echo STARTED:$!",
         shq(inductor_url),
         shq(addr),
         d = REMOTE_DIR,
@@ -140,7 +141,7 @@ pub fn start_backend(
         lines.push(format!("inductor already running (pid {pid})"));
     } else {
         let log = log_file(layout_root, "inductor");
-        let args = serve_args(&port, bind);
+        let args = serve_args(layout_root, &port, bind);
         match spawn_one(&bin_i, &args, &log) {
             Ok(pid) => {
                 let _ = std::fs::write(pid_file(layout_root, "inductor"), pid.to_string());
@@ -177,7 +178,11 @@ pub fn start_local_worker(layout_root: &Path, api: &str) -> Vec<String> {
         }
     };
     let log = log_file(layout_root, "agent");
+    // `--root` for the same reason as the inductor's: the child inherits this
+    // process's cwd, which need not be the root the operator named.
     let args = [
+        "--root".to_string(),
+        layout_root.to_string_lossy().into_owned(),
         "worker".to_string(),
         "--inductor".to_string(),
         api.to_string(),
@@ -295,8 +300,8 @@ fn sweep_one(label: &str, ssh: &Ssh) -> Vec<String> {
 /// nothing to lease waits (a render lease is 90 minutes). Never fails hard —
 /// each machine reports its own outcome, and one unreachable box never
 /// silences the rest.
-pub async fn stop_everywhere(layout_root: &Path, machines: &[Machine], api: &str) -> Vec<String> {
-    let mut lines = stop_backend(layout_root).await;
+pub async fn stop_everywhere(layout: &Layout, machines: &[Machine], api: &str) -> Vec<String> {
+    let mut lines = stop_backend(&layout.root).await;
     // Requeue stranded assignments, but only with no live scheduler: the file
     // is the inductor's to write while it answers.
     if inductor_up(api).await {
@@ -304,7 +309,7 @@ pub async fn stop_everywhere(layout_root: &Path, machines: &[Machine], api: &str
             "inductor still answering — ledger untouched (assigned tasks keep their leases)".into(),
         );
     } else {
-        match requeue_assigned_in_ledger(layout_root) {
+        match requeue_assigned_in_ledger(layout) {
             Ok(back) if back.is_empty() => {
                 lines.push("no stranded tasks — nothing requeued".into())
             }
@@ -440,8 +445,8 @@ pub async fn lan_blackout(machines: &[Machine], api_port: u16) -> Vec<String> {
 /// Only safe while no inductor answers: a live scheduler overwrites this file
 /// on every mutation. Attempts are kept (a strike stays a strike); the
 /// assignee, lease and detail are cleared. Returns the requeued task ids.
-fn requeue_assigned_in_ledger(layout_root: &Path) -> anyhow::Result<Vec<String>> {
-    let path = layout_root.join(".bm").join("ledger.json");
+fn requeue_assigned_in_ledger(layout: &Layout) -> anyhow::Result<Vec<String>> {
+    let path = layout.ledger();
     let text = std::fs::read_to_string(&path)?;
     let mut doc: serde_json::Value = serde_json::from_str(&text)?;
     let mut back = Vec::new();
@@ -536,7 +541,11 @@ mod tests {
             !launch.contains("pkill") && !launch.contains("pgrep"),
             "launch must not inspect: {launch}"
         );
-        assert!(launch.contains("./bm-agent worker --inductor"), "{launch}");
+        assert!(launch.contains("./bm-agent"), "{launch}");
+        assert!(launch.contains("worker --inductor"), "{launch}");
+        // The root travels with the launch: the worker mirror has no rust/
+        // tree, so a child left to discover its own root found nothing.
+        assert!(launch.contains("--root \"$HOME/bm-worker\""), "{launch}");
         assert!(
             launch.contains("http://192.168.2.1:8901") && launch.contains("192.168.2.2"),
             "{launch}"

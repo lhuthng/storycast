@@ -20,6 +20,25 @@ pub(crate) struct BackgroundJob {
     pub(crate) activity: String,
 }
 
+/// What `:workspace` was asked to do. Parsed at submit, so the prompt can
+/// refuse nonsense before a job is queued.
+#[derive(Debug)]
+pub(crate) enum WorkspaceReq {
+    List,
+    Use(String),
+    New(String),
+}
+
+/// What `:profile` was asked to do.
+#[derive(Debug)]
+pub(crate) enum ProfileReq {
+    List,
+    /// `unpack` — replaces the live `assets/` + `prompts/` trees.
+    Load(String),
+    /// Bundle the live tree into `profiles/<name>.tar.zst`.
+    Pack(String),
+}
+
 #[derive(Debug)]
 pub(crate) enum Job {
     Tracked {
@@ -31,7 +50,7 @@ pub(crate) enum Job {
     /// `settings_key` is the app-wide default the ssh chain falls back to
     /// when the machine carries no key of its own.
     Provision {
-        layout_root: std::path::PathBuf,
+        layout: bm_core::Layout,
         api: String,
         machine: Machine,
         force: bool,
@@ -50,7 +69,7 @@ pub(crate) enum Job {
     /// failing box lands in Error, never vetoes the rest. `cancel` lets `X`
     /// stop the catch-up loop between boxes.
     StartBackend {
-        layout_root: std::path::PathBuf,
+        layout: bm_core::Layout,
         api: String,
         api_up: bool,
         start: u32,
@@ -64,7 +83,7 @@ pub(crate) enum Job {
     /// every registered remote worker over ssh. `X` means the cluster is
     /// quiet afterwards — not just this box.
     StopBackend {
-        layout_root: std::path::PathBuf,
+        layout: bm_core::Layout,
         machines: Vec<Machine>,
         api: String,
         settings_key: Option<String>,
@@ -72,7 +91,7 @@ pub(crate) enum Job {
     /// Local file work: copy a clip into `refs/`, tag it from its filename,
     /// register it in the pool and in `voices.json`. Needs no inductor.
     AddSample {
-        layout_root: std::path::PathBuf,
+        layout: bm_core::Layout,
         path: String,
         name: Option<String>,
         tags: Option<Vec<String>>,
@@ -88,12 +107,12 @@ pub(crate) enum Job {
         api: String,
         http: reqwest::Client,
         req: OpRequest,
-        layout_root: std::path::PathBuf,
+        layout: bm_core::Layout,
     },
     LoadRoster {
         api: String,
         http: reqwest::Client,
-        layout_root: std::path::PathBuf,
+        layout: bm_core::Layout,
     },
     /// Read every `data/script-*.json` and index the lines by speaker.
     ///
@@ -102,7 +121,7 @@ pub(crate) enum Job {
     /// it runs once per session — the result is cached, so the audition itself is
     /// instant.
     LoadLines {
-        layout_root: std::path::PathBuf,
+        layout: bm_core::Layout,
     },
     /// Read the three sound-design registries, the scene map and every script,
     /// and work out what each pooled sound is still used for.
@@ -111,13 +130,13 @@ pub(crate) enum Job {
     /// and one more: the removal guard is read off this data, so it is also
     /// re-run after every save rather than cached for the session.
     LoadSounds {
-        layout_root: std::path::PathBuf,
+        layout: bm_core::Layout,
     },
     /// Serve one already-rendered segment from the local checkout: the
     /// disconnected form of `Op::Segment`. Same lookup the inductor runs,
     /// against the TUI's own files, so listening needs no backend.
     Segment {
-        layout_root: std::path::PathBuf,
+        layout: bm_core::Layout,
         character: String,
         voice: String,
         /// Exact sentence wanted (the shown line). Empty means triage.
@@ -128,9 +147,25 @@ pub(crate) enum Job {
     /// voice auditions with no worker on — at the cost of loading the
     /// model here, which is why the connected path stays first.
     PreviewLocal {
-        layout_root: std::path::PathBuf,
+        layout: bm_core::Layout,
         voice: String,
         text: String,
+    },
+    /// List, switch or create a workspace. Switching moves the pointer the
+    /// ledger, settings and data hang off, so it is refused while anything
+    /// reads them — see `cluster_busy`.
+    Workspace {
+        layout: bm_core::Layout,
+        api: String,
+        req: WorkspaceReq,
+    },
+    /// List, load or pack a profile bundle. `tools/profile.sh` does the tar +
+    /// zstd; loading replaces the live tree every worker reads, so it takes
+    /// the same lock as the workspace switch.
+    Profile {
+        layout: bm_core::Layout,
+        api: String,
+        req: ProfileReq,
     },
 }
 
@@ -164,6 +199,16 @@ impl Job {
             Job::LoadSounds { .. } => "load sound design",
             Job::Segment { .. } => "local segment",
             Job::PreviewLocal { .. } => "preview voice (local)",
+            Job::Workspace { req, .. } => match req {
+                WorkspaceReq::List => "list workspaces",
+                WorkspaceReq::Use(_) => "switch workspace",
+                WorkspaceReq::New(_) => "create workspace",
+            },
+            Job::Profile { req, .. } => match req {
+                ProfileReq::List => "list profiles",
+                ProfileReq::Load(_) => "load profile",
+                ProfileReq::Pack(_) => "pack profile",
+            },
             Job::Tracked { .. } => unreachable!(),
         }
         .to_string()
@@ -193,6 +238,9 @@ impl Job {
             Job::LoadRoster { .. } => return DoneKind::RosterDone,
             Job::LoadLines { .. } => return DoneKind::LinesDone,
             Job::LoadSounds { .. } => return DoneKind::SoundsDone,
+            // Both move what the dashboard is reading; the UI re-resolves
+            // the layout and re-reads the pointer when one finishes.
+            Job::Workspace { .. } | Job::Profile { .. } => return DoneKind::Relayout,
             _ => return DoneKind::Other,
         };
         DoneKind::Op {
@@ -233,6 +281,10 @@ pub(crate) enum DoneKind {
     /// A backend start sequence finished (backend up, catch-up done or
     /// cancelled). Clears the double-`B` guard; anything else is Other.
     StartDone,
+    /// A workspace switch or profile load finished: the active workspace,
+    /// the live profile tree, or both have moved, so the dashboard must
+    /// re-resolve its layout and re-read the pointer before the next frame.
+    Relayout,
     Other,
 }
 
@@ -291,7 +343,7 @@ pub(crate) async fn wait_api_live(api: &str, secs: u64) -> bool {
 /// inductor is confirmed down (never fight a live scheduler for its file).
 pub(crate) async fn set_machine_state(
     api: &str,
-    layout_root: &std::path::Path,
+    layout: &bm_core::Layout,
     addr: &str,
     state: MachineState,
     note: &str,
@@ -306,8 +358,9 @@ pub(crate) async fn set_machine_state(
     }
     // Always write the ledger file as well: when the inductor is up the
     // TUI refreshes from the API, but the ledger is the only source
-    // before the API starts or if the POST fails.
-    let path = layout_root.join(".bm/ledger.json");
+    // before the API starts or if the POST fails. It is the *workspace's*
+    // ledger — a box's state belongs to the book being run.
+    let path = layout.ledger();
     let mut doc: serde_json::Value = std::fs::read_to_string(&path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
@@ -338,7 +391,7 @@ pub(crate) fn op_job(app: &App, http: &reqwest::Client, req: OpRequest) -> Job {
         api: app.api.clone(),
         http: http.clone(),
         req,
-        layout_root: app.layout_root.clone(),
+        layout: app.layout.clone(),
     }
 }
 
@@ -377,7 +430,7 @@ fn send(tx: &tokio::sync::mpsc::UnboundedSender<Ev>, level: Level, text: String)
 
 pub(crate) async fn job_provision(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
-    layout_root: std::path::PathBuf,
+    layout: bm_core::Layout,
     api: String,
     machine: Machine,
     force: bool,
@@ -411,7 +464,7 @@ pub(crate) async fn job_provision(
     );
     set_machine_state(
         &api,
-        &layout_root,
+        &layout,
         &addr,
         MachineState::Provisioning,
         if force {
@@ -421,10 +474,10 @@ pub(crate) async fn job_provision(
         },
     )
     .await;
-    let layout = bm_core::Layout::new(&layout_root);
+    let for_provision = layout.clone();
     let out = tokio::task::spawn_blocking(move || {
         crate::provision_machine(
-            &layout,
+            &for_provision,
             &machine.addr,
             &machine.ssh_user,
             machine.ssh_port,
@@ -470,7 +523,7 @@ pub(crate) async fn job_provision(
                 // Worker half only, never the inductor: a `p` retry
                 // finishes with the box joined, whatever else runs.
                 if crate::backend::is_local_addr(&addr) {
-                    for l in crate::backend::start_local_worker(&layout_root, &api) {
+                    for l in crate::backend::start_local_worker(&layout.root, &api) {
                         send(&tx, Level::Info, format!("[{addr}] {l}"));
                     }
                 } else {
@@ -496,7 +549,7 @@ pub(crate) async fn job_provision(
                             );
                             set_machine_state(
                                 &api,
-                                &layout_root,
+                                &layout,
                                 &addr,
                                 MachineState::Error,
                                 "provisioned but the worker would not start — :prov again",
@@ -518,7 +571,7 @@ pub(crate) async fn job_provision(
                             );
                             set_machine_state(
                                 &api,
-                                &layout_root,
+                                &layout,
                                 &addr,
                                 MachineState::Error,
                                 "provisioned but the worker start crashed — :prov again",
@@ -531,7 +584,7 @@ pub(crate) async fn job_provision(
                 }
                 set_machine_state(
                     &api,
-                    &layout_root,
+                    &layout,
                     &addr,
                     MachineState::Provisioning,
                     "worker launched — Online on its first beat",
@@ -548,7 +601,7 @@ pub(crate) async fn job_provision(
                     fail_reason
                 };
                 send_update(&tx, MachineState::Error, &reason);
-                set_machine_state(&api, &layout_root, &addr, MachineState::Error, &reason).await;
+                set_machine_state(&api, &layout, &addr, MachineState::Error, &reason).await;
                 send(
                     &tx,
                     Level::Error,
@@ -569,7 +622,7 @@ pub(crate) async fn job_provision(
             );
             set_machine_state(
                 &api,
-                &layout_root,
+                &layout,
                 &addr,
                 MachineState::Error,
                 "provision task crashed — :prov again",
@@ -615,7 +668,7 @@ pub(crate) async fn job_add_machine(
 
 pub(crate) async fn job_add_sample(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
-    layout_root: std::path::PathBuf,
+    layout: bm_core::Layout,
     path: String,
     name: Option<String>,
     tags: Option<Vec<String>>,
@@ -624,7 +677,7 @@ pub(crate) async fn job_add_sample(
     // while. Same shape as the provision arm below.
     let for_log = path.clone();
     let out = tokio::task::spawn_blocking(move || {
-        bm_core::pool::add_sample(&layout_root, std::path::Path::new(&path), tags, name)
+        bm_core::pool::add_sample(&layout.root, std::path::Path::new(&path), tags, name)
     })
     .await;
     match out {
@@ -667,7 +720,7 @@ fn start_cancelled(tx: &tokio::sync::mpsc::UnboundedSender<Ev>, cancel: &AtomicB
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn job_start_backend(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
-    layout_root: std::path::PathBuf,
+    layout: bm_core::Layout,
     api: String,
     mut api_up: bool,
     start: u32,
@@ -723,7 +776,7 @@ pub(crate) async fn job_start_backend(
                     dark.join(", ")
                 ),
             );
-            let (gone, lines) = crate::backend::stop_inductor(&layout_root).await;
+            let (gone, lines) = crate::backend::stop_inductor(&layout.root).await;
             for l in lines {
                 send(&tx, Level::Info, l);
             }
@@ -756,7 +809,7 @@ pub(crate) async fn job_start_backend(
         return;
     }
     match crate::backend::start_backend(
-        &layout_root,
+        &layout.root,
         &api,
         api_up,
         crate::backend::public_bind(has_remotes),
@@ -801,17 +854,19 @@ pub(crate) async fn job_start_backend(
         send(&tx, Level::Info, format!("[{addr}] provisioning machine…"));
         set_machine_state(
             &api,
-            &layout_root,
+            &layout,
             &addr,
             MachineState::Provisioning,
             "catching up in background",
         )
         .await;
-        let layout = bm_core::Layout::new(&layout_root);
         let (mc, mf, mp) = (m.addr.clone(), m.ssh_user.clone(), m.ssh_port);
         let mk = resolve(m);
+        // The loop keeps `layout` for its own bookkeeping, so the blocking
+        // task gets its own copy.
+        let for_box = layout.clone();
         let out = tokio::task::spawn_blocking(move || {
-            crate::provision_machine(&layout, &mc, &mf, mp, mk, false)
+            crate::provision_machine(&for_box, &mc, &mf, mp, mk, false)
         })
         .await;
         if start_cancelled(&tx, &cancel) {
@@ -826,7 +881,7 @@ pub(crate) async fn job_start_backend(
                     failed.push(addr.clone());
                     set_machine_state(
                         &api,
-                        &layout_root,
+                        &layout,
                         &addr,
                         MachineState::Error,
                         "catch-up failed — select it and run :prov to retry",
@@ -840,10 +895,10 @@ pub(crate) async fn job_start_backend(
                 failed.push(addr.clone());
                 set_machine_state(
                     &api,
-                    &layout_root,
+                    &layout,
                     &addr,
                     MachineState::Error,
-                        "catch-up task crashed — :prov to retry",
+                    "catch-up task crashed — :prov to retry",
                 )
                 .await;
                 send(
@@ -859,7 +914,7 @@ pub(crate) async fn job_start_backend(
         }
         send(&tx, Level::Info, format!("[{addr}] launching worker…"));
         if crate::backend::is_local_addr(&addr) {
-            for l in crate::backend::start_local_worker(&layout_root, &api) {
+            for l in crate::backend::start_local_worker(&layout.root, &api) {
                 send(&tx, Level::Info, format!("[{addr}] {l}"));
             }
         } else {
@@ -882,7 +937,7 @@ pub(crate) async fn job_start_backend(
                     failed.push(addr.clone());
                     set_machine_state(
                         &api,
-                        &layout_root,
+                        &layout,
                         &addr,
                         MachineState::Error,
                         "provisioned but the worker would not start — :prov to retry",
@@ -899,7 +954,7 @@ pub(crate) async fn job_start_backend(
                     failed.push(addr.clone());
                     set_machine_state(
                         &api,
-                        &layout_root,
+                        &layout,
                         &addr,
                         MachineState::Error,
                         "worker start task crashed — :prov to retry",
@@ -916,7 +971,7 @@ pub(crate) async fn job_start_backend(
         }
         set_machine_state(
             &api,
-            &layout_root,
+            &layout,
             &addr,
             MachineState::Provisioning,
             "ready — Online on its first beat",
@@ -947,7 +1002,7 @@ pub(crate) async fn job_start_backend(
 
 pub(crate) async fn job_stop_backend(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
-    layout_root: std::path::PathBuf,
+    layout: bm_core::Layout,
     machines: Vec<Machine>,
     api: String,
     settings_key: Option<String>,
@@ -996,7 +1051,7 @@ pub(crate) async fn job_stop_backend(
             m
         })
         .collect();
-    for line in crate::backend::stop_everywhere(&layout_root, &machines, &api).await {
+    for line in crate::backend::stop_everywhere(&layout, &machines, &api).await {
         send(&tx, Level::Info, line);
     }
     send(
@@ -1030,7 +1085,7 @@ pub(crate) async fn job_op(
     api: String,
     http: reqwest::Client,
     req: OpRequest,
-    layout_root: std::path::PathBuf,
+    layout: bm_core::Layout,
 ) {
     // Ops can wait on the analyzer for minutes; the shared 15s
     // client would time them out. Polling keeps the short one.
@@ -1068,7 +1123,7 @@ pub(crate) async fn job_op(
             if op == Op::SwapVoice {
                 match crate::api::offline_swap(
                     &api,
-                    &layout_root,
+                    &layout,
                     &character.clone().unwrap_or_default(),
                     &voice.clone().unwrap_or_default(),
                 )
@@ -1090,7 +1145,7 @@ pub(crate) async fn job_op(
             } else if op == Op::Remix {
                 match crate::api::offline_remix(
                     &api,
-                    &layout_root,
+                    &layout,
                     req.speed,
                     req.effect_volume,
                     req.music_volume,
@@ -1132,7 +1187,7 @@ pub(crate) async fn job_load_roster(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     api: String,
     http: reqwest::Client,
-    layout_root: std::path::PathBuf,
+    layout: bm_core::Layout,
 ) {
     let res = match http.get(format!("{api}/api/roster")).send().await {
         Ok(r) => match r.json::<Roster>().await {
@@ -1142,7 +1197,7 @@ pub(crate) async fn job_load_roster(
         Err(_) => {
             // Inductor down (X stops it): build from files so picking
             // voices never needs the control plane.
-            Ok(crate::api::offline_roster(&layout_root).await)
+            Ok(crate::api::offline_roster(&layout).await)
         }
     };
     let _ = tx.send(Ev::Roster(res));
@@ -1155,9 +1210,9 @@ pub(crate) async fn job_load_roster(
 /// I/O, and the UI task is the one thing the TUI is not allowed to stall.
 pub(crate) async fn job_load_lines(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
-    layout_root: std::path::PathBuf,
+    layout: bm_core::Layout,
 ) {
-    let res = tokio::task::spawn_blocking(move || crate::tui::audition::index_lines(&layout_root))
+    let res = tokio::task::spawn_blocking(move || crate::tui::audition::index_lines(&layout))
         .await
         .unwrap_or_else(|e| Err(format!("line index task failed: {e}")));
     let _ = tx.send(Ev::Lines(res));
@@ -1173,9 +1228,9 @@ pub(crate) async fn job_load_lines(
 /// opens, and the UI task is the one thing the TUI may not stall.
 pub(crate) async fn job_load_sounds(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
-    layout_root: std::path::PathBuf,
+    layout: bm_core::Layout,
 ) {
-    let res = tokio::task::spawn_blocking(move || crate::tui::sound::load(&layout_root))
+    let res = tokio::task::spawn_blocking(move || crate::tui::sound::load(&layout))
         .await
         .unwrap_or_else(|e| Err(format!("sound design task failed: {e}")));
     let _ = tx.send(Ev::Sounds(res.map(Box::new)));
@@ -1189,7 +1244,7 @@ pub(crate) async fn job_load_sounds(
 /// holding, playback, marker release — cannot tell the two paths apart.
 pub(crate) async fn job_segment(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
-    layout_root: std::path::PathBuf,
+    layout: bm_core::Layout,
     character: String,
     voice: String,
     text: String,
@@ -1200,7 +1255,6 @@ pub(crate) async fn job_segment(
     });
     let voice_job = voice.clone();
     let out = tokio::task::spawn_blocking(move || {
-        let layout = bm_core::Layout::new(&layout_root);
         let engine = bm_core::config::Settings::load(&layout.settings()).engine;
         let cands = bm_core::assemble::rendered_segments(&layout, &engine, &voice_job);
         if cands.is_empty() {
@@ -1280,7 +1334,7 @@ fn serve_local_segment(
 /// markers and the previewed checklist cannot tell it from a render.
 pub(crate) async fn job_preview_local(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
-    layout_root: std::path::PathBuf,
+    layout: bm_core::Layout,
     voice: String,
     text: String,
 ) {
@@ -1307,7 +1361,7 @@ pub(crate) async fn job_preview_local(
             bm_proto::now_secs()
         ));
         (|| {
-            bm_core::pool::synth_preview(&layout_root, &voice, &text, &wav)
+            bm_core::pool::synth_preview(&layout.root, &voice, &text, &wav)
                 .map_err(|e| format!("{e:#}"))?;
             let bytes = std::fs::read(&wav).map_err(|e| format!("reading preview wav: {e}"))?;
             let _ = std::fs::remove_file(&wav);
@@ -1462,25 +1516,186 @@ async fn run_lane<F, Fut>(
     }
 }
 
+/// Refuse to move what the cluster is reading, or `None` when it is quiet.
+///
+/// Two locks, the same two the offline voice swap takes: a running inductor
+/// owns the ledger and settings the switch would move out from under it, and a
+/// live local worker is mid-render against the `assets/` + `prompts/` a profile
+/// load would replace. Remote strays are the operator's responsibility — the
+/// supported flow is `X` (which sweeps them) and then the switch.
+async fn cluster_busy(api: &str) -> Option<String> {
+    if crate::backend::inductor_up(api).await {
+        return Some(
+            "inductor is answering — :X first (it owns the ledger this would move)".into(),
+        );
+    }
+    if crate::backend::local_workers_alive() {
+        return Some("local workers still running — :X first, then try again".into());
+    }
+    None
+}
+
+/// List, switch or create a workspace.
+///
+/// The work itself is [`crate::workspace_cmd`], the same function the CLI
+/// runs — one implementation, two presentations. Listing needs no lock (it
+/// reads a pointer and a directory); switching and creating take both.
+pub(crate) async fn job_workspace(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    layout: bm_core::Layout,
+    api: String,
+    req: WorkspaceReq,
+) {
+    // Read before the request is consumed: only a switch moves anything, and
+    // only a switch owes the UI a re-resolve.
+    let listing = matches!(req, WorkspaceReq::List);
+    let run = |cmd: crate::WorkspaceCmd| {
+        let root = layout.root.clone();
+        async move {
+            tokio::task::spawn_blocking(move || crate::workspace_cmd(&root, cmd))
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("workspace task failed: {e}")))
+        }
+    };
+    let out = match req {
+        WorkspaceReq::List => run(crate::WorkspaceCmd::List).await,
+        WorkspaceReq::Use(name) => match cluster_busy(&api).await {
+            Some(why) => Err(anyhow::anyhow!("{why}")),
+            None => run(crate::WorkspaceCmd::Use { name }).await,
+        },
+        WorkspaceReq::New(name) => match cluster_busy(&api).await {
+            Some(why) => Err(anyhow::anyhow!("{why}")),
+            None => run(crate::WorkspaceCmd::New { name }).await,
+        },
+    };
+    let switched = out.is_ok() && !listing;
+    match out {
+        Ok(lines) => {
+            for l in lines {
+                send(&tx, Level::Info, l);
+            }
+        }
+        Err(e) => send(&tx, Level::Error, format!("workspace: {e:#}")),
+    }
+    // Every arm owes exactly one Done; see `job_load_lines`. A successful
+    // switch reports `Relayout` so the dashboard re-resolves before its next
+    // frame — a listing changed nothing.
+    let _ = tx.send(Ev::Done(if switched {
+        DoneKind::Relayout
+    } else {
+        DoneKind::Other
+    }));
+}
+
+/// List, load or pack a profile bundle, through `tools/profile.sh`.
+///
+/// Shell rather than Rust for the same reason ssh and ffmpeg are: tar + zstd +
+/// GitHub releases are the tools, and the script is the one place the bundle
+/// format lives. Its own output is the report — this streams it line by line
+/// instead of re-deriving it.
+pub(crate) async fn job_profile(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    layout: bm_core::Layout,
+    api: String,
+    req: ProfileReq,
+) {
+    let root = layout.root.clone();
+    let script = root.join("tools/profile.sh");
+    let (verb, arg) = match &req {
+        ProfileReq::List => ("list", None),
+        ProfileReq::Load(name) => ("unpack", Some(name.clone())),
+        ProfileReq::Pack(name) => ("pack", Some(name.clone())),
+    };
+    // A load replaces the live tree; a pack only reads it and writes into
+    // profiles/, so it takes no lock.
+    let loading = matches!(req, ProfileReq::Load(_));
+    if loading {
+        if let Some(why) = cluster_busy(&api).await {
+            send(&tx, Level::Error, format!("profile: {why}"));
+            let _ = tx.send(Ev::Done(DoneKind::Other));
+            return;
+        }
+    }
+    if !script.is_file() {
+        send(
+            &tx,
+            Level::Error,
+            format!("no {} — the bundle format lives there", script.display()),
+        );
+        let _ = tx.send(Ev::Done(DoneKind::Other));
+        return;
+    }
+    send(
+        &tx,
+        Level::Info,
+        match &arg {
+            Some(a) => format!("profile {verb} {a}"),
+            None => format!("profile {verb}"),
+        },
+    );
+    let out = tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg(&script).arg(verb);
+        if let Some(a) = arg {
+            cmd.arg(a);
+        }
+        cmd.output()
+    })
+    .await;
+    match out {
+        Ok(Ok(o)) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            let mut any = false;
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                send(&tx, Level::Info, line.to_string());
+                any = true;
+            }
+            if !any {
+                send(&tx, Level::Warn, "profile.sh said nothing".into());
+            }
+            if !o.status.success() {
+                send(
+                    &tx,
+                    Level::Error,
+                    format!("profile.sh {verb} exited {}", o.status.code().unwrap_or(-1)),
+                );
+            }
+        }
+        Ok(Err(e)) => send(&tx, Level::Error, format!("profile.sh failed to run: {e}")),
+        Err(e) => send(&tx, Level::Error, format!("profile task failed: {e}")),
+    }
+    // A load changes which profile the live tree claims to be; the UI re-reads
+    // the pointer when it lands. Listing and packing change nothing.
+    let _ = tx.send(Ev::Done(if loading {
+        DoneKind::Relayout
+    } else {
+        DoneKind::Other
+    }));
+}
+
 pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
     match job.into_bare() {
         Job::Tracked { .. } => unreachable!(),
         Job::Provision {
-            layout_root,
+            layout,
             api,
             machine,
             force,
             settings_key,
-        } => job_provision(tx, layout_root, api, machine, force, settings_key).await,
+        } => job_provision(tx, layout, api, machine, force, settings_key).await,
         Job::AddMachine { api, http, m } => job_add_machine(tx, api, http, m).await,
         Job::AddSample {
-            layout_root,
+            layout,
             path,
             name,
             tags,
-        } => job_add_sample(tx, layout_root, path, name, tags).await,
+        } => job_add_sample(tx, layout, path, name, tags).await,
         Job::StartBackend {
-            layout_root,
+            layout,
             api,
             api_up,
             start,
@@ -1492,7 +1707,7 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
         } => {
             job_start_backend(
                 tx,
-                layout_root,
+                layout,
                 api,
                 api_up,
                 start,
@@ -1505,35 +1720,33 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
             .await
         }
         Job::StopBackend {
-            layout_root,
+            layout,
             machines,
             api,
             settings_key,
-        } => job_stop_backend(tx, layout_root, machines, api, settings_key).await,
+        } => job_stop_backend(tx, layout, machines, api, settings_key).await,
         Job::DropMachine { api, http, addr } => job_drop_machine(tx, api, http, addr).await,
         Job::Op {
             api,
             http,
             req,
-            layout_root,
-        } => job_op(tx, api, http, req, layout_root).await,
-        Job::LoadRoster {
-            api,
-            http,
-            layout_root,
-        } => job_load_roster(tx, api, http, layout_root).await,
-        Job::LoadLines { layout_root } => job_load_lines(tx, layout_root).await,
-        Job::LoadSounds { layout_root } => job_load_sounds(tx, layout_root).await,
+            layout,
+        } => job_op(tx, api, http, req, layout).await,
+        Job::LoadRoster { api, http, layout } => job_load_roster(tx, api, http, layout).await,
+        Job::LoadLines { layout } => job_load_lines(tx, layout).await,
+        Job::LoadSounds { layout } => job_load_sounds(tx, layout).await,
         Job::Segment {
-            layout_root,
+            layout,
             character,
             voice,
             text,
-        } => job_segment(tx, layout_root, character, voice, text).await,
+        } => job_segment(tx, layout, character, voice, text).await,
         Job::PreviewLocal {
-            layout_root,
+            layout,
             voice,
             text,
-        } => job_preview_local(tx, layout_root, voice, text).await,
+        } => job_preview_local(tx, layout, voice, text).await,
+        Job::Workspace { layout, api, req } => job_workspace(tx, layout, api, req).await,
+        Job::Profile { layout, api, req } => job_profile(tx, layout, api, req).await,
     }
 }

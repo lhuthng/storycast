@@ -71,9 +71,18 @@ async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
 ) -> anyhow::Result<()> {
     let mut app = App::new(api);
-    app.layout_root = layout.root.clone();
+    app.layout = layout;
+    // Read once here, not per frame: the footer shows it, and the footer is
+    // redrawn on every keystroke.
+    app.profile = bm_core::profile::read_pointer(&app.layout.root).ok();
     app.http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        // The inductor is a LAN service — loopback for a solo run, a private
+        // address for a cluster. A configured `HTTP_PROXY` would otherwise
+        // intercept every poll and answer with its own body, which surfaces as
+        // "bad state payload" and a dashboard that never connects. Same
+        // reasoning as `api::sidecar_client`.
+        .no_proxy()
         .build()?;
     let http = app.http.clone();
 
@@ -114,9 +123,16 @@ async fn run_loop(
             // voice is in the picker without a manual R. Read before `apply`
             // moves the event.
             let reload_roster = matches!(ev, Ev::Done(DoneKind::ReloadRoster));
+            // A workspace switch or profile load moved the tree under us:
+            // re-resolve before the next frame, or the panes keep showing
+            // the book we just left.
+            let relayout = matches!(ev, Ev::Done(DoneKind::Relayout));
             app.apply(ev);
             if reload_roster && app.roster.is_some() {
                 app.load_roster(&job_tx, &http);
+            }
+            if relayout {
+                app.relayout(&job_tx, &http);
             }
         }
         if event::poll(Duration::from_millis(200))? {
@@ -160,6 +176,9 @@ async fn run_loop(
 pub async fn snapshot(api: &str) -> anyhow::Result<()> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        // Same as the dashboard's client above: the inductor is on loopback or
+        // the LAN, and an ambient `HTTP_PROXY` would answer in its place.
+        .no_proxy()
         .build()?;
     let base = api.trim_end_matches('/');
     let v: serde_json::Value = http

@@ -103,7 +103,7 @@ pub(crate) fn audition(
     // Same engine call the sidecar makes, so a fresh voice auditions with
     // nothing on — at the cost of loading the model here.
     if !matches!(app.conn, Conn::Up) {
-        if app.layout_root.as_os_str().is_empty() {
+        if app.layout.root.as_os_str().is_empty() {
             app.set_status(
                 Level::Warn,
                 "inductor unreachable and no local checkout — :B to connect",
@@ -115,7 +115,7 @@ pub(crate) fn audition(
             app,
             job_tx,
             Job::PreviewLocal {
-                layout_root: app.layout_root.clone(),
+                layout: app.layout.clone(),
                 voice: voice.to_string(),
                 text: l.text.clone(),
             },
@@ -209,7 +209,7 @@ pub(crate) fn segment(
         return;
     }
     if !matches!(app.conn, Conn::Up) {
-        if app.layout_root.as_os_str().is_empty() {
+        if app.layout.root.as_os_str().is_empty() {
             app.set_status(
                 Level::Warn,
                 "inductor unreachable and no local checkout — :B to connect",
@@ -235,7 +235,7 @@ pub(crate) fn segment(
             app,
             job_tx,
             Job::Segment {
-                layout_root: app.layout_root.clone(),
+                layout: app.layout.clone(),
                 character: character.to_string(),
                 voice: voice.to_string(),
                 text: text.to_string(),
@@ -344,9 +344,7 @@ pub(crate) fn pick_current(
             ),
         ),
         Some(cur) => match shown_line(app, &p.character, p.line.as_ref()) {
-            None => {
-                app.set_status(Level::Warn, "no lines in the scripts yet — nothing to test")
-            }
+            None => app.set_status(Level::Warn, "no lines in the scripts yet — nothing to test"),
             Some(l) => {
                 p.line = Some(l.clone());
                 segment(app, job_tx, http, &p.character, &cur, &l.text);
@@ -406,9 +404,7 @@ pub(crate) fn cast_current(
             format!("“{}” has no voice assigned yet", row.character),
         ),
         Some(row) => match shown_line(app, &row.character, v.line.as_ref()) {
-            None => {
-                app.set_status(Level::Warn, "no lines in the scripts yet — nothing to test")
-            }
+            None => app.set_status(Level::Warn, "no lines in the scripts yet — nothing to test"),
             Some(l) => {
                 v.line = Some(l.clone());
                 segment(app, job_tx, http, &row.character, &row.voice, &l.text);
