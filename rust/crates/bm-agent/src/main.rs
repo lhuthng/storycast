@@ -926,6 +926,17 @@ async fn worker_loop(
             token,
             shared: shared.clone(),
             probe: Mutex::new(LoadProbe::new()),
+            layout: layout.clone(),
+            settings: settings.clone(),
+            sidecar: tokio::sync::Mutex::new(Sidecar::new(&tts_url)),
+            // The inductor is never dialled on this path, so the client is here
+            // only because `run_offer` takes one. It still must not be
+            // proxy-intercepted, hence the same builder as the loop above.
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .no_proxy()
+                .build()?,
+            busy: std::sync::atomic::AtomicBool::new(false),
         });
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
         println!("instruction channel on 0.0.0.0:{port} (token required)");
