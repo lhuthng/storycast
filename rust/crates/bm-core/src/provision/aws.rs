@@ -76,6 +76,15 @@ pub struct AwsConfig {
     /// EC2 keypair **name** per region. The private half never leaves this
     /// machine — see [`AwsConfig::key_file`].
     pub keypairs: BTreeMap<String, String>,
+    /// AMI per region, because an image is one region's copy.
+    ///
+    /// Deliberately explicit rather than looked up: the AMI decides what
+    /// actually runs on the account, so it is a decision to make and see, not
+    /// one to resolve from a moving "latest" pointer. `aws init` prints the
+    /// command that resolves the current Ubuntu LTS in a region. It must match
+    /// `ssh_user` — `ubuntu` on Ubuntu, `ec2-user` on Amazon Linux — and the
+    /// two are checked together.
+    pub images: BTreeMap<String, String>,
     /// Where the profile bundles are published, content-addressed. Empty turns
     /// the S3 path off and falls back to rsyncing from here.
     pub bucket: String,
@@ -107,6 +116,7 @@ impl Default for AwsConfig {
             iam_instance_profile: String::new(),
             ssh_user: "ubuntu".into(),
             keypairs: BTreeMap::new(),
+            images: BTreeMap::new(),
             bucket: String::new(),
             spot: true,
             max_workers: 8,
@@ -167,6 +177,15 @@ impl AwsConfig {
         self.keypairs.get(&self.region).map(String::as_str)
     }
 
+    /// The AMI for the configured region, if one is set.
+    ///
+    /// Per region for the same reason as the keypair, and separate from it
+    /// because the two are chosen for different reasons: the keypair is about
+    /// how you get in, the image is about what is already installed when you do.
+    pub fn image(&self) -> Option<&str> {
+        self.images.get(&self.region).map(String::as_str)
+    }
+
     /// Where this region's private half lives, as a path relative to the repo
     /// root. `.bm/` is already ignored, so no `.gitignore` change is needed and
     /// the material is out of the tree by construction.
@@ -199,6 +218,12 @@ impl AwsConfig {
         if self.keypair().is_none() {
             out.push(format!(
                 "no keypair for region {:?} — add it to `keypairs` (an EC2 keypair belongs to one region)",
+                self.region
+            ));
+        }
+        if self.image().is_none() {
+            out.push(format!(
+                "no AMI for region {:?} — add it to `images`; `aws init` prints the lookup for the current Ubuntu LTS",
                 self.region
             ));
         }
@@ -289,6 +314,108 @@ fn merge(base: &mut serde_json::Value, over: serde_json::Value) {
         }
         (slot, v) => *slot = v,
     }
+}
+
+/// The `aws ec2 describe-images` call that finds the AMI's root device name.
+///
+/// Needed because the block-device mapping has to name it, and the name differs
+/// by image (`/dev/sda1` on Ubuntu, `/dev/xvda` on Amazon Linux). Resolving it
+/// instead of assuming one means `disk_gb` is honoured on any image rather than
+/// silently ignored on half of them.
+pub fn describe_image_args(cfg: &AwsConfig, image_id: &str) -> Vec<String> {
+    vec![
+        "ec2".into(),
+        "describe-images".into(),
+        "--region".into(),
+        cfg.region.clone(),
+        "--image-ids".into(),
+        image_id.into(),
+        "--query".into(),
+        "Images[0].RootDeviceName".into(),
+        "--output".into(),
+        "text".into(),
+    ]
+}
+
+/// The `aws ec2 run-instances` call for `count` boxes.
+///
+/// Pure, and the whole point of that: `aws up --dry-run` prints this exact argv,
+/// so what will run on the account is reviewable before it costs anything. Every
+/// value comes from the config — nothing is invented here.
+///
+/// `tag_value` is written to the marker tag and is what `ls`/`down` read back;
+/// the caller passes the profile hash, so a box always says which build it was
+/// launched for.
+///
+/// `root_device` comes from [`describe_image_args`] because the mapping must
+/// name the image's own root device.
+pub fn run_instances_args(
+    cfg: &AwsConfig,
+    count: u32,
+    root_device: &str,
+    tag_value: &str,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "ec2".into(),
+        "run-instances".into(),
+        "--region".into(),
+        cfg.region.clone(),
+        "--image-id".into(),
+        cfg.image().unwrap_or_default().into(),
+        "--instance-type".into(),
+        cfg.instance_type.clone(),
+        "--count".into(),
+        count.to_string(),
+        "--subnet-id".into(),
+        cfg.subnet_id.clone(),
+        "--security-group-ids".into(),
+        cfg.security_group_id.clone(),
+        "--key-name".into(),
+        cfg.keypair().unwrap_or_default().into(),
+        // DeleteOnTermination: a pool that leaks volumes on every launch is a
+        // bill nobody looks at until it is large.
+        "--block-device-mappings".into(),
+        format!(
+            "DeviceName={root_device},Ebs={{VolumeSize={},VolumeType=gp3,DeleteOnTermination=true}}",
+            cfg.disk_gb
+        ),
+        // The marker is the safety mechanism, not decoration: `down` filters on
+        // it, so an untagged box is one this tool can never terminate by
+        // accident — including a stranger's.
+        "--tag-specifications".into(),
+        format!(
+            "ResourceType=instance,Tags=[{{Key={},Value={}}},{{Key=Name,Value={}}}]",
+            cfg.tag_key, tag_value, cfg.tag_key
+        ),
+        "--output".into(),
+        "json".into(),
+    ];
+    if cfg.spot {
+        // No max-price: the on-demand ceiling is the sane default, and a
+        // hard-coded bid is how a pool silently stops launching.
+        args.push("--instance-market-options".into());
+        args.push("MarketType=spot".into());
+    }
+    args
+}
+
+/// The `aws ec2 terminate-instances` call for explicit instance ids.
+///
+/// Takes ids rather than a filter on purpose. `down` resolves the ids from the
+/// marker tag first and shows them, so the destructive step is always over a
+/// list someone could read — never a pattern that might match something else.
+pub fn terminate_args(region: &str, ids: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "ec2".into(),
+        "terminate-instances".into(),
+        "--region".into(),
+        region.into(),
+    ];
+    args.push("--instance-ids".into());
+    args.extend(ids.iter().cloned());
+    args.push("--output".into());
+    args.push("json".into());
+    args
 }
 
 /// One running box, as much of it as the dashboard needs.
@@ -396,6 +523,7 @@ mod tests {
             security_group_id: "sg-0abc".into(),
             iam_instance_profile: "storycast-worker".into(),
             keypairs: BTreeMap::from([("eu-central-1".to_string(), "storycast".to_string())]),
+            images: BTreeMap::from([("eu-central-1".to_string(), "ami-0abc".to_string())]),
             bucket: "storycast-assets".into(),
             ..Default::default()
         }
@@ -484,6 +612,113 @@ mod tests {
         c.bucket = String::new();
         assert!(!c.publishes_assets());
         assert!(c.summary().contains("rsync from here"), "{}", c.summary());
+    }
+
+    #[test]
+    fn the_launch_argv_is_reviewable_and_carries_the_marker() {
+        // `aws up --dry-run` prints this argv, so it is the thing an operator
+        // reads before anything costs money. Every value must come from the
+        // config, and the marker tag must be present: `down` filters on it, so
+        // a launch without it is a box this tool can never clean up.
+        let mut c = configured();
+        let argv = run_instances_args(&c, 3, "/dev/sda1", "b20f7789f510");
+        let joined = argv.join(" ");
+        for want in [
+            "run-instances",
+            "--region eu-central-1",
+            "--image-id ami-0abc",
+            "--instance-type c7i.xlarge",
+            "--count 3",
+            "--subnet-id subnet-0abc",
+            "--security-group-ids sg-0abc",
+            "--key-name storycast",
+        ] {
+            assert!(joined.contains(want), "missing {want:?} in {joined}");
+        }
+        // The volume follows the image's own root device, and it is deleted
+        // with the box.
+        assert!(joined.contains("DeviceName=/dev/sda1"), "{joined}");
+        assert!(joined.contains("VolumeSize=30"), "{joined}");
+        assert!(joined.contains("VolumeType=gp3"), "{joined}");
+        assert!(joined.contains("DeleteOnTermination=true"), "{joined}");
+        // The marker, with the profile hash as its value.
+        assert!(
+            joined
+                .contains("ResourceType=instance,Tags=[{Key=storycast-worker,Value=b20f7789f510}"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("MarketType=spot"),
+            "spot is on by default: {joined}"
+        );
+        // On-demand drops the market option entirely rather than asking for
+        // on-demand explicitly — the two are not the same request.
+        c.spot = false;
+        assert!(!run_instances_args(&c, 1, "/dev/xvda", "h")
+            .join(" ")
+            .contains("MarketType"));
+    }
+
+    #[test]
+    fn the_image_is_looked_up_rather_than_assumed() {
+        // `/dev/sda1` on Ubuntu, `/dev/xvda` on Amazon Linux: assuming one
+        // means `disk_gb` is silently ignored on half the images.
+        let c = configured();
+        assert_eq!(
+            describe_image_args(&c, "ami-0abc"),
+            vec![
+                "ec2",
+                "describe-images",
+                "--region",
+                "eu-central-1",
+                "--image-ids",
+                "ami-0abc",
+                "--query",
+                "Images[0].RootDeviceName",
+                "--output",
+                "text"
+            ]
+        );
+    }
+
+    #[test]
+    fn terminating_names_ids_and_never_a_filter() {
+        // The destructive step is always over a list someone could have read.
+        // A filter here would mean "terminate whatever matches", which is how
+        // an autoscaler deletes the wrong account's boxes.
+        let argv = terminate_args("eu-central-1", &["i-0aaa".into(), "i-0bbb".into()]);
+        assert_eq!(
+            argv,
+            vec![
+                "ec2",
+                "terminate-instances",
+                "--region",
+                "eu-central-1",
+                "--instance-ids",
+                "i-0aaa",
+                "i-0bbb",
+                "--output",
+                "json"
+            ]
+        );
+        assert!(!argv.join(" ").contains("--filters"), "no pattern matching");
+    }
+
+    #[test]
+    fn a_pool_without_an_image_cannot_launch() {
+        // The image decides what runs on the account, so a missing one is a
+        // refusal naming the fix — not a launch against some default that
+        // nobody chose.
+        let mut c = configured();
+        c.images.clear();
+        assert!(
+            c.missing().iter().any(|m| m.contains("AMI")),
+            "{:?}",
+            c.missing()
+        );
+        c.images = BTreeMap::from([("eu-central-1".into(), "ami-0abc".into())]);
+        assert!(c.missing().is_empty(), "{:?}", c.missing());
+        assert_eq!(c.image(), Some("ami-0abc"));
     }
 
     #[test]
