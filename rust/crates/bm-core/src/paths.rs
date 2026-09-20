@@ -366,6 +366,18 @@ impl Layout {
         self.bm_state().join("machines.json")
     }
 
+    /// The AWS worker pool definition: region, type, subnet, security group,
+    /// instance profile, keypair names, bucket, caps.
+    ///
+    /// At the root rather than in the workspace, for the same reason as
+    /// `machines()`: it describes *this machine's access to AWS*, not a book.
+    /// The profile a box is built for is the machine-global `.bm/profile`, so
+    /// two workspaces share one pool without either one's settings leaking into
+    /// it.
+    pub fn aws_config(&self) -> PathBuf {
+        self.bm_state().join("aws.json")
+    }
+
     /// Reference clips for enrolled clones — supplied by the operator and the
     /// input to enrolment. Ignored, and the only voice asset that reaches a
     /// worker.

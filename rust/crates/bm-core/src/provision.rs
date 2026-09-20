@@ -14,10 +14,14 @@ use bm_proto::{Machine, MachineState};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+mod aws;
 mod ssh;
 mod stamp;
 mod steps;
 
+pub use aws::{
+    instance_line, parse_instances, profile_object, AwsConfig, AwsInstance, DEFAULT_TAG,
+};
 pub use ssh::{resolve_key, KeySource, Ssh};
 pub use stamp::{compute_provision_stamp, ProvisionStamp};
 pub use steps::{provision, Probe};
