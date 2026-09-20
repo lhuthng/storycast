@@ -378,6 +378,17 @@ impl Layout {
         self.bm_state().join("aws.json")
     }
 
+    /// The tracked AWS template: the *shape* of the pool, which travels with
+    /// the repo so a clone knows what to fill in. Values are personal and live
+    /// in [`Layout::aws_config`]; see `AwsConfig::load_layered`.
+    ///
+    /// Tracked at the root beside `voices.default.json`, the same split the
+    /// voice catalogue uses: the shipped half is content, the local half is
+    /// machine state.
+    pub fn aws_default(&self) -> PathBuf {
+        self.root.join(crate::provision::DEFAULT_FILE)
+    }
+
     /// Reference clips for enrolled clones — supplied by the operator and the
     /// input to enrolment. Ignored, and the only voice asset that reaches a
     /// worker.

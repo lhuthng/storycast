@@ -36,6 +36,17 @@ use std::path::Path;
 /// untagged pool cannot be told from a stranger's instances.
 pub const DEFAULT_TAG: &str = "storycast-worker";
 
+/// The tracked template at the repo root, beside `voices.default.json` and for
+/// the same reason: the *shape* of the pool has to travel with the repo, so
+/// anyone who clones knows what to fill in. Only the values are personal, and
+/// they live in the ignored `.bm/aws.json`.
+///
+/// Credentials belong in neither file. They come from the standard AWS chain,
+/// which is also what makes this shareable: two people with the same repo and
+/// different accounts each set up their own `.bm/aws.json` and neither can
+/// commit the other's account IDs by accident.
+pub const DEFAULT_FILE: &str = "aws.default.json";
+
 /// One AWS worker pool. Everything a launch needs, written once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -106,13 +117,35 @@ impl Default for AwsConfig {
 }
 
 impl AwsConfig {
-    /// Read the pool definition. A missing file is not an error — it means the
-    /// pool has never been set up, which is a state [`Self::missing`] describes.
+    /// Read the pool definition from one file. A missing file is not an error —
+    /// it means the pool has never been set up, which is a state
+    /// [`Self::missing`] describes.
     pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
+        read_doc(path)
+            .and_then(|d| serde_json::from_value(d).ok())
             .unwrap_or_default()
+    }
+
+    /// The effective pool: the local values over the tracked template over the
+    /// compiled defaults.
+    ///
+    /// Layered rather than either/or, because the two halves answer different
+    /// questions. The template ships the *shape* — which fields exist, what a
+    /// sensible instance type is, why spot is a good fit — and travels with the
+    /// repo. The local file holds the account-specific values, which are
+    /// nobody else's business and which git ignores. A field the local file
+    /// omits keeps the template's value, so a config written before a field
+    /// existed still picks it up instead of silently reverting to a compiled
+    /// default that the template had deliberately changed.
+    ///
+    /// Objects merge key by key (a local `keypairs` entry adds to the
+    /// template's rather than replacing it); everything else replaces.
+    pub fn load_layered(root: &Path) -> Self {
+        let mut doc = read_doc(&root.join(DEFAULT_FILE)).unwrap_or(serde_json::Value::Null);
+        if let Some(local) = read_doc(&root.join(".bm/aws.json")) {
+            merge(&mut doc, local);
+        }
+        serde_json::from_value(doc).unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -234,6 +267,28 @@ pub fn profile_object(bucket: &str, manifest_hash: &str) -> Option<String> {
         return None;
     }
     Some(format!("s3://{bucket}/profiles/{hash}.tar.zst"))
+}
+
+/// One JSON file, or `None` when it is absent or unreadable.
+fn read_doc(path: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// `over` wins, key by key; nested objects merge rather than replace.
+///
+/// The `_note` keys the template carries for the human are just keys here —
+/// serde drops what the struct does not name, so the explanation survives in
+/// the file the operator edits without ever reaching the code.
+fn merge(base: &mut serde_json::Value, over: serde_json::Value) {
+    match (base, over) {
+        (serde_json::Value::Object(b), serde_json::Value::Object(o)) => {
+            for (k, v) in o {
+                merge(b.entry(k).or_insert(serde_json::Value::Null), v);
+            }
+        }
+        (slot, v) => *slot = v,
+    }
 }
 
 /// One running box, as much of it as the dashboard needs.
@@ -481,6 +536,89 @@ mod tests {
         // Fields the API may omit must not panic or shift the row.
         assert_eq!(got[2].instance_type, "");
         assert_eq!(got[2].state, "stopped");
+    }
+
+    #[test]
+    fn the_local_values_layer_over_the_tracked_template() {
+        // The split that makes this shareable: the template travels with the
+        // repo so a clone knows what to fill in, and the values stay personal.
+        // A field the local file omits keeps the template's value — otherwise a
+        // local file that predates a field would silently revert to a compiled
+        // default the template had deliberately changed.
+        let dir = std::env::temp_dir().join(format!("bm-aws-layer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".bm")).unwrap();
+        std::fs::write(
+            dir.join(DEFAULT_FILE),
+            r#"{"_note":"shipped","instance_type":"c7i.xlarge","ttl_hours":6,
+                "tag_key":"storycast-worker","keypairs":{"eu-central-1":"team"}}"#,
+        )
+        .unwrap();
+
+        // Template alone: a clone that has not set anything up yet still gets
+        // the shipped shape, not the compiled defaults.
+        let from_template = AwsConfig::load_layered(&dir);
+        assert_eq!(from_template.instance_type, "c7i.xlarge");
+        assert_eq!(from_template.keypair(), None, "no region chosen yet");
+        assert_eq!(from_template.tag_key, "storycast-worker");
+
+        // Local values win, field by field, and an omitted field keeps the
+        // template's.
+        std::fs::write(
+            dir.join(".bm/aws.json"),
+            r#"{"region":"eu-central-1","ttl_hours":2,"subnet_id":"subnet-1"}"#,
+        )
+        .unwrap();
+        let merged = AwsConfig::load_layered(&dir);
+        assert_eq!(merged.region, "eu-central-1", "local wins");
+        assert_eq!(merged.ttl_hours, 2, "local wins");
+        assert_eq!(merged.subnet_id, "subnet-1");
+        assert_eq!(
+            merged.instance_type, "c7i.xlarge",
+            "omitted locally, so the template's value survives"
+        );
+        assert_eq!(merged.tag_key, "storycast-worker");
+        // Objects merge rather than replace, so a per-region keypair in the
+        // template is not lost the moment the local file names a region.
+        assert_eq!(merged.keypair(), Some("team"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_shipped_template_parses_and_only_needs_the_account_fields() {
+        // The tracked `aws.default.json` is a real parse target, not just
+        // documentation: `aws init` seeds the operator's file from it. If it
+        // ever stops matching the struct, every setup starts from a broken file.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let cfg = AwsConfig::load_layered(&root);
+        let missing = cfg.missing();
+        // What the template cannot know: which account, which subnet, which
+        // group, which profile, which keypair. Everything else it supplies.
+        for field in [
+            "region",
+            "subnet_id",
+            "security_group_id",
+            "iam_instance_profile",
+        ] {
+            assert!(
+                missing.iter().any(|m| m.contains(field)),
+                "the template must still be missing {field}: {missing:?}"
+            );
+        }
+        for supplied in [
+            "instance_type",
+            "disk_gb",
+            "ssh_user",
+            "tag_key",
+            "max_workers",
+        ] {
+            assert!(
+                !missing.iter().any(|m| m.contains(supplied)),
+                "the template supplies {supplied}: {missing:?}"
+            );
+        }
+        assert_eq!(cfg.instance_type, "c7i.xlarge");
+        assert!(cfg.spot, "spot is the shipped default");
     }
 
     #[test]
