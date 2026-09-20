@@ -118,7 +118,12 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
         Paragraph::new(Line::from(vec![
             Span::styled("filter: ", Style::default().fg(Color::DarkGray)),
             Span::styled(view.filter.clone(), app.style(Color::White)),
-            Span::styled("▌", app.style(Color::Cyan)),
+            // The cursor shows exactly when typing would land: only while
+            // the filter is focused (in audition focus `t` would play).
+            Span::styled(
+                if view.filter_focus { "▌" } else { "" },
+                app.style(Color::Cyan),
+            ),
         ])),
         rows_area[1],
     );
@@ -280,16 +285,29 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
         f.render_widget(table, rows_area[2]);
     }
 
-    let mut hints = vec![
-        Line::from(Span::styled(
-            "type to filter · ↑↓ move · Esc close · R reload roster",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(Span::styled(
-            ":current cached test · :try this line · :another new line — each assigns nothing; every letter filters",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+    let mut hints = if view.filter_focus {
+        vec![
+            Line::from(Span::styled(
+                "typing — t/T filter too · :current :try :another still audition",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "↑↓ move · Esc back to audition keys · R reload roster",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]
+    } else {
+        vec![
+            Line::from(Span::styled(
+                "t cached test · T this line · ^T another line — each assigns nothing",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "other letters filter · ^R focuses filter · ↑↓ move · Esc close · R reload roster",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]
+    };
     // A random line is random until you are told which one it is. Say it, or the
     // operator is comparing two voices on a sentence they cannot see.
     if let Some(l) = &view.line {

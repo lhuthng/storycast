@@ -1208,17 +1208,22 @@ pub(crate) async fn job_segment(
             msg.push_str("; connect (:B) to synthesize instead");
             return Err(msg);
         }
-        // An exact line plays that sentence or misses honestly, like the op.
+        // An exact line plays that sentence or misses honestly, like the op —
+        // with the same fallback to one of hers that did render, so a
+        // fresh swap (rendered chapter by chapter) still auditions.
         let want = text.trim();
         if !want.is_empty() {
             match bm_core::assemble::pick_exact(&cands, &character, want) {
                 Some(pick) => return serve_local_segment(pick),
-                None => {
-                    return Err(format!(
-                        "{} (needs :B to render it)",
-                        bm_core::assemble::segment_miss(&layout, &character, &voice_job, true)
-                    ))
-                }
+                None => match bm_core::assemble::pick_rendered(&cands, &character) {
+                    Some(pick) => return serve_local_segment(pick),
+                    None => {
+                        return Err(format!(
+                            "{} (needs :B to render it)",
+                            bm_core::assemble::segment_miss(&layout, &character, &voice_job, true)
+                        ))
+                    }
+                },
             }
         }
         let pick = bm_core::assemble::pick_rendered(&cands, &character)

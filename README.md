@@ -249,17 +249,23 @@ stage, scaled by the unworked fraction; a dash until anything completes).
 #### Hearing a voice before you commit to it
 
 In the voice picker (`:swap` step 2 of 2) and the cast overview (`:cast`) — the two screens that
-know which voice a speaker has — three words audition and **none of them assign**.
+know which voice a speaker has — three keys audition and **none of them assign**.
 `Enter` is still the only key that changes the cast.
 
-| Word                          | Plays                                                                                |
-| ----------------------------- | ------------------------------------------------------------------------------------ |
-| `:current`                    | the held line with the **current** voice, from cache only — zero synthesis            |
-| `:try` (`:test`)              | that same held line with the **pointed** voice (rendered)                             |
-| `:another` (`:change`, `:next`) | **another** line with the **pointed** voice (rendered)                               |
+| Key           | Plays                                                                                |
+| ------------- | ------------------------------------------------------------------------------------ |
+| `t`           | the held line with the **current** voice, from cache only — zero synthesis            |
+| `T`           | that same held line with the **pointed** voice (rendered)                             |
+| `Ctrl+T`      | **another** line with the **pointed** voice (rendered)                                |
 
-Every letter types into the filter on both screens — the words above run from
-the `:` command line instead of stealing keys.
+The same three run as words from the command line — `:current`, `:try`
+(`:test`), `:another` (`:change`, `:next`).
+
+Keys or filter, never both: both screens open in audition focus, where the
+keys play and any other letter focuses the filter instead. While the filter
+is focused every letter types (`t`/`T` included) and the keys go quiet —
+the words still audition. `^R` focuses explicitly; `Esc` blurs back to the
+audition keys.
 
 In the picker the character is fixed, so `:current` replays the current A/B sentence
 and never rolls; in the cast overview it follows the highlighted speaker.

@@ -1,24 +1,26 @@
 //! Auditioning a voice: play it, never commit to it.
 //!
-//! Three `:` words — `:current`, `:try`, `:another` — answering three
-//! questions, run from the command line on the picker step 2 and cast
-//! screens (see `audition_word`).
+//! Three auditions — current, pointed, another — answering three questions,
+//! run from `t` / `T` / `^T` or from the `:current` / `:try` / `:another`
+//! words (same callees below, so keys and words can never disagree).
 //!
-//! * **`:current`** plays an already-rendered segment (`Op::Segment`): the
+//! * **current** plays an already-rendered segment (`Op::Segment`): the
 //!   held line with the current voice, zero synthesis. In the picker the
 //!   character is fixed so the line never rolls; in the cast overview it
 //!   follows the highlighted speaker.
-//! * **`:try`** renders the held line with the pointed voice
+//! * **try** renders the held line with the pointed voice
 //!   (`Op::PreviewVoice` with text): the one deliberate generation, and the
 //!   only way to hear two voices on the same sentence before either is
 //!   assigned. With the inductor down it synthesizes on this machine
 //!   instead — no worker needs to be on.
-//! * **`:another`** renders another line with the pointed voice: one random
+//! * **another** renders another line with the pointed voice: one random
 //!   pick may be a poor representative.
 //!
-//! Every letter types into the filter on both screens — the words run from
-//! the `:` line instead of stealing keys (the old `t` / `T` / `^T` did, and
-//! blocked the filter).
+//! Keys or filter, never both: picker step 2 and the cast overview open in
+//! audition focus, where `t`/`T`/`^T` play and any other letter focuses the
+//! filter instead. While the filter is focused every letter types (t/T
+//! included) and the keys go quiet — the words still audition from the
+//! command line. `Esc` blurs back to audition focus; `^R` focuses explicitly.
 //!
 //! The held line lives on the screen; `Enter` on a voice additionally locks it
 //! per character (`App::locked_lines`), so reopening the picker resumes on the
@@ -325,7 +327,9 @@ pub(crate) fn audition_word(
 /// front of them. The pointed voice is for `:try` (render) and Enter
 /// (pick) — `:current` never follows the cursor. A miss names the render
 /// word.
-fn pick_current(
+/// Shared with [`audition_word`]: the `:current` / `:try` / `:another`
+/// words dispatch here too, so keys and words can never disagree.
+pub(crate) fn pick_current(
     app: &mut App,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
     http: &reqwest::Client,
@@ -355,7 +359,9 @@ fn pick_current(
 /// rendered with the voice under the cursor. The one deliberate
 /// generation: the only way to hear two voices on the same sentence
 /// before either is assigned.
-fn pick_pointed(
+/// Shared with [`audition_word`]: the `:current` / `:try` / `:another`
+/// words dispatch here too, so keys and words can never disagree.
+pub(crate) fn pick_pointed(
     app: &mut App,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
     http: &reqwest::Client,
@@ -383,7 +389,9 @@ fn pick_pointed(
 /// `:current` on the cast overview: the speaker's current voice on the
 /// shown line, from cache only — never synthesis. A miss names the render
 /// word instead of playing something nearby.
-fn cast_current(
+/// Shared with [`audition_word`]: the `:current` / `:try` / `:another`
+/// words dispatch here too, so keys and words can never disagree.
+pub(crate) fn cast_current(
     app: &mut App,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
     http: &reqwest::Client,
@@ -411,7 +419,9 @@ fn cast_current(
 
 /// `:try` / `:another` on the cast overview: the held line — or another
 /// one — rendered with the highlighted speaker's voice.
-fn cast_pointed(
+/// Shared with [`audition_word`]: the `:current` / `:try` / `:another`
+/// words dispatch here too, so keys and words can never disagree.
+pub(crate) fn cast_pointed(
     app: &mut App,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
     http: &reqwest::Client,
