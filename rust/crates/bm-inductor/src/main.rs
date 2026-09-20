@@ -222,7 +222,7 @@ pub fn provision_machine(
     };
     let pre = probe_ssh.probe();
     log.push(format!("[{addr}] {}", pre.summary()));
-    let binary = match agent_binary_for(pre.arch.as_str(), layout) {
+    let binary = match agent_binary_for(pre.os.as_str(), pre.arch.as_str(), layout) {
         Ok(b) => b,
         Err(e) => {
             log.push(format!("[{addr}] {e}"));
@@ -230,7 +230,7 @@ pub fn provision_machine(
         }
     };
     log.push(format!("[{addr}] agent binary: {}", binary.display()));
-    let tts = match tts_binary_for(pre.arch.as_str(), layout) {
+    let tts = match tts_binary_for(pre.os.as_str(), pre.arch.as_str(), layout) {
         Ok(b) => b,
         Err(e) => {
             log.push(format!("[{addr}] {e}"));
@@ -245,7 +245,7 @@ pub fn provision_machine(
         &layout.root,
         &binary,
         &tts,
-        &tts_runtime_dir(layout),
+        tts_runtime_dir(pre.os.as_str(), pre.arch.as_str(), layout).as_deref(),
         env!("CARGO_PKG_VERSION"),
         force,
         Some(pre),
@@ -302,48 +302,104 @@ async fn cmd_serve(
     Ok(())
 }
 
-/// Pick the agent binary matching the target arch. Cross builds live next to
-/// the native one; a missing cross binary is a build error, not a guess.
-/// Pick the TTS sidecar binary for the target arch.
+/// Pick the binaries matching the target platform. `os`/`arch` are the probe's
+/// normalized values, in Rust's spelling (`linux`/`macos`, `x86_64`/`aarch64`).
+///
+/// A box identical to this machine runs the native build — which is also how a
+/// macOS worker gets its binary with no cross toolchain involved. Anything
+/// else needs its cross build present; a missing one is a build error naming
+/// the exact command, never a guess that ships the wrong executable.
+///
+/// Pick the TTS sidecar binary for the target platform.
 ///
 /// Unlike [`agent_binary_for`], this one is a **release** build: bm-tts's hot
 /// loop is a hand-written SIMD matvec, and a debug build would give all of that
-/// back. Missing is a build error, not a guess — `make tts` produces it.
-fn tts_binary_for(arch: &str, layout: &Layout) -> anyhow::Result<std::path::PathBuf> {
-    let dir = layout.root.join("rust/target");
-    let cand = if arch == "x86_64" {
-        dir.join("x86_64-unknown-linux-gnu/release/bm-tts")
-    } else {
-        dir.join("release/bm-tts")
-    };
-    if cand.is_file() {
-        return Ok(cand);
+/// back. Missing is a build error, not a guess — `make tts` produces the
+/// linux/x86_64 one.
+fn tts_binary_for(
+    os: &str,
+    arch: &str,
+    layout: &Layout,
+) -> anyhow::Result<std::path::PathBuf> {
+    for cand in tts_candidates(os, arch, layout) {
+        if cand.is_file() {
+            return Ok(cand);
+        }
     }
     anyhow::bail!(
-        "no TTS sidecar binary for arch {arch} at {} (run `make tts`)",
-        cand.display()
+        "no TTS sidecar binary for {os}/{arch} at {} (linux/x86_64: `make tts`; linux/aarch64: `cargo zigbuild --release --target aarch64-unknown-linux-gnu -p bm-tts` after staging its runtime)",
+        tts_candidates(os, arch, layout)
+            .into_iter()
+            .map(|c| c.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" or ")
     )
 }
 
-/// Where `make runtime` staged the shared ONNX Runtime to push alongside it.
-fn tts_runtime_dir(layout: &Layout) -> std::path::PathBuf {
-    layout.root.join("rust/target/ort-linux-x64")
+/// Where `make runtime` staged the shared ONNX Runtime to push alongside the
+/// sidecar — `None` where the sidecar is self-contained (macOS links its
+/// runtime statically, so no `.so` travels).
+fn tts_runtime_dir(
+    os: &str,
+    arch: &str,
+    layout: &Layout,
+) -> Option<std::path::PathBuf> {
+    match (os, arch) {
+        ("linux", "x86_64") => Some(layout.root.join("rust/target/ort-linux-x64")),
+        ("linux", "aarch64") => Some(layout.root.join("rust/target/ort-linux-aarch64")),
+        _ => None,
+    }
 }
 
-fn agent_binary_for(arch: &str, layout: &Layout) -> anyhow::Result<std::path::PathBuf> {
-    let dir = layout.root.join("rust/target");
-    let cand = if arch == "x86_64" {
-        dir.join("x86_64-unknown-linux-gnu/debug/bm-agent")
-    } else {
-        dir.join("debug/bm-agent")
-    };
-    if cand.is_file() {
-        return Ok(cand);
+fn agent_binary_for(
+    os: &str,
+    arch: &str,
+    layout: &Layout,
+) -> anyhow::Result<std::path::PathBuf> {
+    for cand in agent_candidates(os, arch, layout) {
+        if cand.is_file() {
+            return Ok(cand);
+        }
     }
     anyhow::bail!(
-        "no agent binary for arch {arch} at {} (build it first)",
-        cand.display()
+        "no agent binary for {os}/{arch} at {} (linux/x86_64 is cross-built; linux/aarch64: `cargo zigbuild --target aarch64-unknown-linux-gnu -p bm-agent`; macOS: provision from a same-arch Mac so the native build matches)",
+        agent_candidates(os, arch, layout)
+            .into_iter()
+            .map(|c| c.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" or ")
     )
+}
+
+/// Cross builds first (they target older glibc and run anywhere), then the
+/// native build when this machine *is* the target platform.
+fn agent_candidates(os: &str, arch: &str, layout: &Layout) -> Vec<std::path::PathBuf> {
+    let dir = layout.root.join("rust/target");
+    let mut cands = Vec::new();
+    match (os, arch) {
+        ("linux", "x86_64") => cands.push(dir.join("x86_64-unknown-linux-gnu/debug/bm-agent")),
+        ("linux", "aarch64") => cands.push(dir.join("aarch64-unknown-linux-gnu/debug/bm-agent")),
+        _ => {}
+    }
+    if os == std::env::consts::OS && arch == std::env::consts::ARCH {
+        cands.push(dir.join("debug/bm-agent"));
+    }
+    cands
+}
+
+/// Same order as the agent: cross first, native when this machine matches.
+fn tts_candidates(os: &str, arch: &str, layout: &Layout) -> Vec<std::path::PathBuf> {
+    let dir = layout.root.join("rust/target");
+    let mut cands = Vec::new();
+    match (os, arch) {
+        ("linux", "x86_64") => cands.push(dir.join("x86_64-unknown-linux-gnu/release/bm-tts")),
+        ("linux", "aarch64") => cands.push(dir.join("aarch64-unknown-linux-gnu/release/bm-tts")),
+        _ => {}
+    }
+    if os == std::env::consts::OS && arch == std::env::consts::ARCH {
+        cands.push(dir.join("release/bm-tts"));
+    }
+    cands
 }
 
 /// Rewrite interjections into engine tags via the live inductor API.
@@ -721,6 +777,47 @@ mod tests {
             assert_eq!(lines.len(), 1, "{lines:?}");
             assert!(lines[0].contains("nothing to provision"), "{}", lines[0]);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn binary_routing_serves_each_platform_its_own_build() {
+        // A fixture root holding one binary per platform: routing must pick
+        // the file matching the probe, and refuse — not guess — the rest.
+        let dir = std::env::temp_dir().join(format!("bm-routing{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = bm_core::Layout::new(&dir);
+        let touch = |rel: &str| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"fake").unwrap();
+            p
+        };
+        let cross_agent = touch("rust/target/x86_64-unknown-linux-gnu/debug/bm-agent");
+        assert_eq!(
+            agent_binary_for("linux", "x86_64", &layout).unwrap(),
+            cross_agent
+        );
+        assert_eq!(
+            tts_runtime_dir("linux", "x86_64", &layout).unwrap(),
+            dir.join("rust/target/ort-linux-x64")
+        );
+        // Nothing staged for linux/arm64: a build error naming the platform,
+        // never another platform's binary.
+        let err = agent_binary_for("linux", "aarch64", &layout).unwrap_err();
+        assert!(err.to_string().contains("linux/aarch64"), "{err}");
+        // This host's own platform falls back to the native build — asserted
+        // on the candidate list (not the pick) so the test holds on any host:
+        // on linux/x86_64 the cross file above would otherwise win first.
+        let native = touch("rust/target/debug/bm-agent");
+        assert_eq!(
+            agent_candidates(std::env::consts::OS, std::env::consts::ARCH, &layout)
+                .last()
+                .unwrap(),
+            &native
+        );
+        // The macOS sidecar is self-contained: no runtime travels with it.
+        assert!(tts_runtime_dir("macos", "aarch64", &layout).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
