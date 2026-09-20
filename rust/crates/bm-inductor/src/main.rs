@@ -162,6 +162,30 @@ enum Cmd {
         #[command(subcommand)]
         cmd: WorkspaceCmd,
     },
+    /// AWS worker pool: the definition written once in `.bm/aws.json`, and what
+    /// the account actually holds. Local only — starts nothing.
+    Aws {
+        #[command(subcommand)]
+        cmd: AwsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AwsCmd {
+    /// Print the pool definition, what is still missing, and the one-off setup
+    /// commands it needs. Reads no network.
+    Show,
+    /// Write a `.bm/aws.json` template to fill in. Refuses to overwrite one
+    /// that exists unless --force.
+    Init {
+        /// Overwrite an existing pool definition.
+        #[arg(long)]
+        force: bool,
+    },
+    /// List the boxes this tool started, straight from the account.
+    ///
+    /// The credential and region check: if this answers, `up` can too.
+    Ls,
 }
 
 #[derive(Subcommand)]
@@ -520,6 +544,180 @@ pub(crate) fn workspace_cmd(
         }
     }
 }
+/// The AWS pool: the definition, and what the account holds.
+///
+/// Returns the lines to show, like [`workspace_cmd`] — the CLI prints them and
+/// the dashboard could log the same operation. Nothing here starts, stops or
+/// terminates anything: `up`/`down` are the commands that spend money, and they
+/// are not written yet.
+fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
+    use bm_core::provision::{instance_line, parse_instances, AwsConfig};
+    let path = root.join(".bm").join("aws.json");
+    let mut out: Vec<String> = Vec::new();
+    match cmd {
+        AwsCmd::Init { force } => {
+            if path.exists() && !force {
+                anyhow::bail!(
+                    "{} already exists — edit it, or pass --force to replace it",
+                    path.display()
+                );
+            }
+            let cfg = AwsConfig::default();
+            cfg.save(&path)?;
+            out.push(format!("wrote {}", path.display()));
+            out.push(String::new());
+            out.push("Fill in these, then `aws show` lists what is still missing:".into());
+            out.push("  region, subnet_id, security_group_id, iam_instance_profile".into());
+            out.push("  keypairs.<region>  — the EC2 keypair NAME, per region".into());
+            out.push("  bucket             — leave empty to rsync the assets from here".into());
+            out.push(String::new());
+            out.push("One-off setup this tool deliberately does not do for you:".into());
+            out.push("  aws ec2 create-key-pair --key-name <name> --query KeyMaterial --output text > .bm/aws/<region>.pem".into());
+            out.push("  chmod 600 .bm/aws/<region>.pem".into());
+            out.push("  aws s3 mb s3://<bucket> --region <region>   # if publishing assets".into());
+            out.push("  aws iam create-instance-profile --instance-profile-name <name>   # + a role that can read the bucket".into());
+            out.push(String::new());
+            out.push("The identity you run this as needs EC2 and nothing else:".into());
+            out.push(
+                "  ec2:DescribeInstances, ec2:RunInstances, ec2:TerminateInstances, ec2:CreateTags"
+                    .into(),
+            );
+            out.push("  ec2:DescribeSubnets, ec2:DescribeSecurityGroups, ec2:DescribeImages, ec2:DescribeKeyPairs".into());
+            out.push("  iam:PassRole  (only on the instance profile above)".into());
+            out.push(
+                "Nothing account-wide, no billing, no S3 write unless you publish assets yourself."
+                    .into(),
+            );
+            out.push(String::new());
+            out.push("Creating, tagging and terminating boxes is money and destruction — those are `aws up` / `aws down`, next.".into());
+            Ok(out)
+        }
+        AwsCmd::Show => {
+            let cfg = AwsConfig::load(&path);
+            if !path.exists() {
+                out.push(format!(
+                    "no pool defined yet — `aws init` writes {}",
+                    path.display()
+                ));
+            }
+            out.push(cfg.summary());
+            // The key file is named after the region, so there is nothing
+            // meaningful to print before one is set — a path ending in `.pem`
+            // with no name in it reads as a missing file rather than as a
+            // missing region.
+            if cfg.region.trim().is_empty() {
+                out.push("private key: (no region yet — the file is named after it)".into());
+            } else {
+                let key = root.join(cfg.key_file());
+                out.push(format!(
+                    "private key: {} ({})",
+                    key.display(),
+                    if key.is_file() {
+                        "present"
+                    } else {
+                        "MISSING — the box cannot be reached without it"
+                    }
+                ));
+            }
+            if let Ok(p) = bm_core::profile::read_pointer(root) {
+                match bm_core::provision::profile_object(&cfg.bucket, &p.hash) {
+                    Some(obj) => out.push(format!("asset plane: {obj}")),
+                    None => out.push(
+                        "asset plane: not published — every box would take a 668 MB upload from this machine".into(),
+                    ),
+                }
+            }
+            let missing = cfg.missing();
+            if missing.is_empty() {
+                out.push("ready: nothing missing".into());
+            } else {
+                out.push(String::new());
+                out.push(format!("{} thing(s) still to set:", missing.len()));
+                for m in missing {
+                    out.push(format!("  - {m}"));
+                }
+            }
+            Ok(out)
+        }
+        AwsCmd::Ls => {
+            let cfg = AwsConfig::load(&path);
+            if cfg.region.trim().is_empty() {
+                anyhow::bail!("no region set — `aws init`, then fill it in");
+            }
+            out.push(format!(
+                "{} · tag {} · spot={}",
+                cfg.region, cfg.tag_key, cfg.spot
+            ));
+            let json = aws_cli_instances(&cfg.region, &cfg.tag_key)?;
+            let Some(instances) = parse_instances(&json, &cfg.tag_key) else {
+                anyhow::bail!(
+                    "the aws CLI answered something this does not understand — reporting an empty account here would be the one wrong answer that costs money"
+                );
+            };
+            if instances.is_empty() {
+                out.push("no boxes running (nothing carries this tag)".into());
+            }
+            for i in &instances {
+                out.push(instance_line(i));
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// `aws ec2 describe-instances`, filtered to the boxes we tagged.
+///
+/// A missing CLI and missing credentials are both normal first-run states, so
+/// each gets a sentence naming the fix instead of a raw exit status. The filter
+/// is `tag-key`, not a value: it matches every box we started whatever profile
+/// it was built for, and it cannot match a stranger's instances.
+fn aws_cli_instances(region: &str, tag_key: &str) -> anyhow::Result<String> {
+    let filters = [
+        "Name=tag-key".to_string() + ",Values=" + tag_key,
+        "Name=instance-state-name,Values=pending,running,stopping,stopped".to_string(),
+    ];
+    let mut cmd = std::process::Command::new("aws");
+    cmd.args([
+        "ec2",
+        "describe-instances",
+        "--region",
+        region,
+        "--output",
+        "json",
+    ]);
+    for f in &filters {
+        cmd.arg("--filters").arg(f);
+    }
+    let out = match cmd.output() {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
+            "the `aws` CLI is not on PATH — install the AWS CLI v2, or run `aws show` for the definition alone"
+        ),
+        Err(e) => anyhow::bail!("could not run the aws CLI: {e}"),
+    };
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        // Three first-run states, three different fixes. The middle one is the
+        // one that wastes an afternoon: the credentials *are* found, so nothing
+        // says "credentials" — the call is simply not allowed, and the account
+        // and user in the message are the only clue about which policy to edit.
+        let hint = if err.contains("Unable to locate credentials") {
+            " — no credentials in the standard chain; `aws configure sso`, or set AWS_PROFILE"
+        } else if err.contains("UnauthorizedOperation") || err.contains("not authorized") {
+            " — the credentials were found but the identity may not call EC2; it needs at least ec2:DescribeInstances (see `aws init` for the full list)"
+        } else if err.contains("InvalidClientTokenId") || err.contains("ExpiredToken") {
+            " — the credentials are stale; refresh them (`aws sso login`)"
+        } else {
+            ""
+        };
+        anyhow::bail!(
+            "aws describe-instances failed{hint}: {}",
+            bm_core::util::head_chars(err.trim(), 300)
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Rewrite interjections into engine tags via the live inductor API.
 async fn cmd_retag(api: &str, dry_run: bool) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
@@ -695,7 +893,7 @@ async fn main() -> anyhow::Result<()> {
     // and touches no worker.
     if !matches!(
         &cli.cmd,
-        Cmd::Roster { .. } | Cmd::Digest { .. } | Cmd::Workspace { .. }
+        Cmd::Roster { .. } | Cmd::Digest { .. } | Cmd::Workspace { .. } | Cmd::Aws { .. }
     ) {
         check_bins()?;
     }
@@ -820,6 +1018,12 @@ async fn main() -> anyhow::Result<()> {
         },
         Cmd::Workspace { cmd } => {
             for line in workspace_cmd(&layout.root, cmd)? {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        Cmd::Aws { cmd } => {
+            for line in aws_cmd(&layout.root, cmd)? {
                 println!("{line}");
             }
             Ok(())
