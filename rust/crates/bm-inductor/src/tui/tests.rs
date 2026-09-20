@@ -3426,7 +3426,7 @@ fn the_sound_editor_marks_remove_unavailable_where_it_is() {
     let text = render_text(&mut app, 120, 40);
     // The three tabs, with their sizes.
     assert!(text.contains("effects 11"), "tabs missing:\n{text}");
-    assert!(text.contains("music 6"), "{text}");
+    assert!(text.contains("music 9"), "{text}");
     assert!(text.contains("injects 39"), "{text}");
     // Every shipped effect sound answers a shipped rule, so the first row is
     // in use and the remove key is drawn as unavailable, with the reason.

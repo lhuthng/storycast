@@ -898,7 +898,7 @@ mod tests {
         let after = std::fs::read_to_string(&path).unwrap();
 
         // The block, exactly as it stands in the file, is gone...
-        let block = "  \"market\": {\n    \"tags\": [\"market\", \"busy\", \"day\"],\n    \"files\": [\"music/market-bg-1.mp3\"]\n  },\n";
+        let block = "  \"market\": {\n    \"tags\": [\"market\", \"busy\"],\n    \"files\": [\"music/market-bg-1.mp3\"]\n  },\n";
         assert!(original.contains(block), "fixture moved; fix this test");
         assert!(!after.contains("\"market\""), "{after}");
         // ...and the file is the original with exactly that block cut out.

@@ -1210,7 +1210,7 @@ mod tests {
             "page-turn",
             Sound {
                 tags: vec![],
-                files: vec!["injects/page-turn.mp3".into()],
+                files: vec!["injects/page-turn-1.mp3".into()],
                 looped: false,
                 dur_s: Some(0.6),
                 mode: Some("overlap".into()),

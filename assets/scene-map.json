@@ -219,6 +219,27 @@
       ],
       "note": "triumph, revelation, awe, a turning point"
     },
+    "sad": {
+      "tags": [
+        "sad",
+        "sorrow"
+      ],
+      "note": "grief, loss, farewell, mourning"
+    },
+    "playful": {
+      "tags": [
+        "playful",
+        "light"
+      ],
+      "note": "humor, games, light mischief, warm comedy"
+    },
+    "tense": {
+      "tags": [
+        "tense",
+        "uneasy"
+      ],
+      "note": "dread, suspicion, something wrong, waiting"
+    },
     "none": {
       "tags": [],
       "note": "silence — a death, a shock, a line that must land dry"
