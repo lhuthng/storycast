@@ -790,39 +790,24 @@ mod tests {
     /// remember to clear. The guard comes back with the path, so the caller has
     /// to hold it — dropping it deletes the tree mid-test.
     fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
-        std::fs::create_dir_all(dir.join("assets")).unwrap();
-        std::fs::create_dir_all(dir.join("prompts")).unwrap();
-        std::fs::write(dir.join("prompts/analyze.txt"), "x").unwrap();
+        bm_core::profile::install_fixture(&dir).expect("fixture profile");
+        // Placeholder clips: the editor probes takes for length, so every
+        // listed take exists as an (empty) file without shipping audio.
         for kind in PoolKind::ALL {
-            std::fs::copy(
-                repo.join("assets").join(kind.registry()),
-                dir.join("assets").join(kind.registry()),
-            )
-            .unwrap();
-            copy_dir(
-                &repo.join("assets").join(kind.dir()),
-                &dir.join("assets").join(kind.dir()),
+            let pool = bm_core::audio_pool::load_pool(
+                &dir.join("assets").join(kind.registry()),
             );
-        }
-        std::fs::copy(
-            repo.join("assets/scene-map.json"),
-            dir.join("assets/scene-map.json"),
-        )
-        .unwrap();
-        (tmp, dir)
-    }
-
-    fn copy_dir(from: &Path, to: &Path) {
-        std::fs::create_dir_all(to).unwrap();
-        for e in std::fs::read_dir(from).unwrap().flatten() {
-            let p = e.path();
-            if p.is_file() {
-                let _ = std::fs::copy(&p, to.join(p.file_name().unwrap()));
+            for sound in pool.values() {
+                for f in &sound.files {
+                    let p = dir.join("assets").join(f);
+                    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                    std::fs::write(&p, b"").unwrap();
+                }
             }
         }
+        (tmp, dir)
     }
 
     #[test]

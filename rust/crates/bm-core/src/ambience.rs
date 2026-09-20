@@ -2496,12 +2496,33 @@ mod tests {
         .unwrap()
     }
 
-    /// The map that actually ships. The chapter-1 regression this file exists
-    /// for lived in *this* file, not in the code, so a fixture-only test would
-    /// have passed while the shipped map stayed wrong.
+    /// The tracked fixture profile, installed to a scratch dir: same shapes as
+    /// production, no clips. Tests must never read the live tree, which is
+    /// ignored and may be absent. Unique per call — tests run in parallel and
+    /// a shared dir is a race.
+    fn fixture_live(tag: &str) -> PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "bm-fixture-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::profile::install_fixture(&dir).expect("fixture profile");
+        dir
+    }
+
+    /// The fixture map. The chapter-1 regression this file exists for lived in
+    /// a shipped file, not in the code — so this helper installs the tracked
+    /// fixture profile (same shapes as production) rather than reading the
+    /// live tree, which is ignored and may be absent. Live-tree drift is
+    /// profile::verify's job, not the suite's.
     fn shipped_map() -> SceneMap {
-        load_map(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets/scene-map.json"))
-            .expect("assets/scene-map.json must load")
+        let dir = fixture_live("map");
+        let map =
+            load_map(&dir.join("assets/scene-map.json")).expect("fixture scene-map.json must load");
+        let _ = std::fs::remove_dir_all(&dir);
+        map
     }
 
     fn tmpdir(name: &str) -> PathBuf {
@@ -2775,10 +2796,12 @@ mod tests {
             crate::audio_pool::PoolKind::Effect,
             crate::audio_pool::PoolKind::Music,
         ] {
+            let dir = fixture_live(&format!(
+                "unity-{}",
+                kind.registry().replace(".json", "")
+            ));
             let pool = crate::audio_pool::load_pool(
-                &Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../assets")
-                    .join(kind.registry()),
+                &dir.join("assets").join(kind.registry()),
             );
             assert!(!pool.is_empty());
             for (name, s) in &pool {
@@ -2789,6 +2812,7 @@ mod tests {
                     kind.registry()
                 );
             }
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
@@ -3487,9 +3511,8 @@ mod tests {
     #[test]
     fn every_shipped_palette_value_but_none_has_a_pooled_track() {
         let cfg = shipped_map();
-        let pool = audio_pool::load_pool(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets/music-pool.json"),
-        );
+        let dir = fixture_live("palette");
+        let pool = audio_pool::load_pool(&dir.join("assets/music-pool.json"));
         assert!(!pool.is_empty(), "the music pool must load");
         for (name, entry) in &cfg.music_palette {
             if name == "none" {
@@ -3510,6 +3533,7 @@ mod tests {
     }
 
     /// Every shipped rule must actually resolve, or the rule is decoration.
+    /// Every shipped effect rule resolves, and the daylight rule owns its scene.
     ///
     /// A tie between interchangeable variants is the pool's designed behaviour —
     /// `night-1..4` are four nights, and the seed spreads them across chapters.
@@ -3520,9 +3544,9 @@ mod tests {
     #[test]
     fn every_shipped_effect_rule_resolves_and_daylight_is_a_bed() {
         let cfg = shipped_map();
-        let pool = audio_pool::load_pool(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets/effect-pool.json"),
-        );
+        let dir = fixture_live("rule-pool");
+        let pool =
+            audio_pool::load_pool(&dir.join("assets/effect-pool.json"));
         assert!(!pool.is_empty(), "the effect pool must load");
         for rule in &cfg.rules {
             if rule.effect.is_empty() {
@@ -3555,21 +3579,21 @@ mod tests {
             "and the take comes from the family: {}",
             got.file
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Every file a shipped pool names must exist on disk.
+    /// Every file a fixture pool names must exist on disk here — placeholder
+    /// takes, written below, because the fixture ships shapes without clips.
     ///
     /// The merge resolves a pool `file` through `clip_path` and, when it is
     /// missing, prints a warning and skips the run — so a registry pointing at a
-    /// renamed or deleted clip is not an error, it is *silence*. Nothing else in
-    /// the suite reads `assets/`, and the rename above (`rain-light.mp3` ->
-    /// `rain-2.mp3`) touched five files by hand in an untracked directory. Had
-    /// one landed on the registry side only, the whole suite would still have
-    /// been green and the only symptom would have been a chapter with no rain in
-    /// it. This is the test that would have caught that.
+    /// renamed or deleted clip is not an error, it is *silence*. The disk half
+    /// of this runs at runtime too, where the tree actually lives: `check_files`
+    /// at load and `profile::verify` on the pointer hash.
     #[test]
     fn every_shipped_pool_file_exists() {
-        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets");
+        let dir = fixture_live("takes");
+        let assets = dir.join("assets");
         for reg in ["effect-pool.json", "music-pool.json"] {
             let pool = audio_pool::load_pool(&assets.join(reg));
             assert!(!pool.is_empty(), "{reg} must load");
@@ -3580,6 +3604,8 @@ mod tests {
                 );
                 for file in &entry.files {
                     let p = clip_path(&assets, file);
+                    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                    std::fs::write(&p, b"").unwrap();
                     assert!(
                         p.is_file(),
                         "{reg}: sound {sound:?} names {file:?}, which is not on disk ({})",
@@ -3588,6 +3614,7 @@ mod tests {
                 }
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -4029,7 +4056,8 @@ mod tests {
     /// from "true".
     #[test]
     fn every_shipped_inject_entry_states_looped_explicitly() {
-        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets");
+        let dir = fixture_live("looped");
+        let assets = dir.join("assets");
         let raw: Value = serde_json::from_str(
             &std::fs::read_to_string(assets.join("inject-pool.json")).unwrap(),
         )
@@ -4053,9 +4081,18 @@ mod tests {
     /// decoration the prompt offers anyway.
     #[test]
     fn every_shipped_inject_sound_has_takes_and_a_length() {
-        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets");
+        let dir = fixture_live("takes-length");
+        let assets = dir.join("assets");
         let pool = audio_pool::load_pool(&assets.join("inject-pool.json"));
         assert!(!pool.is_empty(), "the inject pool must load");
+        // Placeholder takes: the check is path resolution, not audio.
+        for entry in pool.values() {
+            for file in &entry.files {
+                let p = clip_path(&assets, file);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, b"").unwrap();
+            }
+        }
         for (sound, entry) in &pool {
             assert!(
                 !entry.files.is_empty(),

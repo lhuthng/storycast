@@ -848,18 +848,15 @@ mod tests {
     // writing a registry
     // -----------------------------------------------------------------------
 
-    /// A scratch copy of a shipped registry. Never write to `assets/` from a
-    /// test: the writer's whole promise is that it leaves those files alone.
+    /// A scratch copy of the fixture registry. Never write to the live tree
+    /// from a test: it is ignored and may be absent, and the writer's whole
+    /// promise is that it leaves its input alone.
     fn shipped_copy(kind: PoolKind, tag: &str) -> (std::path::PathBuf, String) {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../assets")
-            .join(kind.registry());
-        let original = std::fs::read_to_string(&src).expect("shipped registry");
         let dir = std::env::temp_dir().join(format!("bm-pool-write-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(kind.registry());
-        std::fs::write(&path, &original).unwrap();
+        crate::profile::install_fixture(&dir).expect("fixture profile");
+        let path = dir.join("assets").join(kind.registry());
+        let original = std::fs::read_to_string(&path).expect("fixture registry");
         (path, original)
     }
 
@@ -1136,10 +1133,11 @@ mod tests {
     /// true the mix has changed, and it should be a decision, not a surprise.
     #[test]
     fn the_shipped_registries_are_all_at_unity_today() {
+        let dir = std::env::temp_dir().join("bm-pool-unity");
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::profile::install_fixture(&dir).expect("fixture profile");
         for kind in PoolKind::ALL {
-            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../assets")
-                .join(kind.registry());
+            let path = dir.join("assets").join(kind.registry());
             for (name, sound) in load_pool(&path) {
                 if kind == PoolKind::Inject {
                     continue; // the inject layer has always had per-sound trims
