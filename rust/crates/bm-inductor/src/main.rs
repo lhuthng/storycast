@@ -553,6 +553,7 @@ pub(crate) fn workspace_cmd(
 fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
     use bm_core::provision::{instance_line, parse_instances, AwsConfig};
     let path = root.join(".bm").join("aws.json");
+    let template = root.join(bm_core::provision::DEFAULT_FILE);
     let mut out: Vec<String> = Vec::new();
     match cmd {
         AwsCmd::Init { force } => {
@@ -562,9 +563,29 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
                     path.display()
                 );
             }
-            let cfg = AwsConfig::default();
-            cfg.save(&path)?;
-            out.push(format!("wrote {}", path.display()));
+            // Seed from the tracked template when it is there, so the file the
+            // operator edits carries the `_note`s explaining each field rather
+            // than a bare struct dump. The notes are ignored on read — serde
+            // drops what the struct does not name — and the round trip proves
+            // a hand-edited template that has drifted from the shape cannot
+            // seed a broken config.
+            if template.is_file() {
+                let text = std::fs::read_to_string(&template)?;
+                serde_json::from_str::<AwsConfig>(&text)
+                    .map_err(|e| anyhow::anyhow!("{} does not parse: {e}", template.display()))?;
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, text)?;
+                out.push(format!(
+                    "wrote {} (from {})",
+                    path.display(),
+                    template.display()
+                ));
+            } else {
+                AwsConfig::default().save(&path)?;
+                out.push(format!("wrote {}", path.display()));
+            }
             out.push(String::new());
             out.push("Fill in these, then `aws show` lists what is still missing:".into());
             out.push("  region, subnet_id, security_group_id, iam_instance_profile".into());
@@ -593,7 +614,7 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
             Ok(out)
         }
         AwsCmd::Show => {
-            let cfg = AwsConfig::load(&path);
+            let cfg = AwsConfig::load_layered(root);
             if !path.exists() {
                 out.push(format!(
                     "no pool defined yet — `aws init` writes {}",
@@ -640,7 +661,7 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
             Ok(out)
         }
         AwsCmd::Ls => {
-            let cfg = AwsConfig::load(&path);
+            let cfg = AwsConfig::load_layered(root);
             if cfg.region.trim().is_empty() {
                 anyhow::bail!("no region set — `aws init`, then fill it in");
             }
