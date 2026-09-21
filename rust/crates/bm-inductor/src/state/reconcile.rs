@@ -75,6 +75,14 @@ impl Inner {
         // on; the serve gate refuses to run them anywhere else.
         self.ledger_profile = Some(self.settings.profile.clone());
         self.save();
+        // **After** the promotion loop above, never before: that loop marks a
+        // merge `Done` on `has_mp3` alone, so an invalidation that ran first
+        // would have its deletion undone by the very promotion it was trying to
+        // prevent. `adopt` is true because reconcile is routine — it is the
+        // pass that also catches a hand-edited `settings.json` or scene map,
+        // and it must not read "this merge predates the stamp field" as "this
+        // merge is stale".
+        self.invalidate_stale_design(true);
     }
 
     pub(crate) fn upstream_done(&self, chapter: u32, stage: Stage) -> bool {
@@ -257,6 +265,14 @@ impl Inner {
             if touched || (speaks && !complete) {
                 chapters.push(n);
                 // Stale product goes away; render+merge requeue fresh.
+                // The re-render pins to the box that holds the chapter (the
+                // merge's affinity): it already has every unchanged unit, so
+                // it speaks only the forced set instead of the whole chapter
+                // from scratch. The local node takes pinned renders too.
+                let pin = self
+                    .tasks
+                    .get(&format!("{}:{n}", Stage::Merge))
+                    .and_then(|t| t.affinity.clone());
                 let _ = std::fs::remove_file(self.layout.final_mp3(n));
                 for stage in [Stage::Render, Stage::Merge] {
                     let key = format!("{stage}:{n}");
@@ -266,9 +282,15 @@ impl Inner {
                         t.assigned_to = None;
                         t.lease_until = None;
                         t.updated = now_secs();
+                        if stage == Stage::Render {
+                            t.affinity = pin.clone();
+                        }
                     } else {
                         let mut t = Task::new(n, stage);
                         t.updated = now_secs();
+                        if stage == Stage::Render {
+                            t.affinity = pin.clone();
+                        }
                         self.tasks.insert(key, t);
                     }
                 }

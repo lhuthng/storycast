@@ -9,6 +9,7 @@ use bm_proto::{Machine, Stage, Task};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
+mod design;
 mod ledger;
 mod observe;
 mod offer;
@@ -370,6 +371,108 @@ mod tests {
     }
 
     #[test]
+    fn surgical_swap_pins_rerender_to_the_warm_box_and_forces_only_the_stale_set() {
+        // The flaw this pins: a swap deleted stale files only locally, the
+        // offer carried the whole chapter, and whichever cold box asked next
+        // re-spoke everything from scratch. Now the re-render pins to the box
+        // that holds the chapter (the merge's affinity) and the offer forces
+        // only what this store lacks — the swapped voice — so the warm box
+        // speaks one file while a cold box never sees the task.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(1),
+            r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"B","text":"z"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
+        let seg = layout.seg_dir("vieneu", 1);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(seg.join("0001_Adam.wav"), vec![0u8; 2000]).unwrap();
+        for (stage, state) in [
+            (Stage::Crawl, TaskState::Done),
+            (Stage::Digest, TaskState::Done),
+        ] {
+            let mut t = Task::new(1, stage);
+            t.state = state;
+            inner.tasks.insert(format!("{stage}:1"), t);
+        }
+        let mut m = Task::new(1, Stage::Merge);
+        m.state = TaskState::Done;
+        m.affinity = Some("192.168.2.2".into());
+        inner.tasks.insert("merge:1".into(), m);
+        for (w, addr) in [
+            ("warm-a", "192.168.2.2"),
+            ("cold-b", "192.168.2.3"),
+            ("lo-w", "127.0.0.1"),
+        ] {
+            inner.workers.insert(w.into(), addr.into());
+            inner.caps.insert(
+                w.into(),
+                vec![
+                    "crawl".into(),
+                    "digest".into(),
+                    "render".into(),
+                    "render-segments".into(),
+                    "merge".into(),
+                ],
+            );
+        }
+
+        inner.op_swap_voice("A", "Minh Triết").unwrap();
+        assert_eq!(
+            inner.tasks["render:1"].affinity.as_deref(),
+            Some("192.168.2.2"),
+            "re-render stays where the chapter is"
+        );
+        assert_eq!(
+            inner.tasks["merge:1"].affinity.as_deref(),
+            Some("192.168.2.2"),
+            "merge pin untouched"
+        );
+
+        assert!(
+            inner.offer("cold-b").is_none(),
+            "a cold box must not re-speak the whole chapter for a swap"
+        );
+        let offer = inner.offer("warm-a").expect("warm box takes its re-render");
+        assert_eq!(offer.task_id, "render:1");
+        let units = offer.render_units.as_ref().expect("planned, not legacy");
+        let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(
+            offer.render_force.len(),
+            1,
+            "only the swapped voice is forced, got {:?}",
+            offer.render_force
+        );
+        assert!(
+            names.contains(&offer.render_force[0].as_str()),
+            "forced file is one of the chapter's units: {:?}",
+            offer.render_force
+        );
+        assert!(
+            offer.render_force[0].contains("Minh Tri"),
+            "forced file is the new voice: {:?}",
+            offer.render_force
+        );
+        assert!(
+            !offer.render_force[0].contains("Adam"),
+            "untouched voices are never forced: {:?}",
+            offer.render_force
+        );
+
+        // The local node steals pinned renders, like pinned merges.
+        let t = inner.tasks.get_mut("render:1").unwrap();
+        t.state = TaskState::Pending;
+        t.assigned_to = None;
+        t.lease_until = None;
+        let offer = inner.offer("lo-w").expect("local takes pinned renders");
+        assert_eq!(offer.task_id, "render:1");
+        assert!(offer.local_node);
+    }
+
+    #[test]
     fn merge_runs_on_the_machine_that_rendered() {
         // The pin's real meaning is "merge where the segments are" — and after
         // an inverted render that is the box that just wrote them. It cannot
@@ -655,6 +758,16 @@ mod tests {
     #[test]
     fn remix_saves_the_mix_and_requeues_only_merges() {
         let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        // A script is what makes a chapter a chapter: the fingerprint is
+        // computed from it, so without one there is no mix to invalidate and
+        // the merge is left where it is (pinned in
+        // `a_merge_with_no_script_is_left_alone`).
+        std::fs::write(
+            layout.script(1),
+            r#"{"segments":[{"speaker":"A","text":"Chương 1"}]}"#,
+        )
+        .unwrap();
         for (n, stage, state) in [
             (1, Stage::Merge, TaskState::Done),
             (2, Stage::Render, TaskState::Done),
@@ -663,16 +776,15 @@ mod tests {
             let mut t = Task::new(n, stage);
             t.state = state;
             inner.tasks.insert(t.id(), t);
-            let mp3 = inner.layout.final_mp3(n);
-            if let Some(parent) = mp3.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(&mp3, b"old mix").unwrap();
         }
+        std::fs::create_dir_all(layout.output()).unwrap();
+        std::fs::write(layout.final_mp3(1), b"old mix").unwrap();
+
         let msg = inner
             .op_remix(Some(1.5), Some(0.5), Some(0.0), Some(0.25))
             .expect("valid mix");
         assert!(msg.contains("1.5"), "{msg}");
+        assert!(msg.contains("1 merge(s) requeued"), "{msg}");
         assert_eq!(
             (
                 inner.settings.speed,
@@ -682,15 +794,17 @@ mod tests {
             ),
             (1.5, 0.5, 0.0, 0.25)
         );
-        for t in inner.tasks.values() {
-            if t.stage == Stage::Merge {
-                assert_eq!(t.state, TaskState::Pending, "{}", t.id());
-                assert_eq!(t.attempts, 0);
-                assert!(!inner.layout.final_mp3(t.chapter).is_file());
-            } else {
-                assert_eq!(t.state, TaskState::Done, "renders keep cache");
-            }
-        }
+        // The published merge comes back and its mp3 goes with it. The render
+        // keeps its cache — tempo and the layer trims apply at merge time, so
+        // no segment is re-spoken. The shelved merge never published anything,
+        // so it has no mix to be wrong about and a knob change does not
+        // un-shelve it.
+        let m = &inner.tasks["merge:1"];
+        assert_eq!(m.state, TaskState::Pending);
+        assert_eq!(m.attempts, 0);
+        assert!(!layout.final_mp3(1).is_file(), "the old mix is not kept");
+        assert_eq!(inner.tasks["render:2"].state, TaskState::Done);
+        assert_eq!(inner.tasks["merge:3"].state, TaskState::Shelved);
         assert!(inner
             .op_remix(Some(9.0), Some(1.0), Some(1.0), None)
             .is_err());
@@ -708,6 +822,249 @@ mod tests {
         assert_eq!(inner.settings.inject_volume, 0.25);
         let saved = Settings::load(&inner.layout.settings());
         assert_eq!(saved.inject_volume, 0.25);
+    }
+
+    /// Two chapters, each in a different scene, and the registries that give
+    /// each one a clip of its own — so the fingerprint has something to be
+    /// per-chapter *about*.
+    fn design_fixture() -> (tempfile::TempDir, Inner) {
+        let (d, inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::create_dir_all(layout.assets()).unwrap();
+        std::fs::write(
+            layout.scene_map(),
+            r#"{
+              "rules": [
+                {"match": ["mountain"], "effect": ["wind"], "level": 0.3},
+                {"match": ["kitchen"], "effect": ["fire"], "level": 0.2}
+              ],
+              "default": {"effect": [], "level": 0.0}
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            layout.pool(bm_core::audio_pool::PoolKind::Effect),
+            r#"{
+              "wind": {"tags": ["wind"], "files": ["effects/wind-1.mp3"], "level": 0.5},
+              "fire": {"tags": ["fire"], "files": ["effects/fire-1.mp3"], "level": 0.5}
+            }"#,
+        )
+        .unwrap();
+        for (n, scene) in [(1u32, "mountain"), (2, "kitchen")] {
+            let script = serde_json::json!({
+                "segments": [
+                    {"speaker": "A", "text": format!("Chương {n}")},
+                    {"speaker": "A", "text": "ở đó", "scene": scene}
+                ]
+            });
+            std::fs::write(layout.script(n), script.to_string()).unwrap();
+            let seg = layout.seg_dir("vieneu", n);
+            std::fs::create_dir_all(&seg).unwrap();
+            std::fs::write(seg.join("0000_Adam.wav"), vec![0u8; 2000]).unwrap();
+        }
+        (d, inner)
+    }
+
+    /// A merge that has published: Done, its mp3 on disk, and stamped under the
+    /// design in force — the state `offer` leaves a completed merge in.
+    fn published(inner: &mut Inner, chapter: u32) {
+        let design = bm_core::design::MergeDesign::load(&inner.layout);
+        let stamp = inner
+            .design_stamp(&design, inner.design_knobs(), chapter)
+            .expect("the fixture gives every chapter a script");
+        let mut t = Task::new(chapter, Stage::Merge);
+        t.state = TaskState::Done;
+        t.design = Some(stamp);
+        inner.tasks.insert(t.id(), t);
+        let mp3 = inner.layout.final_mp3(chapter);
+        std::fs::create_dir_all(mp3.parent().unwrap()).unwrap();
+        std::fs::write(&mp3, b"old mix").unwrap();
+    }
+
+    #[test]
+    fn a_sound_edit_reaches_only_the_chapters_that_use_it() {
+        // The requirement, at the ledger. Retuning one clip requeues the
+        // chapters whose mix can land on it and leaves the rest published —
+        // and the fingerprint is what decides the scope, so there is no second
+        // rule to keep in step with the mixer.
+        let (_d, mut inner) = design_fixture();
+        let layout = inner.layout.clone();
+        for ch in [1u32, 2] {
+            published(&mut inner, ch);
+        }
+        // Stamped under the design as it stands, so nothing is stale yet.
+        assert!(inner.op_sound_changed().contains("nothing to requeue"));
+
+        // Retune the clip the mountain chapter can land on.
+        std::fs::write(
+            layout.pool(bm_core::audio_pool::PoolKind::Effect),
+            r#"{
+              "wind": {"tags": ["wind"], "files": ["effects/wind-1.mp3"], "level": 0.9},
+              "fire": {"tags": ["fire"], "files": ["effects/fire-1.mp3"], "level": 0.5}
+            }"#,
+        )
+        .unwrap();
+        let msg = inner.op_sound_changed();
+        assert!(msg.contains("1 merge(s) requeued"), "{msg}");
+        let m = &inner.tasks["merge:1"];
+        assert_eq!(m.state, TaskState::Pending);
+        assert_eq!(m.attempts, 0);
+        assert_eq!(m.detail, "requeued: sound design changed");
+        assert_eq!(m.assigned_to, None);
+        assert!(
+            !layout.final_mp3(1).is_file(),
+            "the stale mp3 goes now, not on the next reconcile"
+        );
+        // The kitchen chapter cannot reach `wind`, so it keeps its mix.
+        assert_eq!(inner.tasks["merge:2"].state, TaskState::Done);
+        assert!(layout.final_mp3(2).is_file());
+
+        // Idempotent: the requeue wrote the new stamp, so a second look finds
+        // nothing. Without that write every pass would requeue for ever.
+        assert!(inner.op_sound_changed().contains("nothing to requeue"));
+    }
+
+    #[test]
+    fn a_master_knob_reaches_every_published_chapter() {
+        // A gain is applied to every mix, so it is in every chapter's stamp and
+        // every published merge comes back. The count in the message is the
+        // check that the scope is the library and not one chapter.
+        let (_d, mut inner) = design_fixture();
+        let layout = inner.layout.clone();
+        for ch in [1u32, 2] {
+            published(&mut inner, ch);
+        }
+        let mut render = Task::new(1, Stage::Render);
+        render.state = TaskState::Done;
+        inner.tasks.insert(render.id(), render);
+
+        let msg = inner
+            .op_remix(Some(1.0), Some(1.5), Some(1.0), Some(1.0))
+            .expect("valid mix");
+        assert!(msg.contains("2 merge(s) requeued"), "{msg}");
+        for ch in [1u32, 2] {
+            assert_eq!(
+                inner.tasks[&format!("merge:{ch}")].state,
+                TaskState::Pending,
+                "ch{ch}"
+            );
+            assert!(!layout.final_mp3(ch).is_file(), "ch{ch}");
+        }
+        // The render is not this pass's business: tempo and the trims apply at
+        // merge time, so no segment is re-spoken and no cache is dropped.
+        assert_eq!(inner.tasks["render:1"].state, TaskState::Done);
+        assert!(layout.seg_dir("vieneu", 1).join("0000_Adam.wav").is_file());
+    }
+
+    #[test]
+    fn an_unstamped_merge_is_adopted_not_invalidated() {
+        // Every merge published before the stamp existed has no stamp. Reading
+        // that as "stale" would re-merge the whole library on the first boot
+        // after the upgrade, and those mp3s are not reproducible — TTS is
+        // stochastic, so re-merging is a re-recording, not a cache miss. So a
+        // routine pass adopts: it writes the stamp and leaves the artifact.
+        let (_d, mut inner) = design_fixture();
+        let layout = inner.layout.clone();
+        published(&mut inner, 1);
+        inner.tasks.get_mut("merge:1").unwrap().design = None;
+
+        assert!(inner.invalidate_stale_design(true).is_empty());
+        let m = &inner.tasks["merge:1"];
+        assert_eq!(m.state, TaskState::Done, "an adopted merge is still done");
+        assert!(m.design.is_some(), "adoption is a write, not a shrug");
+        assert!(layout.final_mp3(1).is_file(), "and the artifact stays");
+        // Adopted once is adopted for good.
+        assert!(inner.invalidate_stale_design(true).is_empty());
+
+        // A caller that has *just* changed the design is the other case: an
+        // unstamped merge is then by definition one that change invalidated.
+        inner.tasks.get_mut("merge:1").unwrap().design = None;
+        let msg = inner.op_sound_changed();
+        assert!(msg.contains("1 merge(s) requeued"), "{msg}");
+        assert!(!layout.final_mp3(1).is_file());
+    }
+
+    #[test]
+    fn reconcile_adopts_the_stamp_without_undoing_a_promotion() {
+        // The order in `reconcile` is load-bearing: the promotion loop marks a
+        // merge Done on `has_mp3` alone, so an invalidation that ran before it
+        // would have its deletion undone by the very promotion it was trying to
+        // prevent. Here the merge is Pending with its mp3 already home — the
+        // promotion runs, then the adoption, and the file survives both.
+        let (_d, mut inner) = design_fixture();
+        let layout = inner.layout.clone();
+        let mut t = Task::new(1, Stage::Merge);
+        t.state = TaskState::Pending;
+        inner.tasks.insert(t.id(), t);
+        std::fs::create_dir_all(layout.output()).unwrap();
+        std::fs::write(layout.final_mp3(1), b"old mix").unwrap();
+
+        inner.reconcile(1, 2);
+        let m = &inner.tasks["merge:1"];
+        assert_eq!(m.state, TaskState::Done, "ground truth promotes");
+        assert!(m.design.is_some(), "and the pass that follows adopts");
+        assert!(layout.final_mp3(1).is_file());
+    }
+
+    #[test]
+    fn a_merge_with_no_script_is_left_alone() {
+        // No script means the chapter cannot be planned, so there is no mix to
+        // be wrong about — and this pass will not delete a published mp3 on the
+        // strength of a read that failed. An unstampable merge is `None`, and
+        // `None` is a skip rather than a verdict.
+        let (_d, mut inner) = design_fixture();
+        let layout = inner.layout.clone();
+        published(&mut inner, 1);
+        std::fs::remove_file(layout.script(1)).unwrap();
+
+        assert!(inner.op_sound_changed().contains("nothing to requeue"));
+        assert_eq!(inner.tasks["merge:1"].state, TaskState::Done);
+        assert!(
+            layout.final_mp3(1).is_file(),
+            "the artifact is not a read error's to delete"
+        );
+    }
+
+    #[test]
+    fn a_completed_merge_carries_the_design_it_was_mixed_under() {
+        // The stamp is written where the merge is marked done, not where it is
+        // offered. A task that never finished has no artifact to make a claim
+        // about, and a stamp taken at offer time would describe a design the
+        // worker may not have mixed with.
+        let (_d, mut inner) = design_fixture();
+        let layout = inner.layout.clone();
+        let mut t = Task::new(1, Stage::Merge);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w1".into());
+        inner.tasks.insert(t.id(), t);
+        std::fs::create_dir_all(layout.output()).unwrap();
+        std::fs::write(layout.final_mp3(1), vec![0u8; 2000]).unwrap();
+
+        inner.complete(&completion("w1", "merge:1", true, "merge ch1 -> out.mp3"));
+        assert_eq!(inner.tasks["merge:1"].state, TaskState::Done);
+        let stamped = inner.tasks["merge:1"]
+            .design
+            .clone()
+            .expect("a finished merge says which design it was mixed under");
+
+        // And it is the design in force, not a placeholder: the next sound edit
+        // has to disagree with it, which is the whole reason to carry it.
+        std::fs::write(
+            layout.pool(bm_core::audio_pool::PoolKind::Effect),
+            r#"{
+              "wind": {"tags": ["wind"], "files": ["effects/wind-1.mp3"], "level": 0.9},
+              "fire": {"tags": ["fire"], "files": ["effects/fire-1.mp3"], "level": 0.5}
+            }"#,
+        )
+        .unwrap();
+        let design = bm_core::design::MergeDesign::load(&layout);
+        assert_ne!(
+            inner
+                .design_stamp(&design, inner.design_knobs(), 1)
+                .unwrap(),
+            stamped
+        );
+        assert!(inner.op_sound_changed().contains("1 merge(s) requeued"));
     }
 
     #[test]
@@ -1016,8 +1373,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_units_omits_what_the_store_already_holds() {
-        // Doc test 1: a store holding 29 of 32 units yields an offer of 3.
+    fn planned_units_names_every_unit_regardless_of_this_store() {
+        // Doc test 1: 32 units in the chapter, 32 in the offer — this store's
+        // contents do not enter into it. It used to be the difference against
+        // this store, and that is what left a remote box holding a strict
+        // subset: it received only the units this store lacked, none of the
+        // others, and the merge pinned to it failed on `N segments missing`.
         let (_d, inner) = fixture();
         let layout = inner.layout.clone();
         let mut segs = Vec::new();
@@ -1044,27 +1405,46 @@ mod tests {
             std::fs::write(seg.join(format!("{i:04}_{voice}.wav")), vec![0u8; 2000]).unwrap();
         }
 
-        let units = inner.missing_units(9).expect("plannable chapter");
+        let units = inner.planned_units(9).expect("plannable chapter");
+        assert_eq!(
+            units.len(),
+            32,
+            "the whole chapter, not the three this store lacks"
+        );
         let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
         assert_eq!(
-            names,
-            vec!["0005_Adam.wav", "0017_Adam.wav", "0030_Đức Trí.wav"],
-            "exactly the missing three, in order: {names:?}"
+            &names[..4],
+            &[
+                "0000_Đức Trí.wav",
+                "0001_Adam.wav",
+                "0002_Đức Trí.wav",
+                "0003_Adam.wav"
+            ],
+            "in speaking order: {names:?}"
         );
-        assert_eq!(units[0].speaker, "B");
         assert!(
-            !units[0].text.is_empty(),
+            names.contains(&"0005_Adam.wav"),
+            "the ones this store lacks are in the offer too: {names:?}"
+        );
+        assert_eq!(units[1].speaker, "B");
+        assert!(
+            !units[1].text.is_empty(),
             "the worker gets text, not a lookup key"
         );
 
-        // Full store → Some([]): report ok/0, not a replan.
+        // A store that holds everything gets the same offer. The worker skips
+        // what it has, and that is the only place a disk is consulted.
         for i in [5u32, 17, 30] {
             let voice = if i % 2 == 0 { "Đức Trí" } else { "Adam" };
             std::fs::write(seg.join(format!("{i:04}_{voice}.wav")), vec![0u8; 2000]).unwrap();
         }
-        assert_eq!(inner.missing_units(9).unwrap().len(), 0);
+        assert_eq!(
+            inner.planned_units(9).unwrap().len(),
+            32,
+            "a complete store changes nothing"
+        );
         // No script → None: the worker plans from its own copy instead.
-        assert!(inner.missing_units(77).is_none());
+        assert!(inner.planned_units(77).is_none());
     }
 
     #[test]
@@ -1585,6 +1965,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retry_chapter_takes_only_that_chapters_shelved_tasks() {
+        // The middle scope, `:retry 24`: narrower than the blanket retry, which
+        // forgives every strike in the ledger, and wider than `F`, which names
+        // one stage. A neighbouring chapter's shelved task must not move.
+        let (_d, mut inner) = fixture();
+        for (chapter, stage, state) in [
+            (24u32, Stage::Digest, TaskState::Shelved),
+            (24, Stage::Render, TaskState::Shelved),
+            (24, Stage::Merge, TaskState::Pending),
+            (25, Stage::Digest, TaskState::Shelved),
+            (24, Stage::Crawl, TaskState::Done),
+        ] {
+            let mut t = Task::new(chapter, stage);
+            t.state = state;
+            t.attempts = 3;
+            inner.tasks.insert(t.id(), t);
+        }
+
+        let msg = inner.op_retry_chapter(24);
+        assert!(msg.contains("ch24"), "{msg}");
+        assert!(msg.contains("digest:24"), "{msg}");
+        assert!(msg.contains("render:24"), "{msg}");
+        assert_eq!(inner.tasks["digest:24"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["render:24"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["digest:24"].attempts, 0);
+        assert_eq!(
+            inner.tasks["digest:25"].state,
+            TaskState::Shelved,
+            "another chapter is untouched"
+        );
+        assert_eq!(
+            inner.tasks["merge:24"].state,
+            TaskState::Pending,
+            "only shelved tasks move"
+        );
+        assert_eq!(
+            inner.tasks["crawl:24"].state,
+            TaskState::Done,
+            "and never a finished one"
+        );
+        assert!(
+            inner.op_retry_chapter(24).contains("no shelved"),
+            "second run is a no-op"
+        );
+        assert!(
+            inner
+                .op_retry_chapter(99)
+                .contains("no shelved tasks on ch99"),
+            "and it says which chapter it looked at"
+        );
+    }
+
     fn completion(worker: &str, task: &str, ok: bool, detail: &str) -> Complete {
         Complete {
             worker_id: worker.into(),
@@ -1887,6 +2320,233 @@ mod tests {
     }
 
     #[test]
+    fn a_forced_merge_retry_forces_the_render_that_feeds_it() {
+        // The failure this exists for: `merge:24 FAILED (shelved — press u to
+        // retry): 42 segments missing in .../segments-vieneu-24: run the render
+        // stage first`. Nothing in the merge stage produces segments, so
+        // re-offering the merge fails again on the same box — and the operator
+        // had to work out that the fix was `F` on a *different* row. Force now
+        // means force the producer.
+        let (_d, mut inner) = fixture();
+        let engine = inner.settings.engine.clone();
+        let seg = inner.layout.seg_dir(&engine, 24);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+        for (stage, state) in [
+            (Stage::Render, TaskState::Done),
+            (Stage::Merge, TaskState::Shelved),
+        ] {
+            let mut t = Task::new(24, stage);
+            t.state = state;
+            t.attempts = 3;
+            t.assigned_to = Some("marmot".into());
+            inner.tasks.insert(t.id(), t);
+        }
+        assert!(
+            !inner.layout.final_mp3(24).exists(),
+            "the merge failed, so nothing was published"
+        );
+
+        let msg = inner.op_retry_task(Stage::Merge, 24, true);
+        assert!(msg.contains("merge:24"), "{msg}");
+        assert!(
+            msg.contains("+ render"),
+            "the cascade is operator-facing: {msg}"
+        );
+        assert_eq!(inner.tasks["merge:24"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["render:24"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["render:24"].attempts, 0);
+        assert!(
+            !seg.exists(),
+            "the render cache goes, or the re-offer stays the no-op this fixes"
+        );
+        // Both stages reach the stream, so the log explains the state change
+        // rather than leaving a render row that moved on its own.
+        let evs: Vec<String> = inner
+            .recent_events(2)
+            .into_iter()
+            .map(|e| e.text.clone())
+            .collect();
+        assert!(evs.iter().any(|e| e.contains("render:24")), "{evs:?}");
+        assert!(evs.iter().any(|e| e.contains("merge:24")), "{evs:?}");
+    }
+
+    #[test]
+    fn a_merge_retry_cascades_only_when_forced_and_nothing_was_published() {
+        // Two guards, both about not deleting more than was asked for: an
+        // unforced retry deletes nothing at all (that is the whole difference
+        // from `F`), and a chapter that already has an mp3 keeps its segments,
+        // because those are that file's provenance.
+        let (_d, mut inner) = fixture();
+        let engine = inner.settings.engine.clone();
+        let seg = inner.layout.seg_dir(&engine, 24);
+        std::fs::create_dir_all(&seg).unwrap();
+        let keep = seg.join("0000_Đức Trí.wav");
+        std::fs::write(&keep, vec![0u8; 2000]).unwrap();
+        let mut r = Task::new(24, Stage::Render);
+        r.state = TaskState::Done;
+        inner.tasks.insert(r.id(), r);
+        let mut m = Task::new(24, Stage::Merge);
+        m.state = TaskState::Shelved;
+        inner.tasks.insert(m.id(), m);
+
+        // Unforced: the merge is requeued and nothing else is touched.
+        let msg = inner.op_retry_task(Stage::Merge, 24, false);
+        assert!(!msg.contains("render"), "{msg}");
+        assert_eq!(inner.tasks["render:24"].state, TaskState::Done);
+        assert!(keep.exists());
+
+        // Forced, but this chapter is already published: the stale mp3 goes
+        // (it is about to be rebuilt) and the segments stay.
+        std::fs::write(inner.layout.final_mp3(24), vec![0u8; 2000]).unwrap();
+        let msg = inner.op_retry_task(Stage::Merge, 24, true);
+        assert!(!msg.contains("render"), "no cascade to announce: {msg}");
+        assert_eq!(
+            inner.tasks["render:24"].state,
+            TaskState::Done,
+            "left alone"
+        );
+        assert!(keep.exists(), "provenance survives");
+        assert!(
+            !inner.layout.final_mp3(24).exists(),
+            "the stale product goes"
+        );
+    }
+
+    #[test]
+    fn offer_skips_a_merge_whose_segments_are_missing_and_heals_its_render() {
+        // The failure this exists for: `merge:24 FAILED (will retry): 42
+        // segments missing in .../segments-vieneu-24: run the render stage
+        // first`. The ledger said `render:Done` but the files were not on
+        // the disk the merge would run against — so the offer, not the
+        // third strike, is where it stops.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        let engine = inner.settings.engine.clone();
+        std::fs::write(
+            layout.script(9),
+            r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"A","text":"y"},{"speaker":"B","text":"z"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast(&engine), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
+        let seg = layout.seg_dir(&engine, 9);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000-0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+        for (stage, state) in [
+            (Stage::Crawl, TaskState::Done),
+            (Stage::Digest, TaskState::Done),
+            (Stage::Render, TaskState::Done),
+        ] {
+            let mut t = Task::new(9, stage);
+            t.state = state;
+            inner.tasks.insert(t.id(), t);
+        }
+        inner.tasks.insert(Task::new(9, Stage::Merge).id(), Task::new(9, Stage::Merge));
+
+        // One run wav short of the set: the merge is not offered, its render
+        // is requeued, and the worker leaves with the healing render instead
+        // of idling behind a chapter it could not have merged.
+        let offer = inner.offer("w1").expect("the render is offerable");
+        assert_eq!(offer.task_id, "render:9", "not the starved merge");
+        assert_eq!(inner.tasks["merge:9"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["render:9"].state, TaskState::Assigned);
+        assert!(
+            inner.tasks["render:9"]
+                .detail
+                .contains("segments missing"),
+            "the requeue names its cause: {}",
+            inner.tasks["render:9"].detail
+        );
+    }
+
+    #[test]
+    fn offer_hands_over_a_merge_whose_segments_are_home() {
+        // Same chapter complete: the guard is not a veto on merges, only on
+        // merges the box would fail.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        let engine = inner.settings.engine.clone();
+        std::fs::write(
+            layout.script(9),
+            r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"A","text":"y"},{"speaker":"B","text":"z"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast(&engine), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
+        let seg = layout.seg_dir(&engine, 9);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000-0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(seg.join("0002_Adam.wav"), vec![0u8; 2000]).unwrap();
+        for (stage, state) in [
+            (Stage::Crawl, TaskState::Done),
+            (Stage::Digest, TaskState::Done),
+            (Stage::Render, TaskState::Done),
+        ] {
+            let mut t = Task::new(9, stage);
+            t.state = state;
+            inner.tasks.insert(t.id(), t);
+        }
+        inner.tasks.insert(Task::new(9, Stage::Merge).id(), Task::new(9, Stage::Merge));
+
+        let offer = inner.offer("w1").expect("a ready merge is offerable");
+        assert_eq!(offer.task_id, "merge:9");
+        assert_eq!(inner.tasks["render:9"].state, TaskState::Done);
+    }
+
+    #[test]
+    fn a_merge_failing_on_missing_segments_requeues_its_render() {
+        // The offer guard only sees this disk. A remote that was wiped (or
+        // never rendered the chapter) fails the same way with a healthy disk
+        // here — so the failure heals the render instead of burning three
+        // strikes into shelved and waiting for a manual force.
+        let (_d, mut inner) = fixture();
+        let mut r = Task::new(9, Stage::Render);
+        r.state = TaskState::Done;
+        inner.tasks.insert(r.id(), r);
+        let mut m = Task::new(9, Stage::Merge);
+        m.state = TaskState::Running;
+        m.assigned_to = Some("marmot".into());
+        inner.tasks.insert(m.id(), m);
+
+        let msg = inner.complete(&completion(
+            "marmot",
+            "merge:9",
+            false,
+            "merge ch9 failed: 42 segments missing in /home/thang/bm-worker/data/audio/segments-vieneu-09 (e.g. title_Đức Trí.wav): run the render stage first",
+        ));
+        assert!(msg.contains("failed"), "{msg}");
+        assert_eq!(inner.tasks["merge:9"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["merge:9"].attempts, 1, "the strike still counts");
+        assert_eq!(
+            inner.tasks["render:9"].state,
+            TaskState::Pending,
+            "the render is requeued beside the retry"
+        );
+
+        // Published is the veto: then the segments are that mp3's
+        // provenance, not cache, and nothing re-renders on a failure's word.
+        std::fs::create_dir_all(inner.layout.final_mp3(9).parent().unwrap()).unwrap();
+        std::fs::write(inner.layout.final_mp3(9), vec![0u8; 2000]).unwrap();
+        let mut r = Task::new(9, Stage::Render);
+        r.state = TaskState::Done;
+        inner.tasks.insert(r.id(), r);
+        let m = inner.tasks.get_mut("merge:9").unwrap();
+        m.state = TaskState::Running;
+        m.assigned_to = Some("marmot".into());
+        let msg = inner.complete(&completion(
+            "marmot",
+            "merge:9",
+            false,
+            "merge ch9 failed: 1 segments missing in /home/thang/bm-worker/data/audio/segments-vieneu-09 (e.g. 0000_Adam.wav): run the render stage first",
+        ));
+        assert!(msg.contains("failed"), "{msg}");
+        assert_eq!(
+            inner.tasks["render:9"].state,
+            TaskState::Done,
+            "a published chapter keeps its segments"
+        );
+    }
+
+    #[test]
     fn a_render_offer_freezes_the_voices_it_hands_out() {
         // The filenames a worker writes embed the voice, so a plan that is not
         // persisted is re-derived later — by the completion gate and by the
@@ -1907,7 +2567,7 @@ mod tests {
         // leave behind.
         std::fs::write(layout.cast(&engine), r#"{"Narrator":"Đức Trí"}"#).unwrap();
 
-        let units = inner.missing_units(187).expect("planning must succeed");
+        let units = inner.planned_units(187).expect("planning must succeed");
         assert_eq!(units.len(), 1);
         let offered = units[0].name.clone();
         assert!(offered.ends_with(".wav"), "{offered}");
@@ -1937,7 +2597,7 @@ mod tests {
                 "segments":[{"speaker":"Người Khác","text":"x"}]}"#,
         )
         .unwrap();
-        let _ = inner.missing_units(188).expect("planning must succeed");
+        let _ = inner.planned_units(188).expect("planning must succeed");
         let after = crate::segments::expected_names(&layout, &engine, 187).unwrap();
         assert_eq!(
             expected, after,
@@ -1978,10 +2638,10 @@ mod tests {
         )
         .unwrap();
 
-        let a = inner.missing_units(180).expect("Vân bá must plan");
+        let a = inner.planned_units(180).expect("Vân bá must plan");
         assert_eq!(a.len(), 1);
         let b = inner
-            .missing_units(182)
+            .planned_units(182)
             .expect("Nam tử bị thương must plan");
         assert_eq!(b.len(), 1);
         assert!(

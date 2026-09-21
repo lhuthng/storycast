@@ -12,7 +12,10 @@ impl Inner {
     /// Merge affinity is an optimization for remote boxes, never a gate for
     /// the local node: it shares the inductor's segment store — units are
     /// collected before a render completion is applied, so a `done` render's
-    /// wavs are always on local disk — and takes any pending merge. Without
+    /// wavs are always on local disk — and takes any pending merge. A surgical
+    /// re-render pins the same way to the box that already holds the chapter,
+    /// so a cold box never re-speaks the whole chapter for a voice swap; the
+    /// local node takes those too. Without
     /// this a render on a dead, ffmpeg-less, or merge-disabled box strands
     /// its merge pending for ever. A machine with no stored policy gets the
     /// default (all four, merge → render
@@ -20,6 +23,13 @@ impl Inner {
     /// needs `render-segments`, merge needs `merge` (absent when the box has no
     /// ffmpeg) — and a merge's affinity still pins it to the box that rendered
     /// the chapter.
+    ///
+    /// A merge is additionally offered only when its segments are on this
+    /// disk (`missing_wavs` empty): the ledger's `render:Done` is a claim
+    /// about files, and files deleted or never collected since make it a lie
+    /// that every box would fail the same way. A starved merge heals its
+    /// render (see `heal_render_for_merge`) and yields to the next stage,
+    /// so one bad chapter never idles the worker.
     pub fn offer(&mut self, worker_id: &str) -> Option<TaskOffer> {
         self.reap();
         let machine = self.workers.get(worker_id).cloned().unwrap_or_default();
@@ -45,7 +55,7 @@ impl Inner {
             .get(&machine)
             .map(|m| m.effective_task_policy())
             .unwrap_or_else(bm_proto::TaskPref::default_list);
-        let caps = self.caps.get(worker_id);
+        let caps = self.caps.get(worker_id).cloned();
         // Pick first, then mutate — the borrow checker wants the scan finished
         // before the assignment begins. Walk the policy in order and take the
         // oldest chapter of the first enabled stage that has assignable work.
@@ -56,7 +66,7 @@ impl Inner {
             // ffmpeg and a box without it advertises no `merge`. A worker with
             // no recorded capabilities is allowed — failing closed here would
             // strand anything that never registered.
-            if let Some(caps) = caps {
+            if let Some(caps) = &caps {
                 let can = |cap: &str| caps.iter().any(|c| c == cap);
                 if (stage == Stage::Render && !can("render-segments"))
                     || (stage == Stage::Merge && !can("merge"))
@@ -64,7 +74,7 @@ impl Inner {
                     continue;
                 }
             }
-            let mut ids: Vec<&String> = self
+            let mut ids: Vec<String> = self
                 .tasks
                 .iter()
                 .filter(|(_, t)| t.stage == stage)
@@ -73,11 +83,12 @@ impl Inner {
                 .filter(|(_, t)| match &t.affinity {
                     Some(only) => {
                         *only == machine
-                            || (t.stage == Stage::Merge && bm_core::is_local_node(&machine))
+                            || ((t.stage == Stage::Merge || t.stage == Stage::Render)
+                                && bm_core::is_local_node(&machine))
                     }
                     None => true,
                 })
-                .map(|(id, _)| id)
+                .map(|(id, _)| id.clone())
                 .collect();
             // Numeric chapter order — lexical sort would put ch100 before ch93.
             ids.sort_by_key(|id| {
@@ -85,8 +96,41 @@ impl Inner {
                     .and_then(|(_, ch)| ch.parse::<u32>().ok())
                     .unwrap_or(0)
             });
+            if stage == Stage::Merge {
+                // The data check delivery was missing: offer the oldest merge
+                // whose segments are actually here, and heal the render of
+                // every starved one skipped along the way. A chapter this
+                // disk cannot plan (`None` — no script, uncast speaker) is
+                // offered as before: there is nothing local to prove it
+                // starved, and its failure names the real cause.
+                let mut ready: Option<String> = None;
+                for id in &ids {
+                    let chapter = id
+                        .split_once(':')
+                        .and_then(|(_, ch)| ch.parse::<u32>().ok())
+                        .unwrap_or(0);
+                    match crate::segments::missing_wavs(
+                        &self.layout,
+                        &self.settings.engine,
+                        chapter,
+                    ) {
+                        Some(missing) if !missing.is_empty() => {
+                            self.heal_render_for_merge(chapter);
+                        }
+                        _ => {
+                            ready = Some(id.clone());
+                            break;
+                        }
+                    }
+                }
+                if let Some(id) = ready {
+                    pick = Some((id, stage));
+                    break;
+                }
+                continue;
+            }
             if let Some(id) = ids.first() {
-                pick = Some(((*id).clone(), stage));
+                pick = Some((id.clone(), stage));
                 break;
             }
         }
@@ -132,6 +176,29 @@ impl Inner {
         let text = (t.stage == Stage::Digest)
             .then(|| std::fs::read_to_string(self.layout.chapter_txt(n)).ok())
             .flatten();
+        let render_units = if t.stage == Stage::Render {
+            self.planned_units(n)
+        } else {
+            None
+        };
+        // ponytail: offer-time diff against this store, not a persisted set.
+        let render_force: Vec<String> = render_units
+            .as_deref()
+            .map(|units| {
+                let seg_dir = self.layout.seg_dir(&self.settings.engine, n);
+                units
+                    .iter()
+                    .filter(|u| {
+                        !seg_dir
+                            .join(&u.name)
+                            .metadata()
+                            .map(|m| m.len() > 1000)
+                            .unwrap_or(false)
+                    })
+                    .map(|u| u.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         TaskOffer {
             task_id: t.id(),
             chapter: n,
@@ -172,23 +239,38 @@ impl Inner {
             effect_volume: self.settings.effect_volume,
             music_volume: self.settings.music_volume,
             inject_volume: self.settings.inject_volume,
-            // The inductor plans; the worker speaks. `None` when this chapter
-            // cannot be planned here — the worker falls back to its own
-            // script, exactly as before the migration.
-            render_units: if t.stage == Stage::Render {
-                self.missing_units(n)
-            } else {
-                None
-            },
+            // The inductor plans; the worker speaks. The whole chapter's
+            // units, so the worker can skip what it already holds — see
+            // `planned_units`. `None` when this chapter cannot be planned
+            // here — the worker falls back to its own script, exactly as
+            // before the migration. `render_force` names the units this
+            // store lacks (the surgical set a swap/retag just deleted, or
+            // everything after a full invalidation): the worker must speak
+            // those even when its own disk holds a same-named file, or it
+            // keeps serving stale bytes under the new text.
+            render_units,
+            render_force,
             // The inductor decides locality; the worker never guesses from
             // paths. Same predicate the provisioner uses for `Ssh.local`.
             local_node: bm_core::is_local_node(machine),
         }
     }
 
-    /// Units of `chapter` the inductor's own store lacks, for a render offer.
-    /// `None` when the chapter cannot be planned here (missing script,
-    /// unparseable JSON, uncast speaker).
+    /// **Every** unit `chapter` needs, for a render offer. `None` when the
+    /// chapter cannot be planned here (missing script, unparseable JSON,
+    /// uncast speaker).
+    ///
+    /// The whole set, deliberately — not the difference against this store.
+    /// That difference reads as an optimisation and is a bug: the offer goes
+    /// to whichever box asks next, that box has a store of its own, and the
+    /// inductor cannot see it. So a partial offer lands on a box holding a
+    /// strict subset — a voice swap's new units on a box that never had the
+    /// chapter's others — and the merge that follows, pinned by `affinity` to
+    /// that same box, fails on `N segments missing` for a chapter the cluster
+    /// has rendered in full. Sending everything and letting the worker skip
+    /// what it holds (`bm-agent`'s `pending_units`) means any box that finishes
+    /// a render holds the whole chapter, which is what makes `affinity` true
+    /// rather than merely intended.
     ///
     /// This **persists** the cast (`save = true`), unlike every read-only
     /// prover. The units it returns are the filenames the worker will write,
@@ -200,7 +282,7 @@ impl Inner {
     /// the chapter reports `incomplete` and `20 segments missing` while the
     /// audio sits on disk. Planning is the moment the voices are decided; this
     /// is where they are frozen.
-    pub(crate) fn missing_units(&self, chapter: u32) -> Option<Vec<RenderUnitSpec>> {
+    pub(crate) fn planned_units(&self, chapter: u32) -> Option<Vec<RenderUnitSpec>> {
         let engine = self.settings.engine.clone();
         let script_path = self.layout.script(chapter);
         let text = std::fs::read_to_string(&script_path).ok()?;
@@ -225,11 +307,6 @@ impl Inner {
         Some(
             units
                 .into_iter()
-                .filter(|u| {
-                    // Same completeness test the agent's resume check uses: a
-                    // present, non-trivial file is done.
-                    !(u.dest.exists() && u.dest.metadata().map(|m| m.len() > 1000).unwrap_or(false))
-                })
                 .map(|u| RenderUnitSpec {
                     tag: u.tag,
                     name: u
@@ -411,12 +488,26 @@ impl Inner {
                         );
                     }
                 }
+                // The design this mp3 was mixed under, read *before* the borrow
+                // below: the stamp needs `self.settings` and the registries,
+                // and it has to be written under the same borrow as the state.
+                // A merge that failed never gets here, which is right — it left
+                // no artifact to make a claim about.
+                let design = if stage == Stage::Merge {
+                    let d = bm_core::design::MergeDesign::load(&self.layout);
+                    self.design_stamp(&d, self.design_knobs(), chapter)
+                } else {
+                    None
+                };
                 if let Some(t) = self.tasks.get_mut(&c.task_id) {
                     t.state = TaskState::Done;
                     t.detail = c.detail.clone();
                     t.assigned_to = None;
                     t.lease_until = None;
                     t.updated = now_secs();
+                    if let Some(d) = design {
+                        t.design = Some(d);
+                    }
                 }
                 // Throughput ledger: every completion feeds the ETA model.
                 // Render units are TTS calls; other stages count 1 per chapter.
@@ -466,6 +557,36 @@ impl Inner {
         )
     }
 
+    /// A merge failed on `N segments missing`, or an offer-time check proved
+    /// its segments are not on this disk: the ledger's `render:Done` is a
+    /// claim about files that is no longer true (a wiped box, a surgically
+    /// deleted stale file, units never collected). Flip that `Done` render
+    /// back to `Pending` so the chapter re-renders instead of failing the
+    /// same merge into shelved.
+    ///
+    /// Only `Done` moves: anything else is already queued, in flight, or
+    /// parked for an operator. A published mp3 vetoes the flip — then the
+    /// segments are provenance (TTS does not reproduce), not cache. Nothing
+    /// is deleted: the next render fills gaps (`pending_units` skips what
+    /// the box holds) rather than starting over.
+    fn heal_render_for_merge(&mut self, chapter: u32) -> bool {
+        if self.layout.final_mp3(chapter).is_file() {
+            return false;
+        }
+        match self.tasks.get_mut(&format!("{}:{chapter}", Stage::Render)) {
+            Some(t) if t.state == TaskState::Done => {
+                t.state = TaskState::Pending;
+                t.attempts = 0;
+                t.assigned_to = None;
+                t.lease_until = None;
+                t.detail = "requeued: merge found segments missing".into();
+                t.updated = now_secs();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Record a failed report: a strike, Pending again (Shelved at 3), and an
     /// event line. Shared by worker-reported failures and the completion
     /// gate, which fails reports whose files never landed.
@@ -487,6 +608,20 @@ impl Inner {
                 false
             }
         };
+        // A merge fails where its segments are — a per-box store the ledger
+        // cannot see, so the offer guard above only catches it when *this*
+        // disk is the short one. A remote that was wiped (or never rendered
+        // the chapter) fails the same way with a healthy disk here: requeue
+        // the render alongside the merge retry, or the same merge fails twice
+        // more into shelved and waits for a manual force. The merge keeps its
+        // strike — a render that cannot close the gap still shelves.
+        if let Some(rest) = task_id.strip_prefix("merge:") {
+            if detail.contains("segments missing") {
+                if let Ok(chapter) = rest.parse::<u32>() {
+                    self.heal_render_for_merge(chapter);
+                }
+            }
+        }
         let level = if shelved { "error" } else { "warn" };
         let note = if shelved {
             " (shelved — press u to retry)"
