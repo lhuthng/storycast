@@ -9,7 +9,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
 };
 
 pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -22,7 +22,7 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     } else {
         "Logs".to_string()
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = super::pane_block(app, title);
     if app.events.is_empty() {
         f.render_widget(
             empty_body(vec!["nothing has happened yet".into()]).block(block),
@@ -31,7 +31,7 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let colour = app.colour;
+    let colour = app.colour();
     let lines: Vec<Line> = app
         .events
         .iter()

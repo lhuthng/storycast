@@ -52,3 +52,12 @@ rust/target/
 /rust/vendor/sea-g2p/python/
 /models/
 
+# Agent working files: the per-session transcript dump and the assistant's own
+# memory/log directory. Both are a record of *this* machine's conversations
+# rather than of the code, and both are rewritten continuously — so they are
+# machine-local in the same sense as `.bm/` and `refs/`, not documents that
+# happen to be untracked. `session-*.md` is a name the harness picks, not one we
+# chose, so it is matched by pattern rather than by path.
+session-*.md
+/.workbuddy-ai/
+

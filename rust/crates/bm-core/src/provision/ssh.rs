@@ -7,6 +7,40 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const RSYNC_TIMEOUT_SECS: u64 = 1800;
 const RSYNC_IO_TIMEOUT: &str = "--timeout=120";
 
+/// The host-key policy, written once and used by both transports — `ssh` and
+/// the `ssh` that `rsync` spawns through `-e`.
+///
+/// Every box this reaches is either an instance launched minutes ago or a
+/// worker linked by hand, and every call is scripted: `BatchMode=yes` forbids
+/// the "are you sure you want to continue connecting?" prompt, so a host key
+/// that is not already in `known_hosts` is a hard `exit 255 — Host key
+/// verification failed`. A freshly launched EC2 instance *always* presents a
+/// key nobody has seen before, which is why the first provision of every new
+/// box failed with exactly that message.
+///
+/// So verification is declined and `known_hosts` is neither read nor written
+/// (`/dev/null`). That is not only about first contact: AWS hands the same
+/// public IP to a different box later, and a *remembered* key for a recycled
+/// address is the same failure in a different coat — `StrictHostKeyChecking=no`
+/// accepts an unknown host but still refuses a *changed* one. `/dev/null` also
+/// keeps the tool out of `~/.ssh` entirely, which is the one directory a
+/// sandboxed session may not touch.
+///
+/// `~/.ssh/config` is still read — an `-o` overrides a single option, it does
+/// not replace the file — so Host aliases, `ProxyJump` and `IdentityFile` keep
+/// working. `LogLevel=ERROR` removes the "Permanently added … to the list of
+/// known hosts" line, which is untrue here because nothing is persisted; it
+/// keeps the warnings that carry information, e.g. an identity file that is not
+/// readable (verified against a real box, not assumed).
+const HOST_KEY_OPTS: [&str; 6] = [
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "LogLevel=ERROR",
+];
+
 use super::REMOTE_DIR;
 use crate::util::expand_tilde;
 
@@ -71,7 +105,7 @@ impl Ssh {
     }
 
     fn ssh_args(&self) -> Vec<String> {
-        let mut args = vec![
+        let mut args: Vec<String> = vec![
             // Never prompt, never linger: every use is scripted, and a stalled
             // connection must die instead of hanging a TUI job forever.
             "-n".into(),
@@ -84,6 +118,7 @@ impl Ssh {
             "-o".into(),
             "ServerAliveCountMax=2".into(),
         ];
+        args.extend(HOST_KEY_OPTS.iter().map(|s| s.to_string()));
         if self.port != 22 {
             args.push("-p".into());
             args.push(self.port.to_string());
@@ -125,8 +160,16 @@ impl Ssh {
         run_bounded(&mut cmd, timeout_secs, &transport)
     }
 
+    /// The `-e` value rsync reaches the box through. It carries the *same*
+    /// host-key policy as [`Self::ssh_args`]: rsync spawns its own ssh, so
+    /// setting the policy on one transport only would fix the probe and leave
+    /// every push failing with the identical message.
     fn rsync_e(&self) -> String {
-        let mut e = format!("ssh -o BatchMode=yes -o ConnectTimeout=10 -p {}", self.port);
+        let mut e = format!(
+            "ssh -o BatchMode=yes -o ConnectTimeout=10 {} -p {}",
+            HOST_KEY_OPTS.join(" "),
+            self.port
+        );
         if let Some(key) = &self.key {
             e.push_str(&format!(" -i {}", expand_tilde(key).display()));
         }
@@ -134,7 +177,18 @@ impl Ssh {
     }
 
     /// Push a local path into the machine's worker root.
-    pub fn rsync_push(&self, src: &Path, remote_rel: &str, delete: bool) -> Result<()> {
+    ///
+    /// `progress` streams throttled `[target] {label}: …% … MB/s` lines while
+    /// the transfer runs — the difference between watching a 668 MB models
+    /// push crawl and wondering whether it stalled. `None` keeps the silent
+    /// push (segment collection, local copies).
+    pub fn rsync_push(
+        &self,
+        src: &Path,
+        remote_rel: &str,
+        delete: bool,
+        progress: Option<RsyncProgress<'_>>,
+    ) -> Result<()> {
         if self.local {
             return self.rsync_push_local(src, remote_rel);
         }
@@ -143,6 +197,11 @@ impl Ssh {
             vec!["-az".into(), "--no-perms".into(), RSYNC_IO_TIMEOUT.into()];
         if delete {
             args.push("--delete".into());
+        }
+        if progress.is_some() {
+            // Per-file `%` (openrsync knows no `progress2`): the tracker
+            // below turns it into throttled file n/N + speed lines.
+            args.push("--progress".into());
         }
         args.push("-e".into());
         args.push(self.rsync_e());
@@ -154,10 +213,18 @@ impl Ssh {
         }
         args.push(src_s);
         args.push(dst);
-        let (code, _, stderr) = run_bounded(
+        let mut tracker = progress.map(|p| {
+            ProgressTracker::new(p.tx.clone(), self.target.clone(), p.label.to_string())
+        });
+        let watch: OutputWatch<'_> = match tracker.as_mut() {
+            Some(t) => Some(&mut |out: &str, err: &str| t.on_output(out, err)),
+            None => None,
+        };
+        let (code, _, stderr) = run_bounded_live(
             Command::new("rsync").args(&args),
             RSYNC_TIMEOUT_SECS,
             &format!("rsync push to {}", self.target),
+            watch,
         )?;
         if code != 0 {
             let hint = if stderr.contains("command not found") {
@@ -233,6 +300,102 @@ impl Ssh {
     }
 }
 
+/// Live byte-progress for one rsync push: the sender every throttled
+/// `[target] {label}: …` line goes to, plus the human label (`models`,
+/// `agent`, …) those lines carry.
+pub struct RsyncProgress<'a> {
+    pub tx: &'a tokio::sync::mpsc::UnboundedSender<String>,
+    pub label: &'a str,
+}
+
+/// Turns rsync `--progress` snapshots into throttled status lines. A changed
+/// file-or-band emits (at most every 2 s, so a hundred tiny files don't
+/// flood the pane); an unchanged one re-emits every 30 s as a heartbeat —
+/// frozen values with advancing timestamps are exactly how a stall reads.
+struct ProgressTracker {
+    tx: tokio::sync::mpsc::UnboundedSender<String>,
+    target: String,
+    label: String,
+    last_emit: Option<std::time::Instant>,
+    last_key: Option<(String, u8)>,
+}
+
+impl ProgressTracker {
+    fn new(
+        tx: tokio::sync::mpsc::UnboundedSender<String>,
+        target: String,
+        label: String,
+    ) -> Self {
+        ProgressTracker {
+            tx,
+            target,
+            label,
+            last_emit: None,
+            last_key: None,
+        }
+    }
+
+    fn on_output(&mut self, stdout: &str, stderr: &str) {
+        // Progress lands on stdout when piped; stderr is free insurance.
+        let snapshot = format!("{stdout}\n{stderr}");
+        let Some((file, bytes, pct, speed)) = parse_progress(&snapshot) else {
+            return;
+        };
+        let key = (file.clone(), pct / 10);
+        let now = std::time::Instant::now();
+        let should = match (self.last_emit, self.last_key.as_ref() != Some(&key)) {
+            (None, _) => true,
+            (Some(t), true) => now.duration_since(t) >= std::time::Duration::from_secs(2),
+            (Some(t), false) => now.duration_since(t) >= std::time::Duration::from_secs(30),
+        };
+        if !should {
+            return;
+        }
+        let mb = bytes as f64 / 1048576.0;
+        let _ = self.tx.send(format!(
+            "[{}] {}: {file} {pct}% ({mb:.0} MB) @ {speed}",
+            self.target, self.label,
+        ));
+        self.last_emit = Some(now);
+        self.last_key = Some(key);
+    }
+}
+
+/// The last `--progress` update in a snapshot: `(file, bytes, pct, speed)`.
+/// rsync separates live updates with `\r` and files with `\n`, so both split
+/// the scan; the current file is the last non-progress line. Only the final
+/// line per file carries `(xfer#…)` — intermediate updates are bare
+/// `bytes pct speed eta`, which is why the match is on that shape.
+fn parse_progress(snapshot: &str) -> Option<(String, u64, u8, String)> {
+    let mut file = None;
+    let mut prog = None;
+    for seg in snapshot.split(['\r', '\n']) {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        if let Some(p) = parse_progress_line(seg) {
+            prog = Some(p);
+        } else {
+            file = Some(seg.to_string());
+        }
+    }
+    prog.map(|(bytes, pct, speed)| (file.unwrap_or_default(), bytes, pct, speed))
+}
+
+/// One `--progress` update: `12,345 45% 2.10MB/s 0:01:23` (final line per
+/// file appends `(xfer#5, to-check=120/400)`, parsed the same way).
+/// Four whitespace fields with `%` on the second — a filename matching all
+/// of that exactly is absurd enough to ignore.
+fn parse_progress_line(seg: &str) -> Option<(u64, u8, String)> {
+    let mut parts = seg.split_whitespace();
+    let bytes: u64 = parts.next()?.replace(',', "").parse().ok()?;
+    let pct: u8 = parts.next()?.strip_suffix('%')?.parse().ok()?;
+    let speed = parts.next()?.to_string();
+    let _eta = parts.next()?;
+    Some((bytes, pct, speed))
+}
+
 fn output_file() -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -268,6 +431,22 @@ fn run_bounded(
     timeout_secs: u64,
     transport: &str,
 ) -> Result<(i32, String, String)> {
+    run_bounded_live(cmd, timeout_secs, transport, None)
+}
+
+/// Same as [`run_bounded`], plus a watcher that sees stdout/stderr snapshots
+/// while the child runs — the rsync push tails its own `--progress` output
+/// through it. Called at most twice a second; `None` is today's behavior.
+/// Tails a running child's stdout/stderr snapshots into the watcher.
+/// `None` is today's fire-and-collect behavior.
+type OutputWatch<'a> = Option<&'a mut dyn FnMut(&str, &str)>;
+
+fn run_bounded_live(
+    cmd: &mut Command,
+    timeout_secs: u64,
+    transport: &str,
+    mut watch: OutputWatch<'_>,
+) -> Result<(i32, String, String)> {
     use std::os::unix::fs::FileExt;
     let stdout = output_file().with_context(|| format!("creating stdout for {transport}"))?;
     let stderr = output_file().with_context(|| format!("creating stderr for {transport}"))?;
@@ -285,23 +464,9 @@ fn run_bounded(
         )
         .spawn()
         .with_context(|| format!("spawning {transport}"))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                anyhow::bail!("{transport} timed out after {timeout_secs}s — the box (or its network) stalled mid-command");
-            }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                anyhow::bail!("waiting on {transport}: {e}");
-            }
-        }
-    };
+    // The read closure is defined before the loop so the watcher can reuse
+    // it: output files only grow, and a 50 ms `read_exact_at` over megabytes
+    // every poll would cost more than the rsync it watches.
     let read = |file: &std::fs::File| -> std::io::Result<String> {
         let mut bytes = vec![
             0;
@@ -311,6 +476,37 @@ fn run_bounded(
         ];
         file.read_exact_at(&mut bytes, 0)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
+    let mut next_watch = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("{transport} timed out after {timeout_secs}s — the box (or its network) stalled mid-command");
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                // One snapshot per half second, not per poll: the files only
+                // grow and the watcher parses from scratch each time.
+                if let Some(w) = watch.as_mut() {
+                    if std::time::Instant::now() >= next_watch {
+                        next_watch =
+                            std::time::Instant::now() + std::time::Duration::from_millis(500);
+                        if let (Ok(o), Ok(e)) = (read(&stdout), read(&stderr)) {
+                            w(&o, &e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("waiting on {transport}: {e}");
+            }
+        }
     };
     Ok((
         status.code().unwrap_or(255),
@@ -354,6 +550,51 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_parser_reads_the_last_update_and_its_file() {
+        // Real `--progress` bytes (openrsync, piped: `\r` between updates,
+        // and only the final line per file carries `(xfer#…)`). The last
+        // update wins; the file is the last non-progress line.
+        let snap = "weights.bin\r         262144  12%  255.37KB/s   00:00:07\r         655360  31%  192.06KB/s   00:00:07\r        2097152 100%  204.68KB/s   00:00:10 (xfer#1, to-check=0/1)\n";
+        assert_eq!(
+            parse_progress(snap),
+            Some(("weights.bin".into(), 2097152, 100, "204.68KB/s".into()))
+        );
+        // Multi-file: percent resets per file, and the bare intermediate
+        // updates (no xfer suffix) must parse as updates, never as filenames.
+        let snap2 = "a.bin\r          100 100%  1.00MB/s   00:00:00 (xfer#1, to-check=1/2)\nb.bin\r           50  25%  1.00MB/s   00:00:01\r";
+        assert_eq!(
+            parse_progress(snap2),
+            Some(("b.bin".into(), 50, 25, "1.00MB/s".into()))
+        );
+        assert_eq!(parse_progress(""), None);
+        assert_eq!(parse_progress("sending incremental file list\n"), None);
+    }
+
+    #[test]
+    fn rsync_watch_streams_progress_while_the_child_runs() {
+        // A fake slow transfer through the real runner: progress-shaped
+        // stdout for ~1.5 s. First update emits immediately; same-band
+        // repeats inside the 2 s window stay silent.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut tracker = ProgressTracker::new(tx, "t@h".into(), "models".into());
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "echo big.bin; for i in 1 2 3 4 5 6; do echo '  100 10% 1.00MB/s 00:00:01'; sleep 0.25; done",
+        ]);
+        let watch: OutputWatch<'_> =
+            Some(&mut |out: &str, err: &str| tracker.on_output(out, err));
+        let (code, _, _) = run_bounded_live(&mut cmd, 30, "fake push", watch).unwrap();
+        assert_eq!(code, 0);
+        let line = rx.try_recv().expect("first update streams immediately");
+        assert_eq!(line, "[t@h] models: big.bin 10% (0 MB) @ 1.00MB/s");
+        assert!(
+            rx.try_recv().is_err(),
+            "same-band repeats inside 2 s stay silent"
+        );
+    }
 
     #[test]
     fn ssh_run_honours_its_timeout_instead_of_blocking_forever() {
@@ -452,7 +693,10 @@ mod tests {
         assert_eq!(args[i + 1], format!("{home}/.ssh/k"), "ssh argv: {args:?}");
         assert_eq!(
             ssh.rsync_e(),
-            format!("ssh -o BatchMode=yes -o ConnectTimeout=10 -p 22 -i {home}/.ssh/k")
+            format!(
+                "ssh -o BatchMode=yes -o ConnectTimeout=10 {} -p 22 -i {home}/.ssh/k",
+                HOST_KEY_OPTS.join(" ")
+            )
         );
 
         let bare = Ssh {
@@ -506,6 +750,35 @@ mod tests {
         ] {
             assert!(args.contains(flag), "{args}");
         }
+    }
+
+    #[test]
+    fn both_transports_decline_host_key_verification() {
+        // The bug this pins: a freshly launched EC2 instance presents a host key
+        // nobody has seen, and `BatchMode=yes` forbids the prompt, so every
+        // first provision died with `exit 255: Host key verification failed`.
+        // The fix has to be on *both* transports — rsync spawns its own ssh, so
+        // a policy on the direct one alone would fix `probe` and leave every
+        // push failing identically.
+        let ssh = Ssh::for_machine(&Machine::new("3.121.112.113", "ubuntu", 22, None, "worker"));
+
+        let args = ssh.ssh_args().join(" ");
+        assert!(args.contains("StrictHostKeyChecking=no"), "{args}");
+        assert!(args.contains("UserKnownHostsFile=/dev/null"), "{args}");
+        // `~/.ssh/config` must still be read: an -o overrides one option, it
+        // does not replace the file. `-F /dev/null` would silently drop Host
+        // aliases, ProxyJump and IdentityFile.
+        assert!(!args.contains("-F /dev/null"), "{args}");
+        assert!(!args.contains("-F/dev/null"), "{args}");
+
+        let e = ssh.rsync_e();
+        assert!(e.contains("StrictHostKeyChecking=no"), "{e}");
+        assert!(e.contains("UserKnownHostsFile=/dev/null"), "{e}");
+        assert!(!e.contains("-F /dev/null"), "{e}");
+
+        // A local machine never goes through either: it runs `sh` in place.
+        let local = Ssh::for_machine(&Machine::new("127.0.0.1", "me", 22, None, "worker"));
+        assert!(local.local, "the local node must not be ssh'd to");
     }
 
     #[test]

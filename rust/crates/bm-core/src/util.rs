@@ -42,6 +42,31 @@ pub fn atomic_write(path: &Path, text: &str) -> Result<()> {
 ///
 /// An item carrying both is malformed — the digest validator refuses it — and
 /// `text` wins here, loudly: losing a line of speech is the worse failure.
+/// Owner-only permissions, where the platform has them.
+///
+/// One implementation because two things now store a secret on disk — the
+/// cluster token and the AWS credentials — and a second copy of a permission
+/// check is a second chance to get it wrong.
+///
+/// Unix-only by construction: the inductor and the workers are macOS and
+/// Linux, and there is no cross-build target that is not. Elsewhere this is a
+/// no-op rather than an error, so a port is a build, not a rewrite — but it
+/// should be revisited, because a secret with default permissions is exactly
+/// the failure this exists to prevent.
+pub fn restrict(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
 pub fn is_sound_item(item: &Value) -> bool {
     let names_a_sound = item.get("sound").is_some() || item.get("stop").is_some();
     if names_a_sound && item.get("text").is_some() {

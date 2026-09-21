@@ -4,47 +4,92 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 impl Inner {
-    /// Oldest assignable task for this worker. Merge affinity pins merges to
-    /// the local node; render goes to any worker that uploads units.
+    /// The task this worker should do next.
+    ///
+    /// The box's own **policy** decides which stages it will run and in what
+    /// order (most-preferred first): the scheduler walks the enabled stages and
+    /// takes the oldest chapter of the first stage that has assignable work.
+    /// Merge affinity is an optimization for remote boxes, never a gate for
+    /// the local node: it shares the inductor's segment store — units are
+    /// collected before a render completion is applied, so a `done` render's
+    /// wavs are always on local disk — and takes any pending merge. Without
+    /// this a render on a dead, ffmpeg-less, or merge-disabled box strands
+    /// its merge pending for ever. A machine with no stored policy gets the
+    /// default (all four, merge → render
+    /// → digest → crawl). Capability gates still apply within a stage — render
+    /// needs `render-segments`, merge needs `merge` (absent when the box has no
+    /// ffmpeg) — and a merge's affinity still pins it to the box that rendered
+    /// the chapter.
     pub fn offer(&mut self, worker_id: &str) -> Option<TaskOffer> {
         self.reap();
         let machine = self.workers.get(worker_id).cloned().unwrap_or_default();
-        let mut ids: Vec<String> = self.tasks.keys().cloned().collect();
-        // Numeric chapter order — lexical sort would put ch100 before ch93.
-        ids.sort_by_key(|id| {
-            let (stage, ch) = id.split_once(':').unwrap_or(("", "0"));
-            (ch.parse::<u32>().unwrap_or(0), stage.to_string())
-        });
-        // Pick first, then mutate — the borrow checker wants the scan
-        // finished before the assignment begins.
-        let pick = ids
-            .iter()
-            .filter_map(|id| self.tasks.get(id))
-            .find(|t| {
-                if t.state != TaskState::Pending || self.shelved(t.chapter) {
-                    return false;
+        // The readiness gate, and it is deliberately the *first* thing after
+        // the worker lookup: a task handed to a box that is booting, being
+        // pushed to, or known-broken is a task that fails slowly and strikes
+        // the chapter for the inductor's mistake.
+        //
+        // `Unknown` passes, as "no opinion formed": a hand-written ledger, or
+        // the legacy pull worker asking before its first beat. Both were
+        // offered work before this gate existed, and a live worker asking for
+        // work is itself evidence the box is up — second-guessing that is not
+        // this gate's job. Every *other* state is one the inductor chose.
+        if let Some(m) = self.machines.get(&machine) {
+            if !m.state.accepts_work() && m.state != bm_proto::MachineState::Unknown {
+                return None;
+            }
+        }
+        // The box's order + enablement. An unknown worker id (a hand-written
+        // ledger) runs the default policy, exactly as it always did.
+        let policy = self
+            .machines
+            .get(&machine)
+            .map(|m| m.effective_task_policy())
+            .unwrap_or_else(bm_proto::TaskPref::default_list);
+        let caps = self.caps.get(worker_id);
+        // Pick first, then mutate — the borrow checker wants the scan finished
+        // before the assignment begins. Walk the policy in order and take the
+        // oldest chapter of the first enabled stage that has assignable work.
+        let mut pick: Option<(String, Stage)> = None;
+        for pref in policy.iter().filter(|p| p.enabled) {
+            let stage = pref.stage;
+            // Capability gates. Render uploads units; merge shells out to
+            // ffmpeg and a box without it advertises no `merge`. A worker with
+            // no recorded capabilities is allowed — failing closed here would
+            // strand anything that never registered.
+            if let Some(caps) = caps {
+                let can = |cap: &str| caps.iter().any(|c| c == cap);
+                if (stage == Stage::Render && !can("render-segments"))
+                    || (stage == Stage::Merge && !can("merge"))
+                {
+                    continue;
                 }
-                if !self.upstream_done(t.chapter, t.stage) {
-                    return false;
-                }
-                // Render uploads units; a worker that registered without
-                // `render-segments` keeps every other stage but never renders
-                // (its report would fail the completion gate anyway). Workers
-                // with no recorded capabilities are allowed — failing closed
-                // here would strand anything that never registered.
-                if t.stage == Stage::Render {
-                    if let Some(caps) = self.caps.get(worker_id) {
-                        if !caps.iter().any(|c| c == "render-segments") {
-                            return false;
-                        }
+            }
+            let mut ids: Vec<&String> = self
+                .tasks
+                .iter()
+                .filter(|(_, t)| t.stage == stage)
+                .filter(|(_, t)| t.state == TaskState::Pending && !self.shelved(t.chapter))
+                .filter(|(_, t)| self.upstream_done(t.chapter, t.stage))
+                .filter(|(_, t)| match &t.affinity {
+                    Some(only) => {
+                        *only == machine
+                            || (t.stage == Stage::Merge && bm_core::is_local_node(&machine))
                     }
-                }
-                if let Some(only) = &t.affinity {
-                    return *only == machine;
-                }
-                true
-            })
-            .map(|t| (t.id(), t.stage));
+                    None => true,
+                })
+                .map(|(id, _)| id)
+                .collect();
+            // Numeric chapter order — lexical sort would put ch100 before ch93.
+            ids.sort_by_key(|id| {
+                id.split_once(':')
+                    .and_then(|(_, ch)| ch.parse::<u32>().ok())
+                    .unwrap_or(0)
+            });
+            if let Some(id) = ids.first() {
+                pick = Some(((*id).clone(), stage));
+                break;
+            }
+        }
         let (id, stage) = pick?;
         {
             let t = self.tasks.get_mut(&id)?;
@@ -66,7 +111,8 @@ impl Inner {
             .get(machine)
             .and_then(|m| m.tts_url.clone())
             .unwrap_or_else(|| "http://127.0.0.1:8818".into());
-        let bible = if t.stage == Stage::Digest {
+        // Digest merges the delta into it; merge hands it to `assemble`.
+        let bible = if matches!(t.stage, Stage::Digest | Stage::Merge) {
             bm_core::read_json::<Value>(&self.layout.bible()).unwrap_or(json!({"characters": []}))
         } else {
             Value::Null
@@ -75,6 +121,13 @@ impl Inner {
         // shipping them in the offer beats shared storage.
         let script = matches!(t.stage, Stage::Render | Stage::Merge)
             .then(|| bm_core::read_json::<Value>(&self.layout.script(n)).ok())
+            .flatten();
+        // The cast decides segment *filenames*. A worker that had to recompute
+        // it would plan different names than the render wrote — and a
+        // provisioned worker cannot recompute it at all, because `data/` is
+        // not part of what provisioning copies.
+        let cast = matches!(t.stage, Stage::Render | Stage::Merge)
+            .then(|| bm_core::read_json::<Value>(&self.layout.cast(&self.settings.engine)).ok())
             .flatten();
         let text = (t.stage == Stage::Digest)
             .then(|| std::fs::read_to_string(self.layout.chapter_txt(n)).ok())
@@ -110,6 +163,7 @@ impl Inner {
             ),
             bible: if bible.is_null() { None } else { Some(bible) },
             script,
+            cast,
             text,
             gap_ms: self.settings.gap_ms,
             speed: self.settings.speed,
@@ -305,11 +359,31 @@ impl Inner {
                     self.ensure_task(chapter, Stage::Render);
                 }
                 if stage == Stage::Render {
-                    // Merge is pinned to the local node: the segments now live
-                    // on the inductor, so the merge runs where they are. The
-                    // reporting machine no longer matters.
+                    // **Merge runs where the segments are**, and after an
+                    // inverted render that is the box that just wrote them: a
+                    // remote one cannot be handed thirty-odd wavs inside an
+                    // offer, and the inductor's own copy arrived over
+                    // `GET /unit` for the completion gate to read.
+                    //
+                    // This used to be the literal `127.0.0.1`. That read as
+                    // "the local node" but meant "the only machine whose disk
+                    // the inductor can read" — true on one box, and the reason
+                    // a cluster of remote workers rendered for ever without
+                    // ever merging.
+                    //
+                    // `assigned_to` is still set here: the block below clears
+                    // it, and `workers` is what turns a worker id into a
+                    // machine.
+                    let rendered_by = self
+                        .tasks
+                        .get(&c.task_id)
+                        .and_then(|t| t.assigned_to.as_deref())
+                        .and_then(|w| self.workers.get(w).cloned());
                     let m = self.ensure_task(chapter, Stage::Merge);
-                    m.affinity = Some("127.0.0.1".into());
+                    // No known renderer — a hand-written ledger, a report from
+                    // a worker that never registered. The local node shares the
+                    // inductor's store, which is what this always was.
+                    m.affinity = rendered_by.or_else(|| Some("127.0.0.1".into()));
                 }
                 if stage == Stage::Merge {
                     // A remote merge's product comes home in the report; a

@@ -125,7 +125,10 @@ pub fn concat_slots(slots: &[crate::ambience::Slot], out: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ffmpeg_available() -> bool {
+/// Whether this host can run the merge stage's encoder. Public so the worker
+/// agent can advertise the `merge` capability truthfully: a box without it
+/// provisions cleanly and then fails every merge it is offered.
+pub fn ffmpeg_available() -> bool {
     Command::new("ffmpeg")
         .arg("-version")
         .stdout(std::process::Stdio::null())

@@ -32,80 +32,38 @@ struct TaskQuery {
 
 async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl IntoResponse {
     let mut inner = st.lock().await;
-    // Known machine by address, else the local one for loopback agents.
-    let addr = if inner.machines.contains_key(&r.addr) {
-        r.addr.clone()
-    } else if r.addr == "127.0.0.1" || r.addr == "localhost" {
-        "127.0.0.1".into()
-    } else {
-        let m = Machine::new(&r.addr, "unknown", 22, None, "worker");
-        inner.machines.insert(r.addr.clone(), m);
-        r.addr.clone()
+    // A registration is a liveness report with nothing to report yet. It goes
+    // through the same `observe` a beat does, so the two routes into the
+    // ledger cannot drift apart — which is what happened when the bookkeeping
+    // lived in two handlers.
+    let beat = Heartbeat {
+        worker_id: r.worker_id,
+        addr: r.addr,
+        task_id: None,
+        stage: None,
+        chapter: None,
+        progress: 0.0,
+        activity: String::new(),
+        eta_secs: None,
+        ts: bm_proto::now_secs(),
+        hostname: r.hostname,
+        alias: String::new(),
+        cpu_pct: None,
+        mem_pct: None,
+        mem_gb: None,
+        capabilities: r.capabilities,
     };
-    // A registering worker is alive by definition — this is what flips a
-    // background-provisioned box Online with no polling involved.
-    if let Some(m) = inner.machines.get_mut(&addr) {
-        m.state = MachineState::Online;
-    }
-    // Carry the registry handle (not the OS hostname) to the panes: the
-    // provision log says `hawk`, so the machines/workers panes must say it
-    // too. Kept when set — a beat never renames a box.
-    if inner
-        .machines
-        .get(&addr)
-        .map(|m| m.name.is_empty())
-        .unwrap_or(false)
-    {
-        let name = inner.box_name(&addr, &r.hostname);
-        if let Some(m) = inner.machines.get_mut(&addr) {
-            m.name = name;
-        }
-    }
-    inner.workers.insert(r.worker_id.clone(), addr.clone());
-    inner
-        .caps
-        .insert(r.worker_id.clone(), r.capabilities.clone());
-    // A worker announcing itself is a bind: its config survives restarts in
-    // machines.json, not just in memory. The "unknown"-user placeholder
-    // carries no configured values, so it stays memory-only as before.
-    if inner.machines.get(&addr).map(|m| m.ssh_user.as_str()) != Some("unknown") {
-        inner.persist_box(&addr, &r.hostname);
-    }
-    // Staged-rollout visibility: an agent without `render-segments` keeps
-    // taking every other stage but never sees a render offer. Say so on the
-    // machine, or the idle box looks broken.
-    if !r.capabilities.iter().any(|c| c == "render-segments") {
-        if let Some(m) = inner.machines.get_mut(&addr) {
-            m.note = "agent predates render-segments: crawl/digest/merge only".into();
-        }
-    }
+    inner.observe(&beat);
     inner.save();
     Json(serde_json::json!({"ok": true}))
 }
 
 async fn heartbeat(State(st): State<Shared>, Json(h): Json<Heartbeat>) -> impl IntoResponse {
     let mut inner = st.lock().await;
-    // Refresh the worker→machine mapping on every beat: it heals itself
-    // across inductor restarts (the persisted ledger may predate it).
-    inner.workers.insert(h.worker_id.clone(), h.addr.clone());
+    // Whether the report arrived by post or by the dispatcher's poll, it lands
+    // in the same place — see `state::observe`.
+    inner.observe(&h);
     inner.save();
-    let addr = inner.workers.get(&h.worker_id).cloned();
-    if let Some(addr) = addr {
-        if let Some(m) = inner.machines.get_mut(&addr) {
-            m.last_seen = bm_proto::now_secs();
-            m.state = MachineState::Online;
-            // A beating worker refutes the provision-time verdict: without
-            // this the pane keeps saying "would not start" under a live
-            // worker row. One-shot — the match is on the stale wording.
-            if m.note.contains("would not start")
-                || m.note.contains("worker start failed")
-                || m.note.contains("worker start crashed")
-            {
-                m.note = "worker is beating — earlier start verdict was stale".into();
-            }
-        }
-    }
-    inner.beats.insert(h.worker_id.clone(), h);
     Json(
         serde_json::to_value(&bm_proto::HeartbeatAck {
             ok: true,
@@ -228,6 +186,12 @@ struct MachineStateUpdate {
     state: MachineState,
     #[serde(default)]
     note: String,
+    /// A whole new work policy for this machine, when the request carries one.
+    /// Absent means "leave the policy alone" — the provisioning transitions
+    /// send only state and note. Always a full four-entry list (the policy
+    /// panel sends every stage), so `Some` is a replacement, never a merge.
+    #[serde(default)]
+    task_policy: Option<Vec<bm_proto::TaskPref>>,
 }
 
 async fn set_machine_state(
@@ -237,16 +201,80 @@ async fn set_machine_state(
     let mut inner = st.lock().await;
     match inner.machines.get_mut(&u.addr) {
         Some(m) => {
-            m.state = u.state;
+            // Through `set_state` so the transition is stamped: the pane can
+            // then say how long a box has been provisioning, and the boot
+            // deadline can tell a fresh `Initializing` from a stuck one.
+            m.set_state(u.state);
             if !u.note.is_empty() {
-                m.note = u.note;
+                // State flows rewrite the note freely, but an EC2 instance id
+                // on it is the box's one stable identity — relink matches by
+                // it, so a note rewrite may never erase it.
+                m.note = bm_core::provision::preserve_ec2_id(&m.note, &u.note);
             }
+            if let Some(p) = &u.task_policy {
+                m.task_policy = Some(p.clone());
+            }
+            let addr = u.addr.clone();
+            inner.persist_box(&addr, &addr);
             inner.save();
             Json(serde_json::json!({"ok": true}))
         }
         None => {
             Json(serde_json::json!({"ok": false, "error": format!("unknown machine {}", u.addr)}))
         }
+    }
+}
+
+/// Replace one machine's work policy. Separate from `set_machine_state`
+/// because a policy edit is a scheduling decision, not a phase transition —
+/// it must not drag the machine's state or note along with it.
+#[derive(Deserialize)]
+struct TaskPolicyUpdate {
+    addr: String,
+    task_policy: Vec<bm_proto::TaskPref>,
+}
+
+async fn set_task_policy(
+    State(st): State<Shared>,
+    Json(u): Json<TaskPolicyUpdate>,
+) -> impl IntoResponse {
+    let mut inner = st.lock().await;
+    match inner.machines.get_mut(&u.addr) {
+        Some(m) => {
+            m.task_policy = Some(u.task_policy.clone());
+            let addr = u.addr.clone();
+            // Config, not runtime: the policy belongs in machines.json beside
+            // the box's login, so it survives the ledger being cleared.
+            inner.persist_box(&addr, &addr);
+            inner.save();
+            Json(serde_json::json!({"ok": true}))
+        }
+        None => Json(
+            serde_json::json!({"ok": false, "error": format!("unknown machine {}", u.addr)}),
+        ),
+    }
+}
+
+/// Reconcile EC2-launched boxes with the address they carry now. Reads the
+/// account off the async runtime, then applies the drift to the registry; the
+/// same routine runs once at startup. Returns the repair lines so a caller can
+/// surface them in its own log.
+async fn relink(State(st): State<Shared>) -> impl IntoResponse {
+    let root = { st.lock().await.layout.root.clone() };
+    let pool = tokio::task::spawn_blocking(move || crate::aws_ops::pool(&root)).await;
+    match pool {
+        Ok(Ok((_cfg, instances))) => {
+            let mut inner = st.lock().await;
+            let lines = inner.relink_drifted(&instances);
+            for l in &lines {
+                inner.push_event("info", l.clone());
+            }
+            Json(serde_json::json!({"ok": true, "lines": lines}))
+        }
+        Ok(Err(e)) => Json(serde_json::json!({"ok": false, "error": format!("{e:#}")})),
+        Err(e) => Json(
+            serde_json::json!({"ok": false, "error": format!("relink task failed: {e}")}),
+        ),
     }
 }
 
@@ -1105,6 +1133,8 @@ pub fn router(st: Shared) -> Router {
         .route("/api/machines", post(add_machine))
         .route("/api/machines", delete(drop_machine))
         .route("/api/machines/state", post(set_machine_state))
+        .route("/api/machines/policy", post(set_task_policy))
+        .route("/api/relink", post(relink))
         .route("/api/op", post(op))
         .route("/api/state", get(state))
         .route("/api/roster", get(roster))
@@ -1314,6 +1344,7 @@ mod tests {
                 cpu_pct: None,
                 mem_pct: None,
                 mem_gb: None,
+                capabilities: vec![],
             }),
         )
         .await;
@@ -1341,6 +1372,7 @@ mod tests {
                 port: 22,
                 key: None,
                 role: "worker".into(),
+                task_policy: None,
             },
         )
         .unwrap();
@@ -1405,6 +1437,7 @@ mod tests {
             cpu_pct: None,
             mem_pct: None,
             mem_gb: None,
+            capabilities: vec![],
         };
         heartbeat(State(st.clone()), Json(beat())).await;
         {
@@ -1451,6 +1484,7 @@ mod tests {
                 addr: "192.168.2.2".into(),
                 state: MachineState::Provisioning,
                 note: "pushing sources".into(),
+                task_policy: None,
             }),
         )
         .await;
@@ -1467,6 +1501,7 @@ mod tests {
                 addr: "10.9.9.9".into(),
                 state: MachineState::Error,
                 note: String::new(),
+                task_policy: None,
             }),
         )
         .await;

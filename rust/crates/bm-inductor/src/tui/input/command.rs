@@ -4,7 +4,8 @@ use crate::tui::{
     app::App,
     input::{audition, dispatch, dispatch_op},
     jobs::Job,
-    screen::{CastView, Confirm, ConfirmAction, Picker, Screen, TextKind, TextPrompt},
+    model::{busy_on, instance_addresses, is_live_state},
+    screen::{CastView, CloudView, Confirm, ConfirmAction, Picker, Screen, TextKind, TextPrompt},
     style::{Conn, Level},
 };
 use bm_proto::{Op, OpRequest};
@@ -22,7 +23,10 @@ pub(crate) enum Command {
     AddMachine,
     AddSample,
     AddNamed,
-    Provision { force: bool },
+    Relink,
+    Provision {
+        force: bool,
+    },
     DropMachine,
     Translate,
     CrawlSetup,
@@ -48,6 +52,22 @@ pub(crate) enum Command {
     AuditionCurrent,
     AuditionTry,
     AuditionAnother,
+    /// Show what the EC2 account holds. Read-only: launches nothing.
+    AwsPool,
+    /// Store the app's IAM user from the console's CSV. Setup, once.
+    AwsLogin,
+    /// Read the account into the pool definition. Setup, once — and safe to
+    /// re-run, since every field already set is kept.
+    AwsDiscover,
+    /// Launch `count` EC2 boxes and link what comes back into the registry.
+    AwsUp {
+        count: u32,
+    },
+    /// Terminate the live boxes the Cloud view is showing. Destructive, so it
+    /// asks first; `force` skips the in-flight guard, not the confirmation.
+    AwsDown {
+        force: bool,
+    },
 }
 
 /// One `:`-addressable command: its single-char form, its words, and its
@@ -78,6 +98,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: Some('p'), names: &["provision", "prov"], desc: Some("provision the selected machine"), cmd: Command::Provision { force: false } },
     Word { key: Some('P'), names: &["reprovision", "reprov"], desc: Some("re-provision it, forcing past the skip-if-configured check"), cmd: Command::Provision { force: true } },
     Word { key: Some('d'), names: &["drop", "remove"], desc: Some("drop the selected machine from the cluster registry"), cmd: Command::DropMachine },
+    Word { key: None, names: &["relink"], desc: Some("re-point a drifted EC2 box at its current public IP — matched by instance id, then :prov"), cmd: Command::Relink },
     Word { key: Some('t'), names: &["translate"], desc: Some("enqueue crawl + digest for a chapter range"), cmd: Command::Translate },
     Word { key: Some('c'), names: &["crawl"], desc: Some("save the URL template, then probe-crawl one chapter"), cmd: Command::CrawlSetup },
     Word { key: Some('v'), names: &["voices"], desc: Some("re-read the roster, enforce the accent policy, refill gaps"), cmd: Command::Voices },
@@ -94,6 +115,11 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["shutdown-when-idle", "drain"], desc: Some("workers exit on their own once the queue drains — restart with :B"), cmd: Command::ShutdownWhenIdle },
     Word { key: None, names: &["workspace", "ws"], desc: Some("list, switch or create a workspace — one per book; only with the cluster stopped"), cmd: Command::Workspace },
     Word { key: None, names: &["profile"], desc: Some("list, load or pack a genre profile — loading replaces assets/ + prompts/, so only with the cluster stopped"), cmd: Command::Profile },
+    Word { key: None, names: &["login"], desc: Some("store the IAM user's key from the console's accessKeys.csv — setup, once"), cmd: Command::AwsLogin },
+    Word { key: None, names: &["discover"], desc: Some("read the account into `.bm/aws.json`: AMI, subnet, group, keypair, instance profile"), cmd: Command::AwsDiscover },
+    Word { key: Some('l'), names: &["pool", "aws", "cloud"], desc: Some("what the EC2 account holds — launches nothing"), cmd: Command::AwsPool },
+    Word { key: Some('w'), names: &["up", "launch"], desc: Some("launch EC2 boxes and link them into the cluster — spends money"), cmd: Command::AwsUp { count: 1 } },
+    Word { key: Some('o'), names: &["down", "terminate"], desc: Some("terminate the live EC2 boxes — destructive; asks first, refuses while a render is in flight"), cmd: Command::AwsDown { force: false } },
     Word { key: Some('X'), names: &["stop"], desc: Some("stop everything everywhere: local backend plus workers on all machines"), cmd: Command::Stop },
     Word { key: None, names: &["sshkey"], desc: None, cmd: Command::SshKey },
     Word { key: None, names: &["sshuser"], desc: None, cmd: Command::SshUser },
@@ -101,10 +127,12 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["advertise", "adv"], desc: Some("the address workers dial back on — set it when they are off the LAN"), cmd: Command::Advertise },
     Word { key: Some('q'), names: &["quit", "exit", "q"], desc: None, cmd: Command::Key(KeyCode::Char('q')) },
     Word { key: None, names: &["inspect"], desc: None, cmd: Command::Key(KeyCode::Char('i')) },
+    Word { key: None, names: &["policy"], desc: Some("per-machine work policy: which stages the selected box may run, in priority order"), cmd: Command::Key(KeyCode::Char('P')) },
     Word { key: None, names: &["tasks"], desc: None, cmd: Command::Key(KeyCode::Char('K')) },
     Word { key: None, names: &["jobs"], desc: None, cmd: Command::Key(KeyCode::Char('J')) },
     Word { key: None, names: &["refresh"], desc: None, cmd: Command::Key(KeyCode::Char('r')) },
     Word { key: None, names: &["colour", "color"], desc: None, cmd: Command::Key(KeyCode::Char('C')) },
+    Word { key: None, names: &["theme"], desc: Some("cycle the palette: default → dim → mono — the word always carries the state"), cmd: Command::Key(KeyCode::Char('C')) },
     Word { key: None, names: &["run"], desc: None, cmd: Command::Key(KeyCode::Char('R')) },
     Word { key: None, names: &["newest"], desc: None, cmd: Command::Key(KeyCode::Char('G')) },
     Word { key: None, names: &["help"], desc: None, cmd: Command::Key(KeyCode::Char('?')) },
@@ -127,6 +155,29 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
         // Read-only keys keep their Normal-mode arms, so the command
         // presses the key and every context behaves like it was typed.
         return Some(Command::Key(KeyCode::Char(c)));
+    }
+    // Commands that take an argument. Only `up` does today (`:up 3`), and
+    // `down force` is the escape hatch past the in-flight guard. A bad argument
+    // is `None`, which keeps the prompt open with "unknown command" rather than
+    // launching a wrong count.
+    let mut parts = word.split_whitespace();
+    if let Some(head) = parts.next() {
+        let rest: Vec<&str> = parts.collect();
+        match head.to_ascii_lowercase().as_str() {
+            "up" => {
+                let count = match rest.first() {
+                    None => 1,
+                    Some(s) => s.parse::<u32>().ok()?,
+                };
+                return (count > 0).then_some(Command::AwsUp { count });
+            }
+            "down" if !rest.is_empty() => {
+                return rest[0]
+                    .eq_ignore_ascii_case("force")
+                    .then_some(Command::AwsDown { force: true });
+            }
+            _ => {}
+        }
     }
     let lower = word.to_ascii_lowercase();
     WORDS
@@ -196,13 +247,13 @@ pub(crate) fn do_command(
                         format!("Onboard {} over ssh.", m.addr),
                         String::new(),
                         if force {
-                            "Force ignores the skip-if-configured check and rebuilds the".into()
+                            "Force ignores the skip-if-configured check and re-sends the".into()
                         } else {
                             "Already-configured machines are detected and skipped, so this is"
                                 .into()
                         },
                         if force {
-                            "worker venv when present. That is the slow path.".into()
+                            "sidecar and its weights. That is the slow path.".into()
                         } else {
                             "cheap to run again — it will report why it did nothing.".into()
                         },
@@ -229,6 +280,26 @@ pub(crate) fn do_command(
                     ],
                     action: ConfirmAction::DropMachine {
                         addr: m.addr.clone(),
+                    },
+                });
+            }
+        },
+        Command::Relink => match app.selected_machine() {
+            None => app.set_status(Level::Warn, "no machine selected"),
+            Some(m) => {
+                app.screen = Screen::Confirm(Confirm {
+                    title: "Relink to the box's current address".into(),
+                    danger: false,
+                    body: vec![
+                        format!("{} no longer answers — EC2 public IPs change on every", m.addr),
+                        "stop/start and spot relaunch.".into(),
+                        String::new(),
+                        "The account is read, the box is matched by its EC2 instance id,".into(),
+                        "and the registry entry is re-pointed at the address it carries".into(),
+                        "now. Nothing is pushed; :prov afterwards onboards it.".into(),
+                    ],
+                    action: ConfirmAction::RelinkMachine {
+                        old_addr: m.addr.clone(),
                     },
                 });
             }
@@ -421,6 +492,132 @@ pub(crate) fn do_command(
                 http,
                 audition::AuditionKind::Pointed { reroll: true },
             );
+        }
+        Command::AwsLogin => {
+            // The console's download is the whole prompt. Prefilled with where
+            // it actually lands, because the secret must never be typed on a
+            // screen — this is the only login route a dashboard can offer.
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::AwsLogin,
+                "AWS login — the IAM user this app runs as",
+                "the console's accessKeys.csv: IAM → Users → storycast-operator → Security \
+                 credentials → Access keys → Create access key → Download .csv file. \
+                 It carries both halves, so no secret is typed here.",
+                "~/Downloads/accessKeys.csv",
+            ));
+        }
+        Command::AwsDiscover => {
+            // Prefilled with the region already in force, so the common re-run
+            // is one keypress. The name-and-path flags are left out on purpose:
+            // an omitted field is kept from the pool, and prefilling them would
+            // suggest they had to be retyped.
+            let cfg = bm_core::provision::AwsConfig::load_layered(&app.layout.root);
+            let initial = if cfg.region.trim().is_empty() {
+                String::new()
+            } else {
+                format!("--region {}", cfg.region.trim())
+            };
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::AwsDiscover,
+                "AWS discover — read the account into .bm/aws.json",
+                "--region <r> [--pem <path>] [--instance-profile <name>] \
+                 [--security-group sg-…] [--subnet subnet-…] [--ami ami-…] [--force]. \
+                 Everything already set is kept, so re-running is safe; --force only \
+                 replaces a `.pem` that is a different key.",
+                &initial,
+            ));
+        }
+        Command::AwsPool => {
+            // Open the view first, then fill it: the screen renders its own
+            // "reading…" state, so the operator sees the command was taken.
+            app.screen = Screen::Cloud(CloudView::new());
+            dispatch(
+                app,
+                job_tx,
+                Job::AwsPool {
+                    root: app.layout.root.clone(),
+                    api: app.api.clone(),
+                    http: http.clone(),
+                },
+            );
+            app.set_status(Level::Info, "reading the EC2 account…");
+        }
+        Command::AwsUp { count } => {
+            // No confirmation: the CLI's review step is `aws up --dry-run`, and
+            // the launch prints its own argv into the event pane before it runs.
+            // The cap in `.bm/aws.json` is the guard that matters here.
+            dispatch(
+                app,
+                job_tx,
+                Job::AwsUp {
+                    root: app.layout.root.clone(),
+                    api: app.api.clone(),
+                    http: http.clone(),
+                    count,
+                },
+            );
+            app.set_status(
+                Level::Info,
+                format!("launching {count} box(es) — watch events"),
+            );
+        }
+        Command::AwsDown { force } => {
+            if app.cloud.is_empty() {
+                app.set_status(Level::Warn, "no cloud listing yet — run :pool first");
+                return;
+            }
+            let ids: Vec<String> = app
+                .cloud
+                .iter()
+                .filter(|i| is_live_state(&i.state))
+                .map(|i| i.id.clone())
+                .collect();
+            if ids.is_empty() {
+                app.set_status(
+                    Level::Info,
+                    "nothing to terminate — no live box carries the marker tag",
+                );
+                return;
+            }
+            // The guard the CLI does not have: a box killed mid-render loses
+            // that render, and TTS is stochastic — it cannot be reproduced from
+            // the same inputs, so the loss is not recoverable from the ledger.
+            let addrs = instance_addresses(&app.cloud);
+            let busy = busy_on(&app.beats, &app.tasks, &addrs, bm_proto::now_secs());
+            if !busy.is_empty() && !force {
+                app.set_status(
+                    Level::Warn,
+                    format!(
+                        "refused: {} task(s) in flight on those boxes — `:down force` to kill a render mid-flight",
+                        busy.len()
+                    ),
+                );
+                return;
+            }
+            let mut body = vec![
+                format!("Terminate {} EC2 instance(s):", ids.len()),
+                String::new(),
+            ];
+            for id in &ids {
+                body.push(format!("  {id}"));
+            }
+            body.push(String::new());
+            body.push("Terminated boxes cannot be restarted; a replacement is `:up`.".into());
+            body.push("Their registry entries stay until you `:drop` them.".into());
+            if !busy.is_empty() {
+                body.push(String::new());
+                body.push(format!(
+                    "FORCED past {} in-flight task(s): {}",
+                    busy.len(),
+                    busy.join(", ")
+                ));
+            }
+            app.screen = Screen::Confirm(Confirm {
+                title: format!("Terminate {} box(es)?", ids.len()),
+                danger: true,
+                body,
+                action: ConfirmAction::AwsDown { ids },
+            });
         }
         Command::ShutdownWhenIdle => {
             // Graceful and reversible (nothing deleted, `:B` brings workers

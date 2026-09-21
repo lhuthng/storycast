@@ -32,6 +32,12 @@ pub enum Stage {
 impl Stage {
     pub const ALL: [Stage; 4] = [Stage::Crawl, Stage::Digest, Stage::Render, Stage::Merge];
 
+    /// The order the scheduler prefers when a machine has no explicit policy:
+    /// finish chapters before starting new ones, so `merge` leads and `crawl`
+    /// trails. See [`TaskPref`].
+    pub const DEFAULT_PRIORITY: [Stage; 4] =
+        [Stage::Merge, Stage::Render, Stage::Digest, Stage::Crawl];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Stage::Crawl => "crawl",
@@ -151,14 +157,37 @@ impl Task {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MachineState {
+    /// In the registry, never contacted: a hand-written ledger entry, or a box
+    /// the operator added and has not probed. "No opinion formed", which is why
+    /// [`Self::accepts_work`] lets it through.
     #[default]
     Unknown,
+    /// **Created, not yet answering.** A launched EC2 instance spends its first
+    /// half-minute here: the account has the box, the box is booting, and
+    /// nothing can be pushed to it yet.
+    ///
+    /// Deliberately *not* `Offline`. Offline is a verdict about a box that was
+    /// answering and went quiet; reading a boot as death is how a freshly
+    /// launched pool looks broken. It is also the one state with a deadline —
+    /// see the inductor's boot expiry.
+    Initializing,
+    /// An ssh probe is in flight.
     Probing,
-    /// Probed and found already provisioned — nothing to distribute.
+    /// The box has everything it needs; no worker is beating yet.
+    ///
+    /// Reached two ways, and they mean the same thing: the probe found the box
+    /// already provisioned and there was nothing to distribute, or a push
+    /// finished and the worker was launched. Either way the next event is the
+    /// worker's first beat, which is what moves it to `Online` — so this is
+    /// "ready and idle", not "busy".
     Configured,
+    /// Artifacts being pushed.
     Provisioning,
+    /// A worker is answering beats. **The only state that works.**
     Online,
+    /// Was answering, now silent.
     Offline,
+    /// A transition failed. The note says which.
     Error,
 }
 
@@ -166,6 +195,7 @@ impl MachineState {
     pub fn as_str(self) -> &'static str {
         match self {
             MachineState::Unknown => "unknown",
+            MachineState::Initializing => "initializing",
             MachineState::Probing => "probing",
             MachineState::Configured => "configured",
             MachineState::Provisioning => "provisioning",
@@ -173,6 +203,70 @@ impl MachineState {
             MachineState::Offline => "offline",
             MachineState::Error => "error",
         }
+    }
+
+    /// May this machine be handed a task?
+    ///
+    /// One state works: `Online`, which means a worker is answering. Every
+    /// other state is a deliberate "not yet" — booting, being pushed to,
+    /// provisioned but never started, silent, or broken — and offering work
+    /// into any of them is how a task lands on a box that cannot run it.
+    ///
+    /// The caller decides what to do about `Unknown`: it means no opinion was
+    /// ever formed, so it is neither a yes nor a no.
+    pub fn accepts_work(self) -> bool {
+        matches!(self, MachineState::Online)
+    }
+
+    /// On its way up: wait for it, and never read it as dead.
+    ///
+    /// The dispatcher asks every registered box `/status` every couple of
+    /// seconds. A box that is still booting — or being pushed to, or
+    /// provisioned with no worker started yet — cannot answer, and stamping
+    /// `Offline` on it would replace the one state that says *this is expected,
+    /// give it time* with "it is gone".
+    pub fn coming_up(self) -> bool {
+        matches!(
+            self,
+            MachineState::Initializing
+                | MachineState::Probing
+                | MachineState::Provisioning
+                | MachineState::Configured
+        )
+    }
+}
+
+/// The port a worker answers the inverted protocol on. One constant for both
+/// sides: the launcher records it on the `Machine` and passes it to the worker
+/// as `--serve-tasks`, so a mismatch is impossible rather than merely unlikely.
+pub const DEFAULT_TASK_PORT: u16 = 8917;
+
+fn default_task_port() -> Option<u16> {
+    Some(DEFAULT_TASK_PORT)
+}
+
+/// One stage's place in a machine's own work policy.
+///
+/// The scheduler walks the list in order and takes the first stage that has an
+/// assignable task; a disabled entry is skipped. Storing the full list (not just
+/// the enabled ones) keeps the operator's chosen order stable while they toggle
+/// stages on and off in the dashboard's policy panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskPref {
+    pub stage: Stage,
+    pub enabled: bool,
+}
+
+impl TaskPref {
+    /// The default policy: every stage enabled, in [`Stage::DEFAULT_PRIORITY`].
+    pub fn default_list() -> Vec<TaskPref> {
+        Stage::DEFAULT_PRIORITY
+            .iter()
+            .map(|s| TaskPref {
+                stage: *s,
+                enabled: true,
+            })
+            .collect()
     }
 }
 
@@ -194,11 +288,32 @@ pub struct Machine {
     /// `worker`, `tts`, or `both`.
     pub role: String,
     pub state: MachineState,
+    /// When `state` last changed, unix seconds. `0` means "never stamped" —
+    /// a record written before this field, which is adopted rather than
+    /// expired on the strength of a missing timestamp.
+    ///
+    /// This is what lets a deadline tell "launched 20 s ago, still booting"
+    /// from "has been `Initializing` since this morning, and is not coming".
+    #[serde(default)]
+    pub state_since: u64,
     pub last_seen: u64,
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub tts_url: Option<String>,
+    /// Port this box answers the inverted protocol on.
+    ///
+    /// Defaulted rather than optional, so a box is driven because it is a
+    /// worker — not because some other record remembers how it was started.
+    /// An explicit `null` is the way to say "do not drive this one", which is
+    /// what an operator wants for a box still running the pull protocol.
+    #[serde(default = "default_task_port")]
+    pub task_port: Option<u16>,
+    /// This machine's own work policy: which stages it may run, most-preferred
+    /// first. `None` means the default (all four, merge → render → digest →
+    /// crawl). Persisted in `machines.json`, so it survives restarts.
+    #[serde(default)]
+    pub task_policy: Option<Vec<TaskPref>>,
     /// Human-readable note: probe output, error, provision result.
     pub note: String,
 }
@@ -220,11 +335,41 @@ impl Machine {
             ssh_key,
             role: role.to_string(),
             state: MachineState::Unknown,
+            state_since: 0,
             last_seen: 0,
             capabilities: Vec::new(),
             tts_url: None,
+            task_port: default_task_port(),
+            task_policy: None,
             note: String::new(),
         }
+    }
+
+    /// The stages this machine may run, most-preferred first. Falls back to the
+    /// full default list when no policy is stored, so a machine that predates
+    /// the policy behaves exactly as it always did.
+    pub fn effective_task_policy(&self) -> Vec<TaskPref> {
+        self.task_policy
+            .clone()
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(TaskPref::default_list)
+    }
+
+    /// Move this machine to `state`, stamping when it happened.
+    ///
+    /// The one transition point, because a state change is a *decision* and the
+    /// timestamp is half of it. The note is the caller's business: several of
+    /// them fold theirs in through `preserve_ec2_id`, and doing it here would
+    /// mean this crate knowing the note format.
+    ///
+    /// Re-stating the current state does **not** move the stamp — that is what
+    /// keeps "online since 14:02" and "initializing for 4 minutes" meaningful
+    /// while a poll re-states the same verdict every two seconds.
+    pub fn set_state(&mut self, state: MachineState) {
+        if self.state != state {
+            self.state_since = now_secs();
+        }
+        self.state = state;
     }
 
     /// `user@host` for ssh/rsync.
@@ -284,6 +429,14 @@ pub struct Heartbeat {
     /// hashing the worker id, which churns on every restart.
     #[serde(default)]
     pub alias: String,
+    /// What this worker can run. Carried here as well as on `Register`
+    /// because the inverted direction has no registration: the inductor
+    /// learns the worker from its first `/status` answer, and the render gate
+    /// needs to know whether the box can produce units. Defaulted, so an
+    /// agent that predates the field reports none rather than failing to
+    /// parse — the gate then treats it as "no render", which is the safe read.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 /// The heartbeat's answer: the only inductor→worker command channel.
@@ -314,10 +467,24 @@ pub struct Complete {
     /// Render stage: how many TTS units actually ran (cache hits excluded).
     #[serde(default)]
     pub units: u64,
+    /// The cast that decided this chapter's segment **filenames**.
+    ///
+    /// Shipped for the same reason as the script, and it has to be: a
+    /// provisioned worker has no `data/cast-*.json` (provisioning copies
+    /// `prompts/`, `assets/` and `refs/`, never `data/`), so a merge that
+    /// recomputed the plan locally would name every segment differently from
+    /// the render that produced them and report all of them missing.
     /// Digest stage: the full script, so the inductor holds the artifact and
     /// can hand it to whichever machine renders.
     #[serde(default)]
     pub script: Option<serde_json::Value>,
+    /// The cast that decided this chapter's segment **filenames**.
+    ///
+    /// Shipped for the same reason as the script, and it has to be: a
+    /// provisioned worker has no `data/cast-*.json` — provisioning copies
+    /// `prompts/`, `assets/` and `refs/`, never `data/` — so a merge that
+    /// recomputed the plan locally would name every segment differently
+    /// from the render that produced them and report all of them missing.
     /// Crawl stage: the cleaned chapter text, for the same reason.
     #[serde(default)]
     pub text: Option<String>,
@@ -540,6 +707,15 @@ pub struct TaskOffer {
     /// them without shared storage.
     #[serde(default)]
     pub script: Option<serde_json::Value>,
+    /// The cast that decided this chapter's segment **filenames**.
+    ///
+    /// Shipped for the same reason as the script, and it has to be: a
+    /// provisioned worker has no `data/cast-*.json` — provisioning copies
+    /// `prompts/`, `assets/` and `refs/`, never `data/` — so a merge that
+    /// recomputed the plan locally would name every segment differently
+    /// from the render that produced them and report all of them missing.
+    #[serde(default)]
+    pub cast: Option<serde_json::Value>,
     /// Digest stage: the chapter text inline, for the same reason.
     #[serde(default)]
     pub text: Option<String>,
@@ -886,6 +1062,101 @@ mod tests {
     }
 
     #[test]
+    fn every_machine_state_roundtrips_through_its_wire_string() {
+        // `as_str` is what the TUI posts to `/api/machines/state` and what the
+        // machines pane renders; the enum is what the API deserializes back.
+        // A state added to one list and not the other would show up as a
+        // machine whose transition silently 400s, so pin both directions.
+        let all = [
+            MachineState::Unknown,
+            MachineState::Initializing,
+            MachineState::Probing,
+            MachineState::Configured,
+            MachineState::Provisioning,
+            MachineState::Online,
+            MachineState::Offline,
+            MachineState::Error,
+        ];
+        for s in all {
+            let wire = serde_json::to_string(&s).unwrap();
+            assert_eq!(wire, format!("\"{}\"", s.as_str()), "serde vs as_str");
+            assert_eq!(serde_json::from_str::<MachineState>(&wire).unwrap(), s);
+        }
+        // The match in `as_str` is exhaustive, so a new variant cannot compile
+        // without a wire name — but it *can* be given a name that collides.
+        let mut names: Vec<&str> = all.iter().map(|s| s.as_str()).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "two states share a wire name");
+    }
+
+    #[test]
+    fn only_online_accepts_work() {
+        assert!(MachineState::Online.accepts_work());
+        for s in [
+            MachineState::Initializing,
+            MachineState::Probing,
+            MachineState::Configured,
+            MachineState::Provisioning,
+            MachineState::Offline,
+            MachineState::Error,
+        ] {
+            assert!(!s.accepts_work(), "{s:?} must not be handed work");
+        }
+        // `Unknown` is "no opinion formed", not "ready" — the offer gate
+        // treats it as a separate case on purpose.
+        assert!(!MachineState::Unknown.accepts_work());
+    }
+
+    #[test]
+    fn coming_up_covers_every_state_that_is_not_a_verdict() {
+        // The dispatcher stamps `Offline` on any box that fails to answer
+        // `/status`. These four cannot answer *yet*, and reading a boot as
+        // death is exactly what makes a freshly launched pool look broken.
+        for s in [
+            MachineState::Initializing,
+            MachineState::Probing,
+            MachineState::Provisioning,
+            MachineState::Configured,
+        ] {
+            assert!(s.coming_up(), "{s:?} is on its way up");
+            assert!(!s.accepts_work(), "{s:?} is not ready for work");
+        }
+        // A verdict is not "coming up": silence about these is real news.
+        for s in [
+            MachineState::Online,
+            MachineState::Offline,
+            MachineState::Error,
+            MachineState::Unknown,
+        ] {
+            assert!(!s.coming_up(), "{s:?} is a verdict, not a wait");
+        }
+    }
+
+    #[test]
+    fn set_state_stamps_only_real_transitions() {
+        let mut m = Machine::new("10.0.0.5", "ubuntu", 22, None, "worker");
+        assert_eq!(m.state, MachineState::Unknown);
+        assert_eq!(m.state_since, 0, "a fresh record is never stamped");
+
+        m.set_state(MachineState::Initializing);
+        let born = m.state_since;
+        assert!(born > 0, "a transition stamps the clock");
+
+        // Re-stating the same state must not move the stamp, or "initializing
+        // for 4 minutes" would reset on every poll and never reach a deadline.
+        m.state_since = born.saturating_sub(60);
+        let aged = m.state_since;
+        m.set_state(MachineState::Initializing);
+        assert_eq!(m.state_since, aged, "same state, same clock");
+
+        // A real transition does move it.
+        m.set_state(MachineState::Online);
+        assert!(m.state_since >= aged);
+    }
+
+    #[test]
     fn upstream_chain_is_a_prefix_of_all() {
         for st in Stage::ALL {
             let idx = Stage::ALL.iter().position(|s| *s == st).unwrap();
@@ -1186,6 +1457,7 @@ mod tests {
             credentials: both_keys(),
             bible: None,
             script: None,
+            cast: None,
             text: None,
             gap_ms: 300,
             speed: 1.0,
@@ -1244,8 +1516,7 @@ mod tests {
         // upgradable on its own.
         let old: HeartbeatAck = serde_json::from_str(r#"{"ok": true}"#).unwrap();
         assert!(old.ok && !old.shutdown);
-        let told: HeartbeatAck =
-            serde_json::from_str(r#"{"ok":true,"shutdown":true}"#).unwrap();
+        let told: HeartbeatAck = serde_json::from_str(r#"{"ok":true,"shutdown":true}"#).unwrap();
         assert!(told.shutdown);
         assert_eq!(Op::parse("shutdown-workers"), Some(Op::ShutdownWorkers));
         assert_eq!(Op::ShutdownWorkers.as_str(), "shutdown-workers");

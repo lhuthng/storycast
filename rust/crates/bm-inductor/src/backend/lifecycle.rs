@@ -19,26 +19,56 @@ fn remote_worker_check_script() -> String {
     "pgrep -f 'bm-agent worke[r]' | tr '\\n' ',' | sed 's/,$//;s/^/ALREADY:/'".into()
 }
 
-fn remote_worker_launch_script(inductor_url: &str, addr: &str) -> String {
+/// The remote half of the launch. **No inductor URL is passed**, and that is
+/// the point of the whole inversion: a worker that is never told where the
+/// inductor is cannot dial it, so a box behind NAT on either end is a
+/// non-issue rather than a thing to route around.
+fn remote_worker_launch_script(addr: &str) -> String {
     format!(
-        "cd \"$HOME/{d}\" && nohup ./bm-agent --root \"$HOME/{d}\" worker --inductor {} --addr {} >> agent.log 2>&1 & echo STARTED:$!",
-        shq(inductor_url),
+        "cd \"$HOME/{d}\" && nohup ./bm-agent --root \"$HOME/{d}\" worker --serve-tasks {p} --addr {} >> agent.log 2>&1 & echo STARTED:$!",
         shq(addr),
         d = REMOTE_DIR,
+        p = bm_proto::DEFAULT_TASK_PORT,
     )
 }
+
+/// Start a worker on each machine. **The one place a worker is started.**
+///
+/// The mechanism differs — a box on this machine is a child process, any other
+/// is started over ssh — but that is a difference in *transport*, not in
+/// worker: both get the same command line, both serve-only, both driven the
+/// same way afterwards. Keeping the choice here is what stops it becoming two
+/// divergent copies, which is what it was.
+///
+/// Returns `(all_up, lines)` like [`start_remote_workers`], so callers keep
+/// one error path whether the box was local or not.
+pub fn start_workers(machines: &[Machine], layout_root: &Path) -> (bool, Vec<String>) {
+    let mut ok = true;
+    let mut lines = Vec::new();
+    for m in machines.iter().filter(|m| is_local_addr(&m.addr)) {
+        for l in start_local_worker(layout_root) {
+            lines.push(format!("[{}] {l}", m.addr));
+        }
+    }
+    let remotes: Vec<Machine> = machines
+        .iter()
+        .filter(|m| !is_local_addr(&m.addr))
+        .cloned()
+        .collect();
+    if !remotes.is_empty() {
+        let (o, l) = start_remote_workers(&remotes);
+        ok &= o;
+        lines.extend(l);
+    }
+    (ok, lines)
+}
+
 /// Start a worker on every remote machine (blocking): skip boxes that already
-/// run one, launch the rest detached into `~/bm-worker/agent.log`. Each box
-/// gets the inductor URL on its own subnet, or the operator's advertised
-/// address when there is one — see [`worker_inductor_url`] for why the guess
-/// is not enough off a LAN.
+/// run one, launch the rest detached into `~/bm-worker/agent.log`.
+///
 /// Returns `(all_up, lines)` — a failed launch vetoes the start like a failed
 /// provision does, so `B` never leaves a half-started cluster.
-pub fn start_remote_workers(
-    machines: &[Machine],
-    api_port: u16,
-    advertise: Option<&str>,
-) -> (bool, Vec<String>) {
+pub fn start_remote_workers(machines: &[Machine]) -> (bool, Vec<String>) {
     let mut lines = Vec::new();
     let mut ok = true;
     let mut remotes: Vec<&Machine> = machines
@@ -48,14 +78,6 @@ pub fn start_remote_workers(
     remotes.sort_by(|a, b| a.addr.cmp(&b.addr));
     remotes.dedup_by(|a, b| a.addr == b.addr);
     for m in remotes {
-        let inductor_url = match worker_inductor_url(advertise, &m.addr, api_port) {
-            Ok(url) => url,
-            Err(e) => {
-                lines.push(format!("[{}] no dial-back address ({e:#})", m.addr));
-                ok = false;
-                continue;
-            }
-        };
         // pgrep first: a second worker per box is harmless but noisy, and the
         // report should say what actually happened.
         let ssh = Ssh::for_machine(m);
@@ -79,7 +101,7 @@ pub fn start_remote_workers(
             }
             _ => {}
         }
-        let script = remote_worker_launch_script(&inductor_url, &m.addr);
+        let script = remote_worker_launch_script(&m.addr);
         match ssh.run(&script, 60) {
             Ok((0, stdout, _)) => {
                 let out = stdout.trim().to_string();
@@ -162,7 +184,7 @@ pub fn start_backend(
     // Worker half unless the caller stages it per-box (degraded start):
     // extra workers are harmless, so only our own PID suppresses.
     if with_worker {
-        lines.extend(start_local_worker(layout_root, api));
+        lines.extend(start_local_worker(layout_root));
     }
     Ok(lines)
 }
@@ -170,7 +192,7 @@ pub fn start_backend(
 /// Start the local worker unless this TUI already runs one. Split out so a
 /// single-box `p` retry can launch exactly its box's worker without touching
 /// the inductor half.
-pub fn start_local_worker(layout_root: &Path, api: &str) -> Vec<String> {
+pub fn start_local_worker(layout_root: &Path) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(pid) = read_pid(&pid_file(layout_root, "agent")).filter(|p| is_alive(*p)) {
         lines.push(format!("worker already running (pid {pid})"));
@@ -186,12 +208,15 @@ pub fn start_local_worker(layout_root: &Path, api: &str) -> Vec<String> {
     let log = log_file(layout_root, "agent");
     // `--root` for the same reason as the inductor's: the child inherits this
     // process's cwd, which need not be the root the operator named.
+    //
+    // No `--inductor`: a serve-only worker holds no address for one, so it
+    // cannot call home. The inductor drives it over `--serve-tasks` instead.
     let args = [
         "--root".to_string(),
         layout_root.to_string_lossy().into_owned(),
         "worker".to_string(),
-        "--inductor".to_string(),
-        api.to_string(),
+        "--serve-tasks".to_string(),
+        bm_proto::DEFAULT_TASK_PORT.to_string(),
     ];
     match spawn_one(&bin_a, &args, &log) {
         Ok(pid) => {
@@ -299,15 +324,74 @@ fn sweep_one(label: &str, ssh: &Ssh) -> Vec<String> {
     out
 }
 
-/// Stop every worker in the cluster: the local backend by PID file, then a
-/// local sweep for strays (hand-started shells, tmux), then every registered
-/// remote machine over ssh. Tasks stranded on dead workers are requeued into
-/// the ledger the moment no inductor answers — so stop-then-start loses
-/// nothing to lease waits (a render lease is 90 minutes). Never fails hard —
-/// each machine reports its own outcome, and one unreachable box never
-/// silences the rest.
+/// Remote task endpoints for an HTTP shutdown: `(addr, port)`, one per box.
+/// A `None` port is the operator saying "do not drive this one" — ssh sweep
+/// only, never a shutdown knock.
+fn shutdown_targets(machines: &[Machine]) -> Vec<(String, u16)> {
+    let mut out: Vec<(String, u16)> = machines
+        .iter()
+        .filter(|m| !is_local_addr(&m.addr))
+        .filter_map(|m| m.task_port.map(|p| (m.addr.clone(), p)))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Ask every remote worker to stop over its own task port: one 5 s HTTP call
+/// each, all at once. The ssh pkill below stays as the backstop — but on a
+/// slow link the ssh handshake alone can outlast the sweep while the worker
+/// would have answered HTTP in a second, and that gap is how pre-X workers
+/// survived X and squatted on their tasks afterwards. Never fails hard.
+async fn shutdown_remotes_http(layout_root: &Path, machines: &[Machine]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let Some(token) = bm_core::token::read(layout_root) else {
+        lines.push("no cluster token — remote shutdown skipped, ssh sweep only".into());
+        return lines;
+    };
+    let http = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            lines.push(format!("http client failed ({e:#}) — ssh sweep only"));
+            return lines;
+        }
+    };
+    let mut jobs = Vec::new();
+    for (addr, port) in shutdown_targets(machines) {
+        let (http, token) = (http.clone(), token.clone());
+        jobs.push(tokio::spawn(async move {
+            let url = format!("http://{addr}:{port}/shutdown");
+            match http.post(&url).bearer_auth(&token).send().await {
+                Ok(r) if r.status().is_success() => {
+                    format!("[{addr}] worker stopping (shutdown acknowledged)")
+                }
+                Ok(r) => format!("[{addr}] shutdown refused ({}) — ssh sweep follows", r.status()),
+                Err(e) => format!("[{addr}] no shutdown answer ({e:#}) — ssh sweep follows"),
+            }
+        }));
+    }
+    for j in jobs {
+        lines.push(
+            j.await
+                .unwrap_or_else(|e| format!("shutdown task failed ({e}) — ssh sweep follows")),
+        );
+    }
+    lines
+}
+
+/// Stop every worker in the cluster: remote workers over HTTP first, then the
+/// local backend by PID file, then a local sweep for strays (hand-started
+/// shells, tmux), then every registered remote machine over ssh. Tasks
+/// stranded on dead workers are requeued into the ledger the moment no
+/// inductor answers — so stop-then-start loses nothing to lease waits (a
+/// render lease is 90 minutes). Never fails hard — each machine reports its
+/// own outcome, and one unreachable box never silences the rest.
 pub async fn stop_everywhere(layout: &Layout, machines: &[Machine], api: &str) -> Vec<String> {
-    let mut lines = stop_backend(&layout.root).await;
+    let mut lines = shutdown_remotes_http(&layout.root, machines).await;
+    lines.extend(stop_backend(&layout.root).await);
     // Requeue stranded assignments, but only with no live scheduler: the file
     // is the inductor's to write while it answers.
     if inductor_up(api).await {
@@ -519,6 +603,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shutdown_targets_skips_local_and_undriven_boxes() {
+        // One entry per remote box on its task port: HTTP shutdown knocks
+        // exactly where the inductor drives. Loopback never dials out, and
+        // a `None` port is the operator saying "do not drive this one" —
+        // ssh sweep only, never a shutdown knock.
+        let lan = Machine::new("192.168.2.2", "thang", 22, None, "worker");
+        assert_eq!(
+            shutdown_targets(&[lan]),
+            vec![("192.168.2.2".into(), bm_proto::DEFAULT_TASK_PORT)]
+        );
+        let mut quiet = Machine::new("192.168.2.2", "thang", 22, None, "worker");
+        quiet.task_port = None;
+        let local = Machine::new("127.0.0.1", "me", 22, None, "worker");
+        assert!(shutdown_targets(&[quiet, local]).is_empty());
+    }
+
+    #[test]
     fn kill_scripts_never_match_their_own_literal() {
         // pkill -f matches full command lines: if the worker pattern appeared
         // verbatim, the sweep would kill its own shell. The bracketed form is
@@ -550,20 +651,27 @@ mod tests {
         let check = remote_worker_check_script();
         assert!(!check.contains("bm-agent worker"), "self-match: {check}");
         assert!(check.contains("ALREADY:"), "{check}");
-        let launch = remote_worker_launch_script("http://192.168.2.1:8901", "192.168.2.2");
+        let launch = remote_worker_launch_script("192.168.2.2");
         assert!(
             !launch.contains("pkill") && !launch.contains("pgrep"),
             "launch must not inspect: {launch}"
         );
         assert!(launch.contains("./bm-agent"), "{launch}");
-        assert!(launch.contains("worker --inductor"), "{launch}");
+        // **This assertion is the constraint.** A launched worker is never
+        // handed an inductor address, so it has nothing to dial — the
+        // guarantee is the absence of the argument, not a flag saying "do not
+        // call home". Reintroducing `--inductor` here would quietly restore
+        // the requirement that the inductor be reachable *from* a cloud
+        // worker, which is the one thing the inversion removed.
+        assert!(
+            !launch.contains("--inductor"),
+            "a launched worker must not be given an inductor address: {launch}"
+        );
+        assert!(launch.contains("worker --serve-tasks"), "{launch}");
         // The root travels with the launch: the worker mirror has no rust/
         // tree, so a child left to discover its own root found nothing.
         assert!(launch.contains("--root \"$HOME/bm-worker\""), "{launch}");
-        assert!(
-            launch.contains("http://192.168.2.1:8901") && launch.contains("192.168.2.2"),
-            "{launch}"
-        );
+        assert!(launch.contains("192.168.2.2"), "{launch}");
     }
 
     #[test]

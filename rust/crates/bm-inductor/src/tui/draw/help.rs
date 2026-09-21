@@ -3,7 +3,7 @@ use crate::tui::{app::App, style::centered_padded};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Clear, Paragraph},
 };
 
 pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
@@ -30,6 +30,10 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
             "inspect the selected machine (probe output, capabilities)",
         ),
         (
+            "P",
+            "work policy: which stages the selected box may run, in priority order",
+        ),
+        (
             "J / :jobs",
             "TUI background jobs: running/queued, elapsed time, activity",
         ),
@@ -39,7 +43,7 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         ("?", "this help"),
         (
             "C",
-            "toggle colour (state names are always shown, so nothing depends on colour)",
+            "cycle the palette: default → dim → mono (state words are always shown, so nothing depends on colour)",
         ),
         ("q", "quit"),
     ] {
@@ -178,8 +182,12 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }
 
-    section(&mut lines, "Workers and Stats (dashboard)");
+    section(&mut lines, "Machines, Workers and Stats (dashboard)");
     for v in [
+        "Machines reads `machine · kind · ip`: the box's handle, where it came",
+        "from (aws for an EC2-launched box, rmt for one reached by ssh, local for",
+        "this host), and the address to reach it. The `policy` column is the",
+        "box's work order at a glance (`M>R>D>C`; a lower-case letter is off).",
         "Workers lists every live box: alias, machine, stage, chapter,",
         "progress, cpu %, ram % + used GiB (a dash until the agent measures).",
         "Stats sits beside Tasks: rows are workers, columns the four stages,",
@@ -192,12 +200,46 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }
 
+    section(&mut lines, "Work policy (P)");
+    for v in [
+        "Each machine picks its own next task. The list shows the four stages —",
+        "merge, render, digest, crawl — most-preferred first, all enabled by",
+        "default. The scheduler takes the first *enabled* stage that has work on",
+        "that box, and falls to the next when it has none.",
+        "↑↓ move the cursor; Space picks a row up and the arrows carry it up or",
+        "down the order, Space drops it; Enter toggles a stage on or off. Every",
+        "change saves at once, so there is no unsaved state to lose on Esc.",
+        "A stage is also gated by what the box can actually do: a worker without",
+        "ffmpeg reports no `merge` capability, so merge stays off there until",
+        "provisioning installs ffmpeg (or you install it and re-provision).",
+    ] {
+        lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
+    }
+
+    section(&mut lines, "Outside the TUI");
+    for v in [
+        "The AWS *console* is the only thing the dashboard cannot stand in for:",
+        "creating the IAM user, its access key, the SSH keypair and the security",
+        "group are AWS's own browser pages. Everything the tool owns is here —",
+        "`:` :login stores the console's CSV, :discover reads the account into",
+        ".bm/aws.json, :up launches and links, :pool shows the account, :down",
+        "terminates, :prov onboards. An EC2 public IP changes on every stop/start",
+        "and spot relaunch — a drifted box is now re-pointed automatically when",
+        "the account is read (:pool, and once at startup), matched by instance id;",
+        ":relink is still there to force it by hand. Each repair is logged.",
+        "No step of an AWS pool needs a terminal —",
+        "the CLI still keeps `aws up --dry-run`, a no-call preview of the launch.",
+        "While the console work is not done yet, `:login` and `:discover` say what",
+        "is missing rather than failing obscurely.",
+    ] {
+        lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
+    }
+
     section(&mut lines, "Notes");
     for v in [
         "Swap voice deletes only that speaker's cached segments, drops the stale",
         "mp3s and requeues render + merge. Every other character keeps its cache.",
-        "VieNeu presets are Central/South only — Northern voices are rejected by",
-        "policy. Enrolled clones always pass, because they were vetted on enrolment.",
+        "Enrolled clones always pass, because they were vetted on enrolment.",
         "Below 100x30 the Tasks pane folds into the footer so Logs keeps its rows;",
         "below 76x20 the dashboard is replaced by a size notice, because a clipped",
         "dashboard is worse than an honest one.",
@@ -207,10 +249,7 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(app.style(Color::Cyan))
-        .title("Help — Esc or ? to close · ↑↓ scroll");
+    let block = super::pane_block(app, "Help — Esc or ? to close · ↑↓ scroll");
     let inner_h = area.height.saturating_sub(2) as usize;
     let max = lines.len().saturating_sub(inner_h);
     let offset = scroll.min(max) as u16;

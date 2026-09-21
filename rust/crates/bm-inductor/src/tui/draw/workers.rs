@@ -2,27 +2,41 @@
 use crate::tui::{
     app::App,
     layout::COMPACT_WORKER_COLS,
-    model::{live_beats, machine_name, reported_alias},
+    model::{beat_backed, live_beats, machine_name, reported_alias},
     style::{bar, cell, empty_body, stage_color, style_bold_of, style_of, worker_alias},
 };
 use ratatui::{
     layout::{Constraint, Rect},
     style::Color,
     text::{Line, Span},
-    widgets::{Block, Borders, Row, Table},
+    widgets::{Row, Table},
 };
 
 pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compact: bool) {
-    let block = Block::default().borders(Borders::ALL).title("Workers");
     // Stale beats stay in state for the reaper's accounting but leave the
     // pane: a dead worker drawn as an idle row is indistinguishable from a
     // live one, which is exactly the "two hares" confusion.
     let live = live_beats(&app.beats, bm_proto::now_secs());
+    // Ghost rows: the box declared them silent (Offline) after their last
+    // beat. They stay out of the pane — a worker row on an ✗ machine is
+    // exactly the contradiction this filter removes.
+    let live: Vec<_> = live
+        .into_iter()
+        .filter(|b| beat_backed(&app.machines, b))
+        .collect();
+    // The count in the corner: how many workers are on, without counting rows.
+    let block = super::pane_block(app, Line::from(format!("Workers · {} live", live.len())));
     if live.is_empty() {
         f.render_widget(
             empty_body(vec![
                 if app.beats.is_empty() {
                     "no workers connected".into()
+                } else if app
+                    .beats
+                    .iter()
+                    .any(|b| !beat_backed(&app.machines, b))
+                {
+                    "workers silent — their boxes read offline".into()
                 } else {
                     "no live workers — beats older than 90s are hidden".into()
                 },
@@ -34,7 +48,7 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compac
         return;
     }
 
-    let colour = app.colour;
+    let colour = app.colour();
     let rows: Vec<Row> = live
         .iter()
         .map(|b| {
@@ -97,7 +111,7 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compac
         })
         .collect();
 
-    let mut header = vec!["worker"];
+    let mut header = vec!["alias"];
     let mut widths: Vec<Constraint> = vec![Constraint::Length(11)];
     if !compact {
         header.push("machine");
@@ -105,7 +119,10 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compac
     }
     header.extend(["stage", "ch", "progress"]);
     if !compact {
-        header.extend(["cpu", "ram"]);
+        // Qualified: these are whole-box load (the agent reports
+        // `global_cpu_usage` / used memory), not the task's share — bare
+        // `cpu`/`ram` next to per-task progress read as the render's cost.
+        header.extend(["box cpu", "box ram"]);
     }
     header.push("activity");
     if compact {

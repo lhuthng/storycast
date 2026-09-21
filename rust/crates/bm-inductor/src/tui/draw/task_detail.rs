@@ -9,7 +9,7 @@ use bm_proto::TaskState;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Clear, Paragraph, Wrap},
 };
 
 /// One task in full: everything the ledger knows, `detail` first among them.
@@ -23,12 +23,10 @@ pub(crate) fn draw_task_detail(f: &mut ratatui::Frame, app: &App, view: &TaskDet
         .iter()
         .find(|t| t.stage == view.stage && t.chapter == view.chapter);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(app.style(Color::Cyan))
-        .title(format!(
-            "Task {id} — Esc back · u retry · F force re-run · q dashboard"
-        ));
+    let block = super::pane_block(
+        app,
+        format!("Task {id} — Esc back · u retry · F force re-run · q dashboard"),
+    );
     let inner = block.inner(area);
     f.render_widget(block, area);
 

@@ -57,20 +57,26 @@ enum Cmd {
         #[arg(long, default_value = "vieneu")]
         engine: String,
     },
-    /// Register with an inductor and pull tasks until stopped.
+    /// Run as a worker.
+    ///
+    /// With `--inductor` this dials that inductor and pulls tasks, exactly as
+    /// it always has. **Without it the worker is serve-only**: it holds no
+    /// inductor address at all, so it cannot dial one — the inductor does all
+    /// the asking and drives this box over `--serve-tasks`. The absence of an
+    /// address is the guarantee, not a flag saying "do not dial".
     Worker {
         #[arg(long)]
-        inductor: String,
+        inductor: Option<String>,
         #[arg(long)]
         worker_id: Option<String>,
         #[arg(long)]
         addr: Option<String>,
         #[arg(long)]
         tts_url: Option<String>,
-        /// Also answer the inverted protocol on this port: `GET /status`,
-        /// and later `POST /task` / `GET /units`. Needs a cluster token in
-        /// `.bm/` — see `bm_core::token`. Off by default, so a worker started
-        /// the old way is byte-for-byte the old worker.
+        /// Answer the inverted protocol on this port: `GET /status`,
+        /// `POST /task`, `GET /unit`, `POST /shutdown`. Needs a cluster token
+        /// in `.bm/` — see `bm_core::token`. Required in serve-only mode,
+        /// optional alongside `--inductor`.
         #[arg(long)]
         serve_tasks: Option<u16>,
     },
@@ -299,90 +305,17 @@ fn render_action(render_units: Option<&[bm_proto::RenderUnitSpec]>) -> RenderAct
     }
 }
 
-/// Sweep a chapter's seg dir only when every clause holds: the task reported
-/// `ok`, the report was accepted, the units came from the inductor (never the
-/// legacy path, which never uploaded), and this is not the local node (whose
-/// dir IS the store). In particular a failed task keeps its files for resume,
-/// and a lost report keeps them until the re-offered empty units report
-/// success — then they go.
-fn should_sweep(
-    stage: bm_proto::Stage,
-    render_units: Option<&[bm_proto::RenderUnitSpec]>,
-    local_node: bool,
-    ok: bool,
-    reported: bool,
-) -> bool {
-    ok && reported
-        && matches!(stage, bm_proto::Stage::Render)
-        && render_units.is_some()
-        && !local_node
-}
-
-/// POST one wav to the inductor's store. A non-200 or an `ok: false` body
-/// fails the task: the unit stays missing and the next offer repeats it.
-async fn upload_segment(
-    http: &reqwest::Client,
-    inductor: &str,
-    engine: &str,
-    chapter: u32,
-    name: &str,
-    wav: &[u8],
-) -> anyhow::Result<()> {
-    let resp = http
-        .post(format!("{inductor}/api/segment"))
-        .query(&[
-            ("chapter", chapter.to_string()),
-            ("engine", engine.to_string()),
-            ("name", name.to_string()),
-        ])
-        .body(wav.to_vec())
-        .send()
-        .await
-        .with_context(|| format!("uploading {name}"))?;
-    if !resp.status().is_success() {
-        // The refusal reason rides the body — without it a 400 names no
-        // check, and the next hour is spent guessing which one fired.
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let why: String = serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v.get("error")?.as_str().map(|s| s.to_string()))
-            .unwrap_or_else(|| bm_core::util::head_chars(body.trim(), 200));
-        anyhow::bail!("uploading {name}: inductor refused {status}: {why}");
-    }
-    let v: serde_json::Value = resp.json().await.context("parsing segment ack")?;
-    if v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "uploading {name}: {}",
-            v.get("error")
-                .and_then(|e| e.as_str())
-                .unwrap_or("unknown refusal")
-        )
-    }
-}
-
-/// Speak exactly the offered units. Local node writes straight into the seg
-/// dir (which is the inductor's store); everyone else uploads per file, and a
-/// single failed upload fails the whole task.
-#[allow(clippy::too_many_arguments)]
 async fn render_offered_units(
     layout: &Layout,
     n: u32,
     engine: &str,
     units: &[bm_proto::RenderUnitSpec],
-    local_node: bool,
-    inductor: &str,
-    http: &reqwest::Client,
     tts: &Tts,
     shared: &Shared,
 ) -> Result<u64> {
     let total = units.len();
     let seg_dir = layout.seg_dir(engine, n);
-    if local_node {
-        std::fs::create_dir_all(&seg_dir)?;
-    }
+    std::fs::create_dir_all(&seg_dir)?;
     for (i, u) in units.iter().enumerate() {
         set_progress(
             shared,
@@ -392,11 +325,7 @@ async fn render_offered_units(
         let wav = tts
             .infer(&u.text, &u.voice, u.temperature, u.silence_p, engine)
             .await?;
-        if local_node {
-            std::fs::write(seg_dir.join(&u.name), &wav)?;
-        } else {
-            upload_segment(http, inductor, engine, n, &u.name, &wav).await?;
-        }
+        std::fs::write(seg_dir.join(&u.name), &wav)?;
     }
     set_progress(
         shared,
@@ -616,7 +545,36 @@ fn heartbeat_now(p: &Progress, who: &WorkerIdentity, probe: &mut LoadProbe) -> H
         cpu_pct,
         mem_pct,
         mem_gb,
+        capabilities: capabilities(),
     }
+}
+
+/// What this worker can run, in one place.
+///
+/// Both `Register` and the `/status` answer carry it, and the inductor's
+/// render gate reads whichever arrived. Two copies would let a worker claim
+/// one thing on registration and another on its status poll, and the gate
+/// would believe whichever it saw last.
+///
+/// `render-segments` is the migration gate: the inductor only offers render
+/// tasks to a box that can produce units.
+///
+/// `merge` is advertised **only when ffmpeg is on PATH**. The merge stage shells
+/// out to ffmpeg, so a box without it would take every merge offered and fail
+/// each one — three strikes and the chapter shelves. Reporting the capability
+/// truthfully lets the scheduler skip merge here and give the box its other
+/// stages, instead of poisoning the ledger with failures it cannot help.
+fn capabilities() -> Vec<String> {
+    let mut caps = vec![
+        "crawl".into(),
+        "digest".into(),
+        "render".into(),
+        "render-segments".into(),
+    ];
+    if bm_core::assemble::ffmpeg_available() {
+        caps.push("merge".into());
+    }
+    caps
 }
 
 async fn heartbeat_loop(
@@ -643,6 +601,42 @@ async fn heartbeat_loop(
             }
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Seconds of silence before a worker gives up on its inductor.
+///
+/// Derived from the same setting the inductor's own idle timer uses, so the
+/// two cannot be configured into a state where the worker quits before the
+/// inductor gets a chance to say goodbye.
+fn idle_secs(s: &Settings) -> u64 {
+    s.idle_mins.max(1) as u64 * 60
+}
+
+/// Exit when the inductor stops asking.
+///
+/// In serve-only mode this worker has no way to *notice* the inductor is gone:
+/// no dial to fail, no report to be refused, just silence. Without this it
+/// would hold its port and its TTS sidecar indefinitely.
+///
+/// A busy worker is exempt, and that exemption is load-bearing: the inductor
+/// is blocked inside its own `POST /task` for the whole stage, so no polls
+/// arrive by design — and counting that as idleness would kill a render
+/// halfway through.
+async fn idle_watchdog(push: std::sync::Arc<push::Push>, timeout: Duration) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        if push.is_busy() {
+            push.touch();
+            continue;
+        }
+        if push.silent_for() >= timeout {
+            println!(
+                "no contact from the inductor for {}s — exiting",
+                timeout.as_secs()
+            );
+            std::process::exit(0);
+        }
     }
 }
 
@@ -693,14 +687,19 @@ fn install_credentials(creds: &bm_proto::Credentials) -> Vec<&'static str> {
     creds.names()
 }
 
+/// Run one offered task on this box, start to finish.
+///
+/// **No inductor URL, and no HTTP client.** A worker that never sends anything
+/// to the inductor needs neither, and not having them is the enforcement: the
+/// compiler will not let a future stage reintroduce a call home. Everything
+/// this needs — the text, the script, the bible, the credentials, the units to
+/// speak — arrived inside the offer.
 async fn run_offer(
     layout: &Layout,
     settings: &Settings,
     offer: &TaskOffer,
     shared: &Shared,
     sidecar: &mut Sidecar,
-    inductor: &str,
-    http: &reqwest::Client,
 ) -> Result<TaskResult> {
     use bm_proto::Stage::*;
     let n = offer.chapter;
@@ -717,6 +716,20 @@ async fn run_offer(
     }
     if let Some(script) = &offer.script {
         bm_core::atomic_write(&layout.script(n), &serde_json::to_string_pretty(script)?)?;
+    }
+    // The cast decides the filenames this stage will look for, so the offer's
+    // copy wins over anything on this box. Without it a merge on a provisioned
+    // worker names every segment differently from the render and finds none.
+    if let Some(cast) = &offer.cast {
+        bm_core::atomic_write(
+            &layout.cast(&offer.engine),
+            &serde_json::to_string_pretty(cast)?,
+        )?;
+    }
+    if let Some(bible) = &offer.bible {
+        if offer.stage == bm_proto::Stage::Merge {
+            bm_core::atomic_write(&layout.bible(), &serde_json::to_string_pretty(bible)?)?;
+        }
     }
     match offer.stage {
         Crawl => {
@@ -789,18 +802,8 @@ async fn run_offer(
                 RenderAction::Units => {
                     // Proven non-empty by the match above.
                     let list = offer.render_units.as_deref().unwrap_or(&[]);
-                    render_offered_units(
-                        layout,
-                        n,
-                        &offer.engine,
-                        list,
-                        offer.local_node,
-                        inductor,
-                        http,
-                        &sidecar.tts(),
-                        shared,
-                    )
-                    .await?
+                    render_offered_units(layout, n, &offer.engine, list, &sidecar.tts(), shared)
+                        .await?
                 }
             };
             sidecar.stop(); // per-task lifecycle: RSS returns to the OS here
@@ -831,20 +834,18 @@ async fn run_offer(
                 shared,
             )
             .await?;
-            // Local node: `publish()` already renamed the mp3 into the
-            // inductor's `output/` — shipping 7 MB of base64 back to the
-            // machine that wrote it is pure cost, so the report carries
-            // nothing and the inductor verifies the file instead.
-            // Remote: the product comes home in the report, and an unreadable
-            // file fails the task rather than reporting a silent Done.
-            let mp3 = if offer.local_node {
-                None
-            } else {
-                Some(base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &std::fs::read(&path).with_context(|| format!("reading merged {path}"))?,
-                ))
-            };
+            // **The product always comes home in the report.** This used to
+            // depend on whether the box was the local node: a local merge
+            // leaned on `publish()` having renamed the file straight into the
+            // inductor's own `output/`, which is only true when the two share
+            // a filesystem. Shipping it every time costs a few MB of base64
+            // and removes the branch — and the inductor writes it to
+            // `final_mp3` either way, idempotently for a box that already put
+            // it there.
+            let mp3 = Some(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &std::fs::read(&path).with_context(|| format!("reading merged {path}"))?,
+            ));
             Ok(TaskResult {
                 ok: true,
                 detail: format!("merge ch{n} -> {path}"),
@@ -872,7 +873,7 @@ struct TaskResult {
 async fn worker_loop(
     layout: Layout,
     settings: Settings,
-    inductor: String,
+    inductor: Option<String>,
     worker_id: String,
     addr: String,
     tts_url: String,
@@ -902,15 +903,8 @@ async fn worker_loop(
         activity: "starting".to_string(),
         ..Default::default()
     }));
-    tokio::spawn(heartbeat_loop(
-        http.clone(),
-        inductor.clone(),
-        who.clone(),
-        shared.clone(),
-    ));
-    // The inverted half of the protocol: this worker answers `GET /status`
-    // instead of only posting beats. Off unless a port is given, so a worker
-    // started the old way behaves exactly as it did.
+    // The instruction channel: this worker answers instead of only asking.
+    let mut channel: Option<std::sync::Arc<push::Push>> = None;
     if let Some(port) = serve_tasks {
         // A worker with no token refuses to serve rather than serving openly:
         // "authenticated or off" is the only safe pair of states for a channel
@@ -929,37 +923,54 @@ async fn worker_loop(
             layout: layout.clone(),
             settings: settings.clone(),
             sidecar: tokio::sync::Mutex::new(Sidecar::new(&tts_url)),
-            // The inductor is never dialled on this path, so the client is here
-            // only because `run_offer` takes one. It still must not be
-            // proxy-intercepted, hence the same builder as the loop above.
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .no_proxy()
-                .build()?,
             busy: std::sync::atomic::AtomicBool::new(false),
+            last_contact: std::sync::atomic::AtomicU64::new(bm_proto::now_secs()),
         });
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
         println!("instruction channel on 0.0.0.0:{port} (token required)");
+        let serving = push.clone();
         tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, push::router(push)).await {
+            if let Err(e) = axum::serve(listener, push::router(serving)).await {
                 eprintln!("instruction channel died: {e}");
             }
         });
+        channel = Some(push);
     }
+
+    // ── Serve-only ──────────────────────────────────────────────────────────
+    // No inductor URL means nothing to dial, and that is the whole guarantee:
+    // this worker cannot contact the inductor because it holds no address for
+    // one — not because a flag told it not to. Every line below this point
+    // that talks to an inductor is unreachable in this mode.
+    let Some(inductor) = inductor else {
+        let Some(push) = channel else {
+            anyhow::bail!(
+                "neither --inductor nor --serve-tasks: this worker would have nothing to do and no way to be given work"
+            );
+        };
+        println!(
+            "serve-only as {} — answering on port {}, dialling nothing",
+            push.who.worker_id,
+            serve_tasks.unwrap_or_default()
+        );
+        // The worker's own off switch. The inductor's timer covers the normal
+        // case; this covers the inductor dying, where silence is otherwise
+        // indistinguishable from "no work yet".
+        idle_watchdog(push, Duration::from_secs(idle_secs(&settings) + 90)).await;
+        return Ok(());
+    };
+
+    tokio::spawn(heartbeat_loop(
+        http.clone(),
+        inductor.clone(),
+        who.clone(),
+        shared.clone(),
+    ));
     let reg = Register {
         worker_id: worker_id.clone(),
         addr: addr.clone(),
         hostname,
-        // `render-segments` is the migration gate: the inductor only offers
-        // render tasks to workers that upload units. An agent without it keeps
-        // taking crawl/digest/merge and simply never sees a render offer.
-        capabilities: vec![
-            "crawl".into(),
-            "digest".into(),
-            "render".into(),
-            "merge".into(),
-            "render-segments".into(),
-        ],
+        capabilities: capabilities(),
         tts_url: Some(tts_url.clone()),
         version: VERSION.into(),
     };
@@ -1006,17 +1017,7 @@ async fn worker_loop(
         };
         set_task(&shared, &offer);
         let t0 = Instant::now();
-        let res = match run_offer(
-            &layout,
-            &settings,
-            &offer,
-            &shared,
-            &mut sidecar,
-            &inductor,
-            &http,
-        )
-        .await
-        {
+        let res = match run_offer(&layout, &settings, &offer, &shared, &mut sidecar).await {
             Ok(r) => r,
             Err(e) => TaskResult {
                 ok: false,
@@ -1063,22 +1064,17 @@ async fn worker_loop(
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
-        // Phase 4: a non-local worker's copy is scratch. It goes only after
-        // the report is accepted — a lost report keeps the files until the
-        // re-offered (now empty) units report success, then they go.
-        if should_sweep(
-            offer.stage,
-            offer.render_units.as_deref(),
-            offer.local_node,
-            res.ok,
-            reported,
-        ) {
-            let dir = layout.seg_dir(&offer.engine, offer.chapter);
-            match std::fs::remove_dir_all(&dir) {
-                Ok(()) => println!("[ok] swept {}", dir.display()),
-                Err(e) => println!("[WARN] sweep {} failed: {e}", dir.display()),
-            }
-        }
+        // **No sweep.** A non-local worker's segment directory used to be
+        // scratch, deleted here once its units had been uploaded and the
+        // report accepted. That stopped being true when the merge moved onto
+        // the renderer: this directory is now the merge's *input*, and the
+        // inductor's copy is the one that is redundant (it exists for the
+        // completion gate and for planning what is still missing). Deleting it
+        // here failed every remote merge a stage later with missing segments.
+        //
+        // Reclaiming it is a job for a `gc` pass that knows the chapter is
+        // finished, not for the worker that just produced it.
+        let _ = (offer.render_units.as_deref(), reported);
         clear_task(&shared);
     }
 }
@@ -1335,7 +1331,7 @@ mod tests {
 
     #[test]
     fn render_action_pins_the_empty_offer_to_noop() {
-        use bm_proto::{RenderUnitSpec, Stage};
+        use bm_proto::RenderUnitSpec;
         // Zero units means "report ok/0 at once" — never a fall-through into
         // rendering, and never the legacy path.
         assert_eq!(render_action(None), RenderAction::Legacy);
@@ -1351,35 +1347,10 @@ mod tests {
         }];
         assert_eq!(render_action(Some(&one)), RenderAction::Units);
 
-        // Sweep if and only if: render task, offered units, remote node,
-        // success reported. Every other combination keeps the files.
-        let sweep = |stage, units: Option<&[RenderUnitSpec]>, local, ok, reported| {
-            should_sweep(stage, units, local, ok, reported)
-        };
-        assert!(sweep(Stage::Render, Some(&one), false, true, true));
-        assert!(
-            !sweep(Stage::Render, Some(&one), false, true, false),
-            "lost report keeps files"
-        );
-        assert!(
-            !sweep(Stage::Render, Some(&one), false, false, true),
-            "failure keeps files"
-        );
-        assert!(
-            !sweep(Stage::Render, Some(&one), true, true, true),
-            "local node never sweeps"
-        );
-        assert!(
-            !sweep(Stage::Render, None, false, true, true),
-            "legacy path never sweeps"
-        );
-        assert!(
-            !sweep(Stage::Merge, Some(&one), false, true, true),
-            "merge untouched"
-        );
-        // The empty-units re-offer after a lost report: accepted, then sweep
-        // the stranded files from the first attempt.
-        assert!(sweep(Stage::Render, Some(&[]), false, true, true));
+        // There is no sweep to assert any more: a rendered chapter's segment
+        // directory is the merge's input, so nothing may delete it. See the
+        // comment at the old call site for what that broke.
+        assert_eq!(render_action(Some(&[])), RenderAction::Noop);
     }
 
     #[test]
@@ -1614,6 +1585,7 @@ mod tests {
             credentials: bm_proto::Credentials::default(),
             bible: None,
             script: None,
+            cast: None,
             text: Some("Chương 1\n\nCó một người đi qua cầu.\n".into()),
             gap_ms: 300,
             speed: 1.0,
@@ -1627,23 +1599,11 @@ mod tests {
         };
         let shared: Shared = Arc::new(Mutex::new(Progress::default()));
         let mut sidecar = Sidecar::new("http://127.0.0.1:8818");
-        // `.no_proxy()`: this is loopback, and the fixture is only reachable
-        // without a proxy.
-        let http = reqwest::Client::builder().no_proxy().build().unwrap();
 
         // The digest itself is *expected* to fail — the fixture answers `{}`,
         // which is not a valid digest, so the one repair attempt fails too.
         // What is under test is where the request went and what it asked for.
-        let _ = run_offer(
-            &layout,
-            &box_settings,
-            &offer,
-            &shared,
-            &mut sidecar,
-            "http://127.0.0.1:9",
-            &http,
-        )
-        .await;
+        let _ = run_offer(&layout, &box_settings, &offer, &shared, &mut sidecar).await;
 
         let bodies = seen.lock().unwrap().clone();
         assert!(

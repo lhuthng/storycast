@@ -8,7 +8,7 @@ impl Inner {
     pub fn reconcile(&mut self, start: u32, count: u32) {
         self.machines.entry("127.0.0.1".into()).or_insert_with(|| {
             let mut m = Machine::new("127.0.0.1", "local", 22, None, "both");
-            m.state = MachineState::Online;
+            m.set_state(MachineState::Online);
             m.tts_url = Some("http://127.0.0.1:8818".into());
             m
         });

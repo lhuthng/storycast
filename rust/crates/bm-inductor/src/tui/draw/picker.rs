@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout as RLayout},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Clear, Paragraph, Wrap},
 };
 use std::collections::BTreeMap;
 
@@ -26,10 +26,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
         PickStage::Character => format!("Swap voice · {step}"),
         PickStage::Voice => format!("Swap voice · {step} · for “{}”", picker.character),
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(app.style(Color::Cyan))
-        .title(title);
+    let block = super::pane_block(app, title);
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -55,10 +52,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
         Paragraph::new(Line::from(vec![
             Span::styled("filter: ", Style::default().fg(Color::DarkGray)),
             Span::styled(picker.filter.clone(), app.style(Color::White)),
-            Span::styled(
-                if typing { "▌" } else { "" },
-                app.style(Color::Cyan),
-            ),
+            Span::styled(if typing { "▌" } else { "" }, app.style(Color::Cyan)),
         ])),
         rows[0],
     );
@@ -126,7 +120,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
     f.render_widget(Paragraph::new(audition_ctx), rows[2]);
 
     let height = rows[3].height as usize;
-    let colour = app.colour;
+    let colour = app.colour();
     // Which voice is rendering right now. Read from the `App`, not the picker:
     // the cast overview can start an audition too, so "in flight" is a property
     // of the process and not of this screen.

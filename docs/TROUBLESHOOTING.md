@@ -92,19 +92,54 @@ Common causes per stage:
 | Symptom | Meaning / fix |
 |---|---|
 | `unreachable: ssh exit 255` | wrong address/user/key, or ssh asks for a password. The provisioner uses `BatchMode=yes`, so **keys must work non-interactively**; test `ssh -o BatchMode=yes user@box true`. `make link KEY=~/.ssh/your-key` then provision again |
+| `ssh exit 255: Host key verification failed` | **cannot happen any more.** The transport declines host-key verification and never reads or writes `known_hosts`, because a launched instance always presents a key nobody has seen and AWS hands the same public IP to a different box later (`StrictHostKeyChecking=no` alone still refuses a *changed* key). If you see it, that inductor predates the fix — rebuild it |
+| a box just launched says **still booting** and `:prov` keeps doing nothing | **that is the correct answer, not a failure.** A fresh instance is `running` in EC2 seconds before `sshd` listens, and a probe cannot tell a booting box from a dead one. The state stays `initializing` (with the `state age` line counting up) rather than flipping to `error`, and the boot deadline gives up after five minutes. Wait, then `:prov` again. If it goes to `error` instead, ssh *did* answer and the note names the step that failed — that one is real |
 | provision uses the wrong key | the machine overlay's `ssh key` line names the winning source (`machines.json` / `settings.json` / ssh default) — fix it where it wins: re-bind with `:a`, `:sshkey` for the default, or `make link KEY=..` |
-| `python provisioning failed` | the box ran out of disk or has no `python3`; the venv needs ~2 GB free |
+| `bm-tts would not run — missing libonnxruntime.so.1 beside it?` | the sidecar is pushed together with its shared ONNX Runtime; if the library did not travel the loader fails by SONAME. `make runtime` stages it locally, then re-provision with `P` |
 | `voice enrollment failed for: <names>` | a clip in `voices.json` is missing or unreadable on this machine; fix `refs/`, then provision again |
 | Provisioning runs the slow path every time | the stamp changed — check *what* changed: any edit under `prompts/`, `python/requirements.txt`, the cast files, or the agent version resets the sources stamp; any change to `voices.json` or `refs/` resets the voices stamp. `P` forces the slow path deliberately |
+| Re-provisioning a **healthy** box is slow | it should not be. On a box that already passed a full provision, `ensure_opencode`/`ensure_ffmpeg` are gated off and only run a `command -v` check — so no `npm i` (600 s bound) and no `apt install -y`. If it is still slow, the stamp changed: see the row above |
+| `OPENCODE-SKIP (already configured — not reinstalling; force a re-provision to try again)` | not an error — the gate above declining to reinstall on a box it has already configured. It only appears if the tool is genuinely missing, and then the message names the remedy: `P` |
+| `FFMPEG-SKIP (…)` / `ffmpeg is not on PATH` | same gate. Merge is disabled on that box until ffmpeg is present; crawl/digest/render still work. `apt install ffmpeg` (or `dnf`), then `P` |
 | Machine added but workers never start | the inductor must be reachable **from the worker boxes** — start it bound to the LAN: `make serve` already uses `--bind 0.0.0.0` |
+
+## AWS boxes
+
+A box that is in the cloud fails in ways a LAN box cannot, and the first
+question is always *"is this the tool or is this the network"*. There is one
+deliberate inversion to keep in mind: **the inductor dials the box, and nothing
+ever dials the inductor.**
+
+| Symptom | What it is |
+|---|---|
+| `no IAM user for this app yet` | expected until you run `bm-inductor aws login --csv <the console's download>`. The app does not fall back to your own AWS identity — see [AWS-CREDENTIALS.md](AWS-CREDENTIALS.md) |
+| `aws ec2 failed: InvalidKeyPair.NotFound` | the keypair is in another region. EC2 keypairs are region-scoped, and the console's region selector is nowhere near the Create button |
+| `aws ec2 failed: InvalidGroup.NotFound` | same, for the security group — one region *and* one VPC |
+| `UnauthorizedOperation … iam:PassRole` | the launch named an instance profile the policy does not allow. `aws-policy.json` scopes `PassRole` to `storycast-worker` alone, which is the point |
+| `InvalidParameterCombination … not eligible for Free Tier` | the account is on an AWS **Free plan**, which caps the instance type. Nothing the tool can read can see a plan, so `aws show` said "ready" and meant it. **Fix: set `instance_type` to `m7i-flex.large`** — 2 vCPU / **8 GiB**, on the free-tier list. Not a reason to pay more — but not a reason to go smaller either: `c7i-flex.large` sits on the same list at 4 GiB and **does not fit**, because the sidecar is ~2.85 GB resident the moment the weights load and that plus the agent and the OS will not go into ~3.9 GB usable. The field is `instance_type` in `.bm/aws.json` |
+| `AuthFailure.ServiceLinkedRoleCreationNotPermitted` | the account has never used spot, so `AWSServiceRoleForEC2Spot` does not exist and the operator user cannot create it. Request one spot instance once in the console, or set `"spot": false` |
+| A box runs, `aws ls` shows it, but the dashboard says **Offline** for ever | nothing admits the **task port (8917)** inbound. The box is healthy and simply unreachable; a closed port is swallowed, not refused, so there is no error anywhere |
+| `ssh` **hangs and times out** | nothing admits **port 22**. Different failure, different cause |
+| `ssh` connects then says `Permission denied (publickey)` | the firewall is fine; the box was linked without its key. `link --key .bm/aws/<region>.pem` |
+| A freshly launched box shows **initializing** | correct, not a fault. `:up` links it the moment the account returns an address, and an instance is not reachable until sshd is listening — typically 30–60 s. `initializing` is deliberately not `offline`, so nothing calls the box dead while it boots. Still initializing after 5 minutes means it never answered ssh at all: it becomes **error** and the note says so (terminated, or in a subnet this machine cannot dial). `i` on the box shows `state age` — how long it has been that way |
+| A box is up and driven, but every crawl fails | the box has no **outbound** access to the internet. Crawl is the one stage that fetches chapter URLs; every other stage works on files the inductor already pushed |
+
+`bm-inductor aws discover` is the diagnostic for the two firewall rows: it reads
+the group's own rules and names the ports that are missing. `bm-inductor aws
+show` says what is missing from the pool. Setup and the reasoning behind each
+rule are in [AWS-IAM-USER.md](AWS-IAM-USER.md); the order to do things in is
+[AWS-WORKERS.md](AWS-WORKERS.md).
 
 ## TUI problems
 
 | Symptom | Fix |
 |---|---|
-| "terminal too small" panel | resize to at least 76×20; 100×32 for the full dashboard. `C` toggles colour |
+| "terminal too small" panel | resize to at least 76×20; 100×32 for the full dashboard. `C` cycles the theme (default → dim → mono) |
 | Events pane floods after connecting | that is the inductor's recent history (up to 100 events) being shown once — by design |
 | A key does nothing | `?` shows the full list; capital vs lowercase matters (`u` retry vs nothing, `K` ledger vs `k` move up, `P` force vs `p` provision) |
+| A job sits at `queued · needs box 10.0.0.5` | **that is the answer, not a fault.** Another job holds that box. Jobs run together unless they need the same thing, so this row is waiting on the named resource and on nothing else. Jobs that name no resource share the command lane and queue among themselves by design |
+| `start backend` finished, but boxes are still catching up | intended. `B` brings the backend up in seconds and hands every box that is **not already working** its own job, so the press returns immediately instead of holding the cluster for the slowest push. A failing box lands in `Error` with its reason and does not veto the rest |
+| `B` re-provisions a box that was already working | it should not — an `online` box is skipped, and the log says so. If you see it, that box was not `online` when `B` ran (its first beat had not arrived). `p` is the deliberate re-provision, `B` is the catch-up |
 | Everything froze | it should not — polling is backgrounded. If it truly hangs, `Ctrl-C` loses nothing: restart with `make tui` and the ledger is intact |
 
 ## Nuclear options (all safe, in order of severity)

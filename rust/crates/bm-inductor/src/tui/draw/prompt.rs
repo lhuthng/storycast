@@ -23,9 +23,9 @@ pub(crate) fn draw_text_prompt(f: &mut ratatui::Frame, app: &App, prompt: &TextP
         // What is on screen is exactly what will be submitted — the prompt is
         // the echo, so nothing is sent that the operator did not read back.
         Line::from(vec![
-            Span::styled("> ", style_of(app.colour, Color::Cyan)),
-            Span::styled(before, style_of(app.colour, Color::White)),
-            Span::styled("▌", style_of(app.colour, Color::Cyan)),
+            Span::styled("> ", style_of(app.colour(), Color::Cyan)),
+            Span::styled(before, style_of(app.colour(), Color::White)),
+            Span::styled("▌", style_of(app.colour(), Color::Cyan)),
             Span::raw(after),
         ]),
         Line::from(""),
@@ -39,7 +39,7 @@ pub(crate) fn draw_text_prompt(f: &mut ratatui::Frame, app: &App, prompt: &TextP
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(style_of(app.colour, Color::Cyan))
+                    .border_style(style_of(app.colour(), Color::Cyan))
                     .title(prompt.title.clone()),
             )
             .wrap(Wrap { trim: false }),

@@ -16,14 +16,14 @@ use crate::tui::{
     },
     model::clamp_scroll,
     sound::{self, SoundView},
-    style::{cell, centered_padded, empty_body, style_bold_of, style_of},
+    style::{cell, centered_padded, empty_body, selection_bg, style_bold_of, style_of},
 };
 use bm_core::audio_pool::PoolKind;
 use ratatui::{
     layout::{Constraint, Direction, Layout as RLayout},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Row, Table, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Row, Table, Wrap},
 };
 
 pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &App, view: &SoundView) {
@@ -38,10 +38,7 @@ pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &App, view: &SoundView) {
     };
     f.render_widget(Clear, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(app.style(Color::Cyan))
-        .title("Sound design — Esc to close");
+    let block = super::pane_block(app, "Sound design — Esc to close");
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 6 {
@@ -169,7 +166,7 @@ pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &App, view: &SoundView) {
             rows_area[2],
         );
     } else if body > 0 {
-        let colour = app.colour;
+        let colour = app.colour();
         let table_w = rows_area[2].width.saturating_sub(2);
         let wide = table_w >= cols(&SOUND_COLS_WIDE);
         let widths = if wide {
@@ -215,7 +212,7 @@ pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &App, view: &SoundView) {
                 ];
                 let mut row = Row::new(cells);
                 if selected {
-                    row = row.style(Style::default().add_modifier(Modifier::REVERSED));
+                    row = row.style(Style::default().bg(selection_bg()));
                 }
                 row
             })
@@ -249,6 +246,7 @@ pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &App, view: &SoundView) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(Color::DarkGray))
                         .title(title),
                 ),

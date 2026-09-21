@@ -51,7 +51,7 @@ pub(crate) fn draw_jobs(f: &mut ratatui::Frame, app: &App, scroll: usize) {
     } else {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            format!("  {total} job(s) total — two lanes: lifecycle (B/X/p) and commands run in parallel"),
+            format!("  {total} job(s) — jobs run together unless they need the same thing"),
             dim,
         )));
     }

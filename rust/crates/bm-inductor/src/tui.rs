@@ -34,7 +34,7 @@ pub(crate) const REFRESH_TICKS: u64 = 4;
 use crate::tui::{
     app::App,
     draw::draw,
-    input::{dispatch_op, handle_key},
+    input::{dispatch, dispatch_op, handle_key},
     jobs::DoneKind,
     jobs::{fetch_state, run_jobs, Ev, Job},
     model::reported_alias,
@@ -147,6 +147,41 @@ async fn run_loop(
             }
         }
         app.tick += 1;
+        // A `B` start left boxes to catch up. One job each, deliberately: the
+        // start job ends the moment the inductor answers, and every box that
+        // still needs work gets its own row and its own box resource, so they
+        // provision at the same time instead of queueing behind one job that
+        // holds the cluster for the whole catch-up.
+        if let Some((machines, cancel)) = app.pending_catchup.take() {
+            let settings_key = app.ssh_defaults().key;
+            // Read once, before the loop: `dispatch` needs `&mut app`, so the
+            // pieces of the job cannot be borrowed out of it in the call.
+            let (layout, api) = (app.layout.clone(), app.api.clone());
+            for machine in machines {
+                if dispatch(
+                    &mut app,
+                    &job_tx,
+                    Job::Provision {
+                        layout: layout.clone(),
+                        api: api.clone(),
+                        machine,
+                        force: false,
+                        settings_key: settings_key.clone(),
+                        cancel: Some(cancel.clone()),
+                    },
+                ) {
+                    // `dispatch` sets `next_job_id` to the id it just handed
+                    // out, which is the only way to name the job afterwards.
+                    app.catchup_jobs.push(app.next_job_id);
+                }
+            }
+            // The start sequence is not over: those boxes are still joining.
+            // Holding the flag until the last one finishes is what keeps a
+            // second `B` from queueing a duplicate push at every box.
+            if !app.catchup_jobs.is_empty() {
+                app.backend_start_outstanding = true;
+            }
+        }
         // A `B` start asked for work: fire it once the poller reports the
         // inductor is up, and only then.
         if app.conn == Conn::Up {

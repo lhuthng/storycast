@@ -3,7 +3,7 @@ use crate::tui::{
     app::App,
     layout::{KEYS_COMPACT, KEYS_FULL},
     model::task_rollup,
-    style::{range_label, Conn},
+    style::{pulse, spinner, Conn},
 };
 use bm_proto::TaskState;
 use ratatui::{
@@ -32,8 +32,10 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
         Span::styled(app.status.text.clone(), app.style(app.status.level.color())),
     ];
     if app.pending > 0 {
+        // The spinner steps at the poll cadence, so "jobs are running" is
+        // visible from across the room even when the job is quiet.
         spans.push(Span::styled(
-            format!("   {} job(s) running", app.pending),
+            format!("   {} {} job(s) running", spinner(app.tick), app.pending),
             app.style(Color::Yellow),
         ));
     }
@@ -53,70 +55,36 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
     match &app.conn {
         Conn::Up => {
             let ago = app.refreshed.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+            // The dot breathes: a *moving* live light proves the poll loop
+            // is alive, which a static ● could not (a frozen poll once read
+            // as connected for minutes).
             spans.push(Span::styled(
-                format!("   ● live ({ago}s ago)"),
+                format!("   {} live ({ago}s ago)", pulse(app.tick)),
                 app.style(Color::Green),
             ));
         }
         Conn::Down(_) => spans.push(Span::styled("   ● disconnected", app.style(Color::Red))),
-        Conn::Unknown => spans.push(Span::styled("   ● connecting…", app.style(Color::Yellow))),
+        Conn::Unknown => spans.push(Span::styled("   ○ connecting…", app.style(Color::Yellow))),
     }
-    if !app.colour {
+    // The engine and chapter range moved to the full tier's header strip.
+    // Workspace and profile stay here in the compact tier: there is no header
+    // row at 76×20, and a default nobody looked at is exactly how work lands
+    // in the wrong book.
+    if compact {
         spans.push(Span::styled(
-            "   [mono]",
+            format!("   ws: {}", crate::tui::model::workspace_label(&app.layout)),
             Style::default().fg(Color::DarkGray),
         ));
-    }
-    // Which book, and which genre — the two things every path below this line
-    // is derived from, and the two that can now be switched at runtime. Shown
-    // always, like the chapter range: a default nobody looked at is exactly how
-    // work lands in the wrong workspace.
-    spans.push(Span::styled(
-        format!("   ws: {}", crate::tui::model::workspace_label(&app.layout)),
-        Style::default().fg(Color::DarkGray),
-    ));
-    spans.push(Span::styled(
-        format!(
-            "   profile: {}",
-            crate::tui::model::profile_label(app.profile.as_ref())
-        ),
-        // A missing profile is not decoration: every runner refuses to start
-        // without one, so it reads as the problem it is.
-        if app.profile.is_some() {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            app.style(Color::Yellow)
-        },
-    ));
-    if let Some(engine) = app
-        .settings
-        .as_ref()
-        .and_then(|s| s.get("engine"))
-        .and_then(|e| e.as_str())
-    {
         spans.push(Span::styled(
-            format!("   engine: {engine}"),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-    if let Some(analyzer) = app
-        .settings
-        .as_ref()
-        .and_then(|s| s.get("analyzer"))
-        .and_then(|e| e.as_str())
-    {
-        spans.push(Span::styled(
-            format!("   digest: {analyzer}"),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-    // The chapter range the prompts prefill and `B` reconciles: the thing that
-    // decides whether work lands on ch1 or ch21. Shown always, so a default
-    // nobody looked at can never surprise again.
-    if let Some(r) = range_label(&app.settings) {
-        spans.push(Span::styled(
-            format!("   {r}"),
-            Style::default().fg(Color::DarkGray),
+            format!(
+                "   profile: {}",
+                crate::tui::model::profile_label(app.profile.as_ref())
+            ),
+            if app.profile.is_some() {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                app.style(Color::Yellow)
+            },
         ));
     }
 
@@ -125,7 +93,7 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
     if compact {
         // The Tasks pane is gone in this tier; the roll-up takes its place so
         // the counts are never simply missing.
-        lines.push(task_rollup(&app.counts, app.colour));
+        lines.push(task_rollup(&app.counts, app.colour()));
     }
     f.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::NONE)),

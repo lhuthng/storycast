@@ -8,6 +8,14 @@
 //! Everything shells out to `ssh` and `rsync` rather than linking an SSH
 //! library. That keeps the build small, reuses the user's existing keys and
 //! `~/.ssh/config`, and makes the exact command visible in the TUI log.
+//!
+//! One deliberate exception to "reuse the user's ssh setup": **host keys are
+//! not verified, and `known_hosts` is not touched at all.** Every box here is
+//! either an instance launched minutes ago or a worker linked by hand, and
+//! every call is scripted, so `BatchMode=yes` turns the "continue connecting?"
+//! prompt into `exit 255 — Host key verification failed`. The policy, and why
+//! `StrictHostKeyChecking=no` alone is not enough, is documented on
+//! `HOST_KEY_OPTS` in `provision/ssh.rs`.
 
 use anyhow::{Context, Result};
 use bm_proto::{Machine, MachineState};
@@ -15,17 +23,25 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 mod aws;
+/// Public rather than re-exported: the callers that need it are the CLI's
+/// `aws login` and `aws show`, and `bm_core::provision::aws_credentials::write`
+/// says which file it writes where a bare `write` would not.
+pub mod aws_credentials;
 mod ssh;
 mod stamp;
 mod steps;
 
 pub use aws::{
-    describe_image_args, instance_line, parse_instances, profile_object, run_instances_args,
-    terminate_args, AwsConfig, AwsInstance, DEFAULT_FILE, DEFAULT_TAG,
+    admits_port, default_security_group_args, default_subnet_args, describe_image_args,
+    describe_security_group_args, ec2_id_from_note, instance_line, instance_profile_names_args,
+    keypair_names_args, machine_from_instance, parse_instances, parse_name_list,
+    preserve_ec2_id, profile_object, run_instances_args, sole_name, terminate_args,
+    ubuntu_ami_args, AwsConfig, AwsInstance, DEFAULT_FILE, DEFAULT_TAG, REQUIRED_INGRESS,
+    UBUNTU_LTS,
 };
-pub use ssh::{resolve_key, KeySource, Ssh};
+pub use ssh::{resolve_key, KeySource, RsyncProgress, Ssh};
 pub use stamp::{compute_provision_stamp, ProvisionStamp};
-pub use steps::{provision, Probe};
+pub use steps::{provision, LiveLog, Probe};
 
 /// Directory under the remote `$HOME` that holds a worker's whole world.
 pub const REMOTE_DIR: &str = "bm-worker";
@@ -50,6 +66,12 @@ pub struct LinkedBox {
     pub key: Option<String>,
     #[serde(default = "default_role")]
     pub role: String,
+    /// Per-machine work policy: which stages this box may run and in what
+    /// order. `None` means the default (all four, merge → render → digest →
+    /// crawl). Lives in `machines.json` beside `role`, for the same reason: it
+    /// is a scheduling decision, not liveness.
+    #[serde(default)]
+    pub task_policy: Option<Vec<bm_proto::TaskPref>>,
 }
 
 fn default_ssh_user() -> String {
@@ -75,6 +97,7 @@ impl LinkedBox {
             &self.role,
         );
         m.tts_url = Some(format!("http://127.0.0.1:{TTS_PORT}"));
+        m.task_policy = self.task_policy.clone();
         m
     }
 }
@@ -145,6 +168,7 @@ pub fn split_machine(m: &Machine, name: &str) -> (LinkedBox, MachineRuntime) {
         port: m.ssh_port,
         key: m.ssh_key.clone(),
         role: m.role.clone(),
+        task_policy: m.task_policy.clone(),
     };
     let rt = MachineRuntime {
         state: m.state,
@@ -171,6 +195,7 @@ pub fn join_machine(bxo: &LinkedBox, rt: Option<&MachineRuntime>) -> Machine {
     m.note = rt.note;
     m.capabilities = rt.capabilities;
     m.tts_url = rt.tts_url;
+    m.task_policy = bxo.task_policy.clone();
     m
 }
 
@@ -224,6 +249,7 @@ mod tests {
             port: 22,
             key: Some("/k/id".into()),
             role: "worker".into(),
+            task_policy: None,
         };
         super::save_box(&path, &bxo).unwrap();
         // Same address re-binds in place (the name may change); a new
@@ -259,6 +285,7 @@ mod tests {
             port: 22,
             key: Some("/k/id".into()),
             role: "worker".into(),
+            task_policy: None,
         }
         .machine();
         assert_eq!(m.ssh_target(), "thang@10.0.0.9");

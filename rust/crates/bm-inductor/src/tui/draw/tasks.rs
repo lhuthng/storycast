@@ -6,20 +6,20 @@ use crate::tui::{
     model::{age_secs, clamp_scroll, filtered_tasks, task_state_counts},
     screen::TasksView,
     style::{
-        cell, centered_padded, empty_body, stage_color, state_cell, state_color, style_bold_of,
-        style_of, why_label, worker_name,
+        cell, centered_padded, empty_body, selection_bg, stage_color, state_color,
+        state_glyph_cell, style_bold_of, style_of, why_label, worker_name,
     },
 };
 use bm_proto::TaskState;
 use ratatui::{
     layout::{Constraint, Direction, Layout as RLayout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Row, Table},
 };
 
 pub(crate) fn draw_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title("Tasks");
+    let block = super::pane_block(app, "Tasks");
     let mut lines: Vec<Line> = Vec::new();
 
     match app.counts.as_object() {
@@ -115,14 +115,19 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
     let all = &app.tasks;
     let shown = filtered_tasks(all, &view.filter);
     let shelved = all.iter().filter(|t| t.state == TaskState::Shelved).count();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(app.style(if shelved > 0 { Color::Red } else { Color::Cyan }))
-        .title(if shelved > 0 {
+    let block = super::pane_block(
+        app,
+        if shelved > 0 {
             format!("Tasks — {shelved} shelved · Esc or q to close")
         } else {
             "Tasks — Esc or q to close".to_string()
-        });
+        },
+    )
+    .border_style(app.style(if shelved > 0 {
+        Color::Red
+    } else {
+        crate::tui::style::theme_accent()
+    }));
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 5 {
@@ -196,7 +201,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
         let mut scroll = view.scroll;
         clamp_scroll(cursor, &mut scroll, shown.len(), height);
         let (start, end) = (scroll, (scroll + height).min(shown.len()));
-        let colour = app.colour;
+        let colour = app.colour();
 
         let (widths, header): (Vec<Constraint>, Vec<&str>) = if compact {
             (
@@ -243,7 +248,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
                 let cells = vec![
                     cell(format!("{mark}{}", t.chapter)),
                     cell(t.stage.as_str().to_string()),
-                    state_cell(colour, t.state.as_str()),
+                    state_glyph_cell(colour, t.state.as_str()),
                     cell(t.attempts.to_string()),
                     cell(worker_name(t.assigned_to.as_deref())),
                     cell(format!("{}s", age_secs(t.updated))),
@@ -262,7 +267,10 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
                     TaskState::Pending => Row::new(cells),
                 };
                 if idx == cursor {
-                    row = row.style(Style::default().add_modifier(Modifier::REVERSED));
+                    // Tint, not REVERSED: reversing wiped the row's severity
+                    // style, so the highlighted shelved row stopped reading
+                    // red — the one state the operator hunts for.
+                    row = row.style(Style::default().bg(selection_bg()));
                 }
                 row
             })

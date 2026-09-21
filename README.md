@@ -43,12 +43,22 @@ each segment with the right voice → glue the audio together.
 
 For each chapter, four stages run in order:
 
+```mermaid
+flowchart LR
+    URL["chapter URL<br/>url_template, chapter number substituted"] -->|crawl| TEXT["clean chapter text"]
+    TEXT -->|digest| SCRIPT["script-NN.json<br/>segments · speakers · moods · scenes"]
+    BIBLE[("bible.json<br/>who the characters are")] -.->|"as prompt context"| SCRIPT
+    SCRIPT -.->|"bible delta + roster"| BIBLE
+    SCRIPT -.->|"roster + aliases"| CAST[("cast-vieneu.json<br/>which voice speaks whom")]
+    SCRIPT -->|render| SEGS["per-segment audio<br/>cached, one dir per chapter"]
+    CAST -.->|"voice per speaker"| SEGS
+    SEGS -->|merge| OUT["Ch.N - Title.mp3<br/>in output/"]
 ```
-URL ──crawl──▶ clean text ──digest──▶ script-NN.json ──render──▶ per-segment audio ──merge──▶ Ch.N - Title.mp3
-                                │
-                                └─▶ bible.json        (who the characters are, kept across chapters)
-                                    cast-vieneu.json  (which voice speaks each character)
-```
+
+The dotted edges are the part that is easy to miss: **the bible is an input to
+digest and an output of it**, and the cast is derived from the digest rather
+than chosen up front. That is what lets chapter 40 keep the voice chapter 1 gave
+a character, without any of it being configured by hand.
 
 - **crawl** — downloads chapter `{n}` from your URL template and cleans it into
   plain text.
@@ -211,6 +221,33 @@ under the voice — plus a third layer the script places by hand:
 
 ## 3. Start it — three ways, easiest first
 
+Whichever way you run it, the shape is the same: **one inductor, many workers,
+and the inductor does all the dialling.**
+
+```mermaid
+flowchart LR
+    TUI["TUI<br/>the operator's only interface"] --> IND["bm-inductor<br/>scheduler + control API :8901"]
+    IND --> LOCAL["local worker"]
+    IND ==>|"dials out · /status · /task · /unit · /shutdown"| LAN["LAN box<br/>bm-agent + bm-tts"]
+    IND ==>|"dials out · the same protocol"| AWS["EC2 box<br/>bm-agent + bm-tts"]
+    LOCAL --> STORE[("segment store<br/>the only copy of any segment")]
+    LAN -.->|"the inductor fetches<br/>the units it is missing"| STORE
+    AWS -.->|"the inductor fetches<br/>the units it is missing"| STORE
+```
+
+The direction is not a detail. A worker is a small HTTP server that answers
+questions and is **never told where the inductor is**, because a box on the
+public internet cannot reach a laptop behind NAT — and the version that tried
+needed a local/remote fork in the launcher, the offer *and* the artifact path.
+Inverting it removed the requirement instead of working around it: the inductor
+already has a route to every worker, because it launched them. A consequence
+worth knowing before you go hunting for it: **a worker that can reach you and
+you cannot reach is useless**, so the ports your firewall has to admit are
+inbound **22** (provisioning) and the **task port** (the work itself). The
+second is the one that gets missed, and its failure is quiet — a box with 22
+open and 8917 closed launches, accepts ssh, looks healthy in the console and is
+never driven.
+
 ### A. "Just run it on this machine" (solo, headless)
 
 ```bash
@@ -229,16 +266,22 @@ make tui
 
 | Key                    | Does                                                                                                                                  |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `:`                    | **Command line — every operator action runs here, by word**: `:add`, `:prov`, `:drop`/`:remove`, `:translate`, `:voices`, `:swap`, `:eta`, `:retry`, `:reconcile`, `:backend`, `:drain`, `:quit`/`:exit`, `:X` stop. Single letters still work (`:m` is `:reconcile`); aliases in `:help`. Actions that need input open their prompt after `Enter`. No single key can fire anything destructive. |
+| `:`                    | **Command line — every operator action runs here, by word**: `:add`, `:prov`, `:drop`/`:remove`, `:translate`, `:voices`, `:swap`, `:eta`, `:retry`, `:reconcile`, `:backend`, `:up [n]`/`:pool`/`:down` (EC2, see §3D), `:drain`, `:quit`/`:exit`, `:X` stop. Single letters still work (`:m` is `:reconcile`); aliases in `:help`. Actions that need input open their prompt after `Enter`. No single key can fire anything destructive. |
 | **R** / **K** / **S**  | Read-only screens — system overview (`Enter` launches) / **task ledger** / cast overview                                             |
 | **i**                  | Inspect the selected machine (probe output, capabilities)                                                                              |
 | **arrows / k j**       | Move the selection · **PgUp PgDn** scroll the log · **G** pin to newest                                                               |
-| **r**                  | Refresh now · **?** full help · **C** colour on/off · **q** quit                                                                      |
+| **r**                  | Refresh now · **?** full help · **C** theme default→dim→mono · **q** quit                                                             |
 
 `:` + `B` with no machines registered runs a local-only cluster — the easy
 first run. In the task ledger (`K`): `j/k` or arrows to move, type to filter
 (e.g. `shelved`, `digest`, `42`), `u` retry / `F` force re-run the highlighted
 row, `Enter` for the full error, `Esc`/`q` to close.
+
+**Background jobs run together unless they need the same thing.** Provisioning
+two boxes at once is the point, so neither waits; two `aws` commands are
+serialised, because both read-modify-write the same account document. A row
+that *is* waiting says what it is waiting for — `queued · needs box 10.0.0.5` —
+so "why is this not running" is answered on the row instead of in a log.
 
 The dashboard's Workers pane shows each live box with cpu % and ram % +
 used GiB from its heartbeats. Beside Tasks sits Stats: rows are workers,
@@ -295,13 +338,94 @@ make link NAME=box-1 ADDR=192.168.2.2
 #    makes a nothing-changed run finish in under a second.
 make provision BOX=box-1
 
-# 3. Start the cluster (re-provisions — fast now — then launches everything)
+# 3. Start the cluster: `:B` brings the backend up in seconds and hands each
+#    box that is not already working its own catch-up job, so the boxes
+#    provision *at the same time* and the press returns immediately.
 make tui     # press :B
 ```
 
-Workers pull chapters from a shared queue, so idle machines pick up work
-automatically. A chapter's render+merge stays on the box that rendered it, so
+The queue is shared but nobody pulls from it: the inductor asks each box what it
+is doing every couple of seconds and hands it a chapter when it says "nothing".
+So an idle machine picks up work automatically, and a box that is mid-render is
+left alone. A chapter's render+merge stays on the box that rendered it, so
 cached segments are never re-uploaded.
+
+### D. "Run the workers on AWS" (a cloud pool)
+
+**You operate this from the TUI.** Storing the key, reading the account into the
+pool, launching, linking, provisioning, starting workers and destroying boxes are
+all `:` commands. The only step outside the dashboard is the AWS **console** —
+create the IAM user, its policy, the keypair and the security group by following
+**[docs/AWS-IAM-USER.md](docs/AWS-IAM-USER.md)**, then:
+
+```bash
+make tui
+```
+
+| In the TUI | What it does |
+| --- | --- |
+| `:login` | store the IAM user's key from the console's `accessKeys.csv` — the prompt asks for the path, prefilled `~/Downloads/accessKeys.csv`. The secret is never typed on screen, so this is the only login route there is |
+| `:discover --region eu-central-1 --pem ~/Downloads/storycast.pem --instance-profile storycast-worker` | read the account into `.bm/aws.json`: AMI, subnet, security group, keypair, instance profile. Safe to re-run — anything already set is kept |
+| `:profile` → `pack default` → `:profile` → `default` | save then load a profile, writing `.bm/profile` — **required before `:up`**, because every box's marker tag records the profile hash it was launched for |
+| `:B` | backend up (`:8901`) — `:up` and `:prov` `POST` to it, so nothing works without this |
+| `:up 3` | launch three tagged boxes and **link each one** into the cluster with the pool's `.pem` and `ubuntu` login — the one command that spends money |
+| `:B` again | the catch-up run: every linked box that is **not already working** gets its own provision-and-start job, and they all run at once. A box that is already online is skipped and says so — `p` is the deliberate re-provision |
+| `:pool` (`l`) | the **Cloud** view — what the account holds, and which rows are `not linked` |
+| `:down` (`o`) | terminate the live boxes — asks first, and **refuses while a render is in flight**; needs a prior `:pool` so it has ids; `:down force` overrides |
+
+A box moves through a small number of states, and two of them are the ones that
+look like faults and are not:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> unknown: ":add, or a hand-written registry"
+    [*] --> initializing: ":up — launched, not answering yet"
+    unknown --> probing: ":prov"
+    initializing --> probing: sshd starts listening
+    probing --> provisioning: something needs pushing
+    probing --> configured: nothing changed
+    provisioning --> configured: stamp written
+    configured --> online: its worker starts beating
+    online --> offline: /status stops answering
+    offline --> online: answers again
+    initializing --> error: 5-minute boot deadline
+    probing --> error: ssh answered, the step failed
+    error --> probing: ":prov retries"
+```
+
+`initializing` and `configured` are the two that read as broken and are not.
+`initializing` is a box that has been created and has not answered ssh yet — EC2
+says `running` seconds before `sshd` listens, and **a probe cannot tell a booting
+box from a dead one**, so it stays `initializing` with a clock running rather
+than being called dead. It is the only state with a deadline (five minutes);
+after that it becomes `error` and the note says why. `configured` is a box that
+has everything it needs and simply has no worker beating yet — the last step of
+the catch-up is what moves it to `online`.
+
+All of these are words first (`:login`, `:discover`, `:up`, `:pool`, `:down`) and
+`:up`/`:pool`/`:down` also have keys (`w`/`l`/`o`); a stray key in Normal mode only
+points at the command line — no single keypress stores a credential, launches or
+destroys anything. `:down` terminates **by explicit instance id**, never a filter,
+so it cannot touch boxes that are not yours.
+
+The **two files** are the only things you hand it, and both come from the console:
+**`accessKeys.csv`** is the **Download .csv file** button on the user's access key,
+and **`storycast.pem`** is the browser download from **EC2 → Key pairs → Create key
+pair** (RSA, `.pem`). `:login` writes the key to `.bm/aws/credentials`; `:discover
+--pem` copies the key to `.bm/aws/<region>.pem` — both 0600 and gitignored. A
+leading `~/` is expanded for you, nothing is edited by hand, and neither file
+enters the repo.
+
+**Pick the instance type deliberately.** On an AWS **Free plan** account
+`c7i.xlarge` is refused outright; `m7i-flex.large` (2 vCPU / 8 GiB) is eligible
+and is the size to use — the TTS sidecar is ~2.9 GB resident the moment the
+weights load. **RAM is what decides this, not CPU**: the tempting cheaper
+`c7i-flex.large` sits on the same free-tier list at 2 vCPU / **4 GiB** and does
+not fit, because ~2.9 GB of sidecar plus the agent and the OS will not go into
+~3.9 GB usable. That trap, the working `aws up`/`down` sequences, and the honest
+ledger of what has actually been run on EC2 are in
+**[docs/AWS-WORKERS.md](docs/AWS-WORKERS.md)**.
 
 Headless or screen-reader friendly: `bm-inductor tui --once` prints one
 plain-text snapshot and exits (fine in scripts, `watch`, CI).

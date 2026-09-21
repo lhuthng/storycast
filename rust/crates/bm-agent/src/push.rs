@@ -42,7 +42,9 @@
 //! A worker with no token **refuses to serve at all** rather than serving
 //! openly. "Authenticated or off" is the only safe pair of states.
 
-use crate::{heartbeat_now, run_offer, LoadProbe, Shared, Sidecar, WorkerIdentity};
+use crate::{
+    clear_task, heartbeat_now, run_offer, set_task, LoadProbe, Shared, Sidecar, WorkerIdentity,
+};
 use axum::{
     body::Body,
     extract::{Query, State},
@@ -55,9 +57,10 @@ use bm_core::{config::Settings, Layout};
 use bm_proto::{Complete, Heartbeat, TaskOffer};
 use serde::Deserialize;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
+use std::time::Duration;
 
 /// What the server needs to answer: who this worker is, what it is doing, and
 /// everything a pushed task needs in order to run.
@@ -79,12 +82,35 @@ pub(crate) struct Push {
     /// `await` makes the whole future non-`Send` — which axum reports as an
     /// opaque "`Handler` is not satisfied".
     pub(crate) sidecar: tokio::sync::Mutex<Sidecar>,
-    pub(crate) http: reqwest::Client,
     /// One task at a time, which is what the pull protocol's single task slot
     /// gave too. A second `POST /task` while one runs gets 409 rather than a
     /// queue: the inductor owns the schedule, and a worker holding a backlog is
     /// a worker whose lease the inductor cannot reason about.
     pub(crate) busy: AtomicBool,
+    /// Unix seconds of the last request the inductor made.
+    ///
+    /// The idle watchdog's only input. In serve-only mode there is no dial to
+    /// fail and no report to be refused, so silence is the only evidence that
+    /// the inductor is gone.
+    pub(crate) last_contact: AtomicU64,
+}
+
+impl Push {
+    /// Note that the inductor just spoke to us.
+    pub(crate) fn touch(&self) {
+        self.last_contact
+            .store(bm_proto::now_secs(), Ordering::SeqCst);
+    }
+
+    pub(crate) fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+    }
+
+    /// How long the inductor has been silent.
+    pub(crate) fn silent_for(&self) -> Duration {
+        let last = self.last_contact.load(Ordering::SeqCst);
+        Duration::from_secs(bm_proto::now_secs().saturating_sub(last))
+    }
 }
 
 /// The router the inductor talks to.
@@ -93,6 +119,7 @@ pub(crate) fn router(push: Arc<Push>) -> Router {
         .route("/status", get(status))
         .route("/task", post(task))
         .route("/unit", get(unit))
+        .route("/shutdown", post(shutdown))
         .with_state(push)
 }
 
@@ -105,6 +132,7 @@ async fn status(
     headers: HeaderMap,
 ) -> Result<Json<Heartbeat>, (StatusCode, String)> {
     check(&headers, &push.token)?;
+    push.touch();
     let p = push.shared.lock().map(|p| p.clone()).unwrap_or_default();
     let mut probe = push
         .probe
@@ -150,6 +178,7 @@ async fn task(
     if let Err(e) = check(&headers, &push.token) {
         return e.into_response();
     }
+    push.touch();
     // `swap` rather than load-then-store: two simultaneous posts must not both
     // find the slot free.
     if push.busy.swap(true, Ordering::SeqCst) {
@@ -161,6 +190,11 @@ async fn task(
         return (StatusCode::CONFLICT, format!("already running {running}")).into_response();
     }
     let _guard = BusyGuard(&push.busy);
+    // Tell the status answer what this worker is doing. The pull path sets
+    // this before `run_offer`; without it `/status` answers `task_id: None`
+    // while a render is at 45%, the inductor reads that as "idle", and its own
+    // orphan pass then requeues the very task the worker is executing.
+    set_task(&push.shared, &offer);
 
     let mut sidecar = push.sidecar.lock().await;
     // The inductor URL is deliberately empty: units stay on this box and the
@@ -168,17 +202,19 @@ async fn task(
     // out would fail loudly here rather than silently depending on a route
     // that does not exist across NAT — which is the whole reason for the
     // inversion.
+    let started = std::time::Instant::now();
     let result = run_offer(
         &push.layout,
         &push.settings,
         &offer,
         &push.shared,
         &mut sidecar,
-        "",
-        &push.http,
     )
     .await;
     sidecar.stop();
+    // Idle again, whatever the outcome — the answer below is built from
+    // `result`, so nothing past this point needs the progress block.
+    clear_task(&push.shared);
 
     match result {
         Ok(done) => Json(Complete {
@@ -186,7 +222,7 @@ async fn task(
             task_id: offer.task_id.clone(),
             ok: done.ok,
             detail: done.detail,
-            duration_secs: 0.0,
+            duration_secs: started.elapsed().as_secs_f64(),
             bible_delta: done.delta,
             units: done.units,
             script: done.script,
@@ -194,7 +230,24 @@ async fn task(
             mp3_b64: done.mp3_b64,
         })
         .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+        // A stage that *failed* is an answer, not a transport error — and the
+        // pull path reports it exactly this way. A 500 here would make the
+        // inductor read a text body as a `Complete` and give up on a task the
+        // worker had in fact finished failing, leaving the chapter assigned
+        // until its lease expired.
+        Err(e) => Json(Complete {
+            worker_id: push.who.worker_id.clone(),
+            task_id: offer.task_id.clone(),
+            ok: false,
+            detail: format!("{} ch{} failed: {e:#}", offer.stage, offer.chapter),
+            duration_secs: started.elapsed().as_secs_f64(),
+            bible_delta: None,
+            units: 0,
+            script: None,
+            text: None,
+            mp3_b64: None,
+        })
+        .into_response(),
     }
 }
 
@@ -231,6 +284,7 @@ async fn unit(
     if let Err(e) = check(&headers, &push.token) {
         return e.into_response();
     }
+    push.touch();
     // The name arrives from the network, so it is checked before it is joined:
     // `../../etc/passwd` is a legal-looking filename and `join` would happily
     // walk out of the segment directory with it.
@@ -252,6 +306,26 @@ async fn unit(
         // box rendered it, or this render has not reached it yet.
         Err(_) => (StatusCode::NOT_FOUND, format!("no {}", q.name)).into_response(),
     }
+}
+
+/// `POST /shutdown` — exit on the inductor's say-so.
+///
+/// The pull protocol carried this as a latch on the heartbeat *answer*; the
+/// inverted direction has no answer to hang it on, so the command travels as
+/// its own request. The reply goes out first — the inductor should learn that
+/// the worker accepted rather than guess from a closed socket — and the exit
+/// is deliberate rather than a drop, so the port is released promptly.
+async fn shutdown(State(push): State<Arc<Push>>, headers: HeaderMap) -> Response {
+    if let Err(e) = check(&headers, &push.token) {
+        return e.into_response();
+    }
+    push.touch();
+    println!("inductor asked for shutdown — exiting");
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        std::process::exit(0);
+    });
+    Json(serde_json::json!({"ok": true, "exiting": true})).into_response()
 }
 
 /// A unit name is one `.wav` filename and nothing else.
@@ -298,8 +372,10 @@ mod tests {
             layout: Layout::new(root),
             settings: Settings::default(),
             sidecar: tokio::sync::Mutex::new(Sidecar::new("http://127.0.0.1:8818")),
-            http: reqwest::Client::builder().no_proxy().build().unwrap(),
             busy: AtomicBool::new(false),
+            // "The inductor just spoke" — the watchdog's clock starts now, so
+            // a test that never polls does not trip it immediately.
+            last_contact: AtomicU64::new(bm_proto::now_secs()),
         })
     }
 

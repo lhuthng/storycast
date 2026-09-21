@@ -44,6 +44,12 @@ pub(crate) enum TextKind {
     /// `:profile` — list bundles, load one (unpack) or pack the live tree.
     /// Loading replaces `assets/` + `prompts/`, which workers are reading.
     Profile,
+    /// `:login` — hand over the console's `accessKeys.csv`. The secret is
+    /// never typed here, so the CSV is the whole prompt.
+    AwsLogin,
+    /// `:discover` — the flags for one account read, exactly as the CLI takes
+    /// them (same clap definition), with any path tilde-expanded.
+    AwsDiscover,
     /// `:` command line: the buffer names a key (`m`) or a word
     /// (`reconcile`) and Enter presses it for you. Never dispatched —
     /// handled inline so one keypress can open another prompt.
@@ -215,12 +221,23 @@ pub(crate) struct SoundRemoval {
 #[derive(Debug, Clone)]
 pub(crate) enum ConfirmAction {
     Quit,
+    /// Terminate the named EC2 instance ids. Always explicit ids, never a
+    /// filter: the destructive step is over a list the operator just read.
+    AwsDown {
+        ids: Vec<String>,
+    },
     Provision {
         addr: String,
         force: bool,
     },
     DropMachine {
         addr: String,
+    },
+    /// Re-point a machine whose EC2 address drifted at the address the box
+    /// carries now. Carries the old address; the instance id comes from the
+    /// selected machine's note inside the job.
+    RelinkMachine {
+        old_addr: String,
     },
     SwapVoice {
         character: String,
@@ -296,6 +313,29 @@ impl CastView {
     }
 }
 
+/// The Cloud view: what the EC2 account holds, one row per instance.
+///
+/// Kept separate from the Machines pane on purpose. A `Machine` is a *linked*
+/// box — it has an ssh key, it can be provisioned and driven; an `AwsInstance`
+/// is an EC2 resource that may be linked to nothing. A box the CLI launched has
+/// no registry entry to merge with, so a merged pane would need a correlation
+/// key (an instance id on `Machine`) that deliberately does not exist. This view
+/// shows the account and marks the rows the registry has never heard of.
+#[derive(Debug, Clone)]
+pub(crate) struct CloudView {
+    pub(crate) cursor: usize,
+    pub(crate) scroll: usize,
+}
+
+impl CloudView {
+    pub(crate) fn new() -> Self {
+        CloudView {
+            cursor: 0,
+            scroll: 0,
+        }
+    }
+}
+
 /// The Tasks screen: the whole ledger, navigable and filterable.
 ///
 /// The dashboard's Tasks pane is a roll-up — counts per stage. It answers "is
@@ -355,7 +395,39 @@ pub(crate) enum Screen {
     /// The three sound-design pools, one tab each: add, edit, remove, retune.
     /// Removal is refused for anything the mix still reaches; see `sound.rs`.
     Sound(SoundView),
+    /// What the EC2 account holds: one row per instance, `aws up`/`aws down`
+    /// from here, and a mark on rows the registry has not linked.
+    Cloud(CloudView),
     Confirm(Confirm),
     /// Machine detail, keyed by address so a refresh can never retarget it.
     Machine(String),
+    /// One machine's work policy: which stages it may run, in priority order.
+    Policy(PolicyView),
+}
+
+/// The per-machine work policy editor.
+///
+/// `prefs` is the whole list, most-preferred first. `cursor` walks it; when
+/// `grabbed` is `Some`, the arrows *move* the row at that index instead of
+/// stepping the cursor — the Space-to-pick-up gesture. Edits save as they are
+/// made, so there is no "unsaved" state to lose on Esc.
+#[derive(Debug, Clone)]
+pub(crate) struct PolicyView {
+    pub(crate) addr: String,
+    pub(crate) label: String,
+    pub(crate) cursor: usize,
+    pub(crate) grabbed: Option<usize>,
+    pub(crate) prefs: Vec<bm_proto::TaskPref>,
+}
+
+impl PolicyView {
+    pub(crate) fn new(addr: String, label: String, prefs: Vec<bm_proto::TaskPref>) -> Self {
+        PolicyView {
+            addr,
+            label,
+            cursor: 0,
+            grabbed: None,
+            prefs,
+        }
+    }
 }

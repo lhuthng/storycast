@@ -3,9 +3,18 @@ use bm_proto::Machine;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use super::ssh::Ssh;
+use super::ssh::{RsyncProgress, Ssh};
 use super::stamp::{compute_provision_stamp, parse_stamp, ProvisionStamp};
 use super::{REMOTE_DIR, TTS_PORT};
+
+/// One labelled rsync progress stream off the shared live sender: `None`
+/// keeps the push silent.
+fn progress<'a>(
+    live: Option<&'a tokio::sync::mpsc::UnboundedSender<String>>,
+    label: &'a str,
+) -> Option<RsyncProgress<'a>> {
+    live.map(|tx| RsyncProgress { tx, label })
+}
 
 /// What a probe found on a machine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -134,6 +143,70 @@ pub fn normalize_os(raw: &str) -> String {
     }
 }
 
+/// Whether a provision may chase a missing tool with a package manager.
+///
+/// The rule lives here, once, because two call sites read it and a second copy
+/// is how they drift. No on a box that already has everything and was not
+/// forced to redo it: the answer will not change, and `ensure_opencode`'s
+/// install is bounded at ten minutes — spent on every `B` press of a healthy
+/// cluster, which is what made a catch-up look like a hang. Yes otherwise,
+/// including on `force`, which is the operator explicitly asking for the slow
+/// path.
+fn may_install(configured: bool, force: bool) -> bool {
+    force || !configured
+}
+
+/// The `opencode` step, in two flavours.
+///
+/// Both start with the same `command -v`: a box that has it pays one round
+/// trip either way. The difference is what happens when it does not. On a
+/// fresh or forced provision the box is chased with `npm i -g` (bounded at ten
+/// minutes, and genuinely needed for the digest lane). On a box that already
+/// passed a full provision it is reported instead — the answer is not going to
+/// change because `B` was pressed again, and re-running a failing install on
+/// every press is what made a healthy cluster's start take minutes.
+fn opencode_script(allow_install: bool) -> String {
+    if allow_install {
+        r#"command -v opencode >/dev/null 2>&1 && { echo "OPENCODE-OK (present)"; exit 0; }
+command -v npm >/dev/null 2>&1 || { echo "OPENCODE-SKIP (npm missing; install node first)"; exit 0; }
+mkdir -p "$HOME/.local"
+npm i -g --prefix "$HOME/.local" opencode-ai >/dev/null 2>&1 && echo "OPENCODE-OK (installed)" || echo "OPENCODE-SKIP (npm install failed)""#
+            .into()
+    } else {
+        r#"command -v opencode >/dev/null 2>&1 && { echo "OPENCODE-OK (present)"; exit 0; }
+echo "OPENCODE-SKIP (already configured — not reinstalling; force a re-provision to try again)""#
+            .into()
+    }
+}
+
+/// The `ffmpeg` step. Same split as [`opencode_script`], and here the cheap
+/// half is most of the value: `command -v ffmpeg` is what a healthy box runs,
+/// and the package-manager branch below is only reached on a box that has
+/// neither ffmpeg nor a reason to be chased for it again.
+fn ffmpeg_script(allow_install: bool) -> String {
+    if allow_install {
+        r#"export DEBIAN_FRONTEND=noninteractive
+if command -v ffmpeg >/dev/null 2>&1; then echo "FFMPEG-OK (present)"; exit 0; fi
+install() { $1 >/dev/null 2>&1; }
+if command -v apt-get >/dev/null 2>&1; then
+  sudo -n apt-get install -y ffmpeg >/dev/null 2>&1 || install "apt-get install -y ffmpeg"
+elif command -v dnf >/dev/null 2>&1; then
+  sudo -n dnf install -y ffmpeg >/dev/null 2>&1 || install "dnf install -y ffmpeg"
+elif command -v yum >/dev/null 2>&1; then
+  sudo -n yum install -y ffmpeg >/dev/null 2>&1 || install "yum install -y ffmpeg"
+else
+  echo "FFMPEG-SKIP (no known package manager — install ffmpeg by hand)"; exit 0
+fi
+if command -v ffmpeg >/dev/null 2>&1; then echo "FFMPEG-OK (installed)"; else echo "FFMPEG-SKIP (install refused — needs sudo? run: sudo apt-get install -y ffmpeg)"; fi
+"#
+            .into()
+    } else {
+        r#"if command -v ffmpeg >/dev/null 2>&1; then echo "FFMPEG-OK (present)"; exit 0; fi
+echo "FFMPEG-SKIP (already configured — not reinstalling; force a re-provision to try again)""#
+            .into()
+    }
+}
+
 impl Ssh {
     /// Ask a machine what it already has.
     pub fn probe(&self) -> Probe {
@@ -256,8 +329,12 @@ echo "probe=done"
     }
 
     /// Install or upgrade the agent binary, then verify it runs.
-    pub fn install_agent(&self, agent_binary: &Path) -> Result<String> {
-        self.rsync_push(agent_binary, "bm-agent", false)?;
+    pub fn install_agent(
+        &self,
+        agent_binary: &Path,
+        live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Result<String> {
+        self.rsync_push(agent_binary, "bm-agent", false, progress(live, "agent"))?;
         let script = format!(
             "chmod +x $HOME/{d}/bm-agent && $HOME/{d}/bm-agent --version",
             d = REMOTE_DIR
@@ -277,11 +354,15 @@ echo "probe=done"
     /// through the layout; naming them root-relative shipped no cast at all
     /// the moment a workspace was selected, and the worker then rendered with
     /// the catalogue's default voices.
-    pub fn install_sources(&self, layout: &crate::Layout) -> Result<()> {
+    pub fn install_sources(
+        &self,
+        layout: &crate::Layout,
+        live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Result<()> {
         for rel in ["prompts", "assets", "refs"] {
             let src = layout.root.join(rel);
             if src.exists() {
-                self.rsync_push(&src, rel, true)?;
+                self.rsync_push(&src, rel, true, progress(live, rel))?;
             }
         }
         for (engine, rel) in [
@@ -290,7 +371,7 @@ echo "probe=done"
         ] {
             let src = layout.cast(engine);
             if src.exists() {
-                self.rsync_push(&src, rel, false)?;
+                self.rsync_push(&src, rel, false, progress(live, rel))?;
             }
         }
         // `python/` used to be pushed here. It is not any more: the sidecar is
@@ -306,7 +387,7 @@ echo "probe=done"
         // holding a different declaration is a silent desync.
         let manifest = layout.root.join("voices.json");
         if manifest.exists() {
-            self.rsync_push(&manifest, "voices.json", false)?;
+            self.rsync_push(&manifest, "voices.json", false, progress(live, "voices.json"))?;
         }
         Ok(())
     }
@@ -328,8 +409,9 @@ echo "probe=done"
         &self,
         tts_binary: &Path,
         runtime_dir: Option<&Path>,
+        live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<String> {
-        self.rsync_push(tts_binary, "bm-tts", false)?;
+        self.rsync_push(tts_binary, "bm-tts", false, progress(live, "bm-tts"))?;
         if let Some(runtime_dir) = runtime_dir {
             // Whatever the make target staged, rather than a version hardcoded here:
             // the pin lives in the Makefile, and two copies of it would drift.
@@ -352,7 +434,8 @@ echo "probe=done"
             }
             for lib in &libs {
                 let name = lib.file_name().expect("filtered on a file name");
-                self.rsync_push(lib, &name.to_string_lossy(), false)?;
+                let name = name.to_string_lossy();
+                self.rsync_push(lib, &name, false, progress(live, &name))?;
             }
         }
 
@@ -381,7 +464,11 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
     ///
     /// 668 MB, and content-addressed by the stamp's `tts_hash`, so a re-provision
     /// with nothing changed costs one rsync delta rather than a transfer.
-    pub fn install_models(&self, root: &Path) -> Result<String> {
+    pub fn install_models(
+        &self,
+        root: &Path,
+        live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Result<String> {
         let src = root.join("models");
         if !src.is_dir() {
             anyhow::bail!(
@@ -389,7 +476,7 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
                 src.display()
             );
         }
-        self.rsync_push(&src, "models", true)?;
+        self.rsync_push(&src, "models", true, progress(live, "models"))?;
         let script = format!(
             r#"D="$HOME/{d}/models"
 n=$(ls "$D" | wc -l)
@@ -410,14 +497,40 @@ echo "MODELS-OK ($n files)"
 
     /// Best-effort opencode install for the digest lane. Auth stays manual
     /// (browser login); without it remote digests fail loudly, never silently.
-    pub fn ensure_opencode(&self) -> Result<String> {
-        let script = r#"command -v opencode >/dev/null 2>&1 && { echo "OPENCODE-OK (present)"; exit 0; }
-command -v npm >/dev/null 2>&1 || { echo "OPENCODE-SKIP (npm missing; install node first)"; exit 0; }
-mkdir -p "$HOME/.local"
-npm i -g --prefix "$HOME/.local" opencode-ai >/dev/null 2>&1 && echo "OPENCODE-OK (installed)" || echo "OPENCODE-SKIP (npm install failed)""#;
-        let (code, stdout, stderr) = self.run(script, 600)?;
+    pub fn ensure_opencode(&self, allow_install: bool) -> Result<String> {
+        // `allow_install` is false on a box that already passed a full
+        // provision. The check stays — it is one `command -v` — but the install
+        // does not: `npm i -g` is bounded at ten minutes, and on a box whose
+        // answer will not change it was ten minutes of a `B` press that looked
+        // like a hang. A deliberate re-provision still installs.
+        let (code, stdout, stderr) = self.run(&opencode_script(allow_install), 600)?;
         if code != 0 {
             anyhow::bail!("opencode check failed: {}", stderr.trim());
+        }
+        Ok(stdout.trim().to_string())
+    }
+
+    /// Best-effort ffmpeg install for the merge lane.
+    ///
+    /// The merge stage shells out to `ffmpeg`, so a box without it takes every
+    /// merge it is offered and fails each one. This installs it from the
+    /// platform's package manager when it is missing — never a hard failure:
+    /// a refused install (no sudo, an offline mirror) only warns, and the
+    /// worker's `merge` capability gate keeps merge off this box until ffmpeg
+    /// appears. Returns a one-line verdict for the provision log.
+    ///
+    /// `allow_install` carries the same meaning as on [`Self::ensure_opencode`]:
+    /// a present `ffmpeg` short-circuits either way, so the flag only decides
+    /// whether a *missing* one is chased with a package manager this time.
+    pub fn ensure_ffmpeg(&self, allow_install: bool) -> Result<String> {
+        let (code, stdout, stderr) = self.run(&ffmpeg_script(allow_install), 300)?;
+        if code != 0 {
+            // A failure to even run the check is itself a warning, never fatal:
+            // the merge lane stays available to other boxes.
+            return Ok(format!(
+                "FFMPEG-SKIP (check failed: {})",
+                crate::util::head_chars(stderr.trim(), 120)
+            ));
         }
         Ok(stdout.trim().to_string())
     }
@@ -564,6 +677,32 @@ pub fn undeclared_voices(
     out
 }
 
+/// Provision log lines that also stream live: every `push` appends to the
+/// returned vec *and* forwards a copy to the sender, so a slow provision
+/// (models push, package installs) shows each step in the event pane as it
+/// happens instead of dumping everything at the end. `None` keeps the old
+/// collect-only behavior (CLI, tests).
+pub struct LiveLog {
+    pub lines: Vec<String>,
+    live: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+}
+
+impl LiveLog {
+    pub fn new(live: Option<tokio::sync::mpsc::UnboundedSender<String>>) -> Self {
+        LiveLog {
+            lines: Vec::new(),
+            live,
+        }
+    }
+
+    pub fn push(&mut self, line: String) {
+        if let Some(tx) = &self.live {
+            let _ = tx.send(line.clone());
+        }
+        self.lines.push(line);
+    }
+}
+
 /// Full onboarding for one machine: probe, then push only what is missing.
 ///
 /// Returns the log lines the TUI should show, in order.
@@ -577,9 +716,12 @@ pub fn provision(
     agent_version: &str,
     force: bool,
     initial_probe: Option<Probe>,
+    live: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> (Probe, Vec<String>) {
     let ssh = Ssh::for_machine(m);
-    let mut log = Vec::new();
+    // Cloned, not moved: the install steps below borrow the original for
+    // their byte-progress streams.
+    let mut log = LiveLog::new(live.clone());
 
     let probe = match initial_probe {
         Some(p) => {
@@ -595,7 +737,7 @@ pub fn provision(
     };
     if !probe.reachable {
         log.push(format!("[{}] unreachable — aborting provision", m.id));
-        return (probe, log);
+        return (probe, log.lines);
     }
 
     let local_stamp = compute_provision_stamp(&layout.root, agent_version);
@@ -612,7 +754,19 @@ pub fn provision(
             .map(|s| s.tts_in_sync(&local_stamp))
             .unwrap_or(false);
 
-    if probe.configured(agent_version) && !force {
+    // What the box already is, asked once. This gates the install steps at the
+    // bottom of the function as well as the push steps here: on a box that has
+    // everything, provisioning is a *verification*, and the two package
+    // installs are attempts that can each take minutes and cannot succeed on
+    // the second try any more than the first. That is the difference between a
+    // catch-up that costs a round trip per step and one that costs minutes on a
+    // machine that is already working.
+    let already = probe.configured(agent_version) && !force;
+    // Read here, beside `already`, so the two cannot disagree about what this
+    // run is allowed to do — see [`may_install`].
+    let installs = may_install(probe.configured(agent_version), force);
+
+    if already {
         log.push(format!(
             "[{}] already configured (agent {} + tts sidecar)",
             m.id, agent_version
@@ -622,7 +776,7 @@ pub fn provision(
         } else {
             // Sources still sync: cast/asset/prompt updates must reach workers
             // without a venv rebuild. Cheap rsync deltas when nothing changed.
-            match ssh.install_sources(layout) {
+            match ssh.install_sources(layout, live.as_ref()) {
                 Ok(()) => log.push(format!("[{}] sources in sync", m.id)),
                 Err(e) => log.push(format!("[{}] source sync failed: {e}", m.id)),
             }
@@ -630,15 +784,15 @@ pub fn provision(
     } else {
         if let Err(e) = ssh.ensure_root() {
             log.push(format!("[{}] ensure_root failed: {e}", m.id));
-            return (probe, log);
+            return (probe, log.lines);
         }
         log.push(format!("[{}] worker root ready (~/{REMOTE_DIR})", m.id));
 
-        match ssh.install_agent(agent_binary) {
+        match ssh.install_agent(agent_binary, live.as_ref()) {
             Ok(v) => log.push(format!("[{}] agent installed, reports version {v}", m.id)),
             Err(e) => {
                 log.push(format!("[{}] agent install failed: {e}", m.id));
-                return (probe, log);
+                return (probe, log.lines);
             }
         }
 
@@ -648,7 +802,7 @@ pub fn provision(
                 m.id
             ));
         } else {
-            match ssh.install_sources(layout) {
+            match ssh.install_sources(layout, live.as_ref()) {
                 Ok(()) => log.push(format!("[{}] prompts/assets/refs distributed", m.id)),
                 Err(e) => log.push(format!("[{}] source distribution failed: {e}", m.id)),
             }
@@ -659,11 +813,11 @@ pub fn provision(
                 "[{}] installing the TTS sidecar binary + runtime",
                 m.id
             ));
-            match ssh.install_tts_runtime(tts_binary, tts_runtime) {
+            match ssh.install_tts_runtime(tts_binary, tts_runtime, live.as_ref()) {
                 Ok(v) => log.push(format!("[{}] {v}", m.id)),
                 Err(e) => {
                     log.push(format!("[{}] {e}", m.id));
-                    return (probe, log);
+                    return (probe, log.lines);
                 }
             }
         } else {
@@ -679,11 +833,11 @@ pub fn provision(
             log.push(format!("[{}] models in sync (cache match)", m.id));
         } else {
             log.push(format!("[{}] pushing models (~668 MB)", m.id));
-            match ssh.install_models(&layout.root) {
+            match ssh.install_models(&layout.root, live.as_ref()) {
                 Ok(v) => log.push(format!("[{}] {v}", m.id)),
                 Err(e) => {
                     log.push(format!("[{}] {e}", m.id));
-                    return (probe, log);
+                    return (probe, log.lines);
                 }
             }
         }
@@ -724,7 +878,7 @@ pub fn provision(
             Err(e) => log.push(format!("[{}] profile pointer failed: {e}", m.id)),
         },
         Err(_) => log.push(format!(
-            "[{}] no local profile pointer — `profile.sh unpack <name>` first, or this worker will refuse to start",
+            "[{}] no local profile pointer — load one first (`:profile` in the dashboard, or `tools/profile.sh unpack <name>`), or this worker will refuse to start",
             m.id
         )),
     }
@@ -761,9 +915,22 @@ pub fn provision(
         }
     }
 
-    match ssh.ensure_opencode() {
+    match ssh.ensure_opencode(installs) {
         Ok(v) => log.push(format!("[{}] {v}", m.id)),
         Err(e) => log.push(format!("[{}] opencode check failed: {e}", m.id)),
+    }
+
+    // The merge stage's encoder. Installed here so a fresh box can merge; a
+    // refusal is a warning, and the worker reports no `merge` capability
+    // (so the scheduler simply never offers it one) rather than failing
+    // three merges and shelving chapters.
+    match ssh.ensure_ffmpeg(installs) {
+        Ok(v) if v.starts_with("FFMPEG-OK") => log.push(format!("[{}] {v}", m.id)),
+        Ok(v) => log.push(format!(
+            "[{}] {v} — merge stays disabled on this box until ffmpeg is present (apt/dnf install ffmpeg), then force a re-provision",
+            m.id
+        )),
+        Err(e) => log.push(format!("[{}] ffmpeg install check failed: {e}", m.id)),
     }
 
     match ssh.start_tts() {
@@ -782,7 +949,7 @@ pub fn provision(
     // this log. The fix is one package manager away on every platform.
     if !after.ffmpeg_present {
         log.push(format!(
-            "[{}] ffmpeg is not on PATH — this box can crawl/digest/render but every merge it is offered will fail; install it (apt install ffmpeg / dnf install ffmpeg) and provision again",
+            "[{}] ffmpeg is not on PATH — this box can crawl/digest/render but every merge it is offered will fail; install it (apt install ffmpeg / dnf install ffmpeg) and force a re-provision",
             m.id
         ));
     }
@@ -809,12 +976,27 @@ pub fn provision(
             ));
         }
     }
-    (after, log)
+    (after, log.lines)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_log_streams_a_copy_and_keeps_the_lines() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut log = LiveLog::new(Some(tx));
+        log.push("first".into());
+        log.push("second".into());
+        assert_eq!(log.lines, vec!["first", "second"]);
+        assert_eq!(rx.try_recv().unwrap(), "first");
+        assert_eq!(rx.try_recv().unwrap(), "second");
+        // Collect-only mode: no sender, no panic, lines still kept.
+        let mut quiet = LiveLog::new(None);
+        quiet.push("only".into());
+        assert_eq!(quiet.lines, vec!["only"]);
+    }
 
     #[test]
     fn configured_requires_a_matching_agent_and_the_tts_sidecar() {
@@ -841,6 +1023,55 @@ mod tests {
         p.models_present = false;
         p.python_present = true;
         assert!(!p.configured("0.2.0"), "a venv cannot render");
+    }
+
+    #[test]
+    fn only_a_fresh_or_forced_provision_may_install() {
+        // The decision the two `ensure_*` call sites read. A configured box
+        // that nobody forced is the case that made a healthy cluster's `B`
+        // cost minutes: it re-ran package installs that could not change.
+        assert!(may_install(false, false), "a fresh box installs");
+        assert!(may_install(false, true), "force on a fresh box installs");
+        assert!(may_install(true, true), "force re-installs on purpose");
+        assert!(
+            !may_install(true, false),
+            "a box that already has everything is checked, not reinstalled"
+        );
+    }
+
+    #[test]
+    fn a_configured_box_is_checked_but_never_re_installed() {
+        // The waste this exists to stop: `ensure_opencode` can spend ten
+        // minutes in `npm i`, and it ran on *every* provision of *every* box —
+        // including the ones whose answer was not going to change. A catch-up
+        // on a working cluster is a verification, so the install half is
+        // reserved for a fresh or forced provision.
+        for script in [opencode_script(false), ffmpeg_script(false)] {
+            assert!(
+                script.contains("command -v"),
+                "the check must survive: {script}"
+            );
+            assert!(
+                !script.contains("npm i"),
+                "a configured box must not re-run npm: {script}"
+            );
+            assert!(
+                !script.contains("install -y"),
+                "a configured box must not chase the package manager: {script}"
+            );
+            assert!(
+                script.contains("force a re-provision"),
+                "and it must name the way out: {script}"
+            );
+        }
+        // The full path keeps both halves: a fresh box still gets them.
+        assert!(opencode_script(true).contains("npm i -g"));
+        assert!(ffmpeg_script(true).contains("install -y ffmpeg"));
+        // A box that already has the tool short-circuits in *both* flavours —
+        // the flag only decides what happens when it is missing.
+        for script in [opencode_script(true), opencode_script(false)] {
+            assert!(script.contains(r#"command -v opencode >/dev/null 2>&1 && { echo "OPENCODE-OK (present)"; exit 0; }"#));
+        }
     }
 
     #[test]

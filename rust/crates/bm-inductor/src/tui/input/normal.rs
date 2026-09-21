@@ -4,7 +4,7 @@ use crate::tui::{
     input::{dispatch, runconfig::run_preview},
     jobs::Job,
     screen::{Confirm, ConfirmAction, Screen, TasksView, TextKind, TextPrompt},
-    style::{Conn, Level},
+    style::{theme_next, Conn, Level, Theme},
 };
 use crossterm::event::{KeyCode, KeyEvent};
 use std::sync::{atomic::AtomicBool, Arc};
@@ -47,9 +47,19 @@ pub(crate) async fn normal_key(
             app.set_status(Level::Info, "command mode — Enter runs it, Esc closes");
         }
         KeyCode::Char('C') => {
-            app.colour = !app.colour;
-            let on = if app.colour { "on" } else { "off" };
-            app.set_status(Level::Info, format!("colour {on}"));
+            // The theme cycle: default → dim → mono. The palette itself is
+            // resolved by `style_of`/`themed`, so flipping the theme here is
+            // the whole change — no pane repaints specially.
+            let to = theme_next();
+            app.theme = Theme::ALL
+                .iter()
+                .find(|t| t.label() == to)
+                .copied()
+                .unwrap_or_default();
+            app.set_status(
+                Level::Info,
+                format!("theme {} (C cycles)", app.theme.label()),
+            );
         }
         KeyCode::Char('r') => {
             app.refresh(http).await;
@@ -76,6 +86,28 @@ pub(crate) async fn normal_key(
         KeyCode::Char('i') => match app.selected_machine() {
             None => app.set_status(Level::Warn, "no machine selected"),
             Some(m) => app.screen = Screen::Machine(m.addr.clone()),
+        },
+        // The work policy for the selected box: which stages it may run and in
+        // what order. Read-only keys open screens directly; this one edits
+        // scheduling, but it is per-machine and reversible, so it sits beside
+        // `i` rather than behind a `:` confirmation.
+        KeyCode::Char('P') => match app.selected_machine() {
+            None => app.set_status(
+                Level::Warn,
+                "no machine selected — the policy editor works on one box",
+            ),
+            Some(m) => {
+                let label = crate::tui::model::machine_label(&m);
+                app.screen = Screen::Policy(crate::tui::screen::PolicyView::new(
+                    m.addr.clone(),
+                    label,
+                    m.effective_task_policy(),
+                ));
+                app.set_status(
+                    Level::Info,
+                    "work policy — ↑↓ move · Space grab · Enter toggle · Esc close",
+                );
+            }
         },
         KeyCode::Char('B') => {
             // Backend up now, boxes join in background — a second press
@@ -138,7 +170,6 @@ pub(crate) async fn normal_key(
                 'a' | 'A'
                     | 'N'
                     | 'p'
-                    | 'P'
                     | 'd'
                     | 't'
                     | 'c'
@@ -150,6 +181,9 @@ pub(crate) async fn normal_key(
                     | 'm'
                     | 'B'
                     | 'X'
+                    | 'w'
+                    | 'o'
+                    | 'l'
             ) =>
         {
             app.set_status(
