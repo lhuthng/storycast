@@ -22,6 +22,21 @@ They are separate on purpose. The operator's key never goes on a box, and a box
 that is compromised cannot launch or terminate anything — it can only read its
 own assets. Do not be tempted to reuse one for both.
 
+```mermaid
+flowchart LR
+    YOU["your identity<br/>AWS_PROFILE · SSO session · instance role"]
+    CRED[".bm/aws/credentials<br/>0600 · gitignored · AWS INI<br/>profile storycast"]
+    APP["bm-inductor aws …"]
+    BOX["a box's own role<br/>storycast-worker"]
+    YOU -.->|"five AWS_* vars stripped from every child —<br/>there is nothing left to fall back to"| APP
+    CRED -->|"AWS_SHARED_CREDENTIALS_FILE"| APP
+    APP ==>|"iam:PassRole, scoped to one role"| BOX
+    BOX -.->|"reads its own assets only;<br/>it cannot launch or terminate"| APP
+```
+
+The dotted edge is the one to read twice: it is a *non*-edge. The app does not
+consult your identity at all, and the box cannot act as the operator.
+
 ## Where the operator's credentials live
 
 **One place: `.bm/aws/credentials`.** 0600, gitignored, written in **AWS's own

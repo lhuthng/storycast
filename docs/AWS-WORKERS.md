@@ -13,6 +13,24 @@ itself. Creating it is [AWS-IAM-USER.md](AWS-IAM-USER.md).
 If you just want it running, this is the whole sequence. The sections after this
 explain *why* each one is shaped that way; this is the *what*.
 
+```mermaid
+flowchart TB
+    C["once per account — console<br/>IAM user · policy · its access key<br/>worker role · keypair · security group"] --> L[":login<br/>accessKeys.csv → .bm/aws/credentials"]
+    L --> D[":discover<br/>.pem + the account → .bm/aws.json"]
+    D --> P[":profile load<br/>REQUIRED — the tag records the hash"]
+    P --> DRY["aws up --dry-run<br/>the one review step, CLI-only"]
+    DRY --> B1[":B<br/>backend up"]
+    B1 --> UP[":up 3<br/>launch, and link what it launched"]
+    UP --> B2[":B again<br/>catch-up: one job per box"]
+    B2 --> RUN["chapters render"]
+    RUN --> DOWN[":down<br/>terminate by explicit id"]
+    DOWN --> DROP[":drop<br/>clear the registry entries"]
+```
+
+Two steps in that chain are the ones people skip and regret: **`:profile load`
+before `:up`** (a launch with no loaded profile is refused), and **`aws up
+--dry-run`** before the first real spend.
+
 **It is driven from the TUI.** Storing the key, reading the account into the
 pool, launching, linking, provisioning, starting workers and destroying boxes are
 all `:` commands. The only step outside the dashboard is the AWS **console** —
@@ -88,7 +106,7 @@ no `aws ls` → `:add` copy-paste step:
 | `:B` | backend up. `:up` and `:prov` `POST` to the API, so nothing works without this |
 | `:up 3` | launch three tagged boxes; each is registered with the pool's `.pem` (`AwsConfig::key_file()`) and `ssh_user` |
 | `:pool` (`l`) | the Cloud view: what the account holds, and what is `not linked` |
-| `:B` again | provision every linked box that is not ready, then start its worker — the catch-up that brings a fresh pool up |
+| `:B` again | the catch-up: every linked box that is **not already working** gets its own provision-and-start job, all at once. A box already `online` is skipped and says so — re-provisioning a working box is what used to make this slow. `p` is the deliberate re-provision |
 | `↓` then `:prov` (`p`) | provision one box and start its worker, if you prefer per-box control |
 
 `:up` asks nothing before it spends — the guard that matters is `max_workers` in
