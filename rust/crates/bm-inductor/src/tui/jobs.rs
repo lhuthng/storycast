@@ -6,6 +6,7 @@ use crate::tui::{
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use bm_proto::{Machine, MachineState, Op, OpRequest, Roster};
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -18,6 +19,35 @@ pub(crate) struct BackgroundJob {
     pub(crate) queued: Instant,
     pub(crate) started: Option<Instant>,
     pub(crate) activity: String,
+}
+
+/// Something only one job at a time may hold.
+///
+/// Ordered so a job that names several can take them in a stable order — two
+/// jobs with overlapping sets then queue rather than deadlock. See
+/// [`Job::resources`] for which job names what.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Res {
+    /// The default lane: every job with no real conflict with anything.
+    Command,
+    /// The backend and the worker fleet as a whole.
+    Cluster,
+    /// One machine's ssh/rsync channel.
+    Box(String),
+    /// The AWS account, and the `.bm/aws/` document it is written into.
+    Aws,
+}
+
+impl Res {
+    /// How the jobs screen names this resource. Short — it sits on one row.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Res::Command => "the command lane".into(),
+            Res::Cluster => "the cluster".into(),
+            Res::Box(addr) => format!("box {addr}"),
+            Res::Aws => "the aws account".into(),
+        }
+    }
 }
 
 /// What `:workspace` was asked to do. Parsed at submit, so the prompt can
@@ -49,12 +79,20 @@ pub(crate) enum Job {
     /// Touches nothing else: no veto, no restart, no other worker.
     /// `settings_key` is the app-wide default the ssh chain falls back to
     /// when the machine carries no key of its own.
+    ///
+    /// `cancel` is the `B` start's flag when the catch-up dispatched this, and
+    /// `None` for a `:prov` the operator asked for by hand. It gates the *last*
+    /// step — the worker launch — so an `X` that lands while a push is in
+    /// flight cannot be followed by a fresh worker on a box the operator just
+    /// stopped. It does not abort the push: that is one blocking rsync, and
+    /// killing it mid-file is how a box ends up half-configured.
     Provision {
         layout: bm_core::Layout,
         api: String,
         machine: Machine,
         force: bool,
         settings_key: Option<String>,
+        cancel: Option<Arc<AtomicBool>>,
     },
     AddMachine {
         api: String,
@@ -64,10 +102,18 @@ pub(crate) enum Job {
     /// Start the local backend, then run a range on it once live.
     /// `enqueue` is false for bare `B` (backend only) and true for the run
     /// screen's Enter (backend + job). `machines` is the registry snapshot at
-    /// submit. Degraded start: the backend goes up first (seconds), then each
-    /// box provisions in the background and joins as it becomes ready — a
+    /// submit. Degraded start: the backend goes up first (seconds), then the
+    /// boxes that still need work are handed out **as their own jobs** — a
     /// failing box lands in Error, never vetoes the rest. `cancel` lets `X`
-    /// stop the catch-up loop between boxes.
+    /// stop the catch-up between boxes.
+    ///
+    /// The catch-up is *not* run here. This job used to loop over every box
+    /// itself, so a job called "start backend" — which should take seconds —
+    /// held the cluster for as long as provisioning every machine took, and
+    /// everything else queued behind it. It now finishes as soon as the
+    /// inductor answers and emits [`Ev::CatchUp`]; the dashboard turns that
+    /// into one `Provision` per box, each visible, each cancellable, and all
+    /// of them in parallel.
     StartBackend {
         layout: bm_core::Layout,
         api: String,
@@ -167,6 +213,65 @@ pub(crate) enum Job {
         api: String,
         req: ProfileReq,
     },
+    /// What the account holds: one read-only `describe-instances`, handed to
+    /// the Cloud view. Launches nothing, touches no worker. After the read it
+    /// also asks the inductor to auto-relink any EC2 box whose address moved.
+    AwsPool {
+        root: std::path::PathBuf,
+        api: String,
+        http: reqwest::Client,
+    },
+    /// Save one machine's work policy: which stages it may run and in what
+    /// order. Small and quiet — the editor sends one after every change so the
+    /// panel never holds an unsaved decision.
+    SaveTaskPolicy {
+        api: String,
+        http: reqwest::Client,
+        addr: String,
+        task_policy: Vec<bm_proto::TaskPref>,
+    },
+    /// Re-point a box whose EC2 public IP drifted (stop/start, spot relaunch)
+    /// at the address it carries *now*. The instance id — stable for the box's
+    /// whole life — comes from the machine's note; the account read supplies
+    /// the current address and the registry swap happens in the API, which
+    /// also keeps the live inductor's map consistent.
+    RelinkMachine {
+        layout: bm_core::Layout,
+        api: String,
+        http: reqwest::Client,
+        /// The registry record as the operator selected it — its note carries
+        /// the EC2 instance id to match on, its name the handle to keep.
+        machine: Machine,
+    },
+    /// Store the app's IAM user from the console's CSV, off the UI thread.
+    ///
+    /// The secret is never typed in the dashboard, so the CSV is the only
+    /// route offered — it carries both halves and the verify-then-write order
+    /// is `aws_ops::login`, the same one the CLI runs.
+    AwsLogin {
+        root: std::path::PathBuf,
+        csv: std::path::PathBuf,
+    },
+    /// Read the account and write the pool definition: AMI, subnet, security
+    /// group, keypair and instance profile. `aws show` without the terminal.
+    AwsDiscover {
+        root: std::path::PathBuf,
+        args: crate::aws_ops::DiscoverArgs,
+    },
+    /// Launch boxes, stream the lines, then **link what came back** into the
+    /// registry — the join is made in the same job that reads the launch reply,
+    /// so no instance id ever has to be correlated to a machine later.
+    AwsUp {
+        root: std::path::PathBuf,
+        api: String,
+        http: reqwest::Client,
+        count: u32,
+    },
+    /// Terminate explicit instance ids, stream the lines, refresh the list.
+    AwsDown {
+        root: std::path::PathBuf,
+        ids: Vec<String>,
+    },
 }
 
 impl Job {
@@ -193,6 +298,8 @@ impl Job {
             Job::StopBackend { .. } => "stop backend",
             Job::AddSample { .. } => "add sample",
             Job::DropMachine { .. } => "drop machine",
+            Job::RelinkMachine { .. } => "relink machine",
+            Job::SaveTaskPolicy { .. } => "save task policy",
             Job::Op { req, .. } => req.op.as_str(),
             Job::LoadRoster { .. } => "load roster",
             Job::LoadLines { .. } => "index audition lines",
@@ -209,16 +316,57 @@ impl Job {
                 ProfileReq::Load(_) => "load profile",
                 ProfileReq::Pack(_) => "pack profile",
             },
+            Job::AwsPool { .. } => "aws pool",
+            Job::AwsUp { .. } => "aws up",
+            Job::AwsDown { .. } => "aws down",
+            Job::AwsLogin { .. } => "aws login",
+            Job::AwsDiscover { .. } => "aws discover",
             Job::Tracked { .. } => unreachable!(),
         }
         .to_string()
     }
 
-    pub(crate) fn lifecycle(&self) -> bool {
-        matches!(
-            self.bare(),
-            Job::StartBackend { .. } | Job::StopBackend { .. } | Job::Provision { .. }
-        )
+    /// What this job needs to itself for its whole life.
+    ///
+    /// The scheduler starts a job the moment nothing else holds any of these,
+    /// so **two jobs with nothing in common run at once**. That is the whole
+    /// difference from the boolean "lane" this replaced: `aws discover` used to
+    /// queue behind a five-minute box provision because both were filed under
+    /// "lifecycle", and a provision of box A queued behind one of box B.
+    ///
+    /// Only name a resource where there is a real conflict. A job that names
+    /// nothing conflicting is `Command` — the old command lane, which stays
+    /// serial among its own members on purpose (two model-loading previews at
+    /// once is not a thing anyone asked for).
+    pub(crate) fn resources(&self) -> Vec<Res> {
+        match self.bare() {
+            // One cluster, one lifecycle: `B` and `X` must never interleave,
+            // and either is meaningless while the other runs.
+            Job::StartBackend { .. } | Job::StopBackend { .. } => vec![Res::Cluster],
+            // Per box, not per fleet: two boxes provision independently, and
+            // pushing to both at once is the point of naming the address.
+            Job::Provision { machine, .. } => vec![Res::Box(machine.addr.clone())],
+            // These four read-modify-write `.bm/aws/` and the account it
+            // describes. Interleaving them loses a write or double-launches.
+            Job::AwsUp { .. }
+            | Job::AwsDown { .. }
+            | Job::AwsLogin { .. }
+            | Job::AwsDiscover { .. } => vec![Res::Aws],
+            _ => vec![Res::Command],
+        }
+    }
+
+    /// The one thing worth naming on the jobs screen, or `None`.
+    ///
+    /// `Res::Command` is the default lane — true of most jobs and worth
+    /// nothing on a row — so it is filtered out. A job that shows a resource
+    /// is a job that can be *blocked*, and the row says by what: "queued ·
+    /// needs box 10.0.0.5" is the answer to "why is this not running".
+    pub(crate) fn resource_label(&self) -> Option<String> {
+        self.resources()
+            .iter()
+            .find(|r| !matches!(r, Res::Command))
+            .map(Res::label)
     }
 
     pub(crate) fn fallback_done(&self) -> DoneKind {
@@ -307,6 +455,15 @@ pub(crate) enum Ev {
         start: u32,
         count: u32,
     },
+    /// The boxes a `B` start still has to catch up, and the flag that can stop
+    /// it. The job does not provision them itself — it hands them to the
+    /// dashboard, which dispatches one `Provision` per box so each gets its own
+    /// row on the jobs screen and its own resource to hold. `cancel` is the
+    /// same flag the `B` press created, so `X` still stops the catch-up.
+    CatchUp {
+        machines: Vec<Machine>,
+        cancel: Arc<AtomicBool>,
+    },
     /// Push a machine's state directly into the TUI's in-memory list.
     MachineUpdate {
         addr: String,
@@ -323,6 +480,9 @@ pub(crate) enum Ev {
     /// payload allocating a 512-byte node. A reload is rare and one allocation
     /// is nothing; a progress tick is neither.
     Sounds(Result<Box<crate::tui::sound::SoundData>, String>),
+    /// A fresh account listing, or the reason it could not be read. The Cloud
+    /// view renders it and marks rows absent from the registry.
+    Cloud(Result<Vec<bm_core::provision::AwsInstance>, String>),
 }
 
 /// Bounded wait for a freshly spawned inductor to answer `/api/state`.
@@ -428,6 +588,54 @@ fn send(tx: &tokio::sync::mpsc::UnboundedSender<Ev>, level: Level, text: String)
     }));
 }
 
+/// The state a failed provision leaves behind.
+///
+/// Usually `Error`: the operator asked, it did not work, and the note says why.
+///
+/// The exception is a box we already knew was **booting** that never answered
+/// ssh. The probe learned nothing it did not already know, so calling it broken
+/// is the same misreading the `initializing` state exists to prevent — and
+/// `:prov` a few seconds after `:up` is the most likely way to hit it. It stays
+/// `initializing`, and the boot deadline is what gives up.
+///
+/// Note that restoring `initializing` re-stamps its clock, so a box nobody
+/// touches again expires five minutes after the *last* attempt. That is the
+/// right rule: while the operator is retrying, somebody is watching it.
+pub(crate) fn verdict_after_failed_provision(
+    was_initializing: bool,
+    reachable: bool,
+) -> MachineState {
+    if was_initializing && !reachable {
+        MachineState::Initializing
+    } else {
+        MachineState::Error
+    }
+}
+
+/// Run a blocking provision with its log lines streaming into the event pane
+/// as they happen: each step lands with a wall timestamp, so a slow box
+/// reads as progress rather than a stall. The pump drains before returning,
+/// so everything the caller sends afterwards stays in order.
+async fn provision_live(
+    tx: &tokio::sync::mpsc::UnboundedSender<Ev>,
+    run: impl FnOnce(tokio::sync::mpsc::UnboundedSender<String>) -> crate::ProvisionOutcome
+        + Send
+        + 'static,
+) -> Result<crate::ProvisionOutcome, tokio::task::JoinError> {
+    let (live_tx, mut live_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let fwd = tx.clone();
+    let pump = tokio::spawn(async move {
+        while let Some(line) = live_rx.recv().await {
+            send(&fwd, Level::Info, line);
+        }
+    });
+    let out = tokio::task::spawn_blocking(|| run(live_tx)).await;
+    // The run owned the only sender, so its end closes the channel: awaiting
+    // the pump flushes every line before the caller continues.
+    let _ = pump.await;
+    out
+}
+
 pub(crate) async fn job_provision(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     layout: bm_core::Layout,
@@ -435,9 +643,14 @@ pub(crate) async fn job_provision(
     machine: Machine,
     force: bool,
     settings_key: Option<String>,
+    cancel: Option<Arc<AtomicBool>>,
 ) {
     let addr = machine.addr.clone();
     send(&tx, Level::Info, format!("[{addr}] provisioning machine…"));
+    // Read before the run: the job stamps `provisioning` below, so the state on
+    // the way in is the only record that this box was still booting. A failed
+    // probe against a box we knew was booting is a wait, not a fault.
+    let was_initializing = machine.state == MachineState::Initializing;
     let mut again = machine.clone();
     // The app-wide default fills a keyless box; a box key always wins.
     let key = bm_core::provision::resolve_key(machine.ssh_key.as_deref(), settings_key.as_deref())
@@ -475,7 +688,7 @@ pub(crate) async fn job_provision(
     )
     .await;
     let for_provision = layout.clone();
-    let out = tokio::task::spawn_blocking(move || {
+    let out = provision_live(&tx, move |live| {
         crate::provision_machine(
             &for_provision,
             &machine.addr,
@@ -483,11 +696,14 @@ pub(crate) async fn job_provision(
             machine.ssh_port,
             key,
             force,
+            Some(live),
         )
     })
     .await;
     match out {
-        Ok((ready, lines)) => {
+        Ok(out) => {
+            let ready = out.ready;
+            let lines = out.lines;
             // Extract the most actionable line from the provision log:
             // prefer the inner root cause (e.g. "rsync: command not
             // found") over the outer wrapper ("agent install failed").
@@ -506,14 +722,27 @@ pub(crate) async fn job_provision(
                     bm_core::util::head_chars(raw, 120)
                 })
                 .unwrap_or_default();
-            for l in lines {
-                send(&tx, Level::Info, l);
-            }
+            // Lines already streamed live above — `lines` stays for the
+            // `fail_reason` scan only, never re-sent.
             if ready {
+                // `X` landed while this box was being pushed: the box is
+                // provisioned, but giving it a worker now would leave the
+                // cluster running after the stop the operator asked for. The
+                // push itself is not aborted — it is one blocking rsync, and
+                // killing it mid-file is how a box ends up half-configured —
+                // so the stop is honoured at the last point that matters.
+                if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    let note = "start cancelled (X) — provisioned, worker not launched";
+                    send_update(&tx, MachineState::Configured, note);
+                    set_machine_state(&api, &layout, &addr, MachineState::Configured, note).await;
+                    send(&tx, Level::Info, format!("[{addr}] {note}"));
+                    let _ = tx.send(Ev::Done(DoneKind::Other));
+                    return;
+                }
                 send_update(
                     &tx,
-                    MachineState::Provisioning,
-                    "worker launched — Online on its first beat",
+                    MachineState::Configured,
+                    "provisioned — waiting for the worker's first beat",
                 );
                 send(
                     &tx,
@@ -522,78 +751,82 @@ pub(crate) async fn job_provision(
                 );
                 // Worker half only, never the inductor: a `p` retry
                 // finishes with the box joined, whatever else runs.
-                if crate::backend::is_local_addr(&addr) {
-                    for l in crate::backend::start_local_worker(&layout.root, &api) {
-                        send(&tx, Level::Info, format!("[{addr}] {l}"));
+                // One entry point, whatever the box is: the launcher decides
+                // fork-versus-ssh and nothing here asks which it got.
+                let root = layout.root.clone();
+                let boxm = again;
+                match tokio::task::spawn_blocking(move || {
+                    crate::backend::start_workers(&[boxm], &root)
+                })
+                .await
+                {
+                    Ok((true, lines)) => {
+                        for l in lines {
+                            send(&tx, Level::Info, l);
+                        }
                     }
-                } else {
-                    let port = crate::backend::api_port(&api);
-                    // The operator's advertised address, read once here: the
-                    // launcher cannot reach `settings` from inside its own
-                    // blocking task, and a box off the LAN needs it.
-                    let advertise = advertised_host(&layout);
-                    match tokio::task::spawn_blocking(move || {
-                        crate::backend::start_remote_workers(&[again], port, advertise.as_deref())
-                    })
-                    .await
-                    {
-                        Ok((true, lines)) => {
-                            for l in lines {
-                                send(&tx, Level::Info, l);
-                            }
+                    Ok((false, lines)) => {
+                        for l in lines {
+                            send(&tx, Level::Error, l);
                         }
-                        Ok((false, lines)) => {
-                            for l in lines {
-                                send(&tx, Level::Error, l);
-                            }
-                            send_update(
-                                &tx,
-                                MachineState::Error,
-                                "provisioned but the worker would not start — :prov again",
-                            );
-                            set_machine_state(
-                                &api,
-                                &layout,
-                                &addr,
-                                MachineState::Error,
-                                "provisioned but the worker would not start — :prov again",
-                            )
-                            .await;
-                            let _ = tx.send(Ev::Done(DoneKind::Other));
-                            return;
-                        }
-                        Err(e) => {
-                            send(
-                                &tx,
-                                Level::Error,
-                                format!("[{addr}] worker start task failed: {e}"),
-                            );
-                            send_update(
-                                &tx,
-                                MachineState::Error,
-                                "provisioned but the worker start crashed — :prov again",
-                            );
-                            set_machine_state(
-                                &api,
-                                &layout,
-                                &addr,
-                                MachineState::Error,
-                                "provisioned but the worker start crashed — :prov again",
-                            )
-                            .await;
-                            let _ = tx.send(Ev::Done(DoneKind::Other));
-                            return;
-                        }
+                        send_update(
+                            &tx,
+                            MachineState::Error,
+                            "provisioned but the worker would not start — :prov again",
+                        );
+                        set_machine_state(
+                            &api,
+                            &layout,
+                            &addr,
+                            MachineState::Error,
+                            "provisioned but the worker would not start — :prov again",
+                        )
+                        .await;
+                        let _ = tx.send(Ev::Done(DoneKind::Other));
+                        return;
+                    }
+                    Err(e) => {
+                        send(
+                            &tx,
+                            Level::Error,
+                            format!("[{addr}] worker start task failed: {e}"),
+                        );
+                        send_update(
+                            &tx,
+                            MachineState::Error,
+                            "provisioned but the worker start crashed — :prov again",
+                        );
+                        set_machine_state(
+                            &api,
+                            &layout,
+                            &addr,
+                            MachineState::Error,
+                            "provisioned but the worker start crashed — :prov again",
+                        )
+                        .await;
+                        let _ = tx.send(Ev::Done(DoneKind::Other));
+                        return;
                     }
                 }
                 set_machine_state(
                     &api,
                     &layout,
                     &addr,
-                    MachineState::Provisioning,
-                    "worker launched — Online on its first beat",
+                    MachineState::Configured,
+                    "provisioned — waiting for the worker's first beat",
                 )
                 .await;
+            } else if verdict_after_failed_provision(was_initializing, out.reachable)
+                == MachineState::Initializing
+            {
+                // It never answered ssh, and we already knew it was booting —
+                // so this is a wait, not a fault. Reporting `Error` here would
+                // call a box twenty seconds into its first boot broken, which
+                // is precisely the misreading `initializing` exists to stop.
+                let note = "still booting — nothing to do yet, :prov again in a moment";
+                send_update(&tx, MachineState::Initializing, note);
+                set_machine_state(&api, &layout, &addr, MachineState::Initializing, note).await;
+                send(&tx, Level::Info, format!("[{addr}] {note}"));
             } else {
                 // The note carries the actual failing step from the
                 // provision log (python missing, ssh abort, …) — a
@@ -737,8 +970,10 @@ pub(crate) async fn job_start_backend(
     // Degraded start: the backend goes up first (seconds), then each
     // box provisions in the background and joins as it becomes ready.
     // A failing box lands in Error with its reason — it never vetoes
-    // the rest. Sequential, not parallel: one ssh flow at a time keeps
-    // `X` cancellation prompt between boxes.
+    // the rest. The catch-up is handed to the dashboard rather than run
+    // here (see the hand-off at the end of this function), so the boxes
+    // provision **concurrently** — each one holds its own `Res::Box`,
+    // and `X` reaches them all through the shared `cancel` flag.
     if start_cancelled(&tx, &cancel) {
         return;
     }
@@ -849,159 +1084,54 @@ pub(crate) async fn job_start_backend(
         let _ = tx.send(Ev::Done(DoneKind::StartDone));
         return;
     }
-    // Catch-up loop: provision one box, launch its worker, next.
-    let mut failed: Vec<String> = Vec::new();
-    for m in &targets {
-        if start_cancelled(&tx, &cancel) {
-            return;
+    // The boxes that still need work are handed to the dashboard as jobs of
+    // their own, and this job ends here.
+    //
+    // This is where the inline catch-up loop used to be, and the difference is
+    // the whole point of the change: the loop made one job hold the cluster for
+    // as long as provisioning every box took, so `start backend` — a press that
+    // should be seconds — showed minutes and every later job sat queued behind
+    // it. Each box now gets its own `provision machine` row, all of them
+    // running at once because they hold different boxes.
+    //
+    // A box already beating needs nothing: `online` is the state this path
+    // exists to reach, and it is *working*. Re-provisioning it anyway is why
+    // `B` on a healthy cluster took minutes, so it is skipped and said out
+    // loud — `p` is the deliberate re-provision.
+    let mut todo: Vec<Machine> = Vec::new();
+    let mut online: Vec<String> = Vec::new();
+    for mut m in targets {
+        if m.state == MachineState::Online {
+            online.push(m.addr.clone());
+            continue;
         }
-        let addr = m.addr.clone();
-        send(&tx, Level::Info, format!("[{addr}] provisioning machine…"));
-        set_machine_state(
-            &api,
-            &layout,
-            &addr,
-            MachineState::Provisioning,
-            "catching up in background",
-        )
-        .await;
-        let (mc, mf, mp) = (m.addr.clone(), m.ssh_user.clone(), m.ssh_port);
-        let mk = resolve(m);
-        // The loop keeps `layout` for its own bookkeeping, so the blocking
-        // task gets its own copy.
-        let for_box = layout.clone();
-        let out = tokio::task::spawn_blocking(move || {
-            crate::provision_machine(&for_box, &mc, &mf, mp, mk, false)
-        })
-        .await;
-        if start_cancelled(&tx, &cancel) {
-            return;
-        }
-        match out {
-            Ok((ready, lines)) => {
-                for l in lines {
-                    send(&tx, Level::Info, l);
-                }
-                if !ready {
-                    failed.push(addr.clone());
-                    set_machine_state(
-                        &api,
-                        &layout,
-                        &addr,
-                        MachineState::Error,
-                        "catch-up failed — select it and run :prov to retry",
-                    )
-                    .await;
-                    send(&tx, Level::Error, format!("[{addr}] catch-up failed — cluster runs without it; select it and run :prov to retry"));
-                    continue;
-                }
-            }
-            Err(e) => {
-                failed.push(addr.clone());
-                set_machine_state(
-                    &api,
-                    &layout,
-                    &addr,
-                    MachineState::Error,
-                    "catch-up task crashed — :prov to retry",
-                )
-                .await;
-                send(
-                    &tx,
-                    Level::Error,
-                    format!("[{addr}] catch-up task failed: {e}"),
-                );
-                continue;
-            }
-        }
-        if start_cancelled(&tx, &cancel) {
-            return;
-        }
-        send(&tx, Level::Info, format!("[{addr}] launching worker…"));
-        if crate::backend::is_local_addr(&addr) {
-            for l in crate::backend::start_local_worker(&layout.root, &api) {
-                send(&tx, Level::Info, format!("[{addr}] {l}"));
-            }
-        } else {
-            let mut one = m.clone();
-            one.ssh_key = resolve(m);
-            let advertise = advertised_host(&layout);
-            match tokio::task::spawn_blocking(move || {
-                crate::backend::start_remote_workers(&[one], port, advertise.as_deref())
-            })
-            .await
-            {
-                Ok((true, lines)) => {
-                    for l in lines {
-                        send(&tx, Level::Info, l);
-                    }
-                }
-                Ok((false, lines)) => {
-                    for l in lines {
-                        send(&tx, Level::Error, l);
-                    }
-                    failed.push(addr.clone());
-                    set_machine_state(
-                        &api,
-                        &layout,
-                        &addr,
-                        MachineState::Error,
-                        "provisioned but the worker would not start — :prov to retry",
-                    )
-                    .await;
-                    send(
-                        &tx,
-                        Level::Error,
-                        format!("[{addr}] worker start failed — :prov to retry"),
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    failed.push(addr.clone());
-                    set_machine_state(
-                        &api,
-                        &layout,
-                        &addr,
-                        MachineState::Error,
-                        "worker start task crashed — :prov to retry",
-                    )
-                    .await;
-                    send(
-                        &tx,
-                        Level::Error,
-                        format!("[{addr}] worker start task failed: {e}"),
-                    );
-                    continue;
-                }
-            }
-        }
-        set_machine_state(
-            &api,
-            &layout,
-            &addr,
-            MachineState::Provisioning,
-            "ready — Online on its first beat",
-        )
-        .await;
+        // The key is resolved here, once, exactly as the old loop did it: the
+        // catch-up job is handed a box that already knows how to reach it, so
+        // the dispatcher needs no settings of its own.
+        let key = resolve(&m);
+        m.ssh_key = key;
+        todo.push(m);
     }
-    if start_cancelled(&tx, &cancel) {
-        return;
-    }
-    if failed.is_empty() {
+    for addr in &online {
         send(
             &tx,
-            Level::Ok,
-            "all machines caught up — cluster complete".into(),
+            Level::Info,
+            format!("[{addr}] already online — nothing to catch up (press p to re-provision it)"),
         );
-    } else {
+    }
+    if !todo.is_empty() {
         send(
             &tx,
-            Level::Warn,
+            Level::Info,
             format!(
-                "{} machine(s) in Error — cluster runs degraded; select one and run :prov",
-                failed.len()
+                "{} machine(s) to catch up — one job each, running together",
+                todo.len()
             ),
         );
+        let _ = tx.send(Ev::CatchUp {
+            machines: todo,
+            cancel: cancel.clone(),
+        });
     }
     let _ = tx.send(Ev::Done(DoneKind::StartDone));
 }
@@ -1083,6 +1213,171 @@ pub(crate) async fn job_drop_machine(
         Err(e) => (Level::Error, format!("drop {addr} failed: {e}")),
     };
     send(&tx, level, text);
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
+/// Persist one machine's work policy through the API, so the live inductor and
+/// the on-disk `machines.json` agree. Success is silent — the panel is the
+/// feedback — but a rejection is named, because a policy that did not stick is
+/// a scheduling surprise later.
+pub(crate) async fn job_save_task_policy(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    api: String,
+    http: reqwest::Client,
+    addr: String,
+    task_policy: Vec<bm_proto::TaskPref>,
+) {
+    let url = format!("{}/api/machines/policy", api.trim_end_matches('/'));
+    let body = serde_json::json!({"addr": addr, "task_policy": task_policy});
+    match http.post(&url).json(&body).send().await {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => send(
+            &tx,
+            Level::Error,
+            format!("policy save {addr}: the inductor answered HTTP {}", r.status()),
+        ),
+        Err(e) => send(&tx, Level::Error, format!("policy save {addr} failed: {e}")),
+    }
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
+pub(crate) async fn job_relink_machine(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    layout: bm_core::Layout,
+    api: String,
+    http: reqwest::Client,
+    machine: Machine,
+) {
+    let old_addr = machine.addr.clone();
+    // The machine the operator selected carries its identity in the note:
+    // the EC2 instance id `machine_from_instance` stamped at launch. Without
+    // it there is nothing to match a relaunched box by — say so instead of
+    // guessing across the account.
+    let Some(id) = bm_core::provision::ec2_id_from_note(&machine.note) else {
+        send(
+            &tx,
+            Level::Error,
+            format!(
+                "[{}] relink: no EC2 instance id on this machine's record — only EC2-launched boxes can be relinked; :add the new address by hand",
+                old_addr
+            ),
+        );
+        let _ = tx.send(Ev::Done(DoneKind::Other));
+        return;
+    };
+    // Read the account off the UI thread: one describe-instances.
+    let root = layout.root.clone();
+    let pool = tokio::task::spawn_blocking(move || crate::aws_ops::pool(&root)).await;
+    let (cfg, instances) = match pool {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => {
+            send(&tx, Level::Error, format!("relink: aws pool: {e:#}"));
+            let _ = tx.send(Ev::Done(DoneKind::Other));
+            return;
+        }
+        Err(e) => {
+            send(&tx, Level::Error, format!("relink task failed: {e}"));
+            let _ = tx.send(Ev::Done(DoneKind::Other));
+            return;
+        }
+    };
+    let Some(i) = instances.iter().find(|i| i.id == id) else {
+        send(
+            &tx,
+            Level::Error,
+            format!(
+                "[{old_addr}] relink: {id} is not in the account anymore (terminated, or the marker tag is gone) — :drop it and :add the replacement",
+            ),
+        );
+        let _ = tx.send(Ev::Done(DoneKind::Other));
+        return;
+    };
+    if i.state != "running" {
+        send(
+            &tx,
+            Level::Warn,
+            format!(
+                "[{old_addr}] relink: {} is {} — linking anyway, it must be running to provision",
+                i.id, i.state
+            ),
+        );
+    }
+    if i.public_ip.is_empty() {
+        send(
+            &tx,
+            Level::Error,
+            format!(
+                "[{old_addr}] relink: {} has no public address yet — :pool in a moment, then relink again",
+                i.id
+            ),
+        );
+        let _ = tx.send(Ev::Done(DoneKind::Other));
+        return;
+    }
+    let new_addr = i.public_ip.clone();
+    if new_addr == old_addr {
+        send(
+            &tx,
+            Level::Info,
+            format!("[{old_addr}] relink: already points at the current address — nothing to do"),
+        );
+        let _ = tx.send(Ev::Done(DoneKind::Other));
+        return;
+    }
+    // The machine, re-born at its new address: same login, same key (the
+    // pool's own .pem), same handle. The API's POST replaces the entry only
+    // if the address were equal — it is not — so the old entry is dropped
+    // first and this is an add.
+    let mut m = bm_core::provision::machine_from_instance(i, &cfg);
+    m.name = if machine.name.is_empty() {
+        old_addr.clone()
+    } else {
+        machine.name.clone()
+    };
+    match http
+        .delete(format!(
+            "{api}/api/machines?addr={}",
+            urlencode(&old_addr)
+        ))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => {
+            send(
+                &tx,
+                Level::Error,
+                format!("relink: could not drop {old_addr}: HTTP {}", r.status()),
+            );
+            let _ = tx.send(Ev::Done(DoneKind::Other));
+            return;
+        }
+        Err(e) => {
+            send(&tx, Level::Error, format!("relink: drop {old_addr} failed: {e}"));
+            let _ = tx.send(Ev::Done(DoneKind::Other));
+            return;
+        }
+    }
+    match http.post(format!("{api}/api/machines")).json(&m).send().await {
+        Ok(r) if r.status().is_success() => {
+            send(
+                &tx,
+                Level::Ok,
+                format!(
+                    "[{old_addr}] relinked → {new_addr} ({}) — select it and :prov to onboard it",
+                    i.id
+                ),
+            );
+        }
+        Ok(r) => send(
+            &tx,
+            Level::Error,
+            format!("relink: add {new_addr} rejected: HTTP {}", r.status()),
+        ),
+        Err(e) => send(&tx, Level::Error, format!("relink: add {new_addr} failed: {e}")),
+    }
+    // The Cloud view's linked marks are now stale.
+    let _ = tx.send(Ev::Cloud(cloud_snapshot(&layout.root).await));
     let _ = tx.send(Ev::Done(DoneKind::Other));
 }
 
@@ -1439,86 +1734,126 @@ pub(crate) async fn run_jobs_with<F, Fut>(
     F: Fn(Job, tokio::sync::mpsc::UnboundedSender<Ev>) -> Fut + Clone + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    let (lifecycle_tx, lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
-    let route = async move {
-        while let Some(job) = job_rx.recv().await {
-            let lane = if job.lifecycle() {
-                &lifecycle_tx
-            } else {
-                &command_tx
-            };
-            if lane.send(job).is_err() {
-                break;
+    // A job is queued only behind another job that holds something it needs.
+    //
+    // `pending` is scanned in arrival order, so the queue is still FIFO among
+    // jobs that *do* contend — the change is only that a job with nothing in
+    // common with what is running never waits at all. `busy` is the set of
+    // resources held right now; `done_rx` is how a running job gives them back.
+    let mut pending: VecDeque<(Job, Vec<Res>)> = VecDeque::new();
+    let mut busy: BTreeSet<Res> = BTreeSet::new();
+    // Held by the scheduler as well, so a `recv` here never returns `None`
+    // while jobs are still running — the `None` case is unreachable, and the
+    // loop below never has to distinguish "no completions" from "all done".
+    let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Res>>();
+    let mut accepting = true;
+
+    loop {
+        // Start everything that can start, in arrival order. Re-scan from the
+        // head after each launch: a later job may fit where an earlier one did
+        // not, and skipping it would be exactly the unnecessary queueing this
+        // exists to remove.
+        let mut i = 0;
+        while i < pending.len() {
+            if pending[i].1.iter().any(|r| busy.contains(r)) {
+                i += 1;
+                continue;
+            }
+            let (job, res) = pending.remove(i).expect("index checked above");
+            busy.extend(res.iter().cloned());
+            let run = runner.clone();
+            let tx = tx.clone();
+            let done = done_tx.clone();
+            tokio::spawn(async move {
+                run_one(job, tx, run).await;
+                let _ = done.send(res);
+            });
+        }
+        if !accepting && pending.is_empty() && busy.is_empty() {
+            return;
+        }
+        if accepting {
+            tokio::select! {
+                job = job_rx.recv() => match job {
+                    Some(job) => {
+                        let res = job.resources();
+                        pending.push_back((job, res));
+                    }
+                    None => accepting = false,
+                },
+                Some(res) = done_rx.recv() => release(&mut busy, &res),
+            }
+        } else {
+            match done_rx.recv().await {
+                Some(res) => release(&mut busy, &res),
+                None => return,
             }
         }
-    };
-    tokio::join!(
-        route,
-        run_lane(lifecycle_rx, tx.clone(), runner.clone()),
-        run_lane(command_rx, tx, runner),
-    );
+    }
 }
 
-async fn run_lane<F, Fut>(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<Job>,
-    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
-    runner: F,
-) where
-    F: Fn(Job, tokio::sync::mpsc::UnboundedSender<Ev>) -> Fut + Clone + Send + 'static,
+fn release(busy: &mut BTreeSet<Res>, res: &[Res]) {
+    for r in res {
+        busy.remove(r);
+    }
+}
+
+/// Run one job to completion on its own task: announce it, forward its events
+/// (tagging log lines as this job's activity), and guarantee exactly one
+/// `Done` and one `JobFinished` whatever the job does.
+async fn run_one<F, Fut>(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>, runner: F)
+where
+    F: Fn(Job, tokio::sync::mpsc::UnboundedSender<Ev>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    while let Some(job) = rx.recv().await {
-        let id = match &job {
-            Job::Tracked { id, .. } => Some(*id),
-            _ => None,
-        };
-        let fallback = job.fallback_done();
-        if let Some(id) = id {
-            let _ = tx.send(Ev::JobStarted(id));
-        }
-        let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel();
-        let run = runner.clone();
-        let mut task = tokio::spawn(async move { run(job.into_bare(), job_tx).await });
-        let mut done = false;
-        let mut forward = |ev: Ev| {
-            if matches!(ev, Ev::Done(_)) {
-                if done {
-                    return;
-                }
-                done = true;
+    let id = match &job {
+        Job::Tracked { id, .. } => Some(*id),
+        _ => None,
+    };
+    let fallback = job.fallback_done();
+    if let Some(id) = id {
+        let _ = tx.send(Ev::JobStarted(id));
+    }
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut task = tokio::spawn(async move { runner(job.into_bare(), job_tx).await });
+    let mut done = false;
+    let mut forward = |ev: Ev| {
+        if matches!(ev, Ev::Done(_)) {
+            if done {
+                return;
             }
-            if let (Some(id), Ev::Log(line)) = (id, &ev) {
-                let _ = tx.send(Ev::JobProgress {
-                    id,
-                    text: line.text.clone(),
-                });
-            }
-            let _ = tx.send(ev);
-        };
-        let result = loop {
-            tokio::select! {
-                result = &mut task => break result,
-                Some(ev) = job_rx.recv() => forward(ev),
-            }
-        };
-        job_rx.close();
-        while let Some(ev) = job_rx.recv().await {
-            forward(ev);
+            done = true;
         }
-        if result.is_err() {
-            send(
-                &tx,
-                Level::Error,
-                "background job crashed — retry the operation".into(),
-            );
+        if let (Some(id), Ev::Log(line)) = (id, &ev) {
+            let _ = tx.send(Ev::JobProgress {
+                id,
+                text: line.text.clone(),
+            });
         }
-        if !done {
-            let _ = tx.send(Ev::Done(fallback));
+        let _ = tx.send(ev);
+    };
+    let result = loop {
+        tokio::select! {
+            result = &mut task => break result,
+            Some(ev) = job_rx.recv() => forward(ev),
         }
-        if let Some(id) = id {
-            let _ = tx.send(Ev::JobFinished(id));
-        }
+    };
+    job_rx.close();
+    while let Some(ev) = job_rx.recv().await {
+        forward(ev);
+    }
+    if result.is_err() {
+        send(
+            &tx,
+            Level::Error,
+            "background job crashed — retry the operation".into(),
+        );
+    }
+    if !done {
+        let _ = tx.send(Ev::Done(fallback));
+    }
+    if let Some(id) = id {
+        let _ = tx.send(Ev::JobFinished(id));
     }
 }
 
@@ -1696,6 +2031,217 @@ pub(crate) async fn job_profile(
     }));
 }
 
+/// One account listing, off the UI thread. Errors are returned as strings so
+/// the Cloud view can render the reason instead of an empty account — which is
+/// the one wrong answer that costs money.
+async fn cloud_snapshot(
+    root: &std::path::Path,
+) -> Result<Vec<bm_core::provision::AwsInstance>, String> {
+    let root = root.to_path_buf();
+    match tokio::task::spawn_blocking(move || crate::aws_ops::pool(&root)).await {
+        Ok(Ok((_cfg, instances))) => Ok(instances),
+        Ok(Err(e)) => Err(format!("{e:#}")),
+        Err(e) => Err(format!("aws pool task failed: {e}")),
+    }
+}
+
+pub(crate) async fn job_aws_pool(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    root: std::path::PathBuf,
+    api: String,
+    http: reqwest::Client,
+) {
+    let res = cloud_snapshot(&root).await;
+    match &res {
+        Ok(instances) if instances.is_empty() => send(
+            &tx,
+            Level::Info,
+            "cloud: no boxes running (nothing carries the marker tag)".into(),
+        ),
+        Ok(instances) => send(
+            &tx,
+            Level::Info,
+            format!("cloud: {} box(es)", instances.len()),
+        ),
+        Err(e) => send(&tx, Level::Error, format!("aws pool: {e}")),
+    }
+    let readable = res.is_ok();
+    let _ = tx.send(Ev::Cloud(res));
+    // Auto-relink: after a fresh account read, ask the inductor to reconcile
+    // the registry with the addresses the account carries now. Best-effort —
+    // a down inductor (or an offline TUI) simply skips it, and the repair lines
+    // land in the events pane so the drift is never silent.
+    if readable {
+        let url = format!("{}/api/relink", api.trim_end_matches('/'));
+        if let Ok(r) = http.post(&url).send().await {
+            if r.status().is_success() {
+                if let Ok(v) = r.json::<serde_json::Value>().await {
+                    if let Some(lines) = v.get("lines").and_then(|l| l.as_array()) {
+                        for l in lines.iter().filter_map(|x| x.as_str()) {
+                            send(&tx, Level::Info, l.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
+/// Store the IAM user's key from the console's CSV. `aws_ops::login` is the
+/// same verify-then-write path the CLI runs, so the two cannot disagree about
+/// what a root key or an assumed role means.
+///
+/// `csv` is the only input: the secret is read from a hidden stdin by the CLI
+/// and must never be typed where it would be echoed, so the dashboard offers
+/// the download the console already made.
+pub(crate) async fn job_aws_login(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    root: std::path::PathBuf,
+    csv: std::path::PathBuf,
+) {
+    let out =
+        tokio::task::spawn_blocking(move || crate::aws_ops::login(&root, Some(csv), None, None))
+            .await;
+    match out {
+        Ok(Ok(lines)) => {
+            for l in lines {
+                send(&tx, Level::Info, l);
+            }
+        }
+        Ok(Err(e)) => send(&tx, Level::Error, format!("aws login: {e:#}")),
+        Err(e) => send(&tx, Level::Error, format!("aws login task failed: {e}")),
+    }
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
+/// Read the account into the pool definition. Several read-only AWS calls, so
+/// it runs off the UI thread and takes the lifecycle lane with `up`/`down`.
+pub(crate) async fn job_aws_discover(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    root: std::path::PathBuf,
+    args: crate::aws_ops::DiscoverArgs,
+) {
+    let root_for_pool = root.clone();
+    let out = tokio::task::spawn_blocking(move || crate::aws_ops::discover(&root, args)).await;
+    match out {
+        Ok(Ok(lines)) => {
+            for l in lines {
+                send(&tx, Level::Info, l);
+            }
+            // The pool definition just changed, so the Cloud view's header is
+            // stale — refresh it in the same job that wrote the file.
+            let _ = tx.send(Ev::Cloud(cloud_snapshot(&root_for_pool).await));
+        }
+        Ok(Err(e)) => send(&tx, Level::Error, format!("aws discover: {e:#}")),
+        Err(e) => send(&tx, Level::Error, format!("aws discover task failed: {e}")),
+    }
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
+pub(crate) async fn job_aws_up(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    root: std::path::PathBuf,
+    api: String,
+    http: reqwest::Client,
+    count: u32,
+) {
+    let up_root = root.clone();
+    let out = tokio::task::spawn_blocking(move || crate::aws_ops::launch(&up_root, count)).await;
+    let (cfg, launched) = match out {
+        Ok(Ok((cfg, lines, launched))) => {
+            for l in lines {
+                send(&tx, Level::Info, l);
+            }
+            (cfg, launched)
+        }
+        Ok(Err(e)) => {
+            send(&tx, Level::Error, format!("aws up: {e:#}"));
+            let _ = tx.send(Ev::Done(DoneKind::Other));
+            return;
+        }
+        Err(e) => {
+            send(&tx, Level::Error, format!("aws up task failed: {e}"));
+            let _ = tx.send(Ev::Done(DoneKind::Other));
+            return;
+        }
+    };
+    // The join, made at birth: each returned instance becomes a registry entry
+    // with the address the reply carried and the pool's own key and login. No
+    // instance id is stored — the machine is keyed by address, exactly as `:add`.
+    let mut linked = 0usize;
+    for i in &launched {
+        let m = bm_core::provision::machine_from_instance(i, &cfg);
+        if m.addr.is_empty() {
+            send(
+                &tx,
+                Level::Warn,
+                format!(
+                    "launched {} has no address yet — :pool in a moment, then :add it",
+                    i.id
+                ),
+            );
+            continue;
+        }
+        let url = format!("{}/api/machines", api.trim_end_matches('/'));
+        match http.post(&url).json(&m).send().await {
+            Ok(r) if r.status().is_success() => {
+                linked += 1;
+                send(&tx, Level::Ok, format!("linked {} → {}", i.id, m.addr));
+            }
+            Ok(r) => send(
+                &tx,
+                Level::Warn,
+                format!(
+                    "launched {} but the registry refused it: HTTP {} — start the inductor (:B), then `:add {}`",
+                    i.id,
+                    r.status(),
+                    m.addr
+                ),
+            ),
+            Err(e) => send(
+                &tx,
+                Level::Warn,
+                format!(
+                    "launched {} but linking failed ({e}) — `:add {}` once the inductor is up",
+                    i.id, m.addr
+                ),
+            ),
+        }
+    }
+    if linked > 0 {
+        send(
+            &tx,
+            Level::Ok,
+            format!("{linked} box(es) linked — :prov each one to onboard it"),
+        );
+    }
+    // The launch changed the account, so the Cloud view is now stale.
+    let _ = tx.send(Ev::Cloud(cloud_snapshot(&root).await));
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
+pub(crate) async fn job_aws_down(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    root: std::path::PathBuf,
+    ids: Vec<String>,
+) {
+    let down_root = root.clone();
+    let out =
+        tokio::task::spawn_blocking(move || crate::aws_ops::terminate(&down_root, &ids)).await;
+    match out {
+        Ok(Ok(lines)) => {
+            for l in lines {
+                send(&tx, Level::Ok, l);
+            }
+        }
+        Ok(Err(e)) => send(&tx, Level::Error, format!("aws down: {e:#}")),
+        Err(e) => send(&tx, Level::Error, format!("aws down task failed: {e}")),
+    }
+    let _ = tx.send(Ev::Cloud(cloud_snapshot(&root).await));
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
 pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>) {
     match job.into_bare() {
         Job::Tracked { .. } => unreachable!(),
@@ -1705,8 +2251,19 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
             machine,
             force,
             settings_key,
-        } => job_provision(tx, layout, api, machine, force, settings_key).await,
+            cancel,
+        } => job_provision(tx, layout, api, machine, force, settings_key, cancel).await,
         Job::AddMachine { api, http, m } => job_add_machine(tx, api, http, m).await,
+        Job::AwsPool { root, api, http } => job_aws_pool(tx, root, api, http).await,
+        Job::AwsLogin { root, csv } => job_aws_login(tx, root, csv).await,
+        Job::AwsDiscover { root, args } => job_aws_discover(tx, root, args).await,
+        Job::AwsUp {
+            root,
+            api,
+            http,
+            count,
+        } => job_aws_up(tx, root, api, http, count).await,
+        Job::AwsDown { root, ids } => job_aws_down(tx, root, ids).await,
         Job::AddSample {
             layout,
             path,
@@ -1745,6 +2302,18 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
             settings_key,
         } => job_stop_backend(tx, layout, machines, api, settings_key).await,
         Job::DropMachine { api, http, addr } => job_drop_machine(tx, api, http, addr).await,
+        Job::SaveTaskPolicy {
+            api,
+            http,
+            addr,
+            task_policy,
+        } => job_save_task_policy(tx, api, http, addr, task_policy).await,
+        Job::RelinkMachine {
+            layout,
+            api,
+            http,
+            machine,
+        } => job_relink_machine(tx, layout, api, http, machine).await,
         Job::Op {
             api,
             http,

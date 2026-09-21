@@ -1,6 +1,6 @@
 //! Pure selection: filters, cast rows, task queries. No widgets, no keys.
 use crate::tui::{app::App, style::style_of};
-use bm_proto::{Heartbeat, Machine, Roster, Task, TaskState, VoiceInfo};
+use bm_proto::{Heartbeat, Machine, MachineState, Roster, Stage, Task, TaskState, VoiceInfo};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -303,6 +303,20 @@ pub(crate) fn live_beats(beats: &[Heartbeat], now: u64) -> Vec<&Heartbeat> {
         .collect()
 }
 
+/// Whether a beat's box still backs it. A machine stamped `Offline` after
+/// the beat landed has declared the worker silent — the row is a ghost and
+/// listing it as live contradicts the machines pane. A beat newer than the
+/// verdict (or an unstamped box) still counts, so one slow poll flickers
+/// the dot without deleting the row.
+pub(crate) fn beat_backed(machines: &[Machine], beat: &Heartbeat) -> bool {
+    match machines.iter().find(|m| m.addr == beat.addr) {
+        Some(m) => {
+            m.state != MachineState::Offline || m.state_since == 0 || beat.ts >= m.state_since
+        }
+        None => true,
+    }
+}
+
 /// A worker's self-reported display name, when any beat carries one for this
 /// id. The name is drawn once at worker startup and kept in `worker.alias`;
 /// the panes show it verbatim so one worker never wears two names on one
@@ -312,6 +326,80 @@ pub(crate) fn reported_alias<'a>(beats: &'a [Heartbeat], id: &str) -> Option<&'a
         .iter()
         .find(|b| b.worker_id == id && !b.alias.is_empty())
         .map(|b| b.alias.as_str())
+}
+
+/// Every address one EC2 instance can be reached at, public first.
+///
+/// The registry keys a launched box on its public address
+/// (`machine_from_instance`), while the agent on that box reports whatever
+/// address it binds — usually the private one. The `:down` guard treats either
+/// as the same box, so the two halves agree about what "that machine" is.
+pub(crate) fn instance_addresses(instances: &[bm_core::provision::AwsInstance]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for i in instances {
+        for a in [&i.public_ip, &i.private_ip] {
+            if !a.is_empty() && !out.contains(a) {
+                out.push(a.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Whether an instance is worth terminating: the three states that still cost
+/// money and can still run work.
+pub(crate) fn is_live_state(state: &str) -> bool {
+    matches!(state, "pending" | "running" | "stopping")
+}
+
+/// Workers mid-task on any of `addrs` — the in-flight guard for `:down`.
+///
+/// A box killed here loses that render, and TTS is stochastic: the same inputs
+/// do not reproduce the same audio, so the loss is not recoverable from the
+/// ledger. Returned as task ids (plus worker ids for a render not yet handed a
+/// task record) so the refusal can name exactly what is in flight.
+pub(crate) fn busy_on(
+    beats: &[Heartbeat],
+    tasks: &[Task],
+    addrs: &[String],
+    now: u64,
+) -> Vec<String> {
+    let on_it = |a: &str| addrs.iter().any(|x| x == a);
+    let live: Vec<&Heartbeat> = beats
+        .iter()
+        .filter(|b| now.saturating_sub(b.ts) < 90)
+        .collect();
+    let addr_of = |worker: &str| {
+        live.iter()
+            .find(|b| b.worker_id == worker)
+            .map(|b| b.addr.as_str())
+    };
+    let mut busy: Vec<String> = Vec::new();
+    for t in tasks {
+        if !matches!(t.state, TaskState::Assigned | TaskState::Running) {
+            continue;
+        }
+        let here = t.affinity.as_deref().map(on_it).unwrap_or(false)
+            || t.assigned_to
+                .as_deref()
+                .and_then(addr_of)
+                .map(on_it)
+                .unwrap_or(false);
+        if here {
+            busy.push(t.id());
+        }
+    }
+    for b in &live {
+        if b.stage.is_some() && b.progress < 0.999 && on_it(&b.addr) {
+            let id = b.worker_id.clone();
+            if !busy.contains(&id) {
+                busy.push(id);
+            }
+        }
+    }
+    busy.sort();
+    busy.dedup();
+    busy
 }
 
 /// Live workers on one box, by the addr their heartbeats carry. Powers the
@@ -350,6 +438,65 @@ pub(crate) fn machine_name<'a>(machines: &'a [Machine], beat: &'a Heartbeat) -> 
                 beat.hostname.as_str()
             }
         })
+}
+
+/// What kind of box this is, for the Machines pane's `kind` column.
+///
+/// `local` is the inductor's own node; `aws` is an EC2-launched box, told apart
+/// by the instance id stamped in its note; `rmt` is anything reached by ssh.
+/// The distinction matters because `(aws)` tells an operator the address can
+/// rotate under them — the reason relink exists.
+pub(crate) fn machine_kind(m: &Machine) -> &'static str {
+    if bm_core::is_local_node(&m.addr) {
+        "local"
+    } else if bm_core::provision::ec2_id_from_note(&m.note).is_some() {
+        "aws"
+    } else {
+        "rmt"
+    }
+}
+
+/// The one-word handle for a box in the Machines pane: the registry name when
+/// it has one (`box-1`, `thang`); `local` for the inductor's own node; the ssh
+/// user for a hand-linked remote; the address otherwise. Pairs with
+/// [`machine_kind`] and the raw address so a row reads `box-1 · aws · 18.1.2.3`.
+pub(crate) fn machine_label(m: &Machine) -> String {
+    if !m.name.is_empty() {
+        return m.name.clone();
+    }
+    if bm_core::is_local_node(&m.addr) {
+        return "local".into();
+    }
+    if bm_core::provision::ec2_id_from_note(&m.note).is_some() {
+        return m.addr.clone();
+    }
+    if !m.ssh_user.is_empty() && m.ssh_user != "unknown" && m.ssh_user != "local" {
+        return m.ssh_user.clone();
+    }
+    m.addr.clone()
+}
+
+/// A one-glance encoding of a machine's work policy for the tables:
+/// `M>R>D>C`, most-preferred first, enabled stages upper-case and disabled
+/// ones lower-case (`m>R>D>C` is "merge is switched off here").
+pub(crate) fn policy_summary(m: &Machine) -> String {
+    m.effective_task_policy()
+        .iter()
+        .map(|p| {
+            let c = match p.stage {
+                Stage::Merge => 'M',
+                Stage::Render => 'R',
+                Stage::Digest => 'D',
+                Stage::Crawl => 'C',
+            };
+            if p.enabled {
+                c.to_string()
+            } else {
+                c.to_ascii_lowercase().to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(">")
 }
 
 /// `(state, count)` in `TaskState::ALL` order, zeroes skipped.

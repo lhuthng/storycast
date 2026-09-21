@@ -1,4 +1,4 @@
-//! Colour-aware primitives: severity, cells, empty states, overlays.
+//! Colour-aware primitives: theme, severity, cells, empty states, overlays.
 use bm_proto::Machine;
 use ratatui::{
     layout::{Alignment, Rect},
@@ -6,6 +6,119 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
+
+// --- theme ----------------------------------------------------------------
+
+/// Which named palette the dashboard draws with. `Default` is the stock
+/// ANSI hues; the others exist because a dashboard that is only legible on
+/// one terminal is a dashboard half its operators cannot read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Theme {
+    /// The stock colours every pane already used.
+    #[default]
+    Default,
+    /// Sunken hues for dark terminals: same structure, less glare.
+    Dim,
+    /// Black/white plus intensity, for e-ink, colour-blind operators and
+    /// terminals that mangle the palette — the state word always carries the
+    /// meaning, so nothing depends on colour alone.
+    Mono,
+}
+
+impl Theme {
+    /// `C` cycles in this order; the status names the theme it lands on.
+    pub(crate) const ALL: [Theme; 3] = [Theme::Default, Theme::Dim, Theme::Mono];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Theme::Default => "default",
+            Theme::Dim => "dim",
+            Theme::Mono => "mono",
+        }
+    }
+
+    pub(crate) fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+
+    /// The severity hues, per theme. The palette is named once, here — a
+    /// pane that needs a colour asks the theme rather than hard-coding it,
+    /// which is what made retuning "the reds" a five-file hunt.
+    fn color(self, c: Color) -> Color {
+        use Color::*;
+        match self {
+            Theme::Default => match c {
+                Gray => Gray,
+                DarkGray => DarkGray,
+                Green => Green,
+                Yellow => Yellow,
+                Red => Red,
+                Blue => Blue,
+                Magenta => Magenta,
+                Cyan => Cyan,
+                White => White,
+                _ => c,
+            },
+            Theme::Dim => match c {
+                Gray => Gray,
+                DarkGray => Indexed(240),
+                Green => Indexed(108),
+                Yellow => Indexed(179),
+                Red => Indexed(174),
+                Blue => Indexed(110),
+                Magenta => Indexed(176),
+                Cyan => Indexed(116),
+                White => Indexed(252),
+                _ => c,
+            },
+            Theme::Mono => match c {
+                Gray | White => White,
+                Green | Yellow | Red | Blue | Magenta | Cyan => White,
+                DarkGray => DarkGray,
+                _ => c,
+            },
+        }
+    }
+
+    /// Accent of the `C`-cycled theme chip and the help border.
+    pub(crate) fn accent(self) -> Color {
+        match self {
+            Theme::Default => Color::Cyan,
+            Theme::Dim => Color::Indexed(116),
+            Theme::Mono => Color::White,
+        }
+    }
+}
+
+pub(crate) fn theme_label() -> &'static str {
+    THEME.with(|t| t.get().label())
+}
+
+/// Accent of the active theme: pane borders, the header's workspace chip and
+/// the help box all draw with it, which is what makes the chrome read as one
+/// surface rather than five unrelated boxes.
+pub(crate) fn theme_accent() -> Color {
+    THEME.with(|t| t.get().accent())
+}
+
+pub(crate) fn theme_next() -> &'static str {
+    THEME.with(|t| {
+        let next = t.get().next();
+        t.set(next);
+        next.label()
+    })
+}
+
+thread_local! {
+    static THEME: std::cell::Cell<Theme> = const { std::cell::Cell::new(Theme::Default) };
+}
+
+/// Resolve a stock hue through the active theme. Free function so render
+/// closures can call it alongside `style_of`.
+pub(crate) fn themed(c: Color) -> Color {
+    THEME.with(|t| t.get().color(c))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Level {
@@ -25,12 +138,16 @@ impl Level {
         }
     }
 
+    /// Fixed-width severity tags: the log's message column starts at the
+    /// same offset on every line, which is what makes a pane of timestamps
+    /// readable at all. The old mixed-width glyphs (`·`, `OK`, `ERROR`) left
+    /// the message ragged by construction.
     pub(crate) fn glyph(self) -> &'static str {
         match self {
-            Level::Info => "·",
-            Level::Ok => "OK",
-            Level::Warn => "!",
-            Level::Error => "ERROR",
+            Level::Info => "info",
+            Level::Ok => " ok ",
+            Level::Warn => "warn",
+            Level::Error => "err ",
         }
     }
 }
@@ -79,19 +196,13 @@ pub(crate) enum Conn {
     Down(String),
 }
 
-pub(crate) fn bar(frac: f32, width: usize) -> String {
-    let fill = (frac.clamp(0.0, 1.0) * width as f32).round() as usize;
-    format!(
-        "{}{}",
-        "█".repeat(fill),
-        "░".repeat(width.saturating_sub(fill))
-    )
-}
-
 pub(crate) fn state_color(s: &str) -> Color {
     match s {
         "online" | "done" | "configured" => Color::Green,
-        "running" | "assigned" | "probing" | "provisioning" => Color::Yellow,
+        // `initializing` is a wait, not a fault: a launched box that is still
+        // booting. Red here would make a fresh pool look broken, which is the
+        // misreading the state exists to prevent.
+        "running" | "assigned" | "probing" | "provisioning" | "initializing" => Color::Yellow,
         "offline" | "failed" | "shelved" | "error" => Color::Red,
         "pending" => Color::Gray,
         _ => Color::Gray,
@@ -161,6 +272,27 @@ pub(crate) fn seen_label(m: &Machine) -> String {
     }
 }
 
+/// How long this machine has held its current state — the visible half of
+/// `state_since`.
+///
+/// Worth a line of its own because the state alone does not say whether a box
+/// is *just* booting or has been stuck for twenty minutes, and those two want
+/// opposite reactions. `—` when the record was never stamped (it predates the
+/// field), so a missing clock reads as unknown rather than as "0s ago".
+pub(crate) fn state_age_label(m: &Machine) -> String {
+    if m.state_since == 0 {
+        return "—".into();
+    }
+    let d = bm_proto::now_secs().saturating_sub(m.state_since);
+    if d < 60 {
+        format!("{d}s")
+    } else if d < 3600 {
+        format!("{}m", d / 60)
+    } else {
+        format!("{}h", d / 3600)
+    }
+}
+
 pub(crate) fn gender_label(g: &str) -> &str {
     match g {
         "male" => "male",
@@ -216,11 +348,13 @@ pub(crate) fn cell(text: String) -> Line<'static> {
     Line::from(text)
 }
 
-/// Colour-aware style as a free function, so render closures capture a plain
-/// `bool` instead of the whole `App` — which the panes are also borrowing.
+/// Colour-aware style. `colour` still means "no bold/fg dimming for a
+/// terminal that cannot show it"; the *hues* now come from the active theme
+/// (see `Theme`), so `C` cycles Default → Dim → Mono and the palette lives in
+/// one place instead of being hard-coded across the panes.
 pub(crate) fn style_of(colour: bool, c: Color) -> Style {
     if colour {
-        Style::default().fg(c)
+        Style::default().fg(themed(c))
     } else {
         Style::default()
     }
@@ -228,17 +362,94 @@ pub(crate) fn style_of(colour: bool, c: Color) -> Style {
 
 pub(crate) fn style_bold_of(colour: bool, c: Color) -> Style {
     if colour {
-        Style::default().fg(c).add_modifier(Modifier::BOLD)
+        Style::default().fg(themed(c)).add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::BOLD)
     }
 }
 
-pub(crate) fn state_cell(colour: bool, text: &str) -> Line<'static> {
+/// A state cell with its leading glyph. The word stays — mono mode and the
+/// colour-blind read the text, never the hue — but the dot gives the eye an
+/// anchor: ● running/healthy, ◐ transitional, ✗ failed, ○ pending.
+pub(crate) fn state_glyph_cell(colour: bool, text: &str) -> Line<'static> {
+    let glyph = match text {
+        "online" | "done" | "configured" | "ok" => "● ",
+        // `initializing` joins the in-progress family: a box booting is on its
+        // way, not missing. The hollow circle stays for "nothing known".
+        "running" | "assigned" | "probing" | "provisioning" | "initializing" => "◐ ",
+        "offline" | "failed" | "shelved" | "error" => "✗ ",
+        _ => "○ ",
+    };
     Line::from(Span::styled(
-        text.to_string(),
+        format!("{glyph}{text}"),
         style_of(colour, state_color(text)),
     ))
+}
+
+/// Braille spinner frames, stepped by the ~200 ms tick. Shown beside the
+/// footer's job count so "work is happening" is visible even when the job is
+/// quiet — a static "1 job(s) running" read as stuck text.
+pub(crate) fn spinner(tick: u64) -> char {
+    const FRAMES: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠇'];
+    FRAMES[tick as usize % FRAMES.len()]
+}
+
+/// The live-indicator pulse: a two-step dot that breathes once per second at
+/// the poll cadence. Subtle on purpose — steady means healthy, and anything
+/// louder would compete with real warnings.
+pub(crate) fn pulse(tick: u64) -> char {
+    const FRAMES: [char; 8] = ['●', '●', '●', '◉', '○', '◉', '●', '●'];
+    FRAMES[(tick / 4) as usize % FRAMES.len()]
+}
+
+/// Background of the selected row: a faint tint, not `REVERSED` — reversing
+/// the row inverted the state colours, so a green `online` read as a dark
+/// pill and the task ledger lost its severity tint on the cursor line.
+pub(crate) fn selection_bg() -> Color {
+    themed(Color::Indexed(236))
+}
+
+/// A completed task of that stage, for the Stats matrix: the live hues when
+/// the theme offers them, dim grey otherwise. A number and its stage column
+/// share a hue so the matrix reads by column as well as by row.
+pub(crate) fn stage_count_cell(colour: bool, stage: &str, n: u64) -> Line<'static> {
+    let color = match stage {
+        "crawl" | "digest" | "render" | "merge" => {
+            if colour {
+                themed(stage_color(stage))
+            } else {
+                Color::DarkGray
+            }
+        }
+        _ => Color::DarkGray,
+    };
+    Line::from(Span::styled(n.to_string(), Style::default().fg(color)))
+}
+
+/// Progress at half-block resolution: full, seven-eighths … one-eighth, then
+/// the light shade. Ten columns of `█░` can only move in 10% steps; these
+/// partial glyphs make the same width read in ~2% steps, so a bar that is
+/// "almost done" looks almost done.
+pub(crate) fn bar(frac: f32, width: usize) -> String {
+    const EIGHTHS: [char; 7] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+    let frac = frac.clamp(0.0, 1.0) as f64;
+    let exact = frac * width as f64;
+    let full = exact.floor() as usize;
+    let rest = exact - full as f64;
+    let mut out = String::with_capacity(width * 3);
+    out.push_str(&"█".repeat(full));
+    if full < width {
+        // The remainder in eighths, rounded; zero remainder is the light
+        // shade, never a stray one-eighth tick.
+        if rest <= 0.0 {
+            out.push('░');
+        } else {
+            let eighths = ((rest * 8.0).round() as usize).clamp(1, 7);
+            out.push(EIGHTHS[eighths - 1]);
+        }
+        out.push_str(&"░".repeat(width - full - 1));
+    }
+    out
 }
 
 /// A pane's "nothing here yet" body: centred, dim, and always actionable.

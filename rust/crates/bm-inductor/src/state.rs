@@ -10,9 +10,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
 mod ledger;
+mod observe;
 mod offer;
 mod ops;
 mod reconcile;
+mod relink;
 
 const LEASE_SECS: [(Stage, u64); 4] = [
     (Stage::Crawl, 600),
@@ -100,7 +102,10 @@ impl StatsAgg {
             .entry(stage.as_str().to_string())
             .or_insert(0) += 1;
         if secs > 0.0 {
-            let d = self.durations.entry(stage.as_str().to_string()).or_default();
+            let d = self
+                .durations
+                .entry(stage.as_str().to_string())
+                .or_default();
             d.push(secs);
             if d.len() > STATS_WINDOW {
                 d.remove(0);
@@ -123,8 +128,9 @@ impl StatsAgg {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::ops::BOOT_DEADLINE_SECS;
     use bm_core::config::Settings;
-    use bm_proto::{now_secs, Complete, Stage, Task, TaskState};
+    use bm_proto::{now_secs, Complete, Machine, MachineState, Stage, Task, TaskState};
     use serde_json::Value;
 
     fn fixture() -> (tempfile::TempDir, Inner) {
@@ -227,7 +233,9 @@ mod tests {
         inner.reconcile(1, 0);
         assert_eq!(inner.ledger_profile, Some(ptr("xianxia", "h1")));
         // Tasks bound to xianxia refuse to run under noir.
-        inner.tasks.insert("crawl:1".into(), Task::new(1, Stage::Crawl));
+        inner
+            .tasks
+            .insert("crawl:1".into(), Task::new(1, Stage::Crawl));
         inner.settings.profile = ptr("noir", "h2");
         let err = inner.check_profile().unwrap_err();
         assert!(err.to_string().contains("xianxia"), "{err}");
@@ -238,7 +246,8 @@ mod tests {
     }
 
     #[test]
-    fn save_writes_runtime_only() {        let (_d, mut inner) = fixture();
+    fn save_writes_runtime_only() {
+        let (_d, mut inner) = fixture();
         let layout = inner.layout.clone();
         let (bxo, rt) = bm_core::provision::split_machine(
             &bm_proto::Machine::new("10.0.0.9", "thang", 22, Some("/k".into()), "worker"),
@@ -361,9 +370,15 @@ mod tests {
     }
 
     #[test]
-    fn merge_affinity_is_local_after_a_remote_render() {
-        // Step 13: segments live on the inductor now, so the merge runs where
-        // they are — never where the render happened to run.
+    fn merge_runs_on_the_machine_that_rendered() {
+        // The pin's real meaning is "merge where the segments are" — and after
+        // an inverted render that is the box that just wrote them. It cannot
+        // be handed thirty-odd wavs inside an offer, and the inductor's own
+        // copy exists for the completion gate, not for the mixer.
+        //
+        // This used to be the literal `127.0.0.1`, which worked on one machine
+        // and made a cluster of remote workers render for ever without ever
+        // merging.
         let (_d, mut inner) = fixture();
         let layout = inner.layout.clone();
         std::fs::write(
@@ -376,6 +391,10 @@ mod tests {
         std::fs::create_dir_all(&seg).unwrap();
         std::fs::write(seg.join("0000_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
         std::fs::write(seg.join("0001_Adam.wav"), vec![0u8; 2000]).unwrap();
+        // The worker map is what turns a worker id into a machine.
+        inner
+            .workers
+            .insert("remote-w".into(), "192.168.2.2".into());
         let mut t = Task::new(7, Stage::Render);
         t.state = TaskState::Running;
         t.assigned_to = Some("remote-w".into());
@@ -392,11 +411,38 @@ mod tests {
             TaskState::Done,
             "gate passes: files are home"
         );
-        let m = inner.tasks.get("merge:7").expect("merge task exists");
         assert_eq!(
-            m.affinity.as_deref(),
+            inner.tasks["merge:7"].affinity.as_deref(),
+            Some("192.168.2.2"),
+            "merge follows the renderer, not loopback"
+        );
+
+        // A renderer with no known machine — a hand-written ledger, or a
+        // report from a worker that never registered. The local node shares
+        // the inductor's store, which is what this always was.
+        std::fs::write(
+            layout.script(8),
+            r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"B","text":"z"}]}"#,
+        )
+        .unwrap();
+        let seg8 = layout.seg_dir("vieneu", 8);
+        std::fs::create_dir_all(&seg8).unwrap();
+        std::fs::write(seg8.join("0000_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(seg8.join("0001_Adam.wav"), vec![0u8; 2000]).unwrap();
+        let mut t = Task::new(8, Stage::Render);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("ghost".into());
+        inner.tasks.insert("render:8".into(), t);
+        inner.complete(&completion(
+            "ghost",
+            "render:8",
+            true,
+            "render ch8 (2 calls)",
+        ));
+        assert_eq!(
+            inner.tasks["merge:8"].affinity.as_deref(),
             Some("127.0.0.1"),
-            "merge runs where the segments are"
+            "no known renderer: the local node, as before"
         );
     }
 
@@ -482,6 +528,49 @@ mod tests {
         assert_eq!(offer.task_id, "render:5");
         assert!(!offer.local_node, "192.168.2.2 is not the local node");
         assert!(offer.render_units.is_some(), "planned, not legacy");
+    }
+
+    #[test]
+    fn merge_affinity_never_gates_the_local_node() {
+        // Affinity is an optimization for remote boxes, not a gate for the
+        // local one: it shares the inductor's segment store, so it takes any
+        // pending merge — pinned to a live box, a ffmpeg-less one, or a dead
+        // one. Otherwise a render on a merge-disabled box strands its merge
+        // pending for ever while merge-enabled machines stand idle.
+        let (_d, mut inner) = fixture();
+        for stage in [Stage::Crawl, Stage::Digest, Stage::Render] {
+            let mut t = Task::new(5, stage);
+            t.state = TaskState::Done;
+            inner.tasks.insert(format!("{stage}:5"), t);
+        }
+        let mut merge = Task::new(5, Stage::Merge);
+        merge.affinity = Some("192.0.2.1".into());
+        inner.tasks.insert("merge:5".into(), merge);
+        inner.workers.insert("lo-w".into(), "127.0.0.1".into());
+        inner.workers.insert("rmt-w".into(), "192.0.2.1".into());
+        inner.caps.insert(
+            "rmt-w".into(),
+            vec!["crawl".into(), "digest".into(), "render".into(), "merge".into()],
+        );
+        // Pinned to a live, capable box — the local node still takes it.
+        let offer = inner.offer("lo-w").expect("local merges anything");
+        assert_eq!(offer.task_id, "merge:5");
+        assert!(offer.local_node, "127.0.0.1 is the local node");
+        // The pinned box itself keeps working when it asks first.
+        let m = inner.tasks.get_mut("merge:5").unwrap();
+        m.state = TaskState::Pending;
+        m.assigned_to = None;
+        m.lease_until = None;
+        let offer = inner.offer("rmt-w").expect("affinity still matches");
+        assert_eq!(offer.task_id, "merge:5");
+        // Dead box (no workers at all): same sink.
+        let m = inner.tasks.get_mut("merge:5").unwrap();
+        m.state = TaskState::Pending;
+        m.assigned_to = None;
+        m.lease_until = None;
+        m.affinity = Some("192.0.2.2".into());
+        let offer = inner.offer("lo-w").expect("dead box merges locally");
+        assert_eq!(offer.task_id, "merge:5");
     }
 
     #[test]
@@ -1247,6 +1336,7 @@ mod tests {
                 cpu_pct: None,
                 mem_pct: None,
                 mem_gb: None,
+                capabilities: vec![],
             },
         );
         (d, inner)
@@ -1362,7 +1452,10 @@ mod tests {
         inner.tasks.insert("digest:2".into(), t);
         inner.complete(&done("digest:2", "w1", false));
         let summary = inner.stats.summary();
-        assert_eq!(summary["counts"]["w1"]["digest"], 1, "failures count nothing");
+        assert_eq!(
+            summary["counts"]["w1"]["digest"], 1,
+            "failures count nothing"
+        );
         assert!(summary["counts"]["w1"].get("crawl").is_none());
     }
 
@@ -1409,6 +1502,7 @@ mod tests {
                 cpu_pct: None,
                 mem_pct: None,
                 mem_gb: None,
+                capabilities: vec![],
             },
         );
         assert!(inner.reap().is_empty(), "live worker untouched");
@@ -1446,6 +1540,7 @@ mod tests {
                 cpu_pct: None,
                 mem_pct: None,
                 mem_gb: None,
+                capabilities: vec![],
             },
         );
         let msg = inner.op_requeue_orphans();
@@ -1636,7 +1731,10 @@ mod tests {
             "queue already drained — workers exiting on next beat"
         );
         assert!(inner.shutdown_requested);
-        assert!(!inner.shutdown_when_idle, "one-shot: the arm disarms as it fires");
+        assert!(
+            !inner.shutdown_when_idle,
+            "one-shot: the arm disarms as it fires"
+        );
 
         // Rearm with work outstanding: a pending task blocks the fire.
         inner.shutdown_requested = false;
@@ -1669,7 +1767,10 @@ mod tests {
         inner.op_shutdown_when_idle();
         assert!(!inner.shutdown_requested, "a running task must block");
         inner.complete(&completion("w1", "merge:4", true, "merge ch4 -> out.mp3"));
-        assert!(inner.shutdown_requested, "the draining completion must fire it");
+        assert!(
+            inner.shutdown_requested,
+            "the draining completion must fire it"
+        );
     }
 
     #[test]
@@ -1886,6 +1987,354 @@ mod tests {
         assert!(
             crate::segments::expected_names(&layout, &engine, 180).is_some(),
             "the gate must be able to prove ch180 too"
+        );
+    }
+
+    /// A local worker with every capability, so the offer tests exercise the
+    /// policy alone and not a capability gate.
+    fn offer_fixture(inner: &mut Inner) {
+        inner
+            .machines
+            .insert("127.0.0.1".into(), Machine::new("127.0.0.1", "local", 22, None, "both"));
+        inner.workers.insert("w1".into(), "127.0.0.1".into());
+        inner.caps.insert(
+            "w1".into(),
+            vec![
+                "crawl".into(),
+                "digest".into(),
+                "render".into(),
+                "merge".into(),
+                "render-segments".into(),
+            ],
+        );
+    }
+
+    /// ch1: render ready. ch2: merge ready. Both would be assignable at once.
+    fn two_ready_stages(inner: &mut Inner) {
+        for (stage, state) in [
+            (Stage::Crawl, TaskState::Done),
+            (Stage::Digest, TaskState::Done),
+            (Stage::Render, TaskState::Pending),
+        ] {
+            let mut t = Task::new(1, stage);
+            t.state = state;
+            inner.tasks.insert(format!("{stage}:1"), t);
+        }
+        for stage in Stage::ALL {
+            let mut t = Task::new(2, stage);
+            t.state = if stage == Stage::Merge {
+                TaskState::Pending
+            } else {
+                TaskState::Done
+            };
+            inner.tasks.insert(format!("{stage}:2"), t);
+        }
+    }
+
+    #[test]
+    fn offer_prefers_the_stage_the_policy_lists_first() {
+        let (_d, mut inner) = fixture();
+        offer_fixture(&mut inner);
+        two_ready_stages(&mut inner);
+        // The default policy leads with merge, so the ready merge beats the
+        // equally-ready render — the "finish chapters first" rule.
+        let offer = inner.offer("w1").expect("a ready task is offerable");
+        assert_eq!(offer.task_id, "merge:2");
+    }
+
+    #[test]
+    fn offer_refuses_a_box_the_inductor_knows_is_not_ready() {
+        // The readiness gate. In the inverted protocol `offer` is only reached
+        // after a heartbeat, so this is the invariant *stated* rather than a
+        // live path — and it is worth stating: a task handed to a box that is
+        // booting, being pushed to, or known-broken fails slowly and strikes
+        // the chapter for the inductor's mistake.
+        let (_d, mut inner) = fixture();
+        offer_fixture(&mut inner);
+        two_ready_stages(&mut inner);
+        for state in [
+            MachineState::Initializing,
+            MachineState::Probing,
+            MachineState::Provisioning,
+            MachineState::Configured,
+            MachineState::Offline,
+            MachineState::Error,
+        ] {
+            inner
+                .machines
+                .get_mut("127.0.0.1")
+                .unwrap()
+                .set_state(state);
+            assert!(
+                inner.offer("w1").is_none(),
+                "{state:?} must not be offered work"
+            );
+        }
+        // Nothing was consumed while the gate held, so the queue is intact and
+        // the one state that works gets it.
+        inner
+            .machines
+            .get_mut("127.0.0.1")
+            .unwrap()
+            .set_state(MachineState::Online);
+        let offer = inner.offer("w1").expect("online is the state that works");
+        assert_eq!(offer.task_id, "merge:2");
+    }
+
+    #[test]
+    fn offer_still_serves_a_machine_with_no_opinion_formed() {
+        // `Unknown` is not "not ready" — it is "never contacted": a hand-written
+        // ledger, or the legacy pull worker asking before its first beat. Both
+        // were offered work before the gate existed, and a live worker asking
+        // for work is its own evidence the box is up.
+        let (_d, mut inner) = fixture();
+        offer_fixture(&mut inner);
+        two_ready_stages(&mut inner);
+        assert_eq!(inner.machines["127.0.0.1"].state, MachineState::Unknown);
+        assert!(inner.offer("w1").is_some(), "no opinion is not a refusal");
+    }
+
+    #[test]
+    fn silence_does_not_refute_a_box_that_is_coming_up() {
+        // What the dispatcher does with a box that fails to answer `/status`.
+        // A booting box cannot answer, and stamping Offline on it is the
+        // fresh-pool-looks-broken bug: the pane would call a box that is
+        // twenty seconds into its first boot "gone".
+        let (_d, mut inner) = fixture();
+        for state in [
+            MachineState::Initializing,
+            MachineState::Probing,
+            MachineState::Provisioning,
+            MachineState::Configured,
+        ] {
+            let mut m = Machine::new("3.121.112.113", "ubuntu", 22, None, "worker");
+            m.set_state(state);
+            inner.machines.insert(m.addr.clone(), m);
+            inner.note_silence("3.121.112.113");
+            assert_eq!(
+                inner.machines["3.121.112.113"].state, state,
+                "{state:?} is on its way up — silence is not news"
+            );
+        }
+        // A box that *was* claiming to be online is refuted by silence.
+        inner
+            .machines
+            .get_mut("3.121.112.113")
+            .unwrap()
+            .set_state(MachineState::Online);
+        inner.note_silence("3.121.112.113");
+        assert_eq!(inner.machines["3.121.112.113"].state, MachineState::Offline);
+        // And an address we have never heard of is not created by the report.
+        inner.note_silence("10.9.9.9");
+        assert!(!inner.machines.contains_key("10.9.9.9"));
+    }
+
+    #[test]
+    fn a_box_that_never_came_up_is_retired_instead_of_left_booting() {
+        // `Initializing` is the one state with a deadline. A state with no exit
+        // condition is a lie: a box terminated before it booted, or launched
+        // into a subnet this machine cannot dial, would sit in "initializing"
+        // for ever with the pane implying it is about to work.
+        let (_d, mut inner) = fixture();
+        let mut m = Machine::new("3.121.112.113", "ubuntu", 22, None, "worker");
+        m.set_state(MachineState::Initializing);
+        m.note = "EC2 i-09def58f197d3092c (pending)".into();
+        inner.machines.insert(m.addr.clone(), m);
+
+        // Twenty seconds in is still a boot, and the deadline must not fire.
+        assert!(
+            inner.expire_initializing().is_empty(),
+            "a fresh launch is not a failure"
+        );
+        assert_eq!(
+            inner.machines["3.121.112.113"].state,
+            MachineState::Initializing
+        );
+
+        // Past the deadline it becomes a verdict, naming the address.
+        inner.machines.get_mut("3.121.112.113").unwrap().state_since =
+            now_secs() - (BOOT_DEADLINE_SECS + 1);
+        let retired = inner.expire_initializing();
+        assert_eq!(retired.len(), 1, "one line per box retired: {retired:?}");
+        assert!(retired[0].contains("3.121.112.113"), "{}", retired[0]);
+        assert!(retired[0].contains("never answered ssh"), "{}", retired[0]);
+
+        let m = &inner.machines["3.121.112.113"];
+        assert_eq!(m.state, MachineState::Error);
+        // The EC2 id is the box's one stable identity — relink matches by it,
+        // so a verdict may never erase it.
+        assert!(m.note.contains("i-09def58f197d3092c"), "{}", m.note);
+        // One-shot: the next pass has nothing left to retire.
+        assert!(inner.expire_initializing().is_empty());
+    }
+
+    #[test]
+    fn a_record_from_before_the_stamp_is_adopted_not_expired() {
+        // `state_since == 0` means the record predates the field. Reading a
+        // missing timestamp as "infinitely old" would retire a box on the
+        // strength of a gap in the ledger.
+        let (_d, mut inner) = fixture();
+        let mut m = Machine::new("10.0.0.9", "ubuntu", 22, None, "worker");
+        m.state = MachineState::Initializing;
+        m.state_since = 0;
+        inner.machines.insert(m.addr.clone(), m);
+
+        assert!(
+            inner.expire_initializing().is_empty(),
+            "adopt, do not expire"
+        );
+        let m = &inner.machines["10.0.0.9"];
+        assert!(m.state_since > 0, "the clock was adopted");
+        assert_eq!(m.state, MachineState::Initializing, "and it keeps booting");
+    }
+
+    #[test]
+    fn offer_skips_a_stage_the_policy_disabled() {
+        let (_d, mut inner) = fixture();
+        offer_fixture(&mut inner);
+        two_ready_stages(&mut inner);
+        // Merge off: the same pending work must route to render instead,
+        // never sit unassigned while a merge-capable box is idle.
+        inner.machines.get_mut("127.0.0.1").unwrap().task_policy = Some(vec![
+            bm_proto::TaskPref {
+                stage: Stage::Merge,
+                enabled: false,
+            },
+            bm_proto::TaskPref {
+                stage: Stage::Render,
+                enabled: true,
+            },
+            bm_proto::TaskPref {
+                stage: Stage::Digest,
+                enabled: true,
+            },
+            bm_proto::TaskPref {
+                stage: Stage::Crawl,
+                enabled: true,
+            },
+        ]);
+        let offer = inner.offer("w1").expect("render is offerable");
+        assert_eq!(offer.task_id, "render:1");
+    }
+
+    /// Reorder the local box's policy so `first` leads; the rest follow in
+    /// their canonical order. Every stage stays enabled.
+    fn lead_with(inner: &mut Inner, first: Stage) {
+        let mut list: Vec<bm_proto::TaskPref> = Vec::new();
+        for s in [first, Stage::Crawl, Stage::Digest, Stage::Render, Stage::Merge] {
+            if !list.iter().any(|p| p.stage == s) {
+                list.push(bm_proto::TaskPref {
+                    stage: s,
+                    enabled: true,
+                });
+            }
+        }
+        inner.machines.get_mut("127.0.0.1").unwrap().task_policy = Some(list);
+    }
+
+    #[test]
+    fn offer_respects_a_reordered_policy() {
+        let (_d, mut inner) = fixture();
+        offer_fixture(&mut inner);
+        // ch1 crawl pending; ch2 digest ready (its crawl is done).
+        inner
+            .tasks
+            .insert("crawl:1".into(), Task::new(1, Stage::Crawl));
+        for (stage, state) in [
+            (Stage::Crawl, TaskState::Done),
+            (Stage::Digest, TaskState::Pending),
+        ] {
+            let mut t = Task::new(2, stage);
+            t.state = state;
+            inner.tasks.insert(format!("{stage}:2"), t);
+        }
+        // Crawl first → the crawl wins even though digest is also ready.
+        lead_with(&mut inner, Stage::Crawl);
+        let offer = inner.offer("w1").expect("crawl:1 is offerable");
+        assert_eq!(offer.task_id, "crawl:1");
+        // Digest first → the ready digest wins over the pending crawl.
+        if let Some(t) = inner.tasks.get_mut("crawl:1") {
+            t.state = TaskState::Pending;
+            t.assigned_to = None;
+            t.lease_until = None;
+        }
+        lead_with(&mut inner, Stage::Digest);
+        let offer = inner.offer("w1").expect("digest:2 is offerable");
+        assert_eq!(offer.task_id, "digest:2");
+    }
+
+    fn instance(id: &str, public: &str, private: &str) -> bm_core::provision::AwsInstance {
+        bm_core::provision::AwsInstance {
+            id: id.into(),
+            instance_type: "t3.large".into(),
+            state: "running".into(),
+            az: "eu-central-1a".into(),
+            spot: true,
+            public_ip: public.into(),
+            private_ip: private.into(),
+            profile: "p".into(),
+            launch_time: String::new(),
+        }
+    }
+
+    #[test]
+    fn relink_repoints_a_rotated_public_address() {
+        let (_d, mut inner) = fixture();
+        let mut m = Machine::new("18.1.1.1", "ubuntu", 22, None, "worker");
+        m.name = "box-1".into();
+        m.note = "EC2 i-0123456789abcdef0 (running)".into();
+        inner.machines.insert("18.1.1.1".into(), m);
+        inner.workers.insert("w1".into(), "18.1.1.1".into());
+
+        let lines = inner.relink_drifted(&[instance(
+            "i-0123456789abcdef0",
+            "52.2.2.2",
+            "172.31.21.86",
+        )]);
+        assert!(inner.machines.contains_key("52.2.2.2"));
+        assert!(!inner.machines.contains_key("18.1.1.1"));
+        assert_eq!(inner.machines["52.2.2.2"].name, "box-1", "the handle travels");
+        assert_eq!(
+            inner.workers.get("w1").map(String::as_str),
+            Some("52.2.2.2"),
+            "the worker map follows the box"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("address rotated")),
+            "the repair is explained: {lines:?}"
+        );
+        // The config file moved with it, not just the in-memory map.
+        let boxes = bm_core::provision::load_boxes(&inner.layout.machines());
+        assert!(boxes.iter().any(|b| b.addr == "52.2.2.2"));
+        assert!(!boxes.iter().any(|b| b.addr == "18.1.1.1"));
+    }
+
+    #[test]
+    fn relink_folds_a_private_address_ghost() {
+        let (_d, mut inner) = fixture();
+        let mut m = Machine::new("52.2.2.2", "ubuntu", 22, None, "worker");
+        m.name = "box-1".into();
+        m.note = "EC2 i-0123456789abcdef0 (running)".into();
+        inner.machines.insert("52.2.2.2".into(), m);
+        // The agent reported its VPC-private address and `observe` minted a
+        // second machine for the same box.
+        inner.machines.insert(
+            "172.31.21.86".into(),
+            Machine::new("172.31.21.86", "unknown", 22, None, "worker"),
+        );
+        inner.workers.insert("w1".into(), "172.31.21.86".into());
+
+        let lines = inner.relink_drifted(&[instance(
+            "i-0123456789abcdef0",
+            "52.2.2.2",
+            "172.31.21.86",
+        )]);
+        assert!(!inner.machines.contains_key("172.31.21.86"));
+        assert!(inner.machines.contains_key("52.2.2.2"));
+        assert_eq!(inner.workers.get("w1").map(String::as_str), Some("52.2.2.2"));
+        assert!(
+            lines.iter().any(|l| l.contains("ghost")),
+            "the fold is explained: {lines:?}"
         );
     }
 }

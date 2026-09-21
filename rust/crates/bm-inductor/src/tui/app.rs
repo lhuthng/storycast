@@ -7,9 +7,10 @@ use crate::tui::{
     model::{cast_rows, parse_stats, registry_machines, CastRow, WorkerStats},
     screen::Screen,
     sound::SoundData,
-    style::{level_from_str, style_bold_of, style_of, Conn, Level, LogLine},
+    style::{level_from_str, style_bold_of, style_of, Conn, Level, LogLine, Theme},
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use bm_core::provision::AwsInstance;
 use bm_proto::{Heartbeat, Machine, Op, Roster, Task};
 use ratatui::style::{Color, Style};
 use std::collections::{HashMap, VecDeque};
@@ -68,17 +69,45 @@ pub(crate) struct App {
     /// follows on the first live refresh — so one keypress runs chapters,
     /// not just processes.
     pub(crate) pending_enqueue: Option<(u32, u32)>,
-    /// A backend start sequence is in flight: refuses a second `B`/`R` start,
-    /// cleared when the sequence reports `DoneKind::StartDone`.
+    /// A backend start sequence is in flight: refuses a second `B`/`R` start.
+    ///
+    /// Spans the whole sequence, not just the backend boot — the start job ends
+    /// in seconds and hands its boxes to the scheduler, so the flag is released
+    /// by the last catch-up provision finishing. See `catchup_jobs`.
     pub(crate) backend_start_outstanding: bool,
-    /// Cancel flag for the in-flight start's catch-up loop, set
-    /// synchronously by `X` (the stop job itself still queues behind).
+    /// Cancel flag for the catch-up provisions a `B` start handed out, set
+    /// synchronously by `X`.
+    ///
+    /// `X` no longer waits for the provisions to drain before sweeping: the
+    /// stop holds the cluster resource, a provision holds one box, and the two
+    /// run together. Each provision reads this flag before it launches its
+    /// worker, so a box being pushed when `X` lands finishes its push and then
+    /// stays quiet — which is what "stopped" has to mean.
     pub(crate) start_cancel: Option<Arc<AtomicBool>>,
+    /// The boxes a `B` start left to catch up, and the flag that stops them.
+    ///
+    /// Carried on the `App` rather than dispatched from the job because only
+    /// the dashboard can allocate a job id: `dispatch` is what puts a row on
+    /// the jobs screen, and a job spawning jobs behind its back would produce
+    /// rows nothing could match an id to.
+    pub(crate) pending_catchup: Option<(Vec<bm_proto::Machine>, Arc<AtomicBool>)>,
+    /// Ids of the catch-up provisions a `B` handed out that are still running.
+    ///
+    /// `backend_start_outstanding` spans these, not just the backend boot. The
+    /// start job now ends in seconds while the boxes it handed out keep going,
+    /// so without this a second `B` a moment later would be allowed and would
+    /// queue a duplicate push at every box — which is the queueing this whole
+    /// change exists to remove. The flag is released by the last one finishing.
+    pub(crate) catchup_jobs: Vec<u64>,
     /// Screen a `:` command returns to after it runs: commands fire in the
     /// context they were typed in, so `:F` in the task list retries the
     /// highlighted row instead of losing it.
     pub(crate) command_return: Option<Screen>,
-    pub(crate) colour: bool,
+    /// The active palette. Replaces the old `colour: bool`: mono is now one
+    /// of three themes, and `C` cycles all of them. `colour()` is the boolean
+    /// the panes already read — false exactly when the theme is `Mono` — so
+    /// "no bold/fg for terminals that cannot show it" keeps working.
+    pub(crate) theme: Theme,
     pub(crate) status: LogLine,
     pub(crate) conn: Conn,
     pub(crate) tick: u64,
@@ -106,6 +135,11 @@ pub(crate) struct App {
     pub(crate) sound_error: Option<String>,
     /// The speaker on this desk. Owns the audio process, not the audio.
     pub(crate) player: Player,
+    /// What the EC2 account holds, from the last `describe-instances`. Empty
+    /// until `:pool` runs; `cloud_error` is set instead when the read failed, so
+    /// the Cloud view renders the reason rather than an empty account.
+    pub(crate) cloud: Vec<AwsInstance>,
+    pub(crate) cloud_error: Option<String>,
 }
 
 impl App {
@@ -137,8 +171,10 @@ impl App {
             pending_enqueue: None,
             backend_start_outstanding: false,
             start_cancel: None,
+            pending_catchup: None,
+            catchup_jobs: Vec::new(),
             command_return: None,
-            colour: true,
+            theme: Theme::default(),
             status: LogLine {
                 level: Level::Info,
                 wall: bm_proto::now_secs(),
@@ -155,6 +191,8 @@ impl App {
             sound_loading: false,
             sound_error: None,
             player: Player::new(),
+            cloud: Vec::new(),
+            cloud_error: None,
         }
     }
 
@@ -266,15 +304,19 @@ impl App {
         };
     }
 
-    /// Colour-aware style. `C` disables colour for monochrome terminals and
-    /// for operators who cannot separate the state hues; the state word is
-    /// always rendered too, so nothing depends on colour alone.
+    /// Colour-aware style. Mono (the theme, not a flag) drops the hue but
+    /// keeps the bold; the state word is always rendered too, so nothing
+    /// depends on colour alone.
+    pub(crate) fn colour(&self) -> bool {
+        self.theme != Theme::Mono
+    }
+
     pub(crate) fn style(&self, c: Color) -> Style {
-        style_of(self.colour, c)
+        style_of(self.colour(), c)
     }
 
     pub(crate) fn style_bold(&self, c: Color) -> Style {
-        style_bold_of(self.colour, c)
+        style_bold_of(self.colour(), c)
     }
 
     pub(crate) fn setting_u32(&self, key: &str, default: u32) -> u32 {
@@ -532,7 +574,17 @@ impl App {
                     job.activity = text;
                 }
             }
-            Ev::JobFinished(id) => self.background_jobs.retain(|job| job.id != id),
+            Ev::JobFinished(id) => {
+                self.background_jobs.retain(|job| job.id != id);
+                // The last catch-up provision finishing is what ends the `B`
+                // start sequence now — see `catchup_jobs`.
+                if let Some(i) = self.catchup_jobs.iter().position(|j| *j == id) {
+                    self.catchup_jobs.remove(i);
+                    if self.catchup_jobs.is_empty() {
+                        self.backend_start_outstanding = false;
+                    }
+                }
+            }
             Ev::Log(l) => self.push_log(l),
             Ev::Roster(Ok(r)) => {
                 self.roster_loading = false;
@@ -562,6 +614,13 @@ impl App {
                     Level::Info,
                     format!("ch{start}×{count} will enqueue once live"),
                 );
+            }
+            // The `B` job stopped at the backend and handed us the boxes that
+            // still need work, so the catch-up is one visible job per box
+            // instead of a loop inside "start backend". Stored, not dispatched
+            // here: only `dispatch` can allocate a job id.
+            Ev::CatchUp { machines, cancel } => {
+                self.pending_catchup = Some((machines, cancel));
             }
             Ev::MachineUpdate { addr, state, note } => {
                 if let Some(m) = self.machines.iter_mut().find(|m| m.addr == addr) {
@@ -615,6 +674,17 @@ impl App {
                     }
                 }
             }
+            // A fresh account listing. A failed read clears the rows and
+            // records the reason: showing the previous account as if it were
+            // still true is the one wrong answer here.
+            Ev::Cloud(Ok(instances)) => {
+                self.cloud_error = None;
+                self.cloud = instances;
+            }
+            Ev::Cloud(Err(e)) => {
+                self.cloud.clear();
+                self.cloud_error = Some(e);
+            }
             // A poller snapshot, applied the moment it arrives: nothing here
             // waits on the network, which is what keeps the drawing loop moving
             // even when the inductor is slow to answer.
@@ -624,8 +694,20 @@ impl App {
                 self.pending = self.pending.saturating_sub(1);
                 match kind {
                     DoneKind::StartDone => {
-                        self.backend_start_outstanding = false;
-                        self.start_cancel = None;
+                        // The start *job* is over; the sequence it began may not
+                        // be. `catchup_jobs` holds the boxes it handed out, so
+                        // the flag follows them rather than this event — which
+                        // is what a `B` press now means, and it is why a second
+                        // `B` is still refused while boxes are joining.
+                        //
+                        // `start_cancel` deliberately survives this. It used to
+                        // be cleared here because `StartDone` was the end of the
+                        // catch-up; it is now the moment the catch-up *starts*,
+                        // so clearing it would leave `X` with no way to stop the
+                        // provisions the start just handed out. Its life is from
+                        // a `B` press until `X` consumes it or the next `B`
+                        // replaces it — and a flag nobody sets is inert.
+                        self.backend_start_outstanding = !self.catchup_jobs.is_empty();
                     }
                     DoneKind::RosterDone => self.roster_loading = false,
                     DoneKind::LinesDone => self.lines_loading = false,

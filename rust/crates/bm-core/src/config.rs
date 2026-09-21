@@ -60,6 +60,14 @@ pub struct Settings {
     /// addresses reaches each box — right on a LAN, and useless from a cloud
     /// worker, which is what this field is for.
     pub advertise: String,
+    /// Minutes with nothing left to do before the cluster shuts itself down.
+    ///
+    /// The inductor arms it once the queue has been empty this long, and then
+    /// tells each worker to exit. A worker also exits on its own after the same
+    /// silence plus a margin, so an inductor that died without saying goodbye
+    /// does not leave boxes holding ports and a TTS sidecar. `0` disables the
+    /// timer entirely — for a long-lived inductor an operator keeps open.
+    pub idle_mins: u32,
     /// App-wide ssh defaults for binding machines: user, port, key path.
     /// `None` key means ssh decides (agent, `~/.ssh/config`, default keys).
     /// `#[serde(default)]` keeps every existing `settings.json` parsing —
@@ -120,6 +128,7 @@ impl Default for Settings {
             ],
             control_port: 8901,
             advertise: "127.0.0.1".into(),
+            idle_mins: 5,
             ssh: SshDefaults::default(),
             profile: crate::profile::Pointer::default(),
         }

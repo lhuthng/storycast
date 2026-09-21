@@ -3,14 +3,15 @@ use super::app::App;
 use super::audio::Player;
 use super::audition::AuditionLine;
 use super::draw::draw;
-use super::input::command::{command_key, do_command, Command};
+use super::input::command::{command_key, do_command, Command, WORDS};
 use super::input::runconfig::{
     parse_mix_config, parse_run_config, run_preview, save_app_setting, save_run_config,
 };
 use super::input::submit::submit_text;
 use super::input::{handle_key, op_key, urlencode};
 use super::jobs::{
-    job_segment, run_job, set_machine_state, DoneKind, Ev, Job, ProfileReq, WorkspaceReq,
+    job_segment, run_job, set_machine_state, verdict_after_failed_provision, DoneKind, Ev, Job,
+    ProfileReq, Res, WorkspaceReq,
 };
 use super::layout::{
     cols, size_class, width_of, Size, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H, COMPACT_MACHINES_H,
@@ -24,14 +25,15 @@ use super::sound::{self, SoundView};
 use super::style::*;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use bm_proto::{
-    Heartbeat, Machine, MachineState, Op, OpRequest, Roster, Stage, Task, TaskState, VoiceInfo,
+    Heartbeat, Machine, MachineState, Op, OpRequest, Roster, Stage, Task, TaskPref, TaskState,
+    VoiceInfo,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Color;
 use std::collections::BTreeMap;
 
 #[tokio::test]
-async fn tracked_jobs_keep_lifecycle_serial_and_commands_live() {
+async fn tracked_jobs_queue_only_behind_a_resource_they_need() {
     use super::input::dispatch;
     use super::jobs::run_jobs_with;
     use std::sync::Arc;
@@ -68,6 +70,8 @@ async fn tracked_jobs_keep_lifecycle_serial_and_commands_live() {
         settings_key: None,
     };
     assert!(dispatch(&mut app, &job_tx, start));
+    // Both name `Res::Cluster`, so the stop still waits for the start — the
+    // pair is the one place "one cluster, one lifecycle" is literally true.
     assert!(dispatch(
         &mut app,
         &job_tx,
@@ -127,6 +131,203 @@ async fn tracked_jobs_keep_lifecycle_serial_and_commands_live() {
     assert_eq!(finished, vec![3, 1, 2]);
     assert_eq!(app.pending, 0);
     assert!(app.background_jobs.is_empty());
+}
+
+#[test]
+fn a_queued_row_says_what_it_is_waiting_for() {
+    // "causing every later job to be queued" is only actionable if the row
+    // says why. A job that holds something names it; a job on the default lane
+    // has nothing to contend with, and saying so is the honest answer rather
+    // than inventing a reason.
+    let mut app = App::new("http://unused");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    super::input::dispatch(
+        &mut app,
+        &tx,
+        Job::Provision {
+            layout: bm_core::Layout::new(""),
+            api: "unused".into(),
+            machine: Machine::new("10.0.0.5", "u", 22, None, "worker"),
+            force: false,
+            settings_key: None,
+            cancel: None,
+        },
+    );
+    super::input::dispatch(
+        &mut app,
+        &tx,
+        Job::LoadLines {
+            layout: bm_core::Layout::new(""),
+        },
+    );
+    assert_eq!(
+        app.background_jobs[0].activity,
+        "queued · needs box 10.0.0.5"
+    );
+    assert_eq!(app.background_jobs[1].activity, "queued");
+}
+
+/// A job holds the thing it touches and nothing else.
+///
+/// This is the whole difference from the two hardcoded lanes: `aws discover`
+/// used to queue behind a five-minute box push because both were filed under
+/// "lifecycle", and two boxes provisioned one after the other because there was
+/// one queue for all of them.
+#[test]
+fn resources_name_what_a_job_actually_touches() {
+    let box_job = |addr: &str| Job::Provision {
+        layout: bm_core::Layout::new(""),
+        api: "unused".into(),
+        machine: Machine::new(addr, "u", 22, None, "worker"),
+        force: false,
+        settings_key: None,
+        cancel: None,
+    };
+    let start = Job::StartBackend {
+        layout: bm_core::Layout::new(""),
+        api: "unused".into(),
+        api_up: false,
+        start: 1,
+        count: 1,
+        enqueue: false,
+        machines: vec![],
+        cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        settings_key: None,
+    };
+    assert_eq!(start.resources(), vec![Res::Cluster]);
+    assert_eq!(
+        Job::StopBackend {
+            layout: bm_core::Layout::new(""),
+            machines: vec![],
+            api: "unused".into(),
+            settings_key: None,
+        }
+        .resources(),
+        vec![Res::Cluster]
+    );
+    assert_eq!(
+        box_job("10.0.0.5").resources(),
+        vec![Res::Box("10.0.0.5".into())]
+    );
+    // Two boxes are disjoint, which is what lets them provision at once…
+    assert_ne!(
+        box_job("10.0.0.5").resources(),
+        box_job("10.0.0.6").resources()
+    );
+    // …and the same box twice is not: a second push would interleave with the
+    // first, so those two do queue.
+    assert_eq!(
+        box_job("10.0.0.5").resources(),
+        box_job("10.0.0.5").resources()
+    );
+    // The AWS four read-modify-write the same document.
+    assert_eq!(
+        Job::AwsUp {
+            root: std::path::PathBuf::from("/tmp/x"),
+            api: "unused".into(),
+            http: reqwest::Client::new(),
+            count: 1,
+        }
+        .resources(),
+        vec![Res::Aws]
+    );
+    // Everything else is the default lane, which stays serial among itself.
+    assert_eq!(
+        Job::LoadLines {
+            layout: bm_core::Layout::new("")
+        }
+        .resources(),
+        vec![Res::Command]
+    );
+}
+
+/// The regression this change exists for: a job whose resources are free starts
+/// *now*, even while a long job holds something else.
+#[tokio::test]
+async fn a_free_job_does_not_wait_for_a_long_one() {
+    use super::input::dispatch;
+    use super::jobs::run_jobs_with;
+    use std::sync::Arc;
+    use std::time::Duration;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let blocked = gate.clone();
+    let worker = tokio::spawn(run_jobs_with(job_rx, tx, move |job, tx| {
+        let blocked = blocked.clone();
+        async move {
+            if matches!(&job, Job::Provision { machine, .. } if machine.addr == "10.0.0.5") {
+                blocked.notified().await;
+            }
+            let _ = tx.send(Ev::Done(DoneKind::Other));
+        }
+    }));
+    let mut app = App::new("http://unused");
+    let provision = |addr: &str| Job::Provision {
+        layout: bm_core::Layout::new(""),
+        api: "unused".into(),
+        machine: Machine::new(addr, "u", 22, None, "worker"),
+        force: false,
+        settings_key: None,
+        cancel: None,
+    };
+    assert!(dispatch(&mut app, &job_tx, provision("10.0.0.5")));
+    // A different box: nothing in common with the blocked one, so it runs.
+    assert!(dispatch(&mut app, &job_tx, provision("10.0.0.6")));
+    // The AWS account: also nothing in common, so it runs.
+    assert!(dispatch(
+        &mut app,
+        &job_tx,
+        Job::AwsUp {
+            root: std::path::PathBuf::from("/tmp/x"),
+            api: "unused".into(),
+            http: reqwest::Client::new(),
+            count: 1,
+        }
+    ));
+    // The same box again: this one really does contend, so it waits.
+    assert!(dispatch(&mut app, &job_tx, provision("10.0.0.5")));
+    let started = |ev: &Ev| match ev {
+        Ev::JobStarted(id) => Some(*id),
+        _ => None,
+    };
+    let mut seen = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while seen.len() < 3 {
+            let ev = rx.recv().await.unwrap();
+            if let Some(id) = started(&ev) {
+                seen.push(id);
+            }
+            app.apply(ev);
+        }
+    })
+    .await
+    .expect("every job whose resources are free must start at once");
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![1, 2, 3],
+        "both boxes and the account started together — the single lifecycle \
+         lane this replaced ran them one after another"
+    );
+    // Job 4 names the box job 1 still holds (job 1's runner is parked on the
+    // gate, so the box is held for the whole test), and that is the one job
+    // here that genuinely has to wait. Give the scheduler a beat to prove the
+    // negative rather than reading an empty channel as an answer.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    while let Ok(ev) = rx.try_recv() {
+        if let Some(id) = started(&ev) {
+            seen.push(id);
+        }
+        app.apply(ev);
+    }
+    assert!(
+        !seen.contains(&4),
+        "a second push to the same box must queue behind the first: {seen:?}"
+    );
+    drop(job_tx);
+    gate.notify_one();
+    let _ = tokio::time::timeout(Duration::from_secs(2), worker).await;
 }
 
 #[test]
@@ -568,11 +769,54 @@ async fn run_screen_enters_and_launches_with_previewed_values() {
     );
     app.apply(Ev::Done(DoneKind::StartDone));
     assert!(!app.backend_start_outstanding, "StartDone re-arms B");
+    // …but the cancel flag outlives it. `StartDone` used to be the end of the
+    // catch-up; it is now the moment the catch-up *starts*, and the boxes it
+    // handed out are still provisioning. Clearing the flag here would leave `X`
+    // with nothing to set, and a provision mid-push would launch its worker
+    // anyway — a cluster that is not quiet after a stop.
+    assert!(
+        app.start_cancel.is_some(),
+        "the catch-up outlives the start job that made it"
+    );
 
     // `Esc` just closes.
     app.screen = Screen::Run;
     handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
     assert!(matches!(app.screen, Screen::Normal));
+}
+
+#[test]
+fn the_start_guard_outlives_the_start_job() {
+    // `B` now ends in seconds and hands its boxes to the scheduler. If the guard
+    // were released then, a second `B` a moment later would be allowed and would
+    // queue a duplicate push at every box — exactly the queueing this change
+    // exists to remove. So the flag follows the catch-up, not the start job.
+    let mut app = App::new("http://unused");
+    app.catchup_jobs = vec![7, 8];
+    app.backend_start_outstanding = true;
+
+    app.apply(Ev::Done(DoneKind::StartDone));
+    assert!(
+        app.backend_start_outstanding,
+        "two boxes are still joining, so B is still spoken for"
+    );
+
+    app.apply(Ev::JobFinished(7));
+    assert!(
+        app.backend_start_outstanding,
+        "one box left — the sequence is not over"
+    );
+
+    app.apply(Ev::JobFinished(8));
+    assert!(
+        !app.backend_start_outstanding,
+        "the last box finished, so B is free again"
+    );
+    assert!(app.catchup_jobs.is_empty());
+    // A job that was never part of a start must not touch the flag.
+    app.backend_start_outstanding = true;
+    app.apply(Ev::JobFinished(99));
+    assert!(app.backend_start_outstanding);
 }
 
 #[tokio::test]
@@ -675,6 +919,51 @@ fn the_run_screen_renders_without_a_roster_or_backend() {
     assert!(text.contains("System"), "{text}");
     assert!(text.contains("Enter launches"), "{text}");
     assert!(text.contains("DOWN"), "no backend is attached:\n{text}");
+}
+
+#[test]
+fn the_run_screen_shows_each_machines_work_split() {
+    // Before launching, the operator can see where the work will land: each
+    // box's handle, its kind, and the stage order it will be offered.
+    let mut app = App::new("http://127.0.0.1:8901");
+    let mut aws = named_machine("52.2.2.2", "box-1");
+    aws.note = "EC2 i-0123456789abcdef0 (running)".into();
+    let mut remote = named_machine("192.168.2.2", "box-2");
+    remote.task_policy = Some(vec![
+        TaskPref {
+            stage: Stage::Merge,
+            enabled: false,
+        },
+        TaskPref {
+            stage: Stage::Render,
+            enabled: true,
+        },
+        TaskPref {
+            stage: Stage::Digest,
+            enabled: true,
+        },
+        TaskPref {
+            stage: Stage::Crawl,
+            enabled: true,
+        },
+    ]);
+    app.machines = vec![
+        Machine::new("127.0.0.1", "local", 22, None, "both"),
+        remote,
+        aws,
+    ];
+    app.screen = Screen::Run;
+    let text = render_text(&mut app, 140, 44);
+    assert!(text.contains("work split"), "the section is titled:\n{text}");
+    for row in ["local (local)", "box-2 (rmt)", "box-1 (aws)"] {
+        assert!(text.contains(row), "missing `{row}`:\n{text}");
+    }
+    assert!(text.contains("M>R>D>C"), "default order:\n{text}");
+    assert!(text.contains("m>R>D>C"), "merge off is lower-case:\n{text}");
+    assert!(
+        text.contains("render > digest > crawl"),
+        "the enabled chain skips the disabled stage:\n{text}"
+    );
 }
 
 #[tokio::test]
@@ -1085,6 +1374,60 @@ fn seen_label_says_never_rather_than_a_fifty_year_uptime() {
 }
 
 #[test]
+fn state_age_says_unknown_rather_than_a_fifty_year_boot() {
+    // The same trap `seen_label` has, one field over: `state_since == 0` means
+    // the record predates the field. Formatting that as an elapsed time would
+    // print "1471228h" and make every old record look permanently stuck.
+    let mut m = Machine::new("10.0.0.5", "u", 22, None, "worker");
+    assert_eq!(state_age_label(&m), "—", "never stamped is not 0s ago");
+
+    m.set_state(MachineState::Initializing);
+    assert_eq!(state_age_label(&m), "0s", "just launched");
+
+    m.state_since = bm_proto::now_secs().saturating_sub(45);
+    assert_eq!(state_age_label(&m), "45s");
+    m.state_since = bm_proto::now_secs().saturating_sub(120);
+    assert_eq!(state_age_label(&m), "2m", "a long boot reads in minutes");
+    m.state_since = bm_proto::now_secs().saturating_sub(7200);
+    assert_eq!(state_age_label(&m), "2h");
+}
+
+#[test]
+fn a_booting_box_that_never_answered_ssh_is_not_called_broken() {
+    // `:prov` seconds after `:up` is the likeliest way to meet a box whose
+    // sshd is not listening yet. The probe learned nothing — it cannot even
+    // tell a booting box from a dead one — so calling it `Error` is the exact
+    // misreading `initializing` exists to prevent. Stay booting; the boot
+    // deadline is what gives up.
+    assert_eq!(
+        verdict_after_failed_provision(true, false),
+        MachineState::Initializing
+    );
+}
+
+#[test]
+fn a_box_that_answered_but_failed_a_step_is_broken_even_while_booting() {
+    // The boundary that makes the rule above safe rather than a blanket
+    // amnesty: ssh *answered*, so the failure is real — a missing python, a
+    // full disk, a failed push. That is a fault whatever the clock says.
+    assert_eq!(
+        verdict_after_failed_provision(true, true),
+        MachineState::Error
+    );
+}
+
+#[test]
+fn an_unreachable_box_we_never_thought_was_booting_is_broken() {
+    // The other half of the boundary: without this, every unreachable box
+    // would be forgiven once and sit in `initializing` until the deadline,
+    // turning a plain wrong address into a five-minute wait.
+    assert_eq!(
+        verdict_after_failed_provision(false, false),
+        MachineState::Error
+    );
+}
+
+#[test]
 fn stages_and_states_have_distinct_palettes() {
     // The old build coloured the Workers stage column with the task-state
     // palette, which no stage name matched.
@@ -1199,7 +1542,7 @@ fn app_starts_on_normal_with_a_hint_not_a_blank_status() {
     assert!(matches!(app.screen, Screen::Normal));
     assert!(!app.status.text.is_empty());
     assert_eq!(app.pending, 0);
-    assert!(app.colour);
+    assert!(app.colour());
 }
 
 // --- responsive layout --------------------------------------------------
@@ -1682,6 +2025,7 @@ fn beat(id: &str, addr: &str, age_secs: u64, alias: &str) -> Heartbeat {
         cpu_pct: None,
         mem_pct: None,
         mem_gb: None,
+        capabilities: vec![],
     }
 }
 
@@ -1730,6 +2074,43 @@ fn named_machine(addr: &str, name: &str) -> Machine {
     let mut m = Machine::new(addr, "thang", 22, None, "worker");
     m.name = name.into();
     m
+}
+
+#[test]
+fn workers_pane_hides_ghosts_of_offline_boxes() {
+    use super::model::beat_backed;
+    use bm_proto::MachineState;
+    // A beat the box's Offline verdict postdates is a ghost, not a worker.
+    let mut m = named_machine("192.168.2.2", "hawk");
+    m.set_state(MachineState::Offline);
+    let ghost = beat("thang-marmot", "192.168.2.2", 30, "marmot");
+    assert!(!beat_backed(&[m.clone()], &ghost));
+    // A beat newer than the verdict still counts — one slow poll flickers
+    // the dot without deleting the row.
+    m.state_since = m.state_since.saturating_sub(100);
+    let fresh = beat("thang-marmot", "192.168.2.2", 2, "marmot");
+    assert!(beat_backed(&[m.clone()], &fresh));
+    // Anything but Offline backs its beats; unknown boxes back everything.
+    m.set_state(MachineState::Online);
+    assert!(beat_backed(&[m.clone()], &ghost));
+    assert!(beat_backed(&[], &ghost));
+
+    // And the pane agrees: no ghost rows, and the count with them.
+    let mut app = App::new("http://127.0.0.1:8901");
+    let mut off = named_machine("192.168.2.2", "hawk");
+    off.set_state(MachineState::Offline);
+    app.machines = vec![off];
+    app.beats = vec![beat("thang-marmot", "192.168.2.2", 30, "marmot")];
+    let text = render_text(&mut app, 140, 44);
+    // The Workers block only (Stats keeps per-worker history rows, which
+    // legitimately still name the box).
+    let workers = text
+        .split_once("Workers ·")
+        .and_then(|(_, rest)| rest.split_once("╭"))
+        .map(|(block, _)| block)
+        .unwrap_or_default();
+    assert!(!workers.contains("marmot"), "ghost rows never draw:\n{text}");
+    assert!(text.contains("0 live"), "the count drops with them:\n{text}");
 }
 
 #[test]
@@ -4193,5 +4574,524 @@ async fn down_at_the_last_row_stays_put() {
     match &app.screen {
         Screen::Cast(v) => assert_eq!(v.cursor, 0, "one row in the filter, nowhere to go"),
         other => panic!("{other:?}"),
+    }
+}
+
+// --- the EC2 half -------------------------------------------------------
+
+#[test]
+fn command_keys_are_unique_and_operators_stay_off_the_keyboard() {
+    // There was no key-uniqueness test at all, so a new binding could quietly
+    // shadow an existing one. Read-only navigations may share their Normal-mode
+    // key (that is the point of `Command::Key`); operator commands may not —
+    // they live on the `:` line, and a bare keypress must not launch or
+    // terminate anything.
+    let mut seen: Vec<char> = Vec::new();
+    for w in WORDS {
+        let Some(k) = w.key else { continue };
+        assert!(
+            !seen.contains(&k),
+            "key {k:?} is bound twice in the command table"
+        );
+        seen.push(k);
+    }
+    // The three new cloud keys are gated, not live: a stray `w`/`o`/`l` must not
+    // launch or terminate EC2 instances. (A few older operators — `B`, `X` — do
+    // keep a normal-mode key on purpose; these do not.)
+    for k in ['w', 'o', 'l'] {
+        assert!(seen.contains(&k), "{k:?} lost its command binding");
+        assert!(
+            "aANpPdtcvsSeumBXwol".contains(k),
+            "cloud key {k:?} is not in the normal-mode gate list"
+        );
+    }
+}
+
+#[test]
+fn cloud_commands_parse_words_keys_and_the_up_count() {
+    assert_eq!(command_key("up"), Some(Command::AwsUp { count: 1 }));
+    assert_eq!(command_key("up 3"), Some(Command::AwsUp { count: 3 }));
+    assert_eq!(command_key("launch"), Some(Command::AwsUp { count: 1 }));
+    // A bad count is refused, not defaulted to one.
+    assert_eq!(command_key("up 0"), None);
+    assert_eq!(command_key("up x"), None);
+    assert_eq!(command_key("pool"), Some(Command::AwsPool));
+    assert_eq!(command_key("aws"), Some(Command::AwsPool));
+    assert_eq!(command_key("cloud"), Some(Command::AwsPool));
+    assert_eq!(command_key("down"), Some(Command::AwsDown { force: false }));
+    assert_eq!(
+        command_key("down force"),
+        Some(Command::AwsDown { force: true })
+    );
+    assert_eq!(
+        command_key("terminate"),
+        Some(Command::AwsDown { force: false })
+    );
+    assert_eq!(command_key("l"), Some(Command::AwsPool));
+    assert_eq!(command_key("w"), Some(Command::AwsUp { count: 1 }));
+    assert_eq!(command_key("o"), Some(Command::AwsDown { force: false }));
+}
+
+#[test]
+fn login_and_discover_are_words_with_no_key_of_their_own() {
+    // Setup verbs: reachable from the `:` line, never a bare keypress. They are
+    // one-off account work, and a stray letter must not store a credential.
+    assert_eq!(command_key("login"), Some(Command::AwsLogin));
+    assert_eq!(command_key("LOGIN"), Some(Command::AwsLogin));
+    assert_eq!(command_key("discover"), Some(Command::AwsDiscover));
+    for name in ["login", "discover"] {
+        let w = WORDS
+            .iter()
+            .find(|w| w.names[0] == name)
+            .unwrap_or_else(|| panic!("{name} is not in the word table"));
+        assert!(w.key.is_none(), "{name} must not fire from a bare key");
+        assert!(w.desc.is_some(), "{name} needs a `:help` line");
+    }
+}
+
+#[test]
+fn discover_parses_the_same_flags_the_cli_takes_and_refuses_a_typo() {
+    // The dashboard parses through the CLI's own clap definition, so this is a
+    // regression guard against the two front ends drifting apart: a flag the
+    // CLI accepts must parse here, and an unknown one must be an error rather
+    // than silently dropped.
+    let toks = |s: &str| -> Vec<String> { s.split_whitespace().map(str::to_string).collect() };
+    let args = crate::aws_ops::DiscoverArgs::parse_tokens(&toks(
+        "--region eu-central-1 --instance-profile storycast-worker --security-group sg-abc",
+    ))
+    .unwrap();
+    assert_eq!(args.region.as_deref(), Some("eu-central-1"));
+    assert_eq!(args.instance_profile.as_deref(), Some("storycast-worker"));
+    assert_eq!(args.security_group.as_deref(), Some("sg-abc"));
+    assert!(!args.force);
+    // Empty is a legitimate refresh: every field is kept from the pool.
+    assert!(crate::aws_ops::DiscoverArgs::parse_tokens(&[]).is_ok());
+    assert!(
+        crate::aws_ops::DiscoverArgs::parse_tokens(&toks("--regionn eu-central-1")).is_err(),
+        "a typo must not be ignored"
+    );
+    assert!(
+        crate::aws_ops::LoginArgs::parse_tokens(&toks("--csv x.csv"))
+            .unwrap()
+            .csv
+            .is_some()
+    );
+}
+
+#[test]
+fn the_login_prompt_takes_the_console_csv_and_never_a_typed_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new("http://x");
+    app.layout.root = dir.path().to_path_buf();
+    let prompt = |buf: &str| TextPrompt::new(TextKind::AwsLogin, "t", "h", buf);
+
+    // A bare key id has no secret to go with it, and the secret must not be
+    // typed on a screen — refused with that reason, not half-handled.
+    let err = submit_text(&mut app, &prompt("--access-key-id AKIAEXAMPLE")).unwrap_err();
+    assert!(err.contains("secret cannot be typed here"), "{err}");
+    let err = submit_text(&mut app, &prompt("~/nowhere.csv")).unwrap_err();
+    assert!(err.contains("no such file"), "{err}");
+
+    // A real file is taken as-is, and a leading `~` is expanded (no shell here).
+    let csv = dir.path().join("accessKeys.csv");
+    std::fs::write(
+        &csv,
+        "Access key ID,Secret access key\nAKIAEXAMPLE,s3cr3t\n",
+    )
+    .unwrap();
+    match submit_text(&mut app, &prompt(&csv.display().to_string())).unwrap() {
+        Job::AwsLogin { csv: p, .. } => assert_eq!(p, csv),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_discover_prompt_expands_a_tilde_pem_and_refuses_a_missing_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new("http://x");
+    app.layout.root = dir.path().to_path_buf();
+    let prompt = |buf: &str| TextPrompt::new(TextKind::AwsDiscover, "t", "h", buf);
+
+    assert!(submit_text(&mut app, &prompt("")).is_err());
+    let err = submit_text(
+        &mut app,
+        &prompt("--region eu-central-1 --pem /no/such.pem"),
+    )
+    .unwrap_err();
+    assert!(err.contains("no such .pem"), "{err}");
+
+    let pem = dir.path().join("storycast.pem");
+    std::fs::write(&pem, "-----BEGIN PRIVATE KEY-----").unwrap();
+    match submit_text(
+        &mut app,
+        &prompt(&format!("--region eu-central-1 --pem {}", pem.display())),
+    )
+    .unwrap()
+    {
+        Job::AwsDiscover { args, .. } => {
+            assert_eq!(args.region.as_deref(), Some("eu-central-1"));
+            assert_eq!(args.pem.as_deref(), Some(pem.as_path()));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn aws_pool_job_reports_an_unreadable_account_and_never_a_blank_one() {
+    // A fresh root with no `.bm/aws.json`: the read fails on the missing region.
+    // The Cloud view must get the reason — an empty account is the one wrong
+    // answer here, because it reads as "nothing is running".
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
+    super::jobs::job_aws_pool(
+        tx,
+        dir.path().to_path_buf(),
+        "http://127.0.0.1:1".into(),
+        reqwest::Client::new(),
+    )
+    .await;
+    let mut cloud = None;
+    let mut done = 0usize;
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            Ev::Cloud(r) => cloud = Some(r),
+            Ev::Done(_) => done += 1,
+            _ => {}
+        }
+    }
+    assert!(
+        matches!(cloud, Some(Err(_))),
+        "must report the failure, not an empty list: {cloud:?}"
+    );
+    assert_eq!(done, 1, "every arm owes exactly one Done");
+}
+
+#[test]
+fn the_down_guard_sees_a_render_in_flight_on_one_of_those_boxes() {
+    let now = bm_proto::now_secs();
+    let skip = |json: serde_json::Value| -> Heartbeat { serde_json::from_value(json).unwrap() };
+    let beats = vec![
+        skip(serde_json::json!({
+            "worker_id": "w1", "addr": "172.31.1.5", "stage": "render",
+            "progress": 0.4, "activity": "render ch42", "ts": now
+        })),
+        // A worker merely online with no stage is not "in flight".
+        skip(serde_json::json!({
+            "worker_id": "w2", "addr": "10.0.0.9", "progress": 0.0,
+            "activity": "idle", "ts": now
+        })),
+    ];
+    let mut t = Task::new(42, Stage::Render);
+    t.state = TaskState::Running;
+    t.assigned_to = Some("w1".into());
+    let tasks = vec![t];
+    // Both the public address the registry keys on and the private one the agent
+    // reports name the same box.
+    let addrs = vec!["3.76.103.21".to_string(), "172.31.1.5".to_string()];
+    let busy = busy_on(&beats, &tasks, &addrs, now);
+    assert!(busy.contains(&"render:42".to_string()), "{busy:?}");
+    assert!(busy.contains(&"w1".to_string()), "{busy:?}");
+    assert!(!busy.contains(&"w2".to_string()), "{busy:?}");
+
+    // A box that is not in the list is never the box being killed.
+    let elsewhere = vec!["203.0.113.9".to_string()];
+    assert!(busy_on(&beats, &tasks, &elsewhere, now).is_empty());
+    // A stale heartbeat is not a live render.
+    assert!(busy_on(&beats, &tasks, &addrs, now + 200).is_empty());
+}
+
+#[test]
+fn cloud_listing_addresses_and_liveness_are_read_off_the_instances() {
+    let live = bm_core::provision::AwsInstance {
+        id: "i-09def58f197d3092c".into(),
+        instance_type: "c7i.xlarge".into(),
+        state: "running".into(),
+        az: "eu-central-1a".into(),
+        spot: true,
+        public_ip: "3.76.103.21".into(),
+        private_ip: "172.31.19.210".into(),
+        profile: "b20f7789f510".into(),
+        launch_time: "2026-09-20T18:38:56+00:00".into(),
+    };
+    assert!(is_live_state(&live.state));
+    assert_eq!(
+        instance_addresses(&[live]),
+        vec!["3.76.103.21".to_string(), "172.31.19.210".to_string()]
+    );
+    assert!(is_live_state("running"));
+    assert!(!is_live_state("terminated"));
+    assert!(!is_live_state("stopped"));
+}
+
+// --- visual polish: theme, header, spinner, selection --------------------
+
+fn http_client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
+fn job_channel() -> tokio::sync::mpsc::UnboundedSender<Job> {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    tx
+}
+
+#[tokio::test]
+async fn the_c_key_cycles_the_three_themes_and_mono_drops_the_hues() {
+    use crate::tui::style::{theme_label, themed};
+    use ratatui::style::Color;
+
+    let mut app = App::new("http://127.0.0.1:8901");
+    let http = http_client();
+    let job_tx = job_channel();
+    assert_eq!(theme_label(), "default");
+    assert!(app.colour(), "default keeps the hues");
+
+    // default → dim
+    handle_key(&mut app, key(KeyCode::Char('C')), &http, &job_tx).await;
+    assert_eq!(theme_label(), "dim");
+    assert!(app.colour(), "dim is still colour");
+    assert_ne!(
+        themed(Color::Green),
+        Color::Green,
+        "dim remaps the stock hues"
+    );
+
+    // dim → mono
+    handle_key(&mut app, key(KeyCode::Char('C')), &http, &job_tx).await;
+    assert_eq!(theme_label(), "mono");
+    assert!(!app.colour(), "mono drops the hues");
+    assert_eq!(
+        themed(Color::Green),
+        Color::White,
+        "mono reads every state hue as white"
+    );
+
+    // mono → default, closing the cycle
+    handle_key(&mut app, key(KeyCode::Char('C')), &http, &job_tx).await;
+    assert_eq!(theme_label(), "default");
+    assert!(themed(Color::Green) == Color::Green);
+}
+
+#[tokio::test]
+async fn the_theme_cycle_lands_on_the_same_theme_every_time() {
+    use crate::tui::style::theme_label;
+    // The thread-local must not depend on which test ran before it.
+    for expected in ["dim", "mono", "default", "dim"] {
+        let mut app = App::new("http://127.0.0.1:8901");
+        let http = http_client();
+        let job_tx = job_channel();
+        handle_key(&mut app, key(KeyCode::Char('C')), &http, &job_tx).await;
+        assert_eq!(theme_label(), expected);
+    }
+}
+
+#[tokio::test]
+async fn the_full_tier_has_a_header_strip_and_the_compact_tier_does_not() {
+    let mut app = App::new("http://127.0.0.1:8901");
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains("ws: default"),
+        "the header names the book:\n{text}"
+    );
+    assert!(
+        text.contains("profile:"),
+        "the header names the profile:\n{text}"
+    );
+    assert!(
+        text.contains("C cycles"),
+        "the theme chip advertises the key:\n{text}"
+    );
+
+    // The compact tier keeps ws/profile where its footer can show them.
+    let mut app = App::new("http://127.0.0.1:8901");
+    let text = render_text(&mut app, 80, 24);
+    assert!(
+        text.contains("ws: default"),
+        "compact keeps the workspace in the footer:\n{text}"
+    );
+}
+
+#[tokio::test]
+async fn pending_jobs_show_a_spinner_and_live_shows_a_pulse() {
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.pending = 2;
+    app.tick = 3;
+    app.conn = Conn::Up;
+    app.refreshed = Some(std::time::Instant::now());
+    let text = render_text(&mut app, 140, 44);
+    let frames: Vec<char> = "⠋⠙⠹⠸⠼⠴⠦⠇".chars().collect();
+    assert!(
+        text.contains(&format!("{} 2 job(s) running", frames[3])),
+        "the spinner steps with the tick:\n{text}"
+    );
+}
+
+#[test]
+fn the_log_severity_column_is_fixed_width() {
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.log_at(Level::Error, "boom one");
+    app.log_at(Level::Ok, "fine two");
+    let text = render_text(&mut app, 140, 44);
+    // Both tags start their message at the same column; the old mixed-width
+    // glyphs (`OK`, `ERROR`) left the text ragged.
+    for tag in ["err ", " ok "] {
+        assert!(text.contains(tag), "fixed-width `{tag}` tag:\n{text}");
+    }
+    assert!(!text.contains("ERROR "), "no wide ERROR tag:\n{text}");
+}
+
+#[test]
+fn the_state_column_leads_with_a_glyph_and_the_word_stays() {
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.machines.push(Machine {
+        id: "192.168.2.2".into(),
+        addr: "192.168.2.2".into(),
+        name: "box-1".into(),
+        ssh_user: "ubuntu".into(),
+        ssh_port: 22,
+        ssh_key: None,
+        role: "worker".into(),
+        state: MachineState::Online,
+        state_since: bm_proto::now_secs(),
+        last_seen: bm_proto::now_secs(),
+        capabilities: Vec::new(),
+        tts_url: None,
+        task_port: None,
+        task_policy: None,
+        note: String::new(),
+    });
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains("● online"),
+        "a healthy box reads at a glance:\n{text}"
+    );
+    assert!(
+        text.contains("box-1") && text.contains("1 up"),
+        "the right title counts the boxes:\n{text}"
+    );
+}
+
+#[test]
+fn machines_pane_names_the_kind_and_the_address() {
+    // A row reads `box-1 · rmt · 192.168.2.2` — whose box, where it came from,
+    // and how to reach it. The old `role` column said only "worker".
+    let mut app = App::new("http://127.0.0.1:8901");
+    let mut remote = named_machine("192.168.2.2", "box-1");
+    remote.ssh_user = "thang".into();
+    let mut aws = named_machine("52.2.2.2", "box-2");
+    aws.note = "EC2 i-0123456789abcdef0 (running)".into();
+    app.machines = vec![
+        Machine::new("127.0.0.1", "local", 22, None, "both"),
+        remote,
+        aws,
+    ];
+    let text = render_text(&mut app, 140, 44);
+    for head in ["machine", "kind", "ip"] {
+        assert!(text.contains(head), "missing `{head}` column:\n{text}");
+    }
+    for cell in ["local", "rmt", "aws", "127.0.0.1", "192.168.2.2", "52.2.2.2"] {
+        assert!(text.contains(cell), "missing `{cell}`:\n{text}");
+    }
+    // Default policy reads at a glance, most-preferred first.
+    assert!(text.contains("M>R>D>C"), "policy summary:\n{text}");
+}
+
+#[test]
+fn policy_summary_marks_disabled_stages_lower_case() {
+    let mut m = named_machine("192.168.2.2", "box-1");
+    assert_eq!(super::model::policy_summary(&m), "M>R>D>C");
+    m.task_policy = Some(vec![
+        bm_proto::TaskPref {
+            stage: Stage::Merge,
+            enabled: false,
+        },
+        bm_proto::TaskPref {
+            stage: Stage::Render,
+            enabled: true,
+        },
+        bm_proto::TaskPref {
+            stage: Stage::Digest,
+            enabled: true,
+        },
+        bm_proto::TaskPref {
+            stage: Stage::Crawl,
+            enabled: true,
+        },
+    ]);
+    assert_eq!(super::model::policy_summary(&m), "m>R>D>C");
+}
+
+#[test]
+fn machine_kind_separates_local_aws_and_remote() {
+    use super::model::{machine_kind, machine_label};
+    let local = Machine::new("127.0.0.1", "local", 22, None, "both");
+    assert_eq!(machine_kind(&local), "local");
+    assert_eq!(machine_label(&local), "local");
+    let mut aws = Machine::new("52.2.2.2", "ubuntu", 22, None, "worker");
+    aws.note = "EC2 i-0123456789abcdef0 (running)".into();
+    assert_eq!(machine_kind(&aws), "aws");
+    // An unnamed hand-linked remote falls back to its ssh user.
+    let remote = Machine::new("192.168.2.2", "thang", 22, None, "worker");
+    assert_eq!(machine_kind(&remote), "rmt");
+    assert_eq!(machine_label(&remote), "thang");
+}
+
+#[tokio::test]
+async fn the_policy_panel_toggles_and_reorders_a_machine() {
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.machines = vec![named_machine("192.168.2.2", "box-1")];
+    app.selected = 0;
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel();
+    let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+    handle_key(&mut app, press(KeyCode::Char('P')), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Policy(v) => {
+            assert_eq!(v.prefs[0].stage, Stage::Merge, "default leads with merge");
+            assert!(v.prefs.iter().all(|p| p.enabled), "all on by default");
+        }
+        other => panic!("P must open the policy panel: {other:?}"),
+    }
+
+    // Enter toggles the highlighted stage off and saves it.
+    handle_key(&mut app, press(KeyCode::Enter), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Policy(v) => assert!(!v.prefs[0].enabled, "merge toggled off"),
+        other => panic!("{other:?}"),
+    }
+    let saved = job_rx.try_recv().expect("a save was dispatched");
+    assert!(
+        matches!(saved.bare(), Job::SaveTaskPolicy { .. }),
+        "the toggle persists: {saved:?}"
+    );
+
+    // Space grabs, Down carries merge under render and saves again.
+    handle_key(&mut app, press(KeyCode::Char(' ')), &http, &job_tx).await;
+    handle_key(&mut app, press(KeyCode::Down), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Policy(v) => {
+            assert_eq!(v.prefs[0].stage, Stage::Render);
+            assert_eq!(v.prefs[1].stage, Stage::Merge);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // Esc leaves the editor; the dashboard returns.
+    handle_key(&mut app, press(KeyCode::Esc), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal));
+}
+
+#[test]
+fn the_bar_uses_partial_blocks_and_stays_exact_at_the_ends() {
+    assert_eq!(bar(0.0, 10), "░".repeat(10));
+    assert_eq!(bar(1.0, 10), "█".repeat(10));
+    assert_eq!(bar(0.5, 10), "█████░░░░░");
+    // A third of one cell in the last slot: the old bar could not show it.
+    assert_eq!(bar(0.93, 10), "█████████▎");
+    // Width is always exactly what was asked for.
+    for frac in [0.0f32, 0.01, 0.05, 0.33, 0.5, 0.87, 0.99, 1.0] {
+        for w in [1usize, 4, 10, 17] {
+            assert_eq!(bar(frac, w).chars().count(), w, "bar({frac}, {w})");
+        }
     }
 }

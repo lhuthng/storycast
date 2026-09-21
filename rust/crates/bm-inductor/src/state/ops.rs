@@ -1,7 +1,59 @@
 use super::Inner;
 use bm_proto::{now_secs, Stage, Task, TaskState};
 
+/// How long a box may sit in `Initializing` before the inductor stops
+/// believing it is booting.
+///
+/// A stock Ubuntu AMI answers ssh roughly 30–60 s after `RunInstances` returns.
+/// Five minutes is not a wait — it is the point past which "still booting"
+/// stops being a believable explanation, so the state becomes a verdict instead
+/// of a placeholder that never resolves.
+pub const BOOT_DEADLINE_SECS: u64 = 300;
+
 impl Inner {
+    /// Retire boxes that never came up.
+    ///
+    /// `Initializing` is the one machine state with a deadline, because it is
+    /// the only one where the inductor is *waiting* rather than acting. A state
+    /// with no exit condition is a lie: a box terminated before it booted, or
+    /// launched into a subnet this machine cannot dial, would sit in
+    /// "initializing" for ever with the pane implying it is about to work.
+    ///
+    /// Returns one line per box retired, for the caller to log.
+    pub fn expire_initializing(&mut self) -> Vec<String> {
+        let now = now_secs();
+        let mut out = Vec::new();
+        for m in self.machines.values_mut() {
+            if m.state != bm_proto::MachineState::Initializing {
+                continue;
+            }
+            // `0` is "never stamped" — a record written before this field
+            // existed. Adopt it now and give it the whole deadline rather than
+            // expiring a box on the strength of a missing timestamp.
+            if m.state_since == 0 {
+                m.state_since = now;
+                continue;
+            }
+            if now.saturating_sub(m.state_since) < BOOT_DEADLINE_SECS {
+                continue;
+            }
+            let note = format!(
+                "never answered ssh within {} min of launch — terminated, or unreachable from here",
+                BOOT_DEADLINE_SECS / 60
+            );
+            m.set_state(bm_proto::MachineState::Error);
+            m.note = bm_core::provision::preserve_ec2_id(&m.note, &note);
+            out.push(format!("[{}] {note}", m.addr));
+        }
+        for line in &out {
+            self.push_event("warn", line.clone());
+        }
+        if !out.is_empty() {
+            self.save();
+        }
+        out
+    }
+
     /// Ask every beating worker to exit on its next heartbeat (2s). The
     /// graceful half of the cluster stop: workers die on their own, no ssh.
     /// In-flight tasks are stranded, not failed — the stop flow requeues
@@ -39,21 +91,58 @@ impl Inner {
     /// One-shot: the arm disarms as it fires, so work enqueued afterwards
     /// waits for the next backend start instead of murdering fresh workers.
     /// Shelved tasks don't block — they're parked for an operator, not work.
-    pub(crate) fn maybe_auto_shutdown(&mut self) {        if !self.shutdown_when_idle {
-            return;
-        }
-        let busy = self.tasks.values().any(|t| {
+    /// Is there work outstanding? Shelved tasks don't count — they are parked
+    /// for an operator, not work in flight.
+    pub fn busy(&self) -> bool {
+        self.tasks.values().any(|t| {
             matches!(
                 t.state,
                 TaskState::Pending | TaskState::Assigned | TaskState::Running
             )
-        });
-        if busy {
+        })
+    }
+
+    /// Work the cluster could actually start right now.
+    ///
+    /// Deliberately **not** `busy()`. When a chapter's crawl shelves, its
+    /// digest/render/merge stay `Pending` for good — queued behind a stage
+    /// that will not run again without an operator. Counting those as work
+    /// means the idle timer never fires in precisely the case it exists for:
+    /// a cluster holding a queue it cannot move.
+    pub fn runnable(&self) -> bool {
+        self.tasks.values().any(|t| {
+            t.state == TaskState::Pending
+                && !self.shelved(t.chapter)
+                && self.upstream_done(t.chapter, t.stage)
+        })
+    }
+
+    /// Nothing running and nothing startable — the cluster has nothing to do.
+    ///
+    /// This is the idle timer's predicate, and the distinction from `busy()`
+    /// is the whole reason it is a separate method: a stalled queue is idle
+    /// even though the ledger is full.
+    pub fn idle(&self) -> bool {
+        let in_flight = self
+            .tasks
+            .values()
+            .any(|t| matches!(t.state, TaskState::Assigned | TaskState::Running));
+        !in_flight && !self.runnable()
+    }
+
+    pub(crate) fn maybe_auto_shutdown(&mut self) {
+        if !self.shutdown_when_idle {
+            return;
+        }
+        if self.busy() {
             return;
         }
         self.shutdown_when_idle = false;
         self.shutdown_requested = true;
-        self.push_event("warn", "queue drained — workers exiting on next beat".into());
+        self.push_event(
+            "warn",
+            "queue drained — workers exiting on next beat".into(),
+        );
     }
 
     /// Manual trigger for the same orphan logic `reap` runs automatically:

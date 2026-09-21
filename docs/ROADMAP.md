@@ -51,13 +51,21 @@ Concretely:
 Files likely touched: `rust/crates/bm-core/src/digest/llm.rs`,
 `rust/crates/bm-core/src/config.rs`, `.env.example`.
 
-## 2. AWS: workers on EC2, artifacts and output in S3 (`planned`)
+## 2. AWS: workers on EC2, artifacts and output in S3
 
 **Your words:** "connect to AWS" — confirmed: **EC2 for compute, S3 for
 storage** (artifacts + output), *not* Bedrock and *not* Polly for now.
 
+**Status, split because the two halves are not in the same place:**
+
+| | |
+|---|---|
+| **2b. EC2 workers** | **`done`** — launched, linked, provisioned, driven and terminated from the TUI |
+| **2a. S3 as the shared artifact store** | **`planned`** — still the gap |
+
 **My reading, to confirm:** today the cluster assumes one LAN: the inductor
-pushes sources/venv/voices over `ssh`+`rsync`, the segment store lives on the
+pushes sources, the sidecar's weights and the voices over `ssh`+`rsync`, the
+segment store lives on the
 inductor's disk (merge *affinity* pins merges to the local node), and `output/`
 lands on the inductor's disk. The goal is a cluster that survives the internet:
 
@@ -76,25 +84,63 @@ lands on the inductor's disk. The goal is a cluster that survives the internet:
   to ssh/rsync" philosophy — zero new dependencies) vs. an SDK crate. CLI is
   the smaller, more consistent change; start there.
 
-### 2b. EC2 workers
+### 2b. EC2 workers — `done`
 
-- Provision an instance like any other box: the provisioner learns an "AWS
-  target" alongside the `ssh` target — same stamp logic (skip unchanged
-  sources/voices), installing into `~/.bm-worker/` on the instance and
-  starting the worker + TTS sidecar.
-- A GPU instance for the render lane (the expensive one) and cheap CPU boxes
-  for crawl/digest/merge, following the stage affinities the scheduler
-  already understands.
-- Cost guardrail from day one: idle instances must be stoppable (the existing
-  `X` "stop everything everywhere" is the natural hook), otherwise the render
-  farm bills you while you sleep.
-- `.bm/machines.json` needs an `instance-id` next to addr/user/key — and must
-  stay git-ignored, since credentials live there too.
+Shipped, and the shape is close to what was written here — with three places
+where the plan was wrong and the code went another way. Those are worth keeping,
+because each one was a real correction:
 
-Files likely touched: `rust/crates/bm-core/src/provision/` (the `Ssh` transport
-in `ssh.rs`, the new AWS target in `steps.rs`),
-`rust/crates/bm-inductor/src/{backend,state,api}.rs`, `bm-agent` report paths,
-`.bm/machines.json` schema.
+- **A provisioned instance is not a special kind of box.** The plan said "the
+  provisioner learns an AWS target alongside the `ssh` target". It did not need
+  to: an instance is linked with the pool's `.pem` and the `ubuntu` login and
+  then provisioned by exactly the same `ssh`/`rsync` path as a LAN box, stamp
+  logic included. `:up` is the only AWS-specific step, and all it does is launch
+  and link. Guides: [AWS-WORKERS.md](AWS-WORKERS.md),
+  [AWS-IAM-USER.md](AWS-IAM-USER.md).
+- **A GPU instance for the render lane was the wrong idea, and it is not
+  planned.** The plan assumed render was the expensive stage in a
+  GPU-accelerable sense. It is not: the TTS path is a hand-written SIMD matvec
+  with no GPU code, so the instance choice is decided by **RAM, not CPU** — and
+  the answer is that the sidecar is ~2.85 GB resident the moment the weights
+  load, so 8 GiB is the size and 4 GiB does not fit. See
+  [AWS-WORKERS.md](AWS-WORKERS.md) §4 for the measurement.
+- **The instance id lives in the machine's note, not in a new field.** The plan
+  said `.bm/machines.json` "needs an `instance-id` next to addr/user/key". The
+  registry still keys by **address**, and the id is stamped in the note instead —
+  which is what lets `state/relink.rs` repair an address that rotated (every
+  stop/start, every spot relaunch) by matching the stable id against one account
+  listing. A field would have been the second source of truth this repo keeps
+  avoiding.
+
+The cost guardrail is in and it is not one mechanism but three, because they
+fail differently: `Settings.idle_mins` (default 5) shuts the cluster down when
+there is genuinely nothing to do, `X` stops everything on command, and `:down`
+terminates the boxes — asking first, refusing while a render is in flight, and
+scoped to the `storycast-worker` tag **and** explicit instance ids. `ttl_hours`
+(6) is the backstop for a box that outlives its work.
+
+Credentials are exactly where the plan said they must be: the IAM user's key in
+the ignored `.bm/aws/credentials` (0600), never in `machines.json`, and with **no
+fallback to this machine's own AWS identity**.
+
+Files 2a will touch when it is picked up: `bm-core/src/segments.rs` (an
+`S3Store` behind the existing trait), the artifact paths in `bm-agent/src/push.rs`
+and `bm-inductor/src/api.rs`, and `output/` in `bm-core/src/paths.rs`.
+
+Files 2b actually touched — kept as a map of where the cloud plane lives, since
+that is the useful half of a plan once it is done:
+
+| | |
+|---|---|
+| `bm-core/src/provision/aws.rs` | the EC2 calls, the AMI lookup through SSM, the firewall check |
+| `bm-core/src/provision/aws_credentials.rs` | the credential store, and the verify-then-write order |
+| `bm-core/src/provision/ssh.rs` | `HOST_KEY_OPTS` — one constant, both transports |
+| `bm-core/src/provision/steps.rs` | `may_install`, and the stamp the second run skips on |
+| `bm-inductor/src/aws_ops.rs` | one implementation per verb, shared by CLI and TUI |
+| `bm-inductor/src/dispatch.rs` | the inductor-drives loop |
+| `bm-inductor/src/state/{observe,relink}.rs` | one entry point for liveness; address drift repair |
+| `bm-inductor/src/tui/{draw,input}/{cloud,policy}.rs` | the Cloud view and the policy view |
+| `aws.default.json`, `aws-policy.json` | the tracked pool shape, and the policy to paste |
 
 ## 3. … (more to add)
 

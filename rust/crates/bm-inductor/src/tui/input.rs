@@ -1,6 +1,7 @@
 //! Keys in: the modal chain. Order is load-bearing — see the table in §5.
 pub(crate) mod audition;
 pub(crate) mod cast;
+mod cloud;
 pub(crate) mod command;
 mod confirm;
 mod help;
@@ -8,6 +9,7 @@ mod jobs;
 mod machine;
 mod normal;
 mod picker;
+mod policy;
 mod run;
 pub(crate) mod runconfig;
 pub(crate) mod sound;
@@ -40,6 +42,10 @@ pub(crate) fn dispatch(
         return false;
     };
     let name = job.label();
+    // Read before the job is moved onto the channel. Naming the resource on a
+    // queued row is the whole answer to "why is this not running": a job that
+    // waits says what it waits for.
+    let needs = job.resource_label();
     let queued = std::time::Instant::now();
     match job_tx.send(Job::Tracked {
         id,
@@ -53,7 +59,10 @@ pub(crate) fn dispatch(
                 name,
                 queued,
                 started: None,
-                activity: "queued".into(),
+                activity: match needs {
+                    Some(what) => format!("queued · needs {what}"),
+                    None => "queued".into(),
+                },
             });
             true
         }
@@ -156,6 +165,12 @@ pub(crate) async fn handle_key(
     }
     if let Screen::Sound(view) = app.screen.clone() {
         return sound::key_sound(app, view, key, http, job_tx).await;
+    }
+    if let Screen::Cloud(view) = app.screen.clone() {
+        return cloud::key_cloud(app, view, key, http, job_tx).await;
+    }
+    if let Screen::Policy(view) = app.screen.clone() {
+        return policy::key_policy(app, view, key, http, job_tx).await;
     }
     normal::normal_key(app, key, http, job_tx).await
 }

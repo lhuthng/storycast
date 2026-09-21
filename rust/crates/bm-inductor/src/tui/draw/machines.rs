@@ -3,18 +3,21 @@ use crate::tui::style::Conn;
 use crate::tui::{
     app::App,
     layout::COMPACT_MACHINE_COLS,
-    model::{clamp_scroll, live_workers},
-    style::{cell, empty_body, seen_label, state_cell, style_bold_of, style_of},
+    model::{clamp_scroll, live_workers, machine_kind, machine_label, policy_summary},
+    style::{
+        cell, empty_body, seen_label, selection_bg, state_glyph_cell, style_bold_of, style_of,
+    },
 };
 use ratatui::{
     layout::{Constraint, Rect},
-    style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Row, Table},
+    style::{Color, Style},
+    text::Line,
+    widgets::{Row, Table},
 };
 
 pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, compact: bool) {
     let disconnected = matches!(app.conn, Conn::Down(_));
-    let colour = app.colour;
+    let colour = app.colour();
     let selected = app.selected;
     let title = if disconnected {
         "Machines — DISCONNECTED"
@@ -26,10 +29,11 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
     } else {
         Style::default()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
+    // The right-hand title is the cluster count, where an operator checks
+    // "how many boxes am I actually running" without counting rows.
+    let block = super::pane_block(app, title)
         .border_style(border)
-        .title(title);
+        .title_bottom(Line::from(format!("{} up", app.machines.len())).right_aligned());
 
     if app.machines.is_empty() {
         let mut body = vec!["no machines in the cluster".to_string()];
@@ -57,15 +61,17 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
         .map(|(i, m)| {
             let idx = start + i;
             let cursor = if idx == selected { "▸ " } else { "  " };
-            // The registry handle when the box has one (`hawk` — the word
-            // the provision log and the workers pane use), else the address.
-            // `id` is the addr by construction, so it would only repeat this.
-            let handle = if m.name.is_empty() { m.addr.clone() } else { m.name.clone() };
+            // Name, kind, address: `box-1 · aws · 18.1.2.3` tells an operator
+            // whose box this is, where it came from, and how to reach it —
+            // the address alone never said any of those. `id` is the addr by
+            // construction, so it would only repeat the ip column.
             let mut cells = vec![
-                cell(format!("{cursor}{handle}")),
+                cell(format!("{cursor}{}", machine_label(m))),
+                cell(machine_kind(m).to_string()),
+                cell(m.addr.clone()),
                 cell(live_workers(&app.beats, &m.addr, bm_proto::now_secs()).to_string()),
-                cell(m.role.clone()),
-                state_cell(colour, m.state.as_str()),
+                cell(policy_summary(m)),
+                state_glyph_cell(colour, m.state.as_str()),
             ];
             // The tts column is the widest and the least urgent; in the compact
             // tier it is the first thing to go, so the remaining columns keep
@@ -76,24 +82,28 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
             cells.push(cell(seen_label(m)));
             let mut row = Row::new(cells);
             if idx == selected {
-                row = row.style(Style::default().add_modifier(Modifier::REVERSED));
+                // A faint background keeps the state hue legible on the
+                // cursor line, which REVERSED inverted.
+                row = row.style(Style::default().bg(selection_bg()));
             }
             row
         })
         .collect();
 
-    let mut header = vec!["machine", "workers", "role", "state"];
+    let mut header = vec!["machine", "kind", "ip", "workers", "policy", "state"];
     let mut widths: Vec<Constraint> = if compact {
         // Taken from the constant the compile-time guard checks.
-        COMPACT_MACHINE_COLS[..4]
+        COMPACT_MACHINE_COLS[..6]
             .iter()
             .map(|w| Constraint::Length(*w))
             .collect()
     } else {
         vec![
             Constraint::Length(15),
+            Constraint::Length(6),
+            Constraint::Length(18),
             Constraint::Length(7),
-            Constraint::Length(8),
+            Constraint::Length(11),
             Constraint::Length(13),
         ]
     };
@@ -103,7 +113,7 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
     }
     header.push("seen");
     widths.push(Constraint::Length(if compact {
-        COMPACT_MACHINE_COLS[4]
+        COMPACT_MACHINE_COLS[6]
     } else {
         8
     }));

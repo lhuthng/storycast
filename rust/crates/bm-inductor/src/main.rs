@@ -1,7 +1,9 @@
 //! Inductor: control API + scheduler. Workers report facts; this decides.
 
 mod api;
+mod aws_ops;
 mod backend;
+mod dispatch;
 mod roster;
 mod segments;
 mod state;
@@ -162,8 +164,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: WorkspaceCmd,
     },
-    /// AWS worker pool: the definition written once in `.bm/aws.json`, and what
-    /// the account actually holds. Local only — starts nothing.
+    /// AWS worker pool: the IAM user this app runs as, the definition written
+    /// once in `.bm/aws.json`, and what the account actually holds. Local only
+    /// — starts nothing.
     Aws {
         #[command(subcommand)]
         cmd: AwsCmd,
@@ -175,6 +178,13 @@ enum AwsCmd {
     /// Print the pool definition, what is still missing, and the one-off setup
     /// commands it needs. Reads no network.
     Show,
+    /// Print the least-privilege policy for this app's IAM user, and the
+    /// commands that create that user and attach it. Reads no network.
+    ///
+    /// The policy is the tracked `aws-policy.json` — one document, used by both
+    /// this command and `aws iam put-user-policy`, so what you read and what
+    /// you install cannot drift apart.
+    Policy,
     /// Write a `.bm/aws.json` template to fill in. Refuses to overwrite one
     /// that exists unless --force.
     Init {
@@ -186,6 +196,33 @@ enum AwsCmd {
     ///
     /// The credential and region check: if this answers, `up` can too.
     Ls,
+    /// Store the credentials of the IAM user created for this app, then verify
+    /// them against the account.
+    ///
+    /// **An IAM user, and nothing else.** The identity is checked with
+    /// `sts get-caller-identity` and refused unless it is a `:user/` ARN, so a
+    /// root key or an assumed role cannot be stored — those are the identities
+    /// a dedicated user exists to replace.
+    ///
+    /// The secret is read from stdin and **never** taken as an argument:
+    /// `argv` is visible in `ps` on every box it was typed on. Piped input
+    /// works, so a script can do
+    /// `printf '%s\\n' "$SECRET" | bm-inductor aws login --access-key-id AKIA…`.
+    Login {
+        #[command(flatten)]
+        args: aws_ops::LoginArgs,
+    },
+    /// Fill in the pool fields a console page cannot hand you as a copy-paste:
+    /// the AMI, the default network, and the instance profile.
+    ///
+    /// Everything it learns is written into `.bm/aws.json` **and printed**, so
+    /// what was chosen stays visible and reviewable instead of being
+    /// re-resolved on every launch. Read-only calls; writes nothing outside
+    /// `.bm/`. Run it once, after `aws login`.
+    Discover {
+        #[command(flatten)]
+        args: aws_ops::DiscoverArgs,
+    },
     /// Launch boxes and leave them running, tagged, ready to provision.
     ///
     /// `--dry-run` prints the exact `aws ec2 run-instances` call and stops —
@@ -259,10 +296,29 @@ enum RosterCmd {
     },
 }
 
+/// What one provision run concluded.
+///
+/// `ready` and `reachable` are separate on purpose, and the difference is the
+/// one that matters to an operator staring at a box that will not come up.
+/// `!reachable` means ssh never answered, so *nothing* was learned: no
+/// platform, no binary pushed, no stamp read. The failure is a network fact,
+/// not a provisioning one — and a caller that already knows the box was
+/// launched seconds ago can keep saying "still booting" instead of "broken".
+pub struct ProvisionOutcome {
+    /// The post-provision probe says the box runs this exact agent build with
+    /// TTS — the gate a start hides behind.
+    pub ready: bool,
+    /// ssh answered at all.
+    pub reachable: bool,
+    /// The log, one line per step, prefixed with the address.
+    pub lines: Vec<String>,
+}
+
 /// Blocking provision run shared by the CLI and the TUI background task.
-/// Returns `(ready, lines)`: `ready` is the post-provision probe saying the
-/// box runs this exact agent build with TTS python — the gate a start hides
-/// behind. Soft failures (voice enrolment, opencode check) only ride the log.
+///
+/// `live` streams each log line to the TUI event pane as it happens (slow
+/// steps read as progress, not a stall); `None` keeps collect-only for the
+/// CLI, which prints everything at the end.
 pub fn provision_machine(
     layout: &Layout,
     addr: &str,
@@ -270,22 +326,24 @@ pub fn provision_machine(
     port: u16,
     key: Option<String>,
     force: bool,
-) -> (bool, Vec<String>) {
+    live: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> ProvisionOutcome {
     if bm_core::is_local_node(addr) {
         // No mirror to fill: the local worker runs in place from this repo —
         // prompts, assets, models and binaries are read where they stand, so
         // syncing a `~/bm-worker` copy would only spend disk and let a stale
         // copy fail the readiness gate below. Launching the worker stays the
         // caller's job (`:B` catch-up, `make agent`).
-        return (
-            true,
-            vec![format!(
+        return ProvisionOutcome {
+            ready: true,
+            reachable: true,
+            lines: vec![format!(
                 "[{addr}] local machine — runs from the repo, nothing to provision"
             )],
-        );
+        };
     }
-    use bm_core::provision::{provision, Ssh};
-    let mut log = Vec::new();
+    use bm_core::provision::{provision, LiveLog, Ssh};
+    let mut log = LiveLog::new(live.clone());
     let probe_ssh = Ssh {
         target: format!("{user}@{addr}"),
         port,
@@ -294,13 +352,32 @@ pub fn provision_machine(
     };
     let pre = probe_ssh.probe();
     log.push(format!("[{addr}] {}", pre.summary()));
+    // Unreachable means nothing downstream can run: no platform was learned
+    // (os/arch stay empty — the old flow continued and failed confusingly on
+    // "no agent binary for /"), no binary can be pushed, no worker launched.
+    // Name the network cause and stop.
+    if !pre.reachable {
+        log.push(format!(
+            "[{addr}] cannot provision: the box never answered ssh ({}) — check it is up, and that its address is reachable from here (an EC2 private IP like 172.31.x.x is only routable from inside the VPC; the pool prefers public IPs)",
+            pre.note
+        ));
+        return ProvisionOutcome {
+            ready: false,
+            reachable: false,
+            lines: log.lines,
+        };
+    }
     let pointer = match bm_core::profile::read_pointer(&layout.root) {
         Ok(p) => p,
         Err(_) => {
             log.push(format!(
-                "[{addr}] no local profile loaded — `profile.sh fetch/unpack` first (workers verify it at startup)"
+                "[{addr}] no local profile loaded — load one first (`:profile` in the dashboard; `tools/profile.sh fetch/unpack <name>`) — workers verify it at startup"
             ));
-            return (false, log);
+            return ProvisionOutcome {
+                ready: false,
+                reachable: true,
+                lines: log.lines,
+            };
         }
     };
     log.push(format!(
@@ -312,7 +389,11 @@ pub fn provision_machine(
         Ok(b) => b,
         Err(e) => {
             log.push(format!("[{addr}] {e}"));
-            return (false, log);
+            return ProvisionOutcome {
+                ready: false,
+                reachable: true,
+                lines: log.lines,
+            };
         }
     };
     log.push(format!("[{addr}] agent binary: {}", binary.display()));
@@ -320,7 +401,11 @@ pub fn provision_machine(
         Ok(b) => b,
         Err(e) => {
             log.push(format!("[{addr}] {e}"));
-            return (false, log);
+            return ProvisionOutcome {
+                ready: false,
+                reachable: true,
+                lines: log.lines,
+            };
         }
     };
     log.push(format!("[{addr}] tts sidecar: {}", tts.display()));
@@ -335,9 +420,29 @@ pub fn provision_machine(
         env!("CARGO_PKG_VERSION"),
         force,
         Some(pre),
+        live,
     );
-    log.append(&mut flow);
-    (after.configured(env!("CARGO_PKG_VERSION")), log)
+    // Already streamed live inside `provision` — collect silently here.
+    log.lines.append(&mut flow);
+    ProvisionOutcome {
+        ready: after.configured(env!("CARGO_PKG_VERSION")),
+        reachable: true,
+        lines: log.lines,
+    }
+}
+
+/// A re-provision must not reset the operator's work policy: the machine
+/// `cmd_provision` registers is fresh (`task_policy: None`), and both
+/// registration paths persist it — the live POST and the ledger fallback.
+/// Carry the stored policy forward so re-provisioning keeps the order and
+/// toggles from the policy panel.
+fn carry_task_policy(m: &mut Machine, layout: &Layout) {
+    if m.task_policy.is_none() {
+        m.task_policy = bm_core::provision::load_boxes(&layout.machines())
+            .iter()
+            .find(|b| b.addr == m.addr)
+            .and_then(|b| b.task_policy.clone());
+    }
 }
 
 fn check_bins() -> anyhow::Result<()> {
@@ -362,6 +467,9 @@ async fn cmd_serve(
     start: u32,
     count: u32,
 ) -> anyhow::Result<()> {
+    // `Inner` takes the layout; the dispatcher needs its own handle on it.
+    let drive_layout = layout.clone();
+    let drive_root = drive_layout.root.clone();
     let mut inner = state::Inner::new(layout, settings);
     // No profile, no run: the live tree is ignored and may be absent or
     // drifted — refuse before touching the ledger, naming the fix.
@@ -386,12 +494,47 @@ async fn cmd_serve(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            let expired = reaper.lock().await.reap();
+            let (expired, never_came_up) = {
+                let mut inner = reaper.lock().await;
+                // Boot deadline first, then leases: a box that never answered
+                // has no leases to expire, and one lock covers both.
+                let expired = inner.reap();
+                let never_came_up = inner.expire_initializing();
+                (expired, never_came_up)
+            };
             for id in expired {
                 println!("[inductor] lease expired, requeued {id} (no strike)");
             }
+            for line in never_came_up {
+                println!("[inductor] {line} — marked error");
+            }
         }
     });
+    // The driving half. Nothing dials this process, so if this loop is not
+    // running, no work moves at all — the workers are servers waiting to be
+    // asked, and this is the only thing that asks.
+    let driving = shared.clone();
+    tokio::spawn(async move { dispatch::run(driving, drive_layout).await });
+    // Auto-relink once at startup: an EC2 box that cycled while this inductor
+    // was down is sitting in the registry at an address that no longer answers.
+    // Best-effort — no account, no creds or an offline CLI only means the
+    // repairs wait for the next `:pool` refresh.
+    {
+        let relink_shared = shared.clone();
+        let relink_root = drive_root.clone();
+        tokio::spawn(async move {
+            let root = relink_root;
+            let pool =
+                tokio::task::spawn_blocking(move || crate::aws_ops::pool(&root)).await;
+            if let Ok(Ok((_cfg, instances))) = pool {
+                let mut inner = relink_shared.lock().await;
+                for line in inner.relink_drifted(&instances) {
+                    inner.push_event("info", line.clone());
+                    println!("[inductor] {line}");
+                }
+            }
+        });
+    }
     let app = api::router(shared);
     let addr = format!("{bind}:{port}");
     println!("inductor on http://{addr}");
@@ -445,6 +588,36 @@ fn tts_runtime_dir(os: &str, arch: &str, layout: &Layout) -> Option<std::path::P
 }
 
 fn agent_binary_for(os: &str, arch: &str, layout: &Layout) -> anyhow::Result<std::path::PathBuf> {
+    match agent_binary_staged(os, arch, layout) {
+        Ok(b) => Ok(b),
+        Err(staged) => {
+            // The cross targets are cheap to produce on demand (a debug
+            // `bm-agent` links no C toolchain, so `zig cc` needs no runtime
+            // staged), and a `:prov` clicked in the dashboard should heal the
+            // gap itself rather than send the operator to a shell. Only the
+            // cross candidates are buildable — the native fallback exists
+            // exactly when this host is the target, so `cargo build` already
+            // ran and a miss means something is wrong beyond a missing build.
+            // Cross targets only, and at most one per platform — the build
+            // either succeeds (returning the candidate) or its error is the
+            // provision failure.
+            if let Some(cand) = buildable_agent_candidates(os, arch, layout).into_iter().next() {
+                build_agent_binary(&cand)?;
+                return Ok(cand);
+            }
+            Err(staged)
+        }
+    }
+}
+
+/// The pick among binaries already on disk. Platform-pure, no side effects —
+/// the piece tests can exercise without a toolchain. A missing cross build is
+/// an error naming the platform; [`agent_binary_for`] may still build it.
+fn agent_binary_staged(
+    os: &str,
+    arch: &str,
+    layout: &Layout,
+) -> anyhow::Result<std::path::PathBuf> {
     for cand in agent_candidates(os, arch, layout) {
         if cand.is_file() {
             return Ok(cand);
@@ -458,6 +631,108 @@ fn agent_binary_for(os: &str, arch: &str, layout: &Layout) -> anyhow::Result<std
             .collect::<Vec<_>>()
             .join(" or ")
     )
+}
+
+/// Cross candidates only — the native build is never something we can conjure
+/// here: it exists exactly when this host *is* the target, so a miss there is
+/// not a missing cross toolchain but a broken workspace.
+fn buildable_agent_candidates(os: &str, arch: &str, layout: &Layout) -> Vec<std::path::PathBuf> {
+    let native = layout.root.join("rust/target/debug/bm-agent");
+    agent_candidates(os, arch, layout)
+        .into_iter()
+        .filter(|c| c != &native)
+        .collect()
+}
+
+/// Build the agent binary into the exact path a candidate names, so the
+/// provision flow that asked for it can pick the file straight up. The target
+/// triple is the candidate's grandparent directory (`…/target/<triple>/debug`) —
+/// one spelling, one source. Output is captured: the caller's log gets the tail
+/// on failure, and the dashboard never has cargo's progress spew landing
+/// mid-redraw.
+fn build_agent_binary(cand: &std::path::Path) -> anyhow::Result<()> {
+    let target = cross_target_of(cand)?;
+    let rust_dir = workspace_dir_above_target(cand)?;
+    // A rustup shim dir (~/.cargo/bin) is missing from a non-login shell's
+    // PATH — the same trap the Makefile's CARGO fallback covers — so probe
+    // there before declaring the toolchain absent.
+    let on_path = |tool: &str| {
+        std::env::var_os("PATH")
+            .map(|paths| {
+                std::env::split_paths(&paths).any(|d| d.join(tool).is_file())
+            })
+            .unwrap_or(false)
+            || std::env::var("HOME")
+                .map(|h| std::path::Path::new(&h).join(".cargo/bin").join(tool).is_file())
+                .unwrap_or(false)
+    };
+    for tool in ["zig", "cargo-zigbuild"] {
+        if !on_path(tool) {
+            anyhow::bail!(
+                "{tool} not found: the linux agent cross-build needs it (`cargo install cargo-zigbuild`; zig from `brew install zig` or https://ziglang.org/download)"
+            );
+        }
+    }
+    let out = std::process::Command::new("cargo-zigbuild")
+        .args([
+            "zigbuild",
+            "--target",
+            &target,
+            "-p",
+            "bm-agent",
+            "--manifest-path",
+        ])
+        .arg(rust_dir.join("Cargo.toml"))
+        .output()
+        .map_err(|e| anyhow::anyhow!("running cargo-zigbuild: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tail: String = stderr
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .rev()
+            .take(12)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n  ");
+        anyhow::bail!("cross build of bm-agent for {target} failed:\n  {tail}");
+    }
+    if !cand.is_file() {
+        anyhow::bail!(
+            "cross build reported success but {} is still missing",
+            cand.display()
+        )
+    }
+    Ok(())
+}
+
+/// The cross target a candidate names: its grandparent directory under
+/// `target/` (`…/target/<triple>/debug/bm-agent`). A separate pure function so
+/// the inference is testable without running a toolchain — caught live: the
+/// first version took the *parent* and handed zigbuild `debug`.
+fn cross_target_of(cand: &std::path::Path) -> anyhow::Result<String> {
+    cand.parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("cannot infer target from {}", cand.display()))
+}
+
+/// Walk up from a candidate binary to the workspace directory — the candidate
+/// lives under `<repo>/rust/target/<triple>/debug`, so `target`'s parent is
+/// the dir holding `Cargo.toml`, wherever the layout root actually is.
+fn workspace_dir_above_target(cand: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    cand.ancestors()
+        .find(|a| {
+            a.file_name().is_some_and(|n| n == "target")
+                && a.parent().is_some_and(|p| p.file_name().is_some_and(|n| n == "rust"))
+        })
+        .and_then(|a| a.parent())
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| anyhow::anyhow!("cannot locate the rust workspace above {}", cand.display()))
 }
 
 /// Cross builds first (they target older glibc and run anywhere), then the
@@ -530,7 +805,10 @@ pub(crate) fn workspace_cmd(
             match bm_core::profile::read_pointer(root) {
                 Ok(p) => settings.profile = p,
                 Err(_) => {
-                    out.push("note: no profile loaded — `profile.sh fetch/unpack` first".into())
+                    out.push(
+                        "note: no profile loaded — `:profile` in the dashboard, or `tools/profile.sh fetch/unpack <name>`, first"
+                            .into(),
+                    )
                 }
             }
             settings.save(&dir(&name).join("settings.json"))?;
@@ -571,80 +849,161 @@ pub(crate) fn workspace_cmd(
         }
     }
 }
-/// The AWS pool: the definition, and what the account holds.
+/// The AWS pool: the app's IAM user, the definition, and what the account
+/// holds.
 ///
 /// Returns the lines to show, like [`workspace_cmd`] — the CLI prints them and
-/// the dashboard could log the same operation. Nothing here starts, stops or
-/// terminates anything: `up`/`down` are the commands that spend money, and they
-/// are not written yet.
+/// the dashboard could log the same operation. `policy` and `show` read no
+/// network at all; `login` verifies against the account; `up`/`down` are the
+/// two that spend money and destroy things.
 fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
     use bm_core::provision::{
         describe_image_args, instance_line, parse_instances, run_instances_args, terminate_args,
         AwsConfig,
     };
     let path = root.join(".bm").join("aws.json");
-    let template = root.join(bm_core::provision::DEFAULT_FILE);
     let mut out: Vec<String> = Vec::new();
     match cmd {
         AwsCmd::Init { force } => {
-            if path.exists() && !force {
-                anyhow::bail!(
-                    "{} already exists — edit it, or pass --force to replace it",
-                    path.display()
-                );
-            }
-            // Seed from the tracked template when it is there, so the file the
-            // operator edits carries the `_note`s explaining each field rather
-            // than a bare struct dump. The notes are ignored on read — serde
-            // drops what the struct does not name — and the round trip proves
-            // a hand-edited template that has drifted from the shape cannot
-            // seed a broken config.
-            if template.is_file() {
-                let text = std::fs::read_to_string(&template)?;
-                serde_json::from_str::<AwsConfig>(&text)
-                    .map_err(|e| anyhow::anyhow!("{} does not parse: {e}", template.display()))?;
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(&path, text)?;
-                out.push(format!(
-                    "wrote {} (from {})",
-                    path.display(),
-                    template.display()
-                ));
-            } else {
-                AwsConfig::default().save(&path)?;
-                out.push(format!("wrote {}", path.display()));
-            }
+            out.push(seed_pool(root, &path, force)?);
             out.push(String::new());
-            out.push("Fill in these, then `aws show` lists what is still missing:".into());
-            out.push("  region, subnet_id, security_group_id, iam_instance_profile".into());
-            out.push("  keypairs.<region>  — the EC2 keypair NAME, per region".into());
-            out.push("  bucket             — leave empty to rsync the assets from here".into());
+            // Only two things have to be typed, and neither is a lookup: the
+            // identity (console work, then `aws login`) and the region.
+            // Everything else `discover` reads off the account.
+            out.push("Then, in order:".into());
+            out.push("  bm-inductor aws login --csv ~/Downloads/accessKeys.csv".into());
+            out.push("  bm-inductor aws discover --region eu-central-1 \\".into());
+            out.push("      --pem ~/Downloads/storycast.pem".into());
             out.push(String::new());
-            out.push("One-off setup this tool deliberately does not do for you:".into());
-            out.push("  aws ec2 create-key-pair --key-name <name> --query KeyMaterial --output text > .bm/aws/<region>.pem".into());
-            out.push("  chmod 600 .bm/aws/<region>.pem".into());
-            out.push("  aws s3 mb s3://<bucket> --region <region>   # if publishing assets".into());
-            out.push("  aws iam create-instance-profile --instance-profile-name <name>   # + a role that can read the bucket".into());
+            out.push("`discover` resolves the AMI, the keypair, the instance profile and".into());
+            out.push("the default subnet and security group, prints each one, and writes".into());
+            out.push("them here — so nothing has to be looked up by hand and nothing is".into());
+            out.push("re-resolved on the next launch. `aws show` lists whatever is still".into());
+            out.push("missing.".into());
             out.push(String::new());
-            out.push("The identity you run this as needs EC2 and nothing else:".into());
+            out.push("Add these when the account cannot choose for you. Each is checked".into());
+            out.push("before it is written and kept once set, so a typo costs a sentence".into());
+            out.push("rather than a failed launch:".into());
+            out.push("  --instance-profile <name>   the account holds more than one".into());
             out.push(
-                "  ec2:DescribeInstances, ec2:RunInstances, ec2:TerminateInstances, ec2:CreateTags"
-                    .into(),
+                "  --security-group <sg-…>     the default group is shared — use your own".into(),
             );
-            out.push("  ec2:DescribeSubnets, ec2:DescribeSecurityGroups, ec2:DescribeImages, ec2:DescribeKeyPairs".into());
-            out.push("  iam:PassRole  (only on the instance profile above)".into());
             out.push(
-                "Nothing account-wide, no billing, no S3 write unless you publish assets yourself."
-                    .into(),
+                "  --subnet <subnet-…>         the default subnet is one AZ of several".into(),
             );
+            out.push(String::new());
+            out.push("It also reads the chosen security group's inbound rules and says so".into());
+            out.push("when none admits you: a closed port makes ssh HANG, it does not".into());
+            out.push("refuse, so the symptom is silence.".into());
+            out.push(String::new());
+            out.push("`region` is the only thing you must decide. `bucket` is the only".into());
+            out.push("other field worth typing (leave it empty to rsync the assets from".into());
+            out.push("this machine).".into());
+            out.push(String::new());
+            // The identity is not "whatever you already have on this machine".
+            // Naming the user here matters: `init` is the first command anyone
+            // runs, and the old text told them to grant EC2 to their own
+            // identity, which is the thing this replaces.
+            out.push("The identity this runs as is an IAM user created for the app —".into());
+            out.push("created entirely in the AWS console:".into());
+            out.push(
+                "  bm-inductor aws policy    # the policy, and the commands that create it".into(),
+            );
+            out.push("  step by step: docs/AWS-IAM-USER.md".into());
+            out.push(String::new());
+            // Console work, all of it — and named here rather than assumed,
+            // because the console is where the account gets set up.
+            out.push("In the console, alongside the user:".into());
+            out.push("  the SSH keypair — EC2 → Key pairs → Create key pair, and keep".into());
+            out.push("  the downloaded .pem; `aws discover --pem` puts it where the".into());
+            out.push("  boxes expect it (.bm/aws/<region>.pem, 0600)".into());
+            out.push("  a security group — EC2 → Security Groups → Create, SSH inbound".into());
+            out.push("  only. The account's default group is shared with everything else".into());
+            out.push("  in the default VPC, so a rule on it is a rule on all of that too.".into());
+            out.push("  Name yours with `--security-group` (docs/AWS-IAM-USER.md step 6)".into());
+            out.push("  a bucket — S3 → Create bucket, only if you publish the asset".into());
+            out.push("  plane; leave `bucket` empty and every box rsyncs from here".into());
             out.push(String::new());
             out.push("Creating, tagging and terminating boxes is money and destruction — those are `aws up` / `aws down`, next.".into());
             Ok(out)
         }
+        AwsCmd::Policy => {
+            // The tracked document is the single source: `aws policy` prints it
+            // and the guide says to install it with `--policy-document`, so
+            // there is one policy rather than a JSON block in a doc and an
+            // action list in the code that quietly disagree.
+            let path = root.join(bm_core::provision::aws_credentials::POLICY_FILE);
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+            // Refuse to print something that is not a policy: pasted into IAM
+            // it fails with a message about the *document*, not about this.
+            let doc: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| anyhow::anyhow!("{} is not valid JSON: {e}", path.display()))?;
+            if doc.get("Statement").and_then(|s| s.as_array()).is_none() {
+                anyhow::bail!(
+                    "{} has no `Statement` array — it does not look like a policy document",
+                    path.display()
+                );
+            }
+            out.push(format!(
+                "the policy for this app's IAM user — {} (tracked)",
+                path.display()
+            ));
+            out.push(String::new());
+            out.push(text.trim_end().to_string());
+            out.push(String::new());
+            out.push("Two placeholders to replace: <ACCOUNT_ID> and <WORKER_ROLE>".into());
+            out.push("  (the role the boxes assume — `aws init` names the profile).".into());
+            out.push(String::new());
+            out.push("Create the user and attach it — as an account admin, once:".into());
+            out.push("  aws iam create-user --user-name storycast-operator".into());
+            out.push("  aws iam put-user-policy --user-name storycast-operator \\".into());
+            out.push(
+                "      --policy-name storycast-operator --policy-document file://<the file above, placeholders replaced>"
+                    .into(),
+            );
+            out.push("  aws iam create-access-key --user-name storycast-operator   # secret is shown once".into());
+            out.push(String::new());
+            out.push("Then, as the operator:".into());
+            out.push("  bm-inductor aws login --access-key-id <that key id>".into());
+            out.push("  bm-inductor aws ls       # the check: reaches the API as that user".into());
+            out.push(String::new());
+            out.push("Full walkthrough, including the console path: docs/AWS-IAM-USER.md".into());
+            Ok(out)
+        }
+        AwsCmd::Login { args } => {
+            // Prompting is a terminal affordance and stays here: a CLI has a
+            // hidden stdin, the dashboard does not. The verify-then-write order
+            // lives in `aws_ops::login`, shared with the TUI, which hands over
+            // the console's CSV instead of typing a secret.
+            let aws_ops::LoginArgs { access_key_id, csv } = args;
+            let (key_id, secret) = match csv {
+                // Passed through when a CSV is present, so the shared check
+                // refuses the two answers rather than silently preferring one.
+                Some(_) => (access_key_id, None),
+                None => {
+                    let key_id = match access_key_id {
+                        Some(k) => k,
+                        None => ask("AWS access key id: ")?,
+                    };
+                    let secret = ask_secret("AWS secret access key (not echoed): ")?;
+                    (Some(key_id), Some(secret))
+                }
+            };
+            out.extend(aws_ops::login(root, csv, key_id, secret)?);
+            Ok(out)
+        }
+        AwsCmd::Discover { args } => {
+            out.extend(aws_ops::discover(root, args)?);
+            Ok(out)
+        }
         AwsCmd::Show => {
             let cfg = AwsConfig::load_layered(root);
+            // Which identity is in force, named before anything else: "why
+            // can't it launch" is usually the IAM user — missing, or not the
+            // one the operator thinks — and the answer should not require
+            // running a command that spends money.
+            out.push(bm_core::provision::aws_credentials::source(root).describe(root));
             if !path.exists() {
                 out.push(format!(
                     "no pool defined yet — `aws init` writes {}",
@@ -680,7 +1039,16 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
             }
             let missing = cfg.missing();
             if missing.is_empty() {
-                out.push("ready: nothing missing".into());
+                // "Ready" means ready to *launch*, which is what `missing()`
+                // knows about — and the firewall is deliberately not part of it,
+                // because this command reads no network. Said out loud, because
+                // a box behind a closed port launches perfectly and then does
+                // nothing, and this is the line someone will read before
+                // spending money.
+                out.push(
+                    "ready: nothing missing — the firewall is not checked here; `aws discover` checks it"
+                        .into(),
+                );
             } else {
                 out.push(String::new());
                 out.push(format!("{} thing(s) still to set:", missing.len()));
@@ -691,26 +1059,7 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
             Ok(out)
         }
         AwsCmd::Ls => {
-            let cfg = AwsConfig::load_layered(root);
-            if cfg.region.trim().is_empty() {
-                anyhow::bail!("no region set — `aws init`, then fill it in");
-            }
-            out.push(format!(
-                "{} · tag {} · spot={}",
-                cfg.region, cfg.tag_key, cfg.spot
-            ));
-            let json = aws_cli_instances(&cfg.region, &cfg.tag_key)?;
-            let Some(instances) = parse_instances(&json, &cfg.tag_key) else {
-                anyhow::bail!(
-                    "the aws CLI answered something this does not understand — reporting an empty account here would be the one wrong answer that costs money"
-                );
-            };
-            if instances.is_empty() {
-                out.push("no boxes running (nothing carries this tag)".into());
-            }
-            for i in &instances {
-                out.push(instance_line(i));
-            }
+            out.extend(aws_ops::pool_lines(root)?);
             Ok(out)
         }
         AwsCmd::Up { count, dry_run } => {
@@ -750,59 +1099,8 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
                 }
                 return Ok(out);
             }
-            if !missing.is_empty() {
-                let mut msg = String::from("the pool is not ready to launch:");
-                for m in missing {
-                    msg.push_str(&format!("\n  - {m}"));
-                }
-                anyhow::bail!("{msg}");
-            }
-            // The marker tag's value *is* the profile hash, so without one the
-            // box would be untraceable in `ls` and unprovisionable anyway —
-            // `provision` refuses without a loaded profile. Better to say so
-            // here than to rent a box that cannot be used.
-            if hash.is_empty() {
-                anyhow::bail!(
-                    "no profile loaded — the marker tag records which profile a box was built for, and provisioning refuses without one; `profile.sh fetch/unpack <name>` first"
-                );
-            }
-            // The cap is checked against the total, not against this call: a
-            // cap that only counts what one invocation asked for is not a cap.
-            let json = aws_cli_instances(&cfg.region, &cfg.tag_key)?;
-            let live = parse_instances(&json, &cfg.tag_key)
-                .ok_or_else(|| anyhow::anyhow!("the aws CLI answered something unexpected"))?
-                .iter()
-                .filter(|i| matches!(i.state.as_str(), "pending" | "running" | "stopping"))
-                .count() as u32;
-            if live + count > cfg.max_workers {
-                anyhow::bail!(
-                    "{live} box(es) already live and {count} asked for, over max_workers={} — raise it in `.bm/aws.json` or launch fewer",
-                    cfg.max_workers
-                );
-            }
-            // The mapping must name the image's own root device (`/dev/sda1` on
-            // Ubuntu, `/dev/xvda` on Amazon Linux), so it is resolved rather
-            // than assumed — otherwise `disk_gb` is silently ignored.
-            let image = cfg.image().unwrap_or_default().to_string();
-            let root_device = aws_cli_text(&describe_image_args(&cfg, &image))?;
-            let argv = run_instances_args(&cfg, count, root_device.trim(), &hash);
-            out.push(format!(
-                "{live} live, cap {}, launching {count} tagged {}",
-                cfg.max_workers, cfg.tag_key
-            ));
-            out.push(format!("aws {}", argv.join(" ")));
-            let raw = aws_cli_raw(&argv)?;
-            let launched = parse_instances(&raw, &cfg.tag_key).unwrap_or_default();
-            if launched.is_empty() {
-                out.push("the launch answered without any instances — check the account".into());
-            }
-            for i in &launched {
-                out.push(format!("launched {}", instance_line(i)));
-            }
-            out.push(String::new());
-            out.push(
-                "Next: `provision --addr <ip>` each one, then `:B` to start their workers.".into(),
-            );
+            let (_, lines, _) = aws_ops::launch(root, count)?;
+            out.extend(lines);
             Ok(out)
         }
         AwsCmd::Down { dry_run } => {
@@ -810,7 +1108,7 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
             if cfg.region.trim().is_empty() {
                 anyhow::bail!("no region set — `aws init`, then fill it in");
             }
-            let json = aws_cli_instances(&cfg.region, &cfg.tag_key)?;
+            let json = aws_cli_instances(root, &cfg.region, &cfg.tag_key)?;
             let found = parse_instances(&json, &cfg.tag_key).ok_or_else(|| {
                 anyhow::anyhow!(
                     "the aws CLI answered something unexpected — not terminating on a guess"
@@ -840,13 +1138,108 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
                 ));
                 return Ok(out);
             }
-            let raw = aws_cli_raw(&terminate_args(&cfg.region, &ids))?;
-            for i in parse_instances(&raw, &cfg.tag_key).unwrap_or_default() {
-                out.push(format!("terminating {} ({})", i.id, i.state));
-            }
+            out.extend(aws_ops::terminate(root, &ids)?);
             Ok(out)
         }
     }
+}
+
+/// Write `.bm/aws.json` from the tracked template, once.
+///
+/// Split out of `init` rather than duplicated, because `discover` may be the
+/// first command anyone runs and must not be a second implementation of the
+/// same seeding.
+pub(crate) fn seed_pool(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    force: bool,
+) -> anyhow::Result<String> {
+    if path.exists() && !force {
+        anyhow::bail!(
+            "{} already exists — edit it, or pass --force to replace it",
+            path.display()
+        );
+    }
+    let template = root.join(bm_core::provision::DEFAULT_FILE);
+    // Seed from the tracked template when it is there, so the file the operator
+    // edits carries the `_note`s explaining each field rather than a bare
+    // struct dump. The notes are ignored on read — serde drops what the struct
+    // does not name — and the round trip proves a hand-edited template that has
+    // drifted from the shape cannot seed a broken config.
+    if template.is_file() {
+        let text = std::fs::read_to_string(&template)?;
+        serde_json::from_str::<bm_core::provision::AwsConfig>(&text)
+            .map_err(|e| anyhow::anyhow!("{} does not parse: {e}", template.display()))?;
+        bm_core::util::atomic_write(path, &text)?;
+        Ok(format!(
+            "wrote {} (from {})",
+            path.display(),
+            template.display()
+        ))
+    } else {
+        bm_core::provision::AwsConfig::default().save(path)?;
+        Ok(format!("wrote {}", path.display()))
+    }
+}
+
+/// The local pool document, as raw JSON.
+///
+/// Refuses to start from an empty document when the file exists but does not
+/// parse: quietly writing `{}` back over it would discard every field the
+/// operator had already set, and the file is theirs.
+pub(crate) fn read_pool_doc(path: &std::path::Path) -> anyhow::Result<serde_json::Value> {
+    if !path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+    let text = std::fs::read_to_string(path)?;
+    let doc: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("{} does not parse: {e}", path.display()))?;
+    if !doc.is_object() {
+        anyhow::bail!("{} is not a JSON object", path.display());
+    }
+    Ok(doc)
+}
+
+/// Set one key in a pool document, creating the objects on the way down.
+pub(crate) fn set_json(doc: &mut serde_json::Value, path: &[&str], value: serde_json::Value) {
+    let Some((last, parents)) = path.split_last() else {
+        return;
+    };
+    let mut cur = doc;
+    for key in parents {
+        if !cur.is_object() {
+            *cur = serde_json::json!({});
+        }
+        let Some(obj) = cur.as_object_mut() else {
+            return;
+        };
+        cur = obj
+            .entry((*key).to_string())
+            .or_insert_with(|| serde_json::json!({}));
+    }
+    if !cur.is_object() {
+        *cur = serde_json::json!({});
+    }
+    if let Some(obj) = cur.as_object_mut() {
+        obj.insert((*last).to_string(), value);
+    }
+}
+
+/// One `aws` call whose answer is a single value, or nothing.
+///
+/// `None` means "the call worked and there was nothing to find" — an account
+/// with no default subnet, a region with no keypairs. For `discover` that is an
+/// answer to report rather than a failure, which is why it is not
+/// [`aws_cli_text`], where an empty answer is a refusal.
+pub(crate) fn aws_cli_opt(
+    root: &std::path::Path,
+    args: &[String],
+) -> anyhow::Result<Option<String>> {
+    let text = aws_cli_raw(root, args)?.trim().to_string();
+    if text.is_empty() || text == "None" {
+        return Ok(None);
+    }
+    Ok(Some(text))
 }
 
 /// `aws ec2 describe-instances`, filtered to the boxes we tagged.
@@ -854,19 +1247,26 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
 /// The filter is `tag-key`, not a value: it matches every box we started
 /// whatever profile it was built for, and it cannot match a stranger's
 /// instances.
-fn aws_cli_instances(region: &str, tag_key: &str) -> anyhow::Result<String> {
-    aws_cli_raw(&[
-        "ec2".into(),
-        "describe-instances".into(),
-        "--region".into(),
-        region.into(),
-        "--filters".into(),
-        format!("Name=tag-key,Values={tag_key}"),
-        "--filters".into(),
-        "Name=instance-state-name,Values=pending,running,stopping,stopped".into(),
-        "--output".into(),
-        "json".into(),
-    ])
+pub(crate) fn aws_cli_instances(
+    root: &std::path::Path,
+    region: &str,
+    tag_key: &str,
+) -> anyhow::Result<String> {
+    aws_cli_raw(
+        root,
+        &[
+            "ec2".into(),
+            "describe-instances".into(),
+            "--region".into(),
+            region.into(),
+            "--filters".into(),
+            format!("Name=tag-key,Values={tag_key}"),
+            "--filters".into(),
+            "Name=instance-state-name,Values=pending,running,stopping,stopped".into(),
+            "--output".into(),
+            "json".into(),
+        ],
+    )
 }
 
 /// Run one `aws` subcommand and hand back stdout, or an error naming the fix.
@@ -875,8 +1275,76 @@ fn aws_cli_instances(region: &str, tag_key: &str) -> anyhow::Result<String> {
 /// CLI, missing credentials, or a policy that forbids the call means. Those are
 /// all normal first-run states, so each gets a sentence naming the fix instead
 /// of a raw exit status.
-fn aws_cli_raw(args: &[String]) -> anyhow::Result<String> {
-    let out = match std::process::Command::new("aws").args(args).output() {
+/// Ask for one visible line. Used for the key id, which is an identifier
+/// rather than a secret and hiding it only makes a typo harder to spot.
+fn ask(prompt: &str) -> anyhow::Result<String> {
+    use std::io::{BufRead, Write};
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+/// Ask for one line without echoing it when stdin is a terminal.
+///
+/// `stty -echo` rather than an `rpassword` dependency — one call, Unix-only,
+/// the same reasoning the cluster token uses for `/dev/urandom`. Piped input
+/// is read plainly, which is what makes `printf '%s\n' "$SECRET" | …` work.
+///
+/// If `stty` is missing the echo is simply not suppressed; the value is still
+/// read correctly, and nothing is written anywhere it should not be.
+fn ask_secret(prompt: &str) -> anyhow::Result<String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let tty = std::io::stdin().is_terminal();
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+    if tty {
+        let _ = std::process::Command::new("stty").arg("-echo").status();
+    }
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line);
+    if tty {
+        let _ = std::process::Command::new("stty").arg("echo").status();
+        println!();
+    }
+    read?;
+    Ok(line.trim().to_string())
+}
+
+pub(crate) fn aws_cli_raw(root: &std::path::Path, args: &[String]) -> anyhow::Result<String> {
+    // Every AWS call this tool makes goes through here, and this is the line
+    // that makes "the app runs as the IAM user you created for it" true rather
+    // than aspirational: no user stored, no call made. Never a fallback.
+    bm_core::provision::aws_credentials::require(root)?;
+    aws_cli_with(root, args, &[])
+}
+
+/// Run one `aws` subcommand with credentials supplied for this call alone.
+///
+/// Only `aws login` uses it, and it has to: the identity must be proven — and
+/// proven to be an IAM *user* — before there is a file to point the CLI at.
+///
+/// The shadowing variables are stripped either way. Env-var keys outrank a
+/// shared credentials file, so a stray `AWS_ACCESS_KEY_ID` exported in the
+/// shell would otherwise win silently while `aws show` reported the IAM user.
+pub(crate) fn aws_cli_with(
+    root: &std::path::Path,
+    args: &[String],
+    supplied: &[(String, String)],
+) -> anyhow::Result<String> {
+    let mut cmd = std::process::Command::new("aws");
+    cmd.args(args);
+    for k in bm_core::provision::aws_credentials::SHADOWING_ENV {
+        cmd.env_remove(k);
+    }
+    for (k, v) in bm_core::provision::aws_credentials::cli_env(root) {
+        cmd.env(k, v);
+    }
+    for (k, v) in supplied {
+        cmd.env(k, v);
+    }
+    let out = match cmd.output() {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
             "the `aws` CLI is not on PATH — install the AWS CLI v2, or run `aws show` for the definition alone"
@@ -890,11 +1358,11 @@ fn aws_cli_raw(args: &[String]) -> anyhow::Result<String> {
         // says "credentials" — the call is simply not allowed, and the account
         // and user in the message are the only clue about which policy to edit.
         let hint = if err.contains("Unable to locate credentials") {
-            " — no credentials in the standard chain; `aws configure sso`, or set AWS_PROFILE"
+            " — the stored key was not accepted; re-run `bm-inductor aws login` (docs/AWS-IAM-USER.md)"
         } else if err.contains("UnauthorizedOperation") || err.contains("not authorized") {
-            " — the credentials were found but the identity may not call this; `aws init` lists the actions the pool needs"
+            " — this IAM user is not allowed to make this call; `bm-inductor aws policy` prints the policy it needs"
         } else if err.contains("InvalidClientTokenId") || err.contains("ExpiredToken") {
-            " — the credentials are stale; refresh them (`aws sso login`)"
+            " — the stored key is stale or deleted; `bm-inductor aws login` with a fresh one"
         } else {
             ""
         };
@@ -910,8 +1378,8 @@ fn aws_cli_raw(args: &[String]) -> anyhow::Result<String> {
 /// One `--query`-driven value: a single line, trimmed. `None` and empty are
 /// both "the call succeeded and answered nothing", which for a root device name
 /// is a refusal rather than a default.
-fn aws_cli_text(args: &[String]) -> anyhow::Result<String> {
-    let text = aws_cli_raw(args)?.trim().to_string();
+pub(crate) fn aws_cli_text(root: &std::path::Path, args: &[String]) -> anyhow::Result<String> {
+    let text = aws_cli_raw(root, args)?.trim().to_string();
     if text.is_empty() || text == "None" {
         anyhow::bail!("aws {} answered nothing", args.join(" "));
     }
@@ -954,16 +1422,16 @@ async fn cmd_provision(
     // afterwards needs the live API client.
     let mut m = Machine::new(&addr, &user, port, key.clone(), "worker");
     m.tts_url = Some("http://127.0.0.1:8818".into());
-    let log = tokio::task::spawn_blocking({
+    carry_task_policy(&mut m, &layout);
+    let out = tokio::task::spawn_blocking({
         let (layout, addr, user) = (layout.clone(), addr.clone(), user.clone());
-        move || provision_machine(&layout, &addr, &user, port, key, force)
+        move || provision_machine(&layout, &addr, &user, port, key, force, None)
     })
     .await?;
-    let (ready, lines) = log;
-    for line in &lines {
+    for line in &out.lines {
         println!("{line}");
     }
-    if !ready {
+    if !out.ready {
         println!("[{addr}] provision INCOMPLETE — fix the errors above and run it again");
     }
     // Register the machine so the scheduler sees it: prefer the live API,
@@ -1192,6 +1660,7 @@ async fn main() -> anyhow::Result<()> {
                 port,
                 key,
                 role: "worker".into(),
+                task_policy: None,
             };
             bm_core::provision::save_box(&layout.machines(), &bxo)?;
             println!("linked {name} -> {}", layout.machines().display());
@@ -1378,11 +1847,54 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let layout = bm_core::Layout::new(&dir);
         for addr in ["127.0.0.1", "localhost", "::1"] {
-            let (ready, lines) = provision_machine(&layout, addr, "thang", 22, None, false);
-            assert!(ready, "{addr} must always be ready");
-            assert_eq!(lines.len(), 1, "{lines:?}");
-            assert!(lines[0].contains("nothing to provision"), "{}", lines[0]);
+            let out = provision_machine(&layout, addr, "thang", 22, None, false, None);
+            assert!(out.ready, "{addr} must always be ready");
+            assert!(out.reachable, "{addr} is local — ssh is never involved");
+            assert_eq!(out.lines.len(), 1, "{:?}", out.lines);
+            assert!(
+                out.lines[0].contains("nothing to provision"),
+                "{}",
+                out.lines[0]
+            );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reprovision_keeps_the_stored_work_policy() {
+        // A fresh `Machine` carries `task_policy: None`, and both
+        // registration paths persist it — so without the carry, every
+        // re-provision silently reset the policy panel's order/toggles.
+        let dir = std::env::temp_dir().join(format!("bm-policy{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let layout = bm_core::Layout::new(&dir);
+        let policy = vec![
+            bm_proto::TaskPref { stage: bm_proto::Stage::Merge, enabled: true },
+            bm_proto::TaskPref { stage: bm_proto::Stage::Digest, enabled: true },
+            bm_proto::TaskPref { stage: bm_proto::Stage::Crawl, enabled: true },
+            bm_proto::TaskPref { stage: bm_proto::Stage::Render, enabled: true },
+        ];
+        bm_core::provision::save_box(
+            &layout.machines(),
+            &bm_core::provision::LinkedBox {
+                name: "box-1".into(),
+                addr: "192.0.2.1".into(),
+                user: "fixture".into(),
+                port: 2222,
+                key: None,
+                role: "worker".into(),
+                task_policy: Some(policy.clone()),
+            },
+        )
+        .unwrap();
+        let mut m = Machine::new("192.0.2.1", "fixture", 2222, None, "worker");
+        carry_task_policy(&mut m, &layout);
+        assert_eq!(m.task_policy, Some(policy));
+        // Unknown box: nothing to carry, stays default.
+        let mut fresh = Machine::new("192.0.2.2", "fixture", 2222, None, "worker");
+        carry_task_policy(&mut fresh, &layout);
+        assert_eq!(fresh.task_policy, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1409,9 +1921,31 @@ mod tests {
             dir.join("rust/target/ort-linux-x64")
         );
         // Nothing staged for linux/arm64: a build error naming the platform,
-        // never another platform's binary.
-        let err = agent_binary_for("linux", "aarch64", &layout).unwrap_err();
+        // never another platform's binary. (The full `agent_binary_for` would
+        // go on to cross-build that target on demand — the staged lookup is
+        // the pure, toolchain-free half that is testable here.)
+        let err = agent_binary_staged("linux", "aarch64", &layout).unwrap_err();
         assert!(err.to_string().contains("linux/aarch64"), "{err}");
+        // The on-demand build only ever targets cross candidates: the native
+        // build exists exactly when this host is the target, so a miss there
+        // means a broken workspace, not a missing cross toolchain.
+        let native = layout.root.join("rust/target/debug/bm-agent");
+        assert!(!buildable_agent_candidates(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            &layout
+        )
+        .contains(&native));
+        // A foreign platform always has cross candidates to build.
+        let foreign_arch = if std::env::consts::ARCH == "x86_64" {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        assert!(
+            !buildable_agent_candidates("linux", foreign_arch, &layout).is_empty(),
+            "a foreign linux target must have cross candidates to build"
+        );
         // This host's own platform falls back to the native build — asserted
         // on the candidate list (not the pick) so the test holds on any host:
         // on linux/x86_64 the cross file above would otherwise win first.
@@ -1425,5 +1959,24 @@ mod tests {
         // The macOS sidecar is self-contained: no runtime travels with it.
         assert!(tts_runtime_dir("macos", "aarch64", &layout).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cross_build_infers_target_and_workspace_from_the_candidate_path() {
+        // The target triple is the candidate's grandparent (`…/<triple>/debug`)
+        // and the workspace manifest sits a fixed number of levels above — both
+        // read from the path, so there is one spelling of each and no drift.
+        // Caught live: the first version took the parent and handed zigbuild
+        // `debug`, which it rightly refused.
+        let cand =
+            std::path::Path::new("/repo/rust/target/x86_64-unknown-linux-gnu/debug/bm-agent");
+        assert_eq!(
+            cross_target_of(cand).unwrap(),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            workspace_dir_above_target(cand).unwrap(),
+            std::path::Path::new("/repo/rust")
+        );
     }
 }

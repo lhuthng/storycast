@@ -3,7 +3,7 @@ use crate::tui::{app::App, screen::Confirm, style::centered};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
 pub(crate) fn draw_confirm(f: &mut ratatui::Frame, app: &App, c: &Confirm) {
@@ -31,6 +31,7 @@ pub(crate) fn draw_confirm(f: &mut ratatui::Frame, app: &App, c: &Confirm) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
                     .border_style(app.style(colour))
                     .title(c.title.clone()),
             )

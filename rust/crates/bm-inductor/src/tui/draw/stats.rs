@@ -8,21 +8,24 @@
 use crate::tui::{
     app::App,
     model::{live_beats, reported_alias, task_eta},
-    style::{cell, empty_body, style_bold_of, style_of, worker_alias},
+    style::{cell, empty_body, stage_count_cell, style_bold_of, style_of, worker_alias},
 };
 use bm_proto::Stage;
 use ratatui::{
     layout::{Constraint, Rect},
     style::Color,
     text::{Line, Span},
-    widgets::{Block, Borders, Row, Table},
+    widgets::{Row, Table},
 };
 
 pub(crate) fn draw_stats(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title("Stats");
+    let block = super::pane_block(app, "Stats");
     let live = live_beats(&app.beats, bm_proto::now_secs());
     if live.is_empty() {
-        f.render_widget(empty_body(vec!["no workers connected".into()]).block(block), area);
+        f.render_widget(
+            empty_body(vec!["no workers connected".into()]).block(block),
+            area,
+        );
         return;
     }
     // Border plus header consume three rows; the rest is workers.
@@ -34,10 +37,15 @@ pub(crate) fn draw_stats(f: &mut ratatui::Frame, app: &App, area: Rect) {
             .to_string();
         let tint = worker_alias(&name).1;
         let counts = app.stats.counts.get(&b.worker_id);
-        let mut cells = vec![Line::from(Span::styled(name, style_of(app.colour, tint)))];
+        let mut cells = vec![Line::from(Span::styled(name, style_of(app.colour(), tint)))];
         for st in Stage::ALL {
-            let n = counts.and_then(|c| c.get(st.as_str())).copied().unwrap_or(0);
-            cells.push(cell(n.to_string()));
+            let n = counts
+                .and_then(|c| c.get(st.as_str()))
+                .copied()
+                .unwrap_or(0);
+            // Tinted by stage so the matrix reads by column as well as row;
+            // zero stays dim, so the eye lands on where work happened.
+            cells.push(stage_count_cell(app.colour(), st.as_str(), n));
         }
         let eta = match b.stage {
             Some(st) => {
@@ -61,7 +69,7 @@ pub(crate) fn draw_stats(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Constraint::Length(6),
     ];
     let table = Table::new(rows, widths)
-        .header(Row::new(header).style(style_bold_of(app.colour, Color::Gray)))
+        .header(Row::new(header).style(style_bold_of(app.colour(), Color::Gray)))
         .block(block);
     f.render_widget(table, area);
 }

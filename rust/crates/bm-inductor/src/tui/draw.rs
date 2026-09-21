@@ -1,5 +1,6 @@
 //! Paint: tier dispatch plus the overlay match. Panes live in `draw/`.
 mod cast;
+mod cloud;
 mod confirm;
 mod events;
 mod footer;
@@ -8,6 +9,7 @@ mod jobs;
 mod machine;
 mod machines;
 mod picker;
+mod policy;
 mod prompt;
 mod run;
 mod sound;
@@ -20,8 +22,8 @@ use crate::tui::{
     app::App,
     layout::{
         size_class, Size, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H, COMPACT_MACHINES_H,
-        COMPACT_WORKERS_H, FULL_EVENTS_MIN_H, FULL_FOOTER_H, FULL_MACHINES_H, FULL_TASKS_H,
-        FULL_WORKERS_H, MIN_H, MIN_W,
+        COMPACT_WORKERS_H, FULL_EVENTS_MIN_H, FULL_FOOTER_H, FULL_HEADER_H, FULL_MACHINES_H,
+        FULL_TASKS_H, FULL_WORKERS_H, MIN_H, MIN_W,
     },
     screen::Screen,
     style::centered_padded,
@@ -30,8 +32,20 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout as RLayout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
+
+/// The stock pane frame: rounded corners and the theme's accent border.
+/// The old square `Block::default()` read as five identical boxes; the
+/// rounded outline plus one hue separates chrome from data, which is what
+/// makes a five-pane dashboard scannable.
+pub(crate) fn pane_block(app: &App, title: impl Into<Line<'static>>) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(app.style(crate::tui::style::theme_accent()))
+        .title(title.into())
+}
 
 /// The size guard: the only thing on screen when the terminal cannot hold the
 /// dashboard. It names the requirement, the current size, and the way out.
@@ -86,9 +100,68 @@ pub(crate) fn draw_too_small(f: &mut ratatui::Frame, app: &App, area: Rect) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
                     .border_style(app.style(Color::Yellow)),
             ),
         box_,
+    );
+}
+
+/// The one-line identity strip above the panes, full tier only.
+///
+/// The footer used to carry the workspace, profile, engine, analyzer and
+/// chapter range after the status — the eye had to wade past constants to
+/// find what just happened. Here the identity lives top-left where a title
+/// would be, and the theme chip sits right so `C` is discoverable.
+fn draw_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut left = vec![Span::styled(
+        format!("ws: {}", crate::tui::model::workspace_label(&app.layout)),
+        app.style_bold(crate::tui::style::theme_accent()),
+    )];
+    // A missing profile is not decoration: every runner refuses to start
+    // without one, so it reads as the problem it is (yellow, not dim).
+    left.push(Span::styled(
+        format!(
+            "  profile: {}",
+            crate::tui::model::profile_label(app.profile.as_ref())
+        ),
+        if app.profile.is_some() {
+            dim
+        } else {
+            app.style(Color::Yellow)
+        },
+    ));
+    if let Some(engine) = app
+        .settings
+        .as_ref()
+        .and_then(|s| s.get("engine"))
+        .and_then(|e| e.as_str())
+    {
+        left.push(Span::styled(format!("  engine: {engine}"), dim));
+    }
+    if let Some(analyzer) = app
+        .settings
+        .as_ref()
+        .and_then(|s| s.get("analyzer"))
+        .and_then(|e| e.as_str())
+    {
+        left.push(Span::styled(format!("  digest: {analyzer}"), dim));
+    }
+    if let Some(r) = crate::tui::style::range_label(&app.settings) {
+        left.push(Span::styled(format!("  {r}"), dim));
+    }
+    let right = format!("theme: {} · C cycles", crate::tui::style::theme_label());
+    f.render_widget(
+        Paragraph::new(Line::from(left)),
+        Rect {
+            width: area.width.saturating_sub(right.len() as u16 + 2),
+            ..area
+        },
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(right, dim))).alignment(Alignment::Right),
+        area,
     );
 }
 
@@ -103,7 +176,9 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let compact = size == Size::Compact;
 
     // Compact gives up the Tasks pane — its numbers move to the footer — so
-    // that Logs keeps rows. Logs is the pane that must stay readable.
+    // that Logs keeps rows. Logs is the pane that must stay readable. The
+    // header is full-tier only: the compact tier sits exactly on its 20-row
+    // floor, and the identity it carries lives in the footer there.
     let (machines_h, workers_h) = if compact {
         (COMPACT_MACHINES_H, COMPACT_WORKERS_H)
     } else {
@@ -118,6 +193,7 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         ]
     } else {
         vec![
+            Constraint::Length(FULL_HEADER_H),
             Constraint::Length(machines_h),
             Constraint::Length(workers_h),
             Constraint::Length(FULL_TASKS_H),
@@ -130,23 +206,26 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         .constraints(constraints)
         .split(area);
 
-    machines::draw_machines(f, app, root[0], compact);
-    workers::draw_workers(f, app, root[1], compact);
     if compact {
+        machines::draw_machines(f, app, root[0], compact);
+        workers::draw_workers(f, app, root[1], compact);
         events::draw_events(f, app, root[2]);
         footer::draw_footer(f, app, root[3], true);
     } else {
-        // The tasks row splits: the queue summary keeps the left, the new
+        draw_header(f, app, root[0]);
+        machines::draw_machines(f, app, root[1], compact);
+        workers::draw_workers(f, app, root[2], compact);
+        // The tasks row splits: the queue summary keeps the left, the
         // Stats matrix (workers × stages plus TUI-side ETA) takes a fixed
         // 46 on the right — 38 of columns, 6 of gaps, 2 of border.
         let task_row = RLayout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(30), Constraint::Length(46)])
-            .split(root[2]);
+            .split(root[3]);
         tasks::draw_tasks(f, app, task_row[0]);
         stats::draw_stats(f, app, task_row[1]);
-        events::draw_events(f, app, root[3]);
-        footer::draw_footer(f, app, root[4], false);
+        events::draw_events(f, app, root[4]);
+        footer::draw_footer(f, app, root[5], false);
     }
 
     // Overlays paint last and cover everything beneath them. They are rendered
@@ -159,10 +238,12 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Screen::Run => run::draw_run(f, app),
         Screen::Confirm(c) => confirm::draw_confirm(f, app, &c),
         Screen::Machine(addr) => machine::draw_machine_info(f, app, &addr),
+        Screen::Policy(v) => policy::draw_policy(f, app, &v),
         Screen::Jobs { scroll, .. } => jobs::draw_jobs(f, app, scroll),
         Screen::Tasks(v) => tasks::draw_tasks_screen(f, app, &v),
         Screen::TaskDetail(d) => task_detail::draw_task_detail(f, app, &d),
         Screen::Sound(v) => sound::draw_sound(f, app, &v),
+        Screen::Cloud(v) => cloud::draw_cloud(f, app, &v),
         _ => {}
     }
 }

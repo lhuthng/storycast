@@ -178,6 +178,82 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                 req,
             })
         }
+        // `:login` takes the console's CSV and nothing else. The secret cannot
+        // be typed on a screen — it would be echoed — so a key id alone is
+        // refused with the reason rather than half-handled.
+        TextKind::AwsLogin => {
+            let raw = prompt.buf.trim();
+            if raw.is_empty() {
+                return Err(
+                    "path is empty — point at the console's accessKeys.csv (IAM → Users → \
+                     Security credentials → Access keys → Create access key → Download .csv file)"
+                        .into(),
+                );
+            }
+            // A bare path is the common case; the flags the CLI takes are
+            // accepted too, through the same definition, so `--csv <path>` works.
+            let csv = if raw.starts_with('-') {
+                let toks: Vec<String> = raw.split_whitespace().map(str::to_string).collect();
+                let args =
+                    crate::aws_ops::LoginArgs::parse_tokens(&toks).map_err(|e| format!("{e}"))?;
+                if args.access_key_id.is_some() && args.csv.is_none() {
+                    return Err(
+                        "the secret cannot be typed here — pass the console's CSV instead: \
+                         `--csv ~/Downloads/accessKeys.csv`"
+                            .into(),
+                    );
+                }
+                args.csv
+                    .ok_or_else(|| "pass the console's CSV: `--csv <path>`".to_string())?
+            } else {
+                // Tilde is not expanded by a shell here, so do it by hand — the
+                // console's download lands in `~/Downloads`.
+                bm_core::util::expand_tilde(raw)
+            };
+            if !csv.is_file() {
+                return Err(format!(
+                    "no such file: {} — call it exactly what the console downloaded \
+                     (accessKeys.csv)",
+                    csv.display()
+                ));
+            }
+            Ok(Job::AwsLogin {
+                root: app.layout.root.clone(),
+                csv,
+            })
+        }
+        // `:discover` parses the same flags the CLI does, from the same clap
+        // definition, so a flag cannot mean two things depending on the front
+        // end. A path-valued flag is tilde-expanded first: there is no shell
+        // here to do it.
+        TextKind::AwsDiscover => {
+            let raw = prompt.buf.trim();
+            let toks: Vec<String> = raw.split_whitespace().map(str::to_string).collect();
+            if toks.is_empty() {
+                return Err(
+                    "pass at least `--region <r>`; add `--pem <path>` to import the console's \
+                     .pem"
+                        .into(),
+                );
+            }
+            let mut args =
+                crate::aws_ops::DiscoverArgs::parse_tokens(&toks).map_err(|e| format!("{e}"))?;
+            args.pem = args
+                .pem
+                .map(|p| bm_core::util::expand_tilde(&p.to_string_lossy()));
+            if let Some(p) = &args.pem {
+                if !p.is_file() {
+                    return Err(format!(
+                        "no such .pem: {} — point at the file the console downloaded",
+                        p.display()
+                    ));
+                }
+            }
+            Ok(Job::AwsDiscover {
+                root: app.layout.root.clone(),
+                args,
+            })
+        }
         TextKind::Profile => {
             // Same grammar: `pack <name>` bundles the live tree, a bare name
             // loads it, empty lists.

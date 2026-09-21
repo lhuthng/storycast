@@ -1,5 +1,5 @@
 //! System overview overlay.
-use crate::tui::model::Verdict;
+use crate::tui::model::{machine_kind, machine_label, policy_summary, Verdict};
 use crate::tui::style::Conn;
 use crate::tui::{
     app::App, input::runconfig::run_preview, model::task_rollup, style::centered_padded,
@@ -7,20 +7,17 @@ use crate::tui::{
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Clear, Paragraph, Wrap},
 };
 
 /// System overview: backend, config, voices, tasks — everything one launch
 /// needs, on one screen. Modelled on the cast overview: read here, act with
 /// `Enter` (launch) or `e` (edit the config it shows).
 pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
-    let area = centered_padded(f.area(), 76, 26, 1);
+    let area = centered_padded(f.area(), 76, 30, 1);
     f.render_widget(Clear, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(app.style(Color::Cyan))
-        .title("System — Enter launches · e edits config · Esc closes");
+    let block = super::pane_block(app, "System — Enter launches · e edits config · Esc closes");
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 10 {
@@ -113,7 +110,50 @@ pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
         }
     }
     lines.push(Line::from(""));
-    lines.push(task_rollup(&app.counts, app.colour));
+    lines.push(task_rollup(&app.counts, app.colour()));
+    // The work split: each box's stage order, so what runs where is visible
+    // before Enter launches anything. `M>R>D>C` is most-preferred first, and a
+    // lower-case letter is a stage switched off for that box.
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  work split (P on the dashboard edits it)",
+        app.style_bold(Color::White),
+    )));
+    if app.machines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no machines registered — a local-only run",
+            dim,
+        )));
+    } else {
+        const SHOWN: usize = 6;
+        for m in app.machines.iter().take(SHOWN) {
+            let chain: Vec<&str> = m
+                .effective_task_policy()
+                .iter()
+                .filter(|p| p.enabled)
+                .map(|p| p.stage.as_str())
+                .collect();
+            let detail = if chain.is_empty() {
+                "all stages off — P to enable".to_string()
+            } else {
+                chain.join(" > ")
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {:<16}", format!("{} ({})", machine_label(m), machine_kind(m))),
+                    app.style(Color::Cyan),
+                ),
+                Span::raw(format!("{:<9}", policy_summary(m))),
+                Span::styled(detail, dim),
+            ]));
+        }
+        if app.machines.len() > SHOWN {
+            lines.push(Line::from(Span::styled(
+                format!("  … {} more", app.machines.len() - SHOWN),
+                dim,
+            )));
+        }
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Enter starts the backend if down, then runs the range above",

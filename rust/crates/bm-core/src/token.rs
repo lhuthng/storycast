@@ -63,28 +63,7 @@ pub fn write(root: &Path, token: &str) -> Result<()> {
             .with_context(|| format!("creating {}", parent.display()))?;
     }
     crate::atomic_write(&path, &format!("{token}\n"))?;
-    restrict(&path)?;
-    Ok(())
-}
-
-/// Owner-only permissions, where the platform has them.
-///
-/// Unix-only by construction: the inductor and the workers are macOS and Linux,
-/// and there is no cross-build target that is not. Elsewhere this is a no-op
-/// rather than an error, so a port to another platform is a build, not a
-/// rewrite — but it should be revisited, because a token with default
-/// permissions is the failure this function exists to prevent.
-fn restrict(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("restricting {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
+    crate::util::restrict(&path)?;
     Ok(())
 }
 

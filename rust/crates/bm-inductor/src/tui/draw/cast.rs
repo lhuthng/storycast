@@ -5,14 +5,15 @@ use crate::tui::{
     model::{clamp_scroll, filtered_cast_rows, Verdict},
     screen::CastView,
     style::{
-        cell, centered_padded, dash_if_empty, empty_body, gender_label, style_bold_of, style_of,
+        cell, centered_padded, dash_if_empty, empty_body, gender_label, selection_bg,
+        style_bold_of, style_of,
     },
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout as RLayout},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Row, Table, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Row, Table, Wrap},
 };
 use std::collections::BTreeMap;
 
@@ -30,10 +31,7 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
     };
     f.render_widget(Clear, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(app.style(Color::Cyan))
-        .title("Cast · vi-VN — Esc to close");
+    let block = super::pane_block(app, "Cast · vi-VN — Esc to close");
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 4 {
@@ -155,7 +153,7 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
             rows_area[2],
         );
     } else if body > 0 {
-        let colour = app.colour;
+        let colour = app.colour();
         // Pick the column set from the width the table actually gets, not from
         // the terminal: the overlay has its own borders to pay for.
         let table_w = rows_area[2].width.saturating_sub(2);
@@ -237,7 +235,7 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
                 )));
                 let mut row = Row::new(cells);
                 if selected {
-                    row = row.style(Style::default().add_modifier(Modifier::REVERSED));
+                    row = row.style(Style::default().bg(selection_bg()));
                 }
                 row
             })
@@ -279,6 +277,7 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(Color::DarkGray))
                     .title(title),
             );

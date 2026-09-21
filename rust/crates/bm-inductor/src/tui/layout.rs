@@ -41,6 +41,12 @@ pub(crate) fn size_class(w: u16, h: u16) -> Size {
 
 /// Pane heights, per tier. Named rather than inlined so the compile-time guard
 /// below and the renderer cannot drift apart.
+///
+/// The header is the one-row identity strip (workspace, profile, engine,
+/// chapter range, theme chip). The full tier ran 31 of its 32 rows, so it
+/// fits exactly; the compact tier sits on its 20-row floor and stays without.
+pub(crate) const FULL_HEADER_H: u16 = 1;
+
 pub(crate) const FULL_MACHINES_H: u16 = 8;
 
 pub(crate) const FULL_WORKERS_H: u16 = 8;
@@ -66,12 +72,12 @@ pub(crate) const COMPACT_FOOTER_H: u16 = 4;
 /// The compact tier gets shorter labels because it has 76 columns to work with;
 /// every key is described in full on the help screen, which `?` opens.
 pub(crate) const KEYS_FULL: [&str; 2] = [
-    ":add · :prov · :drop · :translate · :crawl · :eta · i inspect",
+    ":add · :prov · :drop · :translate · :crawl · :eta · P policy · i inspect",
     ":retry · :reconcile · :backend · :stop · :swap · :voices · :S cast · K tasks · J jobs · r · ? · q",
 ];
 
 pub(crate) const KEYS_COMPACT: [&str; 2] = [
-    ":add · :prov · :drop · :translate · :crawl · :stop",
+    ":add · :prov · :drop · :translate · :crawl · :stop · P policy",
     ":retry · :reconcile · :swap · :voices · :S cast · K tasks · ? · q · : cmd",
 ];
 
@@ -79,10 +85,12 @@ pub(crate) const KEYS_COMPACT: [&str; 2] = [
 /// inline; these are the ones that must fit inside `MIN_W`, so they are named
 /// and checked while compiling.
 ///
-/// `addr, workers, role, state, seen` — the `tts` column is dropped.
-pub(crate) const COMPACT_MACHINE_COLS: [u16; 5] = [15, 7, 8, 13, 8];
+/// `machine, kind, ip, workers, policy, state, seen` — the `tts` column is
+/// dropped. Seven short columns now, so `machine`/`ip` stay narrow enough that
+/// the whole identity of a box reads in the width of one address.
+pub(crate) const COMPACT_MACHINE_COLS: [u16; 7] = [11, 5, 15, 4, 9, 13, 5];
 
-/// `worker, stage, ch, progress, activity` — `machine` is dropped.
+/// `alias, stage, ch, progress, activity` — `machine` is dropped.
 pub(crate) const COMPACT_WORKER_COLS: [u16; 5] = [14, 8, 5, 17, 16];
 
 /// Column widths for the cast table, in two sets.
