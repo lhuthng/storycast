@@ -73,7 +73,8 @@ nothing.
 
 Because state lives only in the ledger plus artifacts on disk, any process can
 die at any moment. Restarting the inductor re-reads the ledger; restarting a
-worker re-registers and pulls again.
+worker is enough for it to be picked up again, because the inductor is the one
+asking — there is no registration it has to get back in on (§7).
 
 ### Config lives next to the ledger, not in it
 

@@ -5,12 +5,46 @@ not as your machine's `AWS_PROFILE`, and not as a role borrowed from SSO.
 
 **Everything is created in the [AWS Management Console](https://console.aws.amazon.com/iam/).**
 No `aws` CLI command appears anywhere in this guide, and you do not have to
-install it. Steps 1–6 are console clicks, once per AWS account, by someone with
-admin rights. Steps 6–7 are the app's own two commands: the app is a CLI, so
-there is no console equivalent for those — but they take the files the console
-hands you and fill in the rest themselves.
+install it. **Steps 1–6** are console clicks, once per AWS account, by someone
+with admin rights. **Steps 7–8** are the app's own two commands: the app is a
+CLI, so there is no console equivalent for those — but they take the files the
+console hands you and fill in the rest themselves.
 
-Read it once, top to bottom. The same steps 1–5 in a terminal are at the end, if
+```mermaid
+flowchart TB
+    subgraph console["AWS console — steps 1–6, once per account, admin rights"]
+        direction LR
+        P["1 · the policy<br/>aws-policy.json"] --> U["2 · the user<br/>storycast-operator"]
+        U --> K["3 · its access key<br/>→ accessKeys.csv"]
+        R["4 · the worker role<br/>storycast-worker"] --> IP["its instance profile"]
+        KP["5 · the SSH keypair<br/>→ storycast.pem"] --> SG["6 · the security group<br/>ingress 22 + 8917"]
+        IP --> SG
+    end
+    subgraph app["the app — steps 7–8"]
+        direction LR
+        L[":login"] --> CRED[".bm/aws/credentials<br/>0600 · gitignored"]
+        D[":discover"] --> POOL[".bm/aws.json<br/>AMI · subnet · group · keypair · profile"]
+    end
+    K -->|"the console's CSV"| L
+    KP -->|"the console's .pem"| D
+    SG -->|"checked, not guessed"| D
+    IP -->|"--instance-profile"| D
+    CRED --> READY["ready for :profile load, then :up"]
+    POOL --> READY
+```
+
+Three things that diagram is trying to make obvious:
+
+- **Steps 1–6 need permissions the created user deliberately does not have.**
+  That is the split, not an oversight: if you are not an account admin, hand
+  them this page and `aws-policy.json`.
+- **Steps 4 and 5 are not optional.** `:up` refuses to launch without an
+  instance profile, and a box you cannot log into cannot be provisioned.
+- **The console hands over exactly two files** — `accessKeys.csv` and
+  `storycast.pem` — and every other value in `.bm/aws.json` is *read off the
+  account* by `:discover` rather than typed.
+
+Read it once, top to bottom. The same steps 1–6 in a terminal are at the end, if
 you prefer that.
 
 ## Why not just use your own credentials
