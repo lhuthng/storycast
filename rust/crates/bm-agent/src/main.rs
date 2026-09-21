@@ -287,13 +287,19 @@ async fn run_digest(
 /// What a render offer asks for. Pure, so the zero-units arm — "do nothing
 /// and report success", the easiest arm to write as a fall-through — is
 /// pinned by a test instead of by inspection.
+///
+/// The offered list is the chapter's **whole** unit set, not the difference
+/// against the inductor's store: the inductor cannot see this box's disk. What
+/// this box still has to speak is therefore decided against the disk, in
+/// `pending_units`, and not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RenderAction {
     /// Old inductor (no `render_units`): plan from the local script.
     Legacy,
-    /// Store already complete: report `ok` with `units: 0` at once.
+    /// The offer names no units at all — an empty chapter. Report `ok` with
+    /// `units: 0` at once.
     Noop,
-    /// Speak exactly these units.
+    /// Consider these units; speak the ones this box does not already hold.
     Units,
 }
 
@@ -305,11 +311,36 @@ fn render_action(render_units: Option<&[bm_proto::RenderUnitSpec]>) -> RenderAct
     }
 }
 
+/// The offered units whose file this box does not already hold, plus every
+/// unit the inductor flagged as forced.
+///
+/// Forced names are the ones the inductor's own store lacks — the surgical
+/// set a swap or retag just deleted. They render even when this disk holds a
+/// same-named file, or a warm box keeps serving stale bytes under the new
+/// text. Everything else skips on presence, as before.
+fn pending_units<'a>(
+    offered: &'a [bm_proto::RenderUnitSpec],
+    force: &[String],
+    seg_dir: &std::path::Path,
+) -> Vec<&'a bm_proto::RenderUnitSpec> {
+    offered
+        .iter()
+        .filter(|u| {
+            force.iter().any(|f| f == &u.name)
+                || !seg_dir
+                    .join(&u.name)
+                    .metadata()
+                    .map(|m| m.len() > 1000)
+                    .unwrap_or(false)
+        })
+        .collect()
+}
+
 async fn render_offered_units(
     layout: &Layout,
     n: u32,
     engine: &str,
-    units: &[bm_proto::RenderUnitSpec],
+    units: &[&bm_proto::RenderUnitSpec],
     tts: &Tts,
     shared: &Shared,
 ) -> Result<u64> {
@@ -796,14 +827,30 @@ async fn run_offer(
                 RenderAction::Legacy => {
                     run_render(layout, n, &offer.engine, &sidecar.tts(), shared).await?
                 }
-                // The store is already complete: report success at once.
+                // The offer names no units at all: nothing to speak.
                 RenderAction::Noop => 0,
-                // Speak exactly these; the inductor owns the rest.
+                // The whole chapter's units, minus what this box already has.
+                // Skipping here rather than on the inductor is the point: the
+                // inductor cannot see this disk, and a partial offer is what
+                // used to leave a box holding a strict subset of a chapter.
                 RenderAction::Units => {
                     // Proven non-empty by the match above.
                     let list = offer.render_units.as_deref().unwrap_or(&[]);
-                    render_offered_units(layout, n, &offer.engine, list, &sidecar.tts(), shared)
+                    let todo =
+                        pending_units(list, &offer.render_force, &layout.seg_dir(&offer.engine, n));
+                    if todo.is_empty() {
+                        0
+                    } else {
+                        render_offered_units(
+                            layout,
+                            n,
+                            &offer.engine,
+                            &todo,
+                            &sidecar.tts(),
+                            shared,
+                        )
                         .await?
+                    }
                 }
             };
             sidecar.stop(); // per-task lifecycle: RSS returns to the OS here
@@ -1261,9 +1308,9 @@ async fn main() -> Result<()> {
             let worker_id = worker_id.unwrap_or_else(|| default_worker_id(&layout.root));
             let addr = addr.unwrap_or_else(|| "127.0.0.1".into());
             let tts_url = tts_url.unwrap_or_else(|| "http://127.0.0.1:8818".into());
-            // Same gate as the inductor: a worker with no (or a drifted)
-            // profile must not take tasks it would render with the wrong
-            // voices and sound design. Provisioning writes the pointer.
+            // Same gate as the inductor: no pointer (or an empty live tree)
+            // means a half-rsynced provision — refuse. Drift is adopted.
+            // Provisioning writes the pointer.
             let pointer = bm_core::profile::verify(&layout.root)?;
             println!(
                 "profile {} ({})",
@@ -1333,7 +1380,10 @@ mod tests {
     fn render_action_pins_the_empty_offer_to_noop() {
         use bm_proto::RenderUnitSpec;
         // Zero units means "report ok/0 at once" — never a fall-through into
-        // rendering, and never the legacy path.
+        // rendering, and never the legacy path. Since the offer carries the
+        // chapter's whole unit set, this arm now only fires for a chapter with
+        // no units at all: "this box already holds everything" is decided in
+        // `pending_units`, against the disk.
         assert_eq!(render_action(None), RenderAction::Legacy);
         assert_eq!(render_action(Some(&[])), RenderAction::Noop);
         let one = vec![RenderUnitSpec {
@@ -1351,6 +1401,62 @@ mod tests {
         // directory is the merge's input, so nothing may delete it. See the
         // comment at the old call site for what that broke.
         assert_eq!(render_action(Some(&[])), RenderAction::Noop);
+    }
+
+    #[test]
+    fn pending_units_skips_what_this_box_already_holds() {
+        // Why the offer carries every unit: the inductor cannot see this disk,
+        // so the skip has to happen here. A file that is present and
+        // non-trivial is done — the same test `assemble` applies at merge time,
+        // so the two cannot disagree about a chapter being ready.
+        use bm_proto::RenderUnitSpec;
+        let root = std::env::temp_dir().join(format!("bmpend{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let spec = |name: &str| RenderUnitSpec {
+            tag: "0000".into(),
+            name: name.into(),
+            speaker: "A".into(),
+            voice: "Adam".into(),
+            text: "hi".into(),
+            temperature: 0.8,
+            silence_p: 0.15,
+        };
+        // Held, held but truncated, absent.
+        std::fs::write(root.join("0000_Adam.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(root.join("0001_Adam.wav"), vec![0u8; 500]).unwrap();
+        let offered = vec![
+            spec("0000_Adam.wav"),
+            spec("0001_Adam.wav"),
+            spec("0002_Adam.wav"),
+        ];
+
+        let todo: Vec<&str> = pending_units(&offered, &[], &root)
+            .into_iter()
+            .map(|u| u.name.as_str())
+            .collect();
+        assert_eq!(
+            todo,
+            vec!["0001_Adam.wav", "0002_Adam.wav"],
+            "a truncated file is not done, and order is preserved"
+        );
+
+        // Everything present → nothing to speak. This is the case the inductor
+        // used to decide, and reporting it as a no-op render re-stamped the
+        // merge's affinity to a box that held none of the chapter.
+        std::fs::write(root.join("0001_Adam.wav"), vec![0u8; 2000]).unwrap();
+        std::fs::write(root.join("0002_Adam.wav"), vec![0u8; 2000]).unwrap();
+        assert!(pending_units(&offered, &[], &root).is_empty());
+
+        // Forced names render even when held: a same-named file with stale
+        // bytes (retagged text, repointed voice keeping the tag) must not
+        // skip, or the box serves the old audio under the new plan.
+        let todo: Vec<&str> = pending_units(&offered, &["0000_Adam.wav".to_string()], &root)
+            .into_iter()
+            .map(|u| u.name.as_str())
+            .collect();
+        assert_eq!(todo, vec!["0000_Adam.wav"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1595,6 +1701,7 @@ mod tests {
             music_volume: 1.0,
             inject_volume: 1.0,
             render_units: None,
+            render_force: vec![],
             local_node: false,
         };
         let shared: Shared = Arc::new(Mutex::new(Progress::default()));

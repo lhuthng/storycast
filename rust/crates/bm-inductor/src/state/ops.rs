@@ -182,15 +182,31 @@ impl Inner {
         )
     }
 
-    /// Manual retry for shelved tasks (3 strikes) after fixing the cause.
-    /// Strikes reset — unlike `release`, which keeps them — so the next
-    /// failure gets a full 3 attempts again. The operator asserts the cause
-    /// is fixed by pressing the key, so forgiveness is the point.
+    /// Manual retry for every shelved task (3 strikes) after fixing the cause.
+    ///
+    /// Strikes reset — unlike `release`, which keeps them — so the next failure
+    /// gets a full 3 attempts again. The operator asserts the cause is fixed by
+    /// pressing the key, so forgiveness is the point. It deletes nothing, so
+    /// against a failure whose cause is unmet *input* it is a loop rather than a
+    /// repair; reaching the producer is what `op_retry_task`'s `force` is for.
     pub fn op_retry_shelved(&mut self) -> String {
+        self.requeue_shelved(None)
+    }
+
+    /// The same, narrowed to one chapter — every stage of it that is shelved.
+    /// This is what `:retry 24` means, and it is the useful scope after a
+    /// failure that named a chapter without naming a stage.
+    pub fn op_retry_chapter(&mut self, chapter: u32) -> String {
+        self.requeue_shelved(Some(chapter))
+    }
+
+    /// The one implementation behind both scopes: `chapter` of `None` is the
+    /// whole ledger.
+    fn requeue_shelved(&mut self, chapter: Option<u32>) -> String {
         let now = now_secs();
         let mut back = Vec::new();
         for t in self.tasks.values_mut() {
-            if t.state != TaskState::Shelved {
+            if t.state != TaskState::Shelved || chapter.is_some_and(|n| t.chapter != n) {
                 continue;
             }
             t.state = TaskState::Pending;
@@ -202,12 +218,13 @@ impl Inner {
             back.push(t.id());
         }
         back.sort();
+        let scope = chapter.map(|n| format!(" on ch{n}")).unwrap_or_default();
         if back.is_empty() {
-            return "no shelved tasks — nothing to retry".into();
+            return format!("no shelved tasks{scope} — nothing to retry");
         }
         self.save();
         let msg = format!(
-            "retried {} shelved task(s): {}",
+            "retried {} shelved task(s){scope}: {}",
             back.len(),
             back.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
         );
@@ -220,6 +237,12 @@ impl Inner {
     /// Resets attempts to 0 so the next failure gets a full 3 tries again.
     /// When `force` is true, deletes the on-disk artifact that would otherwise
     /// cause reconcile to mark it Done, so the task re-runs end-to-end.
+    ///
+    /// A forced merge also forces its render, unless the chapter already has a
+    /// published mp3. A merge reads its segments from the box that runs it and
+    /// produces none of its own, so re-offering a merge that failed on
+    /// `N segments missing` fails again, on the same box, for the same reason:
+    /// the retry has to reach the stage that can actually make them.
     pub fn op_retry_task(&mut self, stage: Stage, chapter: u32, force: bool) -> String {
         let key = format!("{stage}:{chapter}");
         let now = now_secs();
@@ -234,6 +257,11 @@ impl Inner {
         task.lease_until = None;
         task.detail = format!("requeued: manual retry (was {prev_state})");
         task.updated = now;
+
+        // Read before the match below: the merge arm deletes this file, so a
+        // check afterwards could never see it.
+        let published = self.layout.final_mp3(chapter).exists();
+        let mut cascaded = false;
 
         // When forcing, remove the output artifact so the stage re-runs fully
         // rather than reconcile marking it Done immediately.
@@ -258,13 +286,37 @@ impl Inner {
                     }
                 }
             }
+            // A merge's input is a per-box store and this stage makes none of
+            // it, so `force` here has to reach the producer or it is the same
+            // re-offer under a different label. This is the keypress an
+            // operator was otherwise making by hand, on the render row, after
+            // working out that the failure was never the merge's to fix.
+            //
+            // Only when nothing was published: a finished mp3 makes its
+            // segments provenance rather than a cache (TTS is stochastic, so
+            // they do not reproduce), and deleting them destroys the record of
+            // how that file was spoken. A merge that failed has no mp3, so the
+            // guarded case is the ordinary one rather than an exception.
+            if stage == Stage::Merge
+                && !published
+                && self
+                    .tasks
+                    .contains_key(&format!("{}:{chapter}", Stage::Render))
+            {
+                self.op_retry_task(Stage::Render, chapter, true);
+                cascaded = true;
+            }
         }
         self.save();
         let msg = format!(
             "{}:{} requeued (was {prev_state}{})",
             stage,
             chapter,
-            if force { ", forced re-run" } else { "" }
+            match (force, cascaded) {
+                (_, true) => ", forced re-run + render",
+                (true, false) => ", forced re-run",
+                _ => "",
+            }
         );
         self.push_event("ok", msg.clone());
         msg
@@ -435,11 +487,31 @@ impl Inner {
         self.settings.music_volume = music;
         self.settings.inject_volume = inj;
         self.settings.save(&self.layout.settings())?;
-        let n = self.requeue_stage(Stage::Merge, "requeued: mix changed", now_secs());
-        self.save();
+        // `adopt = false`: this call *is* a design change, so a merge with no
+        // stamp is one this change invalidated rather than one to bless. The
+        // stamp decides the scope for free — every chapter reaches the knobs,
+        // so every merge whose mp3 the new mix would not reproduce comes back,
+        // and a merge that was never produced stays where it is.
+        let n = self.invalidate_stale_design(false).len();
         Ok(format!(
             "mix saved: speed {speed}, fx {fx}, music {music}, inject {inj}; {n} merge(s) requeued"
         ))
+    }
+
+    /// A sound-design write happened outside the scheduler — `:sound` writes the
+    /// pool registries itself, from the TUI, so this is the inductor being told
+    /// to look rather than the inductor having done it. Same scope rule as
+    /// [`Self::op_remix`]: the fingerprint decides which chapters the edit
+    /// actually reached, so retuning a clip nobody uses requeues nothing.
+    pub fn op_sound_changed(&mut self) -> String {
+        let n = self.invalidate_stale_design(false).len();
+        if n == 0 {
+            // Not "everything matches": a chapter with no script cannot be
+            // stamped at all, so the honest claim is that this pass found
+            // nothing to requeue.
+            return "sound design rechecked: nothing to requeue".into();
+        }
+        format!("sound design changed: {n} merge(s) requeued")
     }
 
     /// Reset every task of one stage to pending, dropping finished mp3s for
@@ -677,6 +749,12 @@ impl Inner {
                 &serde_json::to_string_pretty(&data).unwrap_or_default(),
             );
             let _ = std::fs::remove_file(self.layout.final_mp3(n));
+            // Same warm-box pin as a voice swap: the holder speaks only the
+            // retagged runs instead of the chapter from scratch.
+            let pin = self
+                .tasks
+                .get(&format!("{}:{n}", Stage::Merge))
+                .and_then(|t| t.affinity.clone());
             for stage in [Stage::Render, Stage::Merge] {
                 let key = format!("{stage}:{n}");
                 match self.tasks.get_mut(&key) {
@@ -687,10 +765,16 @@ impl Inner {
                         t.lease_until = None;
                         t.detail = "requeued: retag".into();
                         t.updated = now_secs();
+                        if stage == Stage::Render {
+                            t.affinity = pin.clone();
+                        }
                     }
                     None => {
                         let mut t = Task::new(n, stage);
                         t.updated = now_secs();
+                        if stage == Stage::Render {
+                            t.affinity = pin.clone();
+                        }
                         self.tasks.insert(key, t);
                     }
                 }

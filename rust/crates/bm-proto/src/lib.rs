@@ -132,6 +132,26 @@ pub struct Task {
     /// cross the network: merge runs wherever the render happened.
     #[serde(default)]
     pub affinity: Option<String>,
+    /// `Merge` only: the sound design this chapter's artifact was mixed under —
+    /// a `bm_core::design` fingerprint over the registries and knobs that
+    /// chapter's own script reaches.
+    ///
+    /// The mix reads a scene map, three clip pools and seven settings, and all
+    /// of them can be edited after a chapter is published. Without this the only
+    /// record of "which design produced this mp3" was the operator's memory, so
+    /// a retuned effect left every mp3 that used it looking current. A merge
+    /// whose stamp no longer matches the design on disk is not done.
+    ///
+    /// **`None` means the task predates this field**, and is adopted rather than
+    /// invalidated: the first pass after this ships writes the current stamp
+    /// without touching the task, so a library merged before the field existed
+    /// is not re-merged wholesale. Any *later* change is caught. Never treat
+    /// absent as stale — that is a whole-library re-merge on upgrade.
+    ///
+    /// Written when the merge is applied as done, not when it is offered: a
+    /// merge that failed left no artifact to make a claim about.
+    #[serde(default)]
+    pub design: Option<String>,
 }
 
 impl Task {
@@ -150,6 +170,7 @@ impl Task {
             detail: String::new(),
             updated: now_secs(),
             affinity: None,
+            design: None,
         }
     }
 }
@@ -739,13 +760,22 @@ pub struct TaskOffer {
     pub music_volume: f64,
     #[serde(default = "default_volume")]
     pub inject_volume: f64,
-    /// Render stage: exactly the units the inductor's store lacks — the
-    /// worker speaks these and nothing else. `None` (old inductor) means
-    /// "plan from your own script as before"; `Some([])` means the store is
-    /// already complete, so report `ok` with `units: 0` at once. The Option
-    /// (not a bare Vec) is what keeps those two apart.
+    /// Render stage: **every** unit the chapter needs, not just the ones the
+    /// inductor's store lacks — the inductor cannot see this box's store, so
+    /// the worker skips the units it already holds and speaks the rest.
+    /// `None` (old inductor) means "plan from your own script as before";
+    /// `Some([])` means the chapter has no units at all, so report `ok` with
+    /// `units: 0` at once. The Option (not a bare Vec) is what keeps those two
+    /// apart.
     #[serde(default)]
     pub render_units: Option<Vec<RenderUnitSpec>>,
+    /// Filenames from `render_units` the inductor's own store lacks, so the
+    /// worker must (re-)speak them even when its own disk already holds a
+    /// file of that name. A surgical invalidation deletes only these locally;
+    /// a remote box that skipped on existence alone would keep speaking the
+    /// old bytes under the same name. Absent (old inductor) means none forced.
+    #[serde(default)]
+    pub render_force: Vec<String>,
     /// This worker shares the inductor's root: its seg-dir writes land in the
     /// authoritative store directly, so it neither uploads nor discards.
     /// The inductor decides — the worker never guesses from paths.
@@ -875,6 +905,16 @@ pub enum Op {
     /// the finished mp3s were mixed with the old one. Render cache is kept —
     /// tempo and layers apply at merge time, so no segment needs re-speaking.
     Remix,
+    /// The sound design was edited outside the scheduler — `:sound` writes the
+    /// pool registries itself, from the TUI. This is the inductor being *told*
+    /// to look, not the inductor having acted: it re-reads the registries and
+    /// requeues every merge whose fingerprint the edit reached.
+    ///
+    /// A separate op from `Remix` because the two say different things. `Remix`
+    /// carries the new knobs and saves them; this carries nothing and only
+    /// asks "is what is on disk still what is published?". Collapsing them
+    /// would mean a sound edit had to invent a mix.
+    SoundChanged,
     /// Requeue every render task and its merge, deleting cached segments and
     /// finished mp3s: a full re-speak of the book. Mix-only changes use
     /// `Remix` instead — this one re-synthesizes every voice.
@@ -908,6 +948,7 @@ impl Op {
             Op::Reconcile => "reconcile",
             Op::Retag => "retag",
             Op::Remix => "remix",
+            Op::SoundChanged => "sound-changed",
             Op::Rerender => "rerender",
             Op::Remerge => "remerge",
             Op::ShutdownWorkers => "shutdown-workers",
@@ -930,6 +971,7 @@ impl Op {
             Op::Reconcile,
             Op::Retag,
             Op::Remix,
+            Op::SoundChanged,
             Op::Rerender,
             Op::Remerge,
             Op::ShutdownWorkers,
@@ -1201,6 +1243,7 @@ mod tests {
             Op::Reconcile,
             Op::Retag,
             Op::Remix,
+            Op::SoundChanged,
             Op::Rerender,
             Op::Remerge,
         ] {
@@ -1467,6 +1510,7 @@ mod tests {
             music_volume: 1.0,
             inject_volume: 1.0,
             render_units: None,
+            render_force: vec![],
             local_node: false,
         };
         assert!(!format!("{offer:?}").contains("g-key"));
