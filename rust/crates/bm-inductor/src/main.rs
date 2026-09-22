@@ -612,15 +612,20 @@ fn agent_binary_for(os: &str, arch: &str, layout: &Layout) -> anyhow::Result<std
 }
 
 /// The pick among binaries already on disk. Platform-pure, no side effects —
-/// the piece tests can exercise without a toolchain. A missing cross build is
-/// an error naming the platform; [`agent_binary_for`] may still build it.
+// the piece tests can exercise without a toolchain. A missing cross build is
+// an error naming the platform; [`agent_binary_for`] may still build it.
+//
+// A present file is only picked when it postdates the sources it was built
+// from: bumping the version (or touching agent code) without rebuilding left
+// 0.2.3 on disk while the inductor demanded 0.2.4, and `:prov` shipped the
+// stale build forever. A stale file reads as missing so the caller builds it.
 fn agent_binary_staged(
     os: &str,
     arch: &str,
     layout: &Layout,
 ) -> anyhow::Result<std::path::PathBuf> {
     for cand in agent_candidates(os, arch, layout) {
-        if cand.is_file() {
+        if cand.is_file() && staged_is_fresh(&cand, layout) {
             return Ok(cand);
         }
     }
@@ -643,6 +648,46 @@ fn buildable_agent_candidates(os: &str, arch: &str, layout: &Layout) -> Vec<std:
         .into_iter()
         .filter(|c| c != &native)
         .collect()
+}
+
+/// True when no workspace source the agent builds from is newer than the
+/// staged binary. The agent's in-workspace deps are `bm-core` and `bm-proto`;
+/// third-party crates come from the registry lockfile, which a version bump
+/// already invalidates through the rebuild it forces.
+fn staged_is_fresh(bin: &std::path::Path, layout: &Layout) -> bool {
+    let built = match std::fs::metadata(bin).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    for dir in ["crates/bm-agent/src", "crates/bm-core/src", "crates/bm-proto/src"] {
+        if sources_newer_than(&layout.root.join("rust").join(dir), built) {
+            return false;
+        }
+    }
+    true
+}
+
+fn sources_newer_than(dir: &std::path::Path, built: std::time::SystemTime) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.is_dir() {
+            if sources_newer_than(&p, built) {
+                return true;
+            }
+        } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+            if std::fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .map(|t| t > built)
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Build the agent binary into the exact path a candidate names, so the
@@ -1959,6 +2004,31 @@ mod tests {
         );
         // The macOS sidecar is self-contained: no runtime travels with it.
         assert!(tts_runtime_dir("macos", "aarch64", &layout).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_staged_agent_older_than_its_sources_rebuilds() {
+        // 0.2.3 on disk while 0.2.4 is demanded: a stale staged file reads as
+        // missing so the caller cross-builds instead of shipping it forever.
+        let dir = std::env::temp_dir().join(format!("bm-staged-fresh{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = bm_core::Layout::new(&dir);
+        let src = dir.join("rust/crates/bm-agent/src/main.rs");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        let bin = dir.join("rust/target/x86_64-unknown-linux-gnu/debug/bm-agent");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"fake").unwrap();
+        // The source must land strictly after the binary: one sleep so the
+        // comparison never ties on a coarse clock.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&src, b"fake newer").unwrap();
+        assert!(!staged_is_fresh(&bin, &layout), "older-than-sources must rebuild");
+        assert!(agent_binary_staged("linux", "x86_64", &layout).is_err());
+        // No sources at all (a bare fixture, like the routing test above)
+        // reads as fresh — only newer sources veto.
+        let _ = std::fs::remove_dir_all(dir.join("rust/crates"));
+        assert!(staged_is_fresh(&bin, &layout));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
