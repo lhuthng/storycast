@@ -152,11 +152,85 @@ pub struct Task {
     /// merge that failed left no artifact to make a claim about.
     #[serde(default)]
     pub design: Option<String>,
+    /// `Render` only: the take's position in the chapter's recorded render
+    /// plan (`data/render-NN.json`).
+    ///
+    /// A render is **one task per take**, not one per chapter: the offer then
+    /// carries exactly the segment being spoken plus its `take_key`, so a
+    /// local edit re-speaks one segment instead of shipping a chapter and
+    /// hoping the worker re-derives the same names. The merge gate is the
+    /// plan's coverage — every take's task `Done` — which is the same
+    /// question the mixer asks, so the two cannot disagree.
+    ///
+    /// `None` means this task predates per-take rendering (a legacy
+    /// `render:7` row). Reconciliation replaces such a row with its takes.
+    #[serde(default)]
+    pub take: Option<usize>,
+    /// `Render` only: the **other** ledger rows one offer assigned along with
+    /// this one.
+    ///
+    /// A take is still scheduled, gated and settled on its own row — that is
+    /// what makes a local edit cost one segment instead of a chapter — but the
+    /// *assignment* can cover several takes at once (`Settings::render_batch`),
+    /// because a worker pays a round trip, a heartbeat and a report per offer.
+    /// This field is where that grouping is recorded, so the completion gate
+    /// knows the whole set without a word of it travelling on the wire: the
+    /// offer carries the takes, the ledger carries the grouping.
+    ///
+    /// The row that owns the batch is the one the offer's `task_id` names; its
+    /// own id is deliberately **not** repeated here. Empty is the ordinary
+    /// single-take offer, and is what every pre-batch ledger holds.
+    ///
+    /// Cleared when the batch settles (done or struck), and rewritten by the
+    /// next offer that names this row — so it is never read stale. The reads
+    /// are gated on the reporting worker still owning the row, and only an
+    /// offer grants that, so a grouping that survives a settle is unreachable
+    /// rather than merely unused.
+    #[serde(default)]
+    pub batch: Vec<String>,
+    /// How many times the lease reaper has returned this row to the pool
+    /// **silently** — no strike, because silence is not failure.
+    ///
+    /// The count exists because that rule has a blind spot, and on 2026-09-22 it
+    /// cost about eighty minutes. A worker that died deserves nothing; a worker
+    /// that is **alive and stuck** looks identical from here — fresh beat, task
+    /// never finished — so the row was handed out again and again with nothing
+    /// anywhere saying so, and the operator watched a percentage that never
+    /// moved. Counted only when the holder was *still beating* at the moment the
+    /// lease ran out, so the number means "expired while its worker was alive",
+    /// which is the hang signature rather than the lost-box one.
+    ///
+    /// Reset when the assignment actually resolves — a completion or a reported
+    /// failure — so a row that once looped does not make every later, legitimate
+    /// expiry look like a repeat. `0` is "never", which is also what every row
+    /// written before this field existed reads as.
+    #[serde(default)]
+    pub expiries: u32,
 }
 
 impl Task {
+    /// The ledger key. `render:7` for chapter-granular stages, and
+    /// `render:7:3` for the fourth take of chapter seven.
     pub fn id(&self) -> String {
-        format!("{}:{}", self.stage, self.chapter)
+        match self.take {
+            Some(pos) => format!("{}:{}:{}", self.stage, self.chapter, pos),
+            None => format!("{}:{}", self.stage, self.chapter),
+        }
+    }
+
+    /// The chapter a ledger key names — `"render:7:3"` is chapter 7. `None`
+    /// for anything that is not `stage:chapter[:take]`.
+    pub fn chapter_of(id: &str) -> Option<u32> {
+        let mut it = id.split(':');
+        let stage = it.next()?;
+        Stage::parse(stage)?;
+        it.next()?.parse().ok()
+    }
+
+    /// The take position a ledger key names, when it names one.
+    pub fn take_of(id: &str) -> Option<usize> {
+        let rest = id.splitn(3, ':').nth(2)?;
+        rest.parse().ok()
     }
 
     pub fn new(chapter: u32, stage: Stage) -> Self {
@@ -171,7 +245,17 @@ impl Task {
             updated: now_secs(),
             affinity: None,
             design: None,
+            take: None,
+            batch: Vec::new(),
+            expiries: 0,
         }
+    }
+
+    /// One take of a chapter's render plan.
+    pub fn new_take(chapter: u32, pos: usize) -> Self {
+        let mut t = Task::new(chapter, Stage::Render);
+        t.take = Some(pos);
+        t
     }
 }
 
@@ -265,6 +349,14 @@ pub const DEFAULT_TASK_PORT: u16 = 8917;
 fn default_task_port() -> Option<u16> {
     Some(DEFAULT_TASK_PORT)
 }
+
+/// The port on a worker's **own loopback** that answers the completion hook —
+/// `POST /api/complete` forwarded by the inductor's reverse tunnel, not a
+/// server the worker runs. One constant for both ends: the tunnel is built as
+/// `-R {DEFAULT_HOOK_PORT}:127.0.0.1:{api_port}` and the worker dials
+/// `127.0.0.1:{DEFAULT_HOOK_PORT}`, so a mismatch is impossible rather than
+/// merely unlikely. See `bm-inductor/src/tunnel.rs` for why the hook exists.
+pub const DEFAULT_HOOK_PORT: u16 = 18901;
 
 /// One stage's place in a machine's own work policy.
 ///
@@ -445,6 +537,18 @@ pub struct Heartbeat {
     /// Used RAM in GiB.
     #[serde(default)]
     pub mem_gb: Option<f32>,
+    /// How many TTS sidecar processes are alive on the box.
+    ///
+    /// The quantity that actually kills these boxes, and until now nothing in
+    /// the cluster could see it: one sidecar is ~2.85 GB resident the moment the
+    /// weights load, and an 8 GiB box cannot hold two. `Some(n)` with `n > 1` is
+    /// the OOM warming up — the inductor raises it as an event and stops
+    /// offering the box work until it settles. `None` from an older agent.
+    #[serde(default)]
+    pub sidecars: Option<u32>,
+    /// Their total resident memory in GiB (all of them, summed).
+    #[serde(default)]
+    pub sidecar_gb: Option<f32>,
     /// Stable display name chosen by the worker at startup and kept in its
     /// root (`worker.alias`). Empty from older agents — the TUI falls back to
     /// hashing the worker id, which churns on every restart.
@@ -514,6 +618,26 @@ pub struct Complete {
     #[serde(default)]
     pub mp3_b64: Option<String>,
 }
+
+/// The `worker_id` an operator's own digest reports under.
+///
+/// A manual digest is a *report*, not a special case: it goes to `/api/complete`
+/// with the same body a worker sends, so it flows through the same bible merge,
+/// the same row transition, the same script write and the same
+/// invalidate-on-changed-script rule. The one thing that has to differ is
+/// ownership — the operator is not the worker holding the row — and this id is
+/// how `complete` knows to accept it anyway.
+///
+/// **No `redigest` flag, deliberately.** A manual digest of a chapter the library
+/// already has needs its segments and mp3 invalidated, and `complete` already
+/// decides that by comparing the new script with the one on disk — so a
+/// re-digest that changes nothing invalidates nothing, and one that changes a
+/// line keeps every take whose inputs did not change. A flag would be the same
+/// fact stored twice, and the copy that could go stale.
+///
+/// It is deliberately **not** a legal worker id: worker ids come from the host
+/// (`localhost-caracal`, `marmot`), so a box cannot claim it by accident.
+pub const MANUAL_WORKER: &str = "operator";
 
 /// Provider credentials the offered stage will read, sourced from the
 /// inductor's own environment.
@@ -760,22 +884,50 @@ pub struct TaskOffer {
     pub music_volume: f64,
     #[serde(default = "default_volume")]
     pub inject_volume: f64,
-    /// Render stage: **every** unit the chapter needs, not just the ones the
-    /// inductor's store lacks — the inductor cannot see this box's store, so
-    /// the worker skips the units it already holds and speaks the rest.
+    /// Render stage: the segments this task is responsible for. **One take**
+    /// under the per-take schedule — the offer is sufficient on its own
+    /// (voice, text, parameters), so the worker needs neither the script nor
+    /// the cast to speak it, and a local edit costs one segment rather than a
+    /// whole chapter.
+    ///
     /// `None` (old inductor) means "plan from your own script as before";
     /// `Some([])` means the chapter has no units at all, so report `ok` with
     /// `units: 0` at once. The Option (not a bare Vec) is what keeps those two
     /// apart.
+    ///
+    /// Skipping is by **file presence under a content-addressed name**: a take
+    /// the box already holds is by construction the right bytes, so nothing
+    /// needs forcing. An adopted (pre-plan) take keeps its legacy name and is
+    /// re-offered only once the inductor's own store lacks it, which is the
+    /// one case a warm box can still hold the wrong bytes under a right name —
+    /// see the render plan's `adopted` flag.
     #[serde(default)]
     pub render_units: Option<Vec<RenderUnitSpec>>,
     /// Filenames from `render_units` the inductor's own store lacks, so the
     /// worker must (re-)speak them even when its own disk already holds a
-    /// file of that name. A surgical invalidation deletes only these locally;
-    /// a remote box that skipped on existence alone would keep speaking the
-    /// old bytes under the same name. Absent (old inductor) means none forced.
+    /// file of that name. With content-addressed take files this is empty by
+    /// construction and kept only for the adopted-take case and older
+    /// agents. Absent (old inductor) means none forced.
     #[serde(default)]
     pub render_force: Vec<String>,
+    /// Hash of the voice collection this chapter's plan was built from, keyed
+    /// per speaker. The worker can compare it against the takes it holds to
+    /// notice that the cast moved; the correctness check itself is the
+    /// `take_key` on each unit, which is why nothing is invalidated on this
+    /// alone. Empty from an old inductor.
+    #[serde(default)]
+    pub cast_hash: String,
+    /// Merge stage: the chapter's take files **in mix order**, straight out of
+    /// the recorded render plan.
+    ///
+    /// The mixer must read the names the renderer wrote. It used to re-derive
+    /// them from the script and the cast, which was safe only while a filename
+    /// was a pure function of those two; a content-addressed take name is a
+    /// hash of the inputs instead, so the plan is the only thing that knows it.
+    /// Empty from an old inductor — the worker then falls back to planning the
+    /// names itself, exactly as before.
+    #[serde(default)]
+    pub merge_takes: Vec<String>,
     /// This worker shares the inductor's root: its seg-dir writes land in the
     /// authoritative store directly, so it neither uploads nor discards.
     /// The inductor decides — the worker never guesses from paths.
@@ -796,6 +948,13 @@ pub struct RenderUnitSpec {
     pub text: String,
     pub temperature: f64,
     pub silence_p: f64,
+    /// Hash of the inputs that decide these bytes — voice *key*, text,
+    /// parameters and engine. The name is derived from it
+    /// (`t-<take_key>.wav`), so a file in the store is proof of its own
+    /// inputs and a re-plan can tell changed takes from unchanged ones
+    /// without trusting a filename. Empty from an old inductor.
+    #[serde(default)]
+    pub take_key: String,
 }
 
 fn default_speed() -> f64 {
@@ -1476,6 +1635,115 @@ mod tests {
     }
 
     #[test]
+    fn a_batched_render_offer_survives_the_wire_intact() {
+        // The whole change rests on one asymmetry: the **units** travel on the
+        // wire, the **grouping** does not.
+        //
+        // `render_units` was already a `Vec`, which is what makes a batched
+        // offer parse on a worker that predates batching — so the two sides can
+        // be upgraded independently. The grouping is recorded on the ledger row
+        // (`Task::batch`) and never serialised into an offer, so a worker can
+        // neither see nor depend on a scheduling decision it has no business
+        // knowing about.
+        //
+        // Both halves are easy to undo by accident — a `render_units` that
+        // became a single struct would break the rollout, and a `batch` threaded
+        // onto the offer would silently make the worker's behaviour depend on
+        // the inductor's batch size — so both are pinned here.
+        let units: Vec<RenderUnitSpec> = (0..10)
+            .map(|i| RenderUnitSpec {
+                tag: format!("000{i}"),
+                name: format!("t-{i:016}.wav"),
+                speaker: "A".into(),
+                voice: "Adam".into(),
+                text: format!("line {i}"),
+                temperature: 0.8,
+                silence_p: 0.15,
+                take_key: format!("{i:016}"),
+            })
+            .collect();
+        let offer = TaskOffer {
+            task_id: "render:7:0".into(),
+            chapter: 7,
+            stage: Stage::Render,
+            root: "/r".into(),
+            url: None,
+            tts_url: Some("http://127.0.0.1:8818".into()),
+            engine: "vieneu".into(),
+            model_order: vec![],
+            analyzer: "gemini".into(),
+            analyzer_settings: AnalyzerSettings::default(),
+            credentials: Credentials::default(),
+            bible: None,
+            script: None,
+            cast: None,
+            text: None,
+            gap_ms: 300,
+            speed: 1.0,
+            ambience: false,
+            music: false,
+            effect_volume: 1.0,
+            music_volume: 1.0,
+            inject_volume: 1.0,
+            render_units: Some(units.clone()),
+            render_force: vec![],
+            cast_hash: "abc123".into(),
+            merge_takes: vec![],
+            local_node: false,
+        };
+
+        let json = serde_json::to_string(&offer).unwrap();
+        let back: TaskOffer = serde_json::from_str(&json).unwrap();
+        let got = back.render_units.as_deref().expect("planned, not legacy");
+        assert_eq!(got.len(), 10, "every take the offer carried");
+        assert_eq!(
+            got.iter().map(|u| u.name.clone()).collect::<Vec<_>>(),
+            units.iter().map(|u| u.name.clone()).collect::<Vec<_>>(),
+            "in order — a render speaks its chapter front to back"
+        );
+        assert_eq!(
+            got[9].take_key, units[9].take_key,
+            "with each take's own key"
+        );
+        assert_eq!(got[9].voice, "Adam");
+        assert_eq!(back.cast_hash, "abc123", "and the chapter's cast hash");
+
+        let as_value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            as_value.get("batch").is_none(),
+            "the grouping is the ledger's, not the wire's: {json}"
+        );
+
+        // An offer that names no units is `Some([])`, not absent — the
+        // distinction the worker reads as "report ok with zero units" against
+        // "an old inductor, plan it yourself". A missing field must stay the
+        // second of those.
+        let old: TaskOffer =
+            serde_json::from_str(&json.replace("\"render_units\"", "\"not_render_units\""))
+                .unwrap();
+        assert!(
+            old.render_units.is_none(),
+            "absent means an old inductor, and must not read as an empty chapter"
+        );
+
+        // The ledger side: the grouping is a *row's*, and round-trips there.
+        let mut row = Task::new_take(7, 0);
+        row.batch = vec!["render:7:1".into(), "render:7:2".into()];
+        let row_back: Task = serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
+        assert_eq!(row_back.batch, row.batch);
+        assert_eq!(row_back.take, Some(0));
+        // And a row written before the field existed reads as "no grouping",
+        // which is what keeps a pre-batch ledger loading.
+        let old_row: Task = serde_json::from_str(
+            r#"{"chapter":7,"stage":"render","state":"done","attempts":0,
+                "assigned_to":null,"lease_until":null,"detail":"","updated":1,"take":3}"#,
+        )
+        .unwrap();
+        assert!(old_row.batch.is_empty(), "absent means no grouping");
+        assert_eq!(old_row.take, Some(3));
+    }
+
+    #[test]
     fn debug_never_prints_a_key() {
         // `TaskOffer` is `Debug` and every offer is a candidate for a log
         // line. A redaction that is not tested is a redaction that gets
@@ -1511,6 +1779,8 @@ mod tests {
             inject_volume: 1.0,
             render_units: None,
             render_force: vec![],
+            cast_hash: String::new(),
+            merge_takes: vec![],
             local_node: false,
         };
         assert!(!format!("{offer:?}").contains("g-key"));

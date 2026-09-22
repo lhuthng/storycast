@@ -22,6 +22,10 @@ pub(crate) enum TextKind {
     /// The address workers should dial (`:advertise`): save-only, like the ssh
     /// defaults. Empty clears it back to the routing-table guess.
     Advertise,
+    /// Render batch size (`:batch`): how many of one chapter's takes a single
+    /// offer carries. Save-only, like the ssh defaults — it is read by the
+    /// scheduler when it builds the next offer, so nothing is dispatched.
+    RenderBatch,
     /// Mix levels (`:mix`): story speed plus the two layer volumes, saved to
     /// the settings file like the run config. Launches nothing.
     Mix,
@@ -403,6 +407,91 @@ pub(crate) enum Screen {
     Machine(String),
     /// One machine's work policy: which stages it may run, in priority order.
     Policy(PolicyView),
+    /// The digest manager: every chapter, and a manual two-round digest for one.
+    Digest(DigestView),
+}
+
+/// Chapter numbers per row in the digest manager's grid.
+///
+/// It lives here, beside the view, because **two things depend on it and they
+/// have to agree**: the painter lays the numbers out in rows of this width, and
+/// the arrow keys navigate by it — ↑/↓ step a whole row. A key handler with its
+/// own idea of the width would move the highlight somewhere the eye did not ask
+/// for, which is exactly the class of bug that only shows up on screen.
+pub(crate) const DIGEST_COLS: usize = 12;
+
+/// The digest manager.
+///
+/// **One view, two modes, because they are one task**: the list is where a
+/// chapter is picked, `open` is the chapter that was picked. Keeping both here
+/// means Esc has exactly one meaning (step back), and the list does not have to
+/// be rebuilt when a chapter is closed.
+///
+/// The manual digest exists because a model the operator already has open beats
+/// a fallback that is rate limited — so the prompts leave by clipboard and the
+/// answers come back the same way. What it is *not* is a second, looser digest:
+/// the answers go through the same validators, and the result is reported over
+/// the same `/api/complete` a worker uses.
+#[derive(Debug, Clone)]
+pub(crate) struct DigestView {
+    /// Every chapter the library knows, ascending.
+    pub(crate) chapters: Vec<u32>,
+    pub(crate) cursor: usize,
+    /// Hide chapters that already have a script. **Off** to begin with, so the
+    /// first look shows the whole book rather than a filtered guess at intent.
+    pub(crate) hide_done: bool,
+    /// The chapter being digested, if one is open.
+    pub(crate) open: Option<DigestChapter>,
+}
+
+/// One chapter's manual digest, in flight.
+///
+/// `cast` is round 1's validated answer, held because round 2's prompt is
+/// rendered *against* it — the same hand-off the worker makes between its two
+/// calls, except this one has to survive two keystrokes and however long the
+/// operator spends in their model.
+#[derive(Debug, Clone)]
+pub(crate) struct DigestChapter {
+    pub(crate) n: u32,
+    /// Which round is waiting for a paste.
+    pub(crate) round: bm_core::digest::Round,
+    /// The prompt for `round` — already on the clipboard when it was built.
+    pub(crate) prompt: String,
+    pub(crate) cast: Option<serde_json::Value>,
+    /// The last thing that happened: a copy, a validator's complaint, or the
+    /// outcome. Drawn on the screen, because a complaint *is* the instruction.
+    pub(crate) note: String,
+    /// Round 2 landed and the report was accepted.
+    pub(crate) done: bool,
+}
+
+impl DigestView {
+    pub(crate) fn new(chapters: Vec<u32>) -> Self {
+        DigestView {
+            chapters,
+            cursor: 0,
+            hide_done: false,
+            open: None,
+        }
+    }
+
+    /// The rows actually drawn: the whole list, or the undigested ones.
+    ///
+    /// Filtering is a *view* concern, so the cursor indexes this rather than
+    /// `chapters` — otherwise toggling the filter would leave the cursor
+    /// pointing at a different chapter than the highlighted one.
+    pub(crate) fn rows(&self, digested: &dyn Fn(u32) -> bool) -> Vec<u32> {
+        self.chapters
+            .iter()
+            .copied()
+            .filter(|n| !self.hide_done || !digested(*n))
+            .collect()
+    }
+
+    /// The chapter under the cursor.
+    pub(crate) fn selected(&self, digested: &dyn Fn(u32) -> bool) -> Option<u32> {
+        self.rows(digested).get(self.cursor).copied()
+    }
 }
 
 /// The per-machine work policy editor.

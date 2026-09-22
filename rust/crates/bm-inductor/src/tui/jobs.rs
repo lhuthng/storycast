@@ -230,6 +230,46 @@ pub(crate) enum Job {
         addr: String,
         task_policy: Vec<bm_proto::TaskPref>,
     },
+    /// Report a digest the operator performed by hand.
+    ///
+    /// **It posts the same `Complete` a worker posts, to the same endpoint.** The
+    /// manual route exists to be the same digest with a person standing in for
+    /// the model, so it must land through the same door: the inductor merges the
+    /// bible delta, writes the script, marks the row Done, and invalidates the
+    /// chapter's audio when the script changed. A private endpoint for the
+    /// operator would be a second implementation of all of that.
+    ///
+    /// The body carries the whole `DigestOutcome` rather than a path, because the
+    /// inductor may not share a filesystem with the dashboard — and because the
+    /// script it holds is what every downstream machine is handed.
+    ManualDigest {
+        api: String,
+        http: reqwest::Client,
+        chapter: u32,
+        script: serde_json::Value,
+        delta: serde_json::Value,
+    },
+    /// Turn digest work off — or back on — across every machine.
+    ///
+    /// **Off snapshots each machine's whole policy, not just the digest flag**,
+    /// because "on" has to mean *what that box had*, not *digest enabled*: a box
+    /// whose digest was already off must stay off, and a box with no policy at
+    /// all must get `None` back rather than a list it never had. That distinction
+    /// is the entire reason this is a snapshot rather than a toggle.
+    ///
+    /// The snapshot is a **file**, so an inductor restart in between cannot
+    /// silently turn digest work back on with no way to restore it — which is the
+    /// failure a purely in-memory latch would have.
+    DigestPolicy {
+        api: String,
+        http: reqwest::Client,
+        layout: bm_core::Layout,
+        /// `(addr, that machine's stored policy)`; `None` is "no policy", which
+        /// `effective_task_policy` reads as the default list.
+        machines: Vec<(String, Option<Vec<bm_proto::TaskPref>>)>,
+        /// `true` puts the snapshot back; `false` takes one and disables digest.
+        restore: bool,
+    },
     /// Re-point a box whose EC2 public IP drifted (stop/start, spot relaunch)
     /// at the address it carries *now*. The instance id — stable for the box's
     /// whole life — comes from the machine's note; the account read supplies
@@ -300,6 +340,14 @@ impl Job {
             Job::DropMachine { .. } => "drop machine",
             Job::RelinkMachine { .. } => "relink machine",
             Job::SaveTaskPolicy { .. } => "save task policy",
+            Job::ManualDigest { .. } => "report manual digest",
+            Job::DigestPolicy { restore, .. } => {
+                if *restore {
+                    "digest policy: restore"
+                } else {
+                    "digest policy: off"
+                }
+            }
             Job::Op { req, .. } => req.op.as_str(),
             Job::LoadRoster { .. } => "load roster",
             Job::LoadLines { .. } => "index audition lines",
@@ -446,6 +494,18 @@ pub(crate) enum Ev {
     Log(LogLine),
     Roster(Result<Roster, String>),
     Done(DoneKind),
+    /// The inductor's answer to a manual digest report — the line `complete`
+    /// returned, or why it never arrived.
+    ///
+    /// Carried back rather than assumed: the report can be refused (`unknown
+    /// task`, or the row moving under it), and the operator is looking at a
+    /// screen that said "reporting it" — so the screen has to be able to say what
+    /// happened, including "no".
+    ManualDigest(Result<String, String>),
+    /// The answer to a cluster-wide digest-policy change: what happened, or why
+    /// not. Shown either way, because "digest is off" is a claim the operator
+    /// will act on.
+    DigestPolicy(Result<String, String>),
     /// A `/api/state` snapshot from the background poller. Carrying the payload
     /// (not the parsed structs) keeps the parse on the UI task, where the
     /// ordering/sort fixes already live.
@@ -555,6 +615,30 @@ pub(crate) fn op_job(app: &App, http: &reqwest::Client, req: OpRequest) -> Job {
     }
 }
 
+/// The verdict for a fetch that never got an answer, from the two facts that
+/// decide it.
+///
+/// **Pure on purpose.** The only input that matters is whether the failure was a
+/// *refusal* (`reqwest::Error::is_connect`), and this is the one place that
+/// decides. It used to be three lines inside `fetch_state`'s `match`, which meant
+/// the only way to test the wording was to bind an ephemeral port, drop the
+/// listener and hope nothing else was handed the same port before the request —
+/// a race that failed once in six full-suite runs. Everything the verdict needs
+/// can be handed to it.
+///
+/// `detail` is deliberately dropped on the refusal branch: a refused connection
+/// is the normal cold start, so reqwest's prose for it is noise exactly where the
+/// remedy (`:B`) belongs. On any other failure the detail is kept — a timeout or
+/// a reset may be a *sick* inductor rather than an absent one, and telling those
+/// apart is why there are two branches at all.
+pub(crate) fn unreachable_verdict(api: &str, refused: bool, detail: &str) -> String {
+    if refused {
+        format!("inductor is down at {api} — :B to start it")
+    } else {
+        format!("inductor unreachable at {api}: {detail}")
+    }
+}
+
 /// Fetch `/api/state` once.
 ///
 /// Free-standing so the background poller can use it without holding the UI
@@ -570,12 +654,8 @@ pub(crate) async fn fetch_state(
             .json::<serde_json::Value>()
             .await
             .map_err(|e| format!("bad state payload: {e}")),
-        // Nothing listening is the normal cold start, not a failure worth
-        // reqwest's full prose — name the fix instead. Anything else (a
-        // timeout, a reset) keeps the detail, it may be a sick inductor
-        // rather than an absent one.
-        Err(e) if e.is_connect() => Err(format!("inductor is down at {api} — :B to start it")),
-        Err(e) => Err(format!("inductor unreachable at {api}: {e}")),
+        // Which verdict, and why, is `unreachable_verdict`'s business.
+        Err(e) => Err(unreachable_verdict(api, e.is_connect(), &e.to_string())),
     }
 }
 
@@ -1257,6 +1337,171 @@ pub(crate) async fn job_save_task_policy(
         Err(e) => send(&tx, Level::Error, format!("policy save {addr} failed: {e}")),
     }
     let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
+pub(crate) async fn job_manual_digest(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    api: String,
+    http: reqwest::Client,
+    chapter: u32,
+    script: serde_json::Value,
+    delta: serde_json::Value,
+) {
+    let url = format!("{}/api/complete", api.trim_end_matches('/'));
+    // The body is a worker's, field for field — the same `Complete` the agent
+    // posts — so the inductor cannot tell the two apart except by who is
+    // claiming the work, which is the one thing that legitimately differs.
+    let body = bm_proto::Complete {
+        worker_id: bm_proto::MANUAL_WORKER.to_string(),
+        task_id: format!("{}:{chapter}", bm_proto::Stage::Digest.as_str()),
+        ok: true,
+        detail: format!("digest ch{chapter} by hand"),
+        duration_secs: 0.0,
+        bible_delta: Some(delta),
+        units: 0,
+        script: Some(script),
+        text: None,
+        mp3_b64: None,
+    };
+    let ev = match http.post(&url).json(&body).send().await {
+        Ok(r) if r.status().is_success() => match r.text().await {
+            Ok(line) => Ok(line.trim().to_string()),
+            Err(e) => Err(format!("the inductor's answer did not arrive: {e}")),
+        },
+        Ok(r) => Err(format!("the inductor answered HTTP {}", r.status())),
+        Err(e) => Err(format!("could not reach the inductor: {e}")),
+    };
+    let _ = tx.send(Ev::ManualDigest(ev));
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
+pub(crate) async fn job_digest_policy(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    api: String,
+    http: reqwest::Client,
+    layout: bm_core::Layout,
+    machines: Vec<(String, Option<Vec<bm_proto::TaskPref>>)>,
+    restore: bool,
+) {
+    let path = layout.bm_state().join("digest-suspend.json");
+    let ev = if restore {
+        digest_restore(&path, &api, &http, &machines).await
+    } else {
+        digest_suspend(&path, &api, &http, &machines).await
+    };
+    let _ = tx.send(Ev::DigestPolicy(ev));
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
+/// Save every machine's policy, then write back a copy with digest disabled.
+///
+/// The write-back goes through the same `/api/machines/policy` the policy editor
+/// uses, so there is one place a machine's policy is set — and the live inductor
+/// updates its own copy of the registry rather than only the file.
+async fn digest_suspend(
+    path: &std::path::Path,
+    api: &str,
+    http: &reqwest::Client,
+    machines: &[(String, Option<Vec<bm_proto::TaskPref>>)],
+) -> Result<String, String> {
+    let snapshot: serde_json::Map<String, serde_json::Value> = machines
+        .iter()
+        .map(|(addr, policy)| {
+            (
+                addr.clone(),
+                serde_json::to_value(policy).unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect();
+    bm_core::atomic_write(
+        path,
+        &serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
+    )
+    .map_err(|e| format!("could not save the snapshot to {}: {e}", path.display()))?;
+
+    let mut off = Vec::new();
+    for (addr, policy) in machines {
+        // Disable digest in the policy that is *in force*, so a box with no
+        // stored policy gets the default list with digest turned off rather than
+        // a list invented here.
+        let mut next = policy
+            .clone()
+            .unwrap_or_else(bm_proto::TaskPref::default_list);
+        for p in next.iter_mut() {
+            if p.stage == bm_proto::Stage::Digest {
+                p.enabled = false;
+            }
+        }
+        match put_policy(api, http, addr, &next).await {
+            Ok(()) => off.push(addr.clone()),
+            Err(e) => {
+                return Err(format!(
+                    "digest is off and the snapshot is saved, but {addr} refused it ({e}) — \
+                     `:on` will still put everything back"
+                ))
+            }
+        }
+    }
+    Ok(format!(
+        "digest off on {} machine(s) — snapshot saved to {}; `:on` restores each box's own policy",
+        off.len(),
+        path.display()
+    ))
+}
+
+/// Put each machine's snapshotted policy back, verbatim.
+pub(crate) async fn digest_restore(
+    path: &std::path::Path,
+    api: &str,
+    http: &reqwest::Client,
+    machines: &[(String, Option<Vec<bm_proto::TaskPref>>)],
+) -> Result<String, String> {
+    let saved: serde_json::Map<String, serde_json::Value> =
+        bm_core::read_json(path).map_err(|e| {
+            format!(
+            "no snapshot at {} ({e}) — digest was not turned off from here, so there is nothing \
+             to restore; set each box's policy in the policy editor (`P`)",
+            path.display()
+        )
+        })?;
+    let mut back = 0;
+    for (addr, current) in machines {
+        // A machine that is not in the snapshot was added while digest was off.
+        // Leave it alone and say so: restoring it to `None` would silently
+        // re-enable digest on a box the operator never switched off.
+        let Some(value) = saved.get(addr) else {
+            continue;
+        };
+        let policy: Option<Vec<bm_proto::TaskPref>> =
+            serde_json::from_value(value.clone()).unwrap_or(None);
+        if policy == *current {
+            back += 1;
+            continue;
+        }
+        put_policy(api, http, addr, policy.as_deref().unwrap_or(&[])).await?;
+        back += 1;
+    }
+    // Only now: a restore that failed half way must leave the snapshot in place,
+    // or the boxes it did not reach have no way back.
+    let _ = std::fs::remove_file(path);
+    Ok(format!(
+        "digest policy restored on {back} machine(s) — each box is back to what it had"
+    ))
+}
+
+async fn put_policy(
+    api: &str,
+    http: &reqwest::Client,
+    addr: &str,
+    task_policy: &[bm_proto::TaskPref],
+) -> Result<(), String> {
+    let url = format!("{}/api/machines/policy", api.trim_end_matches('/'));
+    let body = serde_json::json!({"addr": addr, "task_policy": task_policy});
+    match http.post(&url).json(&body).send().await {
+        Ok(r) if r.status().is_success() => Ok(()),
+        Ok(r) => Err(format!("HTTP {}", r.status())),
+        Err(e) => Err(format!("{e}")),
+    }
 }
 
 pub(crate) async fn job_relink_machine(
@@ -2341,6 +2586,20 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
             addr,
             task_policy,
         } => job_save_task_policy(tx, api, http, addr, task_policy).await,
+        Job::ManualDigest {
+            api,
+            http,
+            chapter,
+            script,
+            delta,
+        } => job_manual_digest(tx, api, http, chapter, script, delta).await,
+        Job::DigestPolicy {
+            api,
+            http,
+            layout,
+            machines,
+            restore,
+        } => job_digest_policy(tx, api, http, layout, machines, restore).await,
         Job::RelinkMachine {
             layout,
             api,

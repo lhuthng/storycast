@@ -11,6 +11,9 @@ pub(crate) struct RunPreview {
     pub(crate) analyzer: String,
     pub(crate) models: Vec<String>,
     pub(crate) engine: String,
+    /// Takes per render offer (`:batch`). Shown because it is the one knob that
+    /// changes how *often* a worker is spoken to rather than what it produces.
+    pub(crate) render_batch: u32,
     pub(crate) speed: f64,
     pub(crate) effect_volume: f64,
     pub(crate) music_volume: f64,
@@ -21,9 +24,29 @@ pub(crate) struct RunPreview {
 }
 
 pub(crate) fn run_preview(app: &App) -> RunPreview {
+    // One source, read once: `App::effective_settings` already resolves
+    // live → file → compiled default, so this function is no longer a second
+    // implementation of that precedence with its own two branches to keep in
+    // step. The `live`/`saved` flags are about *provenance* — what to print —
+    // not about which value wins.
+    let s = app.effective_settings();
     let saved = !app.layout.root.as_os_str().is_empty() && app.layout.settings().is_file();
-    if let Some(s) = &app.settings {
-        let models = s
+    let num = |key: &str, default: f64| s.get(key).and_then(|v| v.as_f64()).unwrap_or(default);
+    let u32_of = |key: &str, default: u32| {
+        s.get(key)
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .unwrap_or(default)
+    };
+    RunPreview {
+        start: u32_of("start", 1),
+        count: u32_of("count", 1),
+        analyzer: s
+            .get("analyzer")
+            .and_then(|v| v.as_str())
+            .unwrap_or("opencode")
+            .to_string(),
+        models: s
             .get("analyze_models")
             .and_then(|v| v.as_array())
             .map(|a| {
@@ -32,54 +55,18 @@ pub(crate) fn run_preview(app: &App) -> RunPreview {
                     .map(String::from)
                     .collect()
             })
-            .unwrap_or_default();
-        return RunPreview {
-            start: s.get("start").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
-            count: s.get("count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
-            analyzer: s
-                .get("analyzer")
-                .and_then(|v| v.as_str())
-                .unwrap_or("opencode")
-                .to_string(),
-            models,
-            engine: s
-                .get("engine")
-                .and_then(|v| v.as_str())
-                .unwrap_or("vieneu")
-                .to_string(),
-            speed: s.get("speed").and_then(|v| v.as_f64()).unwrap_or(1.25),
-            effect_volume: s
-                .get("effect_volume")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(1.0),
-            music_volume: s
-                .get("music_volume")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(1.0),
-            inject_volume: s
-                .get("inject_volume")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(1.0),
-            live: true,
-            saved,
-        };
-    }
-    let s = if app.layout.root.as_os_str().is_empty() {
-        bm_core::config::Settings::default()
-    } else {
-        bm_core::config::Settings::load(&app.layout.settings())
-    };
-    RunPreview {
-        start: s.start,
-        count: s.count,
-        analyzer: s.analyzer,
-        models: s.analyze_models,
-        engine: s.engine,
-        speed: s.speed,
-        effect_volume: s.effect_volume,
-        music_volume: s.music_volume,
-        inject_volume: s.inject_volume,
-        live: false,
+            .unwrap_or_default(),
+        engine: s
+            .get("engine")
+            .and_then(|v| v.as_str())
+            .unwrap_or("vieneu")
+            .to_string(),
+        render_batch: u32_of("render_batch", bm_core::config::DEFAULT_RENDER_BATCH),
+        speed: num("speed", 1.25),
+        effect_volume: num("effect_volume", 1.0),
+        music_volume: num("music_volume", 1.0),
+        inject_volume: num("inject_volume", 1.0),
+        live: app.settings.is_some(),
         saved,
     }
 }
@@ -125,6 +112,47 @@ pub(crate) fn parse_run_config(buf: &str, current_analyzer: &str) -> Result<RunC
         }
     };
     Ok((start, count, analyzer, models))
+}
+
+/// Parse the `:batch` prompt: one whole number of takes per offer.
+///
+/// Bounded here rather than in the scheduler so the operator learns the range
+/// while their typing is still on screen — the scheduler clamps as a last
+/// resort, not as the first answer. `Err` keeps the prompt open.
+pub(crate) fn parse_render_batch(buf: &str) -> Result<u32, String> {
+    let t = buf.trim();
+    let n: u32 = t
+        .parse()
+        .map_err(|_| format!("“{t}” is not a number of takes"))?;
+    if n < 1 {
+        return Err("at least 1 — 0 would offer nothing and the chapter would never render".into());
+    }
+    if n > bm_core::config::MAX_RENDER_BATCH {
+        return Err(format!(
+            "at most {} — a batch is a lease on one box, not a queue",
+            bm_core::config::MAX_RENDER_BATCH
+        ));
+    }
+    Ok(n)
+}
+
+/// Persist the render batch size to this workspace's settings file. Returns a
+/// status line. Save-only: nothing is dispatched, because the value is read
+/// when the next offer is built.
+pub(crate) fn save_render_batch(app: &App, buf: &str) -> Result<String, String> {
+    if app.layout.root.as_os_str().is_empty() {
+        return Err("no repo root — restart the TUI from a checkout".into());
+    }
+    let n = parse_render_batch(buf)?;
+    let settings_path = app.layout.settings();
+    let mut settings = bm_core::config::Settings::load(&settings_path);
+    settings.render_batch = n;
+    settings
+        .save(&settings_path)
+        .map_err(|e| format!("saving settings: {e:#}"))?;
+    Ok(format!(
+        "render batch saved: {n} take(s) per offer — takes effect on the next offer"
+    ))
 }
 
 /// Persist run configuration to the settings file. Returns a status line.
@@ -187,30 +215,19 @@ pub(crate) fn parse_mix_config(buf: &str) -> Result<MixConfig, String> {
     ))
 }
 
-/// Prefill for the `:mix` prompt from the live settings when the backend
-/// answers, else the saved file, else the compiled defaults.
+/// Prefill for the `:mix` prompt from the settings in force.
+///
+/// The three-branch dance this used to do (live / the file / the compiled
+/// defaults) now lives in `App::effective_settings`, so this is just the four
+/// reads — and it cannot drift from the run screen's own numbers.
 pub(crate) fn mix_prefill(app: &App) -> String {
-    if app.settings.is_some() {
-        format!(
-            "{} {} {} {}",
-            app.setting_f64("speed", 1.25),
-            app.setting_f64("effect_volume", 1.0),
-            app.setting_f64("music_volume", 1.0),
-            app.setting_f64("inject_volume", 1.0)
-        )
-    } else if app.layout.root.as_os_str().is_empty() {
-        let s = bm_core::config::Settings::default();
-        format!(
-            "{} {} {} {}",
-            s.speed, s.effect_volume, s.music_volume, s.inject_volume
-        )
-    } else {
-        let s = bm_core::config::Settings::load(&app.layout.settings());
-        format!(
-            "{} {} {} {}",
-            s.speed, s.effect_volume, s.music_volume, s.inject_volume
-        )
-    }
+    format!(
+        "{} {} {} {}",
+        app.setting_f64("speed", 1.25),
+        app.setting_f64("effect_volume", 1.0),
+        app.setting_f64("music_volume", 1.0),
+        app.setting_f64("inject_volume", 1.0)
+    )
 }
 
 /// Persist one app-wide ssh default to the settings file. Returns a status

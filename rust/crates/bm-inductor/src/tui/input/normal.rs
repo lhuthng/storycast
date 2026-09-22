@@ -109,6 +109,26 @@ pub(crate) async fn normal_key(
                 );
             }
         },
+        // The digest manager. Unlike `P` it needs no machine: it is about the
+        // *book*, not a box — every chapter the library knows, and a manual
+        // two-round digest for one of them.
+        //
+        // The chapter list comes from the ledger the panes already hold rather
+        // than a scan: a chapter the ledger has never heard of has no digest task
+        // to report against, so listing it would offer work that cannot land.
+        KeyCode::Char('D') => {
+            let mut chapters: Vec<u32> = app.tasks.iter().map(|t| t.chapter).collect();
+            chapters.sort_unstable();
+            chapters.dedup();
+            let total = chapters.len();
+            app.screen = Screen::Digest(crate::tui::screen::DigestView::new(chapters));
+            app.set_status(
+                Level::Info,
+                format!(
+                    "digest manager — {total} chapters · ↑↓ move · Enter open · f hide digested · Esc close"
+                ),
+            );
+        }
         KeyCode::Char('B') => {
             // Backend up now, boxes join in background — a second press
             // while the first sequence runs would provision everything

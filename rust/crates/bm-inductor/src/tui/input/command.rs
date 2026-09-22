@@ -33,6 +33,11 @@ pub(crate) enum Command {
     Voices,
     SwapVoice,
     Cast,
+    /// Stop offering digest work on every machine, remembering what each box had.
+    DigestOff,
+    /// Put each machine's snapshotted digest policy back — **not** "digest on":
+    /// a box that had it off stays off.
+    DigestOn,
     Eta,
     /// Requeue shelved work: everything, one chapter, or one task. `stage`
     /// and `chapter` together name one task; `chapter` alone narrows to that
@@ -48,6 +53,9 @@ pub(crate) enum Command {
     SshUser,
     SshPort,
     Advertise,
+    /// How many of one chapter's takes a single render offer carries. Saved to
+    /// this workspace's settings; applies to offers made from then on.
+    RenderBatch,
     Mix,
     Sound,
     Rerender,
@@ -131,9 +139,13 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["sshuser"], desc: None, cmd: Command::SshUser },
     Word { key: None, names: &["sshport"], desc: None, cmd: Command::SshPort },
     Word { key: None, names: &["advertise", "adv"], desc: Some("the address workers dial back on — set it when they are off the LAN"), cmd: Command::Advertise },
+    Word { key: None, names: &["batch", "renderbatch"], desc: Some("how many of one chapter's takes one render offer carries (default 10)"), cmd: Command::RenderBatch },
     Word { key: Some('q'), names: &["quit", "exit", "q"], desc: None, cmd: Command::Key(KeyCode::Char('q')) },
     Word { key: None, names: &["inspect"], desc: None, cmd: Command::Key(KeyCode::Char('i')) },
     Word { key: None, names: &["policy"], desc: Some("per-machine work policy: which stages the selected box may run, in priority order"), cmd: Command::Key(KeyCode::Char('P')) },
+    Word { key: None, names: &["digest"], desc: Some("digest manager: every chapter, and a manual two-round digest by clipboard for one of them"), cmd: Command::Key(KeyCode::Char('D')) },
+    Word { key: None, names: &["off"], desc: Some("DIGEST POLICY: stop offering digest work on every machine — each box's own policy is saved first, so `:on` puts back what it had"), cmd: Command::DigestOff },
+    Word { key: None, names: &["on"], desc: Some("digest policy: restore every machine to the policy it had before `:off` — a box whose digest was already off stays off"), cmd: Command::DigestOn },
     Word { key: None, names: &["tasks"], desc: None, cmd: Command::Key(KeyCode::Char('K')) },
     Word { key: None, names: &["jobs"], desc: None, cmd: Command::Key(KeyCode::Char('J')) },
     Word { key: None, names: &["refresh"], desc: None, cmd: Command::Key(KeyCode::Char('r')) },
@@ -221,6 +233,62 @@ fn stage_by_name(s: &str) -> Option<Stage> {
         .find(|st| st.as_str().eq_ignore_ascii_case(s))
 }
 
+/// A bounded, one-entry list of in-flight tasks for a dialog line.
+///
+/// **Why it is bounded at all.** `Confirm`'s height is `body.len() + 5`, one
+/// entry per body line — but the paragraph *wraps*, so a single long entry costs
+/// visual lines the height calculation never counted and pushes the
+/// `Enter / y confirm` hint out of the box. That was fine while a box held one
+/// task; with `render_batch` a single box can hold sixty-four, and a forced
+/// `:down` would then render a dialog with no visible keys.
+///
+/// **Bounded by width, not by count.** Ids vary in length (`merge:7` against
+/// `render:42:11`), so "show six" is not a width — a count bound that looks
+/// right for one chapter overflows for another. The budget here is the dialog's
+/// own usable width, which is the actual constraint, and the trailer is
+/// recomputed as names are added because its width depends on how many are left.
+///
+/// The count is always exact — only the *names* are elided, and the number left
+/// out is stated, so nothing is hidden. The ledger's event lines cap themselves
+/// the same way (`reap` shows the first eight).
+pub(crate) fn busy_summary(busy: &[String]) -> String {
+    /// The dialog is 76 wide with two borders; leave a little slack.
+    const WIDTH: usize = 68;
+    let full = busy.join(", ");
+    if full.len() <= WIDTH {
+        return full;
+    }
+    let mut shown = 0usize;
+    let mut out = String::new();
+    for (i, id) in busy.iter().enumerate() {
+        let left = busy.len() - i - 1;
+        let candidate = if shown == 0 {
+            id.clone()
+        } else {
+            format!("{out}, {id}")
+        };
+        let trailer = if left == 0 {
+            0
+        } else {
+            format!(", … +{left} more").len()
+        };
+        if candidate.len() + trailer > WIDTH {
+            break;
+        }
+        out = candidate;
+        shown += 1;
+    }
+    let left = busy.len() - shown;
+    if left == 0 {
+        out
+    } else if shown == 0 {
+        // Not even one name fits; the count is the whole answer.
+        format!("… +{left} more")
+    } else {
+        format!("{out}, … +{left} more")
+    }
+}
+
 /// Run a `:` operator command. `Command::Key` never arrives here — the caller
 /// presses those as a live key so a context (task list, picker) reacts the
 /// same as a real keypress. Only the gated actions land in this match, which
@@ -233,6 +301,55 @@ pub(crate) fn do_command(
 ) {
     match cmd {
         Command::Key(_) => unreachable!("Command::Key is pressed by the caller"),
+        // Digest off / on, cluster-wide. **Off takes the snapshot; on is the only
+        // thing that can put it back**, so the two are one feature and neither
+        // touches a box's policy without the other being able to undo it.
+        Command::DigestOff | Command::DigestOn => {
+            let restore = matches!(cmd, Command::DigestOn);
+            if app.machines.is_empty() {
+                app.set_status(Level::Warn, "no machines known — nothing to switch");
+                return;
+            }
+            if restore {
+                // A restore with no snapshot would post an empty policy to every
+                // box, which reads as "the default list" — i.e. digest *on*
+                // everywhere. That is the opposite of what was asked, so refuse
+                // and name the editor instead.
+                let path = app.layout.bm_state().join("digest-suspend.json");
+                if !path.is_file() {
+                    app.set_status(
+                        Level::Warn,
+                        "no snapshot to restore — `:off` was not run from here; use `P` per box",
+                    );
+                    return;
+                }
+            }
+            let machines: Vec<(String, Option<Vec<bm_proto::TaskPref>>)> = app
+                .machines
+                .iter()
+                .map(|m| (m.addr.clone(), m.task_policy.clone()))
+                .collect();
+            let count = machines.len();
+            dispatch(
+                app,
+                job_tx,
+                Job::DigestPolicy {
+                    api: app.api.clone(),
+                    http: http.clone(),
+                    layout: app.layout.clone(),
+                    machines,
+                    restore,
+                },
+            );
+            app.set_status(
+                Level::Info,
+                if restore {
+                    format!("restoring each box's digest policy… ({count} machine(s))")
+                } else {
+                    format!("turning digest off everywhere… ({count} machine(s))")
+                },
+            );
+        }
         Command::AddMachine => {
             // Bind prompt: `addr [user [port [key]]]`, prefilled from the
             // app-wide ssh defaults. The cursor starts at the front so the
@@ -395,6 +512,26 @@ pub(crate) fn do_command(
                 "host or host:port as the *workers* see this machine — needed when they are \
                  off the LAN (a cloud box cannot reach a NAT'd 192.168.x.x). Empty restores the guess.",
                 &cur,
+            ));
+        }
+        Command::RenderBatch => {
+            // Prefilled from `run_preview` — the *same* precedence the run
+            // screen displays: the live settings while the backend answers, the
+            // workspace's own file while it does not, the compiled default when
+            // neither exists. `App::setting_u32` reads the live settings only,
+            // so on a cold start it would show the compiled 10 over a saved 6 —
+            // and a compiled-in default has to read differently from a number
+            // somebody chose. Sharing the helper is also what stops the prompt
+            // and the screen disagreeing about what is in force.
+            let cur = run_preview(app).render_batch;
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::RenderBatch,
+                "Render batch — takes per offer",
+                "how many of ONE chapter's takes a single render offer carries, 1-64. \
+                 Each take still settles on its own ledger row; this only decides how many \
+                 travel together, so a worker pays one round trip per batch instead of one \
+                 per segment. Saved to this workspace's settings.",
+                &cur.to_string(),
             ));
         }
         Command::Mix => {
@@ -643,10 +780,12 @@ pub(crate) fn do_command(
             body.push("Their registry entries stay until you `:drop` them.".into());
             if !busy.is_empty() {
                 body.push(String::new());
+                // Bounded: one box can hold a whole batch of takes, and the
+                // dialog counts body *entries* while the text wraps.
                 body.push(format!(
                     "FORCED past {} in-flight task(s): {}",
                     busy.len(),
-                    busy.join(", ")
+                    busy_summary(&busy)
                 ));
             }
             app.screen = Screen::Confirm(Confirm {

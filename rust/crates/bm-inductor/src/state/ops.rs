@@ -244,6 +244,27 @@ impl Inner {
     /// `N segments missing` fails again, on the same box, for the same reason:
     /// the retry has to reach the stage that can actually make them.
     pub fn op_retry_task(&mut self, stage: Stage, chapter: u32, force: bool) -> String {
+        // A render is one row per take now, so "retry the render" means every
+        // take of the chapter — and `force` deletes the cached takes first so
+        // the plan's diff makes each of them work again.
+        if stage == Stage::Render && !self.render_take_ids(chapter).is_empty() {
+            let takes = self.render_take_ids(chapter).len();
+            if force {
+                let engine = self.settings.engine.clone();
+                let _ = std::fs::remove_dir_all(self.layout.seg_dir(&engine, chapter));
+            }
+            self.reset_render_takes(chapter, "requeued: manual retry");
+            if force {
+                self.materialize_render_takes(chapter);
+            }
+            self.save();
+            let msg = format!(
+                "render:{chapter} requeued ({takes} take(s){})",
+                if force { ", forced re-run" } else { "" }
+            );
+            self.push_event("ok", msg.clone());
+            return msg;
+        }
         let key = format!("{stage}:{chapter}");
         let now = now_secs();
         let task = match self.tasks.get_mut(&key) {
@@ -297,12 +318,7 @@ impl Inner {
             // they do not reproduce), and deleting them destroys the record of
             // how that file was spoken. A merge that failed has no mp3, so the
             // guarded case is the ordinary one rather than an exception.
-            if stage == Stage::Merge
-                && !published
-                && self
-                    .tasks
-                    .contains_key(&format!("{}:{chapter}", Stage::Render))
-            {
+            if stage == Stage::Merge && !published && !self.render_take_ids(chapter).is_empty() {
                 self.op_retry_task(Stage::Render, chapter, true);
                 cascaded = true;
             }
@@ -338,22 +354,14 @@ impl Inner {
             .filter(|b| now_secs().saturating_sub(b.ts) < 90)
             .count()
             .max(1) as u64;
-        // Render is estimated in TTS calls, not chapters: scale by the median
-        // calls-per-render seen so far (40 before anything measured).
-        let mut units_per_render: Vec<u64> = bm_core::eta::read_stats(&self.layout.stats())
-            .into_iter()
-            .filter(|r| r.stage == "render")
-            .map(|r| r.units.max(1))
-            .collect();
-        units_per_render.sort_unstable();
-        let med_units = units_per_render
-            .get(units_per_render.len() / 2)
-            .copied()
-            .unwrap_or(40);
+        // Render's unit is already one take — a pending render task *is* one
+        // TTS call — so it needs no calls-per-chapter scaling any more. That
+        // estimate existed only while a render task was a whole chapter, and
+        // leaving it in place would multiply the render ETA by forty.
         let remaining = [
             (Stage::Crawl, pending(Stage::Crawl)),
             (Stage::Digest, pending(Stage::Digest)),
-            (Stage::Render, pending(Stage::Render) * med_units),
+            (Stage::Render, pending(Stage::Render)),
             (Stage::Merge, pending(Stage::Merge)),
         ];
         let etas = bm_core::eta::estimate_job(&self.layout.stats(), &remaining, workers);
@@ -638,9 +646,6 @@ impl Inner {
         if !dry_run {
             self.ensure_idle()?;
         }
-        let engine = self.settings.engine.clone();
-        let local = engine == "vieneu";
-        let cast = bm_core::cast::read_cast(&engine, &self.layout.cast(&engine));
         let mut chapters: Vec<u32> = Vec::new();
         let mut edits = 0u32;
         let mut files = 0u32;
@@ -695,90 +700,18 @@ impl Inner {
             if dry_run {
                 continue;
             }
-            // Delete only the runs holding edited segments: speakers and
-            // counts are unchanged, so run boundaries are identical and every
-            // other run's cache stays valid. Positions below parallel
-            // `expected_wavs` ([title?, run0, run1, ...]); indices below are
-            // planned (post-drop), mapped from raw by `skip`.
-            let edited: Vec<serde_json::Value> = data
-                .get("segments")
-                .and_then(|s| s.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let planned = bm_core::assemble::Planned::plan(&edited);
-            let title = bm_core::assemble::title_speech_for_script(&sp, &cast, &edited);
-            let seg_dir = self.layout.seg_dir(&engine, n);
-            let wavs =
-                bm_core::assemble::expected_wavs(&planned, &cast, &seg_dir, local, title.as_ref())
-                    .unwrap_or_default();
-            let at = if title.is_some() { 1 } else { 0 };
-            // Raw item index -> planned piece index, through `origin`. It is
-            // not the identity and not an offset: `speech` has the headline
-            // dropped and the sound items lifted out, so a raw index walks off
-            // the end of `wavs` as soon as a chapter places one sound.
-            let piece_of = |raw: usize| -> Option<usize> {
-                planned.origin.iter().position(|o| o + skip == raw)
-            };
-            let targets: Vec<std::path::PathBuf> = if local {
-                // One wav per run, so a touched piece costs its whole run —
-                // the run's wav is the file that holds the edited text.
-                let hit: Vec<usize> = touched.iter().filter_map(|r| piece_of(*r)).collect();
-                planned
-                    .runs()
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, run)| run.idx.iter().any(|i| hit.contains(i)))
-                    .filter_map(|(r, _)| wavs.get(at + r).cloned())
-                    .collect()
-            } else {
-                // One wav per piece in the cloud, so the piece is the target.
-                touched
-                    .iter()
-                    .filter_map(|r| piece_of(*r))
-                    .filter_map(|p| wavs.get(at + p).cloned())
-                    .collect()
-            };
-            for w in targets {
-                if seg_dir.join(&w).is_file() {
-                    let _ = std::fs::remove_file(seg_dir.join(&w));
-                    files += 1;
-                }
-            }
+            // Write the edited script, then let the plan's diff say what the
+            // edit reached: a retagged run has a new content-addressed name, so
+            // its old file is superseded and its take is work again, while
+            // every run the edit did not touch keeps its audio. This replaced a
+            // hand-rolled "delete the runs holding edited segments" that had to
+            // reconstruct `expected_wavs` positions and the title offset to
+            // find them — the plan already knows, exactly.
             let _ = bm_core::atomic_write(
                 &sp,
                 &serde_json::to_string_pretty(&data).unwrap_or_default(),
             );
-            let _ = std::fs::remove_file(self.layout.final_mp3(n));
-            // Same warm-box pin as a voice swap: the holder speaks only the
-            // retagged runs instead of the chapter from scratch.
-            let pin = self
-                .tasks
-                .get(&format!("{}:{n}", Stage::Merge))
-                .and_then(|t| t.affinity.clone());
-            for stage in [Stage::Render, Stage::Merge] {
-                let key = format!("{stage}:{n}");
-                match self.tasks.get_mut(&key) {
-                    Some(t) => {
-                        t.state = TaskState::Pending;
-                        t.attempts = 0;
-                        t.assigned_to = None;
-                        t.lease_until = None;
-                        t.detail = "requeued: retag".into();
-                        t.updated = now_secs();
-                        if stage == Stage::Render {
-                            t.affinity = pin.clone();
-                        }
-                    }
-                    None => {
-                        let mut t = Task::new(n, stage);
-                        t.updated = now_secs();
-                        if stage == Stage::Render {
-                            t.affinity = pin.clone();
-                        }
-                        self.tasks.insert(key, t);
-                    }
-                }
-            }
+            files += self.resume_render_after_edit(n, "requeued: retag");
         }
         if !dry_run {
             self.save();

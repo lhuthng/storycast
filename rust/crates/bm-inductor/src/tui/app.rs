@@ -319,39 +319,70 @@ impl App {
         style_bold_of(self.colour(), c)
     }
 
+    /// The settings actually in force: the live ones while the inductor
+    /// answers, else this workspace's own file, else the compiled defaults.
+    ///
+    /// **One precedence for the whole dashboard**, because the alternative is
+    /// what actually happened: `setting_u32` read the live payload only, so on a
+    /// cold start a prompt showed the compiled `10` over a workspace file that
+    /// said `6` — and a compiled-in default has to read differently from a
+    /// number somebody chose. `run_preview` had the right precedence and the
+    /// accessors did not, which is the "same thing configured in six places"
+    /// defect in miniature: two answers to one question.
+    ///
+    /// A `Value` rather than a typed `Settings` because the key-based accessors
+    /// read arbitrary keys, and a struct cannot answer for a key it does not
+    /// have. The cost is a file read when the backend is down — which is what
+    /// the run screen already did on every frame, so this adds no new work to
+    /// the draw loop.
+    pub(crate) fn effective_settings(&self) -> serde_json::Value {
+        if let Some(live) = &self.settings {
+            return live.clone();
+        }
+        if !self.layout.root.as_os_str().is_empty() {
+            // A missing *or* malformed file both land on the defaults, the same
+            // rule `Settings::load` applies.
+            if let Ok(v) = bm_core::read_json::<serde_json::Value>(&self.layout.settings()) {
+                return v;
+            }
+        }
+        serde_json::to_value(bm_core::config::Settings::default()).unwrap_or_default()
+    }
+
     pub(crate) fn setting_u32(&self, key: &str, default: u32) -> u32 {
-        self.settings
-            .as_ref()
-            .and_then(|s| s.get(key))
+        self.effective_settings()
+            .get(key)
             .and_then(|v| v.as_u64())
             .map(|v| v as u32)
             .unwrap_or(default)
     }
 
     pub(crate) fn setting_f64(&self, key: &str, default: f64) -> f64 {
-        self.settings
-            .as_ref()
-            .and_then(|s| s.get(key))
+        self.effective_settings()
+            .get(key)
             .and_then(|v| v.as_f64())
             .unwrap_or(default)
     }
 
     pub(crate) fn setting_str(&self, key: &str, default: &str) -> String {
-        self.settings
-            .as_ref()
-            .and_then(|s| s.get(key))
+        self.effective_settings()
+            .get(key)
             .and_then(|v| v.as_str())
             .unwrap_or(default)
             .to_string()
     }
 
-    /// App-wide ssh defaults from the live settings (see `SshDefaults`).
-    /// Deserializing the `ssh` subtree keeps one source for the defaults —
-    /// a missing or partial subtree parses as defaults, like the file itself.
+    /// App-wide ssh defaults from [`App::effective_settings`] (see
+    /// `SshDefaults`). Deserializing the `ssh` subtree keeps one source for the
+    /// defaults — a missing or partial subtree parses as defaults, like the
+    /// file itself.
+    ///
+    /// This is read by `:add`'s prefill **and** by `Job::StartBackend`'s
+    /// `settings_key`, so a cold start now binds a machine with the key the file
+    /// names instead of silently passing none and letting ssh decide.
     pub(crate) fn ssh_defaults(&self) -> bm_core::config::SshDefaults {
-        self.settings
-            .as_ref()
-            .and_then(|s| s.get("ssh"))
+        self.effective_settings()
+            .get("ssh")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default()
     }
@@ -606,6 +637,18 @@ impl App {
                 self.roster_error = Some(e.clone());
                 self.log_at(Level::Error, format!("roster: {e}"));
             }
+            // The inductor's answer to a manual digest, shown either way. The
+            // screen already told the operator it was reporting, so it has to be
+            // able to say what came back — including "no", which is the one
+            // outcome a silent success would hide.
+            Ev::ManualDigest(Ok(line)) => {
+                self.log_at(Level::Ok, format!("manual digest: {line}"));
+            }
+            Ev::ManualDigest(Err(e)) => {
+                self.log_at(Level::Error, format!("manual digest: {e}"));
+            }
+            Ev::DigestPolicy(Ok(msg)) => self.log_at(Level::Ok, msg),
+            Ev::DigestPolicy(Err(e)) => self.log_at(Level::Error, format!("digest policy: {e}")),
             // The `B` job started a backend: run this range on the first live
             // refresh. Stored, not sent, because the inductor is still booting.
             Ev::BackendLive { start, count } => {

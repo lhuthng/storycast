@@ -32,6 +32,14 @@ use std::time::Duration;
 /// stops answering is a worker that is gone.
 const POLL: Duration = Duration::from_secs(2);
 
+/// How soon after a task **finishes** the worker is offered the next one.
+///
+/// A render is one take per task now, so waiting out the full poll between
+/// segments would spend a fifth of the render's wall time doing nothing. This
+/// is used only on the transition — while a task is running the poll stays at
+/// [`POLL`], so a busy box is not polled five times a second.
+const HOT: Duration = Duration::from_millis(200);
+
 /// Asking a question. Anything that has not answered in this long is not
 /// going to.
 const ASK: Duration = Duration::from_secs(5);
@@ -136,6 +144,7 @@ async fn drive(state: Shared, layout: Layout, peer: Peer, http: reqwest::Client)
     // pass reads as "worker gone". That is not a hypothetical: it requeued a
     // digest the worker was 45% through, and then rejected the report as stale.
     let mut job: Option<tokio::task::JoinHandle<()>> = None;
+    let mut was_running = false;
     loop {
         let Some(beat) = ask(&http, &base, "/status", &peer.token).await else {
             // Silent box: the ledger's machine state is the inductor's own
@@ -197,7 +206,13 @@ async fn drive(state: Shared, layout: Layout, peer: Peer, http: reqwest::Client)
                 }));
             }
         }
-        tokio::time::sleep(POLL).await;
+        // Poll hot exactly once after a task completes: the work just drained
+        // the queue one take deeper, and the offer that answers it is already
+        // waiting. Any other iteration is steady state.
+        let running_now = job.as_ref().map(|h| !h.is_finished()).unwrap_or(false);
+        let just_finished = was_running && !running_now;
+        was_running = running_now;
+        tokio::time::sleep(if just_finished { HOT } else { POLL }).await;
     }
 }
 

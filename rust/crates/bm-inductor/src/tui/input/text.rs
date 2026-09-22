@@ -83,6 +83,17 @@ pub(crate) async fn key_text(
                     }
                     Err(msg) => app.set_status(Level::Error, msg),
                 }
+            } else if p.kind == TextKind::RenderBatch {
+                // Save-only, like the ssh defaults: the scheduler reads the
+                // value when it builds its next offer, so there is nothing to
+                // dispatch and nothing to invalidate.
+                match crate::tui::input::runconfig::save_render_batch(app, &p.buf) {
+                    Ok(msg) => {
+                        app.screen = Screen::Normal;
+                        app.set_status(Level::Ok, msg);
+                    }
+                    Err(msg) => app.set_status(Level::Error, msg),
+                }
             } else if matches!(
                 p.kind,
                 TextKind::SshKey | TextKind::SshUser | TextKind::SshPort | TextKind::Advertise

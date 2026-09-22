@@ -43,7 +43,8 @@
 //! openly. "Authenticated or off" is the only safe pair of states.
 
 use crate::{
-    clear_task, heartbeat_now, run_offer, set_task, LoadProbe, Shared, Sidecar, WorkerIdentity,
+    clear_task, heartbeat_now, run_offer, set_task, LoadProbe, Shared, Sidecar, TaskResult,
+    WorkerIdentity,
 };
 use axum::{
     body::Body,
@@ -56,6 +57,7 @@ use axum::{
 use bm_core::{config::Settings, Layout};
 use bm_proto::{Complete, Heartbeat, TaskOffer};
 use serde::Deserialize;
+use serde_json::Value;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
@@ -74,8 +76,9 @@ pub(crate) struct Push {
     pub(crate) probe: Mutex<LoadProbe>,
     pub(crate) layout: Layout,
     pub(crate) settings: Settings,
-    /// The sidecar, spawned per task and stopped after it — the same lifecycle
-    /// the pull path uses, so RSS returns to the OS between chapters.
+    /// The sidecar, warm across tasks and bounded by its own lifecycle rules —
+    /// an idle reap (`sidecar_reaper`), a budget recycle at each task boundary
+    /// (`Sidecar::recycle_if_over_budget`), and `reap_all` before a merge.
     ///
     /// `tokio::sync::Mutex`, not `std::sync`'s: `run_offer` takes `&mut` and is
     /// awaited while the guard is held, and a `std::sync::MutexGuard` across an
@@ -93,6 +96,38 @@ pub(crate) struct Push {
     /// fail and no report to be refused, so silence is the only evidence that
     /// the inductor is gone.
     pub(crate) last_contact: AtomicU64,
+    /// Unix seconds the last task finished. The sidecar reaper stops the warm
+    /// model once this is older than its idle budget — the sidecar is kept
+    /// warm *between* tasks, not forever.
+    pub(crate) last_task_end: AtomicU64,
+}
+
+/// A task outcome, stored where the completion hook can find it.
+///
+/// `run_offer` already ships every artifact as it produces them (units are
+/// written to disk as they are rendered, the merge's mp3 comes home in the
+/// report) — so the only thing a dead uplink loses is the word *done*. The
+/// task handler stashes the outcome here right after building it, and then
+/// answers on the connection that asked, exactly as before. The stash costs
+/// nothing while the primary channel is healthy (the hook sends it only after
+/// long inductor silence — see `hook::supervise`) and is the difference
+/// between a finished stage and a re-rendered one when the uplink blips
+/// mid-task.
+fn stash_outcome(push: &Push, offer: &TaskOffer, ok: bool, detail: String, duration_secs: f64, delta: Option<Value>, units: u64, script: Option<Value>, text: Option<String>, mp3_b64: Option<String>) {
+    if let Ok(mut p) = push.shared.lock() {
+        p.pending = Some(Complete {
+            worker_id: push.who.worker_id.clone(),
+            task_id: offer.task_id.clone(),
+            ok,
+            detail,
+            duration_secs,
+            bible_delta: delta,
+            units,
+            script,
+            text,
+            mp3_b64,
+        });
+    }
 }
 
 impl Push {
@@ -201,7 +236,10 @@ async fn task(
     // inductor collects them (`GET /unit`). Any code path that tried to dial
     // out would fail loudly here rather than silently depending on a route
     // that does not exist across NAT — which is the whole reason for the
-    // inversion.
+    // inversion. The one exception is the completion hook (`hook.rs`), whose
+    // address is the inductor's own reverse tunnel and which fires only when
+    // the inductor has gone silent — a backup channel, never a rival to this
+    // answer.
     let started = std::time::Instant::now();
     let result = run_offer(
         &push.layout,
@@ -211,43 +249,94 @@ async fn task(
         &mut sidecar,
     )
     .await;
-    sidecar.stop();
+    // Deliberately **no** `sidecar.stop()` here: the sidecar is worker-owned
+    // and stays warm across tasks (a per-take schedule would otherwise reload
+    // ~2.85 GB per offer). `sidecar_reaper` stops it after the idle budget, and
+    // the merge arm stops it before ffmpeg runs.
+    //
     // Idle again, whatever the outcome — the answer below is built from
     // `result`, so nothing past this point needs the progress block.
     clear_task(&push.shared);
+    push.last_task_end
+        .store(bm_proto::now_secs(), Ordering::SeqCst);
 
     match result {
-        Ok(done) => Json(Complete {
-            worker_id: push.who.worker_id.clone(),
-            task_id: offer.task_id.clone(),
-            ok: done.ok,
-            detail: done.detail,
-            duration_secs: started.elapsed().as_secs_f64(),
-            bible_delta: done.delta,
-            units: done.units,
-            script: done.script,
-            text: done.text,
-            mp3_b64: done.mp3_b64,
-        })
-        .into_response(),
+        // Destructure once: the stash and the response are the same report,
+        // and `Complete` clones would deep-copy a merge mp3 for nothing.
+        Ok(done) => {
+            let TaskResult {
+                ok,
+                detail,
+                delta,
+                units,
+                script,
+                text,
+                mp3_b64,
+            } = done;
+            let duration_secs = started.elapsed().as_secs_f64();
+            // Stash before answering: if the connection below dies in flight,
+            // this outcome is the only copy on earth (well — and on this
+            // disk, for renders). The hook delivers it when silence says the
+            // inductor never heard the answer.
+            stash_outcome(
+                &push,
+                &offer,
+                ok,
+                detail.clone(),
+                duration_secs,
+                delta.clone(),
+                units,
+                script.clone(),
+                text.clone(),
+                mp3_b64.clone(),
+            );
+            Json(Complete {
+                worker_id: push.who.worker_id.clone(),
+                task_id: offer.task_id.clone(),
+                ok,
+                detail,
+                duration_secs,
+                bible_delta: delta,
+                units,
+                script,
+                text,
+                mp3_b64,
+            })
+            .into_response()
+        }
         // A stage that *failed* is an answer, not a transport error — and the
         // pull path reports it exactly this way. A 500 here would make the
         // inductor read a text body as a `Complete` and give up on a task the
         // worker had in fact finished failing, leaving the chapter assigned
         // until its lease expired.
-        Err(e) => Json(Complete {
-            worker_id: push.who.worker_id.clone(),
-            task_id: offer.task_id.clone(),
-            ok: false,
-            detail: format!("{} ch{} failed: {e:#}", offer.stage, offer.chapter),
-            duration_secs: started.elapsed().as_secs_f64(),
-            bible_delta: None,
-            units: 0,
-            script: None,
-            text: None,
-            mp3_b64: None,
-        })
-        .into_response(),
+        Err(e) => {
+            let detail = format!("{} ch{} failed: {e:#}", offer.stage, offer.chapter);
+            stash_outcome(
+                &push,
+                &offer,
+                false,
+                detail.clone(),
+                started.elapsed().as_secs_f64(),
+                None,
+                0,
+                None,
+                None,
+                None,
+            );
+            Json(Complete {
+                worker_id: push.who.worker_id.clone(),
+                task_id: offer.task_id.clone(),
+                ok: false,
+                detail,
+                duration_secs: started.elapsed().as_secs_f64(),
+                bible_delta: None,
+                units: 0,
+                script: None,
+                text: None,
+                mp3_b64: None,
+            })
+            .into_response()
+        }
     }
 }
 
@@ -321,11 +410,61 @@ async fn shutdown(State(push): State<Arc<Push>>, headers: HeaderMap) -> Response
     }
     push.touch();
     println!("inductor asked for shutdown — exiting");
+    // Take the sidecar with us: a child left behind is 2.85 GB held by a box
+    // nobody is driving, and a spot reclaim leaves one behind every time.
+    // `reap_all`, not `stop`: the provision-started server is nobody's child, and
+    // leaving *it* resident is the same orphan by another route. The HTTP ask is
+    // best-effort — an older sidecar has no `/shutdown`, and the cluster sweep
+    // (`X`) is the backstop for one that declined.
+    push.sidecar.lock().await.reap_all().await;
     tokio::spawn(async {
         tokio::time::sleep(Duration::from_millis(250)).await;
         std::process::exit(0);
     });
     Json(serde_json::json!({"ok": true, "exiting": true})).into_response()
+}
+
+/// How long the warm model is kept after the last task. Long enough to bridge
+/// consecutive render offers on one box, short enough that an idle box is not
+/// holding 2.85 GB.
+const SIDECAR_IDLE_SECS: u64 = 180;
+
+/// Stop the sidecar once the worker has been idle past [`SIDECAR_IDLE_SECS`].
+///
+/// This is what makes "keep it warm" safe: the model lives across tasks, not
+/// across hours. A task arriving resets the clock, and a later render re-`ensure`s
+/// a stopped sidecar (waiting for it, never racing it).
+///
+/// **This is the idle half of the lifecycle, and only the idle half.** A box
+/// that renders continuously never reaches this branch — which is exactly how
+/// the memory leak went unnoticed, since the guard that existed was keyed on
+/// *not working*. Growth under load is `Sidecar::recycle_if_over_budget`'s job,
+/// and it runs at a task boundary inside the render arm where it cannot
+/// interrupt a request. Neither replaces the other: this one bounds an idle
+/// box's footprint, that one bounds a busy box's.
+///
+/// **Deliberately `stop`, not `reap_all`.** An *adopted* server is somebody
+/// else's to keep: on the local node the inductor uses the same port 8818 for
+/// auditions, and reaping on this worker's idle timer would kill a model the
+/// operator is listening to. The two places that really cannot share the box —
+/// a merge's ffmpeg pass, and worker shutdown — call `reap_all` themselves, so
+/// nothing depends on this timer for the memory they need.
+pub(crate) async fn sidecar_reaper(push: Arc<Push>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        if push.is_busy() {
+            continue;
+        }
+        let idle = bm_proto::now_secs().saturating_sub(push.last_task_end.load(Ordering::SeqCst));
+        if idle < SIDECAR_IDLE_SECS {
+            continue;
+        }
+        let mut sidecar = push.sidecar.lock().await;
+        if sidecar.is_running() {
+            sidecar.stop();
+            println!("sidecar stopped after {idle}s idle — its RSS returns to the OS");
+        }
+    }
 }
 
 /// A unit name is one `.wav` filename and nothing else.
@@ -367,6 +506,7 @@ mod tests {
                 chapter: Some(7),
                 frac: 0.5,
                 activity: "render ch7".into(),
+                pending: None,
             })),
             probe: Mutex::new(LoadProbe::new()),
             layout: Layout::new(root),
@@ -376,6 +516,7 @@ mod tests {
             // "The inductor just spoke" — the watchdog's clock starts now, so
             // a test that never polls does not trip it immediately.
             last_contact: AtomicU64::new(bm_proto::now_secs()),
+            last_task_end: AtomicU64::new(bm_proto::now_secs()),
         })
     }
 

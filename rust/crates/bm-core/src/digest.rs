@@ -216,10 +216,8 @@ pub async fn analyze_chapter(
     // The same map the script prompt renders, read once more for the validator:
     // one file, so the vocabulary offered and the vocabulary accepted are the
     // same vocabulary by construction.
-    let palette = crate::ambience::palette_names(&load_map(layout)?);
-    let effect_pool = crate::audio_pool::load_pool(&layout.assets().join("effect-pool.json"));
-    let effects = crate::ambience::effect_tags(&effect_pool);
-    let inject_pool = crate::audio_pool::load_pool(&layout.assets().join("inject-pool.json"));
+    let vocab = vocabulary(layout)?;
+    let (palette, effects, inject_pool) = (&vocab.palette, &vocab.effects, &vocab.injects);
 
     // ---- round 1: the cast and the story -----------------------------------
     progress(0.10, format!("digest ch{n} via {analyzer}: cast"));
@@ -278,7 +276,32 @@ pub async fn analyze_chapter(
         }
     }
 
-    let data = merge_rounds(&context, &script);
+    let outcome = assemble_outcome(bible, &context, &script, &text)?;
+    progress(1.0, format!("digest ch{n} done"));
+    Ok(outcome)
+}
+
+/// Everything after the two answers have parsed: merge the rounds, check the
+/// grammar fixes against the chapter, build the script and the bible delta, and
+/// describe what came out.
+///
+/// **Shared by the worker's automatic path and the operator's manual one, and
+/// that is the point.** A manual digest that assembled its script differently
+/// would put a chapter into the library that the automatic path would have
+/// refused — and the manual route exists to be *the same digest* with a person
+/// standing in for the model, not a second, looser one. One function, rather
+/// than two that agree today.
+///
+/// The `sound_design_gap` check stays in the callers, because they answer it
+/// differently: the worker asks the model again, the operator is told and gets
+/// to paste a better answer.
+fn assemble_outcome(
+    bible: &Value,
+    context: &Value,
+    script: &Value,
+    text: &str,
+) -> Result<DigestOutcome> {
+    let data = merge_rounds(context, script);
 
     let mut log = Vec::new();
     let warnings = warn_vietnamese(&data, bible);
@@ -337,7 +360,6 @@ pub async fn analyze_chapter(
         "segments": script.get("segments").cloned().unwrap_or(json!([])),
     });
 
-    progress(1.0, format!("digest ch{n} done"));
     log.push(format!(
         "segments={} sounds={} roster={}",
         script
@@ -386,10 +408,148 @@ pub async fn digest_chapter(
     progress: &mut (dyn FnMut(f32, String) + Send),
 ) -> Result<DigestOutcome> {
     let mut out = analyze_chapter(layout, n, bible, settings, analyzer, progress).await?;
-    let script_path = layout.script(n);
-    atomic_write(&script_path, &serde_json::to_string_pretty(&out.script)?)?;
-    out.log.push(format!("-> {}", script_path.display()));
+    write_script(layout, n, &out.script)?;
+    out.log.push(format!("-> {}", layout.script(n).display()));
     Ok(out)
+}
+
+/// Which half of the two-round digest an answer belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Round {
+    Cast,
+    Script,
+}
+
+impl Round {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Round::Cast => "cast",
+            Round::Script => "script",
+        }
+    }
+}
+
+/// The prompt for one manual round, ready to be carried to any model.
+#[derive(Debug, Clone)]
+pub struct ManualPrompt {
+    pub round: Round,
+    pub text: String,
+}
+
+/// What a pasted answer produced. Exactly one field is set.
+#[derive(Debug, Clone)]
+pub struct ManualAnswer {
+    /// Round 1: the cast, to be handed back when asking for round 2.
+    pub cast: Option<Value>,
+    /// Round 2: the finished outcome — script assembled, delta ready.
+    pub outcome: Option<DigestOutcome>,
+}
+
+/// The vocabulary the script validators check against, read from the same files
+/// the prompt was rendered from.
+///
+/// One loader for both directions, so what the prompt *offered* and what the
+/// validator *accepts* cannot drift: a tag the prompt listed but the validator
+/// rejected would fail a chapter for a reason nobody could see.
+struct Vocabulary {
+    palette: Vec<String>,
+    effects: Vec<String>,
+    injects: crate::audio_pool::ClipPool,
+}
+
+fn vocabulary(layout: &Layout) -> Result<Vocabulary> {
+    let effect_pool = crate::audio_pool::load_pool(&layout.assets().join("effect-pool.json"));
+    Ok(Vocabulary {
+        palette: crate::ambience::palette_names(&load_map(layout)?),
+        effects: crate::ambience::effect_tags(&effect_pool),
+        injects: crate::audio_pool::load_pool(&layout.assets().join("inject-pool.json")),
+    })
+}
+
+/// The chapter text and the bible, as the manual path needs them.
+fn manual_inputs(layout: &Layout, n: u32) -> Result<(Value, String)> {
+    let chapter_path = layout.chapter_txt(n);
+    let text = std::fs::read_to_string(&chapter_path)
+        .with_context(|| format!("reading {}", chapter_path.display()))?;
+    Ok((load_bible(&layout.bible()), text))
+}
+
+/// Build the prompt for a manual round.
+///
+/// `cast` is the validated answer to round 1 and is required for round 2: the
+/// second prompt is rendered *against the cast*, exactly as the worker's is, so
+/// an operator who skipped round 1 gets an error rather than a prompt that
+/// quietly asks for the wrong thing.
+pub fn manual_prompt(layout: &Layout, n: u32, cast: Option<&Value>) -> Result<ManualPrompt> {
+    let (bible, text) = manual_inputs(layout, n)?;
+    match cast {
+        None => Ok(ManualPrompt {
+            round: Round::Cast,
+            text: build_prompt(layout, &bible, &text)?,
+        }),
+        Some(context) => Ok(ManualPrompt {
+            round: Round::Script,
+            text: build_script_prompt(layout, &bible, context, &text)?,
+        }),
+    }
+}
+
+/// Check a pasted answer for one round, and assemble what it yields.
+///
+/// **The same validators the worker's answers go through, and that is the whole
+/// design.** A manual digest is the automatic one with a person standing in for
+/// the model, so an answer the worker's path would have refused is refused here
+/// too — with the validator's own complaint as the message, because the operator
+/// is the one who can act on it.
+///
+/// Nothing is written. Committing is [`write_script`], called by the caller, so
+/// what lands is one write site rather than two that could differ.
+pub fn manual_accept(
+    layout: &Layout,
+    n: u32,
+    round: Round,
+    pasted: &str,
+    cast: Option<&Value>,
+) -> Result<ManualAnswer> {
+    let (bible, text) = manual_inputs(layout, n)?;
+    match round {
+        Round::Cast => Ok(ManualAnswer {
+            cast: Some(parse_context(pasted, &bible)?),
+            outcome: None,
+        }),
+        Round::Script => {
+            let context = cast.ok_or_else(|| {
+                anyhow::anyhow!("round 2 needs round 1's cast — paste the cast answer first")
+            })?;
+            let vocab = vocabulary(layout)?;
+            let script = parse_script(
+                pasted,
+                &bible,
+                context,
+                &vocab.palette,
+                &vocab.effects,
+                &vocab.injects,
+            )?;
+            // The worker asks the model again at this point; the operator is
+            // simply told, so they can paste an answer that places the sounds it
+            // staged. Same rule, different remedy.
+            if let Some(gap) = sound_design_gap(&script, &text, &vocab.injects) {
+                anyhow::bail!("{gap}");
+            }
+            Ok(ManualAnswer {
+                cast: None,
+                outcome: Some(assemble_outcome(&bible, context, &script, &text)?),
+            })
+        }
+    }
+}
+
+/// Write a chapter's script where every consumer reads it.
+///
+/// One write site, so the worker's path and the operator's cannot land the same
+/// artifact differently.
+pub fn write_script(layout: &Layout, n: u32, script: &Value) -> Result<()> {
+    atomic_write(&layout.script(n), &serde_json::to_string_pretty(script)?)
 }
 
 /// One generation, retried through rate limits.
@@ -408,7 +568,23 @@ async fn generate_retrying(
     let mut last_rl = String::new();
     for attempt in 0..6 {
         match generate(prompt, analyzer, settings).await {
-            Ok(t) => return Ok(t),
+            Ok((t, backend)) => {
+                // The configured backend and the one that ran are not the same
+                // thing whenever the gemini chain falls back. Say which one
+                // answered, so the operator's screen stops naming a backend that
+                // had already given up — this is the label that read "via gemini"
+                // while opencode was the thing hanging.
+                if backend.as_str() != analyzer {
+                    progress(
+                        to,
+                        format!(
+                            "{analyzer} gave up — this round was answered by {}",
+                            backend.as_str()
+                        ),
+                    );
+                }
+                return Ok(t);
+            }
             Err(GenError::RateLimited(msg)) => {
                 let wait = parse_retry_delay(&msg)
                     .unwrap_or_else(|| (30.0 * 2f64.powi(attempt)).min(300.0));
@@ -439,7 +615,9 @@ async fn repair_once(
         "{prompt}\n\nYour last output was invalid: {complaint}. Return ONLY the corrected JSON object."
     );
     match generate(&repair, analyzer, settings).await {
-        Ok(t) => Ok(t),
+        // The backend that answered a repair is not re-labelled here: this path
+        // has no progress sink, and the fallback has already said so in the log.
+        Ok((t, _backend)) => Ok(t),
         Err(GenError::RateLimited(m)) => anyhow::bail!("repair attempt rate-limited: {m}"),
         Err(GenError::Fatal(e)) => Err(e),
     }
@@ -993,6 +1171,160 @@ mod tests {
         assert!(p.contains("quiet (soft, calm;"), "{p}");
         assert!(p.contains("battle, birds, calm"), "{p}");
         assert!(p.contains("blood-spatter (hit; blood"), "{p}");
+    }
+
+    /// The manual path's contract, against the fixture.
+    ///
+    /// What is *not* here is a fully valid pasted script: the assembly after it
+    /// parses is `assemble_outcome`, which the worker's own tests already drive
+    /// through `analyze_chapter`, and that sharing is the whole point of it being
+    /// one function. What this pins is the part that only the manual path has —
+    /// which round a paste belongs to, and what happens when it belongs to none.
+    #[test]
+    fn the_manual_rounds_ask_for_the_right_prompt_and_refuse_a_paste_out_of_order() {
+        let dir = std::env::temp_dir().join("bm-manual-fixture");
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::profile::install_fixture(&dir).expect("fixture profile");
+        let layout = Layout::new(&dir);
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::write(
+            layout.chapter_txt(51),
+            "Chương 51: Fixture\n\nMột câu thoại ngắn.\n",
+        )
+        .unwrap();
+
+        // Round 1 is the *cast* pass, and it is the shipped template rendered —
+        // no placeholders left, and the chapter's own text in it. The fixture's
+        // template is a stub ("production prompts live in the profile"), so the
+        // assertion is on substitution rather than on the production wording:
+        // that is the contract this test can hold the fixture to.
+        let first = manual_prompt(&layout, 51, None).unwrap();
+        assert_eq!(first.round, Round::Cast);
+        assert!(
+            first.text.contains("Fixture dramatization prompt"),
+            "the cast template, as the fixture ships it: {}",
+            head_chars(&first.text, 120)
+        );
+        assert!(
+            first.text.contains("Một câu thoại ngắn"),
+            "and the chapter it is about"
+        );
+        assert!(
+            !first.text.contains("{chapter_text}"),
+            "no placeholder leaked"
+        );
+
+        // A paste for round 2 with no cast is refused by name, rather than
+        // rendering a script prompt against a cast that does not exist.
+        let err = manual_accept(&layout, 51, Round::Script, "{}", None)
+            .expect_err("round 2 needs round 1");
+        assert!(err.to_string().contains("round 1's cast"), "{err}");
+
+        // A garbage paste fails the *worker's* validator — the same one — and
+        // says so in words the operator can paste back into their model.
+        let err =
+            manual_accept(&layout, 51, Round::Cast, "not json at all", None).expect_err("not JSON");
+        assert!(err.to_string().contains("not valid JSON"), "{err:#}");
+
+        // With a cast in hand, round 2 renders the *script* template against it.
+        let cast = json!({"roster": ["Narrator"], "mentions": {}});
+        let second = manual_prompt(&layout, 51, Some(&cast)).unwrap();
+        assert_eq!(second.round, Round::Script);
+        assert_ne!(second.text, first.text, "a different pass, not a repeat");
+        for ph in ["{cast_json}", "{music_palette}", "{inject_sounds}"] {
+            assert!(!second.text.contains(ph), "placeholder leaked: {ph}");
+        }
+
+        // A chapter with no text fails by path, so the operator knows which file
+        // the crawl never produced rather than reading a bare "no such file".
+        let err = manual_prompt(&layout, 999, None).expect_err("no chapter text");
+        assert!(err.to_string().contains("ch999"), "{err:#}");
+    }
+
+    /// The happy path, end to end, without a model.
+    ///
+    /// Two pastes and a finished chapter — the flow the TUI drives with `c` and
+    /// `v`, exercised through `manual_accept` so the seam between the rounds is
+    /// real rather than assumed. What this buys that the per-part tests cannot:
+    /// it proves the round-1 answer is *usable* as round 2's input (a cast that
+    /// parses but cannot be attributed against would only fail at the second
+    /// paste, in front of the operator).
+    ///
+    /// The answers are minimal on purpose. `music` is **absent everywhere**, which
+    /// is the legacy path `validate_script` explicitly keeps open — when no
+    /// segment declares one, the palette check is skipped. Declaring it would mean
+    /// naming a track from the scene map's closed vocabulary, and that is a
+    /// separate test's business (`validate_script`'s own).
+    #[test]
+    fn a_valid_pair_of_pastes_finishes_the_chapter() {
+        let dir = std::env::temp_dir().join("bm-manual-happy");
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::profile::install_fixture(&dir).expect("fixture profile");
+        let layout = Layout::new(&dir);
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::write(
+            layout.chapter_txt(51),
+            "Chương 51: Fixture\n\nMột câu thoại ngắn.\n",
+        )
+        .unwrap();
+
+        // Round 1: the cast answer, exactly as a model would return it.
+        let cast = manual_accept(
+            &layout,
+            51,
+            Round::Cast,
+            r#"{"title": "Dao Phay Trong Bếp", "atmosphere": "A quiet kitchen at dusk.",
+                "roster": ["Narrator"], "mentions": {}, "new_characters": [],
+                "new_aliases": {}}"#,
+            None,
+        )
+        .expect("a well-formed cast answer");
+        let cast = cast.cast.expect("round 1 yields the cast");
+        assert!(cast.get("outcome").is_none(), "and nothing finished");
+
+        // Round 2: the script answer, validated against that cast.
+        let done = manual_accept(
+            &layout,
+            51,
+            Round::Script,
+            r#"{"roster": ["Narrator"],
+                "segments": [{"speaker": "Narrator", "text": "Trời đã sáng."}],
+                "fixes": []}"#,
+            Some(&cast),
+        )
+        .expect("a well-formed script answer against the cast it was given");
+        let outcome = done.outcome.expect("round 2 finishes the chapter");
+
+        assert_eq!(outcome.segments, 1, "one spoken segment");
+        assert_eq!(outcome.script["title"], json!("Dao Phay Trong Bếp"));
+        assert_eq!(outcome.script["roster"], json!(["Narrator"]));
+        // The delta is what the inductor merges into the bible — a manual digest
+        // has to produce one, or the next chapter would not know this cast.
+        assert!(outcome.delta.get("roster").is_some(), "{:?}", outcome.delta);
+        assert!(
+            outcome.log.iter().any(|l| l.contains("segments=1")),
+            "{:?}",
+            outcome.log
+        );
+
+        // **And the hand-off is real, not decorative.** A speaker the cast never
+        // listed must be refused by round 2 — otherwise the cast is a value
+        // carried around for show, and a script naming anybody at all would land.
+        // This is the assertion that makes the happy path above mean something.
+        let err = manual_accept(
+            &layout,
+            51,
+            Round::Script,
+            r#"{"roster": ["Narrator"],
+                "segments": [{"speaker": "Kẻ Không Có Trong Cast", "text": "Ai đó."}],
+                "fixes": []}"#,
+            Some(&cast),
+        )
+        .expect_err("a speaker the cast never resolved must not land");
+        assert!(
+            err.to_string().contains("unknown speaker"),
+            "and says which one: {err:#}"
+        );
     }
 
     /// Manual gate, not CI: runs a real digest of ch51 through the analyzer

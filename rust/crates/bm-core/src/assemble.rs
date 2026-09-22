@@ -6,12 +6,16 @@
 
 mod mood;
 mod plan;
+mod renderplan;
 mod wav;
 
 pub use self::plan::{
     character_has_lines, drop_headline, expected_wavs, pick_exact, pick_rendered, plan_render,
     rendered_segments, segment_miss, segments_complete, title_speech, title_speech_for_script,
-    Planned, RenderedSegment, Run, MAX_SEGMENT_BYTES,
+    Planned, RenderUnit, RenderedSegment, Run, MAX_SEGMENT_BYTES,
+};
+pub use self::renderplan::{
+    reconcile, reconcile_with, take_file, take_key, PlanUpdate, RenderPlan, Take, PLAN_VERSION,
 };
 pub use self::wav::{read_wav, sample_rate_for, silent_wav, GEMINI_RATE, VIENEU_RATE};
 use self::wav::{write_wav, Wav};
@@ -265,6 +269,15 @@ fn plan_turns(
 /// `Layout::scratch_ch(n)` so intermediates never land in `output/`.
 ///
 /// Returns the mp3 when ffmpeg is available, otherwise the wav.
+///
+/// `takes` is the **recorded render plan's** file list, in mix order, when the
+/// caller has one (`TaskOffer::merge_takes`). The mixer must read the same
+/// names the renderer wrote, and a take's name is content-addressed — derived
+/// from the voice, the text and the parameters it was spoken with — so
+/// re-deriving it here from the script and the cast is exactly the five-namers
+/// problem this pipeline removed. `None` is the pre-plan caller: the names are
+/// then computed with [`expected_wavs`], which is what the renderer used
+/// before takes were content-addressed.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble(
     script_path: &Path,
@@ -278,6 +291,7 @@ pub fn assemble(
     speed: f64,
     engine: &str,
     assets: &Path,
+    takes: Option<&[String]>,
 ) -> Result<PathBuf> {
     let policy = crate::cast::policy_for_bible(engine, bible_path)?;
     let cast = crate::cast::load_cast(script_path, cast_path, bible_path, &policy, false)?;
@@ -297,7 +311,10 @@ pub fn assemble(
     // other files.
     let planned = Planned::plan(&segments);
 
-    let wavs = expected_wavs(&planned, &cast, seg_dir, local, title.as_ref())?;
+    let wavs: Vec<PathBuf> = match takes.filter(|t| !t.is_empty()) {
+        Some(names) => names.iter().map(|n| seg_dir.join(n)).collect(),
+        None => expected_wavs(&planned, &cast, seg_dir, local, title.as_ref())?,
+    };
     let missing: Vec<String> = wavs
         .iter()
         .filter(|w| !w.metadata().map(|m| m.len() > 1000).unwrap_or(false))

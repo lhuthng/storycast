@@ -25,6 +25,10 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
             Err("app-wide settings save from the prompt, not submit".into())
         }
         TextKind::Mix => Err("mix saves from the prompt, not submit".into()),
+        // Same for the render batch: `:batch` writes this workspace's settings
+        // and dispatches nothing, because the scheduler reads the value when it
+        // builds its next offer.
+        TextKind::RenderBatch => Err("render batch saves from the prompt, not submit".into()),
         // The sound-design prompts write a registry and launch nothing, so
         // reaching dispatch means a bug — same as the two above.
         TextKind::SoundAdd(_) | TextKind::SoundEdit(..) | TextKind::SoundLevel(..) => {

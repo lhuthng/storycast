@@ -18,23 +18,18 @@ impl Inner {
             let mp3 = self.layout.final_mp3(n);
             let has_txt = txt.is_file();
             let has_script = script.is_file();
-            let engine = self.settings.engine.clone();
-            let segs_done = has_script
-                && bm_core::assemble::segments_complete(
-                    &script,
-                    &self.layout.cast(&engine),
-                    &self.layout.bible(),
-                    &self.layout.seg_dir(&engine, n),
-                    &engine,
-                );
             let has_mp3 = mp3.is_file();
             // Ground truth upgrades pending stages; assignments are verified below.
             // Every stage gets a task object whether or not its artifacts exist
             // yet — a missing object is indistinguishable from "no work".
+            //
+            // Render is **not** among them: it is materialised per take below,
+            // because a render's unit of work is one segment now. A
+            // chapter-granular `render:n` row from an older build is replaced
+            // by its takes there.
             for (stage, done) in [
                 (Stage::Crawl, has_txt),
                 (Stage::Digest, has_script),
-                (Stage::Render, segs_done),
                 (Stage::Merge, has_mp3),
             ] {
                 let t = self
@@ -46,16 +41,24 @@ impl Inner {
                     t.updated = now_secs();
                 }
             }
+            // The render ledger: one row per take, `Done` exactly where the
+            // take's file is on disk. This is also where a changed input is
+            // noticed — a take whose key moved has a new content-addressed
+            // name, so its old file is superseded by the plan's diff and its
+            // row is work again.
+            if has_script {
+                self.materialize_render_takes(n);
+            }
             // Assignments from a dead run: verify artifacts; unverified keeps
             // its assignee with a fresh lease (a live worker's report still
             // counts; a dead one's lease expires and the reaper requeues).
-            for stage in Stage::ALL {
+            // Render takes were verified by the materialisation above.
+            for stage in [Stage::Crawl, Stage::Digest, Stage::Merge] {
                 let key = format!("{stage}:{n}");
                 let done_now = match stage {
                     Stage::Crawl => has_txt,
                     Stage::Digest => has_script,
-                    Stage::Render => segs_done,
-                    Stage::Merge => has_mp3,
+                    _ => has_mp3,
                 };
                 if let Some(t) = self.tasks.get_mut(&key) {
                     if matches!(t.state, TaskState::Assigned | TaskState::Running) {
@@ -71,6 +74,13 @@ impl Inner {
                 }
             }
         }
+        // Then the chapters outside the range: the range decides what this run
+        // *discovers*, not what it is allowed to repair. A render row with no
+        // plan behind it cannot be offered — the take's file is named by the
+        // plan — so leaving it is leaving work that fails on the box for a
+        // bookkeeping reason.
+        let end = start.saturating_add(count);
+        self.materialize_known_render_takes(start..end);
         // Tasks reconciled above are bound to the workspace profile from here
         // on; the serve gate refuses to run them anywhere else.
         self.ledger_profile = Some(self.settings.profile.clone());
@@ -85,8 +95,16 @@ impl Inner {
         self.invalidate_stale_design(true);
     }
 
+    /// Every upstream stage is `Done`. Render is the one stage whose upstream
+    /// is not a single row: a merge waits for **every take** of the chapter,
+    /// which is the same set the mixer will read out of the plan — so "the
+    /// render is finished" and "the merge can run" are one question with one
+    /// answer instead of two derivations that can drift.
     pub(crate) fn upstream_done(&self, chapter: u32, stage: Stage) -> bool {
         stage.upstream().iter().all(|u| {
+            if *u == Stage::Render {
+                return self.render_takes_done(chapter);
+            }
             self.tasks
                 .get(&format!("{u}:{chapter}"))
                 .map(|t| t.state == TaskState::Done)
@@ -94,13 +112,13 @@ impl Inner {
         })
     }
 
+    /// A chapter is parked when any of its tasks is shelved — including a
+    /// single take that struck out three times, because the merge cannot run
+    /// without it either.
     pub(crate) fn shelved(&self, chapter: u32) -> bool {
-        Stage::ALL.iter().any(|s| {
-            self.tasks
-                .get(&format!("{s}:{chapter}"))
-                .map(|t| t.state == TaskState::Shelved)
-                .unwrap_or(false)
-        })
+        self.tasks
+            .values()
+            .any(|t| t.chapter == chapter && t.state == TaskState::Shelved)
     }
 
     pub(crate) fn ensure_task(&mut self, chapter: u32, stage: Stage) -> &mut Task {
@@ -137,58 +155,66 @@ impl Inner {
         out
     }
 
-    /// Drop a chapter's rendered output and requeue render+merge: the script
-    /// changed underneath them, so every segment filename and voice resolve
-    /// is suspect. Attempts reset — this is new work, not a retry — and the
-    /// stale mp3 goes so nothing serves the old dramatization meanwhile.
+    /// The script changed underneath the chapter, so every unit's inputs are
+    /// suspect. **The plan's diff is the invalidation**: a changed input has a
+    /// new content-addressed name, so its old file is superseded and the take is
+    /// work again — while a take whose inputs did not change keeps its audio.
+    /// That is strictly better than deleting the directory, which re-spoke the
+    /// whole chapter for a one-line edit.
+    ///
+    /// Attempts reset (this is new work, not a retry) and the stale mp3 goes, so
+    /// nothing serves the old dramatization meanwhile. A chapter that cannot be
+    /// planned here gets no rows — its failure is named by the stage that could
+    /// not read it, rather than invented here.
     pub(crate) fn invalidate_render(&mut self, chapter: u32) {
-        let engine = self.settings.engine.clone();
-        let _ = std::fs::remove_dir_all(self.layout.seg_dir(&engine, chapter));
         let _ = std::fs::remove_file(self.layout.final_mp3(chapter));
-        for stage in [Stage::Render, Stage::Merge] {
-            let key = format!("{stage}:{chapter}");
-            match self.tasks.get_mut(&key) {
-                Some(t) => {
-                    t.state = TaskState::Pending;
-                    t.attempts = 0;
-                    t.assigned_to = None;
-                    t.lease_until = None;
-                    t.detail = "requeued: script changed".into();
-                    t.updated = now_secs();
-                }
-                None => {
-                    let mut t = Task::new(chapter, stage);
-                    t.updated = now_secs();
-                    self.tasks.insert(key, t);
-                }
+        self.replan_render_takes(chapter);
+        let key = format!("{}:{chapter}", Stage::Merge);
+        match self.tasks.get_mut(&key) {
+            Some(t) => {
+                t.state = TaskState::Pending;
+                t.attempts = 0;
+                t.assigned_to = None;
+                t.lease_until = None;
+                t.detail = "requeued: script changed".into();
+                t.updated = now_secs();
+            }
+            None => {
+                let mut t = Task::new(chapter, Stage::Merge);
+                t.detail = "requeued: script changed".into();
+                t.updated = now_secs();
+                self.tasks.insert(key, t);
             }
         }
         self.save();
     }
 
-    /// Surgical invalidation for one speaker: delete only their local run
-    /// files (filenames embed the OLD voice — exactly the stale set), drop
-    /// the finished mp3s, requeue render+merge. Returns touched chapters + files.
+    /// Surgical invalidation for one speaker: the chapters that hear them
+    /// rebuild their plan, the diff names exactly the files that speaker's
+    /// takes superseded, and only those takes re-speak. Returns touched
+    /// chapters + superseded files.
     ///
-    /// A chapter counts when the speaker is heard in it, not when a stale
-    /// file happened to be deleted: renders run on workers whose segment
-    /// cache never comes home, so gating on local files silently skips every
-    /// remotely-rendered chapter (its mp3 keeps the old voice forever).
-    /// Requeueing is safe regardless — segment filenames embed the voice, so
-    /// the worker only re-synthesizes the new voice's files and the merger
-    /// (`expected_wavs`) resolves against the current cast.
+    /// This used to reconstruct the stale filenames from the OLD voice string
+    /// (`{tag}_{old}.wav`) and delete them by hand. A filename is not an
+    /// identity — with content-addressed takes the diff *is* the stale set, so
+    /// one path serves a rename, a fold, a retag and a script rewrite without
+    /// knowing which of them it is looking at.
     ///
-    /// Narrowing: a chapter whose local store is already complete and holds
-    /// no stale files is left alone — there is nothing to re-speak.
+    /// A chapter counts when the speaker is heard in it, not when a stale file
+    /// happened to be deleted: renders run on workers whose cache never comes
+    /// home, so gating on local files silently skips every remotely-rendered
+    /// chapter (its mp3 keeps the old voice forever). Narrowing is now the
+    /// plan's: a chapter whose takes are all still on disk under their current
+    /// keys is left alone.
     pub(crate) fn invalidate_character(
         &mut self,
         engine: &str,
         character: &str,
-        old: &str,
+        _old: &str,
     ) -> (Vec<u32>, u32) {
         let mut chapters: Vec<u32> = Vec::new();
         let mut files = 0u32;
-        let store = bm_core::segments::LocalStore::new(self.layout.clone());
+        let _ = engine;
         // Speakers are matched literally *or* through the bible. Literally,
         // because a fold calls this with the absorbed name while the bible has
         // already been rewritten to hold that name as the winner's alias — the
@@ -205,96 +231,26 @@ impl Inner {
                 .cloned()
                 .unwrap_or_default();
             let planned = bm_core::assemble::Planned::plan(&segments);
-            let seg_dir = bm_core::segments::SegmentStore::dir(&store, engine, n);
-            let local = engine == "vieneu";
-            let is_them = |run: &bm_core::assemble::Run| {
+            let hears = planned.runs().iter().any(|run| {
                 run.speaker == character
                     || bm_core::digest::resolve_speaker(&bible, &run.speaker) == character
-            };
-            let speaks = planned.runs().iter().any(is_them);
-            let mut touched = false;
-            for run in planned.runs() {
-                if !is_them(&run) {
-                    continue;
-                }
-                let names: Vec<String> = if local {
-                    let (a, b) = (run.idx[0], run.idx[run.idx.len() - 1]);
-                    let tag = if a == b {
-                        format!("{a:04}")
-                    } else {
-                        format!("{a:04}-{b:04}")
-                    };
-                    vec![format!("{tag}_{old}.wav")]
-                } else {
-                    run.idx
-                        .iter()
-                        .map(|i| format!("{i:04}_{old}.wav"))
-                        .collect()
-                };
-                for name in names {
-                    let stale = seg_dir.join(&name);
-                    if stale.is_file() {
-                        let _ = std::fs::remove_file(&stale);
-                        files += 1;
-                        touched = true;
-                    }
-                }
+            });
+            // A chapter can carry this speaker's voice without hearing them:
+            // the headline/published title speaks as the Narrator even when
+            // nobody else in the chapter does. The stored plan is what says so
+            // — its takes record the speaker each voice came from.
+            let in_plan = bm_core::assemble::RenderPlan::load(&self.layout.plan(n))
+                .map(|p| p.takes.iter().any(|t| t.speaker == character))
+                .unwrap_or(false);
+            if !hears && !in_plan {
+                continue;
             }
-            if character == "Narrator" {
-                let stale = seg_dir.join(format!("title_{old}.wav"));
-                if stale.is_file() {
-                    let _ = std::fs::remove_file(&stale);
-                    files += 1;
-                    touched = true;
-                }
+            let superseded = self.resume_render_after_edit(n, "requeued: voice changed");
+            if superseded == 0 && self.render_takes_done(n) {
+                continue;
             }
-            // Requeue when stale files were found, or the speaker is heard but
-            // the local store is incomplete (pre-migration remote chapters,
-            // never-rendered chapters). A complete store with no stale files
-            // needs nothing — the gate `touched || speaks` used to requeue
-            // those too, because no local file meant "unknown origin".
-            let complete = speaks
-                && !touched
-                && bm_core::assemble::segments_complete(
-                    &sp,
-                    &self.layout.cast(engine),
-                    &self.layout.bible(),
-                    &seg_dir,
-                    engine,
-                );
-            if touched || (speaks && !complete) {
-                chapters.push(n);
-                // Stale product goes away; render+merge requeue fresh.
-                // The re-render pins to the box that holds the chapter (the
-                // merge's affinity): it already has every unchanged unit, so
-                // it speaks only the forced set instead of the whole chapter
-                // from scratch. The local node takes pinned renders too.
-                let pin = self
-                    .tasks
-                    .get(&format!("{}:{n}", Stage::Merge))
-                    .and_then(|t| t.affinity.clone());
-                let _ = std::fs::remove_file(self.layout.final_mp3(n));
-                for stage in [Stage::Render, Stage::Merge] {
-                    let key = format!("{stage}:{n}");
-                    if let Some(t) = self.tasks.get_mut(&key) {
-                        t.state = TaskState::Pending;
-                        t.attempts = 0;
-                        t.assigned_to = None;
-                        t.lease_until = None;
-                        t.updated = now_secs();
-                        if stage == Stage::Render {
-                            t.affinity = pin.clone();
-                        }
-                    } else {
-                        let mut t = Task::new(n, stage);
-                        t.updated = now_secs();
-                        if stage == Stage::Render {
-                            t.affinity = pin.clone();
-                        }
-                        self.tasks.insert(key, t);
-                    }
-                }
-            }
+            files += superseded;
+            chapters.push(n);
         }
         self.save();
         (chapters, files)
