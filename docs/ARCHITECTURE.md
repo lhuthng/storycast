@@ -172,21 +172,31 @@ profiles is the mismatch the tag exists to catch.
 * **render** (`bm-agent/src/tts.rs` + `python/`) — speaks each script segment
   through the engine. Vieneu runs as an HTTP sidecar on `127.0.0.1:8818` per
   machine. The inductor owns `data/audio/segments-<engine>-NN/` — it is the
-  only copy of any segment; a worker's copy is scratch. Render offers carry
-  only the missing units (`render_units`, planned with the same `expected_wavs`
-  the merger uses); non-local workers upload each wav via `POST /api/segment`
-  and discard their copy once the report is accepted, while the local node
-  writes straight into the store. A render report is gated on the files being
-  present — the worker's word is not evidence. The report's `units` counts
-  real TTS calls (cache hits excluded), which feeds the ETA model. Only
-  workers advertising the `render-segments` capability are offered renders.
+  only copy of any segment; a worker's copy is scratch. A render offer names
+  **every** unit of the chapter (`render_units`, planned with the same
+  `expected_wavs` the merger uses), never the difference against the
+  inductor's store: the offer goes to whichever box asks next, and the
+  inductor cannot read that box's disk. The worker skips the units it already
+  holds (`pending_units` in `bm-agent`, the same present-and-non-trivial test
+  `assemble` applies) and speaks the rest. A partial offer is what used to
+  leave a box holding a strict subset of a chapter, which the merge then
+  pinned to that box failed on as `N segments missing`. Non-local workers
+  upload each wav via `POST /api/segment` and discard their copy once the
+  report is accepted, while the local node writes straight into the store. A
+  render report is gated on the files being present — the worker's word is not
+  evidence. The report's `units` counts real TTS calls (cache hits excluded),
+  which feeds the ETA model. Only workers advertising the `render-segments`
+  capability are offered renders.
 * **merge** (`assemble/`, `ambience.rs`) — concatenates segments with
   `gap_ms` pauses and optional ambience beds keyed by the script's `scene`
   labels, and writes `output/Ch.N - Title.mp3`. A merge task carries
-  **affinity** for the local node, because that is where the segment store
-  is. A local merge ships no mp3 — the file itself is the evidence. A remote
-  merge (pre-migration affinity, or no local worker alive) ships its mp3 home,
-  base64, inside the report.
+  **affinity** for the box that rendered its chapter, because a box's seg dir
+  is where those wavs were written. Affinity is an optimisation for remote
+  boxes and never a gate for the local node, which shares the inductor's
+  store and may take any merge; that exemption is also why a chapter whose pin
+  is dead still merges. A local merge ships no mp3 — the file itself is the
+  evidence. A remote merge (pre-migration affinity, or no local worker alive)
+  ships its mp3 home, base64, inside the report.
 
 ## 3. The control API (bm-inductor, axum, default :8901)
 

@@ -107,6 +107,23 @@ pub(crate) async fn key_text(
                         app.log_at(Level::Ok, msg.clone());
                         app.set_status(Level::Ok, msg);
                         app.screen = Screen::Sound(view);
+                        // The registry write above is local and needs nothing
+                        // from the scheduler; the *invalidation* is the
+                        // scheduler's. Say what happened rather than letting a
+                        // retuned effect leave every mp3 that uses it looking
+                        // current — the whole reason this op exists.
+                        dispatch(
+                            app,
+                            job_tx,
+                            op_job(
+                                app,
+                                http,
+                                bm_proto::OpRequest {
+                                    op: bm_proto::Op::SoundChanged,
+                                    ..Default::default()
+                                },
+                            ),
+                        );
                     }
                     Err(msg) => app.set_status(Level::Error, msg),
                 }

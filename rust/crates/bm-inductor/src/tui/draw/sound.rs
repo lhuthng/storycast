@@ -296,6 +296,17 @@ pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &App, view: &SoundView) {
                     Color::Red
                 }),
             )));
+            // A bed does not play at the level the pool gives it, and the level
+            // is the thing the operator is about to change with `l`. Stated on
+            // its own full-width line rather than appended to `shape`: that
+            // string is a 23-column table cell and the factor would push the
+            // duration off the end of it.
+            if let Some(g) = r.render_gain() {
+                why.push(Line::from(Span::styled(
+                    format!("    renders at ×{g} of that level — a bed is mixed under the speech"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
         }
     }
     f.render_widget(Paragraph::new(why), rows_area[3]);

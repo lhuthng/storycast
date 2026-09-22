@@ -258,10 +258,19 @@ pub(crate) fn submit(
 }
 
 /// Carry out a confirmed removal, on the screen it came from.
-pub(crate) fn apply_removal(app: &mut App, layer: PoolKind, name: &str, view: SoundView) {
+///
+/// Returns whether a registry was actually written — the caller uses it to
+/// decide whether to tell the inductor the sound design changed. A refused
+/// removal is not a design change, and a notification for it would be noise.
+pub(crate) fn apply_removal(
+    app: &mut App,
+    layer: PoolKind,
+    name: &str,
+    view: SoundView,
+) -> bool {
     if let Err(e) = loaded(app) {
         app.set_status(Level::Warn, e);
-        return;
+        return false;
     }
     // Re-checked, not assumed: the confirmation is a dialog and the screen
     // behind it can have been reloaded (or the scene map edited) while it was
@@ -278,7 +287,7 @@ pub(crate) fn apply_removal(app: &mut App, layer: PoolKind, name: &str, view: So
             format!("“{name}” is in use — nothing was removed"),
         );
         app.screen = Screen::Sound(view);
-        return;
+        return false;
     }
     let outcome = sound::remove(
         app.sound.as_mut().expect("checked by `loaded`"),
@@ -297,10 +306,12 @@ pub(crate) fn apply_removal(app: &mut App, layer: PoolKind, name: &str, view: So
                 .unwrap_or(0);
             v.cursor = v.cursor.min(n.saturating_sub(1));
             app.screen = Screen::Sound(v);
+            true
         }
         Err(e) => {
             app.set_status(Level::Error, e);
             app.screen = Screen::Sound(view);
+            false
         }
     }
 }

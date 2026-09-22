@@ -1098,20 +1098,7 @@ pub(crate) async fn job_start_backend(
     // exists to reach, and it is *working*. Re-provisioning it anyway is why
     // `B` on a healthy cluster took minutes, so it is skipped and said out
     // loud — `p` is the deliberate re-provision.
-    let mut todo: Vec<Machine> = Vec::new();
-    let mut online: Vec<String> = Vec::new();
-    for mut m in targets {
-        if m.state == MachineState::Online {
-            online.push(m.addr.clone());
-            continue;
-        }
-        // The key is resolved here, once, exactly as the old loop did it: the
-        // catch-up job is handed a box that already knows how to reach it, so
-        // the dispatcher needs no settings of its own.
-        let key = resolve(&m);
-        m.ssh_key = key;
-        todo.push(m);
-    }
+    let (todo, online) = split_catchup(targets, api_up, &resolve);
     for addr in &online {
         send(
             &tx,
@@ -1134,6 +1121,37 @@ pub(crate) async fn job_start_backend(
         });
     }
     let _ = tx.send(Ev::Done(DoneKind::StartDone));
+}
+
+/// Split a `B` start's boxes into catch-ups and skips.
+///
+/// A box is skipped as "already online" only when the inductor was up at
+/// submit (`api_up`): with it down, the states are the last live poll's —
+/// frozen by `state_failed`, which keeps the rows — and trusting them skips
+/// every catch-up, so the first `:B` starts the inductor and no worker and
+/// only the second `:B` brings the boxes. A box that truly is beating costs
+/// one cheap "already running" check inside its provision; a box wrongly
+/// skipped costs the whole cluster.
+pub(crate) fn split_catchup(
+    targets: Vec<Machine>,
+    api_up: bool,
+    resolve: &dyn Fn(&Machine) -> Option<String>,
+) -> (Vec<Machine>, Vec<String>) {
+    let mut todo: Vec<Machine> = Vec::new();
+    let mut online: Vec<String> = Vec::new();
+    for mut m in targets {
+        if api_up && m.state == MachineState::Online {
+            online.push(m.addr.clone());
+            continue;
+        }
+        // The key is resolved here, once: the catch-up job is handed a box
+        // that already knows how to reach it, so the dispatcher needs no
+        // settings of its own.
+        let key = resolve(&m);
+        m.ssh_key = key;
+        todo.push(m);
+    }
+    (todo, online)
 }
 
 pub(crate) async fn job_stop_backend(
@@ -1454,6 +1472,21 @@ pub(crate) async fn job_op(
                 )
                 .await
                 {
+                    Ok(msg) => {
+                        send(&tx, Level::Ok, format!("{name}: {msg}"));
+                        true
+                    }
+                    Err(msg) => {
+                        send(
+                            &tx,
+                            Level::Error,
+                            format!("{name}: {msg} (inductor also unreachable: {e})"),
+                        );
+                        false
+                    }
+                }
+            } else if op == Op::SoundChanged {
+                match crate::api::offline_sound_changed(&api, &layout).await {
                     Ok(msg) => {
                         send(&tx, Level::Ok, format!("{name}: {msg}"));
                         true

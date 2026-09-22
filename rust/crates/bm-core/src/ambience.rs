@@ -56,7 +56,7 @@ use std::process::Command;
 /// track. One string doing both jobs is how `martial-shop-morning` — a place —
 /// came out with a hearth under it, because the keyword `shop` matched a fire
 /// rule before the keyword `morning` reached the daylight rule.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize)]
 pub struct SceneRule {
     /// Pool tags, not filenames: `["rain"]` lets the effect pool decide which
     /// rain clip answers. Empty means dry voice.
@@ -90,7 +90,7 @@ pub struct Rule {
 
 /// One value of the closed music vocabulary: the pool tags it means, plus the
 /// gloss the digest prompt shows the analyzer.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize)]
 pub struct PaletteEntry {
     /// Pool tags for assets/music-pool.json. Empty is the `none` value — no
     /// track at all, which is a choice, not a missing one.
@@ -129,7 +129,7 @@ where
 }
 
 /// One keyword rule of the migration shim; see [`SceneMap::legacy_scene_music`].
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize)]
 pub struct LegacyMusicRule {
     #[serde(rename = "match", default)]
     pub matches: Vec<String>,
@@ -138,7 +138,7 @@ pub struct LegacyMusicRule {
 }
 
 /// Where a script that predates the `music` field gets its mood from.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize)]
 pub struct LegacyMusic {
     #[serde(default)]
     pub rules: Vec<LegacyMusicRule>,
@@ -146,7 +146,7 @@ pub struct LegacyMusic {
     pub default: LegacyMusicRule,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct Duck {
     #[serde(default = "default_threshold")]
     pub threshold: f64,
@@ -183,7 +183,7 @@ impl Default for Duck {
 }
 
 /// How sparse the effect layer must be.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct EffectLayer {
     /// Fraction of the chapter's runtime the layer may occupy in total.
     #[serde(default = "d_max_coverage")]
@@ -246,7 +246,7 @@ impl Default for EffectLayer {
 }
 
 /// How loud the music sits, and what it does inside a pause.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct MusicLayer {
     /// Quiet on purpose: 0.06, against an effect layer whose rules reach 0.11
     /// once `layers.effect.trim` has been applied.
@@ -294,7 +294,7 @@ impl Default for MusicLayer {
 }
 
 /// Where a beat fits, and how long it lasts.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct PausePlan {
     /// Delivered seconds — the merge scales it by `speed` before writing it.
     #[serde(default = "d_pause")]
@@ -328,7 +328,7 @@ impl Default for PausePlan {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize)]
 pub struct Layers {
     #[serde(default)]
     pub effect: EffectLayer,
@@ -341,7 +341,7 @@ pub struct Layers {
 }
 
 /// Knobs for the inject layer: script-placed spot effects on their own track.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct InjectLayer {
     /// Master gain over the -20 LUFS foreground contract. 1.0 speaks hits at
     /// voice level; the operator's `inject_volume` multiplies this.
@@ -413,7 +413,7 @@ impl Default for InjectLayer {
 /// Injects ride with the effects switch: they are sound design, so an operator
 /// asking for a plain read gets neither beds nor spot effects. Their volume is
 /// independent — a third gain, not a third switch.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct LayerSwitch {
     pub effects: bool,
     pub music: bool,
@@ -1207,6 +1207,41 @@ pub enum InjectMode {
     Trail,
 }
 
+impl InjectMode {
+    /// How much of its own level this mode plays at.
+    ///
+    /// A `hit` owns the silence it was written into, so it plays at the level
+    /// the pool gives it. An `overlap` and a `trail` own nothing: they run
+    /// *under* the speech, and at full level they stop being a bed and start
+    /// competing with the voice. The library had already voted on this — every
+    /// overlap or trail clip that sat right had been hand-trimmed to 0.05–0.2 in
+    /// its own pool entry, which is a per-clip workaround for a property of the
+    /// mode. So the mode carries the trim, and the pool's `level` goes back to
+    /// being the balance *between* clips of one mode.
+    pub const fn gain(self) -> f64 {
+        match self {
+            InjectMode::Hit => 1.0,
+            InjectMode::Overlap | InjectMode::Trail => 0.1,
+        }
+    }
+}
+
+/// The mode a pool entry's string names, or `None` for a string that names
+/// none — which the caller reads as *skip this directive*, never as a default.
+///
+/// The one place the string is parsed. `injects_of` needs the mode to place the
+/// clip; the `:sound` editor needs it to say how loud the clip will be, and a
+/// second `match` there would be a second answer to the same question — the kind
+/// that goes stale silently when a fourth mode is added.
+pub fn inject_mode(name: &str) -> Option<InjectMode> {
+    match name {
+        "hit" => Some(InjectMode::Hit),
+        "overlap" => Some(InjectMode::Overlap),
+        "trail" => Some(InjectMode::Trail),
+        _ => None,
+    }
+}
+
 /// One inject directive: start a sound at the place it was cut into, or fade
 /// out a running one from there.
 #[derive(Debug, Clone, PartialEq)]
@@ -1263,16 +1298,13 @@ pub fn injects_of(directives: &[Value], pool: &ClipPool, default_hold: f64) -> V
         let Some(entry) = pool.get(sound) else {
             continue;
         };
-        let Some(mode) = (match entry.mode.as_deref().unwrap_or("hit") {
-            "hit" => Some(InjectMode::Hit),
-            "overlap" => Some(InjectMode::Overlap),
-            "trail" => Some(InjectMode::Trail),
-            _ => None,
-        }) else {
+        let Some(mode) = inject_mode(entry.mode.as_deref().unwrap_or("hit")) else {
             continue;
         };
         let hold_s = entry.hold.filter(|h| *h > 0.0).unwrap_or(default_hold);
-        let level = entry.level.filter(|l| *l > 0.0).unwrap_or(1.0);
+        // The pool's trim, then the mode's. A `hit` is an event and keeps its
+        // level; an `overlap`/`trail` is a bed and renders at a tenth of it.
+        let level = entry.level.filter(|l| *l > 0.0).unwrap_or(1.0) * mode.gain();
         out.push(Inject::Start {
             sound: sound.to_string(),
             mode,
@@ -1507,7 +1539,8 @@ fn relayout(slots: &mut [Slot]) {
 }
 
 /// One placed inject: what plays, when, and how it ends. The level is the
-/// directive's own; the layer and operator gains are applied at render.
+/// directive's own — the pool's trim with [`InjectMode::gain`] already folded
+/// in — and the layer and operator gains are applied at render.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InjectEvent {
     pub sound: String,
@@ -3740,14 +3773,16 @@ mod tests {
                     sound: "boil".into(),
                     mode: InjectMode::Overlap,
                     hold_s: 2.0,
-                    level: 1.0
+                    level: 0.1
                 },
-                // `hold` and `level` come from the entry too, not the layer default.
+                // `hold` and `level` come from the entry too, not the layer
+                // default — and the level then takes the mode's gain, so a
+                // trail's 0.5 is rendered at 0.05.
                 Inject::Start {
                     sound: "rumble".into(),
                     mode: InjectMode::Trail,
                     hold_s: 3.0,
-                    level: 0.5
+                    level: 0.05
                 },
                 // No `mode` in the entry: the one default left is `hit`.
                 Inject::Start {
@@ -3773,7 +3808,7 @@ mod tests {
                 sound: "boil".into(),
                 mode: InjectMode::Overlap,
                 hold_s: 2.0,
-                level: 1.0
+                level: 0.1
             }],
         );
         // Absent, empty, malformed and unknown entries are silence, not errors —
@@ -3799,6 +3834,79 @@ mod tests {
         assert_eq!(
             injects_of(&[json!({"sound": "empty"})], &pool, 2.0).len(),
             1
+        );
+    }
+
+    /// An `overlap` and a `trail` are beds: they run *under* the speech, so they
+    /// render at a tenth of the level their pool entry carries. A `hit` owns the
+    /// silence it was written into and keeps its level.
+    ///
+    /// The gain belongs to the *mode*, so two clips of one mode keep their ratio
+    /// to each other — the pool's `level` stays the balance between them rather
+    /// than a second volume knob for the layer. And it is applied *after* the
+    /// `None`/zero rule, so a bed with no level of its own is 0.1, not 0.0: the
+    /// "a pool can never mute by arithmetic accident" promise survives it.
+    #[test]
+    fn a_bed_renders_at_a_tenth_of_its_level_and_a_hit_at_all_of_it() {
+        let pool: ClipPool = serde_json::from_value(json!({
+            "slam":  {"tags": ["x"], "files": ["injects/a.mp3"], "mode": "hit", "level": 0.8},
+            "boil":  {"tags": ["x"], "files": ["injects/b.mp3"], "mode": "overlap", "level": 0.5},
+            "wind":  {"tags": ["x"], "files": ["injects/c.mp3"], "mode": "trail"},
+            "quiet": {"tags": ["x"], "files": ["injects/d.mp3"], "mode": "overlap", "level": 0.0},
+        }))
+        .unwrap();
+        let levels: Vec<f64> = injects_of(
+            &[
+                json!({"sound": "slam"}),
+                json!({"sound": "boil"}),
+                json!({"sound": "wind"}),
+                json!({"sound": "quiet"}),
+            ],
+            &pool,
+            2.0,
+        )
+        .iter()
+        .map(|i| match i {
+            Inject::Start { level, .. } => *level,
+            Inject::Stop { .. } => unreachable!("no stops in this script"),
+        })
+        .collect();
+        assert_eq!(
+            levels,
+            vec![0.8, 0.05, 0.1, 0.1],
+            "a hit keeps its level; a bed takes a tenth of the entry's — or of \
+             the unity an absent or zero level resolves to"
+        );
+    }
+
+    /// An entry whose `mode` names nothing is silence, not a default. The pool
+    /// said something the mixer does not understand, and guessing `hit` would
+    /// play a length of clip nobody asked for. `inject_mode` returning `None` is
+    /// what makes that a skip — and it is now also the answer the `:sound`
+    /// editor's own validation reads, so the two cannot disagree about which
+    /// strings are modes.
+    #[test]
+    fn an_entry_with_an_unknown_mode_is_skipped_not_defaulted() {
+        let pool: ClipPool = serde_json::from_value(json!({
+            "loud": {"tags": ["x"], "files": ["injects/a.mp3"], "mode": "loud"},
+            "slam": {"tags": ["x"], "files": ["injects/b.mp3"], "mode": "hit"},
+        }))
+        .unwrap();
+        let got = injects_of(
+            &[json!({"sound": "loud"}), json!({"sound": "slam"})],
+            &pool,
+            2.0,
+        );
+        assert_eq!(
+            got.len(),
+            1,
+            "the unknown mode is dropped and the known one still plays: {got:?}"
+        );
+        assert_eq!(inject_mode("hit").map(|m| m.gain()), Some(1.0));
+        assert_eq!(inject_mode("trail").map(|m| m.gain()), Some(0.1));
+        assert!(
+            inject_mode("loud").is_none(),
+            "and it is one answer, not two"
         );
     }
 
@@ -3898,6 +4006,13 @@ mod tests {
         assert!((ev[3].start - 20.0).abs() < 1e-9);
         assert!((ev[3].end - (23.0 + 3.0)).abs() < 1e-9, "{ev:?}");
         assert!((ev[3].fade_out - 3.0).abs() < 1e-9, "stop_fade_s");
+        // The level the render multiplies by `layers.inject.level` is the pool's
+        // with the mode's gain already folded in — `boil` carries none (unity),
+        // `rumble` 0.5. Pinned here, at the far end of the pipeline from
+        // `injects_of`, because a gain that stopped halfway would still leave
+        // every test above passing.
+        assert!((ev[1].level - 0.1).abs() < 1e-9, "{ev:?}");
+        assert!((ev[3].level - 0.05).abs() < 1e-9, "{ev:?}");
     }
 
     #[test]

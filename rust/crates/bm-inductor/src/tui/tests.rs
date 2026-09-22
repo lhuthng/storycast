@@ -819,6 +819,31 @@ fn the_start_guard_outlives_the_start_job() {
     assert!(app.backend_start_outstanding);
 }
 
+#[test]
+fn cold_start_catches_up_every_box_despite_stale_online_states() {
+    // `:X`, restart, `:B`: the machine list is the last live poll's, states
+    // frozen `Online` (`state_failed` keeps the rows), inductor down. The
+    // old skip trusted those states and provisioned nothing — the backend
+    // came up with no workers and only a second `:B` (fresh states, Offline)
+    // brought the boxes.
+    use super::jobs::split_catchup;
+    let stale = || {
+        let mut lo = Machine::new("127.0.0.1", "me", 22, None, "worker");
+        lo.set_state(MachineState::Online);
+        let mut rmt = Machine::new("192.168.2.2", "thang", 22, None, "worker");
+        rmt.set_state(MachineState::Online);
+        vec![lo, rmt]
+    };
+    let (todo, online) = split_catchup(stale(), false, &|_| None);
+    assert_eq!(todo.len(), 2, "cold start provisions everything");
+    assert!(online.is_empty(), "nothing is known-online while down");
+    // ...and a warm `B` keeps the skip: re-provisioning a beating box is
+    // why `B` on a healthy cluster took minutes.
+    let (todo, online) = split_catchup(stale(), true, &|_| None);
+    assert!(todo.is_empty(), "nothing to catch up while healthy");
+    assert_eq!(online.len(), 2);
+}
+
 #[tokio::test]
 async fn machine_state_falls_back_to_the_workspace_ledger_while_down() {
     // Nothing answers on port 9 (discard): the API post fails fast and
@@ -1486,13 +1511,56 @@ fn log_heads_alias_machines_and_workers_but_not_sentences() {
 }
 
 #[test]
+fn retry_scopes_narrow_by_argument_and_refuse_a_bare_stage() {
+    // `:retry` is the only way to aim a requeue at one chapter from the main
+    // panel, so the parser has to be exact: a mistyped scope must leave the
+    // prompt open rather than quietly run the blanket retry.
+    fn retry(stage: Option<Stage>, chapter: Option<u32>) -> Option<Command> {
+        Some(Command::Retry { stage, chapter })
+    }
+    assert_eq!(
+        command_key("retry"),
+        retry(None, None),
+        "no argument is the blanket retry"
+    );
+    assert_eq!(command_key("retry 24"), retry(None, Some(24)));
+    assert_eq!(
+        command_key("retry render 24"),
+        retry(Some(Stage::Render), Some(24))
+    );
+    assert_eq!(
+        command_key("u merge 7"),
+        retry(Some(Stage::Merge), Some(7)),
+        "the single-letter form takes the same arguments"
+    );
+    assert_eq!(
+        command_key("retry RENDER 24"),
+        retry(Some(Stage::Render), Some(24)),
+        "stage names are case-insensitive"
+    );
+
+    // Refusals. Each would otherwise run something at the wrong scope, and the
+    // blanket retry is the dangerous direction: it forgives every strike in the
+    // ledger, so `:u render` must not reach it.
+    assert_eq!(command_key("retry render"), None, "a bare stage is refused");
+    assert_eq!(command_key("retry 0"), None, "chapter 0 is not a chapter");
+    assert_eq!(command_key("retry ch24"), None, "no `ch` prefix");
+    assert_eq!(command_key("retry r 24"), None, "no single-letter stages");
+    assert_eq!(command_key("retry render 24 extra"), None, "one scope only");
+    assert_eq!(command_key("retry boss 24"), None, "no such stage");
+}
+
+#[test]
 fn command_line_maps_keys_and_words() {
     assert_eq!(command_key("m"), Some(Command::Reconcile));
     assert_eq!(command_key("B"), Some(Command::Backend));
     assert_eq!(command_key("?"), Some(Command::Key(KeyCode::Char('?'))));
     assert_eq!(
         command_key("u"),
-        Some(Command::Retry),
+        Some(Command::Retry {
+            stage: None,
+            chapter: None
+        }),
         "single chars are commands"
     );
     assert_eq!(command_key("r"), Some(Command::Key(KeyCode::Char('r'))));
@@ -4232,7 +4300,7 @@ async fn a_rejected_entry_keeps_the_prompt_open_and_writes_nothing() {
 #[tokio::test]
 async fn a_level_edit_touches_only_the_level() {
     let http = reqwest::Client::new();
-    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let (_d, root) = sound_layout("level");
     let mut app = sound_app(&root);
     let rows = sound::rows(
@@ -4258,6 +4326,14 @@ async fn a_level_edit_touches_only_the_level() {
         "0.35",
     ));
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    // A retune is a sound-design change, and this is the one write the
+    // scheduler does not make — the pool registry is edited from the screen —
+    // so the inductor has to be told to look. Without this op the level moves
+    // and every published chapter keeps its old mix for ever.
+    match job_rx.try_recv().map(Job::into_bare) {
+        Ok(Job::Op { req, .. }) => assert_eq!(req.op, Op::SoundChanged),
+        other => panic!("expected a sound-changed op, got {other:?}"),
+    }
     let after = sound::rows(
         app.sound.as_ref().unwrap(),
         bm_core::audio_pool::PoolKind::Inject,
@@ -4277,6 +4353,11 @@ async fn a_level_edit_touches_only_the_level() {
         "",
     ));
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    // Clearing is an edit too: unity is a value, not the absence of one.
+    match job_rx.try_recv().map(Job::into_bare) {
+        Ok(Job::Op { req, .. }) => assert_eq!(req.op, Op::SoundChanged),
+        other => panic!("expected a sound-changed op, got {other:?}"),
+    }
     let cleared = sound::rows(
         app.sound.as_ref().unwrap(),
         bm_core::audio_pool::PoolKind::Inject,

@@ -64,10 +64,11 @@ storage** (artifacts + output), *not* Bedrock and *not* Polly for now.
 | **2a. S3 as the shared artifact store** | **`planned`** — still the gap |
 
 **My reading, to confirm:** today the cluster assumes one LAN: the inductor
-pushes sources, the sidecar's weights and the voices over `ssh`+`rsync`, the
-segment store lives on the
-inductor's disk (merge *affinity* pins merges to the local node), and `output/`
-lands on the inductor's disk. The goal is a cluster that survives the internet:
+pushes sources, the sidecar's weights and the voices over `ssh`+`rsync`, a
+chapter's segment store lives on the box that rendered it (merge *affinity* pins
+each merge to that box, since a merge reads segments it cannot be handed), and
+`output/` lands on the inductor's disk. The goal is a cluster that survives the
+internet:
 
 ### 2a. S3 as the shared artifact store
 

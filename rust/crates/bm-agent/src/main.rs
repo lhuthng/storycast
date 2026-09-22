@@ -169,9 +169,14 @@ impl Sidecar {
             // loading shared libraries", which reads as a missing model.
             .env("LD_LIBRARY_PATH", layout.tts_lib_dir())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            // Piped, not nulled: when the child dies mid-startup its last
+            // words name the cause (a missing lib says so plainly), and the
+            // failure below quotes them instead of reading identically every
+            // time.
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .with_context(|| format!("spawning TTS sidecar {}", bin.display()))?;
+        let mut stderr = child.stderr.take();
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_secs(5)).await;
             if self.serving_current().await {
@@ -179,7 +184,10 @@ impl Sidecar {
                 return Ok(());
             }
             if child.try_wait()?.is_some() {
-                anyhow::bail!("TTS sidecar exited during startup");
+                anyhow::bail!(
+                    "TTS sidecar exited during startup{}",
+                    child_stderr_tail(&mut stderr).await
+                );
             }
         }
         let _ = child.kill().await;
@@ -203,6 +211,29 @@ impl Sidecar {
             let _ = child.start_kill();
         }
     }
+}
+
+/// What a dead sidecar said as it died, or nothing when it said nothing.
+/// Tail, not head: the loader error lands last.
+async fn child_stderr_tail(stderr: &mut Option<tokio::process::ChildStderr>) -> String {
+    let Some(s) = stderr else {
+        return String::new();
+    };
+    let mut buf = String::new();
+    let _ = tokio::io::AsyncReadExt::read_to_string(s, &mut buf).await;
+    let t = buf.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    let tail: String = t
+        .chars()
+        .rev()
+        .take(300)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!(": {tail}")
 }
 
 // ---------------------------------------------------------------------------
