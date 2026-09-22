@@ -310,6 +310,100 @@ pub fn add_sample(
     Ok(log)
 }
 
+/// Bake clone voices the manifest declares but the pushed store lacks.
+///
+/// The disconnect this closes: `add_sample` enrolls into the venv package's
+/// preset file, while provision pushes (and warns against) the repo's
+/// `models/voices.json` — a different file. Without this merge, an enrolled
+/// voice warned forever ("declared in voices.json but missing from
+/// models/voices.json — fix it and run :prov again") and every render naming
+/// it failed on workers, no matter how often `:prov` ran.
+///
+/// Copies missing presets from the local enrollment's own files into the
+/// bake. Called at the top of `provision`, before the stamp is computed, so
+/// the `tts_hash` drift pushes the updated store to workers in the same run.
+/// Returns the names baked (empty = nothing to do). Voices enrolled nowhere
+/// stay missing — the provision warning still names exactly those.
+pub fn bake_missing_voices(root: &Path) -> Vec<String> {
+    let manifest: BTreeMap<String, String> = std::fs::read_to_string(root.join("voices.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let bake_path = root.join("models/voices.json");
+    let mut bake: serde_json::Value = std::fs::read_to_string(&bake_path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let Some(presets) = bake.get_mut("presets").and_then(|p| p.as_object_mut()) else {
+        return Vec::new();
+    };
+    let missing: Vec<String> = manifest
+        .keys()
+        .filter(|n| !n.starts_with('_') && !presets.contains_key(*n))
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        return Vec::new();
+    }
+    let stores = enrollment_stores(root);
+    if stores.is_empty() {
+        return Vec::new();
+    }
+    let mut baked = Vec::new();
+    for name in &missing {
+        for store in &stores {
+            let entry: Option<serde_json::Value> = std::fs::read_to_string(store)
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .and_then(|v: serde_json::Value| v.get("presets")?.get(name).cloned());
+            if let Some(entry) = entry {
+                presets.insert(name.clone(), entry);
+                baked.push(name.clone());
+                break;
+            }
+        }
+    }
+    if baked.is_empty() {
+        return Vec::new();
+    }
+    // Compact like the file already is (one line): nothing reorders, only
+    // the missing presets are added.
+    let text = serde_json::to_string(&bake).unwrap_or_default();
+    if crate::util::atomic_write(&bake_path, &text).is_err() {
+        return Vec::new();
+    }
+    baked.sort();
+    baked
+}
+
+/// Preset files the local enrollment writes to, turbo first: the venv
+/// package's own assets, found through the venv this checkout carries.
+/// Empty where there is no venv — then nothing can be baked.
+fn enrollment_stores(root: &Path) -> Vec<PathBuf> {
+    let layout = crate::Layout::new(root);
+    let Some(py) = layout.venv_python() else {
+        return Vec::new();
+    };
+    // `.venv/bin/python` -> `.venv`.
+    let Some(venv) = py.parent().and_then(|b| b.parent()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Ok(lib) = std::fs::read_dir(venv.join("lib")) {
+        let mut pydirs: Vec<PathBuf> = lib.filter_map(|e| e.ok().map(|x| x.path())).collect();
+        pydirs.sort();
+        for dir in pydirs {
+            for name in ["voices_v3_turbo.json", "voices_v3_nano.json"] {
+                let p = dir.join("site-packages/vieneu/assets").join(name);
+                if p.is_file() {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Enroll one sample into THIS machine's voice store, so renders use it
 /// immediately. Skips cleanly with no local venv — provision enrolls from
 /// `voices.json` then.
@@ -680,5 +774,71 @@ mod tests {
             candidates(&pool, &["old".to_string(), "male".to_string()]),
             vec!["Lão".to_string()]
         );
+    }
+
+    #[test]
+    fn bake_merges_only_manifest_voices_missing_from_the_store() {
+        // Wolf's box: enrolled in the venv store, absent from the pushed
+        // bake — the warning that never cleared. The bake copies exactly
+        // those, and a second run is a silent no-op.
+        let d = std::env::temp_dir().join("bm-pool-bake");
+        let _ = std::fs::remove_dir_all(&d);
+        let assets = d.join(".venv/lib/python3.12/site-packages/vieneu/assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::create_dir_all(d.join("models")).unwrap();
+        std::fs::create_dir_all(d.join(".venv/bin")).unwrap();
+        std::fs::write(d.join(".venv/bin/python"), b"x").unwrap();
+        std::fs::write(
+            d.join("voices.json"),
+            r#"{"Have":"refs/h.mp3","Want":"refs/w.mp3","Ghost":"refs/g.mp3","_note":"x"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("models/voices.json"),
+            r#"{"meta":{},"default_voice":"Have","presets":{"Have":{"emb":[1]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            assets.join("voices_v3_turbo.json"),
+            r#"{"presets":{"Want":{"emb":[2]},"Else":{"emb":[3]}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(bake_missing_voices(&d), vec!["Want".to_string()]);
+        let bake: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(d.join("models/voices.json")).unwrap())
+                .unwrap();
+        assert_eq!(bake["presets"]["Have"]["emb"], serde_json::json!([1]));
+        assert_eq!(bake["presets"]["Want"]["emb"], serde_json::json!([2]));
+        assert!(
+            bake["presets"].get("Else").is_none(),
+            "unmentioned presets never ride along"
+        );
+        assert!(
+            bake["presets"].get("Ghost").is_none(),
+            "enrolled nowhere stays missing for the warning"
+        );
+        // Idempotent: nothing missing, nothing written.
+        assert!(bake_missing_voices(&d).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bake_without_a_venv_or_bake_is_a_quiet_noop() {
+        let d = std::env::temp_dir().join("bm-pool-bake-none");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("models")).unwrap();
+        std::fs::write(d.join("voices.json"), r#"{"Want":"refs/w.mp3"}"#).unwrap();
+        std::fs::write(
+            d.join("models/voices.json"),
+            r#"{"presets":{"Have":{}}}"#,
+        )
+        .unwrap();
+        // No venv here, so nothing can be baked — and nothing breaks.
+        assert!(bake_missing_voices(&d).is_empty());
+        // No bake file at all: also nothing, not an error.
+        std::fs::remove_file(d.join("models/voices.json")).unwrap();
+        assert!(bake_missing_voices(&d).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

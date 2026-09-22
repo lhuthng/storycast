@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "bm-agent"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "bm-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "bm-proto",
@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "bm-inductor"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "bm-proto"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "bm-tts"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "axum",

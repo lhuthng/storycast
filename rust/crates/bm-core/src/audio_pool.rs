@@ -512,20 +512,22 @@ fn expand_value(v: &serde_json::Value, indent: usize) -> Result<String> {
     }
 }
 
-/// Best-overlap pick among the sounds matching `tags`, then one take of it.
+/// The sounds `pick` can return for `tags`: the maximum-overlap set, before
+/// `seed` decides which sound and which take.
 ///
-/// Scoring rather than set intersection: a scene tagged `[night, calm]` should
-/// prefer a sound tagged `[night, calm]` over one tagged `[night, dark]`, and
-/// `[night]` alone should still find either. A tie is broken by `seed`, so the
-/// choice varies between chapters without varying between two runs of the same
-/// chapter. The same seed then picks the take, so which of `day-1/2/3` plays is
-/// reproducible too.
+/// Empty when nothing overlaps — which is the same question as `pick` returning
+/// `None`, so the two share this answer instead of each computing it. That
+/// matters beyond tidiness: a caller that needs to know *what a scene can
+/// reach* (the sound-design fingerprint, `crate::design`) has to ask the same
+/// question the mix asks, and a second implementation of "which clip answers
+/// this tag" would be free to disagree with the mix about a chapter being
+/// current.
 ///
-/// `None` means "no suitable track", which the caller must read as *the layer
-/// is absent here* — never as "use a silent file".
-pub fn pick(pool: &ClipPool, tags: &[String], seed: u64) -> Option<Picked> {
+/// Name-sorted, because `ClipPool` is a `BTreeMap` — so the set is a stable
+/// value a caller may hash.
+pub fn candidates<'a>(pool: &'a ClipPool, tags: &[String]) -> Vec<(&'a str, &'a Sound)> {
     if tags.is_empty() {
-        return None;
+        return Vec::new();
     }
     let mut best = 0usize;
     let mut cands: Vec<(&str, &Sound)> = Vec::new();
@@ -550,6 +552,22 @@ pub fn pick(pool: &ClipPool, tags: &[String], seed: u64) -> Option<Picked> {
         }
         cands.push((name.as_str(), sound));
     }
+    cands
+}
+
+/// Best-overlap pick among the sounds matching `tags`, then one take of it.
+///
+/// Scoring rather than set intersection: a scene tagged `[night, calm]` should
+/// prefer a sound tagged `[night, calm]` over one tagged `[night, dark]`, and
+/// `[night]` alone should still find either. A tie is broken by `seed`, so the
+/// choice varies between chapters without varying between two runs of the same
+/// chapter. The same seed then picks the take, so which of `day-1/2/3` plays is
+/// reproducible too.
+///
+/// `None` means "no suitable track", which the caller must read as *the layer
+/// is absent here* — never as "use a silent file".
+pub fn pick(pool: &ClipPool, tags: &[String], seed: u64) -> Option<Picked> {
+    let cands = candidates(pool, tags);
     // The guard has to come *before* the index, not inside it: `seed % 0` panics,
     // and an empty `cands` is the ordinary case of a scene naming tags no sound
     // answers. `cands.get(..)?` looks like it handles this and does not, because

@@ -8,8 +8,10 @@
 //! "Loaded" is a pointer file, `.bm/profile` (`{name, hash}`), where `hash`
 //! is the manifest hash recomputed over the live tree. Anything that runs
 //! ([`verify`]) recomputes and compares: a hand-edited live tree, or a tree
-//! unpacked from a different profile, fails loudly with the fix named,
-//! instead of rendering one genre with another's sound design.
+//! unpacked from a different profile, is adopted (the pointer is re-stamped
+//! to the live hash) with a warning, instead of refusing to run. The live
+//! tree is the source of truth — `:sound` retunes it routinely — and
+//! `profile pack <name>` is the verb that saves it back to a bundle.
 //!
 //! Packing and unpacking (tar + zstd) live in `tools/profile.sh` — shell,
 //! like ssh/rsync/ffmpeg. This module only reads pointers and verifies.
@@ -204,22 +206,40 @@ pub fn write_pointer(root: &Path, pointer: &Pointer) -> Result<()> {
     Ok(())
 }
 
-/// The load gate: the pointer must exist and the live tree must still hash to
-/// what it claims. Anything that runs calls this first; the TUI (which loads
-/// and switches profiles) does not.
+/// The load gate: the pointer must exist. A drifted live tree (hand edit,
+/// `:sound` retune, different unpack) is adopted, not refused: the pointer
+/// is re-stamped to the live hash so the next run is clean, and the operator
+/// is told to `profile pack <name>` to save it back to a bundle. An empty
+/// live tree is still refused — that is a missing unpack, not an edit.
 pub fn verify(root: &Path) -> Result<Pointer> {
     let pointer = read_pointer(root)
         .with_context(|| "no profile loaded (.bm/profile missing) — load one before running")?;
     let live = hash_live(root).context("hashing the live profile tree")?;
-    let hash = manifest_hash(&live);
-    if hash != pointer.hash {
+    if live.is_empty() {
         anyhow::bail!(
-            "live {} + {} do not match profile '{}' (hash drift — hand edit or a different unpack; `profile load {}` to repair)",
+            "live {} + {} are missing or empty for profile '{}' — `profile load {}` to unpack it",
             LIVE_DIRS[0],
             LIVE_DIRS[1],
             pointer.name,
             pointer.name,
         );
+    }
+    let hash = manifest_hash(&live);
+    if hash != pointer.hash {
+        let updated = Pointer {
+            name: pointer.name.clone(),
+            hash: hash.clone(),
+        };
+        write_pointer(root, &updated)?;
+        eprintln!(
+            "warning: live {} + {} drifted from profile '{}' — adopting live tree ({}); `profile pack {}` to save it",
+            LIVE_DIRS[0],
+            LIVE_DIRS[1],
+            pointer.name,
+            &hash[..12.min(hash.len())],
+            pointer.name,
+        );
+        return Ok(updated);
     }
     Ok(pointer)
 }
@@ -290,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_passes_on_a_fresh_tree_and_fails_on_drift() {
+    fn verify_passes_on_a_fresh_tree_and_adopts_drift() {
         let dir = live_fixture("verify");
         let hash = manifest_hash(&hash_live(&dir).unwrap());
         write_pointer(
@@ -303,10 +323,14 @@ mod tests {
         .unwrap();
         assert_eq!(verify(&dir).unwrap().name, "fixture");
 
-        // A hand edit drifts the hash: the gate must refuse, naming the fix.
+        // A hand edit (e.g. a `:sound` retune) is adopted, not refused: the
+        // pointer is re-stamped so the next run is clean.
         std::fs::write(dir.join("prompts/analyze.txt"), "tampered").unwrap();
-        let err = verify(&dir).unwrap_err();
-        assert!(err.to_string().contains("profile load fixture"), "{err}");
+        let adopted = verify(&dir).unwrap();
+        assert_eq!(adopted.name, "fixture");
+        assert_eq!(adopted, read_pointer(&dir).unwrap());
+        // And the adopted pointer verifies cleanly afterwards.
+        assert_eq!(verify(&dir).unwrap(), adopted);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

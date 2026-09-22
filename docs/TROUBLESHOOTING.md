@@ -19,9 +19,17 @@ failure with the worker's own error text, and **K** shows it per task.
    worker's actual error (the full text, not a summary).
 2. Fix the cause. Then either `u` (retry: strikes reset) or `F`
    (force: also deletes the stage's partial output, e.g. a half-written
-   `script-NN.json`, so it truly runs again).
+   `script-NN.json`, so it truly runs again). A forced **merge** also forces
+   its render when the chapter has no published mp3 — a merge makes none of its
+   own input, so re-offering it alone fails again on the same box for the same
+   reason. The command line reaches the same three scopes: `:retry` is every
+   shelved task in the ledger, `:retry 24` is every shelved stage of one
+   chapter, `:retry render 24` is one task by name. Only the ledger's `F`
+   deletes anything; the `:retry` forms requeue.
 3. A task that failed 3 times is **shelved** on purpose — it stops starving the
-   healthy chapters until you retry it. It is not broken forever.
+   healthy chapters until you retry it. It is not broken forever. A shelved
+   chapter strands *every* stage of it, so a merge that keeps failing on input
+   it cannot get will shelve the whole chapter.
 
 Common causes per stage:
 
@@ -79,8 +87,28 @@ Common causes per stage:
     environment it started with and will not see it. Stop it and let the worker
     start a fresh one: `pkill -f tts_server.py` on that box. The `vieneu`
     engine reads no key and is unaffected.
-* **merge fails** — usually a missing segment (the render was interrupted and
-  the segment cache incomplete). Retry the render task first, then merge.
+* **merge fails** — usually `N segments missing in <seg dir> (e.g. <name>.wav)`.
+  A merge reads its segments **from the box that runs it**, and it makes none of
+  its own, so the question is always *which box* and *what does that box hold* —
+  not whether the cluster rendered the chapter. Two things produce the message:
+  * **the box never wrote them.** The merge is pinned by **affinity** to the box
+    that rendered the chapter, and the local node is exempt from that pin, so a
+    remote worker can pick up a merge whose segments are on the inductor's disk
+    and not its own. This is what a **voice swap** looks like from a remote box:
+    the swap invalidates the *local* store only, so the new narrator's title wav
+    is missing on a box that only ever had the old one. The message naming a
+    `title_<voice>.wav` is the tell.
+  * **the render did not finish the chapter.** A render offer used to carry only
+    the units the inductor's store lacked, so a box could end up holding a
+    strict subset; the offer now names every unit and the worker skips what it
+    already has, which makes any box that finishes a render hold the whole
+    chapter. A box on an older agent can still do this.
+  Fix with `F` on the merge row — it cascades to the render, which is the stage
+  that can actually make the wavs. The ledger's `u`/`F` work on a task in any
+  state; the `:retry` forms move **shelved** tasks only, so `:retry 24` on a
+  chapter whose merge merely failed says `no shelved tasks on ch24` and does
+  nothing. Once the chapter *is* shelved, `:retry render 24` then
+  `:retry merge 24` is the same repair two steps at a time.
 * **one character speaks with two voices** — the bible forked: title/case/
   description variants (`Huyền Vũ lão tổ`, `Sở Cuồng sư`) became separate
   entries. Press `:m` (reconcile): certain folds apply immediately, ambiguous
@@ -149,7 +177,8 @@ rule are in [AWS-IAM-USER.md](AWS-IAM-USER.md); the order to do things in is
    ride through and re-register. In-flight tasks are re-queued automatically.
 3. **Restart a worker** — its running task is reaped (~90 s) and re-offered.
 4. **Force a stage** — in the K ledger, `F` deletes that stage's artifact so it
-   re-runs end to end (a re-render only re-speaks segments missing from the
-   cache).
+   re-runs end to end (a re-render speaks only the units the box running it does
+   not already hold). A forced merge whose chapter has no published mp3 forces
+   its render too, because the merge makes none of its own input.
 5. **`requeue` op** — frees everything stranded on dead workers without
    waiting out leases. Attempts are kept (it unsticks, it does not forgive).

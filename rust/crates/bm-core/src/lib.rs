@@ -21,6 +21,7 @@ pub mod audio_pool;
 pub mod cast;
 pub mod config;
 pub mod crawl;
+pub mod design;
 pub mod digest;
 pub mod eta;
 pub mod paths;

@@ -7,6 +7,85 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const RSYNC_TIMEOUT_SECS: u64 = 1800;
 const RSYNC_IO_TIMEOUT: &str = "--timeout=120";
 
+/// How many times one transport call is attempted before a blip becomes an
+/// error. Provisioning used to fail a whole box on the first transient ssh
+/// timeout — one flap during `ensure_root` and `:prov` died, then the retry
+/// died on a different step, so re-running never converged.
+const TRANSPORT_ATTEMPTS: u32 = 4;
+/// Sleeps between attempts. The flap this rides out is seconds, not minutes;
+/// backed-off retries plus rsync's delta resume (a re-run only sends what is
+/// still missing) is what lets a 668 MB push converge on a lossy link.
+const TRANSPORT_BACKOFF_SECS: [u64; 3] = [2, 5, 10];
+
+/// True when a failed call smells like the network rather than the command:
+/// running the identical call again can succeed.
+///
+/// ssh reports its own transport failures as 255, rsync as 10/12/30 (or 255
+/// when its ssh dies first). Auth and host-key failures are deliberately NOT
+/// transient — retrying those four times only wastes the backoff.
+fn transient_failure(code: i32, stderr: &str) -> bool {
+    let t = stderr.to_lowercase();
+    if t.contains("permission denied") || t.contains("host key verification failed") {
+        return false;
+    }
+    let net = t.contains("timed out")
+        || t.contains("timeout")
+        || t.contains("connection reset")
+        || t.contains("broken pipe")
+        || t.contains("connection closed")
+        || t.contains("unexpectedly closed")
+        || t.contains("connection refused")
+        || t.contains("no route to host")
+        || t.contains("network is unreachable")
+        || t.contains("unexpected end of file")
+        || t.contains("socket io")
+        || t.contains("stalled mid-command");
+    net && (code == 255 || code == 10 || code == 12 || code == 30)
+}
+
+/// Run `call` up to [`TRANSPORT_ATTEMPTS`] times, backing off between
+/// attempts while the failure looks transient (see [`transient_failure`).
+/// A success or a non-transient failure returns at once; only the last
+/// transient failure surfaces, annotated with the attempt count.
+fn with_transport_retries<F>(mut call: F) -> Result<(i32, String, String)>
+where
+    F: FnMut() -> Result<(i32, String, String)>,
+{
+    // A runner-level `Err` is classified as a 255: `run_bounded` only errors
+    // on spawn (a missing local binary — not transient, fails fast) and on
+    // its own stall timeout ("timed out ... stalled mid-command" — transient,
+    // retries like any other blip).
+    for attempt in 1..=TRANSPORT_ATTEMPTS {
+        let last_attempt = attempt == TRANSPORT_ATTEMPTS;
+        match call() {
+            Ok((0, o, e)) => return Ok((0, o, e)),
+            Ok((code, _o, e)) if transient_failure(code, &e) && !last_attempt => {
+                backoff(attempt);
+                continue;
+            }
+            Ok((code, o, e)) if transient_failure(code, &e) => {
+                let e = format!("{e} [after {TRANSPORT_ATTEMPTS} attempts]");
+                return Ok((code, o, e));
+            }
+            Err(e) if transient_failure(255, &e.to_string()) && !last_attempt => {
+                backoff(attempt);
+                continue;
+            }
+            Err(e) if transient_failure(255, &e.to_string()) => {
+                return Err(e).context(format!("after {TRANSPORT_ATTEMPTS} attempts"));
+            }
+            other => return other,
+        }
+    }
+    unreachable!("loop always returns on the last attempt");
+}
+
+fn backoff(attempt: u32) {
+    std::thread::sleep(std::time::Duration::from_secs(
+        TRANSPORT_BACKOFF_SECS[(attempt - 1) as usize % TRANSPORT_BACKOFF_SECS.len()],
+    ));
+}
+
 /// The host-key policy, written once and used by both transports — `ssh` and
 /// the `ssh` that `rsync` spawns through `-e`.
 ///
@@ -157,7 +236,13 @@ impl Ssh {
         } else {
             format!("ssh to {}", self.target)
         };
-        run_bounded(&mut cmd, timeout_secs, &transport)
+        // Local shells never flap; remote ones do, and one blip must not fail
+        // a whole `:prov` run that converging retries would have saved.
+        if self.local {
+            run_bounded(&mut cmd, timeout_secs, &transport)
+        } else {
+            with_transport_retries(|| run_bounded(&mut cmd, timeout_secs, &transport))
+        }
     }
 
     /// The `-e` value rsync reaches the box through. It carries the *same*
@@ -216,16 +301,19 @@ impl Ssh {
         let mut tracker = progress.map(|p| {
             ProgressTracker::new(p.tx.clone(), self.target.clone(), p.label.to_string())
         });
-        let watch: OutputWatch<'_> = match tracker.as_mut() {
-            Some(t) => Some(&mut |out: &str, err: &str| t.on_output(out, err)),
-            None => None,
-        };
-        let (code, _, stderr) = run_bounded_live(
-            Command::new("rsync").args(&args),
-            RSYNC_TIMEOUT_SECS,
-            &format!("rsync push to {}", self.target),
-            watch,
-        )?;
+        let target = self.target.clone();
+        let (code, _, stderr) = with_transport_retries(|| {
+            let watch: OutputWatch<'_> = match tracker.as_mut() {
+                Some(t) => Some(&mut |out: &str, err: &str| t.on_output(out, err)),
+                None => None,
+            };
+            run_bounded_live(
+                Command::new("rsync").args(&args),
+                RSYNC_TIMEOUT_SECS,
+                &format!("rsync push to {target}"),
+                watch,
+            )
+        })?;
         if code != 0 {
             let hint = if stderr.contains("command not found") {
                 " — rsync is not on this box; install it, e.g. sudo apt install -y rsync"
@@ -276,19 +364,24 @@ impl Ssh {
             std::fs::create_dir_all(parent)?;
         }
         let src = format!("{}:{}/{remote_rel}", self.target, REMOTE_DIR);
-        let (code, _, stderr) = run_bounded(
-            Command::new("rsync").args([
-                "-az",
-                "--no-perms",
-                RSYNC_IO_TIMEOUT,
-                "-e",
-                &self.rsync_e(),
-                &src,
-                &dst.to_string_lossy(),
-            ]),
-            RSYNC_TIMEOUT_SECS,
-            &format!("rsync pull from {}", self.target),
-        )?;
+        let target = self.target.clone();
+        let e = self.rsync_e();
+        let dst_s = dst.to_string_lossy().to_string();
+        let (code, _, stderr) = with_transport_retries(|| {
+            run_bounded(
+                Command::new("rsync").args([
+                    "-az",
+                    "--no-perms",
+                    RSYNC_IO_TIMEOUT,
+                    "-e",
+                    &e,
+                    &src,
+                    &dst_s,
+                ]),
+                RSYNC_TIMEOUT_SECS,
+                &format!("rsync pull from {target}"),
+            )
+        })?;
         if code != 0 {
             anyhow::bail!(
                 "rsync pull failed: {} (from {}, exit {code})",
@@ -876,5 +969,50 @@ mod tests {
             std::fs::read_to_string(dst.join("a.txt")).unwrap(),
             "a longer body"
         );
+    }
+
+    #[test]
+    fn only_blips_retry_never_auth_or_host_key() {
+        // The exact strings a flapping link produces — and the two that must
+        // fail fast instead of burning four attempts of backoff.
+        for (code, stderr) in [
+            (255, "ssh: connect to host h port 22: Operation timed out"),
+            (255, "ssh: connect to host h port 22: Connection refused"),
+            (255, "Connection reset by peer"),
+            (255, "rsync: connection unexpectedly closed"),
+            (255, "rsync error: timeout waiting for daemon (30)"),
+            (10, "rsync error: error in socket IO (code 10)"),
+            (255, "client_loop: send disconnect: Broken pipe"),
+        ] {
+            assert!(transient_failure(code, stderr), "{stderr}");
+        }
+        for (code, stderr) in [
+            (255, "Permission denied (publickey)"),
+            (255, "Host key verification failed."),
+            (1, "Operation timed out"),
+        ] {
+            assert!(!transient_failure(code, stderr), "{stderr}");
+        }
+    }
+
+    #[test]
+    fn transport_retries_a_blip_then_returns_success() {
+        // One 2 s backoff, then the identical call succeeds — the flap `:prov`
+        // used to die on.
+        let mut n = 0;
+        let (code, _, _) = with_transport_retries(|| {
+            n += 1;
+            if n < 2 {
+                Ok((
+                    255,
+                    String::new(),
+                    "ssh: connect to host h port 22: Operation timed out".into(),
+                ))
+            } else {
+                Ok((0, "ok".into(), String::new()))
+            }
+        })
+        .unwrap();
+        assert_eq!((code, n), (0, 2));
     }
 }

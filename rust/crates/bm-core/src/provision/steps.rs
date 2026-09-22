@@ -43,6 +43,11 @@ pub struct Probe {
     /// machine record written before this field still reads.
     #[serde(default)]
     pub tts_bin_present: bool,
+    /// The ONNX Runtime `libonnxruntime.so.1` beside the binary. Linux links
+    /// it dynamically — a binary without it dies on startup — while macOS
+    /// links statically and never has it, so readiness only demands it there.
+    #[serde(default)]
+    pub tts_lib_present: bool,
     /// A baked `~/{REMOTE_DIR}/models/` — the Rust sidecar's weights.
     #[serde(default)]
     pub models_present: bool,
@@ -76,7 +81,14 @@ impl Probe {
 
     /// The TTS sidecar is installed and has its weights.
     pub fn rust_ready(&self) -> bool {
-        self.tts_bin_present && self.models_present
+        self.tts_bin_present && self.models_present && self.tts_runtime_ok()
+    }
+
+    /// The loader is satisfied. A binary-without-lib box reads as not-ready,
+    /// so the next `:prov` repairs it (binary + lib + a verification run)
+    /// instead of confirming a sidecar that dies on startup.
+    pub fn tts_runtime_ok(&self) -> bool {
+        self.os != "linux" || self.tts_lib_present
     }
 
     /// Which sidecar this box would run, for the TUI's summary line.
@@ -232,6 +244,11 @@ if [ -x "$HOME/{dir}/bm-tts" ]; then
 else
   echo "tts_bin=absent"
 fi
+if [ -f "$HOME/{dir}/libonnxruntime.so.1" ]; then
+  echo "tts_lib=present"
+else
+  echo "tts_lib=absent"
+fi
 if [ -f "$HOME/{dir}/models/manifest.json" ]; then
   echo "models=present"
 else
@@ -287,6 +304,7 @@ echo "probe=done"
                         "agent" if v != "absent" => probe.agent_version = Some(v.to_string()),
                         "python" => probe.python_present = v == "present",
                         "tts_bin" => probe.tts_bin_present = v == "present",
+                        "tts_lib" => probe.tts_lib_present = v == "present",
                         "models" => probe.models_present = v == "present",
                         "ffmpeg" => probe.ffmpeg_present = v == "present",
                         "voices" => {
@@ -740,6 +758,22 @@ pub fn provision(
         return (probe, log.lines);
     }
 
+    // Self-healing enrollment: the manifest may name clones the pushed store
+    // lacks (added or swapped since the last bake). Merging them here — before
+    // the stamp — means the hash drift pushes the fix to workers in this same
+    // run, instead of warning forever no matter how often `:prov` runs.
+    // Voices enrolled nowhere stay missing; the warning below still names
+    // exactly those.
+    let baked = crate::pool::bake_missing_voices(&layout.root);
+    if !baked.is_empty() {
+        log.push(format!(
+            "[{}] baked {} voice(s) into models/voices.json: {}",
+            m.id,
+            baked.len(),
+            baked.join(", ")
+        ));
+    }
+
     let local_stamp = compute_provision_stamp(&layout.root, agent_version);
     let remote_stamp = probe.stamp.as_ref();
 
@@ -808,7 +842,7 @@ pub fn provision(
             }
         }
 
-        if !probe.tts_bin_present || force {
+        if !probe.tts_bin_present || !probe.tts_runtime_ok() || force {
             log.push(format!(
                 "[{}] installing the TTS sidecar binary + runtime",
                 m.id
@@ -1202,6 +1236,31 @@ mod tests {
         assert_eq!(p.sidecar(), "rust");
 
         assert!(!p.configured("0.3.0"), "a stale agent is never configured");
+    }
+
+    #[test]
+    fn a_linux_binary_without_its_runtime_is_not_ready() {
+        // Wolf's box: binary + models present, libonnxruntime never landed.
+        // The old gate read that as configured, so `:prov` confirmed a
+        // sidecar that dies on startup instead of repairing it.
+        let mut p = Probe {
+            reachable: true,
+            agent_version: Some("0.2.0".into()),
+            tts_bin_present: true,
+            models_present: true,
+            os: "linux".into(),
+            ..Default::default()
+        };
+        assert!(!p.tts_runtime_ok());
+        assert!(!p.rust_ready());
+        assert!(!p.configured("0.2.0"));
+        assert_eq!(p.sidecar(), "none");
+        p.tts_lib_present = true;
+        assert!(p.configured("0.2.0"));
+        // macOS links statically: no lib, still ready.
+        p.os = "macos".into();
+        p.tts_lib_present = false;
+        assert!(p.configured("0.2.0"));
     }
 
     /// The two flags are independent, so a box can report both without either

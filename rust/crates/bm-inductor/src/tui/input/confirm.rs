@@ -158,7 +158,19 @@ pub(crate) async fn key_confirm(
                 ConfirmAction::SoundRemove(r) => {
                     // Sets the screen itself: answering this dialog returns to
                     // the pool tab it was asked from, not to the dashboard.
-                    crate::tui::input::sound::apply_removal(app, r.layer, &r.name, r.view);
+                    if crate::tui::input::sound::apply_removal(app, r.layer, &r.name, r.view) {
+                        // A clip left the registry, so a published chapter that
+                        // played it no longer matches the design on disk.
+                        dispatch_op(
+                            app,
+                            job_tx,
+                            http,
+                            OpRequest {
+                                op: Op::SoundChanged,
+                                ..Default::default()
+                            },
+                        );
+                    }
                 }
             }
         }

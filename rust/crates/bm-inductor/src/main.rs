@@ -471,8 +471,9 @@ async fn cmd_serve(
     let drive_layout = layout.clone();
     let drive_root = drive_layout.root.clone();
     let mut inner = state::Inner::new(layout, settings);
-    // No profile, no run: the live tree is ignored and may be absent or
-    // drifted — refuse before touching the ledger, naming the fix.
+    // No profile, no run. A drifted live tree is adopted by verify
+    // (a `:sound` retune), not refused — only a missing pointer or an
+    // empty live tree stops us before touching the ledger.
     let pointer = bm_core::profile::verify(&inner.layout.root)?;
     println!(
         "profile {} ({})",

@@ -370,15 +370,22 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
         }
         bm_proto::Op::Retry => {
             let mut inner = st.lock().await;
-            // The blanket retry forgives every shelved task. When a chapter is
-            // named, it narrows to that one task instead — which is what the
-            // Tasks screen sends, so one bad digest never re-queues the batch.
+            // Three scopes, narrowing in this order. A stage + chapter is one
+            // task — what the Tasks screen sends, so one bad digest never
+            // re-queues the batch. A chapter alone is every shelved stage of it
+            // (`:retry 24`). A stage with no chapter is refused rather than
+            // widened to the whole ledger: silently doing more than was asked
+            // is the failure this shape exists to avoid.
             match (req.stage, req.chapter) {
                 (Some(stage), Some(chapter)) => Json(OpResult::ok(inner.op_retry_task(
                     stage,
                     chapter,
                     req.force.unwrap_or(false),
                 ))),
+                (None, Some(chapter)) => Json(OpResult::ok(inner.op_retry_chapter(chapter))),
+                (Some(_), None) => Json(OpResult::fail(
+                    "retry needs a chapter when a stage is named",
+                )),
                 _ => Json(OpResult::ok(inner.op_retry_shelved())),
             }
         }
@@ -420,6 +427,13 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                 Ok(msg) => Json(OpResult::ok(msg)),
                 Err(e) => Json(OpResult::fail(format!("remix failed: {e:#}"))),
             }
+        }
+        bm_proto::Op::SoundChanged => {
+            // No `ensure_idle`: nothing here writes a voice or a cache. It
+            // reads the registries and requeues merges, which is the ordinary
+            // queue operation the scheduler does all day.
+            let mut inner = st.lock().await;
+            Json(OpResult::ok(inner.op_sound_changed()))
         }
         bm_proto::Op::Rerender => {
             let mut inner = st.lock().await;
@@ -762,6 +776,37 @@ fn offline_remix_apply(
         .op_remix(speed, effect_volume, music_volume, inject_volume)
         .map(|m| format!("{m} [offline — inductor was down]"))
         .map_err(|e| e.to_string())
+}
+
+/// A sound-design write with no scheduler to notice it.
+///
+/// `:sound` writes the registries itself, so the write succeeds whether or not
+/// the inductor is up — but the invalidation is the *scheduler's* work, and
+/// without this path an edit made while the inductor was down would go
+/// unnoticed until the next boot. That was survivable while adoption at boot
+/// was the only mechanism; it is not survivable now that a boot can adopt an
+/// unstamped merge, so the same op runs against a throwaway `Inner` here.
+///
+/// No `local_workers_alive` guard, unlike the swap and remix paths: those two
+/// delete a voice's cached segments, which a running worker can be mid-write
+/// on. This deletes published mp3s and requeues — the ordinary queue traffic.
+pub(crate) async fn offline_sound_changed(
+    api: &str,
+    layout: &bm_core::Layout,
+) -> Result<String, String> {
+    if super::backend::inductor_up(api).await {
+        return Err(
+            "inductor is back — sound changes go through it (this path is for inductor-down only)"
+                .into(),
+        );
+    }
+    let settings = bm_core::config::Settings::load(&layout.settings());
+    let mut inner = Inner::new(layout.clone(), settings);
+    inner.load_ledger();
+    Ok(format!(
+        "{} [offline — inductor was down]",
+        inner.op_sound_changed()
+    ))
 }
 
 /// Build the client used for every TTS-sidecar call.
@@ -1567,6 +1612,15 @@ mod tests {
         let layout = bm_core::Layout::new(d.path());
         std::fs::create_dir_all(layout.output()).unwrap();
         std::fs::write(layout.final_mp3(1), b"old mix").unwrap();
+        // A published merge implies a script existed: the design fingerprint is
+        // computed from it, so without one the chapter has no mix to invalidate
+        // and the requeue would be a no-op for a reason that has nothing to do
+        // with the remix.
+        std::fs::write(
+            layout.script(1),
+            r#"{"segments":[{"speaker":"A","text":"Chương 1"}]}"#,
+        )
+        .unwrap();
         bm_core::write_json(
             &layout.ledger(),
             &serde_json::json!({"tasks": [
@@ -1681,6 +1735,127 @@ mod tests {
             res.message.contains("Adam"),
             "name the voice: {}",
             res.message
+        );
+    }
+
+    /// The ledger as `id -> state`, sorted so a diff reads as a ledger diff.
+    async fn ledger(st: &Shared) -> Vec<(String, &'static str)> {
+        let inner = st.lock().await;
+        let mut out: Vec<(String, &'static str)> = inner
+            .tasks
+            .iter()
+            .map(|(id, t)| (id.clone(), t.state.as_str()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    async fn shelve(st: &Shared, chapter: u32, stage: bm_proto::Stage) {
+        let mut inner = st.lock().await;
+        let mut t = bm_proto::Task::new(chapter, stage);
+        t.state = bm_proto::TaskState::Shelved;
+        t.attempts = 3;
+        inner.tasks.insert(t.id(), t);
+    }
+
+    /// `Op::Retry` carries three scopes on one request shape, so the *dispatch*
+    /// is what decides how much a single call touches. The TUI parses the
+    /// argument and the state layer does the work; this is the seam between
+    /// them, and it is where a stage with no chapter must refuse rather than
+    /// widen to every chapter of that stage.
+    #[tokio::test]
+    async fn retry_dispatch_narrows_by_scope_and_refuses_a_bare_stage() {
+        let (_d, layout) = one_run_layout();
+        let st = segment_state(&layout);
+        shelve(&st, 24, bm_proto::Stage::Render).await;
+        shelve(&st, 24, bm_proto::Stage::Digest).await;
+        shelve(&st, 25, bm_proto::Stage::Digest).await;
+
+        let call = |stage, chapter, force| {
+            op(
+                State(st.clone()),
+                Json(OpRequest {
+                    op: bm_proto::Op::Retry,
+                    stage,
+                    chapter,
+                    force,
+                    ..Default::default()
+                }),
+            )
+        };
+
+        // A stage on its own: refused, and the refusal is inert. Widening it
+        // would silently requeue every chapter of that stage.
+        let res = call(Some(bm_proto::Stage::Render), None, None).await;
+        assert!(!res.0.ok, "{}", res.0.message);
+        assert!(
+            res.0.message.contains("needs a chapter"),
+            "say what is missing: {}",
+            res.0.message
+        );
+        assert_eq!(
+            ledger(&st).await,
+            [
+                ("digest:24".to_string(), "shelved"),
+                ("digest:25".to_string(), "shelved"),
+                ("render:24".to_string(), "shelved"),
+            ],
+            "a refused scope must not move a single task"
+        );
+
+        // A chapter alone: every shelved stage of it, and nothing else.
+        let res = call(None, Some(24), None).await;
+        assert!(res.0.ok, "{}", res.0.message);
+        assert_eq!(
+            ledger(&st).await,
+            [
+                ("digest:24".to_string(), "pending"),
+                ("digest:25".to_string(), "shelved"),
+                ("render:24".to_string(), "pending"),
+            ],
+            "ch25 is untouched"
+        );
+
+        // Stage + chapter: exactly one task — what the Tasks screen sends.
+        // Both of ch24's stages are shelved again so that "one task" and "every
+        // shelved stage of the chapter" cannot produce the same ledger: a
+        // chapter-wide dispatch would take `digest:24` too.
+        shelve(&st, 24, bm_proto::Stage::Render).await;
+        shelve(&st, 24, bm_proto::Stage::Digest).await;
+        let res = call(Some(bm_proto::Stage::Render), Some(24), None).await;
+        assert!(res.0.ok, "{}", res.0.message);
+        assert_eq!(
+            ledger(&st).await,
+            [
+                ("digest:24".to_string(), "shelved"),
+                ("digest:25".to_string(), "shelved"),
+                ("render:24".to_string(), "pending"),
+            ],
+            "the named task moves and its sibling stage does not"
+        );
+
+        // Neither: the blanket retry, which is what a bare `:retry` means.
+        let res = call(None, None, None).await;
+        assert!(res.0.ok, "{}", res.0.message);
+        assert_eq!(
+            ledger(&st).await,
+            [
+                ("digest:24".to_string(), "pending"),
+                ("digest:25".to_string(), "pending"),
+                ("render:24".to_string(), "pending"),
+            ],
+            "the blanket scope reaches the other chapter"
+        );
+
+        // `force` has to survive the wire, or the Tasks screen's `F` is a plain
+        // requeue and the stale artifact it was meant to clear stays in place.
+        // The message is the observable: only a forced retry says so.
+        let res = call(Some(bm_proto::Stage::Render), Some(24), Some(true)).await;
+        assert!(res.0.ok, "{}", res.0.message);
+        assert!(
+            res.0.message.contains("forced re-run"),
+            "force must reach the state layer: {}",
+            res.0.message
         );
     }
 }

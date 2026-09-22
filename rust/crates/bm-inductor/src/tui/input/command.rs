@@ -8,7 +8,7 @@ use crate::tui::{
     screen::{CastView, CloudView, Confirm, ConfirmAction, Picker, Screen, TextKind, TextPrompt},
     style::{Conn, Level},
 };
-use bm_proto::{Op, OpRequest};
+use bm_proto::{Op, OpRequest, Stage};
 use crossterm::event::KeyCode;
 use std::sync::{atomic::AtomicBool, Arc};
 
@@ -34,7 +34,13 @@ pub(crate) enum Command {
     SwapVoice,
     Cast,
     Eta,
-    Retry,
+    /// Requeue shelved work: everything, one chapter, or one task. `stage`
+    /// and `chapter` together name one task; `chapter` alone narrows to that
+    /// chapter; neither is the whole ledger.
+    Retry {
+        stage: Option<Stage>,
+        chapter: Option<u32>,
+    },
     Reconcile,
     Backend,
     Stop,
@@ -105,7 +111,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: Some('s'), names: &["swap"], desc: Some("repoint one character — destructive, see below"), cmd: Command::SwapVoice },
     Word { key: Some('S'), names: &["cast"], desc: Some("cast overview: every speaker × voice, read-only"), cmd: Command::Cast },
     Word { key: Some('e'), names: &["eta"], desc: Some("estimate the remaining wall-clock time"), cmd: Command::Eta },
-    Word { key: Some('u'), names: &["retry"], desc: Some("requeue every shelved task — strikes reset"), cmd: Command::Retry },
+    Word { key: Some('u'), names: &["retry"], desc: Some("requeue every shelved task — strikes reset; `:retry 24` narrows to one chapter, `:retry render 24` to one task"), cmd: Command::Retry { stage: None, chapter: None } },
     Word { key: Some('m'), names: &["reconcile"], desc: Some("fold duplicates — asks first; certain folds apply, ambiguous only listed"), cmd: Command::Reconcile },
     Word { key: Some('B'), names: &["backend"], desc: Some("backend up now, machines provision in background and join as ready"), cmd: Command::Backend },
     Word { key: None, names: &["mix"], desc: Some("story speed and fx/music/inject volumes — requeues every merge"), cmd: Command::Mix },
@@ -156,10 +162,10 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
         // presses the key and every context behaves like it was typed.
         return Some(Command::Key(KeyCode::Char(c)));
     }
-    // Commands that take an argument. Only `up` does today (`:up 3`), and
-    // `down force` is the escape hatch past the in-flight guard. A bad argument
-    // is `None`, which keeps the prompt open with "unknown command" rather than
-    // launching a wrong count.
+    // Commands that take an argument: `:up 3`, `down force`, and the retry
+    // scopes (`:retry`, `:retry 24`, `:retry render 24`). A bad argument is
+    // `None`, which keeps the prompt open with "unknown command" rather than
+    // running the wrong thing at the wrong scope.
     let mut parts = word.split_whitespace();
     if let Some(head) = parts.next() {
         let rest: Vec<&str> = parts.collect();
@@ -176,6 +182,7 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
                     .eq_ignore_ascii_case("force")
                     .then_some(Command::AwsDown { force: true });
             }
+            "retry" | "u" if !rest.is_empty() => return retry_scope(&rest),
             _ => {}
         }
     }
@@ -184,6 +191,34 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
         .iter()
         .find(|w| w.names.iter().any(|n| *n == lower))
         .map(|w| w.cmd)
+}
+
+/// `:retry <chapter>` / `:retry <stage> <chapter>` → the command that names
+/// them. `rest` is already non-empty.
+///
+/// A stage on its own is refused rather than widened to every chapter of that
+/// stage: `:remerge` and `:rerender` already mean exactly that, and a typo
+/// should not reach them. A chapter of 0, an unknown stage name and a third
+/// argument are all `None`, which leaves the prompt open.
+fn retry_scope(rest: &[&str]) -> Option<Command> {
+    let (stage, chapter) = match rest {
+        [chapter] => (None, *chapter),
+        [stage, chapter] => (Some(stage_by_name(stage)?), *chapter),
+        _ => return None,
+    };
+    Some(Command::Retry {
+        stage,
+        chapter: Some(chapter.parse::<u32>().ok().filter(|n| *n > 0)?),
+    })
+}
+
+/// A stage name as the task ledger spells it (`crawl`, `digest`, `render`,
+/// `merge`). Single letters are deliberately not accepted: they are live keys
+/// on other screens, so `:u r 24` reads as a typo rather than as a scope.
+fn stage_by_name(s: &str) -> Option<Stage> {
+    Stage::ALL
+        .into_iter()
+        .find(|st| st.as_str().eq_ignore_ascii_case(s))
 }
 
 /// Run a `:` operator command. `Command::Key` never arrives here — the caller
@@ -449,13 +484,15 @@ pub(crate) fn do_command(
                 },
             );
         }
-        Command::Retry => {
+        Command::Retry { stage, chapter } => {
             dispatch_op(
                 app,
                 job_tx,
                 http,
                 OpRequest {
                     op: Op::Retry,
+                    stage,
+                    chapter,
                     ..Default::default()
                 },
             );

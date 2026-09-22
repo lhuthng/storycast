@@ -19,7 +19,7 @@
 //! would block editing for the whole of a long run.
 
 use crate::tui::style::Level;
-use bm_core::ambience::{SceneMap, UseOf};
+use bm_core::ambience::{inject_mode, SceneMap, UseOf};
 use bm_core::audio_pool::{self, ClipPool, PoolKind, Sound};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -144,6 +144,23 @@ impl SoundRow {
                 s
             }
         }
+    }
+
+    /// What the mix multiplies this entry's level by, or `None` when it plays at
+    /// the level as written.
+    ///
+    /// A bed renders at a tenth of its registry level ([`InjectMode::gain`]), so
+    /// that number is the *design* value and not the loudness — an operator
+    /// reading `level 0.8` off an `overlap` row is out by 20 dB.
+    ///
+    /// Deliberately not folded into [`Self::shape`]: that string is a table cell
+    /// 23 columns wide, and `overlap · ×0.1 · loops · 51s` would push the
+    /// duration off the end of it. The detail line under the table is full width,
+    /// and it is where an operator looks before pressing `l`.
+    pub(crate) fn render_gain(&self) -> Option<f64> {
+        inject_mode(self.sound.mode.as_deref().unwrap_or("hit"))
+            .map(|m| m.gain())
+            .filter(|g| *g != 1.0)
     }
 
     /// The compact form, for the table's status column: whether the entry is
@@ -488,9 +505,12 @@ pub(crate) fn parse_entry(
             "looped" => looped = Some(parse_bool(value)?),
             "level" => level = Some(parse_level(value)?),
             "mode" => {
-                if !["hit", "overlap", "trail"].contains(&value) {
+                // Asked of the mixer rather than of a list here: a fourth mode
+                // would otherwise have to be added in two crates, and the one
+                // that was forgotten would accept a value the mix then skips.
+                if inject_mode(value).is_none() {
                     return Err(format!(
-                        "mode “{value}” unknown — hit (holds the whole clip), overlap (runs under the speech), trail (holds, then ducks)"
+                        "mode “{value}” unknown — hit (holds the whole clip), overlap (runs under the speech), trail (holds, then ducks). overlap and trail render at a tenth of their level"
                     ));
                 }
                 mode = Some(value.to_string());
@@ -1003,6 +1023,40 @@ mod tests {
         .unwrap();
         assert_eq!(s.mode.as_deref(), Some("overlap"));
         assert_eq!(s.hold, Some(1.5));
+    }
+
+    /// A bed does not play at the level its entry carries — the mode takes a
+    /// tenth (`InjectMode::gain`), and `render_gain` is what the detail line
+    /// under the table says so with.
+    ///
+    /// Both halves are asserted, because the second is a layout decision that is
+    /// invisible until someone folds the two back together: `shape` is a
+    /// 23-column cell and must not carry the factor.
+    #[test]
+    fn a_bed_renders_at_a_tenth_and_the_table_cell_does_not_say_so() {
+        let row = |mode: Option<&str>, level: Option<f64>| SoundRow {
+            name: "boil".into(),
+            sound: Sound {
+                looped: true,
+                dur_s: Some(51.0),
+                mode: mode.map(str::to_string),
+                level,
+                ..sound(&["injects/boil-1.mp3"], &["water"])
+            },
+            uses: Vec::new(),
+            missing: Vec::new(),
+        };
+        assert_eq!(row(Some("overlap"), Some(0.8)).render_gain(), Some(0.1));
+        assert_eq!(row(Some("trail"), Some(0.5)).render_gain(), Some(0.1));
+        assert_eq!(row(Some("hit"), Some(0.8)).render_gain(), None);
+        // No `mode` at all is the mixer's `hit` default: nothing to say.
+        assert_eq!(row(None, Some(1.0)).render_gain(), None);
+        // And the table cell stays exactly as wide as it was: this is 21 of its
+        // 23 columns, so there is no room for a factor in it.
+        assert_eq!(
+            row(Some("overlap"), Some(0.8)).shape(PoolKind::Inject),
+            "overlap · loops · 51s"
+        );
     }
 
     #[test]
