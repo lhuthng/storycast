@@ -8,6 +8,7 @@ mod roster;
 mod segments;
 mod state;
 mod tui;
+mod tunnel;
 
 use bm_core::{config::Settings, Layout};
 use bm_proto::Machine;
@@ -516,6 +517,12 @@ async fn cmd_serve(
     // asked, and this is the only thing that asks.
     let driving = shared.clone();
     tokio::spawn(async move { dispatch::run(driving, drive_layout).await });
+    // The reverse tunnels: one ssh client per remote box, forwarding the
+    // box's own loopback hook port to this API. A worker uses it only when
+    // this process has gone silent on every normal channel (see
+    // `bm-agent/src/hook.rs`) — holding it open costs one idle ssh per box,
+    // and gives a finished stage a road home when the uplink blips mid-task.
+    tokio::spawn(tunnel::supervise(shared.clone(), port));
     // Auto-relink once at startup: an EC2 box that cycled while this inductor
     // was down is sitting in the registry at an address that no longer answers.
     // Best-effort — no account, no creds or an offline CLI only means the
@@ -677,14 +684,13 @@ fn sources_newer_than(dir: &std::path::Path, built: std::time::SystemTime) -> bo
             if sources_newer_than(&p, built) {
                 return true;
             }
-        } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
-            if std::fs::metadata(&p)
+        } else if p.extension().and_then(|x| x.to_str()) == Some("rs")
+            && std::fs::metadata(&p)
                 .and_then(|m| m.modified())
                 .map(|t| t > built)
                 .unwrap_or(false)
-            {
-                return true;
-            }
+        {
+            return true;
         }
     }
     false

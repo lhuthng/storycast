@@ -14,6 +14,7 @@ mod ledger;
 mod observe;
 mod offer;
 mod ops;
+mod plan;
 mod reconcile;
 mod relink;
 
@@ -30,6 +31,28 @@ fn lease_for(stage: Stage) -> u64 {
         .find(|(s, _)| *s == stage)
         .map(|(_, l)| *l)
         .unwrap_or(600)
+}
+
+/// How much longer than the stage's own lease one **batched** assignment may
+/// run before it counts as stuck.
+///
+/// A batch is `n` takes of one chapter on one box, so a fixed deadline would
+/// expire under a worker that is simply working through a long batch — and the
+/// reaper would then hand the same takes to a second box, which re-speaks them
+/// (TTS is stochastic, so the two do not even agree on the bytes) for nothing.
+///
+/// It is not `n ×` the single-take lease either. That value is a "this is
+/// definitely stuck" bound rather than an estimate — a take is seconds to a
+/// minute, and the render lease is 5400 s — so multiplying it by the largest
+/// batch would leave a genuinely dead worker's chapter stranded for most of a
+/// day. Growth stops here.
+const LEASE_BATCH_MAX_FACTOR: u64 = 4;
+
+/// The lease for an assignment covering `n` takes of `stage`.
+fn lease_for_batch(stage: Stage, n: usize) -> u64 {
+    let base = lease_for(stage);
+    base.saturating_mul(n.max(1) as u64)
+        .min(base.saturating_mul(LEASE_BATCH_MAX_FACTOR))
 }
 
 /// Maximum number of events kept in memory. Older entries fall off the front.
@@ -81,9 +104,39 @@ pub struct Inner {
     /// In-memory like the beats — a fresh window beats stale history,
     /// the same reason the file estimator only reads the last 20.
     pub stats: StatsAgg,
+    /// Ledger rows this build could not deserialise, kept **verbatim** and
+    /// re-emitted on every save.
+    ///
+    /// `load_new_shape` reads each row with
+    /// `if let Ok(task) = serde_json::from_value::<Task>(..)` — a row that fails
+    /// produces no error, no event and no count. That is survivable on its own;
+    /// what is not survivable is the `save()` that follows, which wrote the
+    /// shortened ledger back and turned a read problem into permanent loss. The
+    /// live library is thousands of rows, so any future field added to `Task`
+    /// without `#[serde(default)]` would delete it on the next start, quietly.
+    ///
+    /// Carrying the raw `Value`s through makes that impossible and needs no
+    /// operator step: the row is preserved exactly as written, the event below
+    /// makes it visible, and a build that *can* read it will pick it up again on
+    /// the next load. Re-derived from the file on each load rather than stored
+    /// separately, so the file stays the one source of truth.
+    pub unreadable_tasks: Vec<serde_json::Value>,
 }
 
 /// Per-worker per-stage completions, with a capped run of durations.
+///
+/// **`durations` is scoped to one *offer*, not one unit of work**, and that is
+/// deliberate — but it is also the number easiest to misuse. For crawl, digest
+/// and merge an offer is a chapter, so a duration is a chapter's cost. For
+/// render an offer is `Settings::render_batch` takes, so the same field holds a
+/// *batch's* cost and its magnitude moves with the batch size.
+///
+/// Its one consumer agrees with it: the Stats pane's ETA column is
+/// `median(offer) × (1 - progress)` where `progress` is the fraction of the
+/// current offer, so both halves of that product are offer-scoped. Feeding this
+/// number into anything counted in takes — `:eta` does exactly that, and gets
+/// its seconds from `bm_core::eta::secs_per_unit`, which normalises by `units`
+/// — would be off by the batch size.
 #[derive(Debug, Default)]
 pub struct StatsAgg {
     counts: HashMap<String, HashMap<String, u64>>,
@@ -218,6 +271,276 @@ mod tests {
         assert_eq!(disk, disk2, "reload must not rewrite");
     }
 
+    #[test]
+    fn a_ledger_written_before_batching_loads_every_row() {
+        // **The load path where a new field can destroy the library.** The live
+        // ledger is thousands of rows and none of them carries a `batch` key —
+        // the field arrived with batching. `load_new_shape` deserialises with
+        // `if let Ok(task) = from_value::<Task>(..)`, so a field that did *not*
+        // default would not raise anything: it would drop every row, and the
+        // next `save()` would write the empty result back over them. The rows
+        // below are copied verbatim out of `workspaces/beyond-myriads/ledger.json`
+        // — a render row at the current shape, and a crawl row at the oldest
+        // shape (no `take`, no `design`) — so this is anchored to the real file
+        // rather than to an imagined one.
+        let (_d, mut inner) = fixture();
+        let ledger = inner.layout.ledger();
+        let rows = serde_json::json!([
+            {
+                "affinity": null, "assigned_to": null, "attempts": 0, "chapter": 53,
+                "design": null, "detail": "", "lease_until": null, "stage": "render",
+                "state": "done", "take": 5, "updated": 1790069024
+            },
+            {
+                "chapter": 1, "stage": "crawl", "state": "done", "attempts": 0,
+                "assigned_to": null, "lease_until": null, "detail": "ok",
+                "updated": 1790069000
+            }
+        ]);
+        bm_core::write_json(
+            &ledger,
+            &serde_json::json!({
+                "tasks": rows, "machine_state": {}, "workers": {}, "caps": {},
+                "profile": null
+            }),
+        )
+        .unwrap();
+
+        inner.load_ledger();
+        assert_eq!(
+            inner.tasks.len(),
+            2,
+            "a row without `batch` must still load — a dropped row says nothing"
+        );
+        let take = &inner.tasks["render:53:5"];
+        assert!(
+            take.batch.is_empty(),
+            "the new field defaults to no grouping"
+        );
+        assert_eq!(take.take, Some(5), "and the fields around it are untouched");
+        assert_eq!(take.state, TaskState::Done);
+        let crawl = &inner.tasks["crawl:1"];
+        assert_eq!(
+            (crawl.take, crawl.design.is_none(), crawl.batch.is_empty()),
+            (None, true, true),
+            "the same defaulting that let `take` and `design` arrive"
+        );
+
+        // The write side carries it, so a fresh ledger round-trips instead of
+        // holding the field only in memory.
+        inner.save();
+        let back: Value = bm_core::read_json(&ledger).unwrap();
+        let written = back["tasks"].as_array().unwrap();
+        assert_eq!(written.len(), 2, "and saving does not drop them either");
+        assert!(
+            written
+                .iter()
+                .all(|r| r.get("batch").and_then(|b| b.as_array()).is_some()),
+            "every row is written with the field: {written:?}"
+        );
+    }
+
+    #[test]
+    fn a_ledger_row_this_build_cannot_read_is_kept_not_dropped() {
+        // **The failure mode this closes.** `load_new_shape` reads each row with
+        // `if let Ok(task) = from_value::<Task>(..)`, so an unreadable row
+        // disappeared with no error, no event and no count — and then `save()`
+        // wrote the shortened ledger back over the full one. With thousands of
+        // rows in the live library, any future field added to `Task` without
+        // `#[serde(default)]` would delete it on the next start, quietly.
+        let (_d, mut inner) = fixture();
+        let ledger = inner.layout.ledger();
+        let good = serde_json::json!({
+            "chapter": 1, "stage": "crawl", "state": "done", "attempts": 0,
+            "assigned_to": null, "lease_until": null, "detail": "ok",
+            "updated": 1790069000
+        });
+        // A state this build does not know — exactly what a newer inductor's row
+        // looks like to an older one. `stage`/`chapter` stay readable, which is
+        // also what lets the event name the row.
+        let unknown = serde_json::json!({
+            "chapter": 7, "stage": "render", "state": "quarantined", "attempts": 2,
+            "assigned_to": "w1", "lease_until": 1790000000, "detail": "from the future",
+            "updated": 1790069500, "take": 3, "batch": ["render:7:4"]
+        });
+        bm_core::write_json(
+            &ledger,
+            &serde_json::json!({
+                "tasks": [good.clone(), unknown.clone()], "machine_state": {},
+                "workers": {}, "caps": {}, "profile": null
+            }),
+        )
+        .unwrap();
+
+        inner.load_ledger();
+        assert_eq!(inner.tasks.len(), 1, "the row this build understands");
+        assert!(inner.tasks.contains_key("crawl:1"));
+        assert_eq!(
+            inner.unreadable_tasks.len(),
+            1,
+            "and the one it does not is held"
+        );
+        assert_eq!(
+            inner.unreadable_tasks[0], unknown,
+            "preserved, not reinterpreted"
+        );
+        assert!(
+            inner
+                .recent_events(10)
+                .iter()
+                .any(|e| e.text.contains("render:7")),
+            "and named in the events, so it is not a silent surprise: {:?}",
+            inner
+                .recent_events(10)
+                .iter()
+                .map(|e| &e.text)
+                .collect::<Vec<_>>()
+        );
+
+        // **The write is the moment the library used to shrink.**
+        inner.save();
+        let back: Value = bm_core::read_json(&ledger).unwrap();
+        let rows = back["tasks"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "both rows survive the round trip");
+        // The two rows are treated differently on purpose, and that is the whole
+        // design: a row this build *understands* is rewritten in the current
+        // schema (it gains `affinity`/`design`/`take`/`batch` if it lacked them),
+        // while a row it does not is preserved untouched. So the assertion is
+        // structural equality only for the one that was never parsed.
+        assert!(
+            rows.contains(&unknown),
+            "the unreadable one, intact: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r["stage"] == "crawl" && r["chapter"] == 1),
+            "and the readable one is still there, re-serialised in full: {rows:?}"
+        );
+
+        // Reloading must not duplicate it: the preserved set is re-derived from
+        // the file on each load, not accumulated across them.
+        let mut again = Inner::new(inner.layout.clone(), Settings::default());
+        again.load_ledger();
+        assert_eq!(
+            again.unreadable_tasks.len(),
+            1,
+            "no accumulation across loads"
+        );
+        assert_eq!(again.tasks.len(), 1);
+        again.save();
+        let back: Value = bm_core::read_json(&ledger).unwrap();
+        assert_eq!(
+            back["tasks"].as_array().unwrap().len(),
+            2,
+            "still two after a second load/save cycle"
+        );
+    }
+
+    #[test]
+    fn a_ledger_of_only_unreadable_rows_is_not_an_empty_ledger() {
+        // `check_profile` passes an *empty* ledger and lets reconcile adopt the
+        // workspace's profile. Reading a ledger we could not fully parse as
+        // empty would stamp this book's profile over rows that may belong to
+        // another one — the mixing that gate exists to prevent.
+        let (_d, mut inner) = fixture();
+        inner.settings.profile = ptr("xianxia", "aaa");
+        let ledger = inner.layout.ledger();
+        let unknown = serde_json::json!({
+            "chapter": 3, "stage": "render", "state": "quarantined", "attempts": 0,
+            "assigned_to": null, "lease_until": null, "detail": "", "updated": 1
+        });
+        bm_core::write_json(
+            &ledger,
+            &serde_json::json!({
+                "tasks": [unknown], "machine_state": {}, "workers": {}, "caps": {},
+                "profile": {"name": "khac", "hash": "bbb"}
+            }),
+        )
+        .unwrap();
+
+        inner.load_ledger();
+        assert!(inner.tasks.is_empty(), "nothing readable");
+        assert_eq!(
+            inner.unreadable_tasks.len(),
+            1,
+            "but the ledger is not empty"
+        );
+        let err = inner
+            .check_profile()
+            .expect_err("a foreign ledger is refused, unreadable rows included")
+            .to_string();
+        assert!(
+            err.contains("khac"),
+            "and the foreign profile is named: {err}"
+        );
+    }
+
+    /// A **real** ledger round-trips through the real load/save path.
+    ///
+    /// The one check that protects the library itself. `load_new_shape` + `save`
+    /// is the pair that can shrink a ledger, and a synthetic fixture cannot prove
+    /// it on a file with thousands of rows in every shape the project has ever
+    /// written — including rows from builds that predate fields this one has.
+    ///
+    /// Opt-in and pointed at a *file*, so it never depends on a checkout's live
+    /// state. **Point it at a copy**: it writes through `save()` into the same
+    /// directory it read from, which is the point — that is the real path.
+    ///
+    /// ```text
+    /// cp workspaces/<name>/ledger.json /tmp/ledger.json
+    /// BM_LEDGER_ROUNDTRIP=/tmp/ledger.json cargo test -p bm-inductor \
+    ///   --bin bm-inductor a_real_ledger_round_trips -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "writes through save(); point BM_LEDGER_ROUNDTRIP at a COPY of a real ledger"]
+    fn a_real_ledger_round_trips() {
+        let Ok(src) = std::env::var("BM_LEDGER_ROUNDTRIP") else {
+            panic!("set BM_LEDGER_ROUNDTRIP to a copy of a real ledger.json");
+        };
+        let src = std::path::PathBuf::from(src);
+        let before: Value = serde_json::from_str(&std::fs::read_to_string(&src).unwrap())
+            .expect("parse the ledger");
+        let rows_before = before["tasks"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert!(rows_before > 0, "{} has no tasks to check", src.display());
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::new(dir.path());
+        std::fs::create_dir_all(layout.bm_state()).unwrap();
+        std::fs::create_dir_all(layout.data()).unwrap();
+        std::fs::write(layout.bible(), r#"{"characters":[]}"#).unwrap();
+        std::fs::copy(&src, layout.ledger()).unwrap();
+
+        let mut inner = Inner::new(layout.clone(), Settings::default());
+        inner.load_ledger();
+        let read = inner.tasks.len();
+        let held = inner.unreadable_tasks.len();
+        inner.save();
+
+        let after: Value = bm_core::read_json(&layout.ledger()).unwrap();
+        let rows_after = after["tasks"].as_array().unwrap().len();
+        println!("rows: {rows_before} in · {read} read · {held} preserved · {rows_after} written");
+        assert_eq!(
+            rows_after, rows_before,
+            "the write must not change the row count — this is the moment a ledger shrinks"
+        );
+        assert_eq!(
+            held, 0,
+            "every row of a real ledger should be readable by the current build; \
+             a non-zero here is the unreadable-row path doing its job, and is worth reading"
+        );
+
+        // A second cycle must be stable: no growth, no loss.
+        let mut again = Inner::new(layout.clone(), Settings::default());
+        again.load_ledger();
+        again.save();
+        let after2: Value = bm_core::read_json(&layout.ledger()).unwrap();
+        assert_eq!(
+            after2["tasks"].as_array().unwrap().len(),
+            rows_before,
+            "the second cycle is stable too"
+        );
+    }
+
     fn ptr(name: &str, hash: &str) -> bm_core::profile::Pointer {
         bm_core::profile::Pointer {
             name: name.into(),
@@ -344,6 +667,10 @@ mod tests {
         std::fs::write(seg.join("0000-0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
         std::fs::write(seg.join("0002_Adam.wav"), vec![0u8; 2000]).unwrap();
         std::fs::write(layout.final_mp3(1), vec![0u8; 2000]).unwrap();
+        // The routine pass has already recorded what these files are — which
+        // is what lets the swap say "only A's take changed" instead of "I
+        // cannot prove any of this".
+        inner.materialize_render_takes(1);
 
         let msg = inner.op_swap_voice("A", "Minh Triết").unwrap();
         assert!(msg.contains("Đức Trí -> Minh Triết"), "{msg}");
@@ -356,7 +683,10 @@ mod tests {
             "other voices keep cache"
         );
         assert!(!layout.final_mp3(1).exists(), "stale product goes away");
-        assert_eq!(inner.tasks["render:1"].state, TaskState::Pending);
+        // One row per take: A's run is work again, B's is untouched.
+        assert_eq!(inner.tasks["render:1:0"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["render:1:1"].state, TaskState::Done);
+        assert!(!inner.render_takes_done(1));
         assert_eq!(inner.tasks["merge:1"].state, TaskState::Pending);
         // The swap's *meaning* is checked through the reader (which resolves
         // keys back to names), and the stored form is checked directly — the
@@ -390,6 +720,7 @@ mod tests {
         std::fs::create_dir_all(&seg).unwrap();
         std::fs::write(seg.join("0000_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
         std::fs::write(seg.join("0001_Adam.wav"), vec![0u8; 2000]).unwrap();
+        inner.materialize_render_takes(1);
         for (stage, state) in [
             (Stage::Crawl, TaskState::Done),
             (Stage::Digest, TaskState::Done),
@@ -422,9 +753,14 @@ mod tests {
 
         inner.op_swap_voice("A", "Minh Triết").unwrap();
         assert_eq!(
-            inner.tasks["render:1"].affinity.as_deref(),
+            inner.tasks["render:1:0"].affinity.as_deref(),
             Some("192.168.2.2"),
             "re-render stays where the chapter is"
+        );
+        assert_eq!(
+            inner.tasks["render:1:1"].state,
+            TaskState::Done,
+            "B's take is not work: the swap only reached A"
         );
         assert_eq!(
             inner.tasks["merge:1"].affinity.as_deref(),
@@ -437,38 +773,35 @@ mod tests {
             "a cold box must not re-speak the whole chapter for a swap"
         );
         let offer = inner.offer("warm-a").expect("warm box takes its re-render");
-        assert_eq!(offer.task_id, "render:1");
+        assert_eq!(offer.task_id, "render:1:0", "one take, A's");
         let units = offer.render_units.as_ref().expect("planned, not legacy");
-        let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
-        assert_eq!(
-            offer.render_force.len(),
-            1,
-            "only the swapped voice is forced, got {:?}",
+        assert_eq!(units.len(), 1, "a single segment travels: {units:?}");
+        assert_eq!(units[0].speaker, "A", "and it is the swapped speaker's");
+        assert_eq!(units[0].voice, "Minh Triết", "speaking the new voice");
+        assert!(
+            units[0].name.starts_with("t-"),
+            "content-addressed, so the name is the proof: {}",
+            units[0].name
+        );
+        assert_eq!(units[0].take_key.len(), 16);
+        assert!(
+            offer.render_force.is_empty(),
+            "a content-addressed take needs no forcing: {:?}",
             offer.render_force
         );
+        assert!(!offer.cast_hash.is_empty(), "the voice collection travels too");
         assert!(
-            names.contains(&offer.render_force[0].as_str()),
-            "forced file is one of the chapter's units: {:?}",
-            offer.render_force
-        );
-        assert!(
-            offer.render_force[0].contains("Minh Tri"),
-            "forced file is the new voice: {:?}",
-            offer.render_force
-        );
-        assert!(
-            !offer.render_force[0].contains("Adam"),
-            "untouched voices are never forced: {:?}",
-            offer.render_force
+            seg.join("0001_Adam.wav").is_file(),
+            "untouched voices keep their cache"
         );
 
         // The local node steals pinned renders, like pinned merges.
-        let t = inner.tasks.get_mut("render:1").unwrap();
+        let t = inner.tasks.get_mut("render:1:0").unwrap();
         t.state = TaskState::Pending;
         t.assigned_to = None;
         t.lease_until = None;
         let offer = inner.offer("lo-w").expect("local takes pinned renders");
-        assert_eq!(offer.task_id, "render:1");
+        assert_eq!(offer.task_id, "render:1:0");
         assert!(offer.local_node);
     }
 
@@ -498,21 +831,24 @@ mod tests {
         inner
             .workers
             .insert("remote-w".into(), "192.168.2.2".into());
-        let mut t = Task::new(7, Stage::Render);
+        // The plan adopts the cache that is already here, so the takes are
+        // `Done`; put the first one back in flight to exercise the report.
+        inner.materialize_render_takes(7);
+        let mut t = Task::new_take(7, 0);
         t.state = TaskState::Running;
         t.assigned_to = Some("remote-w".into());
-        inner.tasks.insert("render:7".into(), t);
+        inner.tasks.insert(t.id(), t);
 
         inner.complete(&completion(
             "remote-w",
-            "render:7",
+            "render:7:0",
             true,
-            "render ch7 (2 calls)",
+            "render ch7 (1 calls)",
         ));
         assert_eq!(
-            inner.tasks["render:7"].state,
+            inner.tasks["render:7:0"].state,
             TaskState::Done,
-            "gate passes: files are home"
+            "gate passes: the take's file is home"
         );
         assert_eq!(
             inner.tasks["merge:7"].affinity.as_deref(),
@@ -532,15 +868,16 @@ mod tests {
         std::fs::create_dir_all(&seg8).unwrap();
         std::fs::write(seg8.join("0000_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
         std::fs::write(seg8.join("0001_Adam.wav"), vec![0u8; 2000]).unwrap();
-        let mut t = Task::new(8, Stage::Render);
+        inner.materialize_render_takes(8);
+        let mut t = Task::new_take(8, 0);
         t.state = TaskState::Running;
         t.assigned_to = Some("ghost".into());
-        inner.tasks.insert("render:8".into(), t);
+        inner.tasks.insert(t.id(), t);
         inner.complete(&completion(
             "ghost",
-            "render:8",
+            "render:8:0",
             true,
-            "render ch8 (2 calls)",
+            "render ch8 (1 calls)",
         ));
         assert_eq!(
             inner.tasks["merge:8"].affinity.as_deref(),
@@ -631,6 +968,121 @@ mod tests {
         assert_eq!(offer.task_id, "render:5");
         assert!(!offer.local_node, "192.168.2.2 is not the local node");
         assert!(offer.render_units.is_some(), "planned, not legacy");
+    }
+
+    /// A beat with the load fields this scheduler reads, and nothing else.
+    fn beat_with_load(worker: &str, addr: &str, mem_pct: Option<f32>) -> bm_proto::Heartbeat {
+        let mut h: bm_proto::Heartbeat = serde_json::from_value(serde_json::json!({
+            "worker_id": worker,
+            "addr": addr,
+            "progress": 0.0,
+            "activity": "idle",
+            "ts": now_secs(),
+        }))
+        .expect("a beat needs only the required fields");
+        h.mem_pct = mem_pct;
+        h
+    }
+
+    #[test]
+    fn offer_withholds_a_box_the_oom_killer_is_circling() {
+        // The guardrail for the boxes this repo actually runs: one TTS sidecar
+        // is ~2.85 GB resident, so a box over the ceiling is one that will not
+        // finish what it is handed. Withheld, not failed — nothing moves and
+        // the same task is offered to the next box that asks.
+        let (_d, mut inner) = fixture();
+        inner.workers.insert("w1".into(), "192.168.2.2".into());
+        inner.caps.insert("w1".into(), vec!["crawl".into()]);
+        inner.tasks.insert("crawl:5".into(), Task::new(5, Stage::Crawl));
+        // The offer marks it `Assigned`; put it back so the next box can take it.
+        let rearm = |inner: &mut Inner| {
+            let t = inner.tasks.get_mut("crawl:5").unwrap();
+            t.state = TaskState::Pending;
+            t.assigned_to = None;
+            t.lease_until = None;
+        };
+
+        // No opinion is not a verdict: an agent that never measured (older
+        // agents, a registration) is offered work exactly as before.
+        assert!(inner.offer("w1").is_some(), "an unmeasured box still works");
+        rearm(&mut inner);
+
+        inner
+            .beats
+            .insert("w1".into(), beat_with_load("w1", "192.168.2.2", Some(50.0)));
+        assert!(inner.offer("w1").is_some(), "a working box is fed");
+        rearm(&mut inner);
+
+        inner
+            .beats
+            .insert("w1".into(), beat_with_load("w1", "192.168.2.2", Some(94.0)));
+        assert!(
+            inner.offer("w1").is_none(),
+            "a box at 94% gets nothing — it would fail the task and strike the chapter"
+        );
+        // Untouched, not stranded: still Pending with no assignee, so the next
+        // box that asks can have it, and this one keeps it after it settles.
+        let t = inner.tasks.get("crawl:5").unwrap();
+        assert_eq!(t.state, TaskState::Pending);
+        assert!(t.assigned_to.is_none());
+    }
+
+    #[test]
+    fn a_duplicate_sidecar_is_an_event_on_the_edge_not_on_every_beat() {
+        // Two `bm-tts` on one box is the OOM this cluster kept taking, and the
+        // count is the one fact it could not see. The dispatcher polls every
+        // couple of seconds, so this must fire on the transition — an event per
+        // poll is a log nobody reads, and one that never fires is why the bug
+        // survived.
+        let (_d, mut inner) = fixture();
+        let errors = |inner: &Inner| {
+            inner
+                .recent_events(50)
+                .into_iter()
+                .filter(|e| e.level == "error" && e.text.contains("bm-tts"))
+                .count()
+        };
+
+        let mut h = beat_with_load("w1", "192.168.2.2", Some(70.0));
+        h.sidecars = Some(2);
+        h.sidecar_gb = Some(5.7);
+        inner.observe(&h);
+        assert_eq!(errors(&inner), 1, "a duplicate must be reported");
+        assert!(
+            inner
+                .recent_events(50)
+                .iter()
+                .any(|e| e.text.contains("5.7 GB")),
+            "the cost is named, not just the count"
+        );
+
+        // Same wrong count again: polling must not become a log flood.
+        inner.observe(&h);
+        inner.observe(&h);
+        assert_eq!(errors(&inner), 1, "one event per occurrence, not per beat");
+
+        // It settles, then recurs: a new edge, so it is reported again.
+        h.sidecars = Some(1);
+        inner.observe(&h);
+        h.sidecars = Some(2);
+        inner.observe(&h);
+        assert_eq!(errors(&inner), 2, "a recurrence is news again");
+
+        // An older agent reports nothing; that is not "was fine", so a box
+        // whose first sighting is already wrong still fires.
+        let mut fresh = fixture().1;
+        let mut old = beat_with_load("w2", "192.168.2.3", None);
+        old.sidecars = Some(3);
+        fresh.observe(&old);
+        assert_eq!(
+            fresh
+                .recent_events(50)
+                .into_iter()
+                .filter(|e| e.level == "error" && e.text.contains("bm-tts"))
+                .count(),
+            1,
+            "a first sighting of a duplicate is still a duplicate"
+        );
     }
 
     #[test]
@@ -1192,12 +1644,13 @@ mod tests {
     }
 
     #[test]
-    fn swap_skips_a_chapter_whose_store_is_complete_and_current() {
-        // Doc test 10, the narrowing: A speaks here and the local store is
-        // already complete for the post-swap cast, with no stale files to
-        // delete (the files got ahead of the cast file — a previous render
-        // landed but the assignment never updated). Requeueing would re-speak
-        // units that are already correct, so the chapter is left alone.
+    fn swap_leaves_a_chapter_the_character_is_not_in_alone() {
+        // The narrowing that survives content addressing: **relevance**, not
+        // "the local store looks complete". The old rule read the disk, and the
+        // disk cannot prove that a legacy-named file holds the current text —
+        // that is the whole reason takes are content-addressed now. What a swap
+        // can still say for certain is that a chapter this character never
+        // speaks in did not change.
         let (_d, mut inner) = fixture();
         let layout = inner.layout.clone();
         std::fs::write(
@@ -1205,29 +1658,31 @@ mod tests {
             r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"A","text":"y"}]}"#,
         )
         .unwrap();
-        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
         let seg = layout.seg_dir("vieneu", 11);
         std::fs::create_dir_all(&seg).unwrap();
-        std::fs::write(seg.join("0000-0001_Minh Triết.wav"), vec![0u8; 2000]).unwrap();
-        std::fs::write(layout.final_mp3(11), vec![0u8; 2000]).unwrap();
-        for stage in [Stage::Render, Stage::Merge] {
-            let mut t = Task::new(11, stage);
-            t.state = TaskState::Done;
-            inner.tasks.insert(format!("{stage}:11"), t);
+        inner.materialize_render_takes(11);
+        let plan = bm_core::assemble::RenderPlan::load(&layout.plan(11)).unwrap();
+        for t in &plan.takes {
+            std::fs::write(seg.join(&t.file), vec![0u8; 2000]).unwrap();
         }
+        inner.materialize_render_takes(11);
+        assert!(inner.render_takes_done(11));
+        std::fs::write(layout.final_mp3(11), vec![0u8; 2000]).unwrap();
+        inner.ensure_task(11, Stage::Merge).state = TaskState::Done;
 
-        let msg = inner.op_swap_voice("A", "Minh Triết").unwrap();
+        // B speaks nowhere in this chapter: its voices cannot have moved.
+        let msg = inner.op_swap_voice("B", "Minh Triết").unwrap();
         assert!(
-            !msg.contains("11"),
-            "complete store, no stale files: untouched: {msg}"
+            !msg.contains("[11]"),
+            "a chapter that does not hear B is untouched: {msg}"
         );
         assert!(layout.final_mp3(11).exists(), "product stays");
-        assert!(
-            seg.join("0000-0001_Minh Triết.wav").exists(),
-            "current files stay"
-        );
-        assert_eq!(inner.tasks["render:11"].state, TaskState::Done);
+        assert!(inner.render_takes_done(11), "the takes stay done");
         assert_eq!(inner.tasks["merge:11"].state, TaskState::Done);
+        for t in &plan.takes {
+            assert!(seg.join(&t.file).is_file(), "audio stays: {}", t.file);
+        }
     }
 
     #[test]
@@ -1262,13 +1717,17 @@ mod tests {
             Some(serde_json::json!({"segments":[{"speaker":"A","text":"a rewritten line here"}]}));
         inner.complete(&c);
 
-        assert_eq!(inner.tasks["render:12"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["render:12:0"].state, TaskState::Pending);
         assert_eq!(
-            inner.tasks["render:12"].attempts, 0,
+            inner.tasks["render:12:0"].attempts, 0,
             "new work, not a retry"
         );
         assert_eq!(inner.tasks["merge:12"].state, TaskState::Pending);
+        // A known invalidation never adopts: the old bytes are superseded, not
+        // mistaken for the new take because the legacy name happened to match.
         assert!(!seg.join("0000_Adam.wav").exists(), "stale segments go");
+        let plan = bm_core::assemble::RenderPlan::load(&layout.plan(12)).unwrap();
+        assert!(plan.takes[0].file.starts_with("t-"), "{}", plan.takes[0].file);
         assert!(!layout.final_mp3(12).exists(), "stale product goes");
     }
 
@@ -1298,7 +1757,7 @@ mod tests {
         c.script = Some(serde_json::from_str(script).unwrap());
         inner.complete(&c);
 
-        assert_eq!(inner.tasks["render:12"].state, TaskState::Done);
+        assert_eq!(inner.tasks["render:12:0"].state, TaskState::Done);
         assert_eq!(inner.tasks["merge:12"].state, TaskState::Done);
         assert!(seg.join("0000_Adam.wav").exists(), "nothing touched");
         assert!(layout.final_mp3(12).exists(), "product stays");
@@ -1319,6 +1778,7 @@ mod tests {
         std::fs::write(seg.join("0000_Adam.wav"), vec![0u8; 2000]).unwrap();
         std::fs::write(seg.join("0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
         std::fs::write(layout.final_mp3(13), vec![0u8; 2000]).unwrap();
+        inner.materialize_render_takes(13);
         for stage in [Stage::Render, Stage::Merge] {
             let mut t = Task::new(13, stage);
             t.state = TaskState::Done;
@@ -1339,7 +1799,16 @@ mod tests {
             "other runs keep cache"
         );
         assert!(!layout.final_mp3(13).exists(), "stale product goes");
-        assert_eq!(inner.tasks["render:13"].state, TaskState::Pending);
+        assert_eq!(
+            inner.tasks["render:13:0"].state,
+            TaskState::Pending,
+            "the retagged run re-speaks"
+        );
+        assert_eq!(
+            inner.tasks["render:13:1"].state,
+            TaskState::Done,
+            "and only it"
+        );
         assert_eq!(inner.tasks["merge:13"].state, TaskState::Pending);
 
         // Second run is a no-op: deterministic convergence.
@@ -1373,13 +1842,13 @@ mod tests {
     }
 
     #[test]
-    fn planned_units_names_every_unit_regardless_of_this_store() {
-        // Doc test 1: 32 units in the chapter, 32 in the offer — this store's
-        // contents do not enter into it. It used to be the difference against
-        // this store, and that is what left a remote box holding a strict
-        // subset: it received only the units this store lacked, none of the
-        // others, and the merge pinned to it failed on `N segments missing`.
-        let (_d, inner) = fixture();
+    fn a_chapter_becomes_one_task_per_take_and_adopts_its_cache() {
+        // The unit of render work is a **take**, not a chapter. A local edit
+        // therefore re-speaks one segment instead of shipping the chapter and
+        // hoping the worker re-derives the same names — and the *first* plan
+        // adopts the cache already on disk, so writing one does not re-speak
+        // the library.
+        let (_d, mut inner) = fixture();
         let layout = inner.layout.clone();
         let mut segs = Vec::new();
         for i in 0..32u32 {
@@ -1396,7 +1865,8 @@ mod tests {
         std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
         let seg = layout.seg_dir("vieneu", 9);
         std::fs::create_dir_all(&seg).unwrap();
-        // Alternating speakers = 32 single-line runs: 0000..0031.
+        // Alternating speakers = 32 single-line runs, named the legacy way:
+        // 0000..0031. Three of them are missing.
         for i in 0..32u32 {
             if [5, 17, 30].contains(&i) {
                 continue;
@@ -1405,46 +1875,173 @@ mod tests {
             std::fs::write(seg.join(format!("{i:04}_{voice}.wav")), vec![0u8; 2000]).unwrap();
         }
 
-        let units = inner.planned_units(9).expect("plannable chapter");
+        let plan = inner
+            .materialize_render_takes(9)
+            .expect("plannable chapter");
+        assert_eq!(plan.takes.len(), 32, "one take per spoken run");
+        // Adopted: the pre-plan cache is carried, not re-spoken.
+        assert_eq!(plan.takes.iter().filter(|t| t.adopted).count(), 29);
+        let ids = inner.render_take_ids(9);
+        assert_eq!(ids.len(), 32, "one ledger row per take");
+        assert_eq!(ids[0], "render:9:0");
+        assert_eq!(ids[31], "render:9:31");
+        let work: Vec<&String> = ids
+            .iter()
+            .filter(|id| inner.tasks[*id].state == TaskState::Pending)
+            .collect();
         assert_eq!(
-            units.len(),
-            32,
-            "the whole chapter, not the three this store lacks"
+            work.len(),
+            3,
+            "only the absent takes are work, not the whole chapter: {work:?}"
         );
-        let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
+        assert!(!inner.render_takes_done(9), "the merge gate holds");
+        assert_eq!(inner.tasks["render:9:5"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["render:9:4"].state, TaskState::Done);
+
+        // The take's offer is self-sufficient: text and voice travel with it,
+        // so the worker needs neither the script nor the cast.
+        let (unit, hash, force) = inner.take_spec(9, Some(5)).expect("a spec per take");
+        assert_eq!(unit.speaker, "B");
+        assert!(!unit.text.is_empty(), "the worker gets text, not a key");
+        assert_eq!(unit.take_key.len(), 16);
+        assert_eq!(hash.len(), 16, "the chapter's voice collection hash");
+        assert!(unit.name.starts_with("t-"), "content-addressed: {}", unit.name);
+        assert!(force.is_empty(), "a new take needs no forcing");
+
+        // Fill the three gaps: nothing is work any more, and the plan covers.
+        for id in &work {
+            let pos: usize = id.rsplit(':').next().unwrap().parse().unwrap();
+            let f = plan.takes[pos].file.clone();
+            std::fs::write(seg.join(f), vec![0u8; 2000]).unwrap();
+        }
+        inner.materialize_render_takes(9);
+        assert!(inner.render_takes_done(9), "coverage is the merge gate");
+
+        // No script → no plan → no takes: the failure is named where it can be.
+        assert!(inner.materialize_render_takes(77).is_none());
+        assert!(inner.render_take_ids(77).is_empty());
+    }
+
+    #[test]
+    fn a_render_row_outside_the_reconciled_range_is_materialised_at_startup() {
+        // `--start/--count` decides what a run *discovers*; it must not decide
+        // what it is willing to *repair*. A `render:n` row from an earlier run
+        // survives in the ledger, and a take with no plan behind it can only
+        // fail on the box (the plan is what names the take's file). The last
+        // run of a `COUNT=100` default against a 150-chapter ledger offered 15
+        // such chapters and failed all 45 attempts with "cannot be planned
+        // here" — a bookkeeping gap reported as a worker fault.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(9),
+            r#"{"segments":[{"speaker":"A","text":"một"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+        // The ledger an older build left behind: chapter-granular, no takes.
+        inner
+            .tasks
+            .insert("render:9".into(), Task::new(9, Stage::Render));
+        assert!(inner.tasks["render:9"].take.is_none());
+
+        // A range that does not contain chapter 9.
+        inner.reconcile(50, 10);
+
+        assert!(
+            !inner.tasks.contains_key("render:9"),
+            "the superseded chapter-granular row is gone"
+        );
         assert_eq!(
-            &names[..4],
-            &[
-                "0000_Đức Trí.wav",
-                "0001_Adam.wav",
-                "0002_Đức Trí.wav",
-                "0003_Adam.wav"
-            ],
-            "in speaking order: {names:?}"
+            inner.render_take_ids(9),
+            vec!["render:9:0".to_string()],
+            "its takes are the rows now"
         );
         assert!(
-            names.contains(&"0005_Adam.wav"),
-            "the ones this store lacks are in the offer too: {names:?}"
+            inner.layout.plan(9).is_file(),
+            "and the plan names their files"
         );
-        assert_eq!(units[1].speaker, "B");
+    }
+
+    #[test]
+    fn an_unplannable_chapter_names_its_cause() {
+        // The generic failure cost this run a diagnosis: 15 chapters reported
+        // "cannot be planned here" and the message said nothing about why.
+        let (_d, inner) = fixture();
+        let layout = inner.layout.clone();
+        let why = inner.why_unplannable(7);
         assert!(
-            !units[1].text.is_empty(),
-            "the worker gets text, not a lookup key"
+            why.contains("script-07.json"),
+            "the missing file is named: {why}"
         );
 
-        // A store that holds everything gets the same offer. The worker skips
-        // what it has, and that is the only place a disk is consulted.
-        for i in [5u32, 17, 30] {
-            let voice = if i % 2 == 0 { "Đức Trí" } else { "Adam" };
-            std::fs::write(seg.join(format!("{i:04}_{voice}.wav")), vec![0u8; 2000]).unwrap();
-        }
-        assert_eq!(
-            inner.planned_units(9).unwrap().len(),
-            32,
-            "a complete store changes nothing"
+        // A chapter that plans says so, with the count the ledger would hold.
+        std::fs::write(
+            layout.script(8),
+            r#"{"segments":[{"speaker":"A","text":"một"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+        assert_eq!(inner.why_unplannable(8), "8 plans to 1 unit(s)");
+
+        // A malformed script is a different repair, so it reads differently.
+        std::fs::write(layout.script(8), r#"{"chapter":8}"#).unwrap();
+        let why = inner.why_unplannable(8);
+        assert!(
+            why.contains("no `segments` array") && why.contains("script-08.json"),
+            "the shape and the file are both named: {why}"
         );
-        // No script → None: the worker plans from its own copy instead.
-        assert!(inner.planned_units(77).is_none());
+
+        // A speaker the cast has never seen is *not* a failure: voices are
+        // assigned on demand, which is what freezes them at plan time.
+        std::fs::write(
+            layout.script(8),
+            r#"{"segments":[{"speaker":"Người lạ","text":"một"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(inner.why_unplannable(8), "8 plans to 1 unit(s)");
+    }
+
+    #[test]
+    fn a_local_edit_re_speaks_only_the_takes_it_changed() {
+        // The whole point of per-take tasks: a one-line retag costs one
+        // segment. The plan's diff names the changed take; every other take
+        // keeps its audio and its `Done` row.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(3),
+            r#"{"segments":[{"speaker":"A","text":"một"},{"speaker":"B","text":"hai"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
+        let seg = layout.seg_dir("vieneu", 3);
+        std::fs::create_dir_all(&seg).unwrap();
+        // Render both takes under their content-addressed names.
+        inner.materialize_render_takes(3);
+        let before = bm_core::assemble::RenderPlan::load(&layout.plan(3)).unwrap();
+        for t in &before.takes {
+            std::fs::write(seg.join(&t.file), vec![0u8; 2000]).unwrap();
+        }
+        inner.materialize_render_takes(3);
+        assert!(inner.render_takes_done(3));
+
+        // Retag B's line only.
+        std::fs::write(
+            layout.script(3),
+            r#"{"segments":[{"speaker":"A","text":"một"},{"speaker":"B","text":"hai [thở dài]"}]}"#,
+        )
+        .unwrap();
+        let files = inner.resume_render_after_edit(3, "requeued: retag");
+        let after = bm_core::assemble::RenderPlan::load(&layout.plan(3)).unwrap();
+        assert_eq!(after.takes[0].take_key, before.takes[0].take_key, "A is carried");
+        assert_ne!(after.takes[1].take_key, before.takes[1].take_key, "B changed");
+        assert_eq!(files, 1, "one superseded file, not the chapter");
+        assert!(seg.join(&before.takes[0].file).is_file(), "A's audio survives");
+        assert!(!seg.join(&before.takes[1].file).is_file(), "B's stale file is gone");
+        assert_eq!(inner.tasks["render:3:0"].state, TaskState::Done);
+        assert_eq!(inner.tasks["render:3:1"].state, TaskState::Pending);
+        assert!(!inner.render_takes_done(3), "the merge waits for the new take");
     }
 
     #[test]
@@ -1475,7 +2072,11 @@ mod tests {
         let msg = inner.op_swap_voice("A", "Minh Triết").unwrap();
         assert!(msg.contains("[1]"), "chapter 1 must be listed: {msg}");
         assert!(!layout.final_mp3(1).exists(), "stale product goes away");
-        assert_eq!(inner.tasks["render:1"].state, TaskState::Pending);
+        assert!(
+            !inner.render_take_ids(1).is_empty(),
+            "the chapter re-renders per take"
+        );
+        assert!(!inner.render_takes_done(1), "the takes are work again");
         assert_eq!(inner.tasks["merge:1"].state, TaskState::Pending);
     }
 
@@ -1569,7 +2170,10 @@ mod tests {
 
         assert!(!seg.join("0000_Adam.wav").exists(), "loser's cache goes");
         assert!(!layout.final_mp3(25).exists(), "stale product goes away");
-        assert_eq!(inner.tasks["render:25"].state, TaskState::Pending);
+        assert!(
+            !inner.render_takes_done(25),
+            "the folded speaker's takes are work again"
+        );
         assert_eq!(inner.tasks["merge:25"].state, TaskState::Pending);
         assert!(
             inner.events.iter().any(|e| e.text.contains("reconcile")),
@@ -1716,6 +2320,8 @@ mod tests {
                 cpu_pct: None,
                 mem_pct: None,
                 mem_gb: None,
+                sidecars: None,
+                sidecar_gb: None,
                 capabilities: vec![],
             },
         );
@@ -1785,10 +2391,13 @@ mod tests {
         )
         .unwrap();
         inner.reconcile(1, 1);
-        assert!(inner.tasks.contains_key("render:1"), "render recreated");
+        assert!(
+            !inner.render_take_ids(1).is_empty(),
+            "render recreated, one row per take"
+        );
         assert!(inner.tasks.contains_key("merge:1"), "merge recreated");
         assert_eq!(inner.tasks["digest:1"].state, TaskState::Done);
-        assert_eq!(inner.tasks["render:1"].state, TaskState::Pending);
+        assert!(!inner.render_takes_done(1), "the takes are pending");
     }
 
     #[test]
@@ -1797,6 +2406,51 @@ mod tests {
         let msg = inner.op_eta(1, 10);
         assert!(msg.contains("total"), "{msg}");
         assert!(msg.contains("(guess)"), "{msg}");
+    }
+
+    #[test]
+    fn the_eta_counts_takes_not_offers_so_batching_does_not_move_it() {
+        // The coupling batching could have broken, and the reason it did not.
+        // `:eta` sums `secs_per_unit × pending rows` per stage, and a render row
+        // is one *take* whatever the batch size — so the estimate must be
+        // identical whether ten takes travel per offer or one. If a later change
+        // made the estimator count offers, or made a record's `units` the offer
+        // count instead of the take count, this is what would catch it.
+        let (_d, mut inner) = fixture();
+        render_chapter(&mut inner, 1, 25);
+
+        inner.settings.render_batch = 1;
+        let single = inner.op_eta(1, 1);
+        inner.settings.render_batch = 25;
+        let batched = inner.op_eta(1, 1);
+        assert_eq!(
+            single, batched,
+            "the batch size is a scheduling detail, not a cost"
+        );
+        assert!(
+            single.contains("render"),
+            "and it still prices the render: {single}"
+        );
+
+        // The take count is what the estimate is made of: handing the chapter
+        // out in batches must not shrink the remaining work.
+        let offer = inner
+            .offer("w1")
+            .expect("a full-chapter batch is offerable");
+        assert_eq!(
+            offer.render_units.as_ref().unwrap().len(),
+            25,
+            "all twenty-five takes in one offer"
+        );
+        assert_eq!(
+            inner
+                .tasks
+                .values()
+                .filter(|t| t.stage == Stage::Render && !t.state.is_terminal())
+                .count(),
+            25,
+            "and twenty-five rows still owe work — an offer is not a unit of work"
+        );
     }
 
     #[test]
@@ -1882,10 +2536,157 @@ mod tests {
                 cpu_pct: None,
                 mem_pct: None,
                 mem_gb: None,
+                sidecars: None,
+                sidecar_gb: None,
                 capabilities: vec![],
             },
         );
         assert!(inner.reap().is_empty(), "live worker untouched");
+    }
+
+    #[test]
+    fn an_expiry_on_a_live_worker_is_reported_as_a_hang_not_a_lost_box() {
+        // The blind spot this closes. "Silence is not failure" is right for a
+        // worker that died: it costs no strike and needs no human. A worker that
+        // is **alive and stuck** looks identical from this side — fresh beat,
+        // task never finished — so on 2026-09-22 two digest rows were requeued
+        // silently for ~80 minutes while the TUI showed a percentage that never
+        // moved and the events pane offered nothing but routine-looking
+        // warnings. The distinction is available (the beat is fresh), so the
+        // reaper now says it out loud.
+        let (_d, mut inner) = fixture();
+        let now = now_secs();
+        let arm = |inner: &mut Inner, who: &str, expires_at: u64| {
+            let t = inner.tasks.get_mut("digest:9").unwrap();
+            t.state = TaskState::Running;
+            t.assigned_to = Some(who.into());
+            t.lease_until = Some(expires_at);
+            let _ = t;
+        };
+        let mut t = Task::new(9, Stage::Digest);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w-live".into());
+        t.lease_until = Some(now - 5);
+        inner.tasks.insert("digest:9".into(), t);
+        inner
+            .beats
+            .insert("w-live".into(), beat_with_load("w-live", "127.0.0.1", None));
+
+        let freed = inner.reap();
+        assert_eq!(
+            freed,
+            vec!["digest:9".to_string()],
+            "the requeue itself is unchanged"
+        );
+        assert_eq!(inner.tasks["digest:9"].state, TaskState::Pending);
+        assert_eq!(
+            inner.tasks["digest:9"].attempts, 0,
+            "still strike-free — silence is still not failure"
+        );
+        assert_eq!(
+            inner.tasks["digest:9"].expiries, 1,
+            "but the expiry is counted now"
+        );
+
+        let text = inner
+            .recent_events(5)
+            .iter()
+            .map(|e| e.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("still beating"),
+            "a live holder is the whole point: {text}"
+        );
+        assert!(text.contains("digest:9"), "the row is named: {text}");
+        assert!(text.contains("w-live"), "and so is the worker: {text}");
+        assert!(
+            text.contains("log tail"),
+            "and it says where to look next: {text}"
+        );
+
+        // The second one escalates: by then the loop is the story, not a hiccup.
+        arm(&mut inner, "w-live", now - 1);
+        inner
+            .beats
+            .insert("w-live".into(), beat_with_load("w-live", "127.0.0.1", None));
+        inner.reap();
+        assert_eq!(inner.tasks["digest:9"].expiries, 2);
+        let last = inner.recent_events(1).into_iter().next().unwrap().clone();
+        assert_eq!(last.level, "error", "the repeat is an error: {}", last.text);
+        assert!(last.text.contains("2×"), "and counts them: {}", last.text);
+        assert!(
+            last.text.contains("hang, not a hiccup"),
+            "and calls it what it is: {}",
+            last.text
+        );
+
+        // A *dead* holder is the case the strike-free rule was written for, and
+        // it must not be dressed up as a hang: no counter, no such event.
+        let mut t = Task::new(10, Stage::Digest);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("ghost".into());
+        t.lease_until = Some(now - 5);
+        inner.tasks.insert("digest:10".into(), t);
+        inner.reap();
+        assert_eq!(
+            inner.tasks["digest:10"].expiries, 0,
+            "a lost box is not a hang and is not counted as one"
+        );
+        let text = inner
+            .recent_events(8)
+            .iter()
+            .map(|e| e.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !text.contains("digest:10 expired while"),
+            "and no hang event is invented for it: {text}"
+        );
+    }
+
+    #[test]
+    fn a_settled_row_forgets_its_silent_expiry_streak() {
+        // The counter means "this assignment kept expiring while its worker was
+        // alive". Once the assignment actually resolves that story is over, and a
+        // stale count would make every later, legitimate expiry look like a
+        // repeat — which is how a diagnostic turns into a false alarm.
+        let (_d, mut inner) = fixture();
+        let now = now_secs();
+        let mut t = Task::new(11, Stage::Digest);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w-live".into());
+        t.lease_until = Some(now - 5);
+        t.expiries = 3;
+        inner.tasks.insert("digest:11".into(), t);
+        inner
+            .beats
+            .insert("w-live".into(), beat_with_load("w-live", "127.0.0.1", None));
+        inner.reap();
+        assert_eq!(
+            inner.tasks["digest:11"].expiries, 4,
+            "still counting while it keeps happening"
+        );
+
+        // Now the worker finally answers, successfully.
+        let t = inner.tasks.get_mut("digest:11").unwrap();
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w-live".into());
+        inner.complete(&completion("w-live", "digest:11", true, "ok"));
+        assert_eq!(
+            inner.tasks["digest:11"].expiries, 0,
+            "a completion ends the streak"
+        );
+
+        // And a *reported failure* does too: the worker got far enough to say
+        // something, so it was not stuck.
+        let mut t = Task::new(12, Stage::Digest);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w-live".into());
+        t.expiries = 2;
+        inner.tasks.insert("digest:12".into(), t);
+        inner.complete(&completion("w-live", "digest:12", false, "engine died"));
+        assert_eq!(inner.tasks["digest:12"].expiries, 0);
     }
 
     #[test]
@@ -1920,6 +2721,8 @@ mod tests {
                 cpu_pct: None,
                 mem_pct: None,
                 mem_gb: None,
+                sidecars: None,
+                sidecar_gb: None,
                 capabilities: vec![],
             },
         );
@@ -2034,6 +2837,90 @@ mod tests {
     }
 
     #[test]
+    fn an_operators_digest_report_lands_and_releases_the_box_working_on_it() {
+        // The manual digest reports over the **same endpoint a worker does**,
+        // under the reserved `operator` id. Two things have to hold, and neither
+        // is obvious from either side alone:
+        //
+        // 1. It is accepted even though the row belongs to somebody else. That
+        //    bypass is the entire reason a manual digest can finish a chapter a
+        //    box is already grinding on.
+        // 2. Accepting it **is** the release. Marking the row Done clears the
+        //    assignment, so the box's own report later finds a row it no longer
+        //    owns and is dropped as stale — which is option A, with nothing new
+        //    on the wire and no instruction the worker has to understand.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+
+        // A worker is mid-digest on chapter 7, holding the row.
+        let mut t = Task::new(7, Stage::Digest);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w1".into());
+        t.lease_until = Some(now_secs() + 600);
+        inner.tasks.insert("digest:7".into(), t);
+
+        // The operator finishes it by hand.
+        let mut c = completion(
+            bm_proto::MANUAL_WORKER,
+            "digest:7",
+            true,
+            "digest ch7 by hand",
+        );
+        c.script = Some(serde_json::json!({
+            "title": "Bảy", "atmosphere": "quiet", "roster": ["Narrator"],
+            "mentions": {}, "fixes": [],
+            "segments": [{"speaker": "Narrator", "text": "Xong."}],
+        }));
+        c.bible_delta = Some(serde_json::json!({
+            "new_characters": [], "new_aliases": {},
+            "roster": ["Narrator"], "segments": [],
+        }));
+        let line = inner.complete(&c);
+        assert!(
+            !line.contains("stale"),
+            "the operator's report is taken: {line}"
+        );
+
+        let row = &inner.tasks["digest:7"];
+        assert_eq!(
+            row.state,
+            TaskState::Done,
+            "the chapter is digested: {line}"
+        );
+        assert_eq!(row.assigned_to, None, "and the box is released from it");
+        assert!(
+            layout.script(7).is_file(),
+            "the script landed where every downstream stage reads it"
+        );
+        let written: Value = bm_core::read_json(&layout.script(7)).unwrap();
+        assert_eq!(written["roster"], serde_json::json!(["Narrator"]));
+        // The inductor is the single bible writer, and a manual digest does not
+        // get to be the exception — the delta went through the same merge.
+        let bible: Value = bm_core::read_json(&layout.bible()).unwrap();
+        assert!(
+            bible.get("characters").is_some(),
+            "the bible was written: {bible}"
+        );
+
+        // And the box's own report, arriving after, changes nothing.
+        let late = inner.complete(&completion(
+            "w1",
+            "digest:7",
+            true,
+            "worker got there second",
+        ));
+        assert!(
+            late.contains("stale"),
+            "the box's late report is dropped, not applied: {late}"
+        );
+        assert_eq!(
+            inner.tasks["digest:7"].state,
+            TaskState::Done,
+            "and the row is still the operator's answer"
+        );
+    }
+
+    #[test]
     fn a_render_report_with_missing_files_is_rejected_by_name() {
         // The completion gate: the worker's word is not evidence. Mutate one
         // wav below the completeness threshold and the `ok` report must fail
@@ -2050,22 +2937,28 @@ mod tests {
         std::fs::create_dir_all(&seg).unwrap();
         std::fs::write(seg.join("0000-0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
         std::fs::write(seg.join("0002_Adam.wav"), vec![0u8; 500]).unwrap();
-        let mut t = Task::new(6, Stage::Render);
+        // The plan is what names the file, so a report about a take whose
+        // bytes never landed fails with *that* name — which the next offer
+        // then repeats, because the plan's diff made exactly it work again.
+        let plan = inner.materialize_render_takes(6).expect("plannable");
+        let missing = plan.takes[1].file.clone();
+        assert!(!missing.is_empty());
+        let mut t = Task::new_take(6, 1);
         t.state = TaskState::Running;
         t.assigned_to = Some("w1".into());
-        inner.tasks.insert("render:6".into(), t);
+        inner.tasks.insert(t.id(), t);
 
-        let msg = inner.complete(&completion("w1", "render:6", true, "render ch6 (2 calls)"));
+        let msg = inner.complete(&completion("w1", "render:6:1", true, "render ch6 (1 calls)"));
         assert!(
             msg.contains("failed"),
             "an incomplete ok-report fails: {msg}"
         );
         assert!(
-            msg.contains("0002_Adam.wav"),
-            "the missing file is named: {msg}"
+            msg.contains(&missing),
+            "the missing take file is named: {msg}"
         );
-        assert_eq!(inner.tasks["render:6"].state, TaskState::Pending);
-        assert_eq!(inner.tasks["render:6"].attempts, 1);
+        assert_eq!(inner.tasks["render:6:1"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["render:6:1"].attempts, 1);
     }
 
     #[test]
@@ -2129,13 +3022,30 @@ mod tests {
             last.level, "error",
             "three strikes is an error, not a warning"
         );
-        assert!(last.text.contains("shelved"), "{}", last.text);
+        // Case-insensitive on purpose: the word is deliberately capitalised in
+        // the event so it stands out from the "will retry" failures beside it,
+        // and the test should pin the meaning rather than the letter case.
+        assert!(
+            last.text.to_lowercase().contains("shelved"),
+            "{}",
+            last.text
+        );
+        assert!(
+            last.text.contains("no further retries"),
+            "and says what shelving costs — nothing will retry it: {}",
+            last.text
+        );
         assert!(
             last.text.contains('u'),
             "the way out must be named: {}",
             last.text
         );
         assert_eq!(inner.tasks["digest:4"].state, TaskState::Shelved);
+        assert!(
+            inner.tasks["digest:4"].expiries == 0,
+            "a reported failure is an answer: the silent-expiry streak is not this \
+             assignment's story and is reset"
+        );
     }
 
     #[test]
@@ -2447,15 +3357,20 @@ mod tests {
         // is requeued, and the worker leaves with the healing render instead
         // of idling behind a chapter it could not have merged.
         let offer = inner.offer("w1").expect("the render is offerable");
-        assert_eq!(offer.task_id, "render:9", "not the starved merge");
+        assert_eq!(offer.task_id, "render:9:1", "not the starved merge");
         assert_eq!(inner.tasks["merge:9"].state, TaskState::Pending);
-        assert_eq!(inner.tasks["render:9"].state, TaskState::Assigned);
+        assert_eq!(inner.tasks["render:9:1"].state, TaskState::Assigned);
+        assert_eq!(
+            inner.tasks["render:9:0"].state,
+            TaskState::Done,
+            "the take already on disk is kept — only the gap re-speaks"
+        );
         assert!(
-            inner.tasks["render:9"]
+            inner.tasks["render:9:1"]
                 .detail
                 .contains("segments missing"),
             "the requeue names its cause: {}",
-            inner.tasks["render:9"].detail
+            inner.tasks["render:9:1"].detail
         );
     }
 
@@ -2490,6 +3405,55 @@ mod tests {
         let offer = inner.offer("w1").expect("a ready merge is offerable");
         assert_eq!(offer.task_id, "merge:9");
         assert_eq!(inner.tasks["render:9"].state, TaskState::Done);
+    }
+
+    #[test]
+    fn a_merge_offer_carries_the_plans_takes_in_mix_order() {
+        // The mixer cannot re-derive a content-addressed take name from the
+        // script and the cast — the name is a hash of the inputs, not a
+        // function of them — so the offer has to carry the plan's file list:
+        // the same list the renderer wrote and the completion gate proved.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(9),
+            r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"B","text":"z"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
+        let seg = layout.seg_dir("vieneu", 9);
+        std::fs::create_dir_all(&seg).unwrap();
+        inner.materialize_render_takes(9);
+        let plan = bm_core::assemble::RenderPlan::load(&layout.plan(9)).unwrap();
+        for t in &plan.takes {
+            std::fs::write(seg.join(&t.file), vec![0u8; 2000]).unwrap();
+        }
+        inner.materialize_render_takes(9);
+        for stage in [Stage::Crawl, Stage::Digest] {
+            let mut t = Task::new(9, stage);
+            t.state = TaskState::Done;
+            inner.tasks.insert(t.id(), t);
+        }
+        inner.ensure_task(9, Stage::Merge);
+        inner.workers.insert("w1".into(), "127.0.0.1".into());
+
+        let offer = inner.offer("w1").expect("the merge is offerable");
+        assert_eq!(offer.task_id, "merge:9");
+        assert_eq!(
+            offer.merge_takes,
+            plan.files(),
+            "the plan's names, in mix order"
+        );
+        assert!(
+            offer.merge_takes.iter().all(|f| f.starts_with("t-")),
+            "content-addressed, so nothing else could have named them: {:?}",
+            offer.merge_takes
+        );
+        assert!(offer.script.is_some(), "the turns still need the script");
+        assert!(
+            offer.render_units.is_none(),
+            "and no render payload rides along"
+        );
     }
 
     #[test]
@@ -2547,6 +3511,349 @@ mod tests {
     }
 
     #[test]
+    fn a_merge_starved_on_a_remote_store_moves_to_the_one_that_holds_it() {
+        // The failure this exists for, observed 2026-09-22 on ch148:
+        // `merge ch148 failed: 2 segments missing in
+        // /home/thang/bm-worker/data/audio/segments-vieneu-148 (e.g.
+        // t-ade693a0a8a3a449.wav)`, three times, five seconds apart, then
+        // SHELVED. This disk held all 21 takes. The offer's readiness check
+        // reads *this* disk — the complete one — so it kept offering the merge
+        // to the box that was short; `heal_render_for_merge` looked for local
+        // gaps, found none, and did nothing. The pin was the only thing wrong,
+        // and nothing could say so.
+        //
+        // So: a merge that fails with every take present here is the
+        // scheduler's mistake, and the answer is to move the merge to the store
+        // that provably holds the chapter, without a strike.
+        let (_d, mut inner) = fixture();
+        let files = render_chapter(&mut inner, 9, 4);
+        for f in &files {
+            land(&inner, 9, f);
+        }
+        inner.materialize_render_takes(9);
+        assert!(inner.render_takes_done(9), "every take is home");
+        inner.ensure_task(9, Stage::Merge);
+        {
+            let m = inner.tasks.get_mut("merge:9").unwrap();
+            m.state = TaskState::Running;
+            m.assigned_to = Some("w1".into());
+            m.affinity = Some("192.168.2.2".into());
+        }
+
+        let msg = inner.complete(&completion(
+            "w1",
+            "merge:9",
+            false,
+            "merge ch9 failed: 2 segments missing in /home/thang/bm-worker/data/audio/segments-vieneu-9 (e.g. t-ade693a0a8a3a449.wav): run the render stage first",
+        ));
+        let m = &inner.tasks["merge:9"];
+        assert_eq!(m.state, TaskState::Pending, "it retries: {msg}");
+        assert_eq!(m.attempts, 0, "and the chapter is not struck for a bad pin");
+        assert_eq!(
+            m.affinity.as_deref(),
+            Some("127.0.0.1"),
+            "the merge moves to the store that holds it"
+        );
+        assert!(
+            m.detail.contains("this store holds them all"),
+            "and says why: {}",
+            m.detail
+        );
+        assert!(
+            inner.render_takes_done(9),
+            "nothing re-renders — the audio was never the problem"
+        );
+        assert!(msg.contains("merge moved"), "the log names it: {msg}");
+
+        // The other branch still stands: a merge pinned here, or a short disk,
+        // is the chapter's own failure and keeps its strike.
+        let m = inner.tasks.get_mut("merge:9").unwrap();
+        m.state = TaskState::Running;
+        m.assigned_to = Some("w1".into());
+        inner.complete(&completion(
+            "w1",
+            "merge:9",
+            false,
+            "merge ch9 failed: 2 segments missing in /home/thang/bm-worker/data/audio/segments-vieneu-9: run the render stage first",
+        ));
+        assert_eq!(
+            inner.tasks["merge:9"].attempts, 1,
+            "a merge already pinned here is a real failure"
+        );
+    }
+
+    #[test]
+    fn a_local_render_of_a_chapter_pinned_elsewhere_moves_its_merge_here() {
+        // The split, made and repaired in one step. The offer's affinity filter
+        // lets the local node take a row pinned to any box, so a chapter pinned
+        // to a remote can be spoken partly here and partly there — and the
+        // remote's store can never hold the whole set again. The merge has to
+        // follow the store at the moment the split happens, or the first merge
+        // attempt goes to the short box and fails on a chapter the cluster
+        // rendered in full.
+        let (_d, mut inner) = fixture();
+        render_chapter(&mut inner, 9, 4);
+        for t in inner.tasks.values_mut() {
+            if t.stage == Stage::Render && t.chapter == 9 {
+                t.affinity = Some("192.168.2.2".into());
+            }
+        }
+        inner.ensure_task(9, Stage::Merge);
+        inner.tasks.get_mut("merge:9").unwrap().affinity = Some("192.168.2.2".into());
+        inner.workers.insert("local".into(), "127.0.0.1".into());
+
+        let offer = inner
+            .offer("local")
+            .expect("the local node may take a row pinned to a remote box");
+        assert!(
+            offer.task_id.starts_with("render:9:"),
+            "it takes a take of the pinned chapter: {}",
+            offer.task_id
+        );
+        assert_eq!(
+            inner.tasks["merge:9"].affinity.as_deref(),
+            Some("127.0.0.1"),
+            "the merge moves to the box that can end up holding the whole chapter"
+        );
+        assert_eq!(inner.tasks["merge:9"].state, TaskState::Pending);
+        assert!(
+            inner.tasks["merge:9"].detail.contains("split"),
+            "and says why: {}",
+            inner.tasks["merge:9"].detail
+        );
+    }
+
+    #[test]
+    fn a_remote_completion_does_not_claim_back_a_merge_that_is_already_home() {
+        // Once the local node holds part of a chapter, the remote box can never
+        // hold all of it — so a remote completion must not re-point the merge
+        // at itself. Without this the pin would flip remote on the next remote
+        // take, the merge would be offered to the short store again, and the
+        // chapter would be re-homed one wasted strike at a time.
+        let (_d, mut inner) = fixture();
+        let files = render_chapter(&mut inner, 9, 3);
+        inner.ensure_task(9, Stage::Merge);
+        inner.tasks.get_mut("merge:9").unwrap().affinity = Some("127.0.0.1".into());
+        {
+            let t = inner.tasks.get_mut("render:9:1").unwrap();
+            t.state = TaskState::Running;
+            t.assigned_to = Some("w1".into());
+        }
+        land(&inner, 9, &files[1]);
+        inner.complete(&completion(
+            "w1",
+            "render:9:1",
+            true,
+            "render ch9 (1 calls)",
+        ));
+
+        assert_eq!(
+            inner.tasks["merge:9"].affinity.as_deref(),
+            Some("127.0.0.1"),
+            "the box that cannot hold the whole chapter does not claim its merge"
+        );
+
+        // And the ordinary case is untouched: a remote that took the whole
+        // chapter still gets to merge it.
+        let files = render_chapter(&mut inner, 11, 2);
+        inner.ensure_task(11, Stage::Merge);
+        {
+            let t = inner.tasks.get_mut("render:11:0").unwrap();
+            t.state = TaskState::Running;
+            t.assigned_to = Some("w1".into());
+        }
+        land(&inner, 11, &files[0]);
+        inner.complete(&completion(
+            "w1",
+            "render:11:0",
+            true,
+            "render ch11 (1 calls)",
+        ));
+        assert_eq!(
+            inner.tasks["merge:11"].affinity.as_deref(),
+            Some("192.168.2.2"),
+            "a remote merge is still a remote merge"
+        );
+    }
+
+    #[test]
+    fn a_voice_swap_on_a_split_chapter_keeps_the_rerender_on_the_store_that_holds_it() {
+        // The whole of "the sync for remerging after the voice swap does not
+        // work on the remote machine", observed 2026-09-22 on ch148. The
+        // chapter was split: takes 12 and 15 were spoken here, the other 19 on
+        // the remote, so the remote's store holds 19 of 21 for ever. Then a
+        // voice swap re-speaks one take, and `resume_render_after_edit` pins
+        // that re-render to the merge row's owner — so if the row still names
+        // the remote, the take is spoken on the box that cannot hold the
+        // chapter, the split is renewed instead of repaired, and the merge
+        // that follows fails `N segments missing` on a chapter the cluster
+        // rendered in full.
+        //
+        // So a swap must pin to the store that holds the chapter, which is the
+        // merge row's affinity *after* the split has been re-homed. This walks
+        // that end to end.
+        let (_d, mut inner) = fixture();
+        let files = render_chapter(&mut inner, 9, 4);
+        for t in inner.tasks.values_mut() {
+            if t.stage == Stage::Render && t.chapter == 9 {
+                t.affinity = Some("192.168.2.2".into());
+            }
+        }
+        inner.ensure_task(9, Stage::Merge);
+        inner.tasks.get_mut("merge:9").unwrap().affinity = Some("192.168.2.2".into());
+        inner.workers.insert("local".into(), "127.0.0.1".into());
+        inner.caps.insert(
+            "local".into(),
+            vec!["render".into(), "render-segments".into(), "merge".into()],
+        );
+
+        // 1. The split: the local node takes a take of the pinned chapter, and
+        //    the merge follows the store to here.
+        let offer = inner.offer("local").expect("the local node may take it");
+        assert!(offer.task_id.starts_with("render:9:"), "{}", offer.task_id);
+        let local_take = offer.task_id.clone();
+        assert_eq!(
+            inner.tasks["merge:9"].affinity.as_deref(),
+            Some("127.0.0.1"),
+            "the merge follows the store"
+        );
+
+        // 2. Both stores fill: the local take lands here, the rest remotely.
+        //    Every file lands before any report, because the completion gate
+        //    reads the whole chapter — `collect_units` pulls each unit home
+        //    before the completion is applied, and this is that invariant.
+        //    This is the state ch148 was actually in.
+        for f in &files {
+            land(&inner, 9, f);
+        }
+        {
+            let t = inner.tasks.get_mut(&local_take).unwrap();
+            t.state = TaskState::Running;
+            t.assigned_to = Some("local".into());
+        }
+        inner.complete(&completion(
+            "local",
+            &local_take,
+            true,
+            "render ch9 (1 calls)",
+        ));
+        for i in 0..files.len() {
+            let id = format!("render:9:{i}");
+            if id == local_take {
+                continue;
+            }
+            let t = inner.tasks.get_mut(&id).unwrap();
+            t.state = TaskState::Running;
+            t.assigned_to = Some("w1".into());
+            inner.complete(&completion("w1", &id, true, "render ch9 (1 calls)"));
+        }
+        assert!(inner.render_takes_done(9), "the chapter is complete here");
+        assert_eq!(
+            inner.tasks["merge:9"].affinity.as_deref(),
+            Some("127.0.0.1"),
+            "and no remote completion claimed the merge back"
+        );
+
+        // 3. The voice swap. The cast is rewritten first — that is what a swap
+        //    is — and the invalidation then renames every take the speaker
+        //    produced. The box those re-renders are pinned to must be the one
+        //    that holds the chapter.
+        std::fs::write(inner.layout.cast("vieneu"), r#"{"A":"Adam","B":"Adam"}"#).unwrap();
+        inner.invalidate_character("vieneu", "A", "Đức Trí");
+        let requeued: Vec<String> = inner
+            .tasks
+            .iter()
+            .filter(|(_, t)| {
+                t.stage == Stage::Render && t.chapter == 9 && t.state == TaskState::Pending
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert!(!requeued.is_empty(), "the swap requeued something");
+        for id in &requeued {
+            assert_eq!(
+                inner.tasks[id].affinity.as_deref(),
+                Some("127.0.0.1"),
+                "a re-render after a swap belongs on the store that holds the \
+                 chapter, not on the short box: {id}"
+            );
+        }
+        assert_eq!(
+            inner.tasks["merge:9"].affinity.as_deref(),
+            Some("127.0.0.1"),
+            "and the merge is still here"
+        );
+    }
+
+    #[test]
+    fn a_swap_on_a_chapter_the_remote_holds_keeps_the_rerender_there() {
+        // The counterweight to the test above, and the reason the pin cannot be
+        // "prefer the local node whenever this store holds the chapter".
+        //
+        // That rule looks equivalent to `rehome_starved_merge`'s and is not.
+        // `missing_wavs` reads *this* disk; `collect_units` pulls every unit
+        // home before a render completion is applied, so **every** rendered
+        // chapter is complete here — including the ones a remote holds
+        // perfectly well. Local completeness is therefore no evidence at all
+        // about a remote, and keying the pin on it would drag every surgical
+        // re-render onto the inductor's own box, which is the "warm box never
+        // re-speaks the chapter" property the pin exists for.
+        //
+        // A pin is only known to be wrong *after* the pinned box fails, which
+        // is why `rehome_starved_merge` is driven by a failure and not by a
+        // guess. This test is what says so.
+        let (_d, mut inner) = fixture();
+        let files = render_chapter(&mut inner, 9, 4);
+        for t in inner.tasks.values_mut() {
+            if t.stage == Stage::Render && t.chapter == 9 {
+                t.affinity = Some("192.168.2.2".into());
+            }
+        }
+        inner.ensure_task(9, Stage::Merge);
+        inner.tasks.get_mut("merge:9").unwrap().affinity = Some("192.168.2.2".into());
+
+        // The remote rendered the chapter in full and every unit came home —
+        // so this disk is complete, and the remote is still the right box.
+        for f in &files {
+            land(&inner, 9, f);
+        }
+        for i in 0..files.len() {
+            let id = format!("render:9:{i}");
+            let t = inner.tasks.get_mut(&id).unwrap();
+            t.state = TaskState::Running;
+            t.assigned_to = Some("w1".into());
+            inner.complete(&completion("w1", &id, true, "render ch9 (1 calls)"));
+        }
+        assert!(inner.render_takes_done(9), "complete on this disk");
+        assert_eq!(
+            inner.tasks["merge:9"].affinity.as_deref(),
+            Some("192.168.2.2"),
+            "and still the remote's to merge"
+        );
+
+        // The swap. A chapter the remote holds whole is re-speaker there, not
+        // dragged onto this box — the local store being complete proves
+        // nothing about the remote's.
+        std::fs::write(inner.layout.cast("vieneu"), r#"{"A":"Adam","B":"Adam"}"#).unwrap();
+        inner.invalidate_character("vieneu", "A", "Đức Trí");
+        let requeued: Vec<String> = inner
+            .tasks
+            .iter()
+            .filter(|(_, t)| {
+                t.stage == Stage::Render && t.chapter == 9 && t.state == TaskState::Pending
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert!(!requeued.is_empty(), "the swap requeued something");
+        for id in &requeued {
+            assert_eq!(
+                inner.tasks[id].affinity.as_deref(),
+                Some("192.168.2.2"),
+                "the warm box keeps its own chapter: {id}"
+            );
+        }
+    }
+
+    #[test]
     fn a_render_offer_freezes_the_voices_it_hands_out() {
         // The filenames a worker writes embed the voice, so a plan that is not
         // persisted is re-derived later — by the completion gate and by the
@@ -2554,7 +3861,7 @@ mod tests {
         // least-used over the whole file, so any other chapter's write moves
         // it. That is the whole of "render done, then 20 segments missing":
         // the audio was on disk under names nothing would look up again.
-        let (_d, inner) = fixture();
+        let (_d, mut inner) = fixture();
         let layout = inner.layout.clone();
         let engine = inner.settings.engine.clone();
         std::fs::write(
@@ -2567,22 +3874,24 @@ mod tests {
         // leave behind.
         std::fs::write(layout.cast(&engine), r#"{"Narrator":"Đức Trí"}"#).unwrap();
 
-        let units = inner.planned_units(187).expect("planning must succeed");
-        assert_eq!(units.len(), 1);
-        let offered = units[0].name.clone();
+        let plan = inner
+            .materialize_render_takes(187)
+            .expect("planning must succeed");
+        assert_eq!(plan.takes.len(), 1);
+        let offered = plan.takes[0].file.clone();
         assert!(offered.ends_with(".wav"), "{offered}");
 
-        // 1. The decision is on disk, so every later reader sees it.
+        // 1. The decision is on disk, so every later reader sees it. The file
+        // name is content-addressed and so says nothing about the voice — the
+        // take's recorded voice is the claim, and the persist is what makes it
+        // readable by the completion gate later.
         let cast = bm_core::cast::read_cast(&engine, &layout.cast(&engine));
         let voice = cast
             .get("Hám Thiên Khuyết")
             .expect("the offer must persist the voice it handed out");
-        assert!(
-            offered.contains(voice.as_str()),
-            "the offered filename must name the persisted voice: {offered} vs {voice}"
-        );
+        assert_eq!(plan.takes[0].voice, *voice);
 
-        // 2. The prover the completion gate uses agrees with the worker.
+        // 2. The prover the completion gate uses agrees with the offer.
         let expected = crate::segments::expected_names(&layout, &engine, 187)
             .expect("the chapter is plannable");
         assert!(
@@ -2597,7 +3906,9 @@ mod tests {
                 "segments":[{"speaker":"Người Khác","text":"x"}]}"#,
         )
         .unwrap();
-        let _ = inner.planned_units(188).expect("planning must succeed");
+        let _ = inner
+            .materialize_render_takes(188)
+            .expect("planning must succeed");
         let after = crate::segments::expected_names(&layout, &engine, 187).unwrap();
         assert_eq!(
             expected, after,
@@ -2638,10 +3949,10 @@ mod tests {
         )
         .unwrap();
 
-        let a = inner.planned_units(180).expect("Vân bá must plan");
+        let a = inner.plan_units(180).expect("Vân bá must plan");
         assert_eq!(a.len(), 1);
         let b = inner
-            .planned_units(182)
+            .plan_units(182)
             .expect("Nam tử bị thương must plan");
         assert_eq!(b.len(), 1);
         assert!(
@@ -2995,6 +4306,329 @@ mod tests {
         assert!(
             lines.iter().any(|l| l.contains("ghost")),
             "the fold is explained: {lines:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Batched render offers (`Settings::render_batch`)
+    // -----------------------------------------------------------------
+
+    /// A chapter planned to `n` takes, all of them work, with a capable worker
+    /// registered. Returns the planned filenames in mix order.
+    fn render_chapter(inner: &mut Inner, chapter: u32, n: usize) -> Vec<String> {
+        let layout = inner.layout.clone();
+        let segs: Vec<String> = (0..n)
+            .map(|i| {
+                let speaker = if i % 2 == 0 { "A" } else { "B" };
+                format!(r#"{{"speaker":"{speaker}","text":"line {i}"}}"#)
+            })
+            .collect();
+        std::fs::write(
+            layout.script(chapter),
+            format!(r#"{{"segments":[{}]}}"#, segs.join(",")),
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
+        for stage in [Stage::Crawl, Stage::Digest] {
+            let mut t = Task::new(chapter, stage);
+            t.state = TaskState::Done;
+            inner.tasks.insert(format!("{stage}:{chapter}"), t);
+        }
+        inner.workers.insert("w1".into(), "192.168.2.2".into());
+        inner.caps.insert(
+            "w1".into(),
+            vec![
+                "crawl".into(),
+                "digest".into(),
+                "render".into(),
+                "render-segments".into(),
+                "merge".into(),
+            ],
+        );
+        inner
+            .materialize_render_takes(chapter)
+            .expect("the chapter plans")
+            .files()
+    }
+
+    /// Write a take's wav at the size the gate accepts as landed.
+    fn land(inner: &Inner, chapter: u32, file: &str) {
+        let seg = inner.layout.seg_dir("vieneu", chapter);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join(file), vec![0u8; 2000]).unwrap();
+    }
+
+    #[test]
+    fn a_render_offer_carries_one_chapter_slice_of_the_configured_size() {
+        // The whole point of the batch: one offer, ten takes. The ledger still
+        // holds one row per take — the grouping is recorded on the row the
+        // offer names, so the report has something to settle against.
+        let (_d, mut inner) = fixture();
+        let files = render_chapter(&mut inner, 1, 25);
+
+        let offer = inner.offer("w1").expect("a render is offerable");
+        assert_eq!(
+            offer.task_id, "render:1:0",
+            "the batch is named by its first row"
+        );
+        let units = offer.render_units.as_ref().expect("planned, not legacy");
+        assert_eq!(
+            units.len(),
+            bm_core::config::DEFAULT_RENDER_BATCH as usize,
+            "ten takes travel: {units:?}"
+        );
+        // In mix order, and the payload matches the plan the merge will read.
+        assert_eq!(
+            units.iter().map(|u| u.name.clone()).collect::<Vec<_>>(),
+            files[..10].to_vec(),
+            "the units are the chapter's first ten takes, in order"
+        );
+        assert!(
+            units.iter().all(|u| !u.take_key.is_empty()),
+            "every unit carries its own content-addressed key"
+        );
+
+        // Every assigned row, and only those.
+        for pos in 0..10 {
+            let t = &inner.tasks[&format!("render:1:{pos}")];
+            assert_eq!(
+                t.state,
+                TaskState::Assigned,
+                "render:1:{pos} is in the batch"
+            );
+            assert_eq!(t.assigned_to.as_deref(), Some("w1"));
+        }
+        assert_eq!(
+            inner.tasks["render:1:10"].state,
+            TaskState::Pending,
+            "the eleventh take is not in this batch"
+        );
+        assert_eq!(
+            inner.tasks["render:1:0"].batch,
+            (1..10).map(|p| format!("render:1:{p}")).collect::<Vec<_>>(),
+            "the grouping is recorded once, on the row the offer names"
+        );
+        assert!(
+            inner.tasks["render:1:5"].batch.is_empty(),
+            "and not repeated on every member — one fact, one place"
+        );
+
+        // The chapter is pinned to the box that took it, so its merge can run.
+        assert_eq!(
+            inner.tasks["render:1:24"].affinity.as_deref(),
+            Some("192.168.2.2"),
+            "the whole chapter pins, not just the batch"
+        );
+    }
+
+    #[test]
+    fn a_batch_never_spans_two_chapters() {
+        // The pin, the merge's affinity, the progress line and the inductor's
+        // unit collection are all keyed by chapter: an offer spanning chapters
+        // would collect one chapter's wavs against another's report. Chapter 1
+        // has fewer takes than the batch size, so the batch stops there rather
+        // than reaching into chapter 2.
+        let (_d, mut inner) = fixture();
+        render_chapter(&mut inner, 1, 3);
+        render_chapter(&mut inner, 2, 20);
+
+        let first = inner.offer("w1").expect("ch1 renders first");
+        assert_eq!(first.chapter, 1);
+        assert_eq!(
+            first.render_units.as_ref().unwrap().len(),
+            3,
+            "all of ch1 and none of ch2"
+        );
+        assert!(inner.tasks["render:2:0"].batch.is_empty());
+        assert_eq!(inner.tasks["render:2:0"].state, TaskState::Pending);
+
+        let second = inner.offer("w1").expect("then ch2");
+        assert_eq!(second.chapter, 2);
+        assert_eq!(
+            second.render_units.as_ref().unwrap().len(),
+            bm_core::config::DEFAULT_RENDER_BATCH as usize,
+            "ch2 gets a full batch"
+        );
+    }
+
+    #[test]
+    fn the_workspace_batch_size_overrides_the_default_in_both_directions() {
+        // One is the batch size that means "behave as before"; the cap is what
+        // keeps a typo from holding a chapter on one box for hours.
+        let (_d, mut inner) = fixture();
+        let files = render_chapter(&mut inner, 1, 70);
+        assert_eq!(files.len(), 70, "the chapter plans to seventy takes");
+
+        inner.settings.render_batch = 1;
+        let single = inner.offer("w1").expect("offerable");
+        assert_eq!(single.render_units.as_ref().unwrap().len(), 1);
+        assert!(
+            inner.tasks["render:1:0"].batch.is_empty(),
+            "no grouping to record"
+        );
+
+        // Hand the chapter back out: an absurd value is clamped, not obeyed,
+        // and not refused — a workspace that cannot run at all is a worse
+        // failure than one that runs slower than it asked.
+        for t in inner.tasks.values_mut() {
+            if t.stage == Stage::Render {
+                t.state = TaskState::Pending;
+                t.assigned_to = None;
+                t.lease_until = None;
+                t.batch.clear();
+            }
+        }
+        inner.settings.render_batch = 100_000;
+        let clamped = inner.offer("w1").expect("offerable");
+        assert_eq!(
+            clamped.render_units.as_ref().unwrap().len(),
+            bm_core::config::MAX_RENDER_BATCH as usize,
+            "100000 takes per offer is clamped to the cap, not obeyed"
+        );
+    }
+
+    #[test]
+    fn a_batched_report_settles_every_row_it_covered() {
+        // The gate is per file, and the settle is per row: a report that
+        // verified only the take it was named for would leave nine rows
+        // Assigned to a worker that has already answered, and their leases
+        // would expire into a second render of takes that landed.
+        let (_d, mut inner) = fixture();
+        let files = render_chapter(&mut inner, 4, 12);
+        let offer = inner.offer("w1").expect("a render is offerable");
+        let units = offer.render_units.as_ref().unwrap();
+        assert_eq!(units.len(), 10);
+        for u in units {
+            land(&inner, 4, &u.name);
+        }
+
+        let line = inner.complete(&{
+            let mut c = completion("w1", "render:4:0", true, "render ch4 (10 calls)");
+            c.units = 10;
+            c
+        });
+        assert!(line.contains("done"), "{line}");
+        for pos in 0..10 {
+            let t = &inner.tasks[&format!("render:4:{pos}")];
+            assert_eq!(
+                t.state,
+                TaskState::Done,
+                "render:4:{pos} settled by the batch"
+            );
+            assert!(t.assigned_to.is_none(), "and released");
+            assert!(t.batch.is_empty(), "the grouping is consumed");
+        }
+        assert_eq!(
+            inner.tasks["render:4:10"].state,
+            TaskState::Pending,
+            "a take outside the batch is untouched"
+        );
+        assert_eq!(
+            inner.tasks["merge:4"].affinity.as_deref(),
+            Some("192.168.2.2"),
+            "the merge still follows the renderer"
+        );
+        assert!(files.len() >= 12);
+    }
+
+    #[test]
+    fn a_batched_report_with_one_take_missing_fails_the_whole_batch_by_name() {
+        // A batch is one answer about one offer: a worker whose tenth unit
+        // never landed did not fail only the first take. And the detail names
+        // the file, so the retry is targeted rather than a re-speak of the
+        // chapter.
+        let (_d, mut inner) = fixture();
+        render_chapter(&mut inner, 5, 12);
+        let offer = inner.offer("w1").expect("a render is offerable");
+        let units = offer.render_units.as_ref().unwrap().clone();
+        for u in units.iter().take(9) {
+            land(&inner, 5, &u.name);
+        }
+        let absent = units[9].name.clone();
+
+        let line = inner.complete(&{
+            let mut c = completion("w1", "render:5:0", true, "render ch5 (10 calls)");
+            c.units = 10;
+            c
+        });
+        assert!(line.contains("failed"), "{line}");
+        for pos in 0..10 {
+            let t = &inner.tasks[&format!("render:5:{pos}")];
+            assert_eq!(t.state, TaskState::Pending, "the batch is requeued as one");
+            assert_eq!(t.attempts, 1, "and struck as one");
+            assert!(
+                t.detail.contains(&absent),
+                "the reason names the file: {}",
+                t.detail
+            );
+            assert!(t.batch.is_empty());
+        }
+        assert_eq!(
+            inner.tasks["render:5:10"].attempts, 0,
+            "a take outside the batch takes no strike"
+        );
+    }
+
+    #[test]
+    fn a_batch_that_strikes_out_shelves_every_row_it_held() {
+        // Three strikes is the rule; a batch must not shelter sixty rows from
+        // it by never finishing, or the chapter retries for ever instead of
+        // shelving for an operator to look at.
+        let (_d, mut inner) = fixture();
+        render_chapter(&mut inner, 6, 3);
+        for _ in 0..3 {
+            let offer = inner.offer("w1").expect("still offerable");
+            assert_eq!(offer.render_units.as_ref().unwrap().len(), 3);
+            inner.complete(&completion("w1", "render:6:0", false, "engine died"));
+        }
+        for pos in 0..3 {
+            assert_eq!(
+                inner.tasks[&format!("render:6:{pos}")].state,
+                TaskState::Shelved,
+                "render:6:{pos} shelves with its batch"
+            );
+        }
+        assert!(
+            inner.offer("w1").is_none(),
+            "a shelved chapter stops being offered"
+        );
+    }
+
+    #[test]
+    fn an_offer_that_names_an_unplannable_take_still_reaches_the_gate() {
+        // The degenerate case the batch truncation has to preserve: a take this
+        // store cannot resolve gets an empty payload and is assigned alone, so
+        // the completion gate fails it by name instead of the scheduler
+        // skipping it for ever.
+        let (_d, mut inner) = fixture();
+        // A script with no cast file: `plan_units` cannot name the voices, so
+        // the chapter has no takes at all and keeps its chapter-granular row.
+        std::fs::write(
+            inner.layout.script(9),
+            r#"{"segments":[{"speaker":"A","text":"x"}]}"#,
+        )
+        .unwrap();
+        for stage in [Stage::Crawl, Stage::Digest] {
+            let mut t = Task::new(9, stage);
+            t.state = TaskState::Done;
+            inner.tasks.insert(format!("{stage}:9"), t);
+        }
+        inner.workers.insert("w1".into(), "192.168.2.2".into());
+        inner
+            .caps
+            .insert("w1".into(), vec!["render-segments".into()]);
+        inner.tasks.insert("render:9".into(), {
+            let mut t = Task::new(9, Stage::Render);
+            t.detail = "requeued: unplannable".into();
+            t
+        });
+
+        let offer = inner.offer("w1").expect("the row is still offered");
+        assert_eq!(offer.task_id, "render:9");
+        assert_eq!(
+            offer.render_units.as_deref().map(<[_]>::len),
+            Some(0),
+            "no unit to speak — and `Some([])`, not `None`, which would read as an old inductor"
         );
     }
 }

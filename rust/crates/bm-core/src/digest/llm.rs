@@ -22,6 +22,62 @@ impl std::fmt::Display for GenError {
     }
 }
 
+/// Which backend actually answered.
+///
+/// Returned alongside the text because the *configured* analyzer and the one
+/// that ran are not the same thing: `gemini` falls back to `opencode` when its
+/// chain is exhausted, so a caller that labelled its progress with the
+/// configured name would say "via gemini" while opencode was the thing running
+/// — and, on 2026-09-22, the thing hanging for twenty-six minutes. This is what
+/// lets the caller say which one it actually got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Gemini,
+    Opencode,
+    Openrouter,
+    Ollama,
+}
+
+impl Backend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Backend::Gemini => "gemini",
+            Backend::Opencode => "opencode",
+            Backend::Openrouter => "openrouter",
+            Backend::Ollama => "ollama",
+        }
+    }
+}
+
+/// How long one HTTP attempt against a Gemini model may take.
+///
+/// The digest lease is 1200 s (`bm-inductor/src/state.rs::LEASE_SECS`) and the
+/// chain makes up to three attempts per model, so a per-attempt budget that is
+/// too generous makes the **lease** the deadline that fires first — and a lease
+/// expiry is strike-free, so the task is silently requeued while the request is
+/// still in flight. 180 s keeps a whole chain inside the lease.
+const GEMINI_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// How long the `opencode` child may run before it is killed.
+///
+/// **This is the one that was missing, and it took a cluster's worth of work with
+/// it.** `Command::output()` has no deadline of its own, so a CLI that stalls
+/// blocks the worker for ever: the stage sits at whatever percentage it had
+/// reached, prints nothing, and the only thing that ever happens is the lease
+/// expiring — silently, without a strike — and the task being handed to another
+/// box, which stalls the same way. The whole loop is invisible from the TUI.
+///
+/// **Two minutes, not ten.** This is a *fallback*: if it cannot answer a 32 KB
+/// prompt in two minutes it is not coming back, and every second past that is a
+/// box held hostage. The cost is that a legitimately slow run now fails instead
+/// of finishing — which is the right trade for a path whose failure mode is a
+/// silent infinite hang, and it is one constant if that proves too tight.
+///
+/// Still **under** the 1200 s digest lease, for the reason that matters: the
+/// deadline that fires must be the child's, not the lease's, or the task is
+/// requeued while the request is still in flight.
+const OPENCODE_TIMEOUT: Duration = Duration::from_secs(120);
+
 // ---------------------------------------------------------------------------
 // generation backends
 // ---------------------------------------------------------------------------
@@ -81,32 +137,89 @@ fn missing_key(var: &str) -> GenError {
     ))
 }
 
-async fn generate_opencode(prompt: &str, settings: &Settings) -> Result<String, GenError> {
+async fn generate_opencode(
+    prompt: &str,
+    settings: &Settings,
+) -> Result<(String, Backend), GenError> {
+    generate_opencode_within(prompt, settings, OPENCODE_TIMEOUT).await
+}
+
+/// The same call with the deadline supplied.
+///
+/// Split out so the deadline is **testable**: a test that has to wait ten minutes
+/// is a test nobody runs, and a deadline nobody tests is exactly the one that was
+/// missing here. The caller above is the only production path.
+async fn generate_opencode_within(
+    prompt: &str,
+    settings: &Settings,
+    deadline: Duration,
+) -> Result<(String, Backend), GenError> {
     let full = format!(
         "Do not use any tools. Answer with the requested output and nothing else.\n\n{prompt}"
     );
-    let out = tokio::process::Command::new("opencode")
-        .args(["run", "-m", &settings.opencode_model, &full])
-        .output()
-        .await
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                GenError::Fatal(anyhow!("opencode CLI not found — install it first"))
-            } else {
-                GenError::Fatal(anyhow!(e).context("running opencode"))
-            }
-        })?;
+    let model = settings.opencode_model.clone();
+    // `kill_on_drop` is what makes the deadline below real: without it the future
+    // is dropped at the timeout and the child keeps running, orphaned, holding
+    // the prompt and whatever it was waiting on.
+    let child = tokio::process::Command::new("opencode")
+        .args(["run", "-m", &model, &full])
+        .kill_on_drop(true)
+        .output();
+    println!(
+        "opencode run -m {model} — started ({} bytes of prompt, deadline {}s)",
+        full.len(),
+        // `as_secs_f64`, not `as_secs`: truncating printed "deadline 0s" for the
+        // sub-second deadline a test passes, and a log line that misreports the
+        // deadline it applied is the one thing this fix exists to stop.
+        deadline.as_secs_f64()
+    );
+    let started = std::time::Instant::now();
+    let out = match tokio::time::timeout(deadline, child).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(GenError::Fatal(anyhow!(
+                "opencode CLI not found — install it first"
+            )))
+        }
+        Ok(Err(e)) => return Err(GenError::Fatal(anyhow!(e).context("running opencode"))),
+        // The deadline. Named out loud, because "the digest is stuck" is exactly
+        // what this looked like from the outside and the message has to say
+        // otherwise — and it has to say what to do next.
+        Err(_) => {
+            eprintln!(
+                "opencode run -m {model} — KILLED after {}s with no answer",
+                deadline.as_secs_f64()
+            );
+            return Err(GenError::Fatal(anyhow!(
+                "opencode run -m {model} produced nothing in {}s and was killed. The digest is \
+                 not at fault: run `opencode run -m {model} hello` by hand to see what the CLI \
+                 does on its own",
+                deadline.as_secs_f64()
+            )));
+        }
+    };
+    let took = started.elapsed().as_secs_f64();
     if !out.status.success() {
+        eprintln!(
+            "opencode run -m {model} — failed after {took:.1}s ({})",
+            out.status
+        );
         return Err(GenError::Fatal(anyhow!(
-            "opencode run failed: {}",
+            "opencode run failed after {took:.1}s: {}",
             head_chars(&String::from_utf8_lossy(&out.stderr), 500)
         )));
     }
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    extract_json_object(&stdout).map_err(GenError::Fatal)
+    println!(
+        "opencode run -m {model} — ok in {took:.1}s ({} bytes out)",
+        stdout.len()
+    );
+    extract_json_object(&stdout)
+        .map(|t| (t, Backend::Opencode))
+        .map_err(GenError::Fatal)
 }
 
-async fn generate_ollama(prompt: &str, settings: &Settings) -> Result<String, GenError> {
+async fn generate_ollama(prompt: &str, settings: &Settings) -> Result<(String, Backend), GenError> {
     let body = json!({
         "model": settings.local_model,
         "messages": [{"role": "user", "content": prompt}],
@@ -146,11 +259,14 @@ async fn generate_ollama(prompt: &str, settings: &Settings) -> Result<String, Ge
     let v: Value = serde_json::from_str(&text).map_err(|e| GenError::Fatal(anyhow!(e)))?;
     v.pointer("/message/content")
         .and_then(|c| c.as_str())
-        .map(String::from)
+        .map(|c| (c.to_string(), Backend::Ollama))
         .ok_or_else(|| GenError::Fatal(anyhow!("ollama response had no message.content")))
 }
 
-async fn generate_openrouter(prompt: &str, settings: &Settings) -> Result<String, GenError> {
+async fn generate_openrouter(
+    prompt: &str,
+    settings: &Settings,
+) -> Result<(String, Backend), GenError> {
     let key = std::env::var("OPENROUTER_API_KEY").map_err(|_| missing_key("OPENROUTER_API_KEY"))?;
     let body = json!({
         "model": settings.openrouter_model,
@@ -195,7 +311,7 @@ async fn generate_openrouter(prompt: &str, settings: &Settings) -> Result<String
     let v: Value = serde_json::from_str(&text).map_err(|e| GenError::Fatal(anyhow!(e)))?;
     v.pointer("/choices/0/message/content")
         .and_then(|c| c.as_str())
-        .map(String::from)
+        .map(|c| (c.to_string(), Backend::Openrouter))
         .ok_or_else(|| GenError::Fatal(anyhow!("OpenRouter response had no content")))
 }
 
@@ -206,12 +322,20 @@ async fn generate_openrouter(prompt: &str, settings: &Settings) -> Result<String
 /// quota for nothing. Everything else walks on: 429s (after sleeping the
 /// provider's own delay), 5xx, transport errors, unknown-model 404s and spent
 /// day-quotas.
-async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<String, GenError> {
+async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<(String, Backend), GenError> {
     let key = std::env::var("GEMINI_API_KEY").map_err(|_| missing_key("GEMINI_API_KEY"))?;
     let mut last = String::from("no models configured");
-    for model in analyze_chain(settings) {
-        match try_gemini_model(prompt, &key, &model).await {
-            ModelNext::Text(t) => return Ok(t),
+    let chain = analyze_chain(settings);
+    if chain.is_empty() {
+        // Say so rather than falling through with a reason that reads like a
+        // provider fault: an empty chain is a settings mistake.
+        eprintln!(
+            "gemini: no models configured (analyze_models is empty) — falling back to opencode"
+        );
+    }
+    for model in &chain {
+        match try_gemini_model(prompt, &key, model).await {
+            ModelNext::Text(t) => return Ok((t, Backend::Gemini)),
             ModelNext::Abort(e) => return Err(GenError::Fatal(e)),
             ModelNext::Skip(reason) => {
                 eprintln!("gemini {model} exhausted ({reason}) — next model");
@@ -219,7 +343,16 @@ async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<String, Ge
             }
         }
     }
-    eprintln!("gemini chain exhausted ({last}) — falling back to opencode");
+    // **The line that names the real backend.** Whatever the caller's progress
+    // label says, this is what is about to run, and it is the only record of the
+    // fallback that survives into the log. It also states the deadline, because
+    // "opencode is running" and "opencode is running and will be killed in ten
+    // minutes" are very different things to read at 2 a.m.
+    eprintln!(
+        "gemini chain exhausted ({last}) — running opencode -m {} instead (deadline {}s)",
+        settings.opencode_model,
+        OPENCODE_TIMEOUT.as_secs()
+    );
     match generate_opencode(prompt, settings).await {
         Ok(t) => Ok(t),
         Err(GenError::RateLimited(m)) => Err(GenError::RateLimited(m)),
@@ -245,7 +378,17 @@ async fn try_gemini_model(prompt: &str, key: &str, model: &str) -> ModelNext {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 16384},
     });
-    let client = reqwest::Client::new();
+    // The default client has **no deadline at all** — the same class of bug as
+    // the opencode child below, and just as invisible when it fires.
+    let client = match reqwest::Client::builder()
+        .timeout(GEMINI_ATTEMPT_TIMEOUT)
+        .build()
+    {
+        Ok(c) => c,
+        // `Abort`, not `Skip`: a client that will not build will not build for
+        // the next model either, and walking the chain would only burn time.
+        Err(e) => return ModelNext::Abort(anyhow!(e).context("building the Gemini HTTP client")),
+    };
     let mut last = String::from("no attempts ran");
     for attempt in 0..3 {
         let resp = client.post(&url).json(&body).send().await;
@@ -255,6 +398,10 @@ async fn try_gemini_model(prompt: &str, key: &str, model: &str) -> ModelNext {
                 (status, r.text().await.unwrap_or_default())
             }
             Err(e) => {
+                // Logged per attempt rather than only summarised at the end:
+                // three silent timeouts and three silent 503s produce the same
+                // aggregate line, and they are different problems.
+                eprintln!("gemini {model} attempt {}/3 — transport: {e}", attempt + 1);
                 last = format!("transport error: {e}");
                 continue;
             }
@@ -305,6 +452,14 @@ async fn try_gemini_model(prompt: &str, key: &str, model: &str) -> ModelNext {
                 tokio::time::sleep(Duration::from_secs_f64(wait)).await;
             }
             _ => {
+                // A 5xx used to be silent here — the reason only ever appeared in
+                // the aggregate "chain exhausted" line, which is why a 503 storm
+                // read as "nothing happened".
+                eprintln!(
+                    "gemini {model} attempt {}/3 — {status}: {}",
+                    attempt + 1,
+                    head_chars(text.trim(), 160)
+                );
                 last = format!("{status}: {}", head_chars(text.trim(), 200));
             }
         }
@@ -322,11 +477,16 @@ fn analyze_chain(settings: &Settings) -> Vec<String> {
 }
 
 /// One generation attempt against the configured backend.
+///
+/// Returns the text **and the backend that produced it**: the configured name is
+/// not the one that ran whenever `gemini` falls back, and a caller that labelled
+/// its progress with the configured name would be describing a backend that had
+/// already given up.
 pub async fn generate(
     prompt: &str,
     analyzer: &str,
     settings: &Settings,
-) -> Result<String, GenError> {
+) -> Result<(String, Backend), GenError> {
     match analyzer {
         "local" => generate_ollama(prompt, settings).await,
         "openrouter" => generate_openrouter(prompt, settings).await,
@@ -431,6 +591,50 @@ mod tests {
         // And an inductor that says nothing leaves the box exactly as it was.
         let silent = remote_box.with_analyzer_settings(&bm_proto::AnalyzerSettings::default());
         assert_eq!(analyze_chain(&silent), analyze_chain(&remote_box));
+    }
+
+    #[tokio::test]
+    async fn the_opencode_child_is_killed_at_its_deadline() {
+        // The bug that cost ~80 minutes of silent looping on 2026-09-22:
+        // `Command::output()` has no deadline of its own, so a CLI that stalls
+        // blocks the worker for ever. The stage sits at whatever percentage it
+        // had reached, prints nothing, and the only thing that ever happens is
+        // the lease expiring — silently, without a strike — and the task being
+        // handed to another box, which stalls the same way.
+        //
+        // A 500 ms deadline against the **real** CLI, because a fake one would
+        // only prove the fake hangs. Measured: `opencode run -m <model> "say hi"`
+        // prints its banner and then produces nothing at all, so this exercises
+        // the deadline branch rather than pretending to.
+        //
+        // **Guarded, and loudly.** `opencode` is installed by provisioning rather
+        // than by cargo, so on a machine without it this prints what it did *not*
+        // check instead of failing for the environment's sake.
+        if std::process::Command::new("opencode")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            println!("SKIP: no `opencode` on PATH — the deadline branch was NOT checked here");
+            return;
+        }
+        let err =
+            generate_opencode_within("say hi", &Settings::default(), Duration::from_millis(500))
+                .await
+                .expect_err("half a second is not enough for the CLI to answer");
+        let msg = err.to_string();
+        assert!(msg.contains("produced nothing"), "{msg}");
+        assert!(msg.contains("was killed"), "{msg}");
+        assert!(
+            msg.contains("by hand"),
+            "and names the next step, because the operator's instinct is to blame the \
+             digest rather than the CLI: {msg}"
+        );
+        assert!(
+            matches!(err, GenError::Fatal(_)),
+            "a deadline is fatal for this round — retrying a hung CLI is what made it \
+             invisible in the first place"
+        );
     }
 
     #[test]

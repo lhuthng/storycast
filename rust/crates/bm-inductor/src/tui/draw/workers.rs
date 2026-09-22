@@ -12,6 +12,25 @@ use ratatui::{
     widgets::{Row, Table},
 };
 
+/// The `tts` cell: how many sidecars are resident and what they cost.
+///
+/// A dash, never a zero, when the agent never reported — an older agent has no
+/// opinion about sidecars, and `0×` would read as "none running" on the one box
+/// that has one.
+fn tts_cell(colour: bool, b: &bm_proto::Heartbeat) -> Line<'static> {
+    let Some(n) = b.sidecars else {
+        return cell("—".into());
+    };
+    let text = match b.sidecar_gb {
+        Some(g) if n > 0 => format!("{n}× {g:.1}G"),
+        _ => format!("{n}×"),
+    };
+    Line::from(Span::styled(
+        text,
+        style_of(colour, if n > 1 { Color::Red } else { Color::Gray }),
+    ))
+}
+
 pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compact: bool) {
     // Stale beats stay in state for the reaper's accounting but leave the
     // pane: a dead worker drawn as an idle row is indistinguishable from a
@@ -100,6 +119,12 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compac
                         (Some(p), Some(g)) => format!("{p:.0}% {g:.1}G"),
                         _ => "—".into(),
                     }),
+                    // How many sidecars are resident, and what they cost. The
+                    // quantity that actually kills these boxes: one model is
+                    // ~2.85 GB, so `2×` on an 8 GiB box is the OOM race — and
+                    // one the scheduler stops feeding it (`MEM_PCT_CEILING`).
+                    // Red above one, because this column exists to be noticed.
+                    tts_cell(colour, b),
                 ]);
             }
             cells.push(cell(if b.activity.is_empty() {
@@ -122,7 +147,7 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compac
         // Qualified: these are whole-box load (the agent reports
         // `global_cpu_usage` / used memory), not the task's share — bare
         // `cpu`/`ram` next to per-task progress read as the render's cost.
-        header.extend(["box cpu", "box ram"]);
+        header.extend(["box cpu", "box ram", "tts"]);
     }
     header.push("activity");
     if compact {
@@ -141,6 +166,7 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compac
             Constraint::Length(5),
             Constraint::Length(17),
             Constraint::Length(6),
+            Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Min(20),
         ]);

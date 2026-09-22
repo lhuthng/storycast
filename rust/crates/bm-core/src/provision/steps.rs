@@ -553,11 +553,26 @@ echo "MODELS-OK ($n files)"
         Ok(stdout.trim().to_string())
     }
 
-    /// Start the TTS sidecar detached, unless it is already answering.
+    /// Start the TTS sidecar detached, unless it is already answering, and
+    /// **wait for it to be ready** before returning.
+    ///
+    /// Waiting is the point, not politeness. `bm-tts` binds its port before it
+    /// loads ~2.85 GB of weights, so between the launch and the first ready
+    /// `/health` there is a window where the box has a sidecar that cannot
+    /// answer yet. The old 3-second sleep closed on "model loading" and moved
+    /// on, and the worker's first render — unable to tell "not up yet" from
+    /// "not there" — spawned a **second** model on an 8 GiB box. That is the
+    /// OOM this cluster kept taking.
+    ///
+    /// A ready server answers 200; a loading one answers 503, which `curl`
+    /// reports as success unless told otherwise, so the check is on the *code*.
+    /// The budget is deliberately under the ssh call's own timeout (240 s of
+    /// polling, 300 s allowed) — a sidecar that has not loaded in four minutes
+    /// on a box this repo sizes for is reported, not waited on for ever.
     pub fn start_tts(&self) -> Result<String> {
         let script = format!(
             r#"D="$HOME/{d}"
-if curl -s -o /dev/null --max-time 3 http://127.0.0.1:{port}/health >/dev/null 2>&1; then
+if [ "$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 3 http://127.0.0.1:{port}/health)" = "200" ]; then
   echo "TTS-ALREADY-UP"; exit 0
 fi
 cd "$D" || exit 5
@@ -565,13 +580,16 @@ LD_LIBRARY_PATH="$D" nohup "$D/bm-tts" --models models --codec models \
   --dict models/sea_g2p.bin --voices models/voices.json \
   --port {port} --bind 0.0.0.0 > "$D/tts.log" 2>&1 &
 echo $! > "$D/tts.pid"
-sleep 3
-curl -s -o /dev/null --max-time 10 http://127.0.0.1:{port}/health >/dev/null 2>&1 && echo "TTS-STARTED" || echo "TTS-STARTING (model loading)"
+for _ in $(seq 1 120); do
+  sleep 2
+  [ "$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 3 http://127.0.0.1:{port}/health)" = "200" ] && {{ echo "TTS-STARTED"; exit 0; }}
+done
+echo "TTS-STARTING (not ready after 240s — check $D/tts.log)"
 "#,
             d = REMOTE_DIR,
             port = TTS_PORT
         );
-        let (code, stdout, stderr) = self.run(&script, 60)?;
+        let (code, stdout, stderr) = self.run(&script, 300)?;
         if code != 0 {
             anyhow::bail!(
                 "starting TTS failed (exit {code}): {}",
@@ -967,7 +985,18 @@ pub fn provision(
         Err(e) => log.push(format!("[{}] ffmpeg install check failed: {e}", m.id)),
     }
 
+    // Waits for ready, so this line is a fact and not a hope — see `start_tts`.
+    // A box still loading after the budget is *not* held back here: readiness is
+    // about the binary and the weights (`configured`), and the worker's own
+    // `ensure` now waits for a loading server instead of racing it. Making
+    // `configured` depend on a live sidecar was considered and rejected: it
+    // would deny a registered box over a sidecar restart and drag
+    // `may_install` into re-running package installs on a healthy cluster.
     match ssh.start_tts() {
+        Ok(v) if v.starts_with("TTS-STARTING") => log.push(format!(
+            "[{}] {v} — the worker will wait for it rather than start a second one; re-run the probe if renders are slow to begin",
+            m.id
+        )),
         Ok(v) => log.push(format!("[{}] tts: {v}", m.id)),
         Err(e) => log.push(format!("[{}] could not start tts: {e}", m.id)),
     }

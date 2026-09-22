@@ -216,6 +216,42 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }
 
+    section(&mut lines, "Digest manager (D)");
+    for v in [
+        "Every chapter the ledger knows, as numbers. Dimmed rows already have a",
+        "script; `f` hides them, `Enter` opens one, `Esc` closes. The numbers are a",
+        "grid, so ←/→ step one chapter and ↑/↓ step a whole row.",
+        "The manual digest exists for when no backend is available — a rate-limited",
+        "fallback, a 503 from the model, or simply a model you already have open in",
+        "a browser. `Enter` on a chapter puts round 1's prompt on the clipboard;",
+        "paste it into any model, copy the answer, press `v` here. A valid cast buys",
+        "round 2's prompt, copied for you the same way; paste that answer and press",
+        "`v` again and the chapter is finished. `c` re-copies the current prompt.",
+        "It is the *same* digest, not a looser one: the prompts and the validators",
+        "are the worker's own, and the result is reported to the inductor exactly as",
+        "a worker reports it. So an answer the automatic path would refuse is refused",
+        "here too — with the validator's own complaint on the screen, which is what",
+        "to paste back into the model when it gets something wrong.",
+        "Redoing a chapter that is already digested is supported and expected: the",
+        "inductor compares the new script with the old one, re-renders the takes",
+        "whose inputs changed and re-merges the chapter. A re-digest that changes",
+        "nothing invalidates nothing.",
+        "If a worker is digesting that chapter at the same time, finishing here wins:",
+        "the row is marked done and the box's own report is dropped when it arrives.",
+        "`:off` stops digest work on *every* machine at once — for when the backends are",
+        "rate-limited and there is no point offering the stage. It saves each box's own",
+        "policy first, and `:on` puts that back: a box whose digest was already off stays",
+        "off, and one that was never given a policy gets none back. So `:on` is \"recover\",",
+        "not \"enable\" — which is why it refuses outright if there is no snapshot to restore,",
+        "and why the snapshot is a file: an inductor restart in between cannot silently",
+        "switch digest back on with no way to undo it.",
+        "On the manager's list the same switch is on two keys: `x` for off, `s` for the",
+        "restore. They run the very same command the `:` words do, so there is one",
+        "implementation and two ways in.",
+    ] {
+        lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
+    }
+
     section(&mut lines, "Outside the TUI");
     for v in [
         "The AWS *console* is the only thing the dashboard cannot stand in for:",

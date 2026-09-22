@@ -125,16 +125,30 @@ pub(crate) fn missing_wavs(layout: &Layout, engine: &str, chapter: u32) -> Optio
     Some(missing)
 }
 
-/// The file names `(chapter, engine)` must hold: `expected_wavs` evaluated
-/// against the local script, cast and bible. `None` when the chapter cannot
-/// be planned (unparseable script, uncast speaker) — callers say so instead
-/// of guessing. Shared by the report and the segment-upload endpoint, so the
-/// writer and the prover can never disagree about the set.
+/// The file names `(chapter, engine)` must hold.
+///
+/// **The recorded plan first.** A take's name is content-addressed and its
+/// identity is a hash of the inputs that produced it, so the plan is the only
+/// thing that knows what the set is without recomputing it from a script and a
+/// cast that may have moved since — the same reason the renderer no longer
+/// derives names at speak time. A chapter with no stored plan (never
+/// reconciled, or written by an older build) falls back to evaluating
+/// `expected_wavs` against the local script, cast and bible.
+///
+/// `None` when the chapter cannot be planned (unparseable script, uncast
+/// speaker) — callers say so instead of guessing. Shared by the report, the
+/// completion gate and the collect pass, so the writer and the prover can
+/// never disagree about the set.
 pub(crate) fn expected_names(
     layout: &Layout,
     engine: &str,
     chapter: u32,
 ) -> Option<BTreeSet<String>> {
+    if let Some(plan) = bm_core::assemble::RenderPlan::load(&layout.plan(chapter)) {
+        if plan.engine == engine {
+            return Some(plan.files().into_iter().collect());
+        }
+    }
     let script_path = layout.script(chapter);
     let text = std::fs::read_to_string(&script_path).ok()?;
     let data: serde_json::Value = serde_json::from_str(&text).ok()?;

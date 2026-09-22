@@ -25,7 +25,7 @@ fresh clone is a valid empty state:
 
 | Created by you / at runtime (ignored by git) | What it is                                                                                                         |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `url_template` in `.bm/settings.json`        | Where the chapters live — `{n}` is the chapter number. **This is the only novel-specific setting you must change** |
+| `url_template` in `workspaces/<name>/settings.json` | Where the chapters live — `{n}` is the chapter number. **This is the only novel-specific setting you must change** |
 | Edits to `prompts/analyze.txt`               | Your own dramatization style/language, if the shipped example doesn't fit                                          |
 | `voices.json`, `voice-pool.json`, `refs/`    | Your cloned voices and reference clips (skip entirely to use the catalogue voices)                                 |
 | `data/`, `output/`                           | Scripts, character bible, cached audio, finished MP3s                                                              |
@@ -118,11 +118,12 @@ make tui        # press c, then paste your template, e.g.:
                 #   https://example.com/truyen/any-novel/chapter-{n}
 ```
 
-`{n}` is where the chapter number goes. The TUI saves it to
-`.bm/settings.json` and immediately probe-crawls one chapter to prove the
-selector finds the text. This URL template is the **only novel-specific thing
-you must change** to convert a different novel (plus, if you want a different
-dramatization style, `prompts/analyze.txt`).
+`{n}` is where the chapter number goes. The TUI saves it to the active
+workspace's `settings.json` (`workspaces/<name>/settings.json`) and immediately
+probe-crawls one chapter to prove the selector finds the text. This URL template
+is the **only novel-specific thing you must change** to convert a different
+novel (plus, if you want a different dramatization style,
+`prompts/analyze.txt`).
 
 ### Tell it who speaks (optional, for cloned voices)
 
@@ -184,7 +185,7 @@ under the voice — plus a third layer the script places by hand:
   it. Names come from `assets/inject-pool.json`, whose entries also carry
   `dur_s` — a `hit` on a 51 s clip is refused at digest time, because that is 51 s
   of dead air. The layer rides the `effects` switch and has its own
-  `inject_volume` in `.bm/settings.json`.
+  `inject_volume` in the workspace's `settings.json`.
 - **`digest` can be asked on its own.** `bm-inductor digest <n>` prints the
   analyzer's answer for one chapter and does nothing else — no render, no merge,
   no ledger task, no bible merge, and no file at all unless `--write` is passed.
@@ -207,7 +208,7 @@ under the voice — plus a third layer the script places by hand:
   `looped: false` marks a one-shot stinger; add or retune a **mood** in `scene-map.json`'s
   `music_palette` (the digest prompt is rendered from it, so the analyzer can
   offer it immediately), or reorder the place rules; or switch a layer off with
-  `"ambience": false` / `"music": false` in `.bm/settings.json` (the stock TUI run
+  `"ambience": false` / `"music": false` in the workspace's `settings.json` (the stock TUI run
   screen doesn't yet expose either, but both are read at merge time). Normalize
   new clips with `tools/normalize-audio.sh <src> <dest>` first: the scene map's
   `level` is a gain over a −23 LUFS source, and that only holds if every clip in
@@ -451,9 +452,10 @@ git-ignored — see the two tables at the top for the tracked/ignored split.
 | `voices.json`                               | Character → reference clip (clone voices)                                                   |
 | `voice-pool.json`                           | Tagged sample pool for automatic voice assignment                                           |
 | `refs/`                                     | Your voice clips                                                                            |
-| `.bm/settings.json`                         | Run config: url_template, engine, start/count, speed, gap_ms, ambience, music, effect/music volumes, analyzer, models (`:mix` edits speed + volumes) |
-| `.bm/ledger.json`                           | The task ledger — which chapter/stage is in which state; survives restarts                  |
-| `.bm/machines.json`                         | Linked machines (addr, ssh user/port/key)                                                   |
+| `workspaces/<name>/settings.json`           | Run config, **per book**: url_template, engine, start/count, speed, gap_ms, ambience, music, effect/music volumes, analyzer, models, render_batch (`:mix` edits speed + volumes, `:batch` edits render_batch). At the repo root the same file is `.bm/settings.json`, which is what a checkout with no workspace selected uses |
+| `workspaces/<name>/ledger.json`             | The task ledger — which chapter/stage is in which state; survives restarts. `.bm/ledger.json` at the root, same rule as settings |
+| `.bm/machines.json`                         | Linked machines (addr, ssh user/port/key) — machine-global, so it stays in `.bm/` whichever workspace is active |
+| `.bm/digest-suspend.json`                   | Written by `:off` only: every machine's work policy as it was, so `:on` can put back *what each box had* rather than switching digest on everywhere. Deleted once the restore succeeds. A file rather than a latch, so an inductor restart in between cannot leave digest off with no way back |
 | `~/.bm-worker/`                             | A worker's whole world on any machine: agent binary, `bm-tts` + ONNX runtime, baked `models/`, sources, `.provision_stamp.json` |
 
 The pipeline is **restart-safe**: all of the above is on disk. Kill anything at
@@ -462,18 +464,20 @@ segments are never re-rendered.
 
 ### Clear all tasks
 
-Tasks are stored in **`.bm/ledger.json`**. To remove every task (including
+Tasks are stored in the active workspace's **`ledger.json`**
+(`workspaces/<name>/ledger.json`). To remove every task (including
 pending, running, failed, and completed tasks):
 
 1. Stop the inductor and workers first (`X` in the TUI, confirm, and wait for
    shutdown), then quit the TUI. A running inductor can overwrite your edits
    with its in-memory task list.
-2. In `.bm/ledger.json`, replace the entire `"tasks"` array with `"tasks": []`.
+2. In that `ledger.json`, replace the entire `"tasks"` array with `"tasks": []`.
    Keep the other fields unchanged to preserve machine and worker runtime records.
 3. Reopen the TUI. Starting a new run creates tasks for the selected chapter range;
    `make serve` also recreates tasks for its `START`/`COUNT` range on startup.
 
-Do **not** delete `.bm/` or clear `.bm/settings.json` or `.bm/machines.json`.
+Do **not** delete `.bm/`, and do not clear the workspace's `settings.json` or
+`.bm/machines.json`.
 Clearing tasks does not delete chapter text, scripts, cast assignments, cached
 segment audio, or finished MP3s under `data/` and `output/`; future runs can reuse them.
 

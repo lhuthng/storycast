@@ -39,7 +39,8 @@ Concretely:
    `choices[0].message.content`. (While in there: the OpenRouter path also
    hardcodes this repo's *old* name in its `Referer`/`X-Title` headers — that
    gets the generic treatment too.)
-2. Read endpoint + key + model chain from `Settings` (`.bm/settings.json`)
+2. Read endpoint + key + model chain from `Settings` (the workspace's
+   `settings.json`)
    with `.env` fallbacks, one knob per value — no more vendor names compiled
    in. Keep the existing `GEMINI_API_KEY` / `OPENROUTER_API_KEY` names working
    as deprecated aliases for one release so nobody's setup breaks silently.

@@ -102,6 +102,29 @@ impl Inner {
             }
         }
 
+        // **The duplicate-sidecar alarm.** Two `bm-tts` on one box is the OOM
+        // this cluster kept taking, and the count is the one fact it could not
+        // see: the model is ~2.85 GB resident the moment it loads, so a second
+        // one on an 8 GiB box is the kernel choosing a victim. Edge-triggered
+        // against the previous beat — the dispatcher polls every couple of
+        // seconds per worker, and an event per poll is a log nobody reads — and
+        // `None` from an older agent is not a zero, so it is never read as
+        // "was fine" and never reads as "is fine".
+        if let Some(n) = h.sidecars {
+            let was = self.beats.get(&h.worker_id).and_then(|b| b.sidecars);
+            if n > 1 && was.unwrap_or(0) <= 1 {
+                self.push_event(
+                    "error",
+                    format!(
+                        "[{}] {n} bm-tts sidecars resident on {} ({:.1} GB) — one box, one model; a duplicate is the OOM race, press X to sweep it",
+                        h.worker_id,
+                        h.addr,
+                        h.sidecar_gb.unwrap_or(0.0)
+                    ),
+                );
+            }
+        }
+
         self.beats.insert(h.worker_id.clone(), h.clone());
 
         // The "unknown"-user placeholder carries no configured values, so it

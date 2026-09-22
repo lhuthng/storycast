@@ -29,18 +29,26 @@ API ?= http://127.0.0.1:8901
 START ?= 1
 COUNT ?= 100
 
-.PHONY: build tui serve agent provision link test
+.PHONY: build build-inductor tui serve agent provision link test
 
 build:
 	$(CARGO) build --workspace --manifest-path $(RUST_DIR)/Cargo.toml
 
-tui: build
+# The dashboard and the inductor never touch the TTS sidecar binary, so
+# they must not wait on it: `bm-tts` links C++ system libraries, and a
+# toolchain move (Xcode CLT clang 17 -> 21) breaks that link while the
+# Rust crates are fine. Building only what these commands run keeps
+# `make tui` working through it.
+build-inductor:
+	$(CARGO) build -p bm-inductor -p bm-agent --manifest-path $(RUST_DIR)/Cargo.toml
+
+tui: build-inductor
 	$(BIN)/bm-inductor tui --api $(API)
 
-serve: build
+serve: build-inductor
 	$(BIN)/bm-inductor serve --bind 0.0.0.0 --port 8901 --start $(START) --count $(COUNT)
 
-agent: build
+agent: build-inductor
 	$(BIN)/bm-agent worker --inductor $(API)
 
 provision: build tts

@@ -76,12 +76,27 @@ pub(crate) fn draw_task_detail(f: &mut ratatui::Frame, app: &App, view: &TaskDet
         kv("lease", lease),
         kv("affinity", t.affinity.clone().unwrap_or_else(|| "—".into())),
         kv("updated", format!("{}s ago", age_secs(t.updated))),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  why (task.detail — what the worker reported)",
-            app.style_bold(Color::White),
-        )),
     ];
+    // A batched render, read off the one row that knows: the offer names a
+    // head and records the rest on it (`Task::batch`), so this is the only row
+    // that can answer "why are ten rows assigned to one box". Showing it on a
+    // member would need the same fact stored twice, which is how the two copies
+    // come to disagree.
+    if !t.batch.is_empty() {
+        lines.push(kv(
+            "batch",
+            format!(
+                "one offer, {} takes, settled together — also covers {}",
+                t.batch.len() + 1,
+                t.batch.join(", ")
+            ),
+        ));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  why (task.detail — what the worker reported)",
+        app.style_bold(Color::White),
+    )));
     if t.detail.trim().is_empty() {
         lines.push(Line::from(Span::styled(
             "  — nothing recorded: this task has not run yet",

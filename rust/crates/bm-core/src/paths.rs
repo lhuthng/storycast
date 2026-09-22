@@ -121,6 +121,27 @@ impl Layout {
         self.data().join(format!("script-{n:02}.json"))
     }
 
+    /// Whether this chapter has been digested.
+    ///
+    /// **One definition, because three places ask it** — the digest manager's
+    /// list, its filter and its painter — and they have to agree: the cursor
+    /// indexes the *filtered* rows, so a predicate that answered differently in
+    /// the draw than in the filter would highlight one chapter while acting on
+    /// another. A test found exactly that divergence when each site spelled the
+    /// question out for itself.
+    ///
+    /// The script file is the whole answer: it is what the digest stage produces
+    /// and what every downstream stage reads.
+    pub fn digested(&self, n: u32) -> bool {
+        self.script(n).is_file()
+    }
+
+    /// The recorded render plan: the single namer for a chapter's audio. See
+    /// [`crate::assemble::RenderPlan`].
+    pub fn plan(&self, n: u32) -> PathBuf {
+        self.data().join(format!("render-{n:02}.json"))
+    }
+
     pub fn bible(&self) -> PathBuf {
         self.data().join("bible.json")
     }

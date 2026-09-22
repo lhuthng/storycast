@@ -43,15 +43,16 @@ Common causes per stage:
   event names. `ANALYZER=opencode|openrouter|local` in `.env` swaps the backend.
   * **the event names a model you stopped using** (e.g. a `503` for
     `gemini-3.5-flash` when `analyze_models` holds only
-    `gemini-3.5-flash-lite`) — a provisioned worker has **no
-    `.bm/settings.json`**: provisioning copies `prompts/`, `python/`, `assets/`,
-    `refs/` and the cast, and never the inductor's own state. It therefore used
+    `gemini-3.5-flash-lite`) — a provisioned worker has **no settings file at
+    all**: provisioning copies `prompts/`, `python/`, `assets/`, `refs/` and the
+    cast, and never the inductor's own state. It therefore used
     to run on `Settings::default()` — the *compiled-in* chain — and
     ignore the operator's chain completely. The inductor now sends its analyzer
     block (`analyze_models`, the per-backend model names,
     `ollama_url`) with every digest offer and the worker overlays it, so the
-    model named in the event is the model in the inductor's
-    `.bm/settings.json`. With Gemini credentials configured, an empty
+    model named in the event is the model in the inductor's own settings
+    (`workspaces/<name>/settings.json`). With Gemini credentials configured, an
+    empty
     `analyze_models` list skips Gemini and falls back to `opencode`. If a
     stale name still shows up, that box is running an agent from before the fix:
     re-run `make provision BOX=…`. The agent is re-pushed **only when the
@@ -115,6 +116,26 @@ Common causes per stage:
   pairs go to the analyzer once, the cast is rewritten and only the losers'
   chapters re-render. Refused mid-play — `:X` first, like a voice swap.
 
+## Uplink blips and the completion hook
+
+The inductor drives, so a worker only ever *answers* — and a mid-task uplink
+blip used to swallow the answer, costing a finished stage its report and the
+chapter a full re-render. The reverse tunnel (`ssh -N -R` per box, held by the
+inductor) plus the worker's completion hook (`bm-agent/src/hook.rs`) close
+that hole. What each symptom means:
+
+| Symptom (worker log) | What it is |
+|---|---|
+| `no word from the inductor for 30s — reporting render:7:3 through the tunnel` | **not an error.** The primary channel went quiet mid-task; the hook is delivering the finished stage through the reverse tunnel. `hook accepted — the completion is home` closes it |
+| `hook: <task> still unreported — no tunnel answers on 127.0.0.1:18901` | the tunnel is down: the inductor is dead, predates the feature, or was restarted. Harmless to the box — the lease reaper requeues the task — but the work re-renders. Start the inductor; the supervisor respawns the tunnel on its own clock |
+| `hook: the inductor answered 401/409/… — not accepted` | the tunnel is up but the API refused: a 401 is a stale cluster token on the box (re-provision), anything else read the inductor's own log |
+
+| Symptom (inductor log) | What it is |
+|---|---|
+| `stale report for render:7:3 ignored` right after a tunnel recovery | the hook and the lease reaper raced: the task was already requeued when the completion landed. Discarded by design — the worker's word is not evidence — and the chapter renders once more. Frequent races mean the link drops often; see the next row |
+| `tunnel: <addr> client exited (255) — respawning` | the ssh client died (NAT timeout, network flap). Respawning is automatic; the only cost is the seconds it is down. A client that exits *immediately* in a loop usually means `ExitOnForwardFailure` tripped — a stale sshd session on the box still holds the forwarded port, and it clears when that session dies |
+| `tunnel: <addr> left the registry — tunnel closed` | the box was unlinked/dropped; the channel went with it, as it should |
+
 ## Provisioning problems
 
 | Symptom | Meaning / fix |
@@ -130,6 +151,12 @@ Common causes per stage:
 | `OPENCODE-SKIP (already configured — not reinstalling; force a re-provision to try again)` | not an error — the gate above declining to reinstall on a box it has already configured. It only appears if the tool is genuinely missing, and then the message names the remedy: `P` |
 | `FFMPEG-SKIP (…)` / `ffmpeg is not on PATH` | same gate. Merge is disabled on that box until ffmpeg is present; crawl/digest/render still work. `apt install ffmpeg` (or `dnf`), then `P` |
 | Machine added but workers never start | the inductor must be reachable **from the worker boxes** — start it bound to the LAN: `make serve` already uses `--bind 0.0.0.0` |
+| a box **keeps OOMing** during renders | the model is ~2.85 GB and the box is 8 GiB, so one sidecar fits and two do not. Two is what a race used to produce: provisioning started one detached and the worker — unable to tell "not up yet" from "not there" — started its own. That race is closed (`bm-tts` binds before loading and answers 503 until ready; the worker waits instead of spawning), so a box doing it now is running an older agent/inductor, or holding an orphan. Check the Workers pane's `tts` column (or `pgrep -c bm-tts` on the box): `2×` raises an error event and the scheduler stops feeding that box. `X` sweeps it |
+| a stage **frozen at a percentage with no error anywhere** | the signature of a **child process with no deadline** — the worker is waiting on something that will never return, so it prints nothing and the only thing that happens is the lease expiring, silently. It happened on 2026-09-22: a Gemini 503 sent the digest to its `opencode` fallback, which hung for 26 minutes (it hangs on `opencode run … "say hi"` too, so the fallback itself was broken). Read the worker's log tail — the last line names the step — then `pgrep -fl opencode` for the child. The events pane now says `expired while <worker> was still beating` on the first expiry and escalates on the second; the analyzer's own logs name the backend that actually ran, which is not always the one in the activity column. Fixed by deadlines on both the child and the Gemini client |
+| the log is **full of** `tunnel: <addr> client exited (255) — respawning` | one unreachable box, and on an older build one line per five seconds for ever — 1339 lines was 16% of the inductor log and 198 of its last 200, which buries every real event. The supervisor is now edge-triggered like the duplicate-sidecar alarm: the first failure, then one line every ~5 minutes, plus a line when the box comes back. Seeing it in bulk means the build predates that, or the box has been down a long time — `ssh <addr>` to check |
+| `TTS-STARTING (not ready after 240s — check …/tts.log)` | the sidecar started but never answered ready inside provisioning's budget. It is **not** treated as a failure and the box is still registered: the worker waits for a loading server rather than starting a second one. Read the log it names; a missing `libonnxruntime.so.1` is the usual cause (`make runtime`, then `P`) |
+| a box's memory **creeps up over a long render run** — one sidecar, not two | a *different* cause from the row above, and the one the `tts` column's GiB figure is for. A single sidecar's resident set grows across a long run of inferences, and the old guard could not see it: the idle reaper is keyed on *not working*, so a box rendering continuously never reached it. The worker now recycles the model at a task boundary once it reaches half the box's RAM or has served 200 takes (whichever first, at most once per 5 minutes), logging `sidecar holds N MiB … — recycling it`. Watch for that line; its absence on a climbing box means the agent predates the guard |
+| **tuning** the recycle budget, or measuring the growth | the numbers ship as a judgement and are meant to be replaced by a measurement. The worker prints what it will apply at startup (`TTS sidecar budget: recycle at …`), and both thresholds take a per-box override, so no rebuild is needed: `BM_TTS_MAX_RSS_MB=<MiB>` replaces the half-RAM cap with an absolute one (the log line then says `BM_TTS_MAX_RSS_MB` instead of `half this box's RAM`), `BM_TTS_MAX_RENDERS=<n>` and `BM_TTS_MIN_LIFETIME_SECS=<s>` move the other two. **The experiment:** one box, `:batch 32`, a long chapter — growth then shows up within one sitting in the `tts` column and in the recycle lines, and tells you whether the cap or the count is doing the work. Set the value in the worker's environment permanently (the launch line in `lifecycle.rs`) once you know it |
 
 ## AWS boxes
 

@@ -210,6 +210,70 @@ impl Ssh {
         args
     }
 
+    /// The argv for a long-lived **reverse** tunnel to this machine:
+    /// `ssh … -N -R {remote_port}:127.0.0.1:{local_port} {target}`.
+    ///
+    /// This is the one channel back from a worker to the inductor (the
+    /// completion hook, `bm-inductor/src/tunnel.rs`), and it exists because
+    /// the direction stays inverted: the *inductor* dials the worker to build
+    /// the tunnel, so the worker never needs a route — it forwards its own
+    /// loopback through the connection the inductor opened. On the worker's
+    /// side the remote bind is loopback-only (no `GatewayPorts`), which keeps
+    /// the hook port closed to the box's network — only local processes may
+    /// use it, and the cluster token gates what it does.
+    ///
+    /// Everything else mirrors [`Self::ssh_args`] — BatchMode, the declined
+    /// host-key verification, the same key expansion — because this is the
+    /// third transport and a policy on two of three is the known bug shape.
+    /// `-n` stays (no stdin, never a prompt), and the keepalives are the
+    /// tunnel's *liveness*, so they matter more than on a command run: a dead
+    /// NAT mapping must kill the client quickly so the supervisor respawns it
+    /// against the fresh route.
+    /// `ExitOnForwardFailure=yes` turns a failed remote bind (a stale tunnel
+    /// from a previous, uncleanly-killed inductor still holding the port) into
+    /// a dead client — the supervisor's respawn loop then retries, instead of
+    /// a zombie client pretending a tunnel that never existed.
+    ///
+    /// `-N` (no remote command) is what makes this a pure pipe: no shell is
+    /// allocated on the box, so there is nothing to escape and nothing to time
+    /// out — the client lives exactly as long as the TCP session does.
+    pub fn reverse_hook_args(&self, remote_port: u16, local_port: u16) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            // No stdin (never a prompt) and no remote command: a pure pipe.
+            "-n".into(),
+            "-N".into(),
+            "-o".into(),
+            "BatchMode=yes".into(),
+            // A failed remote bind kills the client — the supervisor's signal
+            // to retry — instead of a live client around a dead forward.
+            "-o".into(),
+            "ExitOnForwardFailure=yes".into(),
+            "-o".into(),
+            "ConnectTimeout=10".into(),
+            // The tunnel's liveness: keepalives tight enough that a NAT mapping
+            // dying is noticed in seconds, not minutes. Without them a silently
+            // dropped connection leaves a client that forwards nowhere while
+            // looking alive.
+            "-o".into(),
+            "ServerAliveInterval=5".into(),
+            "-o".into(),
+            "ServerAliveCountMax=2".into(),
+        ];
+        args.extend(HOST_KEY_OPTS.iter().map(|s| s.to_string()));
+        if self.port != 22 {
+            args.push("-p".into());
+            args.push(self.port.to_string());
+        }
+        if let Some(key) = &self.key {
+            args.push("-i".into());
+            args.push(expand_tilde(key).to_string_lossy().to_string());
+        }
+        args.push("-R".into());
+        args.push(format!("{remote_port}:127.0.0.1:{local_port}"));
+        args.push(self.target.clone());
+        args
+    }
+
     /// Run a shell script on the machine. Returns `(exit_code, stdout, stderr)`.
     ///
     /// A transport failure is reported as exit code 255 (ssh's own convention)

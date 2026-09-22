@@ -1,4 +1,4 @@
-//! Thin HTTP client for the Python TTS sidecar.
+//! Thin HTTP client for the TTS sidecar.
 //!
 //! The agent never loads a model. Every render is one request to whichever
 //! machine runs the sidecar — normally the agent's own, so it is a loopback
@@ -12,6 +12,17 @@ use std::time::Duration;
 pub struct Tts {
     base: String,
     http: reqwest::Client,
+}
+
+/// The three answers `/health` can give. See [`Tts::probe`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    /// Loaded and serving.
+    Up,
+    /// A server exists (it answered) but the model is not loaded yet. Wait.
+    Loading,
+    /// Nothing is listening. Safe to start one.
+    Absent,
 }
 
 impl Tts {
@@ -30,7 +41,13 @@ impl Tts {
         }
     }
 
-    pub async fn health(&self) -> bool {
+    /// What a `/health` probe found.
+    ///
+    /// The third state is the one that matters. `bm-tts` binds its port before
+    /// loading ~2.85 GB of weights and answers 503 while it does, so "a server
+    /// is starting" and "nothing is listening" are different answers — and a
+    /// caller that cannot tell them apart spawns a duplicate and OOMs the box.
+    pub async fn probe(&self) -> Health {
         match self
             .http
             .get(format!("{}/health", self.base))
@@ -38,9 +55,37 @@ impl Tts {
             .send()
             .await
         {
-            Ok(r) => r.status().is_success(),
-            Err(_) => false,
+            Ok(r) if r.status().is_success() => Health::Up,
+            // Any HTTP answer that is not a success is a server that is up and
+            // still loading (the 503), or a capability mismatch. Either way it
+            // exists; the caller must not spawn another.
+            Ok(_) => Health::Loading,
+            Err(_) => Health::Absent,
         }
+    }
+
+    pub async fn health(&self) -> bool {
+        matches!(self.probe().await, Health::Up)
+    }
+
+    /// Ask the sidecar to exit.
+    ///
+    /// The client's 900 s render timeout is deliberately overridden: this call
+    /// must fail fast. A server without the route (an older sidecar, the Python
+    /// one) answers 404, and any non-success is an error the caller reports and
+    /// carries on from — the sweep is the backstop, not an exception handler.
+    pub async fn shutdown(&self) -> Result<()> {
+        let resp = self
+            .http
+            .post(format!("{}/shutdown", self.base))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .with_context(|| format!("POST {}/shutdown", self.base))?;
+        if !resp.status().is_success() {
+            anyhow::bail!("shutdown refused: HTTP {}", resp.status());
+        }
+        Ok(())
     }
 
     /// The installed roster as `(label, id)` pairs.

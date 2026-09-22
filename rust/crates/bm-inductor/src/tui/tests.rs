@@ -3,15 +3,16 @@ use super::app::App;
 use super::audio::Player;
 use super::audition::AuditionLine;
 use super::draw::draw;
-use super::input::command::{command_key, do_command, Command, WORDS};
+use super::input::command::{busy_summary, command_key, do_command, Command, WORDS};
 use super::input::runconfig::{
-    parse_mix_config, parse_run_config, run_preview, save_app_setting, save_run_config,
+    parse_mix_config, parse_render_batch, parse_run_config, run_preview, save_app_setting,
+    save_render_batch, save_run_config,
 };
 use super::input::submit::submit_text;
 use super::input::{handle_key, op_key, urlencode};
 use super::jobs::{
-    job_segment, run_job, set_machine_state, verdict_after_failed_provision, DoneKind, Ev, Job,
-    ProfileReq, Res, WorkspaceReq,
+    job_segment, run_job, set_machine_state, unreachable_verdict, verdict_after_failed_provision,
+    DoneKind, Ev, Job, ProfileReq, Res, WorkspaceReq,
 };
 use super::layout::{
     cols, size_class, width_of, Size, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H, COMPACT_MACHINES_H,
@@ -991,31 +992,43 @@ fn the_run_screen_shows_each_machines_work_split() {
     );
 }
 
-#[tokio::test]
-async fn a_cold_start_names_the_fix_instead_of_reqwest_prose() {
+#[test]
+fn a_cold_start_names_the_fix_instead_of_reqwest_prose() {
     // The complaint this answers: starting the TUI with no inductor up
     // logged `inductor unreachable at …: error sending request for url …`
     // as an ERROR. A refused connection is the normal cold start, so the
     // poll verdict names `:B` and fits on one line.
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let api = format!("http://127.0.0.1:{port}");
-    // `no_proxy`, like the client `run_loop` builds: with `HTTP_PROXY` set in
-    // the environment an ambient proxy answers the loopback request and the
-    // verdict becomes "bad state payload" — the test would then be asserting
-    // the shell's environment rather than the dashboard's behaviour.
-    let http = reqwest::Client::builder().no_proxy().build().unwrap();
-    let err = super::jobs::fetch_state(&http, &api)
-        .await
-        .expect_err("nothing listens there");
-    assert!(err.contains("inductor is down"), "names the state: {err}");
-    assert!(err.contains(":B"), "names the fix: {err}");
+    //
+    // Asserted on the **verdict** rather than through a socket. The socket
+    // version bound an ephemeral port, dropped the listener, and then hoped no
+    // other test was handed that port in between — a race with a real window
+    // that failed once in six full-suite runs and passed 3/3 in isolation. The
+    // trade: reqwest's own classification (`ECONNREFUSED` ⇒ `is_connect`) is no
+    // longer exercised here. That is reqwest's contract rather than this repo's
+    // logic, and it is now the single `refused` argument below.
+    let api = "http://127.0.0.1:8901";
+
+    let down = unreachable_verdict(api, true, "error sending request for url (http://…)");
+    assert!(down.contains("inductor is down"), "names the state: {down}");
+    assert!(down.contains(":B"), "names the fix: {down}");
+    assert!(down.contains(api), "names where: {down}");
     assert!(
-        !err.contains("error sending request"),
-        "no reqwest prose: {err}"
+        !down.contains("error sending request"),
+        "no reqwest prose on the branch where the fix is the answer: {down}"
+    );
+
+    // Anything that is *not* a refusal keeps the detail: a timeout or a reset
+    // may be a sick inductor rather than an absent one, and telling those two
+    // apart is the whole reason the branches exist.
+    let sick = unreachable_verdict(api, false, "operation timed out");
+    assert!(sick.contains("unreachable"), "{sick}");
+    assert!(
+        sick.contains("operation timed out"),
+        "keeps the detail: {sick}"
+    );
+    assert!(
+        !sick.contains(":B"),
+        "a sick inductor is not a cold start, so it must not be told to start one: {sick}"
     );
 }
 
@@ -1925,6 +1938,18 @@ fn render_text(app: &mut App, w: u16, h: u16) -> String {
     out
 }
 
+/// Whether `hint` is on the rendered screen, **as a reader would see it**.
+///
+/// `render_text` returns the buffer row by row, so anything the overlay *wraps* is
+/// split across two of them — and a hint line longer than the overlay's width
+/// wraps by definition. A plain `contains` therefore misses phrases that are
+/// plainly visible on screen, which is a test failing for the wrong reason. This
+/// collapses the whitespace first, so the phrase is looked for as it reads.
+fn hint_visible(text: &str, hint: &str) -> bool {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.contains(hint)
+}
+
 #[test]
 fn the_log_pane_has_one_title_aliases_and_local_time() {
     let mut app = App::new("http://127.0.0.1:8901");
@@ -2093,6 +2118,8 @@ fn beat(id: &str, addr: &str, age_secs: u64, alias: &str) -> Heartbeat {
         cpu_pct: None,
         mem_pct: None,
         mem_gb: None,
+        sidecars: None,
+        sidecar_gb: None,
         capabilities: vec![],
     }
 }
@@ -2717,6 +2744,50 @@ async fn ctrl_u_clears_the_filter_and_never_requeues() {
         job_rx.try_recv().is_err(),
         "Ctrl-U must not be read as a plain `u` — that would re-queue a task"
     );
+}
+
+#[tokio::test]
+async fn the_task_page_explains_a_batched_render_from_the_row_that_owns_it() {
+    // Ten rows flipping to `assigned` on one box with nothing on screen to say
+    // why is the state batching created, and the TUI is the operator's only
+    // interface. The fact lives on the row the offer named — the one the
+    // worker reports progress against — so that is where it is shown, and a
+    // member row says nothing because it knows nothing.
+    let mut app = tasks_app();
+    let head = app
+        .tasks
+        .iter_mut()
+        .find(|t| t.stage == Stage::Render)
+        .expect("the fixture has a render row");
+    head.take = Some(0);
+    head.batch = vec!["render:3:1".into(), "render:3:2".into()];
+    app.screen = Screen::TaskDetail(TaskDetail {
+        stage: Stage::Render,
+        chapter: 3,
+        scroll: 0,
+        list: TasksView::new(),
+    });
+
+    let text = render_text(&mut app, 140, 44);
+    assert!(text.contains("batch"), "the row owns a batch: {text}");
+    assert!(
+        text.contains("3 takes"),
+        "and says how many the offer carries: {text}"
+    );
+    assert!(
+        text.contains("render:3:1") && text.contains("render:3:2"),
+        "naming the other rows, so they can be found in the ledger: {text}"
+    );
+
+    // A row with no batch says nothing extra — the line is not decoration.
+    let head = app
+        .tasks
+        .iter_mut()
+        .find(|t| t.stage == Stage::Render)
+        .unwrap();
+    head.batch.clear();
+    let text = render_text(&mut app, 140, 44);
+    assert!(!text.contains("batch"), "no batch, no line: {text}");
 }
 
 #[tokio::test]
@@ -3825,6 +3896,127 @@ fn ssh_default_commands_save_validate_and_clear() {
 }
 
 #[test]
+fn render_batch_parses_its_bounds_and_saves_to_this_workspaces_settings() {
+    // The knob's own rules in one place. `0` is the value that would deadlock
+    // the scheduler — an offer of no takes assigns no row, so the chapter never
+    // leaves Pending and nothing anywhere says why — and 64 is where a batch
+    // stops being a batch and becomes a lease held on one box for hours. Both
+    // are refused *while the operator's typing is still on screen*; the
+    // scheduler's clamp is the last resort, not the first answer.
+    let dir = std::env::temp_dir().join("bm-renderbatch-save");
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut app = App::new("http://x");
+    app.layout = bm_core::Layout::new(&dir);
+    let load = || bm_core::config::Settings::load(&bm_core::Layout::new(&dir).settings());
+
+    assert_eq!(parse_render_batch("12").unwrap(), 12);
+    assert_eq!(
+        parse_render_batch(" 3 ").unwrap(),
+        3,
+        "whitespace is not a typo"
+    );
+    assert!(parse_render_batch("").unwrap_err().contains("not a number"));
+    assert!(parse_render_batch("ten")
+        .unwrap_err()
+        .contains("not a number"));
+    assert!(parse_render_batch("-2")
+        .unwrap_err()
+        .contains("not a number"));
+    assert!(parse_render_batch("0").unwrap_err().contains("at least 1"));
+    let too_big = parse_render_batch("65").unwrap_err();
+    assert!(too_big.contains("at most 64"), "{too_big}");
+
+    let msg = save_render_batch(&app, "4").unwrap();
+    assert!(msg.contains("4 take"), "{msg}");
+    assert_eq!(
+        load().render_batch,
+        4,
+        "the file is what the scheduler reads"
+    );
+
+    // A refused value writes nothing — a typo must not clear what is in force.
+    assert!(save_render_batch(&app, "0").is_err());
+    assert_eq!(
+        load().render_batch,
+        4,
+        "and the old value survives the typo"
+    );
+}
+
+#[tokio::test]
+async fn the_batch_command_opens_a_prefilled_prompt_and_enter_saves_it() {
+    // End to end through the key chain: the word routes, the prompt opens on
+    // the value actually in force (a compiled default has to read differently
+    // from a number somebody chose), and Enter writes it and closes.
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let dir = std::env::temp_dir().join("bm-renderbatch-prompt");
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut app = App::new("http://x");
+    app.layout = bm_core::Layout::new(&dir);
+
+    assert_eq!(command_key("batch"), Some(Command::RenderBatch));
+    assert_eq!(command_key("renderbatch"), Some(Command::RenderBatch));
+    assert_eq!(
+        command_key("b"),
+        Some(Command::Key(KeyCode::Char('b'))),
+        "no single-key form: `b` is not the batch"
+    );
+
+    // Nothing saved yet, so the prompt shows the compiled default.
+    do_command(&mut app, Command::RenderBatch, &http, &job_tx);
+    match &app.screen {
+        Screen::Text(p) => {
+            assert_eq!(p.kind, TextKind::RenderBatch);
+            assert_eq!(
+                p.buf,
+                bm_core::config::DEFAULT_RENDER_BATCH.to_string(),
+                "prefilled with what is in force"
+            );
+        }
+        other => panic!("expected the batch prompt, got {other:?}"),
+    }
+    assert!(
+        job_rx.try_recv().is_err(),
+        "a save-only prompt dispatches nothing"
+    );
+
+    // A bad value keeps the prompt open with the problem stated in place.
+    if let Screen::Text(p) = &mut app.screen {
+        p.buf = "0".into();
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Text(_)),
+        "the prompt stays open: {:?}",
+        app.screen
+    );
+    assert!(
+        !bm_core::Layout::new(&dir).settings().is_file(),
+        "and a refused value wrote nothing at all — no file, not an empty one"
+    );
+
+    // A good one saves and closes, and the next prompt shows the new value.
+    if let Screen::Text(p) = &mut app.screen {
+        p.buf = "6".into();
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+    let saved = bm_core::config::Settings::load(&bm_core::Layout::new(&dir).settings());
+    assert_eq!(saved.render_batch, 6);
+    assert!(
+        job_rx.try_recv().is_err(),
+        "and it still dispatched nothing — the scheduler reads the file"
+    );
+
+    do_command(&mut app, Command::RenderBatch, &http, &job_tx);
+    match &app.screen {
+        Screen::Text(p) => assert_eq!(p.buf, "6", "prefilled from the file, not the default"),
+        other => panic!("expected the batch prompt, got {other:?}"),
+    }
+}
+
+#[test]
 fn ssh_default_words_route_to_their_commands() {
     assert_eq!(command_key("sshkey"), Some(Command::SshKey));
     assert_eq!(command_key("sshuser"), Some(Command::SshUser));
@@ -4848,6 +5040,73 @@ async fn aws_pool_job_reports_an_unreadable_account_and_never_a_blank_one() {
 }
 
 #[test]
+fn a_batch_is_visible_to_the_down_guard_and_bounded_in_its_dialog() {
+    // Two claims batching could have broken — one held, one did not.
+    //
+    // (a) The guard must still see the box as busy. It reads *rows*, not the
+    //     beat's `task_id`, so every take of a batch counts: batching must not
+    //     be able to hide in-flight work from the one guard that exists to stop
+    //     an operator killing a render.
+    // (b) The dialog line did break. `Confirm`'s height is `body.len() + 5` —
+    //     one entry per body line — while the paragraph *wraps*, so a single
+    //     long entry costs visual lines the height never counted and pushes the
+    //     `Enter / y confirm` hint out of the box. One task per box never did
+    //     that; sixty-four takes on one box does.
+    let now = bm_proto::now_secs();
+    let beat: Heartbeat = serde_json::from_value(serde_json::json!({
+        "worker_id": "w1", "addr": "172.31.1.5", "stage": "render",
+        "progress": 0.4, "activity": "render ch42", "ts": now
+    }))
+    .unwrap();
+    // One chapter's batch, all on one box. The head names the group; the
+    // members carry no grouping of their own.
+    let mut rows: Vec<Task> = (0..12)
+        .map(|pos| {
+            let mut t = Task::new_take(42, pos);
+            t.state = TaskState::Running;
+            t.assigned_to = Some("w1".into());
+            t
+        })
+        .collect();
+    rows[0].batch = (1..12).map(|p| format!("render:42:{p}")).collect();
+
+    let busy = busy_on(&[beat], &rows, &["172.31.1.5".to_string()], now);
+    assert_eq!(
+        busy.len(),
+        13,
+        "all twelve takes are in flight, plus the worker row: {busy:?}"
+    );
+    assert!(busy.contains(&"render:42:0".to_string()), "{busy:?}");
+    assert!(busy.contains(&"render:42:11".to_string()), "{busy:?}");
+
+    // The line is bounded, and says how many it left out. The list arrives
+    // sorted, so `w1` sorts last and is the one that gets elided.
+    let line = busy_summary(&busy);
+    assert!(line.starts_with("render:42:0"), "{line}");
+    assert!(line.contains("more"), "the remainder is stated: {line}");
+    assert!(!line.contains("w1"), "and the tail is elided: {line}");
+    assert!(
+        line.len() <= 68,
+        "and it fits inside the dialog's width: {} chars — {line}",
+        line.len()
+    );
+    // The bound is by width, not by count, so a list of *long* ids is elided
+    // harder than a list of short ones — the property a fixed count gets wrong.
+    let long: Vec<String> = (0..12).map(|i| format!("render:1999:{i}")).collect();
+    assert!(busy_summary(&long).len() <= 68, "{}", busy_summary(&long));
+    let short: Vec<String> = (0..12).map(|i| format!("m:{i}")).collect();
+    let short_line = busy_summary(&short);
+    assert!(short_line.len() <= 68);
+    assert!(
+        short_line.matches(", ").count() > busy_summary(&long).matches(", ").count(),
+        "shorter ids fit more of them: {short_line} vs {}",
+        busy_summary(&long)
+    );
+    // A short list is not elided at all: no ellipsis, no arithmetic.
+    assert_eq!(busy_summary(&busy[..2]), "render:42:0, render:42:1");
+}
+
+#[test]
 fn the_down_guard_sees_a_render_in_flight_on_one_of_those_boxes() {
     let now = bm_proto::now_secs();
     let skip = |json: serde_json::Value| -> Heartbeat { serde_json::from_value(json).unwrap() };
@@ -5114,6 +5373,355 @@ fn machine_kind_separates_local_aws_and_remote() {
     let remote = Machine::new("192.168.2.2", "thang", 22, None, "worker");
     assert_eq!(machine_kind(&remote), "rmt");
     assert_eq!(machine_label(&remote), "thang");
+}
+
+#[tokio::test]
+async fn the_digest_manager_lists_chapters_and_hides_the_digested() {
+    let mut app = App::new("http://127.0.0.1:8901");
+    // The list comes from the ledger the panes already hold, so a chapter the
+    // ledger has never heard of is not offered work it cannot report against.
+    app.tasks = vec![
+        Task::new(11, Stage::Render),
+        Task::new(7, Stage::Digest),
+        Task::new(9, Stage::Digest),
+        Task::new(7, Stage::Merge),
+    ];
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel();
+    let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+    handle_key(&mut app, press(KeyCode::Char('D')), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Digest(v) => {
+            assert_eq!(v.chapters, vec![7, 9, 11], "one row per chapter, sorted");
+            assert!(!v.hide_done, "the whole book is shown to begin with");
+            assert_eq!(v.cursor, 0);
+        }
+        other => panic!("D must open the digest manager: {other:?}"),
+    }
+
+    // Rendered, not just constructed: this is the test that would catch the
+    // overlay clipping its own grid or losing the key hints off the bottom.
+    let text = render_text(&mut app, 100, 32);
+    assert!(text.contains("digest manager"), "{text}");
+    for n in ["7", "9", "11"] {
+        assert!(text.contains(n), "ch{n} is listed:\n{text}");
+    }
+    assert!(text.contains("3 chapters"), "the count is stated:\n{text}");
+    // The keys, not the prose: a hint that is reworded should not fail a test
+    // about whether the screen *has* hints.
+    for hint in ["Enter open", "f filter", "←→ chapter", "stop digest"] {
+        assert!(
+            hint_visible(&text, hint),
+            "the {hint:?} hint is on screen:\n{text}"
+        );
+    }
+
+    // `f` filters. It also has to keep the cursor *inside* the list it filters —
+    // the cursor indexes the rows, so a filter that shrinks them can leave it
+    // pointing past the end at nothing.
+    handle_key(&mut app, press(KeyCode::Down), &http, &job_tx).await;
+    handle_key(&mut app, press(KeyCode::Down), &http, &job_tx).await;
+    handle_key(&mut app, press(KeyCode::Char('f')), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Digest(v) => {
+            assert!(v.hide_done, "the filter is on");
+            // Asserted through `Layout::digested`, which is the question the
+            // handler and the painter both ask. An earlier version of this test
+            // invented its own predicate (`n == 7`) and then complained that the
+            // cursor — correctly clamped against the *real* rows — was out of
+            // range for the invented ones. The lesson is the reason
+            // `Layout::digested` exists: three sites spelling out one question is
+            // three chances to disagree.
+            let rows = v.rows(&|n| app.layout.digested(n));
+            assert!(
+                v.cursor < rows.len(),
+                "the cursor stayed inside the rows it indexes (cursor {}, rows {rows:?})",
+                v.cursor
+            );
+            assert!(
+                v.selected(&|n| app.layout.digested(n)).is_some(),
+                "so it still points at a chapter"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    handle_key(&mut app, press(KeyCode::Esc), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Normal),
+        "Esc returns to the dashboard"
+    );
+}
+
+#[test]
+fn the_digest_chapter_page_names_the_round_and_the_last_thing_that_happened() {
+    // Built directly rather than by opening a chapter: opening one builds a real
+    // prompt, which needs a chapter file and a bible. What this pins is the
+    // *page* — that the round, the validator's words and the prompt's identity
+    // are all on it, at every tier the layout supports.
+    let mut app = App::new("http://127.0.0.1:8901");
+    let mut v = super::screen::DigestView::new(vec![7, 9]);
+    v.open = Some(super::screen::DigestChapter {
+        n: 9,
+        round: bm_core::digest::Round::Cast,
+        prompt: "You are a Vietnamese web-novel dramaturg.".into(),
+        cast: None,
+        note: "cast pass invalid (roster: unknown speaker \"Lão Tam\"); raw saved".into(),
+        done: false,
+    });
+    app.screen = Screen::Digest(v);
+
+    for (w, h) in [(76, 20), (76, 24), (100, 32), (160, 50)] {
+        let text = render_text(&mut app, w, h);
+        assert!(text.contains("ch9"), "{w}x{h}: the chapter:\n{text}");
+        assert!(text.contains("round 1"), "{w}x{h}: which round:\n{text}");
+        assert!(
+            text.contains("unknown speaker"),
+            "{w}x{h}: the validator's own words, which are the instruction:\n{text}"
+        );
+        assert!(
+            text.contains("clipboard:"),
+            "{w}x{h}: and what is on it:\n{text}"
+        );
+        // The absence that matters: a chapter mid-round is not reported as done.
+        assert!(
+            !text.contains("reported to the inductor"),
+            "{w}x{h}: nothing claims it landed yet:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn a_long_validator_complaint_does_not_push_the_chapter_page_off_its_own_box() {
+    // The other half of the bug the grid had. A validator's complaint is the
+    // *instruction* — the operator pastes it back into their model — so it is
+    // deliberately shown in full, and a real one is a paragraph, not a phrase.
+    // This is the same trap as the confirm dialog and the grid footer: the height
+    // counts lines, the paragraph wraps, and the line that falls off the bottom is
+    // whichever was drawn last.
+    let mut app = App::new("http://127.0.0.1:8901");
+    let mut v = super::screen::DigestView::new(vec![7]);
+    v.open = Some(super::screen::DigestChapter {
+        n: 7,
+        round: bm_core::digest::Round::Script,
+        prompt: "You are a Vietnamese web-novel dramaturg.".into(),
+        cast: Some(serde_json::json!({"roster": ["Narrator"]})),
+        note: "script pass invalid (segment 12: unknown speaker \"Kẻ Không Có Trong \
+               Cast\"; segment 19: music \"buồn\" is not in the palette (quiet, battle, \
+               birds, calm); segment 27: missing `music` — when any segment declares \
+               one, every segment must). raw saved to data/.last-analyze-raw.json"
+            .into(),
+        done: false,
+    });
+    app.screen = Screen::Digest(v);
+
+    for (w, h) in [(76, 20), (76, 24), (100, 32), (160, 50)] {
+        let text = render_text(&mut app, w, h);
+        // The prompt's identity is the last thing drawn, so it is what falls off
+        // when the note overflows — and it is how the operator checks the right
+        // prompt is on the clipboard before pasting anything.
+        assert!(
+            hint_visible(&text, "clipboard:"),
+            "{w}x{h}: the clipboard line survived the complaint:\n{text}"
+        );
+        assert!(
+            hint_visible(&text, "then press v"),
+            "{w}x{h}: and so did the instruction:\n{text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_digest_grid_scrolls_so_the_selection_is_never_off_screen() {
+    // The complaint this answers: move down past the last visible row and the
+    // selection disappears. The grid had no viewport at all, so the cursor walked
+    // off the bottom of a 200-chapter book with nothing on screen to show where it
+    // had got to.
+    //
+    // Chapters in the thousands so **absence is testable**: "1000" occurs in no
+    // other number in this list, whereas "1" hides inside 100, 121, 200…
+    let mut app = App::new("http://127.0.0.1:8901");
+    let http = reqwest::Client::new();
+    let (job_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.screen = Screen::Digest(super::screen::DigestView::new((1000..=1200).collect()));
+
+    // A short terminal, deliberately: on a tall one all seventeen rows fit and the
+    // window would never have to move, so the test would pass against the bug.
+    let (w, h) = (100, 20);
+    let first = render_text(&mut app, w, h);
+    assert!(
+        first.contains("1000"),
+        "the first screen starts at the top of the book:\n{first}"
+    );
+    assert!(
+        first.contains("of 17"),
+        "and says how many rows there are:\n{first}"
+    );
+    assert!(
+        first.contains("ch1000 selected"),
+        "and which chapter is under the cursor:\n{first}"
+    );
+
+    // Walk down the book. ↓ moves a whole row, so this is a realistic journey.
+    for _ in 0..20 {
+        handle_key(&mut app, press(KeyCode::Down), &http, &job_tx).await;
+    }
+    let last = render_text(&mut app, w, h);
+    assert!(
+        last.contains("1200"),
+        "the last chapter is drawn — the selection is on screen:\n{last}"
+    );
+    assert!(
+        !last.contains("1000"),
+        "and the first row has scrolled away, so the window really moved:\n{last}"
+    );
+    assert!(
+        last.contains("ch1200 selected"),
+        "the footer names the chapter under the cursor:\n{last}"
+    );
+    assert!(
+        !last.contains("rows 1-"),
+        "and says which rows are on screen:\n{last}"
+    );
+
+    // Walking back up brings the top of the book back, so the window follows the
+    // cursor in both directions rather than only ever scrolling forward.
+    for _ in 0..20 {
+        handle_key(&mut app, press(KeyCode::Up), &http, &job_tx).await;
+    }
+    let back = render_text(&mut app, w, h);
+    assert!(
+        back.contains("1000") && !back.contains("1200"),
+        "back at the top, and the bottom has scrolled off:\n{back}"
+    );
+}
+
+#[tokio::test]
+async fn the_digest_manager_arrows_follow_the_grid_and_esc_steps_back_from_a_chapter() {
+    let mut app = App::new("http://127.0.0.1:8901");
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel();
+    let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let cursor = |app: &App| match &app.screen {
+        Screen::Digest(v) => v.cursor,
+        other => panic!("{other:?}"),
+    };
+
+    app.screen = Screen::Digest(super::screen::DigestView::new((1..=30).collect()));
+
+    // ←/→ step one chapter; ↑/↓ step a **row**, because that is what the picture
+    // shows — the numbers are drawn `DIGEST_COLS` to a line. Stepping one chapter
+    // on ↑ would move the highlight sideways.
+    handle_key(&mut app, press(KeyCode::Right), &http, &job_tx).await;
+    assert_eq!(cursor(&app), 1, "→ is one chapter");
+    handle_key(&mut app, press(KeyCode::Left), &http, &job_tx).await;
+    assert_eq!(cursor(&app), 0, "← is one chapter back");
+    handle_key(&mut app, press(KeyCode::Down), &http, &job_tx).await;
+    assert_eq!(
+        cursor(&app),
+        super::screen::DIGEST_COLS,
+        "↓ is a whole row, not one chapter"
+    );
+    handle_key(&mut app, press(KeyCode::Up), &http, &job_tx).await;
+    assert_eq!(cursor(&app), 0, "↑ is a row back");
+    // Clamped at the end rather than wrapping round to the top.
+    for _ in 0..40 {
+        handle_key(&mut app, press(KeyCode::Right), &http, &job_tx).await;
+    }
+    assert_eq!(cursor(&app), 29, "the last chapter, not a wrap");
+
+    // **The regression.** Esc inside a chapter returns to the list. It used to do
+    // nothing: the handler works on a *clone* of the view and writes it back after
+    // the match, so the Esc arm clearing `open` had that undone one line later.
+    // The list-level Esc was tested and passed — which is exactly why this went
+    // unnoticed, since the bug only lived in the branch the test never entered.
+    if let Screen::Digest(v) = &mut app.screen {
+        v.open = Some(super::screen::DigestChapter {
+            n: 7,
+            round: bm_core::digest::Round::Cast,
+            prompt: "a prompt".into(),
+            cast: None,
+            note: String::new(),
+            done: false,
+        });
+    }
+    handle_key(&mut app, press(KeyCode::Esc), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Digest(v) => assert!(v.open.is_none(), "Esc steps back to the list"),
+        other => panic!("Esc from a chapter must not close the whole screen: {other:?}"),
+    }
+
+    // A second Esc, now from the list, closes the manager.
+    handle_key(&mut app, press(KeyCode::Esc), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Normal),
+        "Esc from the list closes it"
+    );
+
+    // `x` and `s` are the cluster-wide switch, on the screen it belongs to — the
+    // same command the `:off`/`:on` words run, so there is one implementation and
+    // two ways in.
+    app.machines = vec![named_machine("192.168.2.2", "box-1")];
+    app.screen = Screen::Digest(super::screen::DigestView::new(vec![1, 2]));
+    handle_key(&mut app, press(KeyCode::Char('x')), &http, &job_tx).await;
+    match job_rx.try_recv().expect("x dispatches").bare() {
+        Job::DigestPolicy { restore, .. } => assert!(!restore, "x is off"),
+        other => panic!("{other:?}"),
+    }
+    // `s` restores, which needs a snapshot; whether this machine has one is the
+    // filesystem's business, not the test's — what the test holds is that the
+    // screen survives the attempt, because the operator is still on it.
+    handle_key(&mut app, press(KeyCode::Char('s')), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Digest(_)),
+        "the manager stays open through the switch"
+    );
+}
+
+#[tokio::test]
+async fn digest_off_snapshots_every_machine_and_on_refuses_without_a_snapshot() {
+    // Two halves of one feature: `:off` must carry *every* machine's policy into
+    // the job (it is the snapshot), and `:on` must refuse rather than guess when
+    // there is nothing to restore.
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.machines = vec![
+        named_machine("192.168.2.2", "box-1"),
+        named_machine("10.0.0.5", "box-2"),
+    ];
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    assert!(
+        command_key("off").is_some() && command_key("on").is_some(),
+        "both words exist, so :help lists them"
+    );
+    do_command(&mut app, Command::DigestOff, &http, &job_tx);
+    match job_rx.try_recv().expect(":off dispatches").bare() {
+        Job::DigestPolicy {
+            restore, machines, ..
+        } => {
+            assert!(!restore, ":off takes the snapshot");
+            assert_eq!(machines.len(), 2, "every machine is carried into it");
+            assert_eq!(machines[0].0, "192.168.2.2");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // The refusal, tested against a path that certainly has no snapshot. It has
+    // to refuse *before* posting anything: an empty policy reads as the default
+    // list, which is digest ON everywhere — the opposite of the ask.
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("digest-suspend.json");
+    let err = super::jobs::digest_restore(&missing, "http://127.0.0.1:9", &http, &[])
+        .await
+        .expect_err("nothing to restore");
+    assert!(err.contains("no snapshot"), "{err}");
+    assert!(
+        err.contains("policy editor"),
+        "and names the way to do it by hand instead: {err}"
+    );
 }
 
 #[tokio::test]

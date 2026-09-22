@@ -4,6 +4,7 @@ pub(crate) mod cast;
 mod cloud;
 pub(crate) mod command;
 mod confirm;
+mod digest;
 mod help;
 mod jobs;
 mod machine;
@@ -171,6 +172,9 @@ pub(crate) async fn handle_key(
     }
     if let Screen::Policy(view) = app.screen.clone() {
         return policy::key_policy(app, view, key, http, job_tx).await;
+    }
+    if let Screen::Digest(view) = app.screen.clone() {
+        return digest::key_digest(app, view, key, http, job_tx).await;
     }
     normal::normal_key(app, key, http, job_tx).await
 }

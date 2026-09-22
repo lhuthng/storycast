@@ -51,6 +51,9 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
         cpu_pct: None,
         mem_pct: None,
         mem_gb: None,
+        // A registration has not measured the box yet; the next beat does.
+        sidecars: None,
+        sidecar_gb: None,
         capabilities: r.capabilities,
     };
     inner.observe(&beat);
@@ -734,6 +737,11 @@ fn offline_swap_apply(
     let settings = bm_core::config::Settings::load(&layout.settings());
     let mut inner = Inner::new(layout.clone(), settings);
     inner.load_ledger();
+    // The startup pass the live inductor runs before any op: an invalidation
+    // is diffed against the recorded plan, so without one the swap could only
+    // re-speak whole chapters. Built *before* the mutation, so it records the
+    // inputs as they are now and the diff afterwards names what moved.
+    inner.adopt_render_plans();
     inner
         .op_swap_voice(character, voice)
         .map(|m| format!("{m} [offline — inductor was down]"))
@@ -1389,6 +1397,8 @@ mod tests {
                 cpu_pct: None,
                 mem_pct: None,
                 mem_gb: None,
+                sidecars: None,
+                sidecar_gb: None,
                 capabilities: vec![],
             }),
         )
@@ -1482,6 +1492,8 @@ mod tests {
             cpu_pct: None,
             mem_pct: None,
             mem_gb: None,
+            sidecars: None,
+            sidecar_gb: None,
             capabilities: vec![],
         };
         heartbeat(State(st.clone()), Json(beat())).await;

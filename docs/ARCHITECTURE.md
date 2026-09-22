@@ -33,7 +33,8 @@ serving path, so a worker needs no Python at all.
 ## 1. One idea: work is a ledger of tasks, not a loop
 
 Every unit of work is a `(stage, chapter)` pair held in one place — the
-**ledger** (`.bm/ledger.json`) — with one of six states:
+**ledger** (`ledger.json`, in the active workspace; see "Config lives next to
+the ledger" below) — with one of six states:
 
 ```mermaid
 stateDiagram-v2
@@ -66,6 +67,16 @@ nothing.
   pool **without a strike**: silence is not failure. A background `reap` runs
   every 10 s and also re-queues tasks stranded on workers that stopped sending
   heartbeats (~90 s window).
+* **an expiry on a *live* worker is a different event, and says so.** The
+  strike-free rule above is written for a worker that died — it deserves nothing
+  and needs nobody. A worker that is **alive and stuck** looks identical from
+  here (fresh beat, task never finished), and the requeue is silent, so the task
+  is handed out again and again with nothing anywhere saying so. `reap` therefore
+  counts expiries that happened **while the holder was still beating**
+  (`Task.expiries`) and emits its own event — a `warn` on the first, an `error`
+  from the second, naming the row, the worker and where to look. On 2026-09-22
+  two digest rows looped that way for ~80 minutes while the TUI showed a
+  percentage that never moved, and this distinction is what was missing.
 * **strikes** — three failed attempts shelve a task so it stops being retried
   forever. The operator lifts this with `u` (blanket retry) or per task from
   the K ledger (`u` retry, `F` force — which also deletes the stage's on-disk
@@ -78,12 +89,23 @@ asking — there is no registration it has to get back in on (§7).
 
 ### Config lives next to the ledger, not in it
 
-Three files, three jobs: `.bm/settings.json` (app-wide defaults, including
-`ssh.{user,port,key}`), `.bm/machines.json` (per-machine connection config,
-keyed by address, written when a box is bound with `:a`, `link` or
-`provision`), `.bm/ledger.json` (runtime only: task states plus per-machine
+Three files, three jobs: **`settings.json`** (app-wide defaults for *this book*,
+including `ssh.{user,port,key}`), **`machines.json`** (per-machine connection
+config, keyed by address, written when a box is bound with `:a`, `link` or
+`provision`), and **`ledger.json`** (runtime only: task states plus per-machine
 liveness under `machine_state`). The API joins config with runtime and serves
 the same `Machine` shape as always, so the TUI never sees the split.
+
+**Where the first two live is the one thing to get right**, because the answer
+is "it depends" and the wrong half is silent: `Layout::state_file` puts
+`settings.json` and `ledger.json` **under the active workspace**
+(`workspaces/<name>/`) and falls back to `.bm/` only when there is no workspace
+— legacy mode, where `work == root`. So a per-book setting like `render_batch`
+lives in `workspaces/<name>/settings.json`, while `machines.json` and the
+profile pointer are machine-global and stay in `.bm/` whichever book is active.
+Both halves are per-book state that the workspace switch moves; anything an
+operator is told to edit should name the workspace form unless they are on a
+bare checkout.
 
 One chain resolves the ssh key, highest wins: the machine's own entry, else
 the app default, else ssh decides (agent / `~/.ssh/config` — no key at all is
@@ -169,34 +191,100 @@ profiles is the mismatch the tag exists to catch.
   speak the old dramatization under the new one. The "analyzer" is
   pluggable (`opencode | openrouter | gemini | local`) with a fallback chain
   over models.
+  **The digest can also be run by hand** (`D`, the digest manager), which is what
+  to reach for when every backend is unavailable — a rate-limited fallback, a 503,
+  or simply a model already open in a browser. The operator gets round 1's prompt
+  on the clipboard, pastes it into any model, pastes the answer back, and the
+  same for round 2. **It is the same digest, not a looser one**: the prompts are
+  the shipped templates, the answers go through the *same* validators
+  (`manual_accept`), and the result is assembled by the *same* `assemble_outcome`
+  the worker's path uses — so an answer the automatic route would have refused is
+  refused here too, with the validator's own complaint as the message. It is
+  reported over `/api/complete` with a worker's own body under the reserved
+  `operator` id, which is also what makes finishing by hand win a race: the row
+  goes `Done` and the box still grinding on it finds a row it no longer owns, so
+  its report is dropped as stale. `:off` / `:on` stop and restore digest work
+  across every machine — `:off` snapshots each box's whole policy to
+  `.bm/digest-suspend.json` first, so `:on` restores *what each box had* rather
+  than switching digest on everywhere.
 * **render** (`bm-agent/src/tts.rs` + `python/`) — speaks each script segment
   through the engine. Vieneu runs as an HTTP sidecar on `127.0.0.1:8818` per
-  machine. The inductor owns `data/audio/segments-<engine>-NN/` — it is the
-  only copy of any segment; a worker's copy is scratch. A render offer names
-  **every** unit of the chapter (`render_units`, planned with the same
-  `expected_wavs` the merger uses), never the difference against the
-  inductor's store: the offer goes to whichever box asks next, and the
-  inductor cannot read that box's disk. The worker skips the units it already
-  holds (`pending_units` in `bm-agent`, the same present-and-non-trivial test
-  `assemble` applies) and speaks the rest. A partial offer is what used to
-  leave a box holding a strict subset of a chapter, which the merge then
-  pinned to that box failed on as `N segments missing`. Non-local workers
-  upload each wav via `POST /api/segment` and discard their copy once the
-  report is accepted, while the local node writes straight into the store. A
-  render report is gated on the files being present — the worker's word is not
-  evidence. The report's `units` counts real TTS calls (cache hits excluded),
-  which feeds the ETA model. Only workers advertising the `render-segments`
-  capability are offered renders.
+  machine, **worker-owned and warm across offers** (see §4): one sidecar per
+  box, never duplicated, and recycled on a memory budget rather than only when
+  it goes idle.
+
+  A render is **one task per take** — `render:<ch>:<pos>` — where a take is one
+  unit of `plan_render` (a run on the local engine, a line in the cloud). Its
+  name is a hash of the inputs that produce it:
+  `take_key = sha256(engine | voice_key | text | temperature | silence_p)` and
+  `file = t-<take_key[..16]>.wav`, so *holding the file is proof of holding the
+  right bytes* and a changed input is a different name rather than the same
+  name with different audio.
+
+  **One offer, `render_batch` takes.** A take is scheduled, gated and settled on
+  its own ledger row — that is what makes a local edit cost one segment instead
+  of a chapter — but the *assignment* covers a slice of one chapter at once:
+  `Settings::render_batch` takes per offer, ten by default, clamped to 1–64 by
+  `Settings::render_batch()`. The reason is that a worker pays a fixed cost per
+  offer — a round trip, a heartbeat, a completion report, a unit collection —
+  and a chapter is dozens of takes. The grouping is recorded on the row the
+  offer names (`Task::batch`) and nowhere else, so the completion gate and the
+  settle both read it from the ledger; **no word of it travels on the wire**,
+  because the offer already carried `render_units` as a list. A batch never
+  spans two chapters: the pin, the merge's affinity, the progress line and the
+  inductor's unit collection are all keyed by chapter. The lease grows with the
+  batch (capped at 4× the stage's own) so a long batch does not expire under a
+  box that is simply working.
+
+  The chapter's takes and their files are recorded in `data/render-NN.json`
+  (**the render plan**, `bm-core/src/assemble/renderplan.rs`), written by the
+  inductor and never re-derived. That plan is the single namer: the offer, the
+  completion gate, the offer-time heal, `segments`, and the merger all read it,
+  which is what removed the five independent re-derivations that used to
+  disagree: a name computed from the script, cast, bible and engine at offer
+  time, again for the force list, again on the worker's disk, again at the
+  completion gate, and again by the merger — each against whatever state those
+  files happened to be in.
+
+  A chapter with **no** stored plan predates this and is *adopted*: the first
+  plan records every wav already on disk and marks only the genuinely absent
+  takes as work, so writing one re-speaks nothing. Where the store already has
+  the files, that adoption is exact; where a text changed *before* the plan
+  existed it is a deliberate one-time blind spot, caught by the first edit
+  after (see the module docs in `renderplan.rs`).
+
+  So an offer carries **one take and nothing else**: voice, text, parameters,
+  the file to write, and the chapter's `cast_hash`. It ships no script and no
+  cast, because a take is self-sufficient — there is nothing on the box the
+  worker has to look up. The worker skips a take whose file it already holds
+  (`pending_units` in `bm-agent`, the same present-and-non-trivial test
+  `assemble` applies), and a render report is gated on that file being present:
+  the worker's word is not evidence. `render_force` is therefore empty in the
+  normal case (content addressing is the force list); the one exception is an
+  **adopted** pre-plan file that this store lacks, which is forced explicitly.
+
+  A local edit is consequently **one segment, not a chapter**: the plan's diff
+  names the changed takes, deletes exactly the files they superseded, and
+  requeues only those. A chapter's takes are **pinned** to the first box that
+  takes one (`pin_chapter_takes`), because a merge needs the whole chapter in
+  one store — that is also where the merge's affinity comes from. Non-local
+  workers upload each wav via `POST /api/segment` and discard their copy once
+  the report is accepted; the local node writes straight into the store. Only
+  workers advertising the `render-segments` capability are offered renders.
 * **merge** (`assemble/`, `ambience.rs`) — concatenates segments with
   `gap_ms` pauses and optional ambience beds keyed by the script's `scene`
-  labels, and writes `output/Ch.N - Title.mp3`. A merge task carries
-  **affinity** for the box that rendered its chapter, because a box's seg dir
-  is where those wavs were written. Affinity is an optimisation for remote
-  boxes and never a gate for the local node, which shares the inductor's
-  store and may take any merge; that exemption is also why a chapter whose pin
-  is dead still merges. A local merge ships no mp3 — the file itself is the
-  evidence. A remote merge (pre-migration affinity, or no local worker alive)
-  ships its mp3 home, base64, inside the report.
+  labels, and writes `output/Ch.N - Title.mp3`. It is offered only when the
+  plan is **covered** — every take's task `Done`, which is the same question
+  the mixer asks, so the two cannot disagree. The offer carries the plan's
+  file list (`merge_takes`, in mix order): the mixer cannot re-derive a
+  content-addressed take name from the script and the cast and must not try.
+  A merge task carries **affinity** for the box that rendered its chapter,
+  because a box's seg dir is where those wavs were written. Affinity is an
+  optimisation for remote boxes and never a gate for the local node, which
+  shares the inductor's store and may take any merge; that exemption is also
+  why a chapter whose pin is dead still merges. A local merge ships no mp3 —
+  the file itself is the evidence. A remote merge (pre-migration affinity, or
+  no local worker alive) ships its mp3 home, base64, inside the report.
 
 ## 3. The control API (bm-inductor, axum, default :8901)
 
@@ -326,6 +414,74 @@ because `B` is the automated path and runs seconds after `:up` — the likeliest
 all to meet a box mid-boot.
 Restoring `initializing` re-stamps the clock, which is the right rule: while the
 operator is retrying, somebody is watching the box.
+
+### One box, one sidecar
+
+The TTS sidecar is ~2.85 GB resident the moment its weights load (measured on
+the `m7i-flex.large` this project provisions), and the boxes are 8 GiB. One
+model fits; two are the OOM this cluster kept taking, so almost every rule below
+is a way of making "two" impossible rather than survivable.
+
+* **`bm-tts` binds its port before it loads, and `/health` answers 503
+  `{"status":"loading"}` until it is ready.** The port is therefore the
+  single-instance lock, taken *before* the expensive allocation: a second launch
+  dies on the bind having allocated nothing. A 200 still means ready — the
+  reference's worry that "health answering early makes a cold start look fast"
+  is answered by the 503, not by loading first.
+* **The worker waits, it never races.** `Tts::probe` answers `Up | Loading |
+  Absent`; only `Absent` (connection refused) is a reason to spawn. A bound port
+  answering 503 is a server mid-load, and `Sidecar::ensure` polls it for the
+  whole startup budget instead of starting a second model — including when its
+  *own* child exits early, which is what a lost bind race looks like.
+* **The worker owns the lifetime.** The sidecar is kept warm *between* tasks
+  (a per-task stop would reload 2.85 GB for every offer), reaped after
+  `SIDECAR_IDLE_SECS` (180 s) of having no work, and stopped on worker exit —
+  a spot reclaim that leaves a model behind spends the next box's memory on a
+  machine nobody drives. Provisioning's own detached server is adopted rather
+  than duplicated; it is *not* ours to kill by signal, so `POST /shutdown` asks
+  it to exit.
+* **A busy box is never idle, so idleness is not a memory guard.** The model's
+  resident set grows across a long run of inferences — allocator fragmentation,
+  cached activations, whatever the runtime keeps — and the idle reaper could not
+  see it, because it is keyed on *not working*. `Sidecar::recycle_if_over_budget`
+  is the guard that covers load, and it runs at the one moment that is safe: the
+  top of a render arm, **before the first `/infer`**, never during one (a
+  recycled request loses the take, and TTS is stochastic, so it cannot be
+  reproduced from its inputs). It fires when the sidecar's resident set reaches
+  **half the box's RAM** (`SIDECAR_RSS_FRACTION`, ~4 GiB on an 8 GiB box — a
+  fraction rather than a fixed size, so it scales with the machine and needs no
+  configuration) **or** the process has served `SIDECAR_MAX_RENDERS` (200)
+  takes, whichever comes first, with a `SIDECAR_MIN_LIFETIME_SECS` (300 s)
+  cooldown so a badly-tuned budget costs one reload per interval rather than one
+  per offer. The action is `reap_all`, not `stop`, and that is the one place the
+  worker overrides its own "an adopted server is somebody else's to keep" rule:
+  a box about to be killed by its own memory cannot leave the decision to
+  whoever started the model. The count trigger is deliberately *not* gated on
+  the memory reading — a count cannot be unavailable, so the guard still fires
+  on a platform that reports no per-process memory.
+* **A merge reaps every sidecar first** (`reap_all`, waited out until the port
+  is quiet). ffmpeg's working set is the one thing that co-resides badly with a
+  model, and the merge is pinned to the box that rendered the chapter.
+* **The cluster can see the count.** The heartbeat carries `sidecars` and
+  `sidecar_gb`, and both are a census of **processes**: `census_refresh_kind`
+  asks sysinfo for memory and explicitly *not* for tasks, because on Linux
+  sysinfo lists every thread as a process in its own right, each reporting its
+  parent's whole RSS — one 2.4 GiB model with an 8-thread pool read as
+  `8 bm-tts processes … 19.5 GB` on an 11.6 GB box, which also armed the memory
+  budget below against a phantom. `observe` raises an **error event on the
+  transition** to >1 (edge-triggered — the dispatcher polls every couple of
+  seconds and an event per poll is a log nobody reads), and `offer` withholds
+  work from a box over `MEM_PCT_CEILING` (90%) so the scheduler does not feed
+  the box that is about to die. Both are visible in the Workers pane's `tts`
+  column. The remedy when it happens is still `X`, which sweeps `bm-tts` over
+  ssh.
+
+Two consequences worth knowing. Readiness (`Probe::configured`) deliberately
+stays about the binary and the weights, *not* a live `/health`: tying it to a
+running sidecar would deny a registered box over a sidecar restart and drag
+`may_install` into re-running package installs on a healthy cluster. And
+`configured` is consulted before a worker even beats, so the wait above is what
+closes the race — not the gate.
 
 ## 5. Voices: three layers
 
@@ -576,12 +732,36 @@ to a laptop behind NAT, and which forced a local/remote fork through the
 launcher, the offer *and* the artifact path. Inverting it removes the
 requirement instead of working around it: the inductor already has a route to
 every worker, because it launched them. The pull protocol still exists for a
-worker given `--inductor`; it is the transition path, not the design.
+worker given `--inductor`; it is the transition path, not the design.**Idle auto-off.** `Settings.idle_mins` (default 5, `0` disables) shuts the cluster down when there is nothing to do. `Inner::idle()` is deliberately not `busy()`: a shelved crawl leaves digest/render/merge `Pending` for ever, so `busy()` stays true in exactly the case the timer exists for.
 
-**Idle auto-off.** `Settings.idle_mins` (default 5, `0` disables) shuts the
-cluster down when there is nothing to do. `Inner::idle()` is deliberately not
-`busy()`: a shelved crawl leaves digest/render/merge `Pending` for ever, so
-`busy()` stays true in exactly the case the timer exists for.
+### The one channel that runs backwards
+
+The inversion has one cost, and it is paid at the worst possible moment. The pushed task's answer *is* the report — so a mid-task **uplink blip** does not just kill a connection, it kills the completion of a stage that already ran. The render finished on the box, the word "done" died on the wire, the lease expires, the chapter re-renders somewhere else. Hours of GPU time for nothing.
+
+The fix keeps the inversion: the inductor uses the route it already has (ssh, the same one provisioning uses) to hold open one **reverse** forward per box — `ssh -N -R 18901:127.0.0.1:8901 box`, one child per remote worker, restarted on exit (`bm-inductor/src/tunnel.rs`). The worker gains a loopback address that *is* the control API, and reports through it — but only under a gate that makes the hook a backup and never a rival:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant I as inductor · tunnel.rs
+    participant W as worker · bm-agent
+    I->>W: ssh -N -R 18901:127.0.0.1:8901 — held open, respawned on exit
+    Note over W: 127.0.0.1:18901 now IS the control API<br/>(loopback-only bind, Bearer token still required)
+    Note over I,W: the primary channel dies mid-task
+    Note over W: POST /task never answered —<br/>the outcome is stashed, the offer answered as always
+    Note over W: 30 s of silence on every channel the inductor uses
+    W->>I: POST /api/complete — through the tunnel
+    Note over I: the ordinary gates judge it:<br/>stale-report check · render's file-on-disk proof · strikes
+```
+
+* **The task handler stashes every outcome** (`Progress::pending`, written in `push.rs`'s task arm) and then answers on the connection that asked, exactly as before. The stash costs nothing while the primary channel is healthy; it is the difference between a finished stage and a re-rendered one when that channel dies.
+* **The sender (`bm-agent/src/hook.rs`) fires only on silence** — 30 s without a single request from the inductor, judged on `Push::silent_for` (the inductor's own polls, not the worker's failed sends). A healthy dispatcher asks every 2 s even with no work to give, so a live inductor never meets a hook post. Refraining is the design: the hook must never race the primary answer with a duplicate.
+* **The inductor's gates stay the authority.** A hook post is an ordinary `POST /api/complete`: a report for a task already re-queued comes back as `stale` and is ignored; a render whose take file never landed fails the completion gate. The tunnel grants reachability, never authority.
+* **A new offer clears the stash.** Work arriving means the inductor is talking again — and the stashed outcome is stale by definition, its task already re-decided. (The hook had the whole silent window to deliver it.)
+* **Nothing new is exposed.** The remote bind stays on the box's own loopback (no `GatewayPorts`), so the hook port is closed to the box's network; the tunnel is built by the same `Ssh` transport — BatchMode, declined host-key verification, `ExitOnForwardFailure=yes` so a failed bind kills the client and the supervisor respawns — and requires nothing the cluster does not already assume. Local boxes get no tunnel (they share the inductor's loopback); a box with `task_port: null` gets nothing, exactly as it is offered nothing.
+* **The pull protocol is untouched.** A `--inductor` worker has no instruction channel, so no stash and no hook; its reports already retry on their own connection. Both hooks (in the grep sense) live entirely in serve mode.
+
+The tunnel is infrastructure, and infrastructure that only works while nothing goes wrong is decoration: the supervisor re-derives the wanted set every 5 s from the same registry `dispatch` reads, kills children of departed boxes, and respawns dead ones — a lost NAT mapping is noticed by the client's own keepalives (`ServerAliveInterval=5`, `CountMax=2`) in about ten seconds, not at the next human glance.
 
 ## 8. The cloud plane: EC2 boxes as ordinary machines
 

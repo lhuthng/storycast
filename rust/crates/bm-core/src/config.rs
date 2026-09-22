@@ -11,6 +11,30 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// How many render takes one offer carries when the workspace does not say.
+///
+/// A render is scheduled per **take** (one `render:<ch>:<pos>` row each, so a
+/// local edit costs one segment rather than a chapter), but a worker pays for
+/// every offer: a process-to-process round trip, a heartbeat, a completion
+/// report and a unit collection per take. Batching ten takes into one offer
+/// amortises that without changing what the ledger records — the batch is an
+/// *assignment* detail, and each take still settles on its own row.
+///
+/// Ten is a size that keeps an offer's JSON small (a take is text plus a few
+/// numbers) and its lease meaningful, while being a large enough slice that
+/// the per-offer overhead stops mattering.
+pub const DEFAULT_RENDER_BATCH: u32 = 10;
+
+/// The largest batch a workspace may ask for.
+///
+/// A batch is a **lease**, not a queue: the whole batch is `Assigned` to one
+/// box for the render lease, so an absurd value would hold a chapter's worth of
+/// work hostage on one machine for hours. The cap is what keeps a typo in
+/// `settings.json` from being an outage; anything above it is clamped, not
+/// refused, because a workspace that cannot run at all is a worse failure than
+/// one that runs slower than it asked.
+pub const MAX_RENDER_BATCH: u32 = 64;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -68,6 +92,22 @@ pub struct Settings {
     /// does not leave boxes holding ports and a TTS sidecar. `0` disables the
     /// timer entirely — for a long-lived inductor an operator keeps open.
     pub idle_mins: u32,
+    /// How many of one chapter's render takes a single offer carries.
+    ///
+    /// **Per workspace**, like the rest of this file: `.bm/settings.json` in the
+    /// active workspace, so two books can be batched differently (a chapter of
+    /// two-hundred-word lines wants a different slice from one of paragraphs).
+    /// `Settings::load` fills it from [`DEFAULT_RENDER_BATCH`] when the file
+    /// omits it, and [`Settings::render_batch`] clamps it — so an old
+    /// `settings.json` needs no edit, and a bad value degrades instead of
+    /// stopping the cluster.
+    ///
+    /// Read by the **inductor**, not the worker: the batch decides how many
+    /// ledger rows one offer assigns, which is scheduling, not synthesis. A
+    /// worker that predates this simply receives several `render_units` in one
+    /// offer, which it already loops over.
+    #[serde(default = "default_render_batch")]
+    pub render_batch: u32,
     /// App-wide ssh defaults for binding machines: user, port, key path.
     /// `None` key means ssh decides (agent, `~/.ssh/config`, default keys).
     /// `#[serde(default)]` keeps every existing `settings.json` parsing —
@@ -89,6 +129,13 @@ pub struct SshDefaults {
     pub user: String,
     pub port: u16,
     pub key: Option<String>,
+}
+
+/// The serde default for [`Settings::render_batch`] — named rather than inlined
+/// so the "omitted means ten" rule is one place, and so a `settings.json`
+/// written before the field existed loads without an edit.
+fn default_render_batch() -> u32 {
+    DEFAULT_RENDER_BATCH
 }
 
 impl Default for SshDefaults {
@@ -129,6 +176,7 @@ impl Default for Settings {
             control_port: 8901,
             advertise: "127.0.0.1".into(),
             idle_mins: 5,
+            render_batch: DEFAULT_RENDER_BATCH,
             ssh: SshDefaults::default(),
             profile: crate::profile::Pointer::default(),
         }
@@ -214,6 +262,19 @@ impl Settings {
         } else {
             Some(a)
         }
+    }
+
+    /// The batch size the scheduler actually uses: `render_batch`, floored at
+    /// one and capped at [`MAX_RENDER_BATCH`].
+    ///
+    /// **Never zero.** `0` would be the honest reading of "batch nothing", and
+    /// it is a deadlock: the offer loop would take an empty slice, assign no
+    /// row, and the chapter would sit `Pending` for ever with no error anywhere.
+    /// A value the operator did not mean is therefore clamped into range rather
+    /// than obeyed, and the clamp lives here — one place — so no call site can
+    /// forget it.
+    pub fn render_batch(&self) -> usize {
+        self.render_batch.clamp(1, MAX_RENDER_BATCH) as usize
     }
 }
 
@@ -406,6 +467,59 @@ mod tests {
             cleared.analyze_models.is_empty(),
             "{:?}",
             cleared.analyze_models
+        );
+    }
+
+    #[test]
+    fn the_render_batch_defaults_to_ten_and_a_saved_value_wins() {
+        // Three ways the setting can arrive, and the rule for each:
+        //   * absent from settings.json  → ten (the compiled default)
+        //   * present                    → that value, not the default
+        //   * nonsense                   → clamped, never obeyed and never fatal
+        let omitted: Settings = serde_json::from_str(r#"{"engine":"vieneu"}"#).unwrap();
+        assert_eq!(omitted.render_batch, DEFAULT_RENDER_BATCH);
+        assert_eq!(omitted.render_batch(), 10, "and the scheduler sees ten");
+
+        let chosen: Settings = serde_json::from_str(r#"{"render_batch":3}"#).unwrap();
+        assert_eq!(
+            chosen.render_batch(),
+            3,
+            "a workspace value overrides the default"
+        );
+
+        // Zero is the deadlock the clamp exists for: an offer of no takes
+        // assigns no row, so the chapter would never leave Pending and nothing
+        // anywhere would say why.
+        let zero: Settings = serde_json::from_str(r#"{"render_batch":0}"#).unwrap();
+        assert_eq!(zero.render_batch(), 1, "zero would offer nothing at all");
+
+        let absurd: Settings = serde_json::from_str(r#"{"render_batch":100000}"#).unwrap();
+        assert_eq!(
+            absurd.render_batch(),
+            MAX_RENDER_BATCH as usize,
+            "an absurd batch is a lease held on one box for hours"
+        );
+    }
+
+    #[test]
+    fn a_saved_render_batch_round_trips_through_the_file() {
+        // The value has to survive `save`/`load`, because that file is the
+        // single source the run screen previews and the next backend boots with.
+        let dir = std::env::temp_dir().join("bm-settings-batch");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.json");
+        let s = Settings {
+            render_batch: 4,
+            ..Default::default()
+        };
+        s.save(&p).unwrap();
+        assert_eq!(Settings::load(&p).render_batch(), 4);
+        // And a workspace that never mentions it still gets the default.
+        std::fs::write(&p, r#"{"engine":"gemini"}"#).unwrap();
+        assert_eq!(
+            Settings::load(&p).render_batch(),
+            DEFAULT_RENDER_BATCH as usize
         );
     }
 

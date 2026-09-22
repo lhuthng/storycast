@@ -75,6 +75,10 @@ pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
         kv("digest", format!("{} ({models})", cfg.analyzer)),
         kv("engine", cfg.engine.clone()),
         kv(
+            "render",
+            format!("{} take(s) per offer (:batch)", cfg.render_batch),
+        ),
+        kv(
             "mix",
             format!(
                 "speed {} · fx {} · music {} · inject {}",
