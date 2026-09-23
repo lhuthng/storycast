@@ -123,7 +123,7 @@ pub(crate) fn signal(pid: u32, sig: &str) {
 pub fn local_workers_alive() -> bool {
     std::process::Command::new("pgrep")
         .arg("-f")
-        .arg("bm-agent worke[r]")
+        .arg("bm-agent.*worke[r]")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)

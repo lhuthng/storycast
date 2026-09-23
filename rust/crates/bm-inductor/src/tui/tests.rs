@@ -232,10 +232,30 @@ fn resources_name_what_a_job_actually_touches() {
         .resources(),
         vec![Res::Aws]
     );
-    // Everything else is the default lane, which stays serial among itself.
+    // Read-only indexes hold nothing: they must never queue behind heavy work.
     assert_eq!(
         Job::LoadLines {
             layout: bm_core::Layout::new("")
+        }
+        .resources(),
+        Vec::<Res>::new()
+    );
+    assert_eq!(
+        Job::LoadRoster {
+            api: "unused".into(),
+            http: reqwest::Client::new(),
+            layout: bm_core::Layout::new("")
+        }
+        .resources(),
+        Vec::<Res>::new()
+    );
+    // Everything else is the default lane, which stays serial among itself.
+    assert_eq!(
+        Job::Segment {
+            layout: bm_core::Layout::new(""),
+            character: "Vũ".into(),
+            voice: "adam".into(),
+            text: "Xin chào.".into(),
         }
         .resources(),
         vec![Res::Command]

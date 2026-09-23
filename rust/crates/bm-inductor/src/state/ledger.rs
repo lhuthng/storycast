@@ -197,6 +197,17 @@ impl Inner {
                 ),
             );
         }
+        // One-way migration: no row is ever pinned — takes are independent
+        // and a merge pulls the pieces it lacks — so a pin from the
+        // pinning era only serialises the cluster behind one box.
+        // Released on load; the next save persists it.
+        let released = self.release_pins();
+        if released > 0 {
+            self.push_event(
+                "info",
+                format!("released {released} pin(s) — every row is offerable to any box now"),
+            );
+        }
         self.ledger_profile = doc
             .get("profile")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
@@ -211,8 +222,7 @@ impl Inner {
             .map(|m| (m.addr.clone(), m))
             .collect();
         // Worker identity survives restarts: without it, completions filed
-        // while the map is cold get attributed to the wrong machine (and
-        // merge affinity strands tasks on machines that never rendered).
+        // while the map is cold get attributed to the wrong machine.
         if let Some(w) = doc.get("workers").and_then(|w| w.as_object()) {
             for (k, v) in w {
                 if let Some(addr) = v.as_str() {
@@ -425,6 +435,19 @@ impl Inner {
         t.lease_until = None;
         t.detail = format!("requeued: {why}");
         t.updated = now;
+    }
+
+    /// Drop every row's affinity pin. No row is ever pinned: takes are
+    /// independent and a merge pulls the pieces it lacks, so a stored pin
+    /// only hides work from idle boxes.
+    pub(crate) fn release_pins(&mut self) -> usize {
+        let mut released = 0;
+        for t in self.tasks.values_mut() {
+            if t.affinity.take().is_some() {
+                released += 1;
+            }
+        }
+        released
     }
 
     /// Refuse voice/cache surgery while workers are mid-play: acting then

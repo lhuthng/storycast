@@ -17,11 +17,8 @@ use super::consts::{VoicePolicy, CONTENT_LANGUAGE};
 // bottom of this file assert the two agree exactly. Stage 5 deletes the consts
 // and makes this file load-bearing, at which point the duplication is gone;
 // until then it is deliberate and checked rather than accidental and drifting.
-//
-// The machine-local delta over this catalogue (enabled flags, enrolled clones,
-// policy overrides) lives in `.bm/voices.json`, which is ignored. The catalogue
-// itself is committed because the offline guarantee above is load-bearing: a
-// fresh clone with no local config must still be able to render.
+// The catalogue itself is committed because the offline guarantee above is
+// load-bearing: a fresh clone with no local config must still render.
 
 /// The committed catalogue, embedded at compile time.
 ///
@@ -259,150 +256,31 @@ impl EngineRoster {
     }
 }
 
-// --- the operator's roster --------------------------------------------------
-//
-// `.bm/voices.json` is the machine-local half of the roster: the operator's own
-// accent policy and their cast. Both are personal, so both are gitignored — the
-// shipped catalogue is public and states no preference at all.
-//
-// A missing file is a valid state, not an error: a fresh clone has no opinion,
-// and everything that is not personal is already in the catalogue.
-
-/// The operator's local roster, read from `Layout::roster()`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OperatorRoster {
-    #[serde(default)]
-    pub version: u32,
-    #[serde(default)]
-    pub engines: BTreeMap<String, OperatorEngine>,
-}
-
-/// One engine's slice of the operator's roster.
-///
-/// Every field is an *override*: left empty, it inherits the catalogue. Empty is
-/// also what "no restriction" looks like, so the two readings agree.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OperatorEngine {
-    #[serde(default)]
-    pub policy: OperatorPolicy,
-    /// character -> voice. A `key` is written and preferred; a display name
-    /// resolves too, so the file can be edited by hand.
-    #[serde(default)]
-    pub default_cast: BTreeMap<String, String>,
-}
-
-/// The operator's accent policy. This is where a regional preference lives —
-/// e.g. `"excluded_accents": ["Northern"]`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OperatorPolicy {
-    #[serde(default)]
-    pub allowed_accents: Vec<String>,
-    #[serde(default)]
-    pub excluded_accents: Vec<String>,
-    #[serde(default)]
-    pub note: String,
-}
-
-impl OperatorRoster {
-    /// Read the roster. A missing file yields the empty roster — the
-    /// fresh-clone case.
-    ///
-    /// A *malformed* file is an error rather than a silent fallback. Falling
-    /// back to the catalogue would quietly re-admit the very voices the
-    /// operator excluded, and a policy that fails open is worse than one that
-    /// refuses to load.
-    pub fn load(path: &std::path::Path) -> Result<Self, String> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => {
-                serde_json::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(format!("reading {}: {e}", path.display())),
-        }
-    }
-
-    /// The operator's slice for one engine, if they have one.
-    pub fn engine(&self, engine: &str) -> Option<&OperatorEngine> {
-        self.engines.get(engine)
-    }
-
-    /// Apply this roster over one engine of the catalogue.
-    ///
-    /// A field the operator leaves empty inherits the catalogue; a field they
-    /// fill replaces it. The cast is replaced outright when declared, because a
-    /// cast is a set — merging two would invent characters.
-    pub fn apply(&self, engine: &str, base: &EngineRoster) -> EngineRoster {
-        let mut out = base.clone();
-        let Some(op) = self.engine(engine) else {
-            return out;
-        };
-        if !op.policy.allowed_accents.is_empty() {
-            out.policy.allowed_accents = op.policy.allowed_accents.clone();
-        }
-        if !op.policy.excluded_accents.is_empty() {
-            out.policy.excluded_accents = op.policy.excluded_accents.clone();
-        }
-        if !op.policy.note.is_empty() {
-            out.policy.note = op.policy.note.clone();
-        }
-        if !op.default_cast.is_empty() {
-            out.default_cast = op.default_cast.clone();
-        }
-        out
-    }
-}
-
-/// One engine of the catalogue with the operator's roster applied.
-///
-/// The single entry point for "what does this machine actually allow", so no
-/// caller has to remember to merge. `roster_path` is `Layout::roster()`.
-pub fn effective_engine(
-    roster_path: &std::path::Path,
-    engine: &str,
-) -> Result<EngineRoster, String> {
-    let base = RosterFile::catalogue()
+/// One engine of the catalogue: the single entry point for "what is allowed",
+/// with no machine-local overlay. The operator roster (`.bm/voices.json`) is
+/// gone — nothing created it and every path using it is removed — so the
+/// shipped catalogue is the whole policy.
+pub fn effective_engine(engine: &str) -> EngineRoster {
+    RosterFile::catalogue()
         .engine(engine)
         .cloned()
-        .unwrap_or_default();
-    Ok(OperatorRoster::load(roster_path)?.apply(engine, &base))
+        .unwrap_or_default()
 }
 
-/// The effective `VoicePolicy` for `engine` on this machine.
-pub fn effective_policy(
-    roster_path: &std::path::Path,
-    engine: &str,
-) -> Result<VoicePolicy, String> {
-    Ok(effective_engine(roster_path, engine)?.to_policy(engine))
+/// The effective `VoicePolicy` for `engine`.
+pub fn effective_policy(engine: &str) -> VoicePolicy {
+    effective_engine(engine).to_policy(engine)
 }
 
-/// The effective offline roster for `engine` on this machine.
-pub fn effective_offline_voices(
-    roster_path: &std::path::Path,
-    engine: &str,
-) -> Result<Vec<VoiceInfo>, String> {
-    Ok(effective_engine(roster_path, engine)?.to_offline_voices(engine))
+/// The effective offline roster for `engine`.
+pub fn effective_offline_voices(engine: &str) -> Vec<VoiceInfo> {
+    effective_engine(engine).to_offline_voices(engine)
 }
 
-/// [`effective_engine`], but never fails: a malformed roster yields the
-/// catalogue *and* the parse error.
-///
-/// The error must be shown, not dropped. Falling back silently would re-admit
-/// every voice the operator excluded, which is the one failure mode worth being
-/// loud about — the whole reason `effective_engine` returns a `Result`.
-pub fn effective_engine_lenient(
-    roster_path: &std::path::Path,
-    engine: &str,
-) -> (EngineRoster, Option<String>) {
-    match effective_engine(roster_path, engine) {
-        Ok(r) => (r, None),
-        Err(e) => (
-            RosterFile::catalogue()
-                .engine(engine)
-                .cloned()
-                .unwrap_or_default(),
-            Some(e),
-        ),
-    }
+/// [`effective_engine`], kept for call-site compatibility: catalogue reads do
+/// not fail, so the error half is always `None`.
+pub fn effective_engine_lenient(engine: &str) -> (EngineRoster, Option<String>) {
+    (effective_engine(engine), None)
 }
 
 // --- key <-> name resolution ------------------------------------------------
@@ -654,84 +532,14 @@ mod tests {
         }
     }
 
-    // --- the operator's roster ----------------------------------------------
-
-    fn op_roster(json: &str) -> OperatorRoster {
-        serde_json::from_str(json).expect("test roster parses")
-    }
-
+    // The catalogue is the whole policy: no machine-local overlay exists.
     #[test]
-    fn an_absent_roster_leaves_the_catalogue_exactly_as_it_was() {
-        let base = catalogue_engine("vieneu").clone();
-        let merged = OperatorRoster::default().apply("vieneu", &base);
-        assert!(merged.policy.excluded_accents.is_empty());
-        assert!(
-            merged.to_policy("vieneu").allowed.is_empty(),
-            "still unrestricted"
-        );
-        assert!(merged.default_cast.is_empty());
-    }
-
-    #[test]
-    fn a_missing_roster_file_is_fine_but_a_malformed_one_is_not() {
-        let d = std::env::temp_dir().join("bm-operator-roster");
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-
-        // The fresh-clone case: no file, no opinion, no error.
-        assert!(OperatorRoster::load(&d.join("voices.json")).is_ok());
-
-        // A broken file must not be waved through. Falling back to the catalogue
-        // would re-admit every voice the operator excluded, and the operator
-        // would never find out.
-        std::fs::write(d.join("voices.json"), "{ this is not json").unwrap();
-        let e = OperatorRoster::load(&d.join("voices.json")).unwrap_err();
-        assert!(e.contains("parsing"), "{e}");
-    }
-
-    #[test]
-    fn the_operator_roster_narrows_the_policy_and_supplies_the_cast() {
-        let base = catalogue_engine("vieneu").clone();
-        let op = op_roster(
-            r#"{"version":1,"engines":{"vieneu":{
-                 "policy":{"excluded_accents":["Northern"]},
-                 "default_cast":{"Narrator":"duc-tri","Villain":"minh-duc"}}}}"#,
-        );
-        let p = op.apply("vieneu", &base).to_policy("vieneu");
-
-        assert_eq!(p.allowed.len(), 10, "23 declared minus the 13 Northern");
-        assert!(!p.allowed.contains(&"Minh Đức".to_string()));
-        assert!(p.allowed.contains(&"Đức Trí".to_string()));
-        // The cast arrives as keys and leaves as display names.
-        assert_eq!(
-            p.default_cast,
-            vec![
-                ("Narrator".to_string(), "Đức Trí".to_string()),
-                ("Villain".to_string(), "Minh Đức".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_field_the_operator_omits_inherits_the_catalogue() {
-        // Only a cast, no policy: the shipped (unrestricted) policy survives.
-        let base = catalogue_engine("vieneu").clone();
-        let op = op_roster(r#"{"engines":{"vieneu":{"default_cast":{"Narrator":"duc-tri"}}}}"#);
-        let p = op.apply("vieneu", &base).to_policy("vieneu");
-        assert!(p.allowed.is_empty(), "the catalogue's policy is untouched");
-        assert_eq!(p.default_cast.len(), 1);
-    }
-
-    #[test]
-    fn the_lenient_loader_reports_the_error_it_falls_back_on() {
-        let d = std::env::temp_dir().join("bm-operator-roster-lenient");
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("voices.json"), "{ nope").unwrap();
-
-        let (engine, err) = effective_engine_lenient(&d.join("voices.json"), "vieneu");
-        assert!(err.is_some(), "the caller must be able to show the failure");
-        // It still yields a usable roster — the catalogue — so the picker works.
+    fn the_catalogue_needs_no_overlay() {
+        let p = effective_policy("vieneu");
+        assert!(p.allowed.is_empty(), "unrestricted");
+        assert!(p.default_cast.is_empty(), "no seeded cast");
+        let (engine, err) = effective_engine_lenient("vieneu");
+        assert!(err.is_none());
         assert_eq!(engine.voices.len(), 23);
     }
 }

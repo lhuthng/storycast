@@ -214,6 +214,13 @@ fn open_chapter(
     n: u32,
     digested: &dyn Fn(u32) -> bool,
 ) -> Result<DigestChapter, String> {
+    // Manual digest re-digests: a chapter with no script yet goes through the
+    // workers, in bible order, so its delta lands on top of its predecessor's.
+    if !digested(n) {
+        return Err(format!(
+            "ch{n} is not digested yet — manual digest re-digests; fresh chapters go through the workers"
+        ));
+    }
     let step = bm_core::digest::manual_prompt(layout, n, None).map_err(|e| format!("{e:#}"))?;
     let mut note = format!(
         "{} prompt copied — paste it into your model",
@@ -296,4 +303,19 @@ fn accept(
         script: outcome.script,
         delta: outcome.delta,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_digest_refuses_an_undigested_chapter() {
+        // Manual digest re-digests: fresh chapters go through the workers so
+        // their deltas land in bible order.
+        let d = tempfile::tempdir().unwrap();
+        let layout = bm_core::Layout::new(d.path());
+        let err = open_chapter(&layout, 7, &|n| layout.digested(n)).unwrap_err();
+        assert!(err.contains("not digested yet"), "{err}");
+    }
 }

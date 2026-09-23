@@ -85,10 +85,53 @@ async fn task(State(st): State<Shared>, Query(q): Query<TaskQuery>) -> impl Into
 }
 
 async fn complete(State(st): State<Shared>, Json(c): Json<Complete>) -> impl IntoResponse {
+    // Shipments first: a Done row's file must already be home when the
+    // ledger says so — on every channel, including the hook's, which has no
+    // collection round trip.
+    if !c.unit_files.is_empty() {
+        let (layout, engine) = {
+            let inner = st.lock().await;
+            (inner.layout.clone(), inner.settings.engine.clone())
+        };
+        store_shipments(&layout, &engine, &c.task_id, &c.unit_files);
+    }
     let mut inner = st.lock().await;
     let line = inner.complete(&c);
     println!("{line}");
     Json(serde_json::json!({"ok": true}))
+}
+
+/// Store the takes a completion report ships, before the row turns Done.
+///
+/// Same bounds and expected-set check as the upload path; a bad file is
+/// skipped, the completion still applies — a reject must not strand a whole
+/// finished batch over one corrupt name.
+fn store_shipments(
+    layout: &bm_core::Layout,
+    engine: &str,
+    task_id: &str,
+    files: &[bm_proto::UnitFile],
+) {
+    let Some(chapter) = task_id.split(':').nth(1).and_then(|p| p.parse::<u32>().ok()) else {
+        return;
+    };
+    let Some(expected) = crate::segments::expected_names(layout, engine, chapter) else {
+        return;
+    };
+    let store = bm_core::segments::LocalStore::new(layout.clone());
+    for u in files {
+        let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &u.b64)
+        else {
+            continue;
+        };
+        if !(1000..=bm_core::assemble::MAX_SEGMENT_BYTES).contains(&bytes.len()) {
+            continue;
+        }
+        if !expected.contains(&u.name) {
+            continue;
+        }
+        let _ = bm_core::segments::SegmentStore::put(&store, engine, chapter, &u.name, &bytes);
+    }
 }
 
 #[derive(Deserialize)]
@@ -155,6 +198,58 @@ async fn put_segment(
             Json(
                 serde_json::json!({"ok": false, "error": format!("storing {} failed: {e:#}", q.name)}),
             ),
+        ),
+    }
+}
+
+/// One rendered unit, pulled by a merge worker that does not hold it.
+///
+/// Same expected-set validation as the upload path — a worker may read only
+/// files the plan names — and the same size floor, so a half-written file is
+/// a 404 rather than a corrupt mix. This is what lets a merge run on any box:
+/// the inductor's store holds every completed take (`collect_units` pulls
+/// each unit home before its completion is applied), so a worker fetches what
+/// it lacks and mixes from a complete set, wherever it runs.
+async fn get_segment(State(st): State<Shared>, Query(q): Query<SegmentQuery>) -> impl IntoResponse {
+    let fail = |code: StatusCode, msg: String| {
+        (
+            code,
+            Json(serde_json::json!({"ok": false, "error": msg})),
+        )
+            .into_response()
+    };
+    let (layout, engine) = {
+        let inner = st.lock().await;
+        (inner.layout.clone(), inner.settings.engine.clone())
+    };
+    if q.engine != engine {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            format!("engine {:?} is not this run's {engine:?}", q.engine),
+        );
+    }
+    let Some(expected) = crate::segments::expected_names(&layout, &engine, q.chapter) else {
+        return fail(
+            StatusCode::NOT_FOUND,
+            format!("chapter {} cannot be planned here", q.chapter),
+        );
+    };
+    if !expected.contains(&q.name) {
+        return fail(
+            StatusCode::NOT_FOUND,
+            format!("{} is not an expected file for chapter {}", q.name, q.chapter),
+        );
+    }
+    match std::fs::read(layout.seg_dir(&engine, q.chapter).join(&q.name)) {
+        Ok(bytes) if bytes.len() > 1000 => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "audio/wav")],
+            bytes,
+        )
+            .into_response(),
+        _ => fail(
+            StatusCode::NOT_FOUND,
+            format!("{} is not on this box yet", q.name),
         ),
     }
 }
@@ -580,13 +675,9 @@ async fn op_crawl_setup(_layout: &bm_core::Layout, template: &str, sample: u32) 
 /// refill any gaps. Falls back to the offline roster when no sidecar answers.
 /// Distribution to workers rides the next provision sync.
 async fn op_voices(layout: &bm_core::Layout, engine: &str) -> OpResult {
-    // Strict, unlike the picker: this op *prunes* the cast, and pruning against
-    // a silently-defaulted policy would delete assignments the operator meant to
-    // keep. Better to refuse than to guess.
-    let policy = match bm_core::voices::effective_policy(&layout.roster(), engine) {
-        Ok(p) => p,
-        Err(e) => return OpResult::fail(format!("voices: {e}")),
-    };
+    // Strict, unlike the picker: this op *prunes* the cast, so it refuses
+    // rather than guesses.
+    let policy = bm_core::voices::effective_policy(engine);
     // Live roster when a sidecar answers, offline fallback otherwise.
     // Enrolled clones have bare labels (voice == label).
     let http = sidecar_client(Duration::from_secs(10));
@@ -845,14 +936,10 @@ async fn build_roster(
     let mut source = "offline".to_string();
     let mut voices: Vec<VoiceInfo> = Vec::new();
 
-    // The effective roster is the shipped catalogue with the operator's own
-    // applied. Resolved once so the voice list, the allow-list and the header
-    // line cannot disagree about what is assignable. A malformed `.bm/voices.json`
-    // falls back to the catalogue but the error rides into `policy_note`, where
-    // the operator will see it — a policy that fails open *silently* would
-    // re-admit every voice they excluded.
-    let (effective, roster_error) =
-        bm_core::voices::effective_engine_lenient(&layout.roster(), engine);
+    // The effective roster is the shipped catalogue. Resolved once so the
+    // voice list, the allow-list and the header line cannot disagree about
+    // what is assignable.
+    let (effective, roster_error) = bm_core::voices::effective_engine_lenient(engine);
     let policy = effective.to_policy(engine);
 
     if let Ok(r) = http.get(format!("{SIDECAR}/roster")).send().await {
@@ -1182,7 +1269,7 @@ pub fn router(st: Shared) -> Router {
         .route("/api/heartbeat", post(heartbeat))
         .route("/api/task", get(task))
         .route("/api/complete", post(complete))
-        .route("/api/segment", post(put_segment))
+        .route("/api/segment", post(put_segment).get(get_segment))
         .route("/api/machines", post(add_machine))
         .route("/api/machines", delete(drop_machine))
         .route("/api/machines/state", post(set_machine_state))
@@ -2020,5 +2107,80 @@ mod segment_tests {
             "own lines win over Vũ's"
         );
         assert_eq!(res.line_text.as_deref(), Some("Kiên đáp."));
+    }
+
+    #[test]
+    fn a_shipped_take_is_stored_and_a_bad_one_is_skipped() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let layout = bm_core::Layout::new(dir.path());
+        let plan = bm_core::assemble::RenderPlan {
+            chapter: 1,
+            engine: "vieneu".into(),
+            plan_version: bm_core::assemble::PLAN_VERSION,
+            generated: 0,
+            cast_hash: String::new(),
+            takes: vec![bm_core::assemble::Take {
+                pos: 0,
+                tag: "title".into(),
+                speaker: "Narrator".into(),
+                voice: "Narrator".into(),
+                voice_key: String::new(),
+                text: "x".into(),
+                temperature: 0.7,
+                silence_p: 0.1,
+                take_key: "k".into(),
+                file: "t-k.wav".into(),
+                legacy: None,
+                adopted: false,
+            }],
+        };
+        plan.save(&layout.plan(1)).unwrap();
+
+        let enc = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let wav = vec![7u8; 1500];
+        store_shipments(
+            &layout,
+            "vieneu",
+            "render:1:0",
+            &[
+                bm_proto::UnitFile {
+                    name: "t-k.wav".into(),
+                    b64: enc(&wav),
+                },
+                // Not in the plan: a worker may not name its own path.
+                bm_proto::UnitFile {
+                    name: "evil.wav".into(),
+                    b64: enc(&wav),
+                },
+                // Half-write floor: 10 bytes is not a take.
+                bm_proto::UnitFile {
+                    name: "t-k.wav".into(),
+                    b64: enc(&[1u8; 10]),
+                },
+                // Undecodable payload: skipped, not fatal.
+                bm_proto::UnitFile {
+                    name: "t-k.wav".into(),
+                    b64: "!!!".into(),
+                },
+            ],
+        );
+
+        let stored = layout.seg_dir("vieneu", 1).join("t-k.wav");
+        assert_eq!(std::fs::read(&stored).unwrap(), wav, "the take is home");
+        assert!(
+            !layout.seg_dir("vieneu", 1).join("evil.wav").exists(),
+            "unexpected names never land"
+        );
+        // task_ids that name no chapter store nothing and do not panic.
+        store_shipments(
+            &layout,
+            "vieneu",
+            "render",
+            &[bm_proto::UnitFile {
+                name: "t-k.wav".into(),
+                b64: enc(&wav),
+            }],
+        );
     }
 }

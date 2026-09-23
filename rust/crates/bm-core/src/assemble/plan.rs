@@ -342,12 +342,9 @@ pub fn segments_complete(
     if segments.is_empty() {
         return false;
     }
-    // Same policy the renderer assigned with: a completeness check that
-    // admits excluded voices would call a correctly-rendered chapter ready,
-    // or a correctly-planned one missing.
-    let Ok(policy) = crate::cast::policy_for_bible(engine, bible_path) else {
-        return false;
-    };
+    // Same policy the renderer assigned with: the completeness check and the
+    // renderer read one set of names.
+    let policy = crate::cast::policy_for_bible(engine);
     let Ok(cast) = crate::cast::load_cast(script_path, cast_path, bible_path, &policy, false)
     else {
         return false;
@@ -925,12 +922,51 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
             Ok(r) => r,
             Err(_) => continue,
         };
+        // The recorded takes for this chapter, if the cluster renderer wrote
+        // any: take-key files carry no speaker or voice in their names, so
+        // they resolve through this instead of through filename parsing.
+        let takes: Vec<Value> = std::fs::read_to_string(layout.plan(n))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|d| d.get("takes").and_then(|t| t.as_array()).cloned())
+            .unwrap_or_default();
         for e in rd.flatten() {
             let fname = e.file_name().to_string_lossy().to_string();
             let stem = match fname.strip_suffix(".wav") {
                 Some(s) => s,
                 None => continue,
             };
+            // What the renderer writes now: content-addressed takes. The take
+            // carries its own speaker, voice and text.
+            if let Some(key) = stem.strip_prefix("t-") {
+                if let Some(take) = takes.iter().find(|t| {
+                    t.get("take_key").and_then(|k| k.as_str()) == Some(key)
+                }) {
+                    let v = take.get("voice").and_then(|v| v.as_str()).unwrap_or("");
+                    let vk = take
+                        .get("voice_key")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !want.contains(&norm_voice(v)) && !want.contains(&norm_voice(vk)) {
+                        continue;
+                    }
+                    out.push(RenderedSegment {
+                        speaker: take
+                            .get("speaker")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        text: take
+                            .get("text")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        path: e.path(),
+                        chapter: n,
+                    });
+                }
+                continue;
+            }
             // Anything else (titles, strays) is not a book line.
             let (tag, v) = match stem.split_once('_') {
                 Some((t, v)) if t.chars().next().is_some_and(|c| c.is_ascii_digit()) => (t, v),

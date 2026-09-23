@@ -139,7 +139,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["sshuser"], desc: None, cmd: Command::SshUser },
     Word { key: None, names: &["sshport"], desc: None, cmd: Command::SshPort },
     Word { key: None, names: &["advertise", "adv"], desc: Some("the address workers dial back on — set it when they are off the LAN"), cmd: Command::Advertise },
-    Word { key: None, names: &["batch", "renderbatch"], desc: Some("how many of one chapter's takes one render offer carries (default 10)"), cmd: Command::RenderBatch },
+    Word { key: None, names: &["batch", "renderbatch"], desc: Some("how many of one chapter's takes one render offer carries (default 5)"), cmd: Command::RenderBatch },
     Word { key: Some('q'), names: &["quit", "exit", "q"], desc: None, cmd: Command::Key(KeyCode::Char('q')) },
     Word { key: None, names: &["inspect"], desc: None, cmd: Command::Key(KeyCode::Char('i')) },
     Word { key: None, names: &["policy"], desc: Some("per-machine work policy: which stages the selected box may run, in priority order"), cmd: Command::Key(KeyCode::Char('P')) },

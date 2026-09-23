@@ -26,28 +26,20 @@ impl Inner {
     /// The box's own **policy** decides which stages it will run and in what
     /// order (most-preferred first): the scheduler walks the enabled stages and
     /// takes the oldest chapter of the first stage that has assignable work.
-    /// Merge affinity is an optimization for remote boxes, never a gate for
-    /// the local node: it shares the inductor's segment store — units are
-    /// collected before a render completion is applied, so a `done` render's
-    /// wavs are always on local disk — and takes any pending merge. A surgical
-    /// re-render pins the same way to the box that already holds the chapter,
-    /// so a cold box never re-speaks the whole chapter for a voice swap; the
-    /// local node takes those too. Without this a render on a dead,
-    /// ffmpeg-less, or merge-disabled box strands its merge pending for ever.
+    /// No row on any stage carries affinity: takes are independent, every
+    /// unit lands on the inductor before its completion is applied, and a
+    /// merge pulls the pieces it lacks from the inductor — so any capable
+    /// box runs anything whose inputs are done. A merge is one task like any
+    /// other; it is not tied to the boxes that spoke the chapter.
     /// A machine with no stored policy gets the default (all four, merge →
     /// render → digest → crawl). Capability gates still apply within a stage —
     /// render needs `render-segments`, merge needs `merge` (absent when the box
-    /// has no ffmpeg) — and a merge's affinity still pins it to the box that
-    /// rendered the chapter.
+    /// has no ffmpeg).
     ///
-    /// **The local-node escape makes a pin advisory, and that is the one way a
-    /// chapter splits.** A row pinned to a remote box is still offerable here,
-    /// so the local node can take part of a chapter the remote is rendering —
-    /// and from that moment the remote's store can never hold the whole set.
-    /// The pin is therefore re-homed to this box at the moment of the split
-    /// (see the assignment below) rather than left to be discovered at the
-    /// merge, where the only evidence is `N segments missing` and the only
-    /// repair used to be three strikes and a shelving.
+    /// **Chapters split across boxes, and that is expected.** Any box takes
+    /// any take, so a chapter's audio routinely ends up on several stores —
+    /// and the merge fetches what it lacks instead of requiring them on its
+    /// own disk.
     ///
     /// A merge is additionally offered only when its segments are on this
     /// disk (`missing_wavs` empty): the ledger's `render:Done` is a claim
@@ -126,14 +118,10 @@ impl Inner {
                 .filter(|(_, t)| t.stage == stage)
                 .filter(|(_, t)| t.state == TaskState::Pending && !self.shelved(t.chapter))
                 .filter(|(_, t)| self.upstream_done(t.chapter, t.stage))
-                .filter(|(_, t)| match &t.affinity {
-                    Some(only) => {
-                        *only == machine
-                            || ((t.stage == Stage::Merge || t.stage == Stage::Render)
-                                && bm_core::is_local_node(&machine))
-                    }
-                    None => true,
-                })
+                // No affinity gate on any stage: takes are independent and a
+                // merge pulls the pieces it lacks from the inductor, so every
+                // pending row whose inputs are done is offerable to every
+                // capable box. Pins only ever serialised the cluster.
                 .map(|(id, _)| id.clone())
                 .collect();
             // Numeric chapter order — lexical sort would put ch100 before ch93
@@ -217,41 +205,14 @@ impl Inner {
             }
         }
         let t = self.tasks.get(&primary)?;
-        let (chapter, stage) = (t.chapter, t.stage);
         let offer = self.build_offer(t, &batch, &machine);
-        // A chapter's takes belong on one box. The merge runs where the
-        // segments are, so takes spread across boxes leave no single store
-        // holding the whole chapter — the merge would then fail on `N segments
-        // missing` for a chapter the cluster rendered in full. The merge's
-        // affinity already reads this way; here it is established at the first
-        // assignment instead of discovered at the merge, when it is too late.
-        // A re-render keeps the pin its invalidation set, so a swap still
-        // re-speaks on the warm box rather than a cold one.
-        if stage == Stage::Render {
-            // Except that the pin is not a lock: the filter above lets the
-            // local node take a row pinned to any box, so "one box" holds
-            // against other remotes and not against this one. When the local
-            // node takes a row of a chapter pinned elsewhere the chapter is
-            // **split** — this box speaks part of it, the pinned box the rest,
-            // and the pinned box's store can never hold the whole set again.
-            //
-            // The merge has to follow the store, and the store it can follow is
-            // this one: `collect_units` brings every completion home, so once
-            // the chapter's takes are all `Done` this disk holds all of them
-            // while the pinned box holds a strict subset. Left alone, the merge
-            // stays pinned to the short box, and the offer's readiness check —
-            // which reads *this* disk, the complete one — keeps offering it
-            // there until it shelves. Re-home it at the moment the split is
-            // made, so the first merge attempt already runs where the audio is.
-            if bm_core::is_local_node(&machine) && self.merge_pinned_elsewhere(chapter) {
-                self.point_merge_here(
-                    chapter,
-                    &machine,
-                    "requeued: chapter split across boxes — merge moved to the store that holds it",
-                );
-            }
-            self.pin_chapter_takes(chapter, &machine);
-        }
+        // **A chapter may be spoken by several boxes at once, and that is the
+        // point.** No row is ever pinned — takes are independent, a merge
+        // pulls the pieces it lacks from the inductor, and the next worker
+        // to ask deepens this chapter instead of opening another one.
+        //
+        // What keeps the merge possible is the store, not a pin: every unit
+        // lands on the inductor before its completion is applied.
         self.save();
         Some(offer)
     }
@@ -260,11 +221,13 @@ impl Inner {
     /// takes, up to [`bm_core::config::Settings::render_batch`], truncated at
     /// the first take this store cannot resolve.
     ///
-    /// **One chapter, never two.** The pin, the merge's affinity, the progress
-    /// line and the inductor's unit collection are all keyed by chapter, so an
-    /// offer spanning chapters would collect one chapter's wavs against
-    /// another's report. `ids` arrives sorted by `(chapter, take)`, so "one
-    /// chapter" is a prefix.
+    /// **One chapter, never two.** The progress line and
+    /// the inductor's unit collection are all keyed by chapter, so an offer
+    /// spanning chapters would collect one chapter's wavs against another's
+    /// report. `ids` arrives sorted by `(chapter, take)`, so "one chapter" is a
+    /// prefix — and it is also what makes the batch *deepen*: the next worker to
+    /// ask sees this chapter first and gets the next slice of it, not a new
+    /// chapter. Takes are never pinned, so any box takes that next slice.
     ///
     /// The truncation keeps the batch and its payload the same length: a take
     /// with no plan entry has no unit to speak, and assigning it would make the
@@ -619,49 +582,12 @@ impl Inner {
                     }
                 }
                 if stage == Stage::Render {
-                    // **Merge runs where the segments are**, and after an
-                    // inverted render that is the box that just wrote them: a
-                    // remote one cannot be handed thirty-odd wavs inside an
-                    // offer, and the inductor's own copy arrived over
-                    // `GET /unit` for the completion gate to read.
-                    //
-                    // This used to be the literal `127.0.0.1`. That read as
-                    // "the local node" but meant "the only machine whose disk
-                    // the inductor can read" — true on one box, and the reason
-                    // a cluster of remote workers rendered for ever without
-                    // ever merging.
-                    //
-                    // `assigned_to` is still set here: the block below clears
-                    // it, and `workers` is what turns a worker id into a
-                    // machine.
-                    let rendered_by = self
-                        .tasks
-                        .get(&c.task_id)
-                        .and_then(|t| t.assigned_to.as_deref())
-                        .and_then(|w| self.workers.get(w).cloned());
-                    let m = self.ensure_task(chapter, Stage::Merge);
-                    // No known renderer — a hand-written ledger, a report from
-                    // a worker that never registered. The local node shares the
-                    // inductor's store, which is what this always was.
-                    //
-                    // **A pin to this box outranks the completion**, though. A
-                    // local completion is already the local node, so the only
-                    // case this changes is the split: the local node took part
-                    // of the chapter (the offer re-homed the merge here), and a
-                    // remote box is now completing another take. That box
-                    // cannot hold the whole set and never will, so its
-                    // completion must not claim the merge back — otherwise the
-                    // pin flips remote, the merge is offered to a short store,
-                    // and the chapter is re-homed again one wasted strike at a
-                    // time.
-                    let held_here = m
-                        .affinity
-                        .as_deref()
-                        .map(bm_core::is_local_node)
-                        .unwrap_or(false);
-                    if !held_here {
-                        m.affinity = rendered_by.or_else(|| Some("127.0.0.1".into()));
-                    }
+                    // The merge row exists from here on: `ensure_task` creates
+                    // it, unpinned like every other row. A merge runs on
+                    // whichever box asks first and pulls the pieces it lacks
+                    // from the inductor, so completions record nothing about
+                    // who rendered what.
+                    self.ensure_task(chapter, Stage::Merge);
                 }
                 if stage == Stage::Merge {
                     // A remote merge's product comes home in the report; a
@@ -786,11 +712,9 @@ impl Inner {
     /// is deleted: the next render fills gaps (`pending_units` skips what
     /// the box holds) rather than starting over.
     ///
-    /// This is the branch where **this** disk is the short one. When it is not,
-    /// the merge is the thing that is wrong, and [`Self::rehome_starved_merge`]
-    /// is the one that answers — a merge that failed with a complete store here
-    /// has nothing for this function to do, which is why the two are separate
-    /// rather than one function guessing.
+    /// A merge pulls the pieces it lacks from the inductor, so a worker-side
+    /// `segments missing` means the inductor itself is short — and this heal
+    /// is exactly what refills it.
     fn heal_render_for_merge(&mut self, chapter: u32) -> bool {
         if self.layout.final_mp3(chapter).is_file() {
             return false;
@@ -826,56 +750,6 @@ impl Inner {
         healed
     }
 
-    /// A merge failed on `N segments missing` and **this** store holds every
-    /// take of the chapter: the chapter is not the starved input, the pin is.
-    /// Re-home the merge here, and report that nothing should be struck.
-    ///
-    /// The companion to [`Self::heal_render_for_merge`], and the half that was
-    /// missing. A merge reads its segments from the disk it runs on and is
-    /// offered wherever its affinity names, so when that box's store is short
-    /// the merge fails on a chapter the cluster rendered in full — and the
-    /// offer's readiness check cannot see it, because the only disk it can read
-    /// is this one, the complete one. `heal_render_for_merge` then looked for
-    /// local gaps, found none, and did nothing: three identical failures five
-    /// seconds apart, and a chapter shelved for a fault that was never its own.
-    ///
-    /// Completeness here is not a guess. `collect_units` pulls every unit home
-    /// before a render completion is applied, so a chapter whose takes are all
-    /// `Done` is complete on this disk — which makes the local node the one
-    /// merge target *known* to work. The box that just failed is known not to.
-    /// So the merge moves, and the strike does not count: handing a task to a
-    /// box that cannot run it is the scheduler's mistake, the same rule the
-    /// memory guardrail follows.
-    ///
-    /// `false` when the merge is already pinned here — then the failure is real
-    /// and the strike stands — or when this disk is short too, in which case the
-    /// render is the starved input and [`Self::heal_render_for_merge`] has it.
-    fn rehome_starved_merge(&mut self, task_id: &str, detail: &str) -> bool {
-        if !detail.contains("segments missing") {
-            return false;
-        }
-        let Some(chapter) = task_id
-            .strip_prefix("merge:")
-            .and_then(|c| c.parse::<u32>().ok())
-        else {
-            return false;
-        };
-        if !self.merge_pinned_elsewhere(chapter) {
-            return false;
-        }
-        // Empty means this disk holds the chapter. `None` means it cannot be
-        // planned here at all, which is a different failure with its own name.
-        match crate::segments::missing_wavs(&self.layout, &self.settings.engine, chapter) {
-            Some(missing) if missing.is_empty() => {}
-            _ => return false,
-        }
-        self.point_merge_here(
-            chapter,
-            "127.0.0.1",
-            "requeued: segments missing on the pinned box, this store holds them all",
-        )
-    }
-
     /// Record a failed report: a strike, Pending again (Shelved at 3), and an
     /// event line. Shared by worker-reported failures and the completion
     /// gate, which fails reports whose files never landed.
@@ -892,28 +766,10 @@ impl Inner {
     /// skips the takes whose files did land, so a batch that got nine of ten
     /// re-speaks one.
     fn fail_task(&mut self, task_id: &str, worker_id: &str, detail: String) -> String {
-        // **Which input is short?** A merge fails on `N segments missing` for
-        // exactly two reasons, and they need opposite answers: the render never
-        // produced the audio, or the merge was offered to a box that does not
-        // hold it. The second is the scheduler's mistake, so it is settled
-        // before the strike is counted — see `rehome_starved_merge`. A chapter
-        // is not struck for being handed to a box that cannot run it, the same
-        // rule the memory guardrail follows.
-        if self.rehome_starved_merge(task_id, &detail) {
-            let note = " (will retry — merge moved to the store that holds it)";
-            self.push_event(
-                "warn",
-                format!(
-                    "[{worker_id}] {task_id} FAILED{note}: {}",
-                    bm_core::util::head_chars(&detail, 200)
-                ),
-            );
-            self.save();
-            return format!(
-                "{worker_id}: {task_id} failed ({}){note}",
-                bm_core::util::head_chars(&detail, 120)
-            );
-        }
+        // **Which input is short?** A merge fails on `N segments missing`
+        // when the render never produced the audio or the inductor lost it —
+        // the merge itself pulls what it lacks, so its box is never the
+        // problem. The render is requeued alongside the merge retry below.
         let rows = self.covered_rows(task_id);
         let mut shelved = false;
         for id in &rows {
@@ -936,11 +792,11 @@ impl Inner {
                 shelved |= t.state == TaskState::Shelved;
             }
         }
-        // The other branch of the same failure: the merge is pinned here, or
-        // this disk is short too — so the render really is the starved input.
-        // Requeue it alongside the merge retry, or the same merge fails twice
-        // more into shelved and waits for a manual force. The merge keeps its
-        // strike — a render that cannot close the gap still shelves.
+        // The other half of a `segments missing` merge failure: the render
+        // really is the starved input. Requeue it alongside the merge retry,
+        // or the same merge fails twice more into shelved and waits for a
+        // manual force. The merge keeps its strike — a render that cannot
+        // close the gap still shelves.
         if let Some(rest) = task_id.strip_prefix("merge:") {
             if detail.contains("segments missing") {
                 if let Ok(chapter) = rest.parse::<u32>() {
@@ -1010,8 +866,7 @@ impl Inner {
         use std::collections::BTreeSet;
         let engine = self.settings.engine.clone();
         let mut set: BTreeSet<String> = BTreeSet::new();
-        let (effective, _) =
-            bm_core::voices::effective_engine_lenient(&self.layout.roster(), &engine);
+        let (effective, _) = bm_core::voices::effective_engine_lenient(&engine);
         for (name, _) in &effective.to_policy(&engine).default_cast {
             set.insert(name.clone());
         }

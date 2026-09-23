@@ -153,7 +153,7 @@ pub(crate) fn expected_names(
     let text = std::fs::read_to_string(&script_path).ok()?;
     let data: serde_json::Value = serde_json::from_str(&text).ok()?;
     let segments = data.get("segments")?.as_array()?;
-    let policy = bm_core::cast::policy_for_bible(engine, &layout.bible()).ok()?;
+    let policy = bm_core::cast::policy_for_bible(engine);
     let cast = bm_core::cast::load_cast(
         &script_path,
         &layout.cast(engine),

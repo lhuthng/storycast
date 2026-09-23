@@ -126,11 +126,8 @@ impl VoicePolicy {
 
 /// The shipped VieNeu policy: every declared preset, no preference.
 ///
-/// This file is public, so it encodes nobody's regional taste. An operator who
-/// wants a restriction states it in `.bm/voices.json` (`excluded_accents`),
-/// which is ignored — see `OperatorRoster`. An empty `allowed` means "no
-/// restriction" at every site that reads it, so a clone with no local roster
-/// offers the whole roster rather than silently inheriting a stranger's policy.
+/// This file is public, so it encodes nobody's regional taste. An empty
+/// `allowed` means "no restriction" at every site that reads it.
 pub fn vieneu_policy() -> VoicePolicy {
     let male: Vec<String> = VIENEU_MALE.iter().map(|s| s.to_string()).collect();
     let female: Vec<String> = VIENEU_FEMALE.iter().map(|s| s.to_string()).collect();

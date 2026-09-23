@@ -151,6 +151,22 @@ pub fn load_pool(path: &Path) -> Pool {
         .collect()
 }
 
+/// The clone manifest: enrolled voice name -> clip, from `voices.json` at the
+/// repo root. Missing or broken reads as empty, like the pool.
+pub fn load_manifest(root: &Path) -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(root.join("voices.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .map(|obj| {
+            obj.into_iter()
+                .filter(|(k, _)| !k.starts_with('_'))
+                .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn write_pool(path: &Path, pool: &Pool) -> anyhow::Result<()> {
     let mut doc = std::fs::read_to_string(path)
         .ok()
@@ -474,9 +490,12 @@ pub fn synth_preview(
         anyhow::bail!("no local voice store — :B to connect, or provision this box first");
     };
     let script = [
-        "import sys, tts_vieneu as vn",
+        "import sys, unicodedata, tts_vieneu as vn",
         "voice, text, dest = sys.argv[1], sys.argv[2], sys.argv[3]",
         "tts = vn.engine()",
+        "fold = lambda s: ''.join(c for c in unicodedata.normalize('NFD', s or '').replace('đ','d').replace('Đ','d').lower() if unicodedata.category(c) != 'Mn' and c not in '-_ ')",
+        "known = {fold(x) for pair in tts.list_preset_voices() for x in (pair[0], pair[1], pair[0].split('—')[0].split('–')[0])}",
+        "assert not voice or fold(voice) in known, 'unknown voice %r — not enrolled here; add it (:A/:N) or provision' % voice",
         "tts.save(tts.infer(text, voice=voice, temperature=0.8, silence_p=0.15), dest)",
         "print('previewed ' + voice, flush=True)",
     ]

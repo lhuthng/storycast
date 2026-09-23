@@ -400,6 +400,12 @@ impl Job {
             | Job::AwsDown { .. }
             | Job::AwsLogin { .. }
             | Job::AwsDiscover { .. } => vec![Res::Aws],
+            // Read-only indexes: a roster GET, a hundred file opens. They
+            // hold nothing any other job needs, so they name nothing and
+            // start on the next scan — never queued behind a five-minute
+            // provision or a slow op. Callers already guard against
+            // dispatching them twice (`lines_loading`, `roster_loading`).
+            Job::LoadRoster { .. } | Job::LoadLines { .. } | Job::LoadSounds { .. } => vec![],
             _ => vec![Res::Command],
         }
     }
@@ -1362,6 +1368,7 @@ pub(crate) async fn job_manual_digest(
         script: Some(script),
         text: None,
         mp3_b64: None,
+        unit_files: Vec::new(),
     };
     let ev = match http.post(&url).json(&body).send().await {
         Ok(r) if r.status().is_success() => match r.text().await {

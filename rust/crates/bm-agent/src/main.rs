@@ -775,10 +775,11 @@ async fn render_offered_units(
     units: &[&bm_proto::RenderUnitSpec],
     tts: &Tts,
     shared: &Shared,
-) -> Result<u64> {
+) -> Result<(u64, Vec<bm_proto::UnitFile>)> {
     let total = units.len();
     let seg_dir = layout.seg_dir(engine, n);
     std::fs::create_dir_all(&seg_dir)?;
+    let mut files = Vec::with_capacity(total);
     for (i, u) in units.iter().enumerate() {
         set_progress(
             shared,
@@ -789,13 +790,17 @@ async fn render_offered_units(
             .infer(&u.text, &u.voice, u.temperature, u.silence_p, engine)
             .await?;
         std::fs::write(seg_dir.join(&u.name), &wav)?;
+        files.push(bm_proto::UnitFile {
+            name: u.name.clone(),
+            b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &wav),
+        });
     }
     set_progress(
         shared,
         1.0,
         format!("render ch{n} done ({total} new calls)"),
     );
-    Ok(total as u64)
+    Ok((total as u64, files))
 }
 
 /// Legacy path: plan from the local script (old inductor, or no units
@@ -817,7 +822,7 @@ async fn run_render(
         .and_then(|s| s.as_array())
         .cloned()
         .unwrap_or_default();
-    let policy = bm_core::cast::policy_for_bible(engine, &layout.bible())?;
+    let policy = bm_core::cast::policy_for_bible(engine);
     let cast = bm_core::cast::load_cast(&script_path, &cast_path, &layout.bible(), &policy, true)?;
     let local = engine == "vieneu";
     let planned = bm_core::assemble::Planned::plan(&segments);
@@ -885,6 +890,7 @@ async fn run_merge(
     engine: &str,
     job: MergeJob,
     shared: &Shared,
+    fetch: Option<(&reqwest::Client, &str)>,
 ) -> Result<String> {
     let MergeJob {
         gap_ms,
@@ -893,7 +899,43 @@ async fn run_merge(
         takes,
     } = job;
     set_progress(shared, 0.1, format!("merge ch{n}"));
-    // Everything the merge writes goes into one per-chapter scratch directory
+    // Pieces, not chapters: a merge runs on any box, so it pulls the takes
+    // it lacks from the inductor — whose store holds every completed take —
+    // instead of requiring them on local disk. Offer-driven only: the
+    // hand-driven path carries no take list and mixes what is here.
+    if !takes.is_empty() {
+        if let Some((http, inductor)) = fetch {
+            let seg_dir = layout.seg_dir(engine, n);
+            std::fs::create_dir_all(&seg_dir)?;
+            for name in &takes {
+                let dest = seg_dir.join(name);
+                if dest
+                    .metadata()
+                    .map(|m| m.len() > 1000)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let url =
+                    format!("{inductor}/api/segment?chapter={n}&engine={engine}&name={name}");
+                let bytes = http
+                    .get(&url)
+                    .send()
+                    .await
+                    .with_context(|| format!("pulling segment {name}"))?
+                    .error_for_status()
+                    .with_context(|| format!("pulling segment {name}"))?
+                    .bytes()
+                    .await
+                    .with_context(|| format!("pulling segment {name}"))?;
+                if bytes.len() <= 1000 {
+                    anyhow::bail!("segment {name} pulled {} bytes — not a take", bytes.len());
+                }
+                std::fs::write(&dest, &bytes)
+                    .with_context(|| format!("storing segment {name}"))?;
+            }
+        }
+    }    // Everything the merge writes goes into one per-chapter scratch directory
     // under `.bm/`, never into `output/`. `assemble` hands back the mp3 (or a
     // wav when ffmpeg is missing) and `publish` renames it out to `output/`,
     // after which the whole scratch directory can go.
@@ -1300,17 +1342,19 @@ fn install_credentials(creds: &bm_proto::Credentials) -> Vec<&'static str> {
 
 /// Run one offered task on this box, start to finish.
 ///
-/// **No inductor URL, and no HTTP client.** A worker that never sends anything
-/// to the inductor needs neither, and not having them is the enforcement: the
-/// compiler will not let a future stage reintroduce a call home. Everything
-/// this needs — the text, the script, the bible, the credentials, the units to
-/// speak — arrived inside the offer.
+/// **No scheduling calls home.** A worker never asks for work — the offer is
+/// authoritative and everything scheduling needs arrived inside it. The one
+/// exception is data, not scheduling: a merge pulls the take files it lacks
+/// from the inductor (see `run_merge`), exactly as a render pushes its units
+/// there. `fetch` carries the client and base URL for that pull; tests pass
+/// `None`.
 async fn run_offer(
     layout: &Layout,
     settings: &Settings,
     offer: &TaskOffer,
     shared: &Shared,
     sidecar: &mut Sidecar,
+    fetch: Option<(&reqwest::Client, &str)>,
 ) -> Result<TaskResult> {
     use bm_proto::Stage::*;
     let n = offer.chapter;
@@ -1354,6 +1398,7 @@ async fn run_offer(
                 script: None,
                 text: Some(text),
                 mp3_b64: None,
+                unit_files: Vec::new(),
             })
         }
         Digest => {
@@ -1397,6 +1442,7 @@ async fn run_offer(
                 script: Some(script),
                 text: None,
                 mp3_b64: None,
+                unit_files: Vec::new(),
             })
         }
         Render => {
@@ -1407,14 +1453,17 @@ async fn run_offer(
             // why it is not the idle reaper's job.
             sidecar.recycle_if_over_budget().await;
             sidecar.ensure(layout).await?;
-            let units = match render_action(offer.render_units.as_deref()) {
+            let (units, unit_files) = match render_action(offer.render_units.as_deref()) {
                 // Old inductor: plan from the local script, keep files
                 // locally, upload nothing — exactly as before the migration.
                 RenderAction::Legacy => {
-                    run_render(layout, n, &offer.engine, &sidecar.tts(), shared).await?
+                    (
+                        run_render(layout, n, &offer.engine, &sidecar.tts(), shared).await?,
+                        Vec::new(),
+                    )
                 }
                 // The offer names no units at all: nothing to speak.
-                RenderAction::Noop => 0,
+                RenderAction::Noop => (0, Vec::new()),
                 // The takes this offer carries, minus what this box already has.
                 // Skipping here rather than on the inductor is the point: the
                 // inductor cannot see this disk, and a partial offer is what
@@ -1429,7 +1478,7 @@ async fn run_offer(
                     let todo =
                         pending_units(list, &offer.render_force, &layout.seg_dir(&offer.engine, n));
                     if todo.is_empty() {
-                        0
+                        (0, Vec::new())
                     } else {
                         render_offered_units(
                             layout,
@@ -1463,6 +1512,7 @@ async fn run_offer(
                 script: None,
                 text: None,
                 mp3_b64: None,
+                unit_files,
             })
         }
         Merge => {
@@ -1488,6 +1538,7 @@ async fn run_offer(
                     takes: offer.merge_takes.clone(),
                 },
                 shared,
+                fetch,
             )
             .await?;
             // **The product always comes home in the report.** This used to
@@ -1510,6 +1561,7 @@ async fn run_offer(
                 script: None,
                 text: None,
                 mp3_b64: mp3,
+                unit_files: Vec::new(),
             })
         }
     }
@@ -1524,6 +1576,7 @@ struct TaskResult {
     script: Option<Value>,
     text: Option<String>,
     mp3_b64: Option<String>,
+    unit_files: Vec<bm_proto::UnitFile>,
 }
 
 /// Say what the sidecar guard will do, once, when a worker starts.
@@ -1598,6 +1651,14 @@ async fn worker_loop(
             busy: std::sync::atomic::AtomicBool::new(false),
             last_contact: std::sync::atomic::AtomicU64::new(bm_proto::now_secs()),
             last_task_end: std::sync::atomic::AtomicU64::new(bm_proto::now_secs()),
+            // Merge data-plane: the hook base *is* the inductor API through
+            // the reverse tunnel. `no_proxy`, like every loopback client
+            // here — an ambient HTTP_PROXY would answer instead of the tunnel.
+            fetch_http: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            fetch_base: format!("http://127.0.0.1:{}", bm_proto::DEFAULT_HOOK_PORT),
         });
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
         println!("instruction channel on 0.0.0.0:{port} (token required)");
@@ -1611,10 +1672,12 @@ async fn worker_loop(
     }
 
     // ── Serve-only ──────────────────────────────────────────────────────────
-    // No inductor URL means nothing to dial, and that is the whole guarantee:
-    // this worker cannot contact the inductor because it holds no address for
-    // one — not because a flag told it not to. Every line below this point
-    // that talks to an inductor is unreachable in this mode.
+    // No inductor URL means no scheduling calls home, and that is the whole
+    // guarantee: this worker never asks for work — it holds no address to
+    // ask at. The one dial-out it keeps is data, not scheduling: a merge
+    // pulls the take files it lacks through the reverse tunnel's hook base
+    // (which only works while the inductor holds the tunnel open), exactly
+    // as a render pushes its units there.
     let Some(inductor) = inductor else {
         let Some(push) = channel else {
             anyhow::bail!(
@@ -1704,7 +1767,7 @@ async fn worker_loop(
         };
         set_task(&shared, &offer);
         let t0 = Instant::now();
-        let res = match run_offer(&layout, &settings, &offer, &shared, &mut sidecar).await {
+        let res = match run_offer(&layout, &settings, &offer, &shared, &mut sidecar, Some((&http, inductor.as_str()))).await {
             Ok(r) => r,
             Err(e) => TaskResult {
                 ok: false,
@@ -1714,6 +1777,7 @@ async fn worker_loop(
                 script: None,
                 text: None,
                 mp3_b64: None,
+                unit_files: Vec::new(),
             },
         };
         println!("[{}] {}", if res.ok { "ok" } else { "FAIL" }, res.detail);
@@ -1730,6 +1794,7 @@ async fn worker_loop(
             script: res.script,
             text: res.text,
             mp3_b64: res.mp3_b64,
+            unit_files: res.unit_files,
         };
         let mut reported = false;
         for attempt in 1..=3 {
@@ -1952,6 +2017,7 @@ async fn main() -> Result<()> {
                             takes: Vec::new(),
                         },
                         &shared,
+                        None,
                     )
                     .await?;
                 }
@@ -2515,7 +2581,7 @@ mod tests {
         let shared: Shared = Arc::new(Mutex::new(Progress::default()));
         let mut sidecar = Sidecar::new(&format!("http://{addr}"));
 
-        let res = run_offer(&layout, &Settings::default(), &offer, &shared, &mut sidecar)
+        let res = run_offer(&layout, &Settings::default(), &offer, &shared, &mut sidecar, None)
             .await
             .expect("a batch renders");
         assert!(res.ok);
@@ -2540,7 +2606,7 @@ mod tests {
         // skipped, so a retry after a partial batch re-speaks only the gap.
         std::fs::remove_file(seg.join(&units[4].name)).unwrap();
         calls.store(0, Ordering::SeqCst);
-        let res = run_offer(&layout, &Settings::default(), &offer, &shared, &mut sidecar)
+        let res = run_offer(&layout, &Settings::default(), &offer, &shared, &mut sidecar, None)
             .await
             .expect("the retry renders");
         assert_eq!(res.units, 1, "only the missing take is re-spoken");
@@ -2802,7 +2868,7 @@ mod tests {
         // The digest itself is *expected* to fail — the fixture answers `{}`,
         // which is not a valid digest, so the one repair attempt fails too.
         // What is under test is where the request went and what it asked for.
-        let _ = run_offer(&layout, &box_settings, &offer, &shared, &mut sidecar).await;
+        let _ = run_offer(&layout, &box_settings, &offer, &shared, &mut sidecar, None).await;
 
         let bodies = seen.lock().unwrap().clone();
         assert!(
