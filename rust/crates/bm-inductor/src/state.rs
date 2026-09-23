@@ -55,6 +55,19 @@ fn lease_for_batch(stage: Stage, n: usize) -> u64 {
         .min(base.saturating_mul(LEASE_BATCH_MAX_FACTOR))
 }
 
+/// Reported failures before a row is shelved (parked for an operator).
+///
+/// Digest gets 15, everything else 3. A digest is two LLM calls plus repairs
+/// against a rate-limited tier — flaky in a way a stuck ffmpeg is not — and
+/// with racing, each wave of racers re-proves the prompt is bad before the
+/// chapter is parked. A low cap there would shelve chapters for tier hiccups.
+fn shelve_after(stage: Stage) -> u32 {
+    match stage {
+        Stage::Digest => 15,
+        _ => 3,
+    }
+}
+
 /// Maximum number of events kept in memory. Older entries fall off the front.
 const EVENT_CAP: usize = 200;
 
@@ -2327,6 +2340,7 @@ mod tests {
                 sidecars: None,
                 sidecar_gb: None,
                 capabilities: vec![],
+                sidecar_keep: None,
             },
         );
         (d, inner)
@@ -2544,6 +2558,7 @@ mod tests {
                 sidecars: None,
                 sidecar_gb: None,
                 capabilities: vec![],
+                sidecar_keep: None,
             },
         );
         assert!(inner.reap().is_empty(), "live worker untouched");
@@ -2729,6 +2744,7 @@ mod tests {
                 sidecars: None,
                 sidecar_gb: None,
                 capabilities: vec![],
+                sidecar_keep: None,
             },
         );
         let msg = inner.op_requeue_orphans();
@@ -2994,6 +3010,212 @@ mod tests {
     }
 
     #[test]
+    fn recast_fixes_speakers_and_requeues_only_what_the_edit_reached() {
+        // ch112's shape: narration given to the character it describes, and
+        // a quote defaulted to Narrator. The op rewrites the named segments,
+        // refuses unknown voices, and the plan invalidation requeues the mix.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(9),
+            r#"{"title":"T","atmosphere":"q","roster":["Narrator","A"],"mentions":{},
+                "segments":[{"speaker":"A","text":"Nàng nhíu mày."},{"speaker":"Narrator","text":"Đi thôi."}],"fixes":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"Narrator":"Đức Trí","A":"Adam"}"#).unwrap();
+        inner.materialize_render_takes(9);
+
+        let msg = inner
+            .op_recast(
+                9,
+                &[
+                    bm_proto::SpeakerFix {
+                        index: 0,
+                        speaker: "Narrator".into(),
+                    },
+                    bm_proto::SpeakerFix {
+                        index: 1,
+                        speaker: "A".into(),
+                    },
+                ],
+                &[],
+            )
+            .expect("two legal fixes apply");
+        assert!(msg.contains("#0 A→Narrator"), "{msg}");
+        assert!(msg.contains("#1 Narrator→A"), "{msg}");
+        let back: Value = bm_core::read_json(&layout.script(9)).unwrap();
+        assert_eq!(back["segments"][0]["speaker"], serde_json::json!("Narrator"));
+        assert_eq!(back["segments"][1]["speaker"], serde_json::json!("A"));
+        assert_eq!(
+            inner.tasks.get("merge:9").map(|t| t.state),
+            Some(TaskState::Pending),
+            "the mix comes back: {msg}"
+        );
+
+        // Same fixes again: nothing to do, and no requeue churn.
+        let again = inner
+            .op_recast(
+                9,
+                &[bm_proto::SpeakerFix {
+                    index: 0,
+                    speaker: "Narrator".into(),
+                }],
+                &[],
+            )
+            .expect("an idempotent fix is not an error");
+        assert!(again.contains("nothing changed"), "{again}");
+
+        // A voice nobody holds would requeue into an unplannable row.
+        let err = inner
+            .op_recast(
+                9,
+                &[bm_proto::SpeakerFix {
+                    index: 0,
+                    speaker: "Ghost".into(),
+                }],
+                &[],
+            )
+            .expect_err("unknown voices are refused");
+        assert!(err.to_string().contains("no voice"), "{err}");
+
+        // A sound item has no speaker to move.
+        let mut data: Value = bm_core::read_json(&layout.script(9)).unwrap();
+        data["segments"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"sound": "coin"}));
+        let _ = bm_core::atomic_write(
+            &layout.script(9),
+            &serde_json::to_string_pretty(&data).unwrap_or_default(),
+        );
+        let err = inner
+            .op_recast(
+                9,
+                &[bm_proto::SpeakerFix {
+                    index: 2,
+                    speaker: "A".into(),
+                }],
+                &[],
+            )
+            .expect_err("sounds are refused");
+        assert!(err.to_string().contains("sound"), "{err}");
+
+        // Deleting the duplicated line: indexes run against the script as
+        // the operator sees it, sounds included, and the mix comes back.
+        let msg = inner
+            .op_recast(
+                9,
+                &[],
+                &[1],
+            )
+            .expect("removing a duplicated line applies");
+        assert!(msg.contains("removed 1 duplicated segments"), "{msg}");
+        let back: Value = bm_core::read_json(&layout.script(9)).unwrap();
+        assert_eq!(back["segments"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            inner.tasks.get("merge:9").map(|t| t.state),
+            Some(TaskState::Pending),
+            "deleting requeues the mix too"
+        );
+    }
+
+    fn racing_digest(inner: &mut Inner, chapter: u32) {
+        let mut c = Task::new(chapter, Stage::Crawl);
+        c.state = TaskState::Done;
+        inner.tasks.insert(c.id(), c);
+        let d = Task::new(chapter, Stage::Digest);
+        inner.tasks.insert(d.id(), d);
+        inner.workers.insert("w1".into(), "127.0.0.1".into());
+        inner.workers.insert("w2".into(), "127.0.0.1".into());
+        inner
+            .machines
+            .insert("127.0.0.1".into(), Machine::new("127.0.0.1", "local", 22, None, "both"));
+    }
+
+    #[test]
+    fn an_idle_digest_worker_joins_the_head_digest_instead_of_idling() {
+        // The bottleneck racing exists for: the N-1→N chain leaves exactly
+        // one digest offerable, so a second digest worker would sit out a
+        // 20-minute LLM call. It joins as a racer — same row, same snapshot.
+        let (_d, mut inner) = fixture();
+        racing_digest(&mut inner, 1);
+        let first = inner.offer("w1").expect("head digest is offerable");
+        assert_eq!(first.task_id, "digest:1");
+        assert_eq!(inner.tasks["digest:1"].assigned_to.as_deref(), Some("w1"));
+
+        let second = inner.offer("w2").expect("w2 races the same row");
+        assert_eq!(second.task_id, "digest:1");
+        let row = &inner.tasks["digest:1"];
+        assert_eq!(row.state, TaskState::Assigned);
+        assert_eq!(row.assigned_to.as_deref(), Some("w1"), "primary keeps its seat");
+        assert_eq!(row.racers, vec!["w2".to_string()]);
+
+        assert!(
+            inner.offer("w2").is_none(),
+            "a holder is never offered its own row twice"
+        );
+    }
+
+    #[test]
+    fn the_first_digest_report_wins_and_the_loser_is_stale_strike_free() {
+        let (_d, mut inner) = fixture();
+        racing_digest(&mut inner, 1);
+        let _ = inner.offer("w1").expect("w1 takes it");
+        let _ = inner.offer("w2").expect("w2 races it");
+
+        let win = inner.complete(&completion("w2", "digest:1", true, "digest ch1 via gemini"));
+        assert!(!win.contains("stale"), "{win}");
+        assert_eq!(inner.tasks["digest:1"].state, TaskState::Done);
+
+        let late = inner.complete(&completion("w1", "digest:1", true, "digest ch1 via opencode"));
+        assert!(late.contains("stale"), "{late}");
+        let row = &inner.tasks["digest:1"];
+        assert_eq!(row.state, TaskState::Done);
+        assert_eq!(row.attempts, 0, "the loser strikes nothing");
+        assert!(row.racers.is_empty() && row.assigned_to.is_none());
+    }
+
+    #[test]
+    fn a_failing_racer_costs_no_strike_while_the_race_runs() {
+        // One bad box in a race must not park the chapter: the failure drops
+        // just that holder, and only the last holder's failure strikes.
+        let (_d, mut inner) = fixture();
+        racing_digest(&mut inner, 1);
+        let _ = inner.offer("w1").expect("w1 takes it");
+        let _ = inner.offer("w2").expect("w2 races it");
+
+        let out = inner.complete(&completion("w2", "digest:1", false, "model 503"));
+        assert!(out.contains("still racing"), "{out}");
+        let row = &inner.tasks["digest:1"];
+        assert_eq!(row.state, TaskState::Assigned);
+        assert_eq!(row.assigned_to.as_deref(), Some("w1"));
+        assert!(row.racers.is_empty());
+        assert_eq!(row.attempts, 0, "a racing failure is not a strike");
+
+        let last = inner.complete(&completion("w1", "digest:1", false, "model 503"));
+        assert!(!last.contains("still racing"), "{last}");
+        let row = &inner.tasks["digest:1"];
+        assert_eq!(row.state, TaskState::Pending);
+        assert_eq!(row.attempts, 1, "the last holder's failure strikes once");
+    }
+
+    #[test]
+    fn digest_shelves_at_fifteen_not_three() {
+        let (_d, mut inner) = fixture();
+        racing_digest(&mut inner, 1);
+        let _ = inner.offer("w1").expect("w1 takes it");
+        // Two ordinary failures: a crawl would be one strike from shelved,
+        // a digest is barely started.
+        inner.tasks.get_mut("digest:1").unwrap().attempts = 2;
+        let line = inner.complete(&completion("w1", "digest:1", false, "model 503"));
+        assert!(line.contains("failed"), "{line}");
+        assert_eq!(inner.tasks["digest:1"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["digest:1"].attempts, 3);
+        let last = inner.recent_events(1).into_iter().next().unwrap().clone();
+        assert!(last.text.contains("will retry"), "{last:?}");
+    }
+
+    #[test]
     fn a_merge_that_outruns_its_plan_replans_instead_of_failing_again() {
         // The stale-plan loop: a digest lands after the render plan was
         // built, so the recorded take list is short of the timeline. Without
@@ -3124,11 +3346,14 @@ mod tests {
     }
 
     #[test]
-    fn the_third_failure_escalates_to_error_and_names_the_retry_key() {
+    fn the_fifteenth_digest_failure_escalates_to_error_and_names_the_retry_key() {
+        // Digest shelves at 15, not 3: two LLM calls plus repairs against a
+        // rate-limited tier fail in ways a stuck ffmpeg does not, and each
+        // racing wave re-proves the prompt before the chapter is parked.
         let (_d, mut inner) = fixture();
         let mut t = Task::new(4, Stage::Digest);
         t.state = TaskState::Running;
-        t.attempts = 2;
+        t.attempts = 14;
         t.assigned_to = Some("w1".into());
         inner.tasks.insert("digest:4".into(), t);
 
@@ -3142,7 +3367,7 @@ mod tests {
         let last = inner.recent_events(1).into_iter().next().unwrap().clone();
         assert_eq!(
             last.level, "error",
-            "three strikes is an error, not a warning"
+            "fifteen strikes is an error, not a warning"
         );
         // Case-insensitive on purpose: the word is deliberately capitalised in
         // the event so it stands out from the "will retry" failures beside it,

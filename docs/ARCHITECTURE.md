@@ -495,6 +495,24 @@ is a way of making "two" impossible rather than survivable.
   is quiet). ffmpeg's working set is the one thing that co-resides badly with a
   model, and a merge runs nowhere else than the box that takes it — the two
   must never co-reside in 8 GiB.
+* **The policy can turn the sidecar off entirely.** Render is the only stage
+  that needs the model, so a box whose work policy turns render off has no use
+  for ~2.85 GB of weights — and a box switched to digest-only never goes idle,
+  which meant the old lifecycle (warm across tasks, reaped only on idleness)
+  held the model for nothing. The dispatcher owns the instruction and owns
+  **convergence**, not one-shot delivery: a single push misses the box down at
+  edit time, the box that reboots back into its default, the inductor
+  restarted since, the worker busy behind the timeout, and the hand-edited
+  `machines.json`. So on every status poll it compares three books — what the
+  policy says, what it last successfully told the box, and what the box
+  **reports** it believes (the beat's `sidecar_keep`) — and pushes
+  `POST /sidecar-policy` on any disagreement. A worker told to keep none stops
+  its model on the reaper's next tick and refuses stale render offers with a
+  403, which the dispatcher answers by releasing the covered rows **strike-free**
+  (`release_render_rows` — a policy decision must never shelve a chapter);
+  rendering back on restores the normal warm lifecycle. Five unanswered tries
+  per desired value and the push goes quiet until the policy changes, so an
+  agent that predates the endpoint cannot flood the log.
 * **The cluster can see the count.** The heartbeat carries `sidecars` and
   `sidecar_gb`, and both are a census of **processes**: `census_refresh_kind`
   asks sysinfo for memory and explicitly *not* for tasks, because on Linux

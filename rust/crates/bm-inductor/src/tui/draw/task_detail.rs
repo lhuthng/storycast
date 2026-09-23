@@ -3,7 +3,7 @@ use crate::tui::{
     app::App,
     model::age_secs,
     screen::TaskDetail,
-    style::{centered_padded, empty_body, state_color, worker_name},
+    style::{centered_padded, empty_body, state_color, worker_racing},
 };
 use bm_proto::TaskState;
 use ratatui::{
@@ -70,9 +70,17 @@ pub(crate) fn draw_task_detail(f: &mut ratatui::Frame, app: &App, view: &TaskDet
         ]),
         kv(
             "attempts",
-            format!("{} of 3 before it is shelved", t.attempts),
+            format!(
+                "{} of {} before it is shelved",
+                t.attempts,
+                if t.stage == bm_proto::Stage::Digest {
+                    15
+                } else {
+                    3
+                }
+            ),
         ),
-        kv("worker", worker_name(t.assigned_to.as_deref())),
+        kv("worker", worker_racing(t)),
         kv("lease", lease),
         kv("affinity", t.affinity.clone().unwrap_or_else(|| "—".into())),
         kv("updated", format!("{}s ago", age_secs(t.updated))),

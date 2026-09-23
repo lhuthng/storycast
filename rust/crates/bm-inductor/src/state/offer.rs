@@ -1,5 +1,5 @@
 use super::plan::present;
-use super::{lease_for_batch, Inner};
+use super::{lease_for_batch, shelve_after, Inner};
 use bm_core::assemble::RenderPlan;
 use bm_proto::{now_secs, Complete, Stage, Task, TaskOffer, TaskState};
 use serde_json::{json, Value};
@@ -116,8 +116,27 @@ impl Inner {
                 .tasks
                 .iter()
                 .filter(|(_, t)| t.stage == stage)
-                .filter(|(_, t)| t.state == TaskState::Pending && !self.shelved(t.chapter))
-                .filter(|(_, t)| self.upstream_done(t.chapter, t.stage))
+                .filter(|(_, t)| {
+                    if t.state == TaskState::Pending && !self.shelved(t.chapter) {
+                        return self.upstream_done(t.chapter, t.stage);
+                    }
+                    // Digest racing: the head digest is the pipeline's
+                    // bottleneck (the N-1→N chain leaves exactly one digest
+                    // offerable at a time), so an idle digest worker would
+                    // otherwise sit out a 20-minute LLM call. An already
+                    // assigned digest row is offerable to a box that does not
+                    // hold it yet — same snapshot, same prompt, first report
+                    // wins and every later one is dropped as stale. Other
+                    // stages stay single-assignee: their rows are cheap and
+                    // parallel across chapters already.
+                    // ponytail: unbounded racers by design — the operator's
+                    // digest-worker count is the cap; each box holds one task.
+                    stage == Stage::Digest
+                        && matches!(t.state, TaskState::Assigned | TaskState::Running)
+                        && !self.shelved(t.chapter)
+                        && !t.is_holder(worker_id)
+                        && self.upstream_done(t.chapter, t.stage)
+                })
                 // No affinity gate on any stage: takes are independent and a
                 // merge pulls the pieces it lacks from the inductor, so every
                 // pending row whose inputs are done is offerable to every
@@ -188,6 +207,21 @@ impl Inner {
             let lease = now_secs() + lease_for_batch(stage, batch.len());
             for id in &batch {
                 if let Some(t) = self.tasks.get_mut(id) {
+                    // A digest row already grinding on another box: join the
+                    // race instead of stealing it. The primary keeps its seat;
+                    // this box runs the same snapshot and the first `ok`
+                    // report settles the row for everyone.
+                    if stage == Stage::Digest
+                        && matches!(t.state, TaskState::Assigned | TaskState::Running)
+                        && !t.is_holder(worker_id)
+                    {
+                        if !t.racers.iter().any(|r| r == worker_id) {
+                            t.racers.push(worker_id.into());
+                        }
+                        t.lease_until = Some(lease);
+                        t.updated = now_secs();
+                        continue;
+                    }
                     t.state = TaskState::Assigned;
                     t.assigned_to = Some(worker_id.into());
                     t.lease_until = Some(lease);
@@ -263,7 +297,9 @@ impl Inner {
     /// report applies to the whole group or to nothing — a partially settled
     /// batch would leave rows `Assigned` to a worker that has already answered,
     /// and their leases would expire into a second render of takes that landed.
-    fn covered_rows(&self, task_id: &str) -> Vec<String> {
+    /// `pub(crate)` because the ledger's strike-free release of a refused
+    /// render (`release_render_rows`) settles the same set a report would.
+    pub(crate) fn covered_rows(&self, task_id: &str) -> Vec<String> {
         let mut out = vec![task_id.to_string()];
         if let Some(t) = self.tasks.get(task_id) {
             out.extend(t.batch.iter().cloned());
@@ -437,11 +473,11 @@ impl Inner {
         // and their answer is the better one either way.
         //
         // Accepting it here **is** the release. Marking the row Done clears
-        // `assigned_to`, so the other worker's eventual report finds a row it no
-        // longer owns and is dropped as stale — which is the whole of "tell him
-        // to give that up", with no new instruction on the wire. The box keeps
-        // working until it notices, bounded by the stage's own deadline (120 s
-        // for the `opencode` fallback, and the lease above that).
+        // its holders, so every other box's eventual report finds a row it no
+        // longer owns and is dropped as stale — and the dispatcher's drive
+        // loop aborts a losing digest racer's POST on its next poll, so the
+        // worker reads a dropped connection as a cancel instead of grinding
+        // to a stale report. No new instruction on the wire either way.
         let manual = c.worker_id == bm_proto::MANUAL_WORKER;
         // A manual digest may name the next chapter before any worker task
         // exists for it — the operator works ahead of the enqueue, not from
@@ -456,7 +492,14 @@ impl Inner {
         }
         let outcome = match self.tasks.get(&c.task_id) {
             None => Outcome::Unknown,
-            Some(t) if !manual && t.assigned_to.as_deref() != Some(c.worker_id.as_str()) => {
+            // A digest racer holds the row as well as the primary: the first
+            // `ok` wins and every later report — racer or primary — finds a
+            // row it no longer owns and is dropped here, strike-free.
+            Some(t)
+                if !manual
+                    && t.assigned_to.as_deref() != Some(c.worker_id.as_str())
+                    && !t.racers.iter().any(|r| r == &c.worker_id) =>
+            {
                 Outcome::Stale
             }
             Some(t) => {
@@ -650,6 +693,7 @@ impl Inner {
                         t.state = TaskState::Done;
                         t.detail = c.detail.clone();
                         t.assigned_to = None;
+                        t.racers.clear();
                         t.lease_until = None;
                         t.updated = now_secs();
                         t.batch.clear();
@@ -761,9 +805,16 @@ impl Inner {
         healed
     }
 
-    /// Record a failed report: a strike, Pending again (Shelved at 3), and an
+    /// Record a failed report: a strike, Pending again (Shelved at the
+    /// stage's threshold — 3 everywhere but digest, which gets 15), and an
     /// event line. Shared by worker-reported failures and the completion
     /// gate, which fails reports whose files never landed.
+    ///
+    /// Digest racing changes one thing: a failing racer while other boxes
+    /// are still grinding the same row costs no strike — the row stays
+    /// `Assigned` under its remaining holders and only the last holder's
+    /// failure strikes. Otherwise N racers failing one bad prompt would
+    /// shelve the chapter in a single wave.
     ///
     /// **The whole batch takes the strike, not the row the report named.** One
     /// report is one answer about one offer, and the offer covered N takes: a
@@ -777,22 +828,67 @@ impl Inner {
     /// skips the takes whose files did land, so a batch that got nine of ten
     /// re-speaks one.
     fn fail_task(&mut self, task_id: &str, worker_id: &str, detail: String) -> String {
+        // A digest racer failing while others still hold the row: drop just
+        // this holder, strike nothing. The race continues; the row is
+        // struck only when its last holder fails below.
+        if task_id.starts_with("digest:") {
+            let mut racing_on = false;
+            if let Some(t) = self.tasks.get_mut(task_id) {
+                if t.is_holder(worker_id)
+                    && matches!(t.state, TaskState::Assigned | TaskState::Running)
+                {
+                    let holders_before = t.holders().len();
+                    if holders_before > 1 {
+                        t.remove_holder(worker_id);
+                        t.detail = "requeued: racer failed, still racing".to_string();
+                        t.updated = now_secs();
+                        racing_on = true;
+                    }
+                }
+            }
+            if racing_on {
+                let remaining = self
+                    .tasks
+                    .get(task_id)
+                    .map(|t| t.holders().join(", "))
+                    .unwrap_or_default();
+                self.push_event(
+                    "warn",
+                    format!(
+                        "[{worker_id}] {task_id} FAILED (racer out, still racing: {remaining}): {}",
+                        bm_core::util::head_chars(&detail, 200)
+                    ),
+                );
+                self.save();
+                return format!(
+                    "{worker_id}: {task_id} failed (racer out, still racing) ({})",
+                    bm_core::util::head_chars(&detail, 120)
+                );
+            }
+        }
         // **Which input is short?** A merge fails on `N segments missing`
         // when the render never produced the audio or the inductor lost it —
         // the merge itself pulls what it lacks, so its box is never the
         // problem. The render is requeued alongside the merge retry below.
         let rows = self.covered_rows(task_id);
+        let shelve_limit = self
+            .tasks
+            .get(task_id)
+            .map(|t| shelve_after(t.stage))
+            .unwrap_or(3);
         let mut shelved = false;
         for id in &rows {
             if let Some(t) = self.tasks.get_mut(id) {
                 t.attempts += 1;
                 t.detail = detail.clone();
-                t.state = if t.attempts >= 3 {
+                let after = shelve_after(t.stage);
+                t.state = if t.attempts >= after {
                     TaskState::Shelved
                 } else {
                     TaskState::Pending
                 };
                 t.assigned_to = None;
+                t.racers.clear();
                 t.lease_until = None;
                 t.updated = now_secs();
                 t.batch.clear();
@@ -832,9 +928,9 @@ impl Inner {
         // until somebody presses `u`. It has to be distinguishable at a glance
         // from the ordinary "will retry" failure, which needs nobody.
         let note = if shelved {
-            " (SHELVED — 3 strikes, no further retries; press u to requeue)"
+            format!(" (SHELVED — {shelve_limit} strikes, no further retries; press u to requeue)")
         } else {
-            " (will retry)"
+            " (will retry)".to_string()
         };
         self.push_event(
             level,

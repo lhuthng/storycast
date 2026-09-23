@@ -2177,6 +2177,7 @@ fn beat(id: &str, addr: &str, age_secs: u64, alias: &str) -> Heartbeat {
         sidecars: None,
         sidecar_gb: None,
         capabilities: vec![],
+        sidecar_keep: None,
     }
 }
 
@@ -2653,7 +2654,7 @@ async fn enter_opens_the_task_page_and_shows_the_whole_reason() {
         text.contains("second line of the report"),
         "the *rest* of the reason, which the pane never showed:\n{text}"
     );
-    assert!(text.contains("3 of 3 before it is shelved"), "{text}");
+    assert!(text.contains("3 of 15 before it is shelved"), "{text}");
     assert!(
         text.contains(worker_alias("w2").0),
         "the worker that failed:\n{text}"

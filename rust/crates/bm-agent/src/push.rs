@@ -43,8 +43,8 @@
 //! openly. "Authenticated or off" is the only safe pair of states.
 
 use crate::{
-    clear_task, heartbeat_now, run_offer, set_task, LoadProbe, Shared, Sidecar, TaskResult,
-    WorkerIdentity,
+    clear_task, heartbeat_now, run_offer, set_task, LoadProbe, PolicyRefusal, Shared, Sidecar,
+    TaskResult, WorkerIdentity,
 };
 use axum::{
     body::Body,
@@ -99,6 +99,20 @@ pub(crate) struct Push {
     /// model once this is older than its idle budget — the sidecar is kept
     /// warm *between* tasks, not forever.
     pub(crate) last_task_end: AtomicU64,
+    /// Whether this worker should keep a TTS sidecar at all. **`true` is the
+    /// default and the invariant:** every render task runs on the assumption
+    /// that a sidecar may be ensured, so the flag may only be cleared by an
+    /// explicit instruction from the inductor (`POST /sidecar-policy`) and
+    /// must be restored before any render is accepted again — which
+    /// [`Sidecar::allow_ensure`]/[`Sidecar::require_allowed`] enforce.
+    ///
+    /// The inductor sets it when the operator turns `render` off in a box's
+    /// work policy, and restores it when render comes back on: the policy is
+    /// the operator's decision, and the sidecar is just the consequence —
+    /// the worker's own idle reaper and memory guard keep applying either
+    /// way. `AtomicBool` rather than inside the sidecar's mutex so the reaper
+    /// and the endpoint can read it without contending on that lock.
+    pub(crate) keep_sidecar: AtomicBool,
     /// Data-plane dial-out, and only that: the reverse tunnel's worker-side
     /// end (`http://127.0.0.1:{hook port}`), which *is* the inductor's control
     /// API while the inductor holds the tunnel open. A merge pulls the take
@@ -132,6 +146,19 @@ impl Push {
             .store(bm_proto::now_secs(), Ordering::SeqCst);
     }
 
+    /// Whether a render on this box may start its sidecar.
+    pub(crate) fn keep_sidecar(&self) -> bool {
+        self.keep_sidecar.load(Ordering::SeqCst)
+    }
+
+    /// Record the inductor's instruction about the sidecar. The idle reaper
+    /// stops the warm model as soon as it is idle either way — the answer is
+    /// deliberately the same in both directions, so the sidecar's remaining
+    /// life never depends on who asked.
+    pub(crate) fn set_keep_sidecar(&self, keep: bool) {
+        self.keep_sidecar.store(keep, Ordering::SeqCst);
+    }
+
     pub(crate) fn is_busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
     }
@@ -149,6 +176,7 @@ pub(crate) fn router(push: Arc<Push>) -> Router {
         .route("/status", get(status))
         .route("/task", post(task))
         .route("/unit", get(unit))
+        .route("/sidecar-policy", post(sidecar_policy))
         .route("/shutdown", post(shutdown))
         .with_state(push)
 }
@@ -168,7 +196,11 @@ async fn status(
         .probe
         .lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "probe poisoned".into()))?;
-    Ok(Json(heartbeat_now(&p, &push.who, &mut probe)))
+    // The worker's own sidecar belief travels in the beat: the dispatcher's
+    // convergence knows what it *told* this box, but only this answer says
+    // what the box actually believes — which is what a reboot resets.
+    let keep = push.keep_sidecar();
+    Ok(Json(heartbeat_now(&p, &push.who, &mut probe, keep)))
 }
 
 /// `Authorization: Bearer <token>`, compared without short-circuiting.
@@ -219,7 +251,10 @@ async fn task(
             .unwrap_or_default();
         return (StatusCode::CONFLICT, format!("already running {running}")).into_response();
     }
-    let _guard = BusyGuard(&push.busy);
+    let _guard = BusyGuard {
+        busy: &push.busy,
+        shared: &push.shared,
+    };
     // Tell the status answer what this worker is doing. The pull path sets
     // this before `run_offer`; without it `/status` answers `task_id: None`
     // while a render is at 45%, the inductor reads that as "idle", and its own
@@ -241,6 +276,12 @@ async fn task(
     // any other way, so a merge offered here runs where the audio already
     // is or fails loudly by name.
     let started = std::time::Instant::now();
+    // The sidecar policy as of **before** the offer: a snapshot, not a read
+    // the stage could see move under it. `false` is the inductor's
+    // instruction (the operator turned render off) — the render arm refuses
+    // with a typed error that becomes a 403 below, strike-free on the
+    // inductor's side, instead of re-warming the model against the policy.
+    let keep_sidecar = push.keep_sidecar();
     let result = run_offer(
         &push.layout,
         &push.settings,
@@ -248,6 +289,7 @@ async fn task(
         &push.shared,
         &mut sidecar,
         Some((&push.fetch_http, push.fetch_base.as_str())),
+        keep_sidecar,
     )
     .await;
     // Deliberately **no** `sidecar.stop()` here: the sidecar is worker-owned
@@ -258,6 +300,25 @@ async fn task(
     // Idle again, whatever the outcome — the answer below is built from
     // `result`, so nothing past this point needs the progress block.
     clear_task(&push.shared);
+
+    // A render refused because the operator turned render off is **not a
+    // stage failure**: the inductor's `run_one` answers it with a strike-free
+    // release of the covered rows (the same rule a lease expiry gets), while
+    // a 200 `ok:false` report would cost the chapter one of its three
+    // strikes — three operator policy flips in a row would shelve a chapter
+    // for a decision the operator made. 403 is the one status the dispatcher
+    // treats as "refused, not failed"; everything else keeps its old shape.
+    let refused = result
+        .as_ref()
+        .err()
+        .is_some_and(|e| e.chain().any(|c| c.downcast_ref::<PolicyRefusal>().is_some()));
+    if refused {
+        return (
+            StatusCode::FORBIDDEN,
+            "render refused: this box's policy turns render off".to_string(),
+        )
+            .into_response();
+    }
     push.last_task_end
         .store(bm_proto::now_secs(), Ordering::SeqCst);
 
@@ -320,13 +381,24 @@ async fn task(
     }
 }
 
-/// Clears the busy flag however the handler leaves — including on a panic in a
-/// task body, which would otherwise leave the worker permanently refusing work.
-struct BusyGuard<'a>(&'a AtomicBool);
+/// Clears the busy flag AND the shared task slot however the handler leaves —
+/// including when a dropped POST cancels this future mid-task.
+///
+/// That cancel is not hypothetical: the inductor aborts a losing digest
+/// racer's POST once another box wins, and a dead link does the same. The
+/// explicit `clear_task` at the end of the handler never runs then, so
+/// without this the worker would report busy on a dead task for ever — the
+/// drive reads `task_id` to decide idleness and never offers new work.
+/// (A panic in a task body gets the same rescue, as before.)
+struct BusyGuard<'a> {
+    busy: &'a AtomicBool,
+    shared: &'a Shared,
+}
 
 impl Drop for BusyGuard<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.busy.store(false, Ordering::SeqCst);
+        clear_task(self.shared);
     }
 }
 
@@ -375,6 +447,41 @@ async fn unit(
         // box rendered it, or this render has not reached it yet.
         Err(_) => (StatusCode::NOT_FOUND, format!("no {}", q.name)).into_response(),
     }
+}
+
+/// The body of `POST /sidecar-policy`.
+#[derive(Deserialize)]
+struct SidecarPolicyUpdate {
+    keep: bool,
+}
+
+/// `POST /sidecar-policy` — a policy consequence, not a policy.
+///
+/// See the module comment above for the contract; this is its one endpoint.
+/// Answering **before** the model actually stops keeps the inductor's view of
+/// its next render decision exact without holding the connection for the
+/// shutdown waits, and without promising a model that is already leaving.
+async fn sidecar_policy(
+    State(push): State<Arc<Push>>,
+    headers: HeaderMap,
+    Json(u): Json<SidecarPolicyUpdate>,
+) -> Response {
+    if let Err(e) = check(&headers, &push.token) {
+        return e.into_response();
+    }
+    push.touch();
+    push.set_keep_sidecar(u.keep);
+    if u.keep {
+        println!("sidecar policy: keep — the next render may ensure it again");
+    } else {
+        println!("sidecar policy: do not keep — the idle reaper stops it as soon as this worker is idle");
+    }
+    // Answered without touching the sidecar's mutex on purpose: a render
+    // holds that lock for its whole duration, and an ack that waits behind it
+    // would outlive the inductor's timeout and be retried forever. The flag
+    // is stored already; whether a model is resident right now is the reaper's
+    // business, visible in the next beat's `sidecars` census.
+    Json(serde_json::json!({"ok": true})).into_response()
 }
 
 /// `POST /shutdown` — exit on the inductor's say-so.
@@ -439,10 +546,44 @@ pub(crate) async fn sidecar_reaper(push: Arc<Push>) {
         if idle < SIDECAR_IDLE_SECS {
             continue;
         }
+        // The policy is checked **inside** the lock and before `is_running`,
+        // so a flag flip racing this tick cannot stop the model twice, and a
+        // `do not keep` instruction is honoured at most 30 s after it lands —
+        // even on a box that renders continuously, which the idle branch
+        // alone would never reach. The lifecycle stays the same in both
+        // directions: a re-warm is a render's business (a `keep` instruction
+        // restores it), and this is the *stopping* half.
         let mut sidecar = push.sidecar.lock().await;
+        if !push.keep_sidecar() {
+            if sidecar.is_running() {
+                sidecar.stop();
+                println!("sidecar stopped — the policy says this box keeps none");
+            }
+            continue;
+        }
         if sidecar.is_running() {
             sidecar.stop();
             println!("sidecar stopped after {idle}s idle — its RSS returns to the OS");
+            continue;
+        }
+        // An adopted server nobody owns: provisioning's boot-time instance,
+        // still answering long after the worker that used it moved on. The
+        // owned branch above never reaches it (`stop` only signals our own
+        // child), the render-boundary recycle never runs while no renders
+        // arrive, and the inductor's 90% memory guard withholds new work from
+        // a full box — so a fat idle server parks its box for ever: too full
+        // to work, nothing clearing while idle. Reap it once it is both idle
+        // and over budget; the next render re-ensures a fresh server this
+        // worker owns, which the owned branch then manages.
+        //
+        // Non-local boxes only: on the local node the same port serves the
+        // operator's auditions, and killing an adopted server mid-listen is
+        // the tradeoff the owned-only rule was written to avoid.
+        if !bm_core::is_local_node(&push.who.addr) {
+            if let Some(why) = sidecar.over_budget() {
+                println!("adopted sidecar {why} — reaping it so this box drains");
+                sidecar.reap_all().await;
+            }
         }
     }
 }
@@ -497,6 +638,10 @@ mod tests {
             // a test that never polls does not trip it immediately.
             last_contact: AtomicU64::new(bm_proto::now_secs()),
             last_task_end: AtomicU64::new(bm_proto::now_secs()),
+            // The invariant is that the sidecar is kept, and the invariant
+            // holds in tests: a test that wants the *refusing* state flips it
+            // itself, so nothing else in this file drifts.
+            keep_sidecar: AtomicBool::new(true),
             fetch_http: reqwest::Client::builder().no_proxy().build().unwrap(),
             fetch_base: "http://127.0.0.1:1".into(),
         })
@@ -667,6 +812,158 @@ mod tests {
             .unwrap();
         assert_eq!(escape.status(), 400, "a separator must never reach join");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_sidecar_instruction_is_carried_and_gated_by_the_token() {
+        let push = push("s3cret");
+        assert!(push.keep_sidecar(), "the default is to keep the sidecar");
+        let (base, http) = serve(push.clone()).await;
+        let url = format!("{base}/sidecar-policy");
+
+        // No token, no instruction — this carries an order, not a question.
+        let refused = http
+            .post(&url)
+            .json(&serde_json::json!({"keep": false}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 401);
+        assert!(push.keep_sidecar(), "a refused request must not change the flag");
+
+        // The real instruction: drop it. Acknowledged immediately — the
+        // answer deliberately does not wait on the sidecar's mutex, which a
+        // running render holds for its whole duration.
+        let ok = http
+            .post(&url)
+            .bearer_auth("s3cret")
+            .json(&serde_json::json!({"keep": false}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), 200);
+        let v: serde_json::Value = ok.json().await.unwrap();
+        assert_eq!(v["ok"], true);
+        assert!(!push.keep_sidecar(), "the instruction is in force");
+
+        // And back on: same endpoint, opposite value.
+        let ok = http
+            .post(&url)
+            .bearer_auth("s3cret")
+            .json(&serde_json::json!({"keep": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), 200);
+        assert!(push.keep_sidecar(), "the policy can be restored");
+    }
+
+    /// The beat carries the worker's own sidecar belief, so the dispatcher's
+    /// convergence can see a box that rebooted into its default.
+    #[tokio::test]
+    async fn the_status_answer_reports_the_sidecar_belief() {
+        let push = push("s3cret");
+        let (base, http) = serve(push.clone()).await;
+
+        let beat: Heartbeat = http
+            .get(format!("{base}/status"))
+            .bearer_auth("s3cret")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(beat.sidecar_keep, Some(true), "the default is reported");
+
+        http.post(format!("{base}/sidecar-policy"))
+            .bearer_auth("s3cret")
+            .json(&serde_json::json!({"keep": false}))
+            .send()
+            .await
+            .unwrap();
+        let beat: Heartbeat = http
+            .get(format!("{base}/status"))
+            .bearer_auth("s3cret")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            beat.sidecar_keep,
+            Some(false),
+            "the instruction shows in the next beat"
+        );
+    }
+
+    /// `POST /task` while the policy says keep no sidecar: the render is
+    /// skipped — not served by re-warming the model behind the operator's
+    /// back. The instruction arrives through the **real endpoint**, so the
+    /// mirror onto the sidecar's own gate is exercised too; running the whole
+    /// task handler afterwards is as far as a test can reach without a
+    /// sidecar binary.
+    #[tokio::test]
+    async fn a_render_offer_is_skipped_while_the_policy_says_keep_no_sidecar() {
+        let push = push("s3cret");
+        let (base, http) = serve(push.clone()).await;
+        let told = http
+            .post(format!("{base}/sidecar-policy"))
+            .bearer_auth("s3cret")
+            .json(&serde_json::json!({"keep": false}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(told.status(), 200);
+        let offer = serde_json::json!({
+            "task_id": "render:7", "chapter": 7, "stage": "render",
+            "root": "/tmp", "engine": "vieneu",
+        });
+        let resp = http
+            .post(format!("{base}/task"))
+            .bearer_auth("s3cret")
+            .json(&offer)
+            .send()
+            .await
+            .unwrap();
+        // **403, not 200 with `ok: false`**: the dispatcher reads 403 as
+        // "refused on policy — release the rows strike-free", while a failed
+        // report would cost the chapter one of its three strikes. Three
+        // policy flips would otherwise shelve a chapter for a decision the
+        // operator made.
+        assert_eq!(resp.status(), 403);
+        // The render restored the permission on its way out, and the flag
+        // itself is untouched — the inductor's instruction still says "drop".
+        assert!(!push.keep_sidecar(), "the endpoint flag stays as the inductor set it");
+    }
+
+    /// A render offered while the policy still says "keep": the normal path.
+    /// No sidecar binary exists in a test box, so the render fails at `ensure`
+    /// — but with the *startup* error, not the policy refusal. The gate must
+    /// not change what an allowed render does.
+    #[tokio::test]
+    async fn a_render_offer_under_the_default_policy_runs_the_normal_path() {
+        let push = push("s3cret");
+        let (base, http) = serve(push).await;
+        let offer = serde_json::json!({
+            "task_id": "render:7", "chapter": 7, "stage": "render",
+            "root": "/tmp", "engine": "vieneu",
+        });
+        let resp = http
+            .post(format!("{base}/task"))
+            .bearer_auth("s3cret")
+            .json(&offer)
+            .send()
+            .await
+            .unwrap();
+        let done: Complete = resp.json().await.unwrap();
+        assert!(!done.ok);
+        assert!(
+            !done.detail.contains("policy"),
+            "an allowed render must not be gated: {}",
+            done.detail
+        );
     }
 
     #[tokio::test]

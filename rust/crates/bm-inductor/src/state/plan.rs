@@ -208,7 +208,7 @@ impl Inner {
                         )
                     {
                         t.state = TaskState::Done;
-                        t.assigned_to = None;
+                        t.clear_holders();
                         t.lease_until = None;
                         t.updated = now;
                     } else if !here && t.state == TaskState::Done {
@@ -365,7 +365,7 @@ impl Inner {
             if t.stage == Stage::Render && t.chapter == chapter {
                 t.state = TaskState::Pending;
                 t.attempts = 0;
-                t.assigned_to = None;
+                t.clear_holders();
                 t.lease_until = None;
                 t.detail = why.to_string();
                 t.updated = now;
@@ -409,7 +409,7 @@ impl Inner {
                 continue;
             }
             t.attempts = 0;
-            t.assigned_to = None;
+            t.clear_holders();
             t.lease_until = None;
             t.detail = why.to_string();
             t.updated = now;
@@ -426,7 +426,7 @@ impl Inner {
             Some(t) => {
                 t.state = TaskState::Pending;
                 t.attempts = 0;
-                t.assigned_to = None;
+                t.clear_holders();
                 t.lease_until = None;
                 t.detail = why.to_string();
                 t.updated = now;

@@ -324,6 +324,33 @@ impl Inner {
                 && t.lease_until.map(|l| l < now).unwrap_or(false)
             {
                 let id = t.id();
+                // Racing rows keep every live holder: drop the dead ones, and
+                // only requeue when nobody is left on it. A row whose racers
+                // are still beating is not stuck — it is a race in progress —
+                // so its lease is extended rather than released.
+                let live_holders: Vec<String> = t
+                    .holders()
+                    .into_iter()
+                    .filter(|w| live.contains(*w))
+                    .map(str::to_string)
+                    .collect();
+                if !t.racers.is_empty() && !live_holders.is_empty() {
+                    let dead: Vec<String> = t
+                        .holders()
+                        .into_iter()
+                        .filter(|w| !live.contains(*w))
+                        .map(str::to_string)
+                        .collect();
+                    for w in &dead {
+                        t.remove_holder(w);
+                    }
+                    t.lease_until = Some(now + super::lease_for(t.stage));
+                    t.detail = "requeued: lease extended, still racing".to_string();
+                    t.updated = now;
+                    expired.push(id.clone());
+                    out.push(id);
+                    continue;
+                }
                 // Counted **only** when the holder was still beating, so the
                 // number means "expired while its worker was alive" — the hang
                 // signature — rather than a tally of every requeue, which is what
@@ -342,11 +369,32 @@ impl Inner {
         // window the ETA calls live). Workers beat every 2s, so a live one is
         // never caught here — and the boot grace in `started_at` means a
         // reboot never mistakes grinding workers for dead ones either.
+        // Racing rows prune dead holders but stay `Assigned` under the live
+        // ones; only a row with nobody left goes back to the pool.
         let mut orphaned = Vec::new();
         if now.saturating_sub(self.started_at) > 120 {
             for t in self.tasks.values_mut() {
                 if !matches!(t.state, TaskState::Assigned | TaskState::Running) {
                     continue;
+                }
+                if !t.racers.is_empty() {
+                    let dead: Vec<String> = t
+                        .holders()
+                        .into_iter()
+                        .filter(|w| !live.contains(*w))
+                        .map(str::to_string)
+                        .collect();
+                    if dead.is_empty() {
+                        continue;
+                    }
+                    for w in &dead {
+                        t.remove_holder(w);
+                    }
+                    if t.assigned_to.is_some() {
+                        t.detail = "requeued: holder gone, still racing".to_string();
+                        t.updated = now;
+                        continue;
+                    }
                 }
                 let orphan = match &t.assigned_to {
                     None => true,
@@ -427,11 +475,36 @@ impl Inner {
         out
     }
 
+    /// Release every row a render offer covered, strike-free, because the
+    /// worker refused it on policy (render off for that box). The offer is
+    /// not lost — the rows go back to the pool and other boxes take them —
+    /// but a policy decision must never cost a chapter one of its three
+    /// strikes, so this reads [`Self::release`] rather than `fail_task`.
+    /// Returns the line for the log.
+    ///
+    /// Sibling rows come from [`Self::covered_rows`], so a batch offer is
+    /// released whole, exactly as one report would have settled it whole.
+    pub(crate) fn release_render_rows(&mut self, task_id: &str, why: &str) -> String {
+        let now = now_secs();
+        let rows = self.covered_rows(task_id);
+        for id in &rows {
+            if let Some(t) = self.tasks.get_mut(id) {
+                // Only rows this offer actually holds: a row moved on since
+                // (another box took it) stays where it is.
+                if matches!(t.state, TaskState::Assigned | TaskState::Running) {
+                    Self::release(t, now, why);
+                }
+            }
+        }
+        self.save();
+        format!("released {} row(s) back to the pool", rows.len())
+    }
+
     /// Return one task to the pool. Attempts are kept — this unsticks, it
     /// does not forgive strikes.
     pub(crate) fn release(t: &mut Task, now: u64, why: &str) {
         t.state = TaskState::Pending;
-        t.assigned_to = None;
+        t.clear_holders();
         t.lease_until = None;
         t.detail = format!("requeued: {why}");
         t.updated = now;
@@ -462,18 +535,13 @@ impl Inner {
             if !matches!(t.state, TaskState::Assigned | TaskState::Running) {
                 continue;
             }
-            let live_holder = t
-                .assigned_to
-                .as_deref()
-                .and_then(|w| self.beats.get(w))
-                .map(|b| fresh(b.ts))
-                .unwrap_or(false);
-            if live_holder {
-                busy.push(format!(
-                    "{} on {}",
-                    t.id(),
-                    t.assigned_to.as_deref().unwrap_or("?")
-                ));
+            let live_holders: Vec<&str> = t
+                .holders()
+                .into_iter()
+                .filter(|w| self.beats.get(*w).map(|b| fresh(b.ts)).unwrap_or(false))
+                .collect();
+            if !live_holders.is_empty() {
+                busy.push(format!("{} on {}", t.id(), live_holders.join(",")));
             }
         }
         for (w, b) in &self.beats {

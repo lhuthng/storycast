@@ -273,6 +273,23 @@ impl Budget {
     }
 }
 
+/// A render refused because the operator's policy turns render off for this
+/// box. A **type**, so the serve path can tell it apart from every other
+/// render failure: this one answers 403 (strike-free release on the
+/// inductor's side) while a genuine failure answers 200 `ok: false` (a
+/// strike). Hand-rolled `Display`/`Error` rather than `thiserror` — one
+/// two-line type does not want a dependency.
+#[derive(Debug)]
+struct PolicyRefusal(&'static str);
+
+impl std::fmt::Display for PolicyRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for PolicyRefusal {}
+
 struct Sidecar {
     tts_url: String,
     child: Option<tokio::process::Child>,
@@ -689,7 +706,12 @@ async fn run_digest(
             last = (f, s.clone());
             set_progress(&shared2, f, s);
         };
-        let outcome = rt.block_on(bm_core::digest::digest_chapter(
+        // Analyze only, never persist: the inductor is the single writer of
+        // the script and the bible. A worker-mode write would land on the
+        // shared disk underneath the winner — a lost digest race's orphaned
+        // thread finishing late would overwrite the applied script with its
+        // own uncanonicalized version. The script travels home in the report.
+        let outcome = rt.block_on(bm_core::digest::analyze_chapter(
             &layout2, n, &bible, &settings, &analyzer, &mut cb,
         ))?;
         Ok((outcome, last))
@@ -700,8 +722,10 @@ async fn run_digest(
         println!("{line}");
     }
     if merge_local {
-        // Standalone mode keeps legacy behaviour: merge here. Worker mode
-        // returns the delta and the inductor merges as the single writer.
+        // Standalone mode keeps legacy behaviour: persist the script and
+        // merge here. Worker mode returns the delta and the inductor merges
+        // as the single writer.
+        bm_core::digest::write_script(&layout, n, &outcome.script)?;
         let mut local: Value =
             serde_json::from_str(&std::fs::read_to_string(layout.bible())?).unwrap_or(json!({}));
         bm_core::digest::merge_bible(&mut local, &outcome.delta, &format!("{n:02}"));
@@ -712,8 +736,7 @@ async fn run_digest(
         1.0,
         format!("digest ch{n} done ({} segments)", outcome.segments),
     );
-    let script: Value = serde_json::from_str(&std::fs::read_to_string(layout.script(n))?)?;
-    Ok((outcome.delta, script))
+    Ok((outcome.delta, outcome.script))
 }
 
 /// What a render offer asks for. Pure, so the zero-units arm — "do nothing
@@ -1161,7 +1184,17 @@ struct WorkerIdentity {
 /// `GET /status` with it. Two constructions would be two chances for the
 /// inductor's liveness bookkeeping and its panes to disagree about what a
 /// worker is doing, depending on which way the report travelled.
-fn heartbeat_now(p: &Progress, who: &WorkerIdentity, probe: &mut LoadProbe) -> Heartbeat {
+///
+/// `sidecar_keep` is the worker's own belief about its sidecar: pull mode has
+/// no instruction channel, so it is always `true` here — serve mode passes
+/// what the inductor last told it, and the dispatcher's convergence reads
+/// that back to detect a box that rebooted into its default.
+fn heartbeat_now(
+    p: &Progress,
+    who: &WorkerIdentity,
+    probe: &mut LoadProbe,
+    sidecar_keep: bool,
+) -> Heartbeat {
     let (cpu_pct, mem_pct, mem_gb, sidecars, sidecar_gb) = probe.sample();
     Heartbeat {
         worker_id: who.worker_id.clone(),
@@ -1181,6 +1214,7 @@ fn heartbeat_now(p: &Progress, who: &WorkerIdentity, probe: &mut LoadProbe) -> H
         sidecars,
         sidecar_gb,
         capabilities: capabilities(),
+        sidecar_keep: Some(sidecar_keep),
     }
 }
 
@@ -1222,7 +1256,7 @@ async fn heartbeat_loop(
     let mut probe = LoadProbe::new();
     loop {
         let p = shared.lock().map(|p| p.clone()).unwrap_or_default();
-        let body = heartbeat_now(&p, &who, &mut probe);
+        let body = heartbeat_now(&p, &who, &mut probe, true);
         // The inductor's only command channel: a shutdown latch read on
         // every answer. Exiting here strands nothing — the inductor
         // reaps the lease (no strike) or requeues the ledger on its way
@@ -1355,6 +1389,13 @@ async fn run_offer(
     shared: &Shared,
     sidecar: &mut Sidecar,
     fetch: Option<(&reqwest::Client, &str)>,
+    // Whether a render on this box may ensure a sidecar at all. `false` is
+    // the inductor's instruction (`POST /sidecar-policy`): the operator's
+    // policy turned render off, and a render — the one stage that cannot
+    // run without the ~2.85 GB model — is refused rather than served by
+    // re-warming it. A snapshot taken per call, so no hidden mutable state
+    // sits on `Sidecar` for an offer to read stale.
+    keep_sidecar: bool,
 ) -> Result<TaskResult> {
     use bm_proto::Stage::*;
     let n = offer.chapter;
@@ -1446,6 +1487,21 @@ async fn run_offer(
             })
         }
         Render => {
+            // The sidecar policy first, as a **per-call snapshot** the caller
+            // took before this offer ran: an operator who turned render off
+            // for this box must not get a model relaunched under them by a
+            // stray or stale render offer. A typed error, not a bare string —
+            // the serve path answers it with a 403, which the dispatcher
+            // reads as "strike-free refusal, release the rows", while every
+            // other render failure answers 200 `ok: false`, a strike. A
+            // policy decision must never cost a chapter its three strikes
+            // (three flips would shelve it); see `push::task` and
+            // `dispatch::run_one`.
+            if !keep_sidecar {
+                return Err(anyhow::Error::new(PolicyRefusal(
+                    "render skipped: this box's policy turns render off, so the TTS sidecar is not kept",
+                )));
+            }
             // The memory guard, and this is the only place it can safely run:
             // between tasks. A model that has outgrown its budget is recycled
             // here, before the first `/infer` of this offer — never during one.
@@ -1651,6 +1707,10 @@ async fn worker_loop(
             busy: std::sync::atomic::AtomicBool::new(false),
             last_contact: std::sync::atomic::AtomicU64::new(bm_proto::now_secs()),
             last_task_end: std::sync::atomic::AtomicU64::new(bm_proto::now_secs()),
+            // The sidecar is kept by default — the render lifecycle is written
+            // against that — and the inductor's `POST /sidecar-policy` is the
+            // one thing that may clear it (an operator turning render off).
+            keep_sidecar: std::sync::atomic::AtomicBool::new(true),
             // Merge data-plane: the hook base *is* the inductor API through
             // the reverse tunnel. `no_proxy`, like every loopback client
             // here — an ambient HTTP_PROXY would answer instead of the tunnel.
@@ -1767,7 +1827,7 @@ async fn worker_loop(
         };
         set_task(&shared, &offer);
         let t0 = Instant::now();
-        let res = match run_offer(&layout, &settings, &offer, &shared, &mut sidecar, Some((&http, inductor.as_str()))).await {
+        let res = match run_offer(&layout, &settings, &offer, &shared, &mut sidecar, Some((&http, inductor.as_str())), true).await {
             Ok(r) => r,
             Err(e) => TaskResult {
                 ok: false,
@@ -2581,7 +2641,7 @@ mod tests {
         let shared: Shared = Arc::new(Mutex::new(Progress::default()));
         let mut sidecar = Sidecar::new(&format!("http://{addr}"));
 
-        let res = run_offer(&layout, &Settings::default(), &offer, &shared, &mut sidecar, None)
+        let res = run_offer(&layout, &Settings::default(), &offer, &shared, &mut sidecar, None, true)
             .await
             .expect("a batch renders");
         assert!(res.ok);
@@ -2606,7 +2666,7 @@ mod tests {
         // skipped, so a retry after a partial batch re-speaks only the gap.
         std::fs::remove_file(seg.join(&units[4].name)).unwrap();
         calls.store(0, Ordering::SeqCst);
-        let res = run_offer(&layout, &Settings::default(), &offer, &shared, &mut sidecar, None)
+        let res = run_offer(&layout, &Settings::default(), &offer, &shared, &mut sidecar, None, true)
             .await
             .expect("the retry renders");
         assert_eq!(res.units, 1, "only the missing take is re-spoken");
@@ -2868,7 +2928,7 @@ mod tests {
         // The digest itself is *expected* to fail — the fixture answers `{}`,
         // which is not a valid digest, so the one repair attempt fails too.
         // What is under test is where the request went and what it asked for.
-        let _ = run_offer(&layout, &box_settings, &offer, &shared, &mut sidecar, None).await;
+        let _ = run_offer(&layout, &box_settings, &offer, &shared, &mut sidecar, None, true).await;
 
         let bodies = seen.lock().unwrap().clone();
         assert!(

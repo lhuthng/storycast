@@ -161,6 +161,21 @@ impl Inner {
             if !matches!(t.state, TaskState::Assigned | TaskState::Running) {
                 continue;
             }
+            // Racing rows prune dead holders but stay with the live ones.
+            if !t.racers.is_empty() {
+                let dead: Vec<String> = t
+                    .holders()
+                    .into_iter()
+                    .filter(|w| !live.contains(w))
+                    .map(str::to_string)
+                    .collect();
+                for w in &dead {
+                    t.remove_holder(w);
+                }
+                if t.assigned_to.is_some() {
+                    continue;
+                }
+            }
             let orphan = match &t.assigned_to {
                 None => true,
                 Some(w) => !live.contains(w.as_str()),
@@ -182,13 +197,14 @@ impl Inner {
         )
     }
 
-    /// Manual retry for every shelved task (3 strikes) after fixing the cause.
+    /// Manual retry for every shelved task after fixing the cause.
     ///
     /// Strikes reset — unlike `release`, which keeps them — so the next failure
-    /// gets a full 3 attempts again. The operator asserts the cause is fixed by
-    /// pressing the key, so forgiveness is the point. It deletes nothing, so
-    /// against a failure whose cause is unmet *input* it is a loop rather than a
-    /// repair; reaching the producer is what `op_retry_task`'s `force` is for.
+    /// gets a full threshold of attempts again (3 everywhere, 15 for digest).
+    /// The operator asserts the cause is fixed by pressing the key, so
+    /// forgiveness is the point. It deletes nothing, so against a failure
+    /// whose cause is unmet *input* it is a loop rather than a repair;
+    /// reaching the producer is what `op_retry_task`'s `force` is for.
     pub fn op_retry_shelved(&mut self) -> String {
         self.requeue_shelved(None)
     }
@@ -211,7 +227,7 @@ impl Inner {
             }
             t.state = TaskState::Pending;
             t.attempts = 0;
-            t.assigned_to = None;
+            t.clear_holders();
             t.lease_until = None;
             t.detail = "requeued: manual retry".into();
             t.updated = now;
@@ -274,7 +290,7 @@ impl Inner {
         let prev_state = format!("{:?}", task.state).to_lowercase();
         task.state = TaskState::Pending;
         task.attempts = 0;
-        task.assigned_to = None;
+        task.clear_holders();
         task.lease_until = None;
         task.detail = format!("requeued: manual retry (was {prev_state})");
         task.updated = now;
@@ -548,7 +564,7 @@ impl Inner {
             }
             t.state = TaskState::Pending;
             t.attempts = 0;
-            t.assigned_to = None;
+            t.clear_holders();
             t.lease_until = None;
             t.detail = detail.into();
             t.updated = now;
@@ -595,7 +611,7 @@ impl Inner {
                     Some(t) => {
                         t.state = TaskState::Pending;
                         t.attempts = 0;
-                        t.assigned_to = None;
+                        t.clear_holders();
                         t.lease_until = None;
                         t.detail = "requeued: rerender".into();
                         t.updated = now;
@@ -742,5 +758,139 @@ impl Inner {
                 format!(" — e.g. {}", detail.join("; "))
             },
         ))
+    }
+
+    /// Re-attribute speakers on one chapter's script, then requeue exactly
+    /// what the edit reached.
+    ///
+    /// The digest's recurring misattribution, confirmed against chapter text:
+    /// third-person narration given to the character it describes ("Nàng lập
+    /// tức nhíu mày…" spoken by Lạc Lan Tuyết), and a quote with no dialogue
+    /// tag defaulted to Narrator instead of whoever the surrounding action
+    /// introduces. The prompt's rule 3 already forbids the first half word
+    /// for word — the small model disobeyed it — so re-digesting rolls the
+    /// same dice; the correction is surgical.
+    ///
+    /// Chapter-scoped busy guard rather than the cluster-global `ensure_idle`:
+    /// every file this touches belongs to the chapter (its script, its plan,
+    /// its segments, its mp3), so unrelated chapters rendering alongside are
+    /// unaffected. Refused while the chapter itself has work in flight or a
+    /// live beat on it.
+    ///
+    /// A new speaker must already hold a voice (`Narrator` always does), or
+    /// the chapter would requeue into a row no box can speak. The plan's diff
+    /// decides the blast radius for free: a re-voiced run has a new
+    /// content-addressed name, so its old file is superseded and its take is
+    /// work again, while untouched runs keep their audio.
+    pub fn op_recast(
+        &mut self,
+        chapter: u32,
+        fixes: &[bm_proto::SpeakerFix],
+        remove: &[usize],
+    ) -> anyhow::Result<String> {
+        for t in self.tasks.values() {
+            if t.chapter == chapter
+                && matches!(t.state, TaskState::Assigned | TaskState::Running)
+            {
+                anyhow::bail!(
+                    "ch{chapter} has {} in flight — wait for it to settle, then recast",
+                    t.id()
+                );
+            }
+        }
+        let now = now_secs();
+        for b in self.beats.values() {
+            if now.saturating_sub(b.ts) < 30 && b.chapter == Some(chapter) {
+                anyhow::bail!(
+                    "a worker is on ch{chapter} right now ({} at {}) — wait a beat, then recast",
+                    b.worker_id,
+                    b.activity,
+                );
+            }
+        }
+        if fixes.is_empty() && remove.is_empty() {
+            anyhow::bail!("nothing to fix — pass segment indexes with their speakers, or indexes to delete");
+        }
+        let engine = self.settings.engine.clone();
+        let cast = bm_core::cast::read_cast(&engine, &self.layout.cast(&engine));
+        let path = self.layout.script(chapter);
+        let mut data: serde_json::Value = bm_core::read_json(&path)
+            .map_err(|_| anyhow::anyhow!("ch{chapter} has no script yet — digest it first"))?;
+        let segments = data
+            .get_mut("segments")
+            .and_then(|s| s.as_array_mut())
+            .ok_or_else(|| anyhow::anyhow!("ch{chapter} script has no segments array"))?;
+        let mut done: Vec<String> = Vec::new();
+        let len = segments.len();
+        for f in fixes {
+            let item = match segments.get_mut(f.index) {
+                Some(item) => item,
+                None => anyhow::bail!("segment {} is out of range (0..{})", f.index, len),
+            };
+            let old = item
+                .get("speaker")
+                .and_then(|s| s.as_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "segment {} is a sound, not a line — nothing to re-attribute",
+                        f.index
+                    )
+                })?
+                .to_string();
+            let new = f.speaker.trim().to_string();
+            if new.is_empty() {
+                anyhow::bail!("segment {}: empty speaker", f.index);
+            }
+            if new != "Narrator" && cast.get(&new).is_none() {
+                anyhow::bail!(
+                    "{new:?} holds no voice — cast it first (:voices fills gaps), or the chapter requeues into a row no box can speak"
+                );
+            }
+            if old == new {
+                continue;
+            }
+            item["speaker"] = serde_json::Value::String(new.clone());
+            done.push(format!("#{} {old}→{new}", f.index));
+        }
+        // Deletions run after re-attribution and in descending index order,
+        // so earlier indexes stay valid while later items leave. Only lines
+        // go: sounds hold the mix together and are never the duplication.
+        let mut removed: Vec<usize> = Vec::new();
+        if !remove.is_empty() {
+            let mut order: Vec<usize> = remove.to_vec();
+            order.sort_unstable();
+            order.dedup();
+            for idx in order.iter().rev() {
+                let is_line = segments
+                    .get(*idx)
+                    .and_then(|s| s.get("speaker").and_then(|v| v.as_str()))
+                    .is_some();
+                if !is_line {
+                    anyhow::bail!(
+                        "segment {idx} is not a line — only duplicated lines are removed"
+                    );
+                }
+                segments.remove(*idx);
+                removed.push(*idx);
+            }
+            if segments.is_empty() {
+                anyhow::bail!("refusing to empty ch{chapter}: at least one segment must remain");
+            }
+        }
+        if done.is_empty() && removed.is_empty() {
+            return Ok(format!(
+                "recast ch{chapter}: every named speaker already matched — nothing changed"
+            ));
+        }
+        let _ = bm_core::atomic_write(
+            &path,
+            &serde_json::to_string_pretty(&data).unwrap_or_default(),
+        );
+        self.invalidate_render(chapter);
+        let mut parts = done;
+        if !removed.is_empty() {
+            parts.push(format!("removed {} duplicated segments", removed.len()));
+        }
+        Ok(format!("recast ch{chapter}: {}; re-render queued", parts.join(", ")))
     }
 }

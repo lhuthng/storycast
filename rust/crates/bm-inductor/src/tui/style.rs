@@ -256,6 +256,17 @@ pub(crate) fn worker_name(id: Option<&str>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
+/// A task's holders for the table: the primary, plus `+N racing` when digest
+/// racers are grinding the same row. One cell, so the column stays narrow.
+pub(crate) fn worker_racing(t: &bm_proto::Task) -> String {
+    let base = worker_name(t.assigned_to.as_deref());
+    if t.racers.is_empty() {
+        base
+    } else {
+        format!("{} +{} racing", base, t.racers.len())
+    }
+}
+
 /// `last_seen` is 0 for a machine that has never reported. Subtracting it from
 /// now produced a ~56-year uptime; say "never" instead.
 pub(crate) fn seen_label(m: &Machine) -> String {

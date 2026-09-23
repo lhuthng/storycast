@@ -110,7 +110,7 @@ impl Inner {
             if let Some(t) = self.tasks.get_mut(&id) {
                 t.state = TaskState::Pending;
                 t.attempts = 0;
-                t.assigned_to = None;
+                t.clear_holders();
                 t.lease_until = None;
                 t.detail = "requeued: sound design changed".into();
                 t.updated = now;

@@ -63,6 +63,15 @@ fn first_seen_of(c: &Value) -> String {
         .to_string()
 }
 
+/// Presence: how many chapters this entry has appeared in. The dominance
+/// measure for folds — pure over the bible, like everything here.
+fn chapters_seen_of(c: &Value) -> usize {
+    c.get("chapters_seen")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0)
+}
+
 /// Plan a bible reconciliation: deterministic folds first, LLM candidates
 /// second. Pure over the bible value — no I/O, so the inductor never holds
 /// its lock while the LLM thinks.
@@ -79,7 +88,10 @@ pub fn reconcile_plan(bible: &Value) -> ReconcilePlan {
 
     // Group by canonical key: "Sở Cuồng Sư"/"Sở Cuồng sư", titled and
     // parenthetical variants all land in one bucket. Canonical is the
-    // earliest-seen entry (the original, not the fork), ties go shortest.
+    // DOMINANT entry — most chapters seen — because that is the identity the
+    // story (and the audience) knows: folding a 40-chapter "Vân bá" into a
+    // 2-chapter "lão giả" just because the epithet debuted first would throw
+    // away the real voice for a walk-on. Ties go earliest-seen, then shortest.
     let mut groups: std::collections::BTreeMap<String, Vec<usize>> =
         std::collections::BTreeMap::new();
     for (i, n) in names.iter().enumerate() {
@@ -88,7 +100,13 @@ pub fn reconcile_plan(bible: &Value) -> ReconcilePlan {
     let mut folds: Vec<BibleMerge> = Vec::new();
     for idxs in groups.values().filter(|v| v.len() > 1) {
         let mut idxs = idxs.clone();
-        idxs.sort_by_key(|&i| (first_seen_of(&chars[i]), names[i].len()));
+        idxs.sort_by_key(|&i| {
+            (
+                std::cmp::Reverse(chapters_seen_of(&chars[i])),
+                first_seen_of(&chars[i]),
+                names[i].len(),
+            )
+        });
         let canonical = names[idxs[0]].clone();
         let absorb: Vec<String> = idxs[1..].iter().map(|&i| names[i].clone()).collect();
         folds.push((canonical, absorb));
@@ -164,21 +182,27 @@ pub fn reconcile_plan(bible: &Value) -> ReconcilePlan {
 
 /// Deterministic folds for cast keys that never made it into the bible:
 /// same canon-key as a bible entry (titles, parentheticals, casing).
-/// The bible name is canonical. Pure — the caller applies them through
-/// `apply_reconcile`, which records the alias and rewrites cast + scripts.
+/// The DOMINANT bible name is canonical (see `reconcile_plan`). Pure — the
+/// caller applies them through `apply_reconcile`, which records the alias
+/// and rewrites cast + scripts.
 pub fn cast_only_folds(bible: &Value, cast_keys: &[String]) -> Vec<BibleMerge> {
     let chars: &[Value] = bible
         .get("characters")
         .and_then(|c| c.as_array())
         .map(|v| v.as_slice())
         .unwrap_or(&[]);
-    let mut canon_of: std::collections::BTreeMap<String, String> =
+    let mut canon_of: std::collections::BTreeMap<String, (String, usize)> =
         std::collections::BTreeMap::new();
     for c in chars {
         if let Some(n) = c.get("name").and_then(|n| n.as_str()) {
-            canon_of
-                .entry(canon_key(n))
-                .or_insert_with(|| n.to_string());
+            let seen = chapters_seen_of(c);
+            match canon_of.get(&canon_key(n)) {
+                // Most chapters seen wins; ties keep the first listed.
+                Some((_, best)) if *best >= seen => {}
+                _ => {
+                    canon_of.insert(canon_key(n), (n.to_string(), seen));
+                }
+            }
         }
     }
     let in_bible = |n: &str| {
@@ -192,7 +216,7 @@ pub fn cast_only_folds(bible: &Value, cast_keys: &[String]) -> Vec<BibleMerge> {
         if k == "Narrator" || in_bible(k) {
             continue;
         }
-        if let Some(canonical) = canon_of.get(&canon_key(k)) {
+        if let Some((canonical, _)) = canon_of.get(&canon_key(k)) {
             out.entry(canonical.clone()).or_default().push(k.clone());
         }
     }
@@ -284,5 +308,51 @@ mod tests {
         assert!(!folds
             .iter()
             .any(|(_, a)| a.contains(&"Ngao Khánh".to_string())));
+    }
+
+    #[test]
+    fn the_dominant_entry_wins_the_fold_not_the_earliest() {
+        // The epithet debuts first and the person arrives later with forty
+        // chapters: folding the person into the epithet would throw away the
+        // real voice for a walk-on. Presence decides; debut only breaks ties.
+        let bible = json!({"characters": [
+            {"name": "Lão giả", "personality": "x", "voice_hint": "elderly male",
+             "proper_aliases": ["Lão giả"], "first_seen": "04", "chapters_seen": ["04", "05"]},
+            {"name": "Vân bá", "personality": "y", "voice_hint": "adult male",
+             "proper_aliases": ["Vân bá"], "first_seen": "37",
+             "chapters_seen": ["37", "38", "39", "40"]},
+            {"name": "Sở Cuồng Sư", "personality": "x", "voice_hint": "adult male",
+             "proper_aliases": ["Sở Cuồng Sư"], "first_seen": "02", "chapters_seen": []},
+            {"name": "Sở Cuồng sư", "personality": "y", "voice_hint": "",
+             "proper_aliases": ["Sở Cuồng sư"], "first_seen": "09", "chapters_seen": []}
+        ]});
+        // Different canon keys, so no blind fold — but case twins must still
+        // resolve through the dominant entry either way round.
+        let plan = reconcile_plan(&bible);
+        assert_eq!(plan.folds.len(), 1, "{:?}", plan.folds);
+        assert_eq!(plan.folds[0].0, "Sở Cuồng Sư", "tie: earliest still wins");
+        assert_eq!(plan.folds[0].1, vec!["Sở Cuồng sư".to_string()]);
+
+        // Same key, dominant second: presence beats debut.
+        let bible2 = json!({"characters": [
+            {"name": "Huyền Vũ lão tổ", "personality": "x", "voice_hint": "",
+             "proper_aliases": [], "first_seen": "10", "chapters_seen": ["10"]},
+            {"name": "Huyền Vũ", "personality": "cold", "voice_hint": "adult male",
+             "proper_aliases": [], "first_seen": "25",
+             "chapters_seen": ["25", "26", "27", "28", "29"]},
+        ]});
+        let plan2 = reconcile_plan(&bible2);
+        assert_eq!(plan2.folds.len(), 1, "{:?}", plan2.folds);
+        assert_eq!(
+            plan2.folds[0].0, "Huyền Vũ",
+            "five chapters beat an earlier debut: {:?}",
+            plan2.folds
+        );
+
+        // Cast-only folds answer through the dominant entry too.
+        let cast = ["Huyền Vũ tiền bối".to_string()];
+        let folds = cast_only_folds(&bible2, &cast);
+        assert_eq!(folds.len(), 1, "{folds:?}");
+        assert_eq!(folds[0].0, "Huyền Vũ");
     }
 }
