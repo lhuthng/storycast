@@ -7,7 +7,7 @@ use crate::tui::{
     screen::TasksView,
     style::{
         cell, centered_padded, empty_body, selection_bg, stage_color, state_color,
-        state_glyph_cell, style_bold_of, style_of, why_label, worker_name,
+        state_glyph_cell, style_bold_of, style_of, why_label, worker_racing,
     },
 };
 use bm_proto::TaskState;
@@ -250,7 +250,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
                     cell(t.stage.as_str().to_string()),
                     state_glyph_cell(colour, t.state.as_str()),
                     cell(t.attempts.to_string()),
-                    cell(worker_name(t.assigned_to.as_deref())),
+                    cell(worker_racing(t)),
                     cell(format!("{}s", age_secs(t.updated))),
                     cell(why_label(&t.detail)),
                 ];

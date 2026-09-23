@@ -264,6 +264,35 @@ pub fn validate_script(
         }
     }
 
+    // Every word of the chapter is spoken exactly once: adjacent segments
+    // carrying the same line mean the quote was emitted both as narration and
+    // as dialogue, and the mix would speak it twice in two voices. Non-adjacent
+    // repeats are left alone — a cry repeated pages apart is the chapter's
+    // business — but the same sentence twice in a row is never a decision,
+    // only a split the model failed to make.
+    let mut prev: Option<(usize, String)> = None;
+    for (i, s) in segments.iter().enumerate() {
+        if crate::util::is_sound_item(s) {
+            continue;
+        }
+        let text = s
+            .get("text")
+            .and_then(|t| t.as_str())
+            .map(crate::util::squeeze_ws)
+            .unwrap_or_default();
+        if text.is_empty() {
+            continue;
+        }
+        if let Some((j, ref last)) = prev {
+            if *last == text {
+                anyhow::bail!(
+                    "segments {j} and {i} speak the same line twice — a quoted line belongs ONLY to its speaker's segment, never also to a Narrator one"
+                );
+            }
+        }
+        prev = Some((i, text));
+    }
+
     Ok(())
 }
 
@@ -1361,5 +1390,60 @@ mod tests {
             !warns.iter().any(|w| w.contains("atmosphere")),
             "English atmosphere flagged: {warns:?}"
         );
+    }
+
+    #[test]
+    fn adjacent_duplicate_lines_are_refused_but_distant_repeats_pass() {
+        // ch112's shape: every quoted line emitted twice in a row, once as
+        // narration and once as dialogue, so the mix spoke it in two voices.
+        let doubled = json!({
+            "segments": [
+                {"speaker": "Narrator", "text": "A, đây có một cái đầm nước."},
+                {"speaker": "Dịch Phong", "text": "A, đây có một cái đầm nước."},
+            ],
+            "roster": ["Narrator", "Dịch Phong"]
+        });
+        let err = validate_script(
+            &doubled,
+            &json!({"characters": []}),
+            &ctx_of(&doubled),
+            &pal(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("twice"), "{err}");
+
+        // A sound item between the halves does not launder the duplication.
+        let with_sound = json!({
+            "segments": [
+                {"speaker": "Narrator", "text": "Đi thôi."},
+                {"sound": "coin"},
+                {"speaker": "Dịch Phong", "text": "Đi thôi."},
+            ],
+            "roster": ["Narrator", "Dịch Phong"]
+        });
+        validate_script(
+            &with_sound,
+            &json!({"characters": []}),
+            &ctx_of(&with_sound),
+            &pal(),
+        )
+        .unwrap_err();
+
+        // The same cry pages apart is the chapter's business, not a failed split.
+        let distant = json!({
+            "segments": [
+                {"speaker": "Dịch Phong", "text": "Lạc Ly!"},
+                {"speaker": "Narrator", "text": "Gió thổi qua mặt hồ."},
+                {"speaker": "Dịch Phong", "text": "Lạc Ly!"},
+            ],
+            "roster": ["Narrator", "Dịch Phong"]
+        });
+        validate_script(
+            &distant,
+            &json!({"characters": []}),
+            &ctx_of(&distant),
+            &pal(),
+        )
+        .unwrap();
     }
 }

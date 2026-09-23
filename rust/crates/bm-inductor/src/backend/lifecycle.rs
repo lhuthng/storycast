@@ -565,6 +565,7 @@ fn requeue_assigned_in_ledger(layout: &Layout) -> anyhow::Result<Vec<String>> {
                 if let Some(o) = t.as_object_mut() {
                     o.insert("state".into(), serde_json::Value::String("pending".into()));
                     o.insert("assigned_to".into(), serde_json::Value::Null);
+                    o.insert("racers".into(), serde_json::Value::Array(vec![]));
                     o.insert("lease_until".into(), serde_json::Value::Null);
                     o.insert(
                         "detail".into(),

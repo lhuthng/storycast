@@ -123,6 +123,14 @@ pub struct Task {
     pub state: TaskState,
     pub attempts: u32,
     pub assigned_to: Option<String>,
+    /// Digest racing: the extra workers grinding the same digest row besides
+    /// `assigned_to`. Only the digest stage ever fills this — every other
+    /// stage assigns a row to exactly one box. The first holder to report
+    /// `ok` wins; every later report finds a row it no longer owns and is
+    /// dropped as stale, strike-free. Empty on rows written before racing
+    /// existed (`#[serde(default)]`), and cleared wherever `assigned_to` is.
+    #[serde(default)]
+    pub racers: Vec<String>,
     /// Unix seconds. When the lease expires the task returns to the pool
     /// *without* a strike — silence is not failure.
     pub lease_until: Option<u64>,
@@ -240,6 +248,7 @@ impl Task {
             state: TaskState::Pending,
             attempts: 0,
             assigned_to: None,
+            racers: Vec::new(),
             lease_until: None,
             detail: String::new(),
             updated: now_secs(),
@@ -256,6 +265,45 @@ impl Task {
         let mut t = Task::new(chapter, Stage::Render);
         t.take = Some(pos);
         t
+    }
+
+    /// Every worker currently holding this row: the primary plus digest racers.
+    pub fn holders(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        if let Some(w) = self.assigned_to.as_deref() {
+            out.push(w);
+        }
+        out.extend(self.racers.iter().map(String::as_str));
+        out
+    }
+
+    /// Whether this worker holds the row, as primary or racer.
+    pub fn is_holder(&self, worker: &str) -> bool {
+        self.assigned_to.as_deref() == Some(worker) || self.racers.iter().any(|r| r == worker)
+    }
+
+    /// Drop one holder. Promotes the next racer when the primary leaves and
+    /// racers remain, so the row keeps an owner while any box is on it.
+    /// Returns `true` when holders remain.
+    pub fn remove_holder(&mut self, worker: &str) -> bool {
+        if self.assigned_to.as_deref() == Some(worker) {
+            self.assigned_to = None;
+        } else {
+            self.racers.retain(|r| r != worker);
+        }
+        if self.assigned_to.is_none() {
+            if let Some(next) = self.racers.first().cloned() {
+                self.racers.remove(0);
+                self.assigned_to = Some(next);
+            }
+        }
+        self.assigned_to.is_some()
+    }
+
+    /// Release every holder — what settling, requeueing or shelving does.
+    pub fn clear_holders(&mut self) {
+        self.assigned_to = None;
+        self.racers.clear();
     }
 }
 
@@ -562,6 +610,17 @@ pub struct Heartbeat {
     /// parse — the gate then treats it as "no render", which is the safe read.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Whether this worker keeps a TTS sidecar, as it currently believes.
+    /// `None` from an older agent — read as "keeps one", which is both the
+    /// default and the safe read (the old behaviour, never a stuck refusal).
+    ///
+    /// The dispatcher's sidecar-policy convergence reads this: it knows what
+    /// the box's policy says (render on/off) and what it last **told** the
+    /// worker, but neither survives the box rebooting back to its default —
+    /// only the worker's own answer does. A beat whose value disagrees with
+    /// the policy is re-converged; one that agrees costs nothing.
+    #[serde(default)]
+    pub sidecar_keep: Option<bool>,
 }
 
 /// The heartbeat's answer: the only inductor→worker command channel.
@@ -1074,6 +1133,13 @@ pub enum Op {
     /// Rewrite written-out non-verbal sounds into engine tags across every
     /// script (`Ha ha ha!` → `[cười]`), and requeue the chapters it touches.
     Retag,
+    /// Re-attribute speakers on one chapter's script (the digest routinely
+    /// gives third-person narration to the character it describes, and
+    /// quoted speech to the Narrator) and requeue exactly what the edit
+    /// reached: the plan's diff re-speaks the changed takes, the merge
+    /// re-mixes. A new speaker must already hold a voice, or the chapter
+    /// would requeue into an unplannable row.
+    Recast,
     /// Save a new mix (story speed + layer volumes) and requeue every merge:
     /// the finished mp3s were mixed with the old one. Render cache is kept —
     /// tempo and layers apply at merge time, so no segment needs re-speaking.
@@ -1120,6 +1186,7 @@ impl Op {
             Op::RetryTask => "retry-task",
             Op::Reconcile => "reconcile",
             Op::Retag => "retag",
+            Op::Recast => "recast",
             Op::Remix => "remix",
             Op::SoundChanged => "sound-changed",
             Op::Rerender => "rerender",
@@ -1143,6 +1210,7 @@ impl Op {
             Op::RetryTask,
             Op::Reconcile,
             Op::Retag,
+            Op::Recast,
             Op::Remix,
             Op::SoundChanged,
             Op::Rerender,
@@ -1155,9 +1223,26 @@ impl Op {
     }
 }
 
+/// One speaker reassignment inside a chapter's script: the segment at
+/// `index` (position in the script's `segments` array, sounds included)
+/// is re-attributed to `speaker`. Part of the `recast` op.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeakerFix {
+    pub index: usize,
+    pub speaker: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OpRequest {
     pub op: Op,
+    /// Speaker reassignments for `recast`, in any order.
+    #[serde(default)]
+    pub fixes: Vec<SpeakerFix>,
+    /// Segment indexes for `recast` to delete (duplicated lines the digest
+    /// emitted twice). Sorted internally; every index must name a line, and
+    /// at least one segment must remain.
+    #[serde(default)]
+    pub remove: Vec<usize>,
     #[serde(default)]
     pub start: Option<u32>,
     #[serde(default)]

@@ -64,7 +64,7 @@ impl Inner {
                     if matches!(t.state, TaskState::Assigned | TaskState::Running) {
                         if done_now {
                             t.state = TaskState::Done;
-                            t.assigned_to = None;
+                            t.clear_holders();
                             t.lease_until = None;
                         } else {
                             t.lease_until = Some(now_secs() + lease_for(stage));
@@ -190,7 +190,7 @@ impl Inner {
             Some(t) => {
                 t.state = TaskState::Pending;
                 t.attempts = 0;
-                t.assigned_to = None;
+                t.clear_holders();
                 t.lease_until = None;
                 t.detail = "requeued: script changed".into();
                 t.updated = now_secs();

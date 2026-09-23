@@ -2,8 +2,20 @@ use super::tags::normalise_tags;
 use crate::util::squeeze_ws;
 use serde_json::{json, Value};
 
-/// Surface forms that may NEVER join the bible: pronouns, generic nouns, verb phrases.
-const ALIAS_STOP: [&str; 18] = [
+/// Surface forms that may NEVER join the bible: pronouns, bare role nouns,
+/// titles, self-references and indefinite descriptions. Compared lowercased,
+/// so "Nữ tử" and "nữ tử" are the same trap.
+///
+/// The rule behind the list: an alias is only stored when it identifies its
+/// owner better than chance. A bare generic ("nữ tử", "công tử", "tiền bối",
+/// "sư phụ") matches half the cast, so storing it does not resolve future
+/// chapters — it hijacks them, routing every unnamed woman to whoever owns
+/// "nữ tử" (ch112 went to Lạc Lan Tuyết that way although the sword, the
+/// frost-face and the sect all said Bạch Phiêu Phiêu). Forms carrying a
+/// proper-name token ("Lý cô nương", "Dịch sư phụ", "lão Ngô", "nữ tử áo
+/// trắng") stay: the name does the identifying.
+/// Names themselves are never touched by this list — only `proper_aliases`.
+const ALIAS_STOP: [&str; 54] = [
     "hắn",
     "nàng",
     "ta",
@@ -22,6 +34,48 @@ const ALIAS_STOP: [&str; 18] = [
     "tiểu tử",
     "narrator",
     "người dẫn chuyện",
+    // Bare person nouns: any chapter's unnamed figure matches them.
+    "nữ tử",
+    "nam tử",
+    "cô gái",
+    "thiếu nữ",
+    "thiếu niên",
+    "nam hài",
+    "cháu gái",
+    "tiểu thư",
+    "công tử",
+    // Titles and offices: every sect has one, and offices change hands.
+    "tiền bối",
+    "sư phụ",
+    "sư thúc",
+    "sư tôn",
+    "tông chủ",
+    "hội trưởng",
+    "thánh nữ",
+    "phu nhân",
+    "lão gia",
+    // Roles and relations: generic by definition.
+    "thuộc hạ",
+    "quản gia",
+    "lão ca",
+    "lão già",
+    "lão giả",
+    "lão đầu",
+    // Self-references: first-person pronouns wearing a noun's clothes.
+    "bản tôn",
+    "bổn hoàng",
+    // Anaphora and indefinites: "that one", "a mortal".
+    "vị kia",
+    "ông ta",
+    "một thanh niên",
+    "một phàm nhân",
+    "phàm nhân này",
+    // Species nouns used as names: any second dog/crow/centipede hijacks them.
+    "chú chó",
+    "con chó",
+    "cẩu nhi",
+    "quạ đen",
+    "con rết",
 ];
 
 /// Vietnamese letters carrying a diacritic — the tell-tale of un-translated text.
@@ -253,6 +307,57 @@ fn attach_aliases(
             }
         }
     }
+}
+
+/// Drop ambiguous surface forms from every character's `proper_aliases`.
+///
+/// The legacy this cleans: `merge_bible` used to attach bare generics before
+/// `ALIAS_STOP` covered them, so entries like "nữ tử" sit on characters today
+/// and hijack every future chapter about an unnamed woman. The check is the
+/// same list `promotable` enforces for new aliases, so a scrubbed bible and a
+/// bible built from scratch agree.
+///
+/// Names are sacred: an entry equal to its own character's name stays even
+/// when the words are generic ("Quản gia" is somebody's name). Everything
+/// else on the list goes, and the log names each removal. Idempotent.
+pub fn scrub_ambiguous_aliases(bible: &mut Value) -> Vec<String> {
+    let mut log = Vec::new();
+    let Some(chars) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) else {
+        return log;
+    };
+    for c in chars.iter_mut() {
+        let name = c
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string();
+        let Some(aliases) = c.get_mut("proper_aliases").and_then(|a| a.as_array_mut()) else {
+            continue;
+        };
+        let before = aliases.len();
+        aliases.retain(|a| {
+            let Some(form) = a.as_str() else {
+                return true;
+            };
+            let low = form.trim().to_lowercase();
+            // Identity beats ambiguity: a character keeps its own name.
+            if low == name.trim().to_lowercase() {
+                return true;
+            }
+            !ALIAS_STOP.contains(&low.as_str())
+        });
+        if aliases.len() < before {
+            let kept: Vec<&str> = aliases
+                .iter()
+                .filter_map(|a| a.as_str())
+                .collect();
+            log.push(format!(
+                "   bible scrub {name:?}: dropped {} ambiguous alias(es), kept {kept:?}",
+                before - aliases.len()
+            ));
+        }
+    }
+    log
 }
 
 /// Fold a digest's new-character/alias findings into the shared bible.
@@ -779,5 +884,74 @@ mod tests {
         );
         assert!(applied.is_empty());
         assert_eq!(bible["characters"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_bible_refuses_bare_generics_as_new_aliases() {
+        // ch112's hijack, pinned at the gate: "nữ tử" must never attach to
+        // anyone again, while a name-bearing form still does.
+        let mut bible = bible_with("Lạc Lan Tuyết", &["Lạc Lan Tuyết"]);
+        let data = json!({
+            "new_characters": [],
+            "new_aliases": {"Lạc Lan Tuyết": ["nữ tử", "Nữ tử", "cô gái", "tiền bối", "vị kia", "Lý cô nương"]},
+            "roster": [],
+            "segments": []
+        });
+        merge_bible(&mut bible, &data, "200");
+        let aliases: Vec<&str> = bible["characters"][0]["proper_aliases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.as_str())
+            .collect();
+        assert!(
+            aliases.contains(&"Lý cô nương"),
+            "a name-bearing form still attaches: {aliases:?}"
+        );
+        for generic in ["nữ tử", "Nữ tử", "cô gái", "tiền bối", "vị kia"] {
+            assert!(
+                !aliases.iter().any(|a| a.to_lowercase() == generic),
+                "{generic:?} must be refused: {aliases:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scrub_drops_legacy_generics_but_keeps_names_and_specifics() {
+        let mut bible = json!({"characters": [
+            {"name": "Lạc Lan Tuyết", "proper_aliases":
+                ["Lạc Lan Tuyết", "Nữ tử", "nữ tử", "cô gái", "nữ tử áo trắng", "Lý cô nương"]},
+            {"name": "Dịch Phong", "proper_aliases":
+                ["Dịch Phong", "công tử", "tiền bối", "vị kia", "Dịch sư phụ"]},
+            {"name": "Quản gia", "proper_aliases": ["Quản gia"]},
+        ]});
+        let log = scrub_ambiguous_aliases(&mut bible);
+        assert_eq!(log.len(), 2, "{log:?}");
+        let aliases = |n: &str| -> Vec<String> {
+            bible["characters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == n)
+                .unwrap()["proper_aliases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|a| a.as_str().map(String::from))
+                .collect()
+        };
+        assert_eq!(
+            aliases("Lạc Lan Tuyết"),
+            vec!["Lạc Lan Tuyết", "nữ tử áo trắng", "Lý cô nương"],
+            "bare generics go, name-bearing forms stay"
+        );
+        assert_eq!(aliases("Dịch Phong"), vec!["Dịch Phong", "Dịch sư phụ"]);
+        assert_eq!(
+            aliases("Quản gia"),
+            vec!["Quản gia"],
+            "a character keeps its own name even when generic"
+        );
+        // Second run is a no-op: the scrub is idempotent.
+        assert!(scrub_ambiguous_aliases(&mut bible).is_empty());
     }
 }

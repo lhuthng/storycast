@@ -55,6 +55,8 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
         sidecars: None,
         sidecar_gb: None,
         capabilities: r.capabilities,
+        // A registration carries no sidecar belief; the next beat does.
+        sidecar_keep: None,
     };
     inner.observe(&beat);
     inner.save();
@@ -326,6 +328,15 @@ async fn set_machine_state(
 /// Replace one machine's work policy. Separate from `set_machine_state`
 /// because a policy edit is a scheduling decision, not a phase transition —
 /// it must not drag the machine's state or note along with it.
+///
+/// **The sidecar instruction is deliberately *not* sent from here.** A one-shot
+/// push misses every state that matters: the box down at edit time, the box
+/// that reboots later and comes back with the default, the inductor restarted
+/// since, the worker busy behind its 5 s timeout, the hand-edited
+/// `machines.json`. The dispatcher owns convergence instead — it polls every
+/// box every 2 s and re-tells a worker whenever what it last delivered differs
+/// from the box's policy (see `dispatch::drive`). One mechanism, reachable
+/// from every state, retried for free by the poll that already exists.
 #[derive(Deserialize)]
 struct TaskPolicyUpdate {
     addr: String,
@@ -514,6 +525,19 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                 Err(e) => Json(OpResult::fail(format!("retag failed: {e:#}"))),
             }
         }
+        bm_proto::Op::Recast => {
+            let (chapter, fixes, remove) = (req.chapter, req.fixes.clone(), req.remove.clone());
+            match chapter {
+                Some(chapter) => {
+                    let mut inner = st.lock().await;
+                    match inner.op_recast(chapter, &fixes, &remove) {
+                        Ok(msg) => Json(OpResult::ok(msg)),
+                        Err(e) => Json(OpResult::fail(format!("recast failed: {e:#}"))),
+                    }
+                }
+                _ => Json(OpResult::fail("recast requires a chapter")),
+            }
+        }
         bm_proto::Op::Remix => {
             let mut inner = st.lock().await;
             match inner.op_remix(
@@ -570,6 +594,28 @@ async fn op_reconcile(
 ) -> OpResult {
     let bible: serde_json::Value =
         bm_core::read_json(&layout.bible()).unwrap_or(serde_json::json!({"characters": []}));
+    // Ambiguous aliases first: bare generics ("nữ tử", "tiền bối", "vị kia")
+    // sitting in `proper_aliases` hijack every future chapter about an
+    // unnamed figure (ch112 went to Lạc Lan Tuyết that way). Alias-only
+    // change, serialized under the ledger lock like completions, so it races
+    // nothing; idempotent, so a second press is a no-op.
+    let scrubbed: Vec<String> = {
+        let mut inner = st.lock().await;
+        let path = inner.layout.bible();
+        let mut current: serde_json::Value =
+            bm_core::read_json(&path).unwrap_or(serde_json::json!({"characters": []}));
+        let log = bm_core::digest::scrub_ambiguous_aliases(&mut current);
+        if !log.is_empty() && bm_core::digest::save_bible(&current, &path).is_ok() {
+            inner.push_event("ok", format!("reconcile scrub: {}", log.join("; ")));
+            inner.save();
+        }
+        log
+    };
+    let scrub_note = if scrubbed.is_empty() {
+        String::new()
+    } else {
+        format!("scrubbed {} ambiguous aliases; ", scrubbed.len())
+    };
     let plan = bm_core::digest::reconcile_plan(&bible);
     let mut merges = plan.folds;
     {
@@ -598,13 +644,15 @@ async fn op_reconcile(
             .and_then(|c| c.as_array())
             .map(|a| a.len())
             .unwrap_or(0);
-        return OpResult::ok(format!("reconcile: bible already clean ({n} characters)"));
+        return OpResult::ok(format!(
+            "{scrub_note}reconcile: bible already clean ({n} characters)"
+        ));
     }
     if !merges.is_empty() {
         let mut inner = st.lock().await;
         return match inner.apply_reconcile(&merges) {
             Ok(msg) => OpResult::ok(format!(
-                "{msg}{}",
+                "{scrub_note}{msg}{}",
                 if plan.candidates.is_empty() {
                     String::new()
                 } else {
@@ -1407,6 +1455,60 @@ mod tests {
         assert!(!sidecar_serving("http://127.0.0.1:9").await);
     }
 
+    /// A full policy list, as the policy panel sends it: every stage, with
+    /// render set to `enabled` and the rest untouched. Used by the
+    /// dispatcher's convergence test in `dispatch.rs`.
+    #[allow(dead_code)]
+    fn render_policy(enabled: bool) -> Vec<bm_proto::TaskPref> {
+        bm_proto::Stage::DEFAULT_PRIORITY
+            .iter()
+            .map(|s| bm_proto::TaskPref {
+                stage: *s,
+                enabled: enabled || *s != bm_proto::Stage::Render,
+            })
+            .collect()
+    }
+
+    /// The policy edit persists — config, not runtime — and sends nothing
+    /// itself: delivery is the dispatcher's convergence job, which a one-shot
+    /// push misses in every state that matters (box down at edit time, box
+    /// rebooting into its default, inductor restarted, worker busy behind the
+    /// timeout, hand-edited machines.json).
+    #[tokio::test]
+    async fn a_policy_edit_persists_and_leaves_delivery_to_the_dispatcher() {
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+            layout,
+            bm_core::config::Settings::default(),
+        )));
+        {
+            let mut inner = st.lock().await;
+            let m = Machine::new("192.168.2.2", "thang", 22, None, "worker");
+            inner.machines.insert("192.168.2.2".into(), m);
+        }
+        let resp = set_task_policy(
+            State(st.clone()),
+            Json(TaskPolicyUpdate {
+                addr: "192.168.2.2".into(),
+                task_policy: render_policy(false),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let inner = st.lock().await;
+        let policy = inner.machines["192.168.2.2"].task_policy.clone().unwrap();
+        assert_eq!(
+            policy
+                .iter()
+                .find(|p| p.stage == bm_proto::Stage::Render)
+                .unwrap()
+                .enabled,
+            false
+        );
+    }
+
     /// A plannable chapter: one run by A, so `0000_Adam.wav` is the whole
     /// expected set.
     fn one_run_layout() -> (tempfile::TempDir, bm_core::Layout) {
@@ -1544,6 +1646,7 @@ mod tests {
                 sidecars: None,
                 sidecar_gb: None,
                 capabilities: vec![],
+                sidecar_keep: None,
             }),
         )
         .await;
@@ -1639,6 +1742,7 @@ mod tests {
             sidecars: None,
             sidecar_gb: None,
             capabilities: vec![],
+            sidecar_keep: None,
         };
         heartbeat(State(st.clone()), Json(beat())).await;
         {
