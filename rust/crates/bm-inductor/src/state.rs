@@ -2259,6 +2259,44 @@ mod tests {
         assert!(err.contains("neither a preset nor an enrolled clone"), "{err}");
     }
 
+    #[test]
+    fn swap_refuses_a_clone_no_bake_holds() {
+        // A swap queues renders on every worker: a clone the bake lacks 500s
+        // everywhere instead. Refuse it here, naming the fix — unless there
+        // is no bake to check against (fixtures, fresh checkouts).
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::create_dir_all(layout.bm_state()).unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+        std::fs::write(
+            layout.root.join("voice-pool.json"),
+            r#"{"young-female-1": {"file": "refs/young-female-1.mp3", "tags": ["young", "female"]}}"#,
+        )
+        .unwrap();
+        // No bake here: nothing to check against, swap proceeds.
+        assert!(inner.op_swap_voice("A", "young-female-1").is_ok());
+        // A bake that lacks the clone: refused loudly, before any render.
+        std::fs::create_dir_all(layout.root.join("models")).unwrap();
+        std::fs::write(
+            layout.root.join("models/voices.json"),
+            r#"{"presets":{"Đức Trí":{"speaker_emb":[1.0],"codes":[]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+        let err = inner
+            .op_swap_voice("A", "young-female-1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not enrolled"), "{err}");
+        // Enrolled in the bake: admitted again.
+        std::fs::write(
+            layout.root.join("models/voices.json"),
+            r#"{"presets":{"Đức Trí":{"speaker_emb":[1.0],"codes":[]},"young-female-1":{"speaker_emb":[2.0],"codes":[]}}}"#,
+        )
+        .unwrap();
+        assert!(inner.op_swap_voice("A", "young-female-1").is_ok());
+    }
+
     fn busy_inner() -> (tempfile::TempDir, Inner) {
         // One chapter mid-render on w1: assigned task + fresh beat with task.
         let (d, mut inner) = fixture();

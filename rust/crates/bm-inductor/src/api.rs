@@ -779,20 +779,6 @@ async fn roster(State(st): State<Shared>) -> Json<Roster> {
     Json(build_roster(&layout, &engine, characters, cast).await)
 }
 
-/// Roster with no scheduler: a throwaway Inner over the files on disk. The
-/// TUI uses this when the inductor is down (X stops it) so picking voices
-/// never needs the control plane. Sidecar-dependent parts degrade exactly as
-/// they do for a live inductor with a dead sidecar.
-pub(crate) async fn offline_roster(layout: &bm_core::Layout) -> Roster {
-    let settings = bm_core::config::Settings::load(&layout.settings());
-    let engine = settings.engine.clone();
-    let mut inner = Inner::new(layout.clone(), settings);
-    inner.load_ledger();
-    let characters = inner.known_characters();
-    let cast = inner.cast_snapshot();
-    build_roster(layout, &engine, characters, cast).await
-}
-
 /// Swap with no scheduler: the same `op_swap_voice` against a throwaway
 /// Inner, which persists cast + ledger itself. Two locks before touching
 /// anything: the inductor API must be down (its scheduler owns these files
@@ -921,6 +907,72 @@ fn sidecar_client(timeout: Duration) -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
+/// Everything about voices that disk alone knows: shipped catalogue, enrolled
+/// clones, pool samples. No sidecar, no inductor — milliseconds, never hangs.
+fn disk_voices(
+    layout: &bm_core::Layout,
+    engine: &str,
+    effective: &bm_core::voices::EngineRoster,
+) -> Vec<VoiceInfo> {
+    let mut voices = effective.to_offline_voices(engine);
+    for clone in bm_core::voices::enrolled_voices(&layout.root.join("voices.json")) {
+        if !voices.iter().any(|v| v.name == clone.name) {
+            voices.push(clone);
+        }
+    }
+    // The sample pool rides the same list: a pooled sample shows its tags where
+    // the style was, so the picker filter (`young`) finds it — and a sample the
+    // registry names but nothing enrolled yet still shows, as vetted-at-adding
+    // like any clone (the render fails loudly if it never gets enrolled).
+    for (name, entry) in bm_core::pool::load_pool(&layout.root.join("voice-pool.json")) {
+        let style = if entry.tags.is_empty() {
+            "named voice".to_string()
+        } else {
+            format!("pool: {}", entry.tags.join(", "))
+        };
+        match voices.iter_mut().find(|v| v.name == name) {
+            Some(v) => v.style = style,
+            None => voices.push(VoiceInfo {
+                key: String::new(),
+                name,
+                gender: "unknown".into(),
+                accent: "unknown".into(),
+                language: "vi-VN".into(),
+                style,
+                enrolled: true,
+                allowed: true,
+            }),
+        }
+    }
+    // Assignable voices first, then by gender then name: a stable order means
+    // the picker's cursor does not jump between refreshes.
+    voices.sort_by(|a, b| (!a.allowed, &a.gender, &a.name).cmp(&(!b.allowed, &b.gender, &b.name)));
+    voices
+}
+
+/// Roster with no scheduler and no sidecar: what the picker shows instantly.
+/// A live upgrade may follow, but picking never waits for it.
+pub(crate) fn local_roster(layout: &bm_core::Layout) -> Roster {
+    let settings = bm_core::config::Settings::load(&layout.settings());
+    let engine = settings.engine.clone();
+    let mut inner = Inner::new(layout.clone(), settings);
+    inner.load_ledger();
+    let characters = inner.known_characters();
+    let cast = inner.cast_snapshot();
+    let (effective, roster_error) = bm_core::voices::effective_engine_lenient(&engine);
+    Roster {
+        engine: engine.clone(),
+        source: "offline".into(),
+        voices: disk_voices(layout, &engine, &effective),
+        cast,
+        characters,
+        policy_note: match roster_error {
+            Some(e) => format!("roster error — {e}"),
+            None => bm_core::voices::policy_note(&effective),
+        },
+    }
+}
+
 /// Assemble the roster the picker renders: the sidecar's structured roster when
 /// it answers, then its label form, then the bundled table.
 ///
@@ -932,7 +984,10 @@ async fn build_roster(
     characters: Vec<String>,
     cast: BTreeMap<String, String>,
 ) -> Roster {
-    let http = sidecar_client(Duration::from_secs(10));
+    // Loopback: a serving sidecar answers in ms, a loading one 503s, a dead
+    // one refuses — none of which is worth more than 2s of picker. (Was 10s
+    // × 2: every :s press stared at "loading roster" for 20s+ while booting.)
+    let http = sidecar_client(Duration::from_secs(2));
     let mut source = "offline".to_string();
     let mut voices: Vec<VoiceInfo> = Vec::new();
 
@@ -969,8 +1024,10 @@ async fn build_roster(
         }
     }
     if voices.is_empty() {
-        voices = effective.to_offline_voices(engine);
+        voices = disk_voices(layout, engine, &effective);
     }
+    // The merges below are no-ops on the disk path (same names, same styles)
+    // and complete a live answer with the local truth.
     for clone in bm_core::voices::enrolled_voices(&layout.root.join("voices.json")) {
         if !voices.iter().any(|v| v.name == clone.name) {
             voices.push(clone);
@@ -1655,8 +1712,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn offline_roster_reads_cast_and_speakers_from_disk() {
+    #[test]
+    fn local_roster_reads_cast_and_speakers_from_disk() {
         let d = scratch();
         let layout = bm_core::Layout::new(d.path());
         std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
@@ -1665,7 +1722,8 @@ mod tests {
             r#"{"roster":["A"],"segments":[{"speaker":"A","text":"x"}]}"#,
         )
         .unwrap();
-        let r = offline_roster(&layout).await;
+        let r = local_roster(&layout);
+        assert_eq!(r.source, "offline");
         assert_eq!(r.cast.get("A").map(|s| s.as_str()), Some("Đức Trí"));
         assert!(
             r.characters.contains(&"A".to_string()),

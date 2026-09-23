@@ -4070,6 +4070,42 @@ async fn cast_opens_only_from_the_command_line() {
 }
 
 #[tokio::test]
+async fn roster_job_shows_disk_first_without_contacting_anyone() {
+    use std::time::Duration;
+    let d = tempfile::tempdir().unwrap();
+    let layout = bm_core::Layout::new(d.path());
+    std::fs::create_dir_all(layout.data()).unwrap();
+    std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
+    // Nothing listens on :9 — the inductor hop fails fast. The local roster
+    // must already be on the channel: picking never waits for the network.
+    super::jobs::job_load_roster(tx, "http://127.0.0.1:9".into(), http, layout).await;
+    let first = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("the local roster arrives fast")
+        .expect("channel open");
+    match first {
+        Ev::Roster(Ok(r)) => {
+            assert_eq!(r.source, "offline");
+            assert_eq!(r.cast.get("A").map(String::as_str), Some("Đức Trí"));
+            assert!(!r.voices.is_empty(), "catalogue lists voices with no sidecar");
+        }
+        Ev::Roster(Err(e)) => panic!("local roster failed: {e}"),
+        _ => panic!("the first event must be the local roster"),
+    }
+    // ...then the job's Done (the dead inductor contributes no upgrade).
+    let second = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("Done follows")
+        .expect("channel open");
+    assert!(matches!(second, Ev::Done(DoneKind::Other)));
+}
+
+#[tokio::test]
 async fn quit_word_quits_from_the_picker_command_line() {
     // The filter owns every letter on picker/cast, so a bare `q` types —
     // but `:quit` must still quit from there, not type another letter.

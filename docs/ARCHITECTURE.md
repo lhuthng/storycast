@@ -38,7 +38,7 @@ the ledger" below) — with one of six states:
 
 ```mermaid
 stateDiagram-v2
-    direction LR
+    direction TB
     state "Pending" as P
     state "Assigned" as A
     state "Running" as R
@@ -808,7 +808,7 @@ linked, provisioned and driven by the same code as a LAN box; the AWS half only
 creates it and gives it an address.
 
 ```mermaid
-flowchart LR
+flowchart TB
     LOGIN[":login<br/>the IAM user's key"] --> DISC[":discover<br/>read the account into .bm/aws.json"]
     DISC --> PROF[":profile load<br/>REQUIRED — the tag records this hash"]
     PROF --> UP[":up 3<br/>launch + link, the one command that spends money"]
