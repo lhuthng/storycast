@@ -12,7 +12,7 @@ use super::input::submit::submit_text;
 use super::input::{handle_key, op_key, urlencode};
 use super::jobs::{
     job_segment, run_job, set_machine_state, unreachable_verdict, verdict_after_failed_provision,
-    DoneKind, Ev, Job, ProfileReq, Res, WorkspaceReq,
+    BackgroundJob, DoneKind, Ev, Job, ProfileReq, Res, WorkspaceReq,
 };
 use super::layout::{
     cols, size_class, width_of, Size, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H, COMPACT_MACHINES_H,
@@ -1723,6 +1723,42 @@ fn key_hints_fit_their_tier_without_clipping() {
 }
 
 #[test]
+fn the_footer_advertises_jobs_on_tab_in_both_tiers() {
+    // The footer is the only map of the dashboard; the key it names must be
+    // the key that works, in both tiers, or the overlay is undiscoverable.
+    assert!(KEYS_FULL.iter().any(|k| k.contains("Tab jobs")));
+    assert!(KEYS_COMPACT.iter().any(|k| k.contains("Tab jobs")));
+}
+
+#[test]
+fn every_dashboard_header_reads_in_full_at_the_100_column_floor() {
+    // Regression guard for the two header crops an operator actually read:
+    // the full-tier Workers pane drew `box cp` (7 glyphs in a 6-wide column)
+    // and the Machines table overflowed its 98 interior columns, pushing
+    // `seen` and half of `state` off the pane. Both are rendered here at the
+    // exact terminal where they broke.
+    let mut app = stats_app();
+    let text = render_text(&mut app, 100, 32);
+    for header in ["box cpu", "box ram", "workers", "activity", "seen"] {
+        assert!(text.contains(header), "{header} clipped:\n{text}");
+    }
+}
+
+#[test]
+fn the_workers_headers_fit_their_columns() {
+    // Regression guard for the `box cp` crop: the full-tier load columns
+    // must be at least as wide as their headers (the `box cpu` cell carries
+    // a trailing space against the edge, so its column needs 8).
+    for (header, w) in [("box cpu ", 8usize), ("box ram", 10), ("progress", 19)] {
+        assert!(
+            width_of(header) <= w,
+            "{header:?} is {} columns in a {w}-wide one",
+            width_of(header)
+        );
+    }
+}
+
+#[test]
 fn the_footer_advertises_the_cast_key_in_both_tiers() {
     // Regression guard: at 80 columns `S cast` fell off the clipped tail of
     // the old one-line hint, so the feature was undiscoverable exactly
@@ -2388,7 +2424,7 @@ fn the_cast_overview_renders_every_speaker_and_flags_shared_voices() {
         "Hà is flagged:\n{text}"
     );
     assert!(
-        text.contains("unassigned — v fills gaps"),
+        text.contains("unassigned — :v fills gaps"),
         "Mới is flagged:\n{text}"
     );
 }
@@ -2490,7 +2526,10 @@ fn an_empty_ledger_says_what_to_do_instead_of_drawing_nothing() {
     app.screen = Screen::Tasks(TasksView::new());
     let text = render_text(&mut app, 140, 44);
     assert!(text.contains("no tasks in the ledger yet"), "{text}");
-    assert!(text.contains("press t to enqueue"), "{text}");
+    assert!(
+        text.contains(":t (translate) to enqueue"),
+        "the empty state names the gated command:\n{text}"
+    );
 }
 
 #[tokio::test]
@@ -2505,6 +2544,81 @@ async fn k_opens_the_ledger_and_esc_closes_it() {
 
     handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
     assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+}
+
+#[tokio::test]
+async fn tab_opens_jobs_and_tab_closes_it_again() {
+    // Regression guard for the key move: Jobs used to live only on `J`, and
+    // the footer advertised a key nobody associated with "the other side of
+    // the dashboard". Tab opens; Tab closes — the same toggle shape the
+    // sound editor's layer tabs already use.
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    handle_key(&mut app, key(KeyCode::Tab), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Jobs { .. }),
+        "{:?}",
+        app.screen
+    );
+    let text = render_text(&mut app, 100, 30);
+    assert!(
+        text.contains("jobs — all clear"),
+        "the overlay draws its empty state:\n{text}"
+    );
+    assert!(
+        text.contains("B starts the backend"),
+        "the empty state names the real command, not a dead key:\n{text}"
+    );
+    // Tab closes what Tab opened, returning to wherever it came from.
+    handle_key(&mut app, key(KeyCode::Tab), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+    // The mnemonic alias survives, and it too toggles.
+    handle_key(&mut app, key(KeyCode::Char('J')), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Jobs { .. }),
+        "{:?}",
+        app.screen
+    );
+    handle_key(&mut app, key(KeyCode::Char('J')), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+}
+
+#[test]
+fn the_jobs_overlay_sorts_running_first_and_spins_only_running_rows() {
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.background_jobs = vec![
+        BackgroundJob {
+            id: 1,
+            name: "queued one".into(),
+            queued: std::time::Instant::now(),
+            started: None,
+            activity: "waiting".into(),
+        },
+        BackgroundJob {
+            id: 2,
+            name: "running one".into(),
+            queued: std::time::Instant::now(),
+            started: Some(std::time::Instant::now()),
+            activity: "provisioning box-2".into(),
+        },
+    ];
+    app.screen = Screen::Jobs {
+        scroll: 0,
+        previous: Box::new(Screen::Normal),
+    };
+    let text = render_text(&mut app, 100, 30);
+    let run_at = text.find("running one").expect("running row draws");
+    let queued_at = text.find("queued one").expect("queued row draws");
+    assert!(run_at < queued_at, "running sorts above queued:\n{text}");
+    assert!(
+        text.contains("1 running · 1 queued"),
+        "the title splits the footer's total:\n{text}"
+    );
+    assert!(
+        text.contains("#1") && text.contains("#2"),
+        "each row carries its id:\n{text}"
+    );
 }
 
 #[test]
@@ -5839,4 +5953,142 @@ fn the_bar_uses_partial_blocks_and_stays_exact_at_the_ends() {
             assert_eq!(bar(frac, w).chars().count(), w, "bar({frac}, {w})");
         }
     }
+}
+
+// --- the hint audit: every hint a screen draws is a promise about its keys
+
+#[test]
+fn the_cast_overview_hints_name_only_keys_the_screen_handles() {
+    // The cast rows used to advertise a bare `v` (a gated `:` command) and a
+    // "Backspace clears it" that only popped one character. The hint must
+    // name what the screen really binds: `:v`, and Backspace-widens/Ctrl-U-
+    // clears, exactly like the task ledger spells it.
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.roster = Some(roster_fixture());
+    app.screen = Screen::Cast(CastView {
+        filter: "zzz".into(),
+        ..CastView::new()
+    });
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains("Backspace widens it, Ctrl-U clears"),
+        "the empty state names the real editing keys:\n{text}"
+    );
+    assert!(
+        !text.contains("Backspace clears it"),
+        "the dead advice is gone:\n{text}"
+    );
+    app.screen = Screen::Cast(CastView::new());
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains("— :v fills gaps"),
+        "the gated command, with its colon:\n{text}"
+    );
+    assert!(
+        !text.contains("— v fills gaps"),
+        "no bare `v`, which types into the filter:\n{text}"
+    );
+}
+
+#[test]
+fn the_cast_and_picker_empty_states_point_at_the_gated_commands() {
+    // `t` and `v` were removed from Normal mode; an empty speaker list that
+    // said "run t or v first" sent the operator to a warning status.
+    let mut app = App::new("http://127.0.0.1:8901");
+    // A roster that loaded but knows no speakers: the state the empty-body
+    // line is written for (a *missing* roster has its own line).
+    let mut roster = roster_fixture();
+    roster.characters.clear();
+    roster.cast.clear();
+    app.roster = Some(roster);
+    app.screen = Screen::Cast(CastView::new());
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains(":t (translate) or :v (voices) first"),
+        "\n{text}"
+    );
+    app.screen = Screen::Pick(Picker::new());
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains(":t (translate) or :v (voices) first"),
+        "the picker says the same thing the same way:\n{text}"
+    );
+}
+
+#[test]
+fn the_cloud_error_names_the_real_command_words() {
+    // There are no `aws login` / `aws discover` words — the setup commands
+    // are `:login` and `:discover`, and the hint must send the operator to
+    // the command line that actually has them.
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.cloud_error = Some("no credentials".into());
+    app.screen = Screen::Cloud(CloudView::new());
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains("check :login / :discover, then r to retry"),
+        "\n{text}"
+    );
+    assert!(!text.contains("aws login"), "{text}");
+}
+
+#[test]
+fn screens_without_a_reload_key_do_not_advertise_one() {
+    // Two overlays told the operator to press a key they do not handle:
+    // the Run screen said "press R to retry" (only Enter/e/Esc are live
+    // there) and the Machine screen said "P to configure" (only Esc/Enter/
+    // q/i). Both now name the way back to a screen that has the key.
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.conn = Conn::Down("boom".to_string());
+    app.screen = Screen::Run;
+    let text = render_text(&mut app, 100, 34);
+    assert!(
+        text.contains("Esc, then R on the dashboard"),
+        "the run screen names its own way out:\n{text}"
+    );
+
+    let mut app = App::new("http://127.0.0.1:8901");
+    let mut m = named_machine("192.168.2.2", "hawk");
+    // Every stage off: the one state in which the "none enabled" line draws.
+    m.task_policy = Some(vec![
+        TaskPref {
+            stage: Stage::Merge,
+            enabled: false,
+        },
+        TaskPref {
+            stage: Stage::Render,
+            enabled: false,
+        },
+        TaskPref {
+            stage: Stage::Digest,
+            enabled: false,
+        },
+        TaskPref {
+            stage: Stage::Crawl,
+            enabled: false,
+        },
+    ]);
+    app.machines = vec![m];
+    app.screen = Screen::Machine("192.168.2.2".to_string());
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains("Esc, then P on the dashboard"),
+        "the machine screen says where P actually lives:\n{text}"
+    );
+}
+
+#[test]
+fn the_task_ledger_hints_the_movement_it_actually_binds() {
+    // Letters type into the filter here, so `j`/`k` never moved anything —
+    // and the hint said they did.
+    let mut app = tasks_app();
+    app.screen = Screen::Tasks(TasksView::new());
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains("↑/↓ move"),
+        "the movement the ledger really has:\n{text}"
+    );
+    assert!(
+        !text.contains("j/k"),
+        "the keys that type into the filter are not advertised:\n{text}"
+    );
 }

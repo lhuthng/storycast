@@ -46,7 +46,7 @@ pub(crate) fn draw_machine_info(f: &mut ratatui::Frame, app: &App, addr: &str) {
                 .map(|p| p.stage.as_str())
                 .collect();
             if enabled.is_empty() {
-                "none enabled — P to configure".into()
+                "none enabled — Esc, then P on the dashboard".into()
             } else {
                 format!("{}   ({})", enabled.join(" > "), policy_summary(m))
             }

@@ -85,7 +85,7 @@ pub(crate) fn draw_cloud(f: &mut ratatui::Frame, app: &App, view: &CloudView) {
         f.render_widget(
             empty_body(vec![
                 format!("could not read the account: {e}"),
-                "check `aws login` / `aws discover`, then r to retry".into(),
+                "check :login / :discover, then r to retry".into(),
             ])
             .wrap(Wrap { trim: true }),
             rows_area[1],

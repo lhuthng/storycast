@@ -137,7 +137,7 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
                 "roster not loaded — press R".to_string()
             }
         } else {
-            "no speakers known yet — run t (translate) or v (voices) first".to_string()
+            "no speakers known yet — :t (translate) or :v (voices) first".to_string()
         };
         f.render_widget(
             empty_body(vec![msg]).wrap(Wrap { trim: true }),
@@ -146,7 +146,7 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
     } else if list.is_empty() {
         f.render_widget(
             empty_body(vec![format!(
-                "no speaker or voice matches “{}” — Backspace clears it",
+                "no speaker or voice matches “{}” — Backspace widens it, Ctrl-U clears",
                 view.filter.trim()
             )])
             .wrap(Wrap { trim: true }),
@@ -201,7 +201,7 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
                 }
                 let (status, status_colour) = match r.verdict() {
                     Verdict::Unassigned => {
-                        ("unassigned — v fills gaps".to_string(), Color::DarkGray)
+                        ("unassigned — :v fills gaps".to_string(), Color::DarkGray)
                     }
                     Verdict::Blocked => ("accent policy concern".to_string(), Color::Yellow),
                     Verdict::Unknown => ("unknown voice — stale cast?".to_string(), Color::Red),

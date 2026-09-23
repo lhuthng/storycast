@@ -100,7 +100,7 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compac
             cells.extend([
                 stage_line,
                 cell(ch),
-                cell(format!("{} {:>3}%", bar(b.progress, 10), pct)),
+                cell(format!("{} {:>3}%", bar(b.progress, 12), pct)),
             ]);
             // Box load from the heartbeat (`5.2%`, `38% 6.1G`) — a dash
             // while the agent never measured (older agents, first beat).
@@ -147,7 +147,11 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compac
         // Qualified: these are whole-box load (the agent reports
         // `global_cpu_usage` / used memory), not the task's share — bare
         // `cpu`/`ram` next to per-task progress read as the render's cost.
-        header.extend(["box cpu", "box ram", "tts"]);
+        // A trailing space on `box cpu`: ratatui places each header cell in a
+        // Length column and truncates at its edge with no pad, so the 7-glyph
+        // word in a 7-wide column drew as `box cp`. The column is 8, and the
+        // space keeps the word clear of the edge even where the two abut.
+        header.extend(["box cpu ", "box ram", "tts"]);
     }
     header.push("activity");
     if compact {
@@ -164,8 +168,8 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &App, area: Rect, compac
         widths.extend([
             Constraint::Length(8),
             Constraint::Length(5),
-            Constraint::Length(17),
-            Constraint::Length(6),
+            Constraint::Length(19),
+            Constraint::Length(8),
             Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Min(20),

@@ -522,7 +522,7 @@ pub(crate) fn task_rollup(counts: &serde_json::Value, colour: bool) -> Line<'sta
     };
     if obj.is_empty() {
         return Line::from(Span::styled(
-            "tasks: none queued — press t to enqueue a range",
+            "tasks: none queued — :t enqueues a chapter range",
             dim,
         ));
     }

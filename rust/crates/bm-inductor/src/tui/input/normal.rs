@@ -114,12 +114,18 @@ pub(crate) async fn normal_key(
         // two-round digest for one of them.
         //
         // The chapter list comes from the ledger the panes already hold rather
-        // than a scan: a chapter the ledger has never heard of has no digest task
-        // to report against, so listing it would offer work that cannot land.
+        // than a scan — plus the one next chapter past it, when its text is on
+        // disk. A manual report creates its own digest row (see `complete`),
+        // so that next chapter can land; anything further ahead cannot, and is
+        // refused at open time to keep bible deltas landing in order.
         KeyCode::Char('D') => {
             let mut chapters: Vec<u32> = app.tasks.iter().map(|t| t.chapter).collect();
             chapters.sort_unstable();
             chapters.dedup();
+            let next = chapters.last().copied().unwrap_or(0) + 1;
+            if !chapters.contains(&next) && app.layout.chapter_txt(next).is_file() {
+                chapters.push(next);
+            }
             let total = chapters.len();
             app.screen = Screen::Digest(crate::tui::screen::DigestView::new(chapters));
             app.set_status(
@@ -173,8 +179,12 @@ pub(crate) async fn normal_key(
             app.screen = Screen::Tasks(TasksView::new());
         }
         // The background jobs (what the footer's "N job(s) running" actually
-        // is). Sibling of `K`: capital so lowercase `j` stays "move down".
-        KeyCode::Char('J') => {
+        // is). Tab is the spelling the footer advertises — it is the one
+        // free top-row key and "flip to the other side of the dashboard" is
+        // what Tab already means in the sound editor — with `J` kept as the
+        // mnemonic alias (sibling of `K`, capital so lowercase `j` stays
+        // "move down").
+        KeyCode::Tab | KeyCode::Char('J') => {
             let previous = Box::new(app.screen.clone());
             app.screen = Screen::Jobs {
                 scroll: 0,

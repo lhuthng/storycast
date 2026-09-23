@@ -33,9 +33,15 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
     ];
     if app.pending > 0 {
         // The spinner steps at the poll cadence, so "jobs are running" is
-        // visible from across the room even when the job is quiet.
+        // visible from across the room even when the job is quiet. The key
+        // rides along with the count: a number nobody knows how to open is
+        // decoration, and Tab is the spelling this footer itself advertises.
         spans.push(Span::styled(
-            format!("   {} {} job(s) running", spinner(app.tick), app.pending),
+            format!(
+                "   {} {} job(s) running — Tab jobs",
+                spinner(app.tick),
+                app.pending
+            ),
             app.style(Color::Yellow),
         ));
     }

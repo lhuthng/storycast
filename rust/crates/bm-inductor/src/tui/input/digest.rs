@@ -214,11 +214,14 @@ fn open_chapter(
     n: u32,
     digested: &dyn Fn(u32) -> bool,
 ) -> Result<DigestChapter, String> {
-    // Manual digest re-digests: a chapter with no script yet goes through the
-    // workers, in bible order, so its delta lands on top of its predecessor's.
-    if !digested(n) {
+    // Manual digest re-digests — plus the one next chapter past the digested
+    // run, so the operator can work ahead of a bottlenecked digest queue. Its
+    // delta then lands on top of its predecessor's, which is the bible order
+    // the workers keep. Anything further ahead is refused: skipping would
+    // merge deltas out of order.
+    if !digested(n) && !(n == 1 || digested(n - 1)) {
         return Err(format!(
-            "ch{n} is not digested yet — manual digest re-digests; fresh chapters go through the workers"
+            "ch{n} is not next — manual digest does the chapter after the last digested one"
         ));
     }
     let step = bm_core::digest::manual_prompt(layout, n, None).map_err(|e| format!("{e:#}"))?;
@@ -310,12 +313,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manual_digest_refuses_an_undigested_chapter() {
-        // Manual digest re-digests: fresh chapters go through the workers so
-        // their deltas land in bible order.
+    fn manual_digest_refuses_a_chapter_past_the_next_one() {
+        // Skipping ahead would merge bible deltas out of order: only the
+        // chapter right after the digested run may be worked by hand.
         let d = tempfile::tempdir().unwrap();
         let layout = bm_core::Layout::new(d.path());
         let err = open_chapter(&layout, 7, &|n| layout.digested(n)).unwrap_err();
-        assert!(err.contains("not digested yet"), "{err}");
+        assert!(err.contains("not next"), "{err}");
+    }
+
+    #[test]
+    fn manual_digest_opens_the_chapter_after_the_last_digested_one() {
+        // The digest queue's bottleneck case: ch1 done, ch2 fresh — ch2 opens,
+        // ch3 still refused.
+        let d = tempfile::tempdir().unwrap();
+        bm_core::profile::install_fixture(d.path()).unwrap();
+        let layout = bm_core::Layout::new(d.path());
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::write(layout.chapter_txt(2), "text").unwrap();
+        std::fs::write(layout.chapter_txt(3), "text").unwrap();
+        let digested = |n: u32| n == 1;
+        assert!(open_chapter(&layout, 2, &digested).is_ok());
+        assert!(open_chapter(&layout, 3, &digested).is_err());
     }
 }
