@@ -435,6 +435,30 @@ impl Inner {
         if !admitted {
             anyhow::bail!("voice {voice:?} is neither a preset nor an enrolled clone");
         }
+        // A swap must be speakable everywhere it will be offered: a clone the
+        // local bake lacks is one no freshly-provisioned worker has either,
+        // and the invalidation below would queue renders that 500 on every
+        // box. So a swap first merges whatever the local store already holds
+        // into the bake (drifting the stamp, which is what makes the next
+        // :prov push it) and refuses what is enrolled nowhere. Presets ship
+        // with the sidecar, so only clones gate here — and only where a bake
+        // exists to check against.
+        if !declared && self.layout.root.join("models/voices.json").is_file() {
+            bm_core::pool::bake_missing_voices(&self.layout.root);
+            let want = bm_core::util::fold(&voice);
+            let baked = std::fs::read_to_string(self.layout.root.join("models/voices.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|v| v.get("presets").and_then(|p| p.as_object()).map(|o| {
+                    o.keys().any(|k| k == &voice || bm_core::util::fold(k) == want)
+                }))
+                .unwrap_or(false);
+            if !baked {
+                anyhow::bail!(
+                    "voice {voice:?} is not enrolled in this machine's voice store — enroll it (:A / roster add-sample) and :prov before swapping, or every render naming it fails on workers"
+                );
+            }
+        }
         if old == voice {
             return Ok(format!(
                 "{character} already speaks as {voice} — nothing to do"
@@ -446,7 +470,7 @@ impl Inner {
         // file when the Narrator itself moves), only where scripts exist.
         let (chapters, files) = self.invalidate_character(&engine, character, &old);
         Ok(format!(
-            "{character}: {old} -> {voice}; invalidated {files} segment files across {} chapters ({:?}); re-render queued",
+            "{character}: {old} -> {voice}; invalidated {files} segment files across {} chapters ({:?}); re-render queued — :prov workers to push the new voices",
             chapters.len(),
             chapters.iter().take(8).collect::<Vec<_>>(),
         ))

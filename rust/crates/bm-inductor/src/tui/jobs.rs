@@ -1775,18 +1775,31 @@ pub(crate) async fn job_load_roster(
     http: reqwest::Client,
     layout: bm_core::Layout,
 ) {
-    let res = match http.get(format!("{api}/api/roster")).send().await {
-        Ok(r) => match r.json::<Roster>().await {
-            Ok(roster) => Ok(roster),
-            Err(e) => Err(format!("bad roster payload: {e}")),
-        },
-        Err(_) => {
-            // Inductor down (X stops it): build from files so picking
-            // voices never needs the control plane.
-            Ok(crate::api::offline_roster(&layout).await)
+    // Instant first: every piece the picker needs is on this disk, so show
+    // it now instead of after an inductor hop plus a sidecar round trip.
+    // (That chain cost 35s worst case while the sidecar booted: 15s TUI
+    // timeout, then 20s of server-side sidecar timeouts, then the offline
+    // build anyway.)
+    let disk = layout.clone();
+    match tokio::task::spawn_blocking(move || crate::api::local_roster(&disk)).await {
+        Ok(roster) => {
+            let _ = tx.send(Ev::Roster(Ok(roster)));
         }
-    };
-    let _ = tx.send(Ev::Roster(res));
+        Err(e) => {
+            let _ = tx.send(Ev::Roster(Err(format!("local roster failed: {e}"))));
+        }
+    }
+    // ...then upgrade to live when the inductor answers with a sidecar
+    // behind it. Anything else keeps the local roster already shown.
+    match http.get(format!("{api}/api/roster")).send().await {
+        Ok(r) => match r.json::<Roster>().await {
+            Ok(roster) if roster.source.starts_with("live") => {
+                let _ = tx.send(Ev::Roster(Ok(roster)));
+            }
+            _ => {}
+        },
+        Err(_) => {}
+    }
     let _ = tx.send(Ev::Done(DoneKind::Other));
 }
 

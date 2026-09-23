@@ -120,6 +120,28 @@ pub fn compute_provision_stamp(
             sources.update([0]);
         }
     }
+    // The active workspace's cast files: voice assignments travel to workers
+    // via install_sources, so a swap must drift the stamp — otherwise the
+    // next :prov reports "in sync (cache match)" and the new voices never
+    // reach any box while renders naming them are already queued.
+    if let Ok(ws) = std::fs::read_to_string(repo_root.join(".bm").join("active-workspace")) {
+        let ws = ws.trim();
+        if !ws.is_empty() {
+            for name in ["cast-vieneu.json", "cast.json"] {
+                let p = repo_root
+                    .join("workspaces")
+                    .join(ws)
+                    .join("data")
+                    .join(name);
+                if let Ok(bytes) = std::fs::read(&p) {
+                    sources.update(name.as_bytes());
+                    sources.update([0]);
+                    sources.update(&bytes);
+                    sources.update([0]);
+                }
+            }
+        }
+    }
     // …and the clips themselves by signature, exactly like `refs/`: a pool
     // registry is only as good as the files it names, so adding a clip has to
     // resync even though no manifest changed.
@@ -305,8 +327,36 @@ mod tests {
     }
 
     #[test]
-    fn voices_hash_tracks_the_manifest_and_the_reference_clips() {
-        let root = stamp_fixture("voices");
+    fn a_workspace_cast_swap_drifts_the_stamp() {
+        // The swap writes the workspace cast, not the repo-root one — if the
+        // stamp only watched the root, :prov would report "in sync" and the
+        // new voices would never reach any box.
+        let root = stamp_fixture("wscast");
+        std::fs::create_dir_all(root.join(".bm")).unwrap();
+        std::fs::write(root.join(".bm/active-workspace"), "book\n").unwrap();
+        std::fs::create_dir_all(root.join("workspaces/book/data")).unwrap();
+        std::fs::write(
+            root.join("workspaces/book/data/cast-vieneu.json"),
+            r#"{"A":"Đức Trí"}"#,
+        )
+        .unwrap();
+        let a = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        std::fs::write(
+            root.join("workspaces/book/data/cast-vieneu.json"),
+            r#"{"A":"Quang Sơn"}"#,
+        )
+        .unwrap();
+        let b = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        assert_ne!(
+            a.sources_hash, b.sources_hash,
+            "a workspace voice swap must force a resync"
+        );
+        assert_eq!(a.voices_hash, b.voices_hash, "…and must not re-enroll");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn voices_hash_tracks_the_manifest_and_the_reference_clips() {        let root = stamp_fixture("voices");
         let base = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
 
         // A rename in voices.json must re-enroll even though the clip is

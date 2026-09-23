@@ -57,16 +57,10 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
         rows[0],
     );
 
-    // Provenance: never let a fallback roster masquerade as the live one.
+    // Provenance: never let a fallback roster masquerade as the live one —
+    // and never hide a usable roster behind a spinner while a live upgrade
+    // is still in flight.
     let provenance = match (&app.roster, &app.roster_error, app.roster_loading) {
-        (_, _, true) => Line::from(Span::styled(
-            "loading roster from the inductor…",
-            app.style(Color::Yellow),
-        )),
-        (_, Some(e), _) => Line::from(Span::styled(
-            format!("roster unavailable: {e}   (Esc to close, R to retry)"),
-            app.style(Color::Red),
-        )),
         (Some(r), _, _) => {
             let (label, colour) = if r.source == "live" {
                 ("live roster", Color::Green)
@@ -81,6 +75,14 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                 Span::styled(r.policy_note.clone(), Style::default().fg(Color::DarkGray)),
             ])
         }
+        (_, _, true) => Line::from(Span::styled(
+            "loading roster from disk…",
+            app.style(Color::Yellow),
+        )),
+        (_, Some(e), _) => Line::from(Span::styled(
+            format!("roster unavailable: {e}   (Esc to close, R to retry)"),
+            app.style(Color::Red),
+        )),
         (None, None, _) => Line::from(Span::styled(
             "roster not loaded — press R",
             app.style(Color::Yellow),
