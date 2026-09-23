@@ -169,6 +169,7 @@ mod tests {
             script: None,
             text: None,
             mp3_b64: None,
+            unit_files: Vec::new(),
         }
     }
 

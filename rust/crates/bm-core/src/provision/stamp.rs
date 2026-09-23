@@ -27,6 +27,15 @@ pub struct ProvisionStamp {
     /// probe, which is the failure this whole mechanism exists to avoid.
     #[serde(default)]
     pub tts_hash: String,
+    /// SHA-256 of the `bm-agent` binary bytes the inductor would push.
+    ///
+    /// The version *string* alone cannot detect a rebuild: every dev build
+    /// between releases reports the same `agent_version`, so `:prov` kept
+    /// calling the box "already configured" and never pushed the new binary.
+    /// `#[serde(default)]` so pre-existing stamps parse as "" (drift → one
+    /// reinstall, then the fresh stamp records the hash).
+    #[serde(default)]
+    pub agent_hash: String,
 }
 
 impl ProvisionStamp {
@@ -54,6 +63,14 @@ impl ProvisionStamp {
     pub fn tts_in_sync(&self, want: &ProvisionStamp) -> bool {
         self.tts_hash == want.tts_hash
     }
+
+    /// Whether the worker's `bm-agent` binary still matches ours.
+    ///
+    /// An empty `want` means the inductor could not hash its own binary, so it
+    /// has no opinion — never drift on that, or every provision would reinstall.
+    pub fn agent_in_sync(&self, want: &ProvisionStamp) -> bool {
+        want.agent_hash.is_empty() || self.agent_hash == want.agent_hash
+    }
 }
 
 /// Compute manifest stamp for detecting changes to sources and clone voices.
@@ -65,13 +82,18 @@ impl ProvisionStamp {
 ///   manifests the worker must match exactly (`requirements.txt`, the cast
 ///   files, the clone manifest `voices.json`, the scene map and the three
 ///   clip-pool registries), plus the effect, music and inject clip
-///   directories by signature, plus the agent version so a rebuild redeploys.
+///   directories by signature, plus the agent version so a release bump
+///   redeploys. (A rebuild under the *same* version is `agent_hash`'s job.)
 /// * `voices_hash` — `voices.json` by content (a rename with identical clips
 ///   must re-enroll) and `refs/` by signature only: those clips are megabytes,
 ///   and reading them would cost more than the enrollment we are avoiding.
 ///   Kept alongside `sources_hash` (which also covers the manifest) because
 ///   the stamp payload round-trips it and older stamps are still out there.
-pub fn compute_provision_stamp(repo_root: &Path, agent_version: &str) -> ProvisionStamp {
+pub fn compute_provision_stamp(
+    repo_root: &Path,
+    agent_version: &str,
+    agent_binary: &Path,
+) -> ProvisionStamp {
     let mut sources = Sha256::new();
     sources.update(agent_version.as_bytes());
     sources.update([0]);
@@ -156,6 +178,12 @@ pub fn compute_provision_stamp(repo_root: &Path, agent_version: &str) -> Provisi
         sources_hash: hex_digest(sources.finalize()),
         voices_hash: hex_digest(voices.finalize()),
         tts_hash: hex_digest(tts.finalize()),
+        // Content, not signature: the binary is ~100 MB and hashing it costs
+        // ~0.1 s locally, while a stale binary on a worker is silent drift.
+        // Absent locally is not an error (see `agent_in_sync`).
+        agent_hash: std::fs::read(agent_binary)
+            .map(|bytes| hex_digest(Sha256::digest(&bytes)))
+            .unwrap_or_default(),
     }
 }
 
@@ -236,11 +264,20 @@ mod tests {
         root
     }
 
+    /// Stand-in for the cross-built agent binary the stamp hashes.
+    fn agent_bin(root: &std::path::Path) -> std::path::PathBuf {
+        let p = root.join("bm-agent");
+        if !p.exists() {
+            std::fs::write(&p, b"agent-bytes-v1").unwrap();
+        }
+        p
+    }
+
     #[test]
     fn a_stamp_is_stable_and_content_addressed() {
         let root = stamp_fixture("stable");
-        let a = compute_provision_stamp(&root, "0.2.0");
-        let b = compute_provision_stamp(&root, "0.2.0");
+        let a = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let b = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
         assert_eq!(a, b, "nothing changed, so the stamp must not either");
         assert_eq!(a.sources_hash.len(), 64, "sha-256 hex is 64 chars");
         assert_eq!(a.voices_hash.len(), 64);
@@ -248,7 +285,7 @@ mod tests {
 
         // A cast edit is a source change and nothing else.
         std::fs::write(root.join("data/cast.json"), r#"{"Narrator":"Adam"}"#).unwrap();
-        let c = compute_provision_stamp(&root, "0.2.0");
+        let c = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
         assert_ne!(
             a.sources_hash, c.sources_hash,
             "a cast edit must resync sources"
@@ -259,7 +296,7 @@ mod tests {
         );
 
         // A version bump redeploys the agent even when every file is identical.
-        let d = compute_provision_stamp(&root, "0.3.0");
+        let d = compute_provision_stamp(&root, "0.3.0", &agent_bin(&root));
         assert!(!a.sources_in_sync(&d), "a new agent build must redeploy");
         assert!(
             a.voices_in_sync(&d),
@@ -270,14 +307,14 @@ mod tests {
     #[test]
     fn voices_hash_tracks_the_manifest_and_the_reference_clips() {
         let root = stamp_fixture("voices");
-        let base = compute_provision_stamp(&root, "0.2.0");
+        let base = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
 
         // A rename in voices.json must re-enroll even though the clip is
         // identical: enrollment is keyed by name, not by file. The manifest
         // also rides the sources sync now, so the worker's copy never drifts
         // behind the declaration the inductor's warnings are computed against.
         std::fs::write(root.join("voices.json"), r#"{"Storyteller":"refs/n.wav"}"#).unwrap();
-        let renamed = compute_provision_stamp(&root, "0.2.0");
+        let renamed = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
         assert!(!base.voices_in_sync(&renamed), "a rename must re-enroll");
         assert!(
             !base.sources_in_sync(&renamed),
@@ -286,7 +323,7 @@ mod tests {
 
         // A new clip changes the refs signature without touching the manifest.
         std::fs::write(root.join("refs/m.wav"), vec![2u8; 64]).unwrap();
-        let added = compute_provision_stamp(&root, "0.2.0");
+        let added = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
         assert!(!renamed.voices_in_sync(&added), "a new clip must re-enroll");
         assert!(
             renamed.sources_in_sync(&added),
@@ -305,11 +342,11 @@ mod tests {
             r#"{"soft-1":{"file":"assets/music/soft-1.mp3","tags":["soft"]}}"#,
         )
         .unwrap();
-        let base = compute_provision_stamp(&root, "0.2.0");
+        let base = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
 
         // Re-running with nothing touched must not resync — otherwise every
         // provision would push the clip directories for no reason.
-        assert!(base.sources_in_sync(&compute_provision_stamp(&root, "0.2.0")));
+        assert!(base.sources_in_sync(&compute_provision_stamp(&root, "0.2.0", &agent_bin(&root))));
 
         // The registry is a manifest: editing it changes what a scene means,
         // so the worker has to receive it.
@@ -318,7 +355,7 @@ mod tests {
             r#"{"soft-1":{"file":"assets/music/soft-1.mp3","tags":["calm"]}}"#,
         )
         .unwrap();
-        let edited = compute_provision_stamp(&root, "0.2.0");
+        let edited = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
         assert!(
             !base.sources_in_sync(&edited),
             "a pool edit must resync sources"
@@ -327,9 +364,39 @@ mod tests {
         // A new clip resyncs too, even though no manifest moved.
         std::fs::write(root.join("assets/music/soft-1.mp3"), vec![2u8; 32]).unwrap();
         assert!(
-            !edited.sources_in_sync(&compute_provision_stamp(&root, "0.2.0")),
+            !edited.sources_in_sync(&compute_provision_stamp(&root, "0.2.0", &agent_bin(&root))),
             "a new clip must resync sources"
         );
+    }
+
+    /// A rebuild under the same version redeploys the agent and nothing else.
+    ///
+    /// This is the gap the field exists for: the version string cannot see a
+    /// rebuild, so `sources_in_sync` stays true while the bytes moved.
+    #[test]
+    fn a_rebuild_under_the_same_version_redeploys_the_agent_only() {
+        let root = stamp_fixture("agent-drift");
+        let bin = agent_bin(&root);
+        let base = compute_provision_stamp(&root, "0.2.0", &bin);
+        assert!(base.agent_in_sync(&compute_provision_stamp(&root, "0.2.0", &bin)));
+
+        // Same version string, different bytes: drift.
+        std::fs::write(&bin, b"agent-bytes-v2").unwrap();
+        let rebuilt = compute_provision_stamp(&root, "0.2.0", &bin);
+        assert!(
+            !base.agent_in_sync(&rebuilt),
+            "a rebuild must redeploy the agent"
+        );
+        assert!(
+            base.sources_in_sync(&rebuilt),
+            "…but must not resync sources"
+        );
+        assert!(base.tts_in_sync(&rebuilt), "…or touch the sidecar");
+
+        // No local binary to hash means no opinion, never a reinstall loop.
+        let nobin = compute_provision_stamp(&root, "0.2.0", &root.join("no-such-binary"));
+        assert!(nobin.agent_hash.is_empty());
+        assert!(base.agent_in_sync(&nobin));
     }
 
     /// A stamp written before `tts_hash` existed must still parse. Forcing the
@@ -340,6 +407,7 @@ mod tests {
         let s = parse_stamp(old).expect("an older payload must not read as garbage");
         assert_eq!(s.agent_version, "0.2.0");
         assert_eq!(s.tts_hash, "", "an absent field means 'this box has none'");
+        assert_eq!(s.agent_hash, "", "ditto: drift once, then the fresh stamp records it");
     }
 
     /// The Rust sidecar's artifacts are their own hash: a box on the Python path
@@ -347,7 +415,7 @@ mod tests {
     #[test]
     fn the_tts_artifacts_are_tracked_separately_from_the_sources() {
         let root = stamp_fixture("tts");
-        let without = compute_provision_stamp(&root, "0.2.0");
+        let without = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
         assert_eq!(without.tts_hash.len(), 64);
         assert!(
             without.sources_in_sync(&without),
@@ -357,7 +425,7 @@ mod tests {
         // Baking the models moves only the TTS hash.
         std::fs::create_dir_all(root.join("models")).unwrap();
         std::fs::write(root.join("models/manifest.json"), r#"{"files":{}}"#).unwrap();
-        let baked = compute_provision_stamp(&root, "0.2.0");
+        let baked = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
         assert!(
             without.sources_in_sync(&baked),
             "baking models must not resync the Python path's sources"
@@ -369,7 +437,7 @@ mod tests {
 
         // …and swapping a model file under an unchanged manifest is drift too.
         std::fs::write(root.join("models/vieneu_prefill.onnx"), vec![1u8; 64]).unwrap();
-        let swapped = compute_provision_stamp(&root, "0.2.0");
+        let swapped = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
         assert!(!baked.tts_in_sync(&swapped), "a swapped model must resync");
         assert!(
             baked.sources_in_sync(&swapped),
@@ -384,6 +452,7 @@ mod tests {
             sources_hash: "a".repeat(64),
             voices_hash: "b".repeat(64),
             tts_hash: "c".repeat(64),
+            agent_hash: "d".repeat(64),
         };
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(parse_stamp(&text).unwrap(), s, "a real payload round-trips");

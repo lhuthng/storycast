@@ -368,15 +368,6 @@ impl Layout {
         self.root.join("voices.default.json")
     }
 
-    /// The operator's roster: a machine-local delta over the catalogue —
-    /// enabled flags, enrolled clones, policy overrides.
-    ///
-    /// Inside `.bm/`, which `.gitignore` already covers, so keeping personal
-    /// voices out of git needs no `.gitignore` change at all.
-    pub fn roster(&self) -> PathBuf {
-        self.bm_state().join("voices.json")
-    }
-
     /// Linked machines: the per-machine connection config (addr/user/port/key),
     /// keyed by address. The inductor's join of this file with the ledger's
     /// `machine_state` is the `Machine` the API serves.
@@ -670,17 +661,16 @@ mod tests {
     }
 
     #[test]
-    fn the_catalogue_is_tracked_but_the_operator_roster_is_not() {
+    fn the_catalogue_is_tracked() {
         let l = Layout::new("/repo");
         // The catalogue is repo content: a fresh clone has to render with no
         // local config, so this one is committed at the root.
         assert_eq!(l.roster_default(), Path::new("/repo/voices.default.json"));
         // Everything personal lives under `.bm/`, which `.gitignore` already
         // covers — which is the whole reason the split needs no ignore churn.
-        for p in [l.roster(), l.voice_refs(), l.voice_samples()] {
+        for p in [l.voice_refs(), l.voice_samples()] {
             assert!(p.starts_with(l.bm_state()), "{} escaped .bm/", p.display());
         }
-        assert!(l.roster().ends_with(".bm/voices.json"));
         assert!(l.voice_refs().ends_with(".bm/voices/refs"));
         assert!(l.voice_samples().ends_with(".bm/voices/samples"));
         // refs and samples are different things and stay separable, so

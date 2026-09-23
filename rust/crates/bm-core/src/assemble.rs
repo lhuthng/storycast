@@ -293,7 +293,7 @@ pub fn assemble(
     assets: &Path,
     takes: Option<&[String]>,
 ) -> Result<PathBuf> {
-    let policy = crate::cast::policy_for_bible(engine, bible_path)?;
+    let policy = crate::cast::policy_for_bible(engine);
     let cast = crate::cast::load_cast(script_path, cast_path, bible_path, &policy, false)?;
     let text = std::fs::read_to_string(script_path)
         .with_context(|| format!("reading {}", script_path.display()))?;

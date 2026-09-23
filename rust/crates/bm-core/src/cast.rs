@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::ops::{Deref, DerefMut};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// `character -> voice`, plus the bible those character names were resolved
 /// against. Ordered so the file on disk is diff-friendly.
@@ -191,52 +191,26 @@ pub fn cast_on_disk(engine: &str, cast: &Cast) -> Cast {
     cast_for_disk(engine, cast)
 }
 
-/// The sample pool for this bible: `voice-pool.json` at the repo root in real
-/// layouts, beside the bible itself in tests. Missing means "no pool".
+/// The sample pool for this bible: the first non-empty `voice-pool.json`
+/// walking up from the bible — beside it in tests, at the repo root in real
+/// layouts (the bible lives two levels down, under `<workspace>/data/`).
+/// Missing means "no pool".
 fn pool_for_bible(bible_path: &Path) -> crate::pool::Pool {
-    let dirs: Vec<&Path> = match bible_path.parent() {
-        Some(d) => vec![d, d.parent().unwrap_or(d)],
-        None => vec![],
-    };
-    for dir in dirs {
-        let pool = crate::pool::load_pool(&dir.join("voice-pool.json"));
+    let mut dir = bible_path.parent();
+    while let Some(d) = dir {
+        let pool = crate::pool::load_pool(&d.join("voice-pool.json"));
         if !pool.is_empty() {
             return pool;
         }
+        dir = d.parent();
     }
     crate::pool::load_pool(Path::new("/nonexistent/voice-pool.json"))
 }
 
-/// The operator roster for these paths, real layout or test fixture: the first
-/// `.bm/voices.json` found walking up from the bible, else a path that loads
-/// as "no opinion". Missing means unrestricted, exactly like today.
-fn roster_for_bible(bible_path: &Path) -> PathBuf {
-    let mut dirs = Vec::new();
-    if let Some(d) = bible_path.parent() {
-        dirs.push(d.to_path_buf());
-        if let Some(p) = d.parent() {
-            dirs.push(p.to_path_buf());
-        }
-    }
-    for dir in &dirs {
-        let cand = dir.join(".bm/voices.json");
-        if cand.is_file() {
-            return cand;
-        }
-    }
-    dirs.first()
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".bm/voices.json")
-}
-
-/// The assignable-voice policy for a render: the operator's own roster, never
-/// the shipped catalogue alone. Assigning from the catalogue once voice-matched
-/// a Northern preset the sidecar gate then refused — shelving the chapter for
-/// a voice nobody was allowed to use.
-pub fn policy_for_bible(engine: &str, bible_path: &Path) -> Result<VoicePolicy> {
-    crate::voices::effective_policy(&roster_for_bible(bible_path), engine)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+/// The assignable-voice policy for a render: the shipped catalogue. There is
+/// no machine-local overlay.
+pub fn policy_for_bible(engine: &str) -> VoicePolicy {
+    crate::voices::effective_policy(engine)
 }
 
 /// Resolve the full cast for a chapter, assigning any missing speaker.
@@ -644,17 +618,10 @@ mod tests {
     }
 
     #[test]
-    fn an_excluded_preset_is_never_assigned() {
-        // The operator bans Northern: the assigner must not write Minh Đức
-        // (or any Northern preset) into the cast for a gate to reject later —
-        // that exact write shelved a real chapter three times.
+    fn without_an_overlay_there_is_nothing_to_exclude() {
+        // No machine-local roster: the catalogue is unrestricted, so an old
+        // man with no pool rolls the first male preset.
         let d = tmpdir("policy-assign");
-        std::fs::create_dir_all(d.join(".bm")).unwrap();
-        std::fs::write(
-            d.join(".bm/voices.json"),
-            r#"{"version":1,"engines":{"vieneu":{"policy":{"excluded_accents":["Northern"]}}}}"#,
-        )
-        .unwrap();
         let script = d.join("script-01.json");
         std::fs::write(&script, r#"{"roster":["Ông Già"],"segments":[]}"#).unwrap();
         let bible = d.join("bible.json");
@@ -664,24 +631,25 @@ mod tests {
         )
         .unwrap();
 
-        let policy = policy_for_bible("vieneu", &bible).unwrap();
-        assert!(!policy.allowed.is_empty(), "the exclusion must bite");
+        let policy = policy_for_bible("vieneu");
+        assert!(policy.allowed.is_empty(), "unrestricted");
         let cast = load_cast(&script, &d.join("cast-vieneu.json"), &bible, &policy, false).unwrap();
         let got = cast.get("Ông Già").unwrap();
         assert!(
-            policy.allowed.contains(got),
-            "assigned {got:?} outside the policy"
+            policy.male.contains(got),
+            "an old man rolls a male preset: {got:?}"
         );
-        assert_ne!(got, "Minh Đức");
     }
 
     #[test]
-    fn a_malformed_roster_fails_the_render_policy_loudly() {
-        let d = tmpdir("policy-broken");
+    fn the_policy_is_the_catalogue_with_no_overlay() {
+        // No machine-local roster exists any more: even a stray .bm/voices.json
+        // is ignored, and the policy is the shipped catalogue (unrestricted).
+        let d = tmpdir("policy-catalogue");
         std::fs::create_dir_all(d.join(".bm")).unwrap();
         std::fs::write(d.join(".bm/voices.json"), "{ nope").unwrap();
-        let err = policy_for_bible("vieneu", &d.join("bible.json")).unwrap_err();
-        assert!(err.to_string().contains("parsing"), "{err}");
+        let policy = policy_for_bible("vieneu");
+        assert!(policy.allowed.is_empty(), "unrestricted");
     }
 
     #[test]
@@ -831,8 +799,35 @@ mod tests {
     }
 
     #[test]
-    fn hint_tags_backfill_a_bible_that_predates_tags() {
-        // No `tags` key at all: the voice_hint still routes to the pool.
+    fn the_pool_is_found_two_levels_up_like_the_real_layout() {
+        // Real layout: the pool at the repo root, the bible two levels down
+        // at `<workspace>/data/bible.json`. The old lookup only climbed one
+        // level, loaded nothing, and every newcomer fell through to presets.
+        let d = tmpdir("pool-walkup");
+        pool_fixture(&d);
+        let data = d.join("workspaces").join("book").join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let script = data.join("script-01.json");
+        std::fs::write(&script, r#"{"roster":["Cô Bé"],"segments":[]}"#).unwrap();
+        let bible = data.join("bible.json");
+        std::fs::write(
+            &bible,
+            r#"{"characters":[{"name":"Cô Bé","voice_hint":"girl, bright","tags":["young","female"],"proper_aliases":[]}]}"#,
+        )
+        .unwrap();
+        let cast = load_cast(
+            &script,
+            &data.join("cast-vieneu.json"),
+            &bible,
+            &vieneu_policy(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(cast.get("Cô Bé").unwrap(), "young-female-1");
+    }
+
+    #[test]
+    fn hint_tags_backfill_a_bible_that_predates_tags() {        // No `tags` key at all: the voice_hint still routes to the pool.
         let d = tmpdir("pool-hint");
         pool_fixture(&d);
         let script = d.join("script-01.json");

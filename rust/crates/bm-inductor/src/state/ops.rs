@@ -399,30 +399,23 @@ impl Inner {
     pub fn op_swap_voice(&mut self, character: &str, voice: &str) -> anyhow::Result<String> {
         self.ensure_idle()?;
         let engine = self.settings.engine.clone();
-        // The operator's own roster, not the shipped default: this is the gate
-        // that decides what may be assigned on this machine.
-        let policy = bm_core::voices::effective_policy(&self.layout.roster(), &engine)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        // The shipped catalogue is the gate that decides what may be assigned
+        // on this machine.
+        let policy = bm_core::voices::effective_policy(&engine);
         let cast_path = self.layout.cast(&engine);
         // Accept either form: the picker sends display names today, but a key is
         // the stable identifier and both have to work.
         let voice = bm_core::voices::resolve_voice_name(&engine, voice);
         let mut cast = bm_core::cast::read_cast(&engine, &cast_path);
         let old = cast.get(character).cloned().unwrap_or_default();
-        // Trust rule (mirrors the agent gate):
-        //   * an admitted preset, or
-        //   * a voice the catalogue does not declare at all — an enrolled clone —
-        //     that is already assigned somewhere.
+        // Trust rule:
+        //   * a declared preset, or
+        //   * an enrolled clone — in the `voices.json` manifest or the
+        //     sample pool (both vetted at adding) — or already assigned
+        //     somewhere.
         //
-        // An empty `allowed` is "no restriction", not "nothing allowed": the same
-        // reading `violations()` and `voice_from_label` use. Treating it as
-        // "nothing is allowed" would make the picker refuse every voice on a
-        // default install, which has no local roster.
-        //
-        // The clone escape hatch is keyed on "not declared" rather than "not in
-        // the allow-list". Keyed on the allow-list it would also let a *declared*
-        // preset that the operator excluded back in, simply because it was
-        // already assigned — which is how an exclusion quietly stops applying.
+        // Anything else is refused at swap time rather than failing thirty
+        // renders later on the sidecar's unknown-voice gate.
         let declared = policy
             .male
             .iter()
@@ -436,15 +429,11 @@ impl Inner {
         // could be rolled automatically but never picked by hand.
         let pooled = bm_core::pool::load_pool(&self.layout.root.join("voice-pool.json"))
             .contains_key(&voice);
-        let admitted = if policy.allowed.is_empty() {
-            true
-        } else if declared {
-            policy.allowed.iter().any(|a| a == &voice)
-        } else {
-            in_use || pooled
-        };
+        let manifested = bm_core::pool::load_manifest(&self.layout.root)
+            .contains_key(&voice);
+        let admitted = declared || in_use || pooled || manifested;
         if !admitted {
-            anyhow::bail!("voice {voice:?} is neither an admitted preset nor currently assigned");
+            anyhow::bail!("voice {voice:?} is neither a preset nor an enrolled clone");
         }
         if old == voice {
             return Ok(format!(

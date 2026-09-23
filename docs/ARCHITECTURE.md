@@ -224,14 +224,14 @@ profiles is the mismatch the tag exists to catch.
   **One offer, `render_batch` takes.** A take is scheduled, gated and settled on
   its own ledger row — that is what makes a local edit cost one segment instead
   of a chapter — but the *assignment* covers a slice of one chapter at once:
-  `Settings::render_batch` takes per offer, ten by default, clamped to 1–64 by
+  `Settings::render_batch` takes per offer, five by default, clamped to 1–64 by
   `Settings::render_batch()`. The reason is that a worker pays a fixed cost per
   offer — a round trip, a heartbeat, a completion report, a unit collection —
   and a chapter is dozens of takes. The grouping is recorded on the row the
   offer names (`Task::batch`) and nowhere else, so the completion gate and the
   settle both read it from the ledger; **no word of it travels on the wire**,
   because the offer already carried `render_units` as a list. A batch never
-  spans two chapters: the pin, the merge's affinity, the progress line and the
+  spans two chapters: the progress line and the
   inductor's unit collection are all keyed by chapter. The lease grows with the
   batch (capped at 4× the stage's own) so a long batch does not expire under a
   box that is simply working.
@@ -265,12 +265,16 @@ profiles is the mismatch the tag exists to catch.
 
   A local edit is consequently **one segment, not a chapter**: the plan's diff
   names the changed takes, deletes exactly the files they superseded, and
-  requeues only those. A chapter's takes are **pinned** to the first box that
-  takes one (`pin_chapter_takes`), because a merge needs the whole chapter in
-  one store — that is also where the merge's affinity comes from. Non-local
-  workers upload each wav via `POST /api/segment` and discard their copy once
-  the report is accepted; the local node writes straight into the store. Only
-  workers advertising the `render-segments` capability are offered renders.
+  requeues only those. A chapter is **shared, not owned**: no row ever carries
+  affinity — not for a chapter, not for a batch — so every worker is
+  independent and any box may take any take. What keeps a merge possible is
+  the **store**, not a pin: every render report ships the wavs it produced
+  (`Complete.unit_files`), `/api/complete` stores them *before* the row turns
+  `Done`, and `collect_units` pulls any still missing from the box that just
+  answered — so once a chapter's takes are `Done` this disk holds all of them.
+  A box that already holds a file pushes nothing (the store is idempotent by
+  name). Only workers advertising the `render-segments` capability are offered
+  renders.
 * **merge** (`assemble/`, `ambience.rs`) — concatenates segments with
   `gap_ms` pauses and optional ambience beds keyed by the script's `scene`
   labels, and writes `output/Ch.N - Title.mp3`. It is offered only when the
@@ -278,13 +282,15 @@ profiles is the mismatch the tag exists to catch.
   the mixer asks, so the two cannot disagree. The offer carries the plan's
   file list (`merge_takes`, in mix order): the mixer cannot re-derive a
   content-addressed take name from the script and the cast and must not try.
-  A merge task carries **affinity** for the box that rendered its chapter,
-  because a box's seg dir is where those wavs were written. Affinity is an
-  optimisation for remote boxes and never a gate for the local node, which
-  shares the inductor's store and may take any merge; that exemption is also
-  why a chapter whose pin is dead still merges. A local merge ships no mp3 —
-  the file itself is the evidence. A remote merge (pre-migration affinity, or
-  no local worker alive) ships its mp3 home, base64, inside the report.
+  A merge task carries **no affinity**: it runs wherever it is offered, and
+  the only precondition is the store — a merge is offered just when this disk
+  already holds every segment (`missing_wavs` empty); a starved one heals its
+  render (requeues the takes the store lacks) and yields to the next stage.
+  A merge that starts anyway and finds a piece missing pulls it from the
+  inductor's store (`GET /api/segment`, over the reverse tunnel), so the
+  segments come from the one disk guaranteed complete. A local merge ships no
+  mp3 — the file itself is the evidence. A remote merge ships its mp3 home,
+  base64, inside the report.
 
 ## 3. The control API (bm-inductor, axum, default :8901)
 
@@ -292,8 +298,9 @@ profiles is the mismatch the tag exists to catch.
 |---|---|
 | `GET /api/state` | The whole world for the TUI: `tasks`, `machines`, `beats`, `counts`, `settings`, `events` |
 | `POST /api/offer` | A worker asks for work; answers with a task offer (or nothing) |
-| `POST /api/complete` | A worker reports done/failed (+ artifacts: script, text, bible delta, mp3) |
-| `POST /api/segment` | A non-local worker uploads one rendered wav (name validated against the expected set) |
+| `POST /api/complete` | A worker reports done/failed (+ artifacts: script, text, bible delta, mp3, rendered wavs — `unit_files` stored before the row turns Done) |
+| `POST /api/segment` | A worker uploads one rendered wav (name validated against the expected set) |
+| `GET /api/segment` | A merge worker pulls one rendered wav it lacks from the inductor's store |
 | `POST /api/heartbeat` | Progress: stage, chapter, %, activity, ETA |
 | `GET /api/roster` | The resolved voice roster (catalogue + pool + policy verdicts) |
 | `POST /api/op` | Operator ops: `translate`, `crawl-setup`, `voices`, `swap-voice`, `preview-voice`, `eta`, `requeue`, `retry`, `retry-task` |
@@ -335,6 +342,31 @@ perfectly healthy box re-ran `npm i` (bounded at 600 s) and `apt install -y`
 for no reason — which is most of what made `B` feel slow on a cluster that was
 already working. The check-only path says "force a re-provision to try again"
 when a tool is missing, so the remedy is named rather than silently skipped.
+
+**The agent binary is inside that same gate, and the gate is the version
+string.** `install_agent` sits in the `else` of `if already`, where
+`already = probe.configured(agent_version) && !force` and `configured()` is
+`agent_version == env!("CARGO_PKG_VERSION") && rust_ready()`. So on a box already
+running this version, `:prov` logs `already configured (agent 0.2.4 + tts
+sidecar)`, syncs sources and **does not push the binary**: a rebuilt `bm-agent`
+whose version did not change never reaches the box. Only a version difference, or
+`force`, reaches `install_agent`. Note the asymmetry — the *staging* half is
+content-aware (`agent_binary_staged` refuses a candidate older than
+`crates/bm-{agent,core,proto}/src`, so what would be pushed is never stale), while
+the *push* half is version-only. Remedy: `P` / `:reprov` ("forcing past the
+skip-if-configured check"), or `bm-inductor provision --addr <ip> --user thang
+--force` — or bump the version in `rust/Cargo.toml`, which is the route
+`docs/TROUBLESHOOTING.md` names from the operator's side.
+
+**And a push does not restart the worker.** Provisioning kills the TTS sidecar
+(`pkill -x bm-tts`) but nothing kills `bm-agent`; `start_remote_workers` checks
+`pgrep` first and reports `worker already running (pid …)` instead of replacing
+it. So the box keeps executing the old binary until its worker is stopped and
+relaunched — the remote shape of the local trap, that a rebuild does not restart
+the process already running it. The local node is never provisioned at all
+(`provision_machine` returns early for `is_local_node`: "runs from the repo,
+nothing to provision"), so a rebuilt `bm-agent` is picked up there the moment its
+worker is relaunched.
 
 ### What `B` does now, and what it used to do
 
@@ -461,7 +493,8 @@ is a way of making "two" impossible rather than survivable.
   on a platform that reports no per-process memory.
 * **A merge reaps every sidecar first** (`reap_all`, waited out until the port
   is quiet). ffmpeg's working set is the one thing that co-resides badly with a
-  model, and the merge is pinned to the box that rendered the chapter.
+  model, and a merge runs nowhere else than the box that takes it — the two
+  must never co-reside in 8 GiB.
 * **The cluster can see the count.** The heartbeat carries `sidecars` and
   `sidecar_gb`, and both are a census of **processes**: `census_refresh_kind`
   asks sysinfo for memory and explicitly *not* for tasks, because on Linux
@@ -579,6 +612,11 @@ among jobs that genuinely contend.
 
 A job that names nothing conflicting is `Command`, and that lane stays serial on
 purpose — two model-loading previews at once is not a thing anyone asked for.
+A job may also name **nothing at all**: the read-only indexes (`LoadRoster`,
+`LoadLines`, `LoadSounds`) hold no resource, so they start on the very next
+scan even while a five-minute provision runs — they read files or make one
+GET, and queueing them behind heavy work is exactly the wait they exist to
+avoid.
 
 **The queue is visible.** `Job::resource_label()` drops `Command` (true of most
 jobs, worth nothing on a row) and the jobs screen renders the rest, so a blocked

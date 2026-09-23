@@ -792,7 +792,7 @@ pub fn provision(
         ));
     }
 
-    let local_stamp = compute_provision_stamp(&layout.root, agent_version);
+    let local_stamp = compute_provision_stamp(&layout.root, agent_version, agent_binary);
     let remote_stamp = probe.stamp.as_ref();
 
     let sources_match = !force
@@ -823,6 +823,22 @@ pub fn provision(
             "[{}] already configured (agent {} + tts sidecar)",
             m.id, agent_version
         ));
+        // The version string cannot see a rebuild: every dev build between
+        // releases reports the same one, so a same-version binary drift would
+        // otherwise sit on the box for ever. The content hash catches it, and
+        // rsync makes the no-op push cheap when the bytes never moved.
+        if !remote_stamp
+            .map(|s| s.agent_in_sync(&local_stamp))
+            .unwrap_or(false)
+        {
+            match ssh.install_agent(agent_binary, live.as_ref()) {
+                Ok(v) => log.push(format!(
+                    "[{}] agent binary drifted, redeployed (reports version {v})",
+                    m.id
+                )),
+                Err(e) => log.push(format!("[{}] agent redeploy failed: {e}", m.id)),
+            }
+        }
         if sources_match {
             log.push(format!("[{}] sources in sync (cache match)", m.id));
         } else {

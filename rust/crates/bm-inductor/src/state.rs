@@ -701,13 +701,12 @@ mod tests {
     }
 
     #[test]
-    fn surgical_swap_pins_rerender_to_the_warm_box_and_forces_only_the_stale_set() {
+    fn surgical_swap_rerenders_unpinned_and_forces_only_the_stale_set() {
         // The flaw this pins: a swap deleted stale files only locally, the
         // offer carried the whole chapter, and whichever cold box asked next
-        // re-spoke everything from scratch. Now the re-render pins to the box
-        // that holds the chapter (the merge's affinity) and the offer forces
-        // only what this store lacks — the swapped voice — so the warm box
-        // speaks one file while a cold box never sees the task.
+        // re-spoke everything from scratch. Now the re-render is unpinned and
+        // the offer forces only what this store lacks — the swapped voice —
+        // so whoever asks speaks one file while untouched voices keep cache.
         let (_d, mut inner) = fixture();
         let layout = inner.layout.clone();
         std::fs::write(
@@ -753,9 +752,8 @@ mod tests {
 
         inner.op_swap_voice("A", "Minh Triết").unwrap();
         assert_eq!(
-            inner.tasks["render:1:0"].affinity.as_deref(),
-            Some("192.168.2.2"),
-            "re-render stays where the chapter is"
+            inner.tasks["render:1:0"].affinity, None,
+            "re-render is offerable to any box — no warm-box pin"
         );
         assert_eq!(
             inner.tasks["render:1:1"].state,
@@ -763,16 +761,12 @@ mod tests {
             "B's take is not work: the swap only reached A"
         );
         assert_eq!(
-            inner.tasks["merge:1"].affinity.as_deref(),
-            Some("192.168.2.2"),
-            "merge pin untouched"
+            inner.tasks["merge:1"].affinity, None,
+            "the requeue clears the merge pin too"
         );
 
-        assert!(
-            inner.offer("cold-b").is_none(),
-            "a cold box must not re-speak the whole chapter for a swap"
-        );
-        let offer = inner.offer("warm-a").expect("warm box takes its re-render");
+        // Any box takes the re-render — no warm-box pin, no cold box.
+        let offer = inner.offer("cold-b").expect("cold box takes the re-render too");
         assert_eq!(offer.task_id, "render:1:0", "one take, A's");
         let units = offer.render_units.as_ref().expect("planned, not legacy");
         assert_eq!(units.len(), 1, "a single segment travels: {units:?}");
@@ -795,26 +789,22 @@ mod tests {
             "untouched voices keep their cache"
         );
 
-        // The local node steals pinned renders, like pinned merges.
+        // The local node takes merges pinned to it, like any box takes its
+        // own pin.
         let t = inner.tasks.get_mut("render:1:0").unwrap();
         t.state = TaskState::Pending;
         t.assigned_to = None;
         t.lease_until = None;
-        let offer = inner.offer("lo-w").expect("local takes pinned renders");
+        let offer = inner.offer("lo-w").expect("local takes unpinned renders");
         assert_eq!(offer.task_id, "render:1:0");
         assert!(offer.local_node);
     }
 
     #[test]
-    fn merge_runs_on_the_machine_that_rendered() {
-        // The pin's real meaning is "merge where the segments are" — and after
-        // an inverted render that is the box that just wrote them. It cannot
-        // be handed thirty-odd wavs inside an offer, and the inductor's own
-        // copy exists for the completion gate, not for the mixer.
-        //
-        // This used to be the literal `127.0.0.1`, which worked on one machine
-        // and made a cluster of remote workers render for ever without ever
-        // merging.
+    fn merge_runs_on_whichever_box_asks_first() {
+        // No row is ever pinned: a merge pulls the pieces it lacks from the
+        // inductor, so completions record nothing about who rendered what —
+        // and the merge row exists unpinned for whoever asks first.
         let (_d, mut inner) = fixture();
         let layout = inner.layout.clone();
         std::fs::write(
@@ -851,9 +841,8 @@ mod tests {
             "gate passes: the take's file is home"
         );
         assert_eq!(
-            inner.tasks["merge:7"].affinity.as_deref(),
-            Some("192.168.2.2"),
-            "merge follows the renderer, not loopback"
+            inner.tasks["merge:7"].affinity, None,
+            "no pin recorded: whoever asks first merges"
         );
 
         // A renderer with no known machine — a hand-written ledger, or a
@@ -880,9 +869,8 @@ mod tests {
             "render ch8 (1 calls)",
         ));
         assert_eq!(
-            inner.tasks["merge:8"].affinity.as_deref(),
-            Some("127.0.0.1"),
-            "no known renderer: the local node, as before"
+            inner.tasks["merge:8"].affinity, None,
+            "no known renderer: still no pin"
         );
     }
 
@@ -2230,38 +2218,23 @@ mod tests {
     }
 
     #[test]
-    fn swap_admits_anything_until_the_operator_narrows_it() {
+    fn swap_admits_anything_in_the_catalogue() {
+        // No machine-local roster exists: the shipped catalogue applies and it
+        // restricts nothing, so any preset swaps.
         let (_d, mut inner) = fixture();
         let layout = inner.layout.clone();
         std::fs::create_dir_all(layout.bm_state()).unwrap();
         std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
 
-        // No local roster, so the shipped catalogue applies — and it restricts
-        // nothing. A Northern preset that the old hardcoded Central/South policy
-        // refused is assignable, which is the whole point of the split.
         assert!(inner.op_swap_voice("A", "Minh Đức").is_ok());
-
-        // Narrow it the way an operator would, and the same voice is refused.
-        std::fs::write(
-            layout.roster(),
-            r#"{"version":1,"engines":{"vieneu":{"policy":{"excluded_accents":["Northern"]}}}}"#,
-        )
-        .unwrap();
-        let err = inner
-            .op_swap_voice("A", "Minh Đức")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("neither an admitted preset"), "{err}");
 
         // An admitted voice still swaps.
         let msg = inner.op_swap_voice("A", "Quang Sơn").unwrap();
         assert!(msg.contains("->"), "{msg}");
 
-        // A malformed roster is refused outright rather than silently ignored:
-        // falling back to the catalogue would re-admit every excluded voice.
-        std::fs::write(layout.roster(), "{ this is not json").unwrap();
-        let err = inner.op_swap_voice("A", "Đức Trí").unwrap_err().to_string();
-        assert!(err.contains("parsing"), "{err}");
+        // A stray roster file is ignored, not parsed: there is no overlay.
+        std::fs::write(layout.bm_state().join("voices.json"), "{ this is not json").unwrap();
+        assert!(inner.op_swap_voice("A", "Đức Trí").is_ok());
     }
 
     #[test]
@@ -2269,13 +2242,6 @@ mod tests {
         let (_d, mut inner) = fixture();
         let layout = inner.layout.clone();
         std::fs::create_dir_all(layout.bm_state()).unwrap();
-        // Narrow the policy so the trust rule actually bites: without this the
-        // shipped catalogue admits everything and the test proves nothing.
-        std::fs::write(
-            layout.roster(),
-            r#"{"version":1,"engines":{"vieneu":{"policy":{"excluded_accents":["Northern"]}}}}"#,
-        )
-        .unwrap();
         std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
         std::fs::write(
             layout.root.join("voice-pool.json"),
@@ -2290,7 +2256,7 @@ mod tests {
             .op_swap_voice("A", "Chưa Từng Có")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("neither an admitted preset"), "{err}");
+        assert!(err.contains("neither a preset nor an enrolled clone"), "{err}");
     }
 
     fn busy_inner() -> (tempfile::TempDir, Inner) {
@@ -2473,6 +2439,7 @@ mod tests {
             script: None,
             text: None,
             mp3_b64: None,
+            unit_files: Vec::new(),
         };
         let msg = inner.complete(&done("digest:1", "w1", true));
         assert!(msg.contains("done"), "{msg}");
@@ -2833,6 +2800,7 @@ mod tests {
             script: None,
             text: None,
             mp3_b64: None,
+            unit_files: Vec::new(),
         }
     }
 
@@ -3511,20 +3479,12 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_starved_on_a_remote_store_moves_to_the_one_that_holds_it() {
-        // The failure this exists for, observed 2026-09-22 on ch148:
-        // `merge ch148 failed: 2 segments missing in
-        // /home/thang/bm-worker/data/audio/segments-vieneu-148 (e.g.
-        // t-ade693a0a8a3a449.wav)`, three times, five seconds apart, then
-        // SHELVED. This disk held all 21 takes. The offer's readiness check
-        // reads *this* disk — the complete one — so it kept offering the merge
-        // to the box that was short; `heal_render_for_merge` looked for local
-        // gaps, found none, and did nothing. The pin was the only thing wrong,
-        // and nothing could say so.
-        //
-        // So: a merge that fails with every take present here is the
-        // scheduler's mistake, and the answer is to move the merge to the store
-        // that provably holds the chapter, without a strike.
+    fn a_merge_that_fails_missing_segments_keeps_its_strike() {
+        // A merge pulls the pieces it lacks from the inductor, so `segments
+        // missing` means the render never produced the audio or the inductor
+        // lost it — the chapter's own failure, and the strike stands. The
+        // heal refills local gaps; nothing is re-homed, because nothing is
+        // pinned.
         let (_d, mut inner) = fixture();
         let files = render_chapter(&mut inner, 9, 4);
         for f in &files {
@@ -3548,25 +3508,18 @@ mod tests {
         ));
         let m = &inner.tasks["merge:9"];
         assert_eq!(m.state, TaskState::Pending, "it retries: {msg}");
-        assert_eq!(m.attempts, 0, "and the chapter is not struck for a bad pin");
+        assert_eq!(m.attempts, 1, "and the strike stands");
         assert_eq!(
             m.affinity.as_deref(),
-            Some("127.0.0.1"),
-            "the merge moves to the store that holds it"
-        );
-        assert!(
-            m.detail.contains("this store holds them all"),
-            "and says why: {}",
-            m.detail
+            Some("192.168.2.2"),
+            "the failure rewrites no pin — there is nothing to re-home to"
         );
         assert!(
             inner.render_takes_done(9),
             "nothing re-renders — the audio was never the problem"
         );
-        assert!(msg.contains("merge moved"), "the log names it: {msg}");
 
-        // The other branch still stands: a merge pinned here, or a short disk,
-        // is the chapter's own failure and keeps its strike.
+        // A second identical failure strikes again — no re-home, no excuse.
         let m = inner.tasks.get_mut("merge:9").unwrap();
         m.state = TaskState::Running;
         m.assigned_to = Some("w1".into());
@@ -3577,20 +3530,16 @@ mod tests {
             "merge ch9 failed: 2 segments missing in /home/thang/bm-worker/data/audio/segments-vieneu-9: run the render stage first",
         ));
         assert_eq!(
-            inner.tasks["merge:9"].attempts, 1,
-            "a merge already pinned here is a real failure"
+            inner.tasks["merge:9"].attempts, 2,
+            "repeated missing pieces keep striking"
         );
     }
 
     #[test]
-    fn a_local_render_of_a_chapter_pinned_elsewhere_moves_its_merge_here() {
-        // The split, made and repaired in one step. The offer's affinity filter
-        // lets the local node take a row pinned to any box, so a chapter pinned
-        // to a remote can be spoken partly here and partly there — and the
-        // remote's store can never hold the whole set again. The merge has to
-        // follow the store at the moment the split happens, or the first merge
-        // attempt goes to the short box and fails on a chapter the cluster
-        // rendered in full.
+    fn stale_pins_gate_nothing() {
+        // Rows may still carry affinity from the pinning era (the load
+        // migration releases them, but a test sets them by hand). The offer
+        // ignores pins on every stage, and taking work writes none.
         let (_d, mut inner) = fixture();
         render_chapter(&mut inner, 9, 4);
         for t in inner.tasks.values_mut() {
@@ -3604,36 +3553,28 @@ mod tests {
 
         let offer = inner
             .offer("local")
-            .expect("the local node may take a row pinned to a remote box");
+            .expect("any box takes any take, pins or not");
         assert!(
             offer.task_id.starts_with("render:9:"),
-            "it takes a take of the pinned chapter: {}",
+            "it takes a take of the chapter: {}",
             offer.task_id
         );
         assert_eq!(
-            inner.tasks["merge:9"].affinity.as_deref(),
-            Some("127.0.0.1"),
-            "the merge moves to the box that can end up holding the whole chapter"
+            inner.tasks[&offer.task_id].assigned_to.as_deref(),
+            Some("local"),
+            "stale pins gate nothing — the take is assigned"
         );
         assert_eq!(inner.tasks["merge:9"].state, TaskState::Pending);
-        assert!(
-            inner.tasks["merge:9"].detail.contains("split"),
-            "and says why: {}",
-            inner.tasks["merge:9"].detail
-        );
     }
 
     #[test]
-    fn a_remote_completion_does_not_claim_back_a_merge_that_is_already_home() {
-        // Once the local node holds part of a chapter, the remote box can never
-        // hold all of it — so a remote completion must not re-point the merge
-        // at itself. Without this the pin would flip remote on the next remote
-        // take, the merge would be offered to the short store again, and the
-        // chapter would be re-homed one wasted strike at a time.
+    fn completions_write_no_pins() {
+        // Completions used to point the merge at whoever rendered. Now they
+        // record nothing: the merge pulls its pieces, so who spoke what is
+        // scheduling trivia.
         let (_d, mut inner) = fixture();
         let files = render_chapter(&mut inner, 9, 3);
         inner.ensure_task(9, Stage::Merge);
-        inner.tasks.get_mut("merge:9").unwrap().affinity = Some("127.0.0.1".into());
         {
             let t = inner.tasks.get_mut("render:9:1").unwrap();
             t.state = TaskState::Running;
@@ -3648,13 +3589,11 @@ mod tests {
         ));
 
         assert_eq!(
-            inner.tasks["merge:9"].affinity.as_deref(),
-            Some("127.0.0.1"),
-            "the box that cannot hold the whole chapter does not claim its merge"
+            inner.tasks["merge:9"].affinity, None,
+            "a completion writes no pin"
         );
 
-        // And the ordinary case is untouched: a remote that took the whole
-        // chapter still gets to merge it.
+        // And the ordinary case: a remote completion writes no pin either.
         let files = render_chapter(&mut inner, 11, 2);
         inner.ensure_task(11, Stage::Merge);
         {
@@ -3670,28 +3609,17 @@ mod tests {
             "render ch11 (1 calls)",
         ));
         assert_eq!(
-            inner.tasks["merge:11"].affinity.as_deref(),
-            Some("192.168.2.2"),
-            "a remote merge is still a remote merge"
+            inner.tasks["merge:11"].affinity, None,
+            "still no pin — merges run anywhere"
         );
     }
 
     #[test]
-    fn a_voice_swap_on_a_split_chapter_keeps_the_rerender_on_the_store_that_holds_it() {
-        // The whole of "the sync for remerging after the voice swap does not
-        // work on the remote machine", observed 2026-09-22 on ch148. The
-        // chapter was split: takes 12 and 15 were spoken here, the other 19 on
-        // the remote, so the remote's store holds 19 of 21 for ever. Then a
-        // voice swap re-speaks one take, and `resume_render_after_edit` pins
-        // that re-render to the merge row's owner — so if the row still names
-        // the remote, the take is spoken on the box that cannot hold the
-        // chapter, the split is renewed instead of repaired, and the merge
-        // that follows fails `N segments missing` on a chapter the cluster
-        // rendered in full.
-        //
-        // So a swap must pin to the store that holds the chapter, which is the
-        // merge row's affinity *after* the split has been re-homed. This walks
-        // that end to end.
+    fn a_voice_swap_on_a_split_chapter_leaves_the_rerender_unpinned() {
+        // A chapter spoken on two boxes, then a voice swap re-speaks one
+        // take: the re-render is offerable to any box and the merge stays
+        // exactly as it was — scheduling writes no pins, so a split chapter
+        // can never strand work behind a stale one.
         let (_d, mut inner) = fixture();
         let files = render_chapter(&mut inner, 9, 4);
         for t in inner.tasks.values_mut() {
@@ -3707,15 +3635,15 @@ mod tests {
             vec!["render".into(), "render-segments".into(), "merge".into()],
         );
 
-        // 1. The split: the local node takes a take of the pinned chapter, and
-        //    the merge follows the store to here.
-        let offer = inner.offer("local").expect("the local node may take it");
+        // 1. The split: the local node takes a take of the chapter, stale
+        //    pins or not, and nothing is rewritten.
+        let offer = inner.offer("local").expect("any box takes any take");
         assert!(offer.task_id.starts_with("render:9:"), "{}", offer.task_id);
         let local_take = offer.task_id.clone();
         assert_eq!(
             inner.tasks["merge:9"].affinity.as_deref(),
-            Some("127.0.0.1"),
-            "the merge follows the store"
+            Some("192.168.2.2"),
+            "the offer rewrites no pin — the stale one is the migration's job"
         );
 
         // 2. Both stores fill: the local take lands here, the rest remotely.
@@ -3750,14 +3678,13 @@ mod tests {
         assert!(inner.render_takes_done(9), "the chapter is complete here");
         assert_eq!(
             inner.tasks["merge:9"].affinity.as_deref(),
-            Some("127.0.0.1"),
-            "and no remote completion claimed the merge back"
+            Some("192.168.2.2"),
+            "and no completion rewrote the stale pin either way"
         );
 
         // 3. The voice swap. The cast is rewritten first — that is what a swap
         //    is — and the invalidation then renames every take the speaker
-        //    produced. The box those re-renders are pinned to must be the one
-        //    that holds the chapter.
+        //    produced. Those re-renders stay unpinned: any box speaks them.
         std::fs::write(inner.layout.cast("vieneu"), r#"{"A":"Adam","B":"Adam"}"#).unwrap();
         inner.invalidate_character("vieneu", "A", "Đức Trí");
         let requeued: Vec<String> = inner
@@ -3771,36 +3698,21 @@ mod tests {
         assert!(!requeued.is_empty(), "the swap requeued something");
         for id in &requeued {
             assert_eq!(
-                inner.tasks[id].affinity.as_deref(),
-                Some("127.0.0.1"),
-                "a re-render after a swap belongs on the store that holds the \
-                 chapter, not on the short box: {id}"
+                inner.tasks[id].affinity, None,
+                "a re-render after a swap is offerable to any box: {id}"
             );
         }
         assert_eq!(
-            inner.tasks["merge:9"].affinity.as_deref(),
-            Some("127.0.0.1"),
-            "and the merge is still here"
+            inner.tasks["merge:9"].affinity, None,
+            "and the merge stays unpinned"
         );
     }
 
     #[test]
-    fn a_swap_on_a_chapter_the_remote_holds_keeps_the_rerender_there() {
-        // The counterweight to the test above, and the reason the pin cannot be
-        // "prefer the local node whenever this store holds the chapter".
-        //
-        // That rule looks equivalent to `rehome_starved_merge`'s and is not.
-        // `missing_wavs` reads *this* disk; `collect_units` pulls every unit
-        // home before a render completion is applied, so **every** rendered
-        // chapter is complete here — including the ones a remote holds
-        // perfectly well. Local completeness is therefore no evidence at all
-        // about a remote, and keying the pin on it would drag every surgical
-        // re-render onto the inductor's own box, which is the "warm box never
-        // re-speaks the chapter" property the pin exists for.
-        //
-        // A pin is only known to be wrong *after* the pinned box fails, which
-        // is why `rehome_starved_merge` is driven by a failure and not by a
-        // guess. This test is what says so.
+    fn a_swap_on_a_chapter_the_remote_holds_leaves_the_rerender_unpinned() {
+        // Takes are independent: a re-render after a swap is offerable to any
+        // box, wherever the chapter was spoken. The merge is unpinned too —
+        // it pulls its pieces, wherever it runs.
         let (_d, mut inner) = fixture();
         let files = render_chapter(&mut inner, 9, 4);
         for t in inner.tasks.values_mut() {
@@ -3830,9 +3742,8 @@ mod tests {
             "and still the remote's to merge"
         );
 
-        // The swap. A chapter the remote holds whole is re-speaker there, not
-        // dragged onto this box — the local store being complete proves
-        // nothing about the remote's.
+        // The swap. A chapter the remote holds whole is still re-spoken by
+        // whoever asks first — no warm-box pin.
         std::fs::write(inner.layout.cast("vieneu"), r#"{"A":"Adam","B":"Adam"}"#).unwrap();
         inner.invalidate_character("vieneu", "A", "Đức Trí");
         let requeued: Vec<String> = inner
@@ -3846,11 +3757,32 @@ mod tests {
         assert!(!requeued.is_empty(), "the swap requeued something");
         for id in &requeued {
             assert_eq!(
-                inner.tasks[id].affinity.as_deref(),
-                Some("192.168.2.2"),
-                "the warm box keeps its own chapter: {id}"
+                inner.tasks[id].affinity, None,
+                "re-renders stay unpinned: {id}"
             );
         }
+    }
+
+    #[test]
+    fn load_releases_every_stale_pin() {
+        // The pinning era wrote affinity on render and merge rows; the new
+        // scheduler pins nothing, and loading releases it all so idle boxes
+        // see the work.
+        let (_d, mut inner) = fixture();
+        for (id, stage) in [
+            ("render:1:0", Stage::Render),
+            ("render:1:1", Stage::Render),
+            ("merge:1", Stage::Merge),
+        ] {
+            let mut t = Task::new(1, stage);
+            t.affinity = Some("127.0.0.1".into());
+            inner.tasks.insert(id.into(), t);
+        }
+        assert_eq!(inner.release_pins(), 3);
+        assert_eq!(inner.tasks["render:1:0"].affinity, None);
+        assert_eq!(inner.tasks["render:1:1"].affinity, None);
+        assert_eq!(inner.tasks["merge:1"].affinity, None);
+        assert_eq!(inner.release_pins(), 0, "idempotent");
     }
 
     #[test]
@@ -4360,7 +4292,7 @@ mod tests {
 
     #[test]
     fn a_render_offer_carries_one_chapter_slice_of_the_configured_size() {
-        // The whole point of the batch: one offer, ten takes. The ledger still
+        // The whole point of the batch: one offer, five takes. The ledger still
         // holds one row per take — the grouping is recorded on the row the
         // offer names, so the report has something to settle against.
         let (_d, mut inner) = fixture();
@@ -4375,13 +4307,13 @@ mod tests {
         assert_eq!(
             units.len(),
             bm_core::config::DEFAULT_RENDER_BATCH as usize,
-            "ten takes travel: {units:?}"
+            "five takes travel: {units:?}"
         );
         // In mix order, and the payload matches the plan the merge will read.
         assert_eq!(
             units.iter().map(|u| u.name.clone()).collect::<Vec<_>>(),
-            files[..10].to_vec(),
-            "the units are the chapter's first ten takes, in order"
+            files[..5].to_vec(),
+            "the units are the chapter's first five takes, in order"
         );
         assert!(
             units.iter().all(|u| !u.take_key.is_empty()),
@@ -4389,7 +4321,7 @@ mod tests {
         );
 
         // Every assigned row, and only those.
-        for pos in 0..10 {
+        for pos in 0..5 {
             let t = &inner.tasks[&format!("render:1:{pos}")];
             assert_eq!(
                 t.state,
@@ -4399,26 +4331,163 @@ mod tests {
             assert_eq!(t.assigned_to.as_deref(), Some("w1"));
         }
         assert_eq!(
-            inner.tasks["render:1:10"].state,
+            inner.tasks["render:1:5"].state,
             TaskState::Pending,
-            "the eleventh take is not in this batch"
+            "the sixth take is not in this batch"
         );
         assert_eq!(
             inner.tasks["render:1:0"].batch,
-            (1..10).map(|p| format!("render:1:{p}")).collect::<Vec<_>>(),
+            (1..5).map(|p| format!("render:1:{p}")).collect::<Vec<_>>(),
             "the grouping is recorded once, on the row the offer names"
         );
         assert!(
-            inner.tasks["render:1:5"].batch.is_empty(),
+            inner.tasks["render:1:4"].batch.is_empty(),
             "and not repeated on every member — one fact, one place"
         );
 
-        // The chapter is pinned to the box that took it, so its merge can run.
+        // **Nothing pins.** No take carries affinity, so the next worker to
+        // ask takes the next slice of this chapter instead of opening
+        // another one. See `a_second_worker_deepens_the_chapter_the_first_one_opened`.
+        for pos in 0..6 {
+            assert_eq!(
+                inner.tasks[&format!("render:1:{pos}")].affinity, None,
+                "render:1:{pos} stays unpinned: any box takes the next slice"
+            );
+        }
         assert_eq!(
-            inner.tasks["render:1:24"].affinity.as_deref(),
-            Some("192.168.2.2"),
-            "the whole chapter pins, not just the batch"
+            inner.tasks["render:1:24"].affinity, None,
+            "and so is the last — takes are never pinned"
         );
+    }
+
+    #[test]
+    fn a_second_worker_deepens_the_chapter_the_first_one_opened() {
+        // **The scheduler's whole shape**: takes are never pinned, so the
+        // second worker to ask deepens the chapter the first one opened
+        // instead of opening a new one — and small batches keep every worker
+        // cycling back to the scheduler, where a ready merge outranks the
+        // next render slice.
+        //
+        // Two chapters are rendered, because the symptom is not "the second
+        // worker idles" — it is "the second worker opens a *different* chapter",
+        // and only a second chapter can show that.
+        let (_d, mut inner) = fixture();
+        render_chapter(&mut inner, 1, 25);
+        render_chapter(&mut inner, 2, 25);
+
+        let first = inner.offer("w1").expect("the first worker opens ch1");
+        assert_eq!(first.chapter, 1);
+        assert_eq!(first.task_id, "render:1:0", "from the front of the chapter");
+
+        // A different box asks for work. It must deepen ch1, not open ch2.
+        inner.workers.insert("w2".into(), "127.0.0.2".into());
+        inner
+            .caps
+            .insert("w2".into(), vec!["render-segments".into()]);
+        let second = inner.offer("w2").expect("the second worker gets work");
+        assert_eq!(
+            second.chapter, 1,
+            "the second worker deepens ch1 rather than opening another chapter"
+        );
+        assert_eq!(
+            second.task_id, "render:1:5",
+            "exactly where the first batch stopped — no take is handed out twice"
+        );
+        assert_eq!(
+            second.render_units.as_ref().unwrap().len(),
+            bm_core::config::DEFAULT_RENDER_BATCH as usize,
+            "and it gets a full batch of the same chapter"
+        );
+        assert_eq!(
+            inner.tasks["render:1:0"].assigned_to.as_deref(),
+            Some("w1"),
+            "the first batch is still w1's"
+        );
+    }
+
+    #[test]
+    fn a_chapter_spoken_by_two_boxes_needs_no_merge_pin() {
+        // The other half of sharing a chapter: completions record nothing
+        // about who rendered what, because the merge pulls the pieces it
+        // lacks from the inductor. The merge row simply exists, unpinned,
+        // for whoever asks first.
+        let (_d, mut inner) = fixture();
+        let files = render_chapter(&mut inner, 9, 3);
+        inner.workers.insert("w2".into(), "192.0.2.9".into());
+        // `collect_units` pulls every unit home before a completion is applied,
+        // so by the time either report lands this disk holds the chapter.
+        for f in &files {
+            land(&inner, 9, f);
+        }
+
+        // w1 speaks the first take.
+        {
+            let t = inner.tasks.get_mut("render:9:0").unwrap();
+            t.state = TaskState::Running;
+            t.assigned_to = Some("w1".into());
+        }
+        inner.complete(&completion("w1", "render:9:0", true, "render ch9 (1 calls)"));
+        assert_eq!(
+            inner.tasks["merge:9"].affinity, None,
+            "the first completion writes no pin"
+        );
+
+        // w2 speaks the second. The chapter is now on two stores, and neither
+        // of them is the one that can be proved complete.
+        {
+            let t = inner.tasks.get_mut("render:9:1").unwrap();
+            t.state = TaskState::Running;
+            t.assigned_to = Some("w2".into());
+        }
+        inner.complete(&completion("w2", "render:9:1", true, "render ch9 (1 calls)"));
+        assert_eq!(
+            inner.tasks["merge:9"].affinity, None,
+            "nor does the second — the merge stays unpinned"
+        );
+        assert_eq!(inner.tasks["merge:9"].state, TaskState::Pending);
+    }
+
+    #[test]
+    fn digests_chain_in_order() {
+        // Chapter N reads the bible chapter N-1 wrote, so digest:N is
+        // offerable only after digest:N-1 is Done. Chapter 1 has no
+        // predecessor; a missing previous row (a range starting here) counts
+        // as satisfied rather than deadlocking work that was never enqueued.
+        let (_d, mut inner) = fixture();
+        for (ch, stage, state) in [
+            (1, Stage::Crawl, TaskState::Done),
+            (1, Stage::Digest, TaskState::Done),
+            (2, Stage::Crawl, TaskState::Done),
+            (2, Stage::Digest, TaskState::Pending),
+            (3, Stage::Crawl, TaskState::Done),
+            (3, Stage::Digest, TaskState::Pending),
+        ] {
+            let mut t = Task::new(ch, stage);
+            t.state = state;
+            inner.tasks.insert(t.id(), t);
+        }
+        assert!(inner.upstream_done(1, Stage::Digest));
+        assert!(
+            inner.upstream_done(2, Stage::Digest),
+            "crawl:2 done and digest:1 done — ch2 may go"
+        );
+        // Flip ch1 back to pending: ch2 must wait.
+        inner.tasks.get_mut("digest:1").unwrap().state = TaskState::Pending;
+        assert!(
+            !inner.upstream_done(2, Stage::Digest),
+            "digest:2 waits for digest:1"
+        );
+        assert!(
+            !inner.upstream_done(3, Stage::Digest),
+            "and transitively for the chain"
+        );
+        inner.tasks.get_mut("digest:1").unwrap().state = TaskState::Done;
+        assert!(inner.upstream_done(2, Stage::Digest));
+        // A chapter with no previous row is not blocked by it.
+        inner.tasks.remove("digest:1");
+        assert!(inner.upstream_done(2, Stage::Digest));
+        // Other stages ignore the chain.
+        assert!(inner.upstream_done(2, Stage::Crawl));
     }
 
     #[test]
@@ -4490,25 +4559,25 @@ mod tests {
     #[test]
     fn a_batched_report_settles_every_row_it_covered() {
         // The gate is per file, and the settle is per row: a report that
-        // verified only the take it was named for would leave nine rows
+        // verified only the take it was named for would leave four rows
         // Assigned to a worker that has already answered, and their leases
         // would expire into a second render of takes that landed.
         let (_d, mut inner) = fixture();
         let files = render_chapter(&mut inner, 4, 12);
         let offer = inner.offer("w1").expect("a render is offerable");
         let units = offer.render_units.as_ref().unwrap();
-        assert_eq!(units.len(), 10);
+        assert_eq!(units.len(), 5);
         for u in units {
             land(&inner, 4, &u.name);
         }
 
         let line = inner.complete(&{
-            let mut c = completion("w1", "render:4:0", true, "render ch4 (10 calls)");
-            c.units = 10;
+            let mut c = completion("w1", "render:4:0", true, "render ch4 (5 calls)");
+            c.units = 5;
             c
         });
         assert!(line.contains("done"), "{line}");
-        for pos in 0..10 {
+        for pos in 0..5 {
             let t = &inner.tasks[&format!("render:4:{pos}")];
             assert_eq!(
                 t.state,
@@ -4519,21 +4588,20 @@ mod tests {
             assert!(t.batch.is_empty(), "the grouping is consumed");
         }
         assert_eq!(
-            inner.tasks["render:4:10"].state,
+            inner.tasks["render:4:5"].state,
             TaskState::Pending,
             "a take outside the batch is untouched"
         );
         assert_eq!(
-            inner.tasks["merge:4"].affinity.as_deref(),
-            Some("192.168.2.2"),
-            "the merge still follows the renderer"
+            inner.tasks["merge:4"].affinity, None,
+            "completions write no pin — the merge runs anywhere"
         );
         assert!(files.len() >= 12);
     }
 
     #[test]
     fn a_batched_report_with_one_take_missing_fails_the_whole_batch_by_name() {
-        // A batch is one answer about one offer: a worker whose tenth unit
+        // A batch is one answer about one offer: a worker whose fifth unit
         // never landed did not fail only the first take. And the detail names
         // the file, so the retry is targeted rather than a re-speak of the
         // chapter.
@@ -4541,18 +4609,18 @@ mod tests {
         render_chapter(&mut inner, 5, 12);
         let offer = inner.offer("w1").expect("a render is offerable");
         let units = offer.render_units.as_ref().unwrap().clone();
-        for u in units.iter().take(9) {
+        for u in units.iter().take(4) {
             land(&inner, 5, &u.name);
         }
-        let absent = units[9].name.clone();
+        let absent = units[4].name.clone();
 
         let line = inner.complete(&{
-            let mut c = completion("w1", "render:5:0", true, "render ch5 (10 calls)");
-            c.units = 10;
+            let mut c = completion("w1", "render:5:0", true, "render ch5 (5 calls)");
+            c.units = 5;
             c
         });
         assert!(line.contains("failed"), "{line}");
-        for pos in 0..10 {
+        for pos in 0..5 {
             let t = &inner.tasks[&format!("render:5:{pos}")];
             assert_eq!(t.state, TaskState::Pending, "the batch is requeued as one");
             assert_eq!(t.attempts, 1, "and struck as one");
@@ -4564,7 +4632,7 @@ mod tests {
             assert!(t.batch.is_empty());
         }
         assert_eq!(
-            inner.tasks["render:5:10"].attempts, 0,
+            inner.tasks["render:5:5"].attempts, 0,
             "a take outside the batch takes no strike"
         );
     }

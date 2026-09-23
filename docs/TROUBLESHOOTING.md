@@ -9,7 +9,7 @@ failure with the worker's own error text, and **K** shows it per task.
 | Check | Fix |
 |---|---|
 | Is the inductor up? `curl http://127.0.0.1:8901/api/state` | `make serve` (or press `B` in the TUI, which starts it) |
-| Is a worker connected? `tui --once` → "workers (N)" | `make agent` locally; on other boxes, re-run `make provision BOX=…` which starts workers |
+| Is a worker connected? `tui --once` → "workers (N)" | `make agent` locally; on a remote box, `:prov` in the TUI (`p`) — it provisions **and then launches that box's worker**. `make provision BOX=…` provisions and registers the box but starts **no** worker: it finishes with the box joined to the registry and idle |
 | Is any work enqueued? Tasks pane says "no tasks queued" | press `t` and enter a range like `1 10` |
 | The footer says **disconnected** | the inductor is down or the `--api` URL is wrong (`make tui API=http://box:8901`) |
 
@@ -57,7 +57,13 @@ Common causes per stage:
     stale name still shows up, that box is running an agent from before the fix:
     re-run `make provision BOX=…`. The agent is re-pushed **only when the
     workspace version in `rust/Cargo.toml` changed** — an unchanged version
-    reports "already configured" and pushes nothing, so bump it first.
+    reports "already configured" and pushes nothing, so bump it first, or force
+    the push with `P` / `:reprov` (`provision … --force`). Either way the **push
+    does not replace the running worker**: nothing kills `bm-agent`, and
+    `start_remote_workers` reports `worker already running (pid …)`. Drain first
+    (`:drain` — workers exit once the queue empties) or `X`, then `B` to relaunch
+    them onto the new binary. The local node is never provisioned at all, so there
+    the relaunch is the whole job.
   * **`…; opencode fallback failed: opencode CLI not found`** — the gemini chain
     ran out *and* the fallback behind it is not installed on the box that took
     the task. `opencode` is a **binary**, not a pip package, and provisioning
@@ -89,21 +95,23 @@ Common causes per stage:
     start a fresh one: `pkill -f tts_server.py` on that box. The `vieneu`
     engine reads no key and is unaffected.
 * **merge fails** — usually `N segments missing in <seg dir> (e.g. <name>.wav)`.
-  A merge reads its segments **from the box that runs it**, and it makes none of
-  its own, so the question is always *which box* and *what does that box hold* —
-  not whether the cluster rendered the chapter. Two things produce the message:
-  * **the box never wrote them.** The merge is pinned by **affinity** to the box
-    that rendered the chapter, and the local node is exempt from that pin, so a
-    remote worker can pick up a merge whose segments are on the inductor's disk
-    and not its own. This is what a **voice swap** looks like from a remote box:
-    the swap invalidates the *local* store only, so the new narrator's title wav
-    is missing on a box that only ever had the old one. The message naming a
-    `title_<voice>.wav` is the tell.
-  * **the render did not finish the chapter.** A render offer used to carry only
-    the units the inductor's store lacked, so a box could end up holding a
-    strict subset; the offer now names every unit and the worker skips what it
-    already has, which makes any box that finishes a render hold the whole
-    chapter. A box on an older agent can still do this.
+  A merge reads its segments **from the box that runs it** (pulling any piece
+  it lacks from the inductor's store over the tunnel first), and it makes none
+  of its own — so the question is what the **inductor's store** holds, not
+  whether the cluster rendered the chapter. Two things produce the message:
+  * **the store never got them.** Every render report ships its wavs and the
+    inductor stores them before the row turns `Done`; a box on an older agent
+    reports without shipping, and `collect_units` then has to pull each unit
+    from that box after the fact — if the box is gone by then, the file is
+    gone. This is also what a **voice swap** looks like: the swap invalidates
+    the store's copies only, and until the re-render's completion lands (with
+    its wavs) the heal requeues the takes the store lacks. The message naming
+    a `title_<voice>.wav` is the tell.
+  * **the render did not finish the chapter.** A render offer names every unit
+    and the worker skips what it already has, which makes any box that
+    finishes a render hold the whole chapter — but `Done` rows from before
+    that fix (or a failed collection) can still claim files that were never
+    written. A box on an older agent can still do this.
   Fix with `F` on the merge row — it cascades to the render, which is the stage
   that can actually make the wavs. The ledger's `u`/`F` work on a task in any
   state; the `:retry` forms move **shelved** tasks only, so `:retry 24` on a

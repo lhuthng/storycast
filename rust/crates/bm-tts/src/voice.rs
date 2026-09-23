@@ -90,30 +90,55 @@ impl Roster {
         self.voices.get(name)
     }
 
-    /// Resolve a requested voice, falling back to the store's default and then
-    /// to any voice at all.
+    /// Resolve a requested voice. Exact match first, then a
+    /// case/diacritic/separator-insensitive one (so a key like `minh-duc`
+    /// meets its display name `Minh Đức`).
     ///
-    /// The fallback is deliberate and matches the reference's behaviour of
-    /// answering *something*: a render that names a voice this box does not have
-    /// should be audible and obviously wrong rather than silent.
+    /// A named-but-unknown voice is an error, never a fallback: answering
+    /// with the default voice bakes the wrong speaker into renders and
+    /// previews that sound right-length and right-quality, so nobody notices
+    /// until the merge is mixed. Only "no voice asked" (`None`/empty) takes
+    /// the store default.
     pub fn resolve(&self, name: Option<&str>) -> Result<&Voice> {
-        if let Some(n) = name {
-            if let Some(v) = self.voices.get(n) {
-                return Ok(v);
-            }
+        let want = name.map(str::trim).filter(|n| !n.is_empty());
+        let Some(n) = want else {
+            return self
+                .default_voice
+                .as_ref()
+                .and_then(|d| self.voices.get(d))
+                .or_else(|| self.voices.values().next())
+                .context("the voice store is empty");
+        };
+        if let Some(v) = self.voices.get(n) {
+            return Ok(v);
         }
-        if let Some(d) = self.default_voice.as_ref().and_then(|d| self.voices.get(d)) {
-            return Ok(d);
+        let folded = norm(n);
+        if let Some(v) = self
+            .voices
+            .iter()
+            .find(|(k, _)| norm(k) == folded)
+            .map(|(_, v)| v)
+        {
+            return Ok(v);
         }
-        self.voices
-            .values()
-            .next()
-            .context("the voice store is empty")
+        bail!(
+            "unknown voice {n:?} on this box — :prov to push it ({} known)",
+            self.voices.len()
+        )
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.voices.keys().map(|s| s.as_str())
     }
+}
+
+/// Folded voice id: `bm_core::util::fold` with separators dropped, so store
+/// keys, display names and request values meet whatever form each side uses.
+fn norm(s: &str) -> String {
+    bm_core::util::fold(s)
+        .chars()
+        .filter(|c| !matches!(c, '-' | '_' | ' '))
+        .collect()
 }
 
 #[cfg(test)]
@@ -148,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_falls_back_to_the_default_then_to_anything() {
+    fn resolve_refuses_unknown_but_keeps_the_default_for_none() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_store(
             dir.path(),
@@ -157,8 +182,14 @@ mod tests {
         );
         let r = Roster::load(&p).unwrap();
         assert_eq!(r.resolve(Some("A")).unwrap().name, "A");
-        assert_eq!(r.resolve(Some("nope")).unwrap().name, "B");
+        // No silent fallback: a misnamed voice fails loudly instead of
+        // rendering the wrong speaker into a merge.
+        let err = r.resolve(Some("nope")).unwrap_err().to_string();
+        assert!(err.contains("unknown voice"), "{err}");
+        assert!(err.contains(":prov"), "{err}");
+        // "No voice asked" still takes the store default.
         assert_eq!(r.resolve(None).unwrap().name, "B");
+        assert_eq!(r.resolve(Some("  ")).unwrap().name, "B");
 
         // No default recorded: any voice beats silence.
         let p2 = write_store(
@@ -166,6 +197,18 @@ mod tests {
             r#"{"presets":{"A":{"speaker_emb":[1.0],"codes":[]}}}"#,
         );
         assert_eq!(Roster::load(&p2).unwrap().resolve(None).unwrap().name, "A");
+    }
+
+    #[test]
+    fn resolve_matches_keys_against_display_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_store(
+            dir.path(),
+            r#"{"presets":{"Minh Đức":{"speaker_emb":[1.0],"codes":[]}}}"#,
+        );
+        let r = Roster::load(&p).unwrap();
+        assert_eq!(r.resolve(Some("minh-duc")).unwrap().name, "Minh Đức");
+        assert_eq!(r.resolve(Some("MINH DUC")).unwrap().name, "Minh Đức");
     }
 
     #[test]

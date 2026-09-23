@@ -16,14 +16,23 @@ use std::path::Path;
 /// A render is scheduled per **take** (one `render:<ch>:<pos>` row each, so a
 /// local edit costs one segment rather than a chapter), but a worker pays for
 /// every offer: a process-to-process round trip, a heartbeat, a completion
-/// report and a unit collection per take. Batching ten takes into one offer
+/// report and a unit collection per take. Batching five takes into one offer
 /// amortises that without changing what the ledger records — the batch is an
 /// *assignment* detail, and each take still settles on its own row.
 ///
-/// Ten is a size that keeps an offer's JSON small (a take is text plus a few
+/// Five is a size that keeps an offer's JSON small (a take is text plus a few
 /// numbers) and its lease meaningful, while being a large enough slice that
-/// the per-offer overhead stops mattering.
-pub const DEFAULT_RENDER_BATCH: u32 = 10;
+/// the per-offer overhead stops mattering — and a small enough one that a
+/// worker cycles back to the scheduler quickly, where a ready merge outranks
+/// its next render batch.
+///
+/// **The batch is also the unit of sharing.** It is the slice one box claims,
+/// and takes are never pinned, so the rest of the chapter stays claimable
+/// and the next worker to ask deepens this chapter instead of opening
+/// another one. A smaller batch therefore does not give one box less work
+/// overall — it lets more boxes work on the *same* chapter at once, which is
+/// what makes the first artifact appear sooner.
+pub const DEFAULT_RENDER_BATCH: u32 = 5;
 
 /// The largest batch a workspace may ask for.
 ///
@@ -106,6 +115,12 @@ pub struct Settings {
     /// ledger rows one offer assigns, which is scheduling, not synthesis. A
     /// worker that predates this simply receives several `render_units` in one
     /// offer, which it already loops over.
+    ///
+    /// **Smaller means more sharing, not less work per box.** Only the batch is
+    /// pinned to the box that takes it, so a small batch is how several workers
+    /// end up on the *same* chapter — see [`DEFAULT_RENDER_BATCH`]. Turning it
+    /// down to "make the scope smaller" without that pin being batch-scoped is
+    /// what once put every worker on a different chapter.
     #[serde(default = "default_render_batch")]
     pub render_batch: u32,
     /// App-wide ssh defaults for binding machines: user, port, key path.
@@ -471,14 +486,14 @@ mod tests {
     }
 
     #[test]
-    fn the_render_batch_defaults_to_ten_and_a_saved_value_wins() {
+    fn the_render_batch_defaults_to_five_and_a_saved_value_wins() {
         // Three ways the setting can arrive, and the rule for each:
-        //   * absent from settings.json  → ten (the compiled default)
+        //   * absent from settings.json  → five (the compiled default)
         //   * present                    → that value, not the default
         //   * nonsense                   → clamped, never obeyed and never fatal
         let omitted: Settings = serde_json::from_str(r#"{"engine":"vieneu"}"#).unwrap();
         assert_eq!(omitted.render_batch, DEFAULT_RENDER_BATCH);
-        assert_eq!(omitted.render_batch(), 10, "and the scheduler sees ten");
+        assert_eq!(omitted.render_batch(), 5, "and the scheduler sees five");
 
         let chosen: Settings = serde_json::from_str(r#"{"render_batch":3}"#).unwrap();
         assert_eq!(

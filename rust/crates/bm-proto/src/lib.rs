@@ -128,8 +128,8 @@ pub struct Task {
     pub lease_until: Option<u64>,
     pub detail: String,
     pub updated: u64,
-    /// Machine that must run this task. Set on `Merge` so the segments never
-    /// cross the network: merge runs wherever the render happened.
+    /// Unused: no row is ever pinned. Kept for ledger compatibility so old
+    /// files still parse — the loader releases every stored pin.
     #[serde(default)]
     pub affinity: Option<String>,
     /// `Merge` only: the sound design this chapter's artifact was mixed under —
@@ -576,6 +576,15 @@ pub struct HeartbeatAck {
     pub shutdown: bool,
 }
 
+/// One rendered take riding with its completion report, so the inductor
+/// holds the audio the moment the take is Done — on every path, including
+/// the hook's, where no collection round trip is possible.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnitFile {
+    pub name: String,
+    pub b64: String,
+}
+
 /// Sent when a task finishes (successfully or not).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Complete {
@@ -617,6 +626,11 @@ pub struct Complete {
     /// a remote merge's product comes home without shared storage.
     #[serde(default)]
     pub mp3_b64: Option<String>,
+    /// Render stage: the takes this report produced, base64. The inductor
+    /// stores them before applying the completion, so a Done take's file is
+    /// always home — no matter which channel delivered the report.
+    #[serde(default)]
+    pub unit_files: Vec<UnitFile>,
 }
 
 /// The `worker_id` an operator's own digest reports under.

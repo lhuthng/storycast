@@ -88,8 +88,7 @@ impl Inner {
             .get("segments")
             .and_then(|s| s.as_array())
             .with_context(|| format!("{} has no `segments` array", script_path.display()))?;
-        let policy = bm_core::cast::policy_for_bible(&engine, &self.layout.bible())
-            .with_context(|| format!("casting policy for engine {engine:?}"))?;
+        let policy = bm_core::cast::policy_for_bible(&engine);
         let cast = bm_core::cast::load_cast(
             &script_path,
             &self.layout.cast(&engine),
@@ -370,83 +369,15 @@ impl Inner {
                 t.lease_until = None;
                 t.detail = why.to_string();
                 t.updated = now;
+                // Requeued work is offerable to any box — never re-pinned.
+                t.affinity = None;
             }
         }
     }
 
-    /// Pin a chapter's pending takes to the box that took the first one.
-    ///
-    /// This is what keeps a merge possible: takes spread across boxes leave no
-    /// single store holding the chapter, and the mixer runs where the segments
-    /// are. The merge's own affinity already reads that way; here it is
-    /// established at the first assignment instead of discovered at the merge.
-    ///
-    /// **A pin is not a lock.** The offer's affinity filter has an escape that
-    /// lets the local node take a row pinned to any box, so a pin only holds
-    /// against *other remotes*. The local node taking a pinned row is the one
-    /// way a chapter splits across two stores — see [`Self::point_merge_here`]
-    /// for the half that keeps the merge honest about it.
-    pub(crate) fn pin_chapter_takes(&mut self, chapter: u32, machine: &str) {
-        for t in self.tasks.values_mut() {
-            if t.stage == Stage::Render && t.chapter == chapter && t.affinity.is_none() {
-                t.affinity = Some(machine.to_string());
-            }
-        }
-    }
-
-    /// This chapter's merge is pinned to a box other than the local node.
-    ///
-    /// The pin, not the audio, is then the thing to doubt: the local store is
-    /// the only one the inductor can prove complete (see
-    /// [`Self::point_merge_here`]), so a merge pinned away from it is a claim
-    /// the inductor cannot check.
-    pub(crate) fn merge_pinned_elsewhere(&self, chapter: u32) -> bool {
-        self.tasks
-            .get(&format!("{}:{chapter}", Stage::Merge))
-            .and_then(|t| t.affinity.as_deref())
-            .map(|m| !bm_core::is_local_node(m))
-            .unwrap_or(false)
-    }
-
-    /// Re-home a chapter's merge to `machine` — the box that holds its audio —
-    /// and clear the strikes, because the chapter is not what failed.
-    ///
-    /// This is the other half of `pin_chapter_takes`. A merge reads its
-    /// segments from the disk it runs on, and it is offered wherever its
-    /// affinity names; when the affinity names a box whose store is short, the
-    /// merge fails `N segments missing` on a chapter the cluster rendered in
-    /// full, three times, and shelves. Nothing in the ledger could correct that,
-    /// because the offer's readiness check reads *this* store — the one that is
-    /// complete — and `heal_render_for_merge` only looked for local gaps, of
-    /// which there are none.
-    ///
-    /// So the fix is the pin. `collect_units` pulls every unit home before a
-    /// render completion is applied, so a chapter whose takes are all `Done` is
-    /// complete on this disk, and the local node can always merge it. The
-    /// remote box cannot be checked at all. Moving the merge here is therefore
-    /// the only move that is *known* to work, and it is why the re-home is safe
-    /// to make without asking the operator.
-    pub(crate) fn point_merge_here(&mut self, chapter: u32, machine: &str, why: &str) -> bool {
-        let key = format!("{}:{chapter}", Stage::Merge);
-        let now = now_secs();
-        match self.tasks.get_mut(&key) {
-            Some(t) => {
-                t.state = TaskState::Pending;
-                t.attempts = 0;
-                t.assigned_to = None;
-                t.lease_until = None;
-                t.affinity = Some(machine.to_string());
-                t.detail = why.to_string();
-                t.updated = now;
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Apply a local edit's plan diff and requeue what it changed, pinned to
-    /// the box that holds the chapter so the warm box speaks only the changed
-    /// takes. Returns the number of files the diff superseded.
+    /// Apply a local edit's plan diff and requeue what it changed, unpinned so
+    /// any box speaks the changed takes. Returns the number of files the diff
+    /// superseded.
     ///
     /// `None` from the planner means the chapter cannot be planned here; the
     /// caller's edit is left alone rather than acted on from a guess.
@@ -455,12 +386,6 @@ impl Inner {
         let before: BTreeSet<String> = RenderPlan::load(&path)
             .map(|p| p.files().into_iter().collect())
             .unwrap_or_default();
-        // Read the pin before anything is requeued: the merge row is where the
-        // chapter's owner is recorded, and the requeue below clears it.
-        let pin = self
-            .tasks
-            .get(&format!("{}:{chapter}", Stage::Merge))
-            .and_then(|t| t.affinity.clone());
         let Some(plan) = self.replan_render_takes(chapter) else {
             return 0;
         };
@@ -477,9 +402,8 @@ impl Inner {
         // **Only the takes the diff made work.** Resetting the whole chapter
         // here would re-offer every unchanged segment; the plan already knows
         // which ones moved, so a retag costs the retagged runs and nothing
-        // else. They also take the merge's pin: a re-render belongs where the
-        // chapter already is, so the warm box speaks the changed takes instead
-        // of a cold one re-speaking the chapter.
+        // else. No pin: any box speaks them, and the units land on the
+        // inductor before their completions are applied.
         for t in self.tasks.values_mut() {
             if t.stage != Stage::Render || t.chapter != chapter || t.state != TaskState::Pending {
                 continue;
@@ -489,12 +413,14 @@ impl Inner {
             t.lease_until = None;
             t.detail = why.to_string();
             t.updated = now;
-            if let Some(p) = &pin {
-                t.affinity = Some(p.clone());
-            }
+            // And any pin from the batch-pinning era goes: takes are
+            // independent, so a stale pin would only hide them from idle
+            // boxes again.
+            t.affinity = None;
         }
         // And the mix comes back: its inputs moved, so any published mp3 is
-        // stale. Pinned to the same box for the same reason.
+        // stale. Unpinned like everything else — whichever box asks first
+        // merges it, pulling the pieces it lacks.
         let key = format!("{}:{chapter}", Stage::Merge);
         match self.tasks.get_mut(&key) {
             Some(t) => {
@@ -504,13 +430,12 @@ impl Inner {
                 t.lease_until = None;
                 t.detail = why.to_string();
                 t.updated = now;
-                t.affinity = pin.clone();
+                t.affinity = None;
             }
             None => {
                 let mut t = Task::new(chapter, Stage::Merge);
                 t.detail = why.to_string();
                 t.updated = now;
-                t.affinity = pin.clone();
                 self.tasks.insert(key, t);
             }
         }

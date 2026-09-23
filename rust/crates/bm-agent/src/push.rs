@@ -57,7 +57,6 @@ use axum::{
 use bm_core::{config::Settings, Layout};
 use bm_proto::{Complete, Heartbeat, TaskOffer};
 use serde::Deserialize;
-use serde_json::Value;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
@@ -100,33 +99,29 @@ pub(crate) struct Push {
     /// model once this is older than its idle budget — the sidecar is kept
     /// warm *between* tasks, not forever.
     pub(crate) last_task_end: AtomicU64,
+    /// Data-plane dial-out, and only that: the reverse tunnel's worker-side
+    /// end (`http://127.0.0.1:{hook port}`), which *is* the inductor's control
+    /// API while the inductor holds the tunnel open. A merge pulls the take
+    /// files it lacks through it; scheduling still never asks. Empty where
+    /// the tunnel is not expected, and a down tunnel fails the pull loudly
+    /// rather than mixing a partial chapter.
+    pub(crate) fetch_http: reqwest::Client,
+    pub(crate) fetch_base: String,
 }
 
 /// A task outcome, stored where the completion hook can find it.
 ///
-/// `run_offer` already ships every artifact as it produces them (units are
-/// written to disk as they are rendered, the merge's mp3 comes home in the
-/// report) — so the only thing a dead uplink loses is the word *done*. The
-/// task handler stashes the outcome here right after building it, and then
-/// answers on the connection that asked, exactly as before. The stash costs
-/// nothing while the primary channel is healthy (the hook sends it only after
-/// long inductor silence — see `hook::supervise`) and is the difference
-/// between a finished stage and a re-rendered one when the uplink blips
-/// mid-task.
-fn stash_outcome(push: &Push, offer: &TaskOffer, ok: bool, detail: String, duration_secs: f64, delta: Option<Value>, units: u64, script: Option<Value>, text: Option<String>, mp3_b64: Option<String>) {
+/// `run_offer` already ships every artifact as it produces them (units ride
+/// with the report, the merge's mp3 comes home in it) — so the only thing a
+/// dead uplink loses is the word *done*. The task handler stashes the whole
+/// report right after building it, and then answers on the connection that
+/// asked, exactly as before. The stash costs nothing while the primary
+/// channel is healthy (the hook sends it only after long inductor silence —
+/// see `hook::supervise`) and is the difference between a finished stage and
+/// a re-rendered one when the uplink blips mid-task.
+fn stash_outcome(push: &Push, report: &Complete) {
     if let Ok(mut p) = push.shared.lock() {
-        p.pending = Some(Complete {
-            worker_id: push.who.worker_id.clone(),
-            task_id: offer.task_id.clone(),
-            ok,
-            detail,
-            duration_secs,
-            bible_delta: delta,
-            units,
-            script,
-            text,
-            mp3_b64,
-        });
+        p.pending = Some(report.clone());
     }
 }
 
@@ -240,6 +235,11 @@ async fn task(
     // address is the inductor's own reverse tunnel and which fires only when
     // the inductor has gone silent — a backup channel, never a rival to this
     // answer.
+    //
+    // A merge here mixes local pieces plus whatever it pulls through the
+    // reverse tunnel (`fetch_*`): a box behind NAT cannot be handed pieces
+    // any other way, so a merge offered here runs where the audio already
+    // is or fails loudly by name.
     let started = std::time::Instant::now();
     let result = run_offer(
         &push.layout,
@@ -247,6 +247,7 @@ async fn task(
         &offer,
         &push.shared,
         &mut sidecar,
+        Some((&push.fetch_http, push.fetch_base.as_str())),
     )
     .await;
     // Deliberately **no** `sidecar.stop()` here: the sidecar is worker-owned
@@ -272,37 +273,27 @@ async fn task(
                 script,
                 text,
                 mp3_b64,
+                unit_files,
             } = done;
-            let duration_secs = started.elapsed().as_secs_f64();
-            // Stash before answering: if the connection below dies in flight,
-            // this outcome is the only copy on earth (well — and on this
-            // disk, for renders). The hook delivers it when silence says the
-            // inductor never heard the answer.
-            stash_outcome(
-                &push,
-                &offer,
-                ok,
-                detail.clone(),
-                duration_secs,
-                delta.clone(),
-                units,
-                script.clone(),
-                text.clone(),
-                mp3_b64.clone(),
-            );
-            Json(Complete {
+            let report = Complete {
                 worker_id: push.who.worker_id.clone(),
                 task_id: offer.task_id.clone(),
                 ok,
                 detail,
-                duration_secs,
+                duration_secs: started.elapsed().as_secs_f64(),
                 bible_delta: delta,
                 units,
                 script,
                 text,
                 mp3_b64,
-            })
-            .into_response()
+                unit_files,
+            };
+            // Stash before answering: if the connection below dies in flight,
+            // this outcome is the only copy on earth (well — and on this
+            // disk, for renders). The hook delivers it when silence says the
+            // inductor never heard the answer.
+            stash_outcome(&push, &report);
+            Json(report).into_response()
         }
         // A stage that *failed* is an answer, not a transport error — and the
         // pull path reports it exactly this way. A 500 here would make the
@@ -310,32 +301,21 @@ async fn task(
         // worker had in fact finished failing, leaving the chapter assigned
         // until its lease expired.
         Err(e) => {
-            let detail = format!("{} ch{} failed: {e:#}", offer.stage, offer.chapter);
-            stash_outcome(
-                &push,
-                &offer,
-                false,
-                detail.clone(),
-                started.elapsed().as_secs_f64(),
-                None,
-                0,
-                None,
-                None,
-                None,
-            );
-            Json(Complete {
+            let report = Complete {
                 worker_id: push.who.worker_id.clone(),
                 task_id: offer.task_id.clone(),
                 ok: false,
-                detail,
+                detail: format!("{} ch{} failed: {e:#}", offer.stage, offer.chapter),
                 duration_secs: started.elapsed().as_secs_f64(),
                 bible_delta: None,
                 units: 0,
                 script: None,
                 text: None,
                 mp3_b64: None,
-            })
-            .into_response()
+                unit_files: Vec::new(),
+            };
+            stash_outcome(&push, &report);
+            Json(report).into_response()
         }
     }
 }
@@ -517,6 +497,8 @@ mod tests {
             // a test that never polls does not trip it immediately.
             last_contact: AtomicU64::new(bm_proto::now_secs()),
             last_task_end: AtomicU64::new(bm_proto::now_secs()),
+            fetch_http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            fetch_base: "http://127.0.0.1:1".into(),
         })
     }
 

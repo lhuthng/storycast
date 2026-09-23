@@ -101,6 +101,22 @@ impl Inner {
     /// render is finished" and "the merge can run" are one question with one
     /// answer instead of two derivations that can drift.
     pub(crate) fn upstream_done(&self, chapter: u32, stage: Stage) -> bool {
+        // Digests chain: chapter N reads the bible chapter N-1 wrote, so N is
+        // offerable only after N-1's digest is Done. A missing previous row
+        // (a range that starts here, a hand-written ledger) counts as
+        // satisfied — otherwise work that was never enqueued would block work
+        // that was. Chapter 1 (and 0) have no predecessor.
+        if stage == Stage::Digest && chapter > 1 {
+            let prev = format!("{}:{}", Stage::Digest.as_str(), chapter - 1);
+            let ready = self
+                .tasks
+                .get(&prev)
+                .map(|t| t.state == TaskState::Done)
+                .unwrap_or(true);
+            if !ready {
+                return false;
+            }
+        }
         stage.upstream().iter().all(|u| {
             if *u == Stage::Render {
                 return self.render_takes_done(chapter);

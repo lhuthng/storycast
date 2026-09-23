@@ -16,7 +16,7 @@ use std::path::Path;
 /// binary name but no pkill — so neither can match itself. Combining them
 /// reintroduces the kill-own-shell bug through the launch line's literal.
 fn remote_worker_check_script() -> String {
-    "pgrep -f 'bm-agent worke[r]' | tr '\\n' ',' | sed 's/,$//;s/^/ALREADY:/'".into()
+    "pgrep -f 'bm-agent.*worke[r]' | tr '\\n' ',' | sed 's/,$//;s/^/ALREADY:/'".into()
 }
 
 /// The remote half of the launch. **No inductor URL is passed**, and that is
@@ -266,13 +266,18 @@ pub async fn stop_backend(layout_root: &Path) -> Vec<String> {
 }
 
 /// Kill script for worker processes. The `[r]` is load-bearing: `pkill -f`
-/// matches full command lines, so a plain `bm-agent worker` pattern would
-/// match this very command and kill its own shell. The bracketed form matches
-/// `bm-agent worker` without ever matching its own literal.
+/// matches full command lines, so a plain `worker` pattern would match this
+/// very command and kill its own shell. The bracketed form matches without
+/// ever matching its own literal.
+///
+/// The `.*` is load-bearing too: a worker is launched as `./bm-agent --root
+/// … worker …`, so `bm-agent` and `worker` never sit adjacently in its command
+/// line. The old contiguous `bm-agent worke[r]` pattern matched nothing, old
+/// workers survived every sweep, and relaunches died on the taken port.
 fn worker_kill_script() -> String {
-    "pkill -f 'bm-agent worke[r]' 2>/dev/null; sleep 1; \
-     pkill -9 -f 'bm-agent worke[r]' 2>/dev/null; sleep 1; \
-     echo left=$(pgrep -f 'bm-agent worke[r]' 2>/dev/null | wc -l)"
+    "pkill -f 'bm-agent.*worke[r]' 2>/dev/null; sleep 1; \
+     pkill -9 -f 'bm-agent.*worke[r]' 2>/dev/null; sleep 1; \
+     echo left=$(pgrep -f 'bm-agent.*worke[r]' 2>/dev/null | wc -l)"
         .into()
 }
 
@@ -629,7 +634,7 @@ mod tests {
         }
         assert!(
             !worker_kill_script().contains("bm-agent worker"),
-            "verbatim pattern would self-match"
+            "contiguous pattern matches nothing: the launch puts --root between them"
         );
         assert!(
             !sidecar_kill_script().contains("tts_server.py"),
@@ -668,6 +673,24 @@ mod tests {
             "a launched worker must not be given an inductor address: {launch}"
         );
         assert!(launch.contains("worker --serve-tasks"), "{launch}");
+        // The sweep patterns must match what this launch produces. The worker
+        // is started as `./bm-agent --root … worker …`, so `bm-agent` and
+        // `worker` never sit adjacently: a contiguous kill pattern matches
+        // nothing, old workers survive every sweep, and relaunches die on the
+        // taken port. Both words in order, never adjacent.
+        for script in [worker_kill_script(), remote_worker_check_script()] {
+            assert!(script.contains("bm-agent.*worke[r]"), "{script}");
+        }
+        let argv: &str = &launch;
+        let (a, w) = (
+            argv.find("bm-agent").expect("binary in launch"),
+            argv.find("worker --serve-tasks").expect("subcommand in launch"),
+        );
+        assert!(a < w, "binary before subcommand: {argv}");
+        assert!(
+            !argv.contains("bm-agent worker"),
+            "never adjacent — the contiguous pattern is what broke: {argv}"
+        );
         // The root travels with the launch: the worker mirror has no rust/
         // tree, so a child left to discover its own root found nothing.
         assert!(launch.contains("--root \"$HOME/bm-worker\""), "{launch}");
