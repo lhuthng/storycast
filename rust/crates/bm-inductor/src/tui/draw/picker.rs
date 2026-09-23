@@ -151,7 +151,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                 let msg = if app.roster.is_none() {
                     "no roster yet".to_string()
                 } else if picker.filter.trim().is_empty() {
-                    "no speakers known yet — run t (translate) or v (voices) first".to_string()
+                    "no speakers known yet — :t (translate) or :v (voices) first".to_string()
                 } else {
                     format!(
                         "no speaker matches “{}” — Enter accepts it as a new character",
@@ -184,7 +184,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                         ];
                         if current.is_empty() {
                             spans.push(Span::styled(
-                                "unassigned — v (voices) fills gaps".to_string(),
+                                "unassigned — :v (voices) fills gaps".to_string(),
                                 Style::default().fg(Color::DarkGray),
                             ));
                         } else {

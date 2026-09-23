@@ -2927,6 +2927,122 @@ mod tests {
     }
 
     #[test]
+    fn a_manual_digest_for_a_chapter_with_no_row_creates_it() {
+        // Working ahead of the enqueue: the operator digests the next chapter
+        // before any worker task exists for it, so there is no row to report
+        // against. The report creates it rather than bouncing as unknown —
+        // otherwise the D screen could never offer that chapter.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        assert!(!inner.tasks.contains_key("digest:8"));
+
+        let mut c = completion(
+            bm_proto::MANUAL_WORKER,
+            "digest:8",
+            true,
+            "digest ch8 by hand",
+        );
+        c.script = Some(serde_json::json!({
+            "title": "Tám", "atmosphere": "quiet", "roster": ["Narrator"],
+            "mentions": {}, "fixes": [],
+            "segments": [{"speaker": "Narrator", "text": "Xong."}],
+        }));
+        c.bible_delta = Some(serde_json::json!({
+            "new_characters": [], "new_aliases": {},
+            "roster": ["Narrator"], "segments": [],
+        }));
+        let line = inner.complete(&c);
+        assert!(!line.contains("unknown task"), "{line}");
+        assert_eq!(inner.tasks["digest:8"].state, TaskState::Done, "{line}");
+        assert!(
+            layout.script(8).is_file(),
+            "the script landed where downstream stages read it"
+        );
+    }
+
+    #[test]
+    fn a_workers_late_failure_after_a_manual_digest_is_stale_not_a_strike() {
+        // The race the other way: the box was grinding on the chapter the
+        // operator just finished, and its failure arrives after. It must not
+        // strike the row — three such late failures would shelve a digested
+        // chapter and send the next worker to redo finished work.
+        let (_d, mut inner) = fixture();
+        let mut t = Task::new(7, Stage::Digest);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w1".into());
+        t.lease_until = Some(now_secs() + 600);
+        inner.tasks.insert("digest:7".into(), t);
+
+        let mut c = completion(
+            bm_proto::MANUAL_WORKER,
+            "digest:7",
+            true,
+            "digest ch7 by hand",
+        );
+        c.script = Some(serde_json::json!({
+            "title": "Bảy", "atmosphere": "quiet", "roster": ["Narrator"],
+            "mentions": {}, "fixes": [],
+            "segments": [{"speaker": "Narrator", "text": "Xong."}],
+        }));
+        let _ = inner.complete(&c);
+
+        let late = inner.complete(&completion("w1", "digest:7", false, "model 503"));
+        assert!(late.contains("stale"), "{late}");
+        let row = &inner.tasks["digest:7"];
+        assert_eq!(row.state, TaskState::Done);
+        assert_eq!(row.attempts, 0, "no strike from a race the operator won");
+    }
+
+    #[test]
+    fn a_merge_that_outruns_its_plan_replans_instead_of_failing_again() {
+        // The stale-plan loop: a digest lands after the render plan was
+        // built, so the recorded take list is short of the timeline. Without
+        // a heal the merge fails the same way three times into shelved, and
+        // a retry just re-offers the same stale plan. The failure rebuilds
+        // the plan from the current script instead.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.script(7),
+            r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"B","text":"y"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
+        inner.materialize_render_takes(7);
+        assert!(inner.tasks.contains_key("render:7:1"));
+        assert!(!inner.tasks.contains_key("render:7:2"));
+
+        // The digest lands afterwards: three runs under a two-take plan.
+        std::fs::write(
+            layout.script(7),
+            r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"B","text":"y"},{"speaker":"A","text":"z"}]}"#,
+        )
+        .unwrap();
+        let mut m = Task::new(7, Stage::Merge);
+        m.state = TaskState::Running;
+        m.assigned_to = Some("w1".into());
+        m.lease_until = Some(now_secs() + 600);
+        inner.tasks.insert("merge:7".into(), m);
+
+        let line = inner.complete(&completion(
+            "w1",
+            "merge:7",
+            false,
+            "timeline has 3 turns for 2 rendered segments — the render plan and the timeline disagree",
+        ));
+        assert!(!line.contains("stale"), "{line}");
+        assert!(
+            inner.tasks.contains_key("render:7:2"),
+            "the new run is work again: {line}"
+        );
+        assert_eq!(
+            inner.tasks["merge:7"].state,
+            TaskState::Pending,
+            "the merge keeps its strike and retries against the fresh plan"
+        );
+    }
+
+    #[test]
     fn a_render_report_with_missing_files_is_rejected_by_name() {
         // The completion gate: the worker's word is not evidence. Mutate one
         // wav below the completeness threshold and the `ok` report must fail

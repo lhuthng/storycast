@@ -1,4 +1,4 @@
-//! The J overlay: what the background lanes are actually doing, scroll only.
+//! The jobs overlay: what the background lanes are actually doing, scroll only.
 use crate::tui::{app::App, screen::Screen};
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -9,7 +9,9 @@ pub(crate) async fn key_jobs(
     key: KeyEvent,
 ) -> bool {
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('J') | KeyCode::Enter => {
+        // Tab closes what Tab opened — the same toggle shape the sound
+        // editor's layer tabs use, so the key behaves the same everywhere.
+        KeyCode::Esc | KeyCode::Tab | KeyCode::Char('q') | KeyCode::Char('J') | KeyCode::Enter => {
             app.screen = previous;
         }
         KeyCode::Down | KeyCode::Char('j') => {

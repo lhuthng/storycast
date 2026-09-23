@@ -91,9 +91,11 @@ pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
             lines.push(kv("voices", "loading roster…".to_string()));
         }
         None => {
+            // The Run screen itself has no reload key — say the truth (Esc,
+            // then R on the dashboard) rather than a key this screen eats.
             lines.push(kv(
                 "voices",
-                "roster not loaded — press R to retry".to_string(),
+                "roster not loaded — Esc, then R on the dashboard".to_string(),
             ));
         }
         Some(r) => {

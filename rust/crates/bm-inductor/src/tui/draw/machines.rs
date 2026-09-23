@@ -90,7 +90,9 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
         })
         .collect();
 
-    let mut header = vec!["machine", "kind", "ip", "workers", "policy", "state"];
+    // The cursor column: cells carry `▸ name`, so the header is indented to
+    // match the rows and `machine` no longer sits a column left of its data.
+    let mut header = vec![" machine", "kind", "ip", "workers", "policy", "state"];
     let mut widths: Vec<Constraint> = if compact {
         // Taken from the constant the compile-time guard checks.
         COMPACT_MACHINE_COLS[..6]
@@ -98,11 +100,14 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
             .map(|w| Constraint::Length(*w))
             .collect()
     } else {
+        // The 100-column floor leaves 98 inside the border, and this set sums
+        // to exactly that. The old set summed to 102: at the floor, `seen` and
+        // the tail of `state` were pushed off the pane entirely.
         vec![
-            Constraint::Length(15),
+            Constraint::Length(14),
             Constraint::Length(6),
-            Constraint::Length(18),
-            Constraint::Length(7),
+            Constraint::Length(17),
+            Constraint::Length(8),
             Constraint::Length(11),
             Constraint::Length(13),
         ]

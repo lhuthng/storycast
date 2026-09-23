@@ -35,7 +35,7 @@ pub(crate) fn draw_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::DarkGray),
             )));
             lines.push(Line::from(Span::styled(
-                ":translate enqueues a chapter range",
+                ":t (translate) enqueues a chapter range",
                 Style::default().fg(Color::DarkGray),
             )));
         }
@@ -183,7 +183,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
         f.render_widget(
             empty_body(vec![
                 "no tasks in the ledger yet".into(),
-                "press t to enqueue a chapter range".into(),
+                ":t (translate) to enqueue a chapter range".into(),
             ]),
             rows[2],
         );
@@ -307,7 +307,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
                 Span::styled("  ·  Enter details  ·  u retry  ·  F force re-run  ·  R remerge all  ·  E rerender all", dim),
             ]),
             Line::from(Span::styled(
-                "j/k or ↑/↓ move · PgUp/PgDn page · type to filter · Backspace widens · Esc/q close",
+                "↑/↓ move · PgUp/PgDn page · type to filter · Backspace widens · Esc/q close",
                 dim,
             )),
         ]

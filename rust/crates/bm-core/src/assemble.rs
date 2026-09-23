@@ -178,6 +178,26 @@ fn plan_turns(
 ) -> Result<Vec<crate::ambience::Turn>> {
     use crate::ambience::Turn;
     let segments = &planned.speech;
+    // Count before indexing: the take list is the *recorded* render plan,
+    // which may predate the script (a digest landed after the plan was
+    // built), and indexing first turns that disagreement into a panic inside
+    // a worker task — a shelved chapter with no actionable message. Bail
+    // here so the failure names the disagreement; the inductor heals it by
+    // replanning (see `fail_task`).
+    let turns = titled as usize
+        + if local {
+            planned.runs().len()
+        } else {
+            segments.len()
+        };
+    if turns != wavs.len() {
+        anyhow::bail!(
+            "timeline has {} turns for {} rendered segments — the render plan and \
+             the timeline disagree, so the layers would land on the wrong lines",
+            turns,
+            wavs.len()
+        );
+    }
     let mut out: Vec<Turn> = Vec::new();
 
     if titled {
@@ -250,14 +270,6 @@ fn plan_turns(
         }
     }
 
-    if out.len() != wavs.len() {
-        anyhow::bail!(
-            "timeline has {} turns for {} rendered segments — the render plan and \
-             the timeline disagree, so the layers would land on the wrong lines",
-            out.len(),
-            wavs.len()
-        );
-    }
     Ok(out)
 }
 
@@ -607,5 +619,28 @@ mod tests {
         );
         // 1.0 (first half) + 0.5 (hit) + 0.3 (gap) + 0.8 (second half).
         assert!((total - 2.6).abs() < 0.01, "the mix is {total:.3}s");
+    }
+
+    #[test]
+    fn a_stale_take_list_fails_by_name_instead_of_panicking() {
+        // A digest that lands after the render plan was built leaves the
+        // recorded take list short of the timeline. Indexing first turned
+        // that disagreement into a worker-task panic ("index out of bounds:
+        // the len is 33 but the index is 33") — a shelved chapter with no
+        // actionable message. The count is checked up front now.
+        let segments = vec![
+            serde_json::json!({"speaker": "A", "text": "1"}),
+            serde_json::json!({"speaker": "B", "text": "2"}),
+        ];
+        let planned = Planned::plan(&segments);
+        let cfg = crate::ambience::SceneMap::default();
+        let pool = crate::audio_pool::ClipPool::new();
+        let short = vec![PathBuf::from("only-one.wav")];
+        let err = plan_turns(&planned, &short, true, false, &cfg, &pool).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("timeline has 2 turns for 1 rendered segments"),
+            "{err:#}"
+        );
     }
 }

@@ -72,13 +72,13 @@ pub(crate) const COMPACT_FOOTER_H: u16 = 4;
 /// The compact tier gets shorter labels because it has 76 columns to work with;
 /// every key is described in full on the help screen, which `?` opens.
 pub(crate) const KEYS_FULL: [&str; 2] = [
-    ":add · :prov · :drop · :translate · :crawl · :eta · P policy · i inspect",
-    ":retry · :reconcile · :backend · :stop · :swap · :voices · :S cast · K tasks · J jobs · r · ? · q",
+    "Tab jobs · K tasks · i inspect · P policy · D digest · R run · S cast",
+    ":add :prov :drop :translate :crawl :retry :reconcile :backend :stop :swap :voices · r · ? · q",
 ];
 
 pub(crate) const KEYS_COMPACT: [&str; 2] = [
-    ":add · :prov · :drop · :translate · :crawl · :stop · P policy",
-    ":retry · :reconcile · :swap · :voices · :S cast · K tasks · ? · q · : cmd",
+    "Tab jobs · K tasks · i inspect · P policy · R run · S cast",
+    ":add :prov :drop :translate :crawl :stop :retry :swap :voices · ? q : cmd",
 ];
 
 /// Compact-tier column widths. The full tier has slack and keeps its widths
@@ -88,7 +88,11 @@ pub(crate) const KEYS_COMPACT: [&str; 2] = [
 /// `machine, kind, ip, workers, policy, state, seen` — the `tts` column is
 /// dropped. Seven short columns now, so `machine`/`ip` stay narrow enough that
 /// the whole identity of a box reads in the width of one address.
-pub(crate) const COMPACT_MACHINE_COLS: [u16; 7] = [11, 5, 15, 4, 9, 13, 5];
+///
+/// `workers` carries 8: the header word is seven columns and a Length that
+/// cannot hold its own header clips to `work`, which read as a column that
+/// was never meant to be there.
+pub(crate) const COMPACT_MACHINE_COLS: [u16; 7] = [11, 5, 14, 8, 9, 13, 5];
 
 /// `alias, stage, ch, progress, activity` — `machine` is dropped.
 pub(crate) const COMPACT_WORKER_COLS: [u16; 5] = [14, 8, 5, 17, 16];

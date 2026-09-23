@@ -443,6 +443,17 @@ impl Inner {
         // working until it notices, bounded by the stage's own deadline (120 s
         // for the `opencode` fallback, and the lease above that).
         let manual = c.worker_id == bm_proto::MANUAL_WORKER;
+        // A manual digest may name the next chapter before any worker task
+        // exists for it — the operator works ahead of the enqueue, not from
+        // it. Create the row so the report lands instead of bouncing as
+        // unknown. Digest only: the manual path digests, nothing else.
+        if manual && !self.tasks.contains_key(&c.task_id) {
+            if let Some(chapter) = Task::chapter_of(&c.task_id) {
+                if c.task_id == format!("{}:{chapter}", Stage::Digest.as_str()) {
+                    self.ensure_task(chapter, Stage::Digest);
+                }
+            }
+        }
         let outcome = match self.tasks.get(&c.task_id) {
             None => Outcome::Unknown,
             Some(t) if !manual && t.assigned_to.as_deref() != Some(c.worker_id.as_str()) => {
@@ -801,6 +812,17 @@ impl Inner {
             if detail.contains("segments missing") {
                 if let Ok(chapter) = rest.parse::<u32>() {
                     self.heal_render_for_merge(chapter);
+                }
+            }
+            // The plan predates the script: a digest landed after the render
+            // plan was built, so the recorded take list no longer matches the
+            // timeline. Rebuild the plan from the current script — the diff
+            // requeues exactly the changed takes — or the same merge fails
+            // twice more into shelved and waits for a manual force. The merge
+            // keeps its strike, like the starved-input heal above.
+            if detail.contains("turns for ") && detail.contains(" rendered segments") {
+                if let Ok(chapter) = rest.parse::<u32>() {
+                    self.replan_render_takes(chapter);
                 }
             }
         }
