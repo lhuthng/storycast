@@ -216,8 +216,11 @@ pub fn policy_for_bible(engine: &str) -> VoicePolicy {
 /// Resolve the full cast for a chapter, assigning any missing speaker.
 ///
 /// A tagged character rolls from the compatible sample pool first (least-used
-/// wins, so re-renders stay stable); anything untagged or unmatched falls back
-/// to the preset pools exactly as before.
+/// wins, so re-renders stay stable). If the character's descriptive tags do not
+/// match a sample, a voice-hint fallback (gender/age) is tried before presets;
+/// only a genuinely missing or incompatible pool falls back to a catalogue
+/// voice. This is the "discourage defaults" rule: ordinary new characters use
+/// enrolled clones whenever the pool has a usable voice.
 ///
 /// `save = false` is the read-only mode used by the merge stage and by the
 /// completeness check: it must never mutate the cast just because it looked.
@@ -317,27 +320,48 @@ pub fn load_cast(
             continue;
         }
         // The pool rolls first: compatible samples, least-used wins. A sample
-        // name persists like any clone's, so a later swap is just a swap.
-        if let Some(tags) = char_tags.get(name).filter(|t| !t.is_empty()) {
-            let options = crate::pool::candidates(&pool, tags);
-            let pick = options
-                .iter()
-                .min_by_key(|v| {
-                    (
-                        chapter_voices.contains(*v) as u8,
-                        used.iter().filter(|u| u == v).count(),
-                        options.iter().position(|p| p == *v).unwrap_or(usize::MAX),
-                    )
-                })
-                .cloned();
-            if let Some(voice) = pick {
-                used.push(voice.clone());
-                chapter_voices.insert(voice.clone());
-                cast.insert(name.clone(), voice);
-                continue;
-            }
-        }
+        // name persists like any clone's, so a later swap is just a swap. If
+        // descriptive tags do not match, try the character's voice hint before
+        // considering presets; this is what prevents a new character from
+        // silently becoming a catalogue voice just because its tags are broad
+        // (`system`, `merchant`, `disciple`, ...).
         let hint = hints.get(name).cloned().unwrap_or_default();
+        let mut options = char_tags
+            .get(name)
+            .filter(|tags| !tags.is_empty())
+            .map(|tags| crate::pool::candidates(&pool, tags))
+            .unwrap_or_default();
+        let hint_tags = crate::pool::tags_from_hint(&hint);
+        if options.is_empty() {
+            options = crate::pool::candidates(&pool, &hint_tags);
+        }
+        if options.is_empty() && hint_tags.is_empty() {
+            // Unknown gender is still allowed to use a clone when one exists;
+            // the old neutral-to-male preset fallback is now the last resort,
+            // not the first choice. A known but incompatible gender must not
+            // borrow a clone from the wrong side of the pool.
+            options = pool
+                .keys()
+                .filter(|name| name.as_str() != "Narrator")
+                .cloned()
+                .collect();
+        }
+        let pick = options
+            .iter()
+            .min_by_key(|v| {
+                (
+                    chapter_voices.contains(*v) as u8,
+                    used.iter().filter(|u| u == v).count(),
+                    options.iter().position(|p| p == *v).unwrap_or(usize::MAX),
+                )
+            })
+            .cloned();
+        if let Some(voice) = pick {
+            used.push(voice.clone());
+            chapter_voices.insert(voice.clone());
+            cast.insert(name.clone(), voice);
+            continue;
+        }
         let preset = policy.pool_for_hint(&hint).to_vec();
         // The accent policy binds the assigner too, not just the gates: with
         // an exclusion in force, an excluded preset must never be written into
@@ -431,6 +455,33 @@ mod tests {
     }
 
     #[test]
+    fn anonymous_slots_receive_stable_voices_without_bible_entries() {
+        let d = tmpdir("anonymous-slot");
+        let bible = d.join("bible.json");
+        std::fs::write(&bible, r#"{"characters":[]}"#).unwrap();
+        let cast_path = d.join("cast-vieneu.json");
+        let first = d.join("script-01.json");
+        std::fs::write(
+            &first,
+            r#"{"roster":["Narrator","anonymous:anon-1"],
+                "segments":[{"speaker":"anonymous:anon-1","text":"Mở cửa!"}]}"#,
+        )
+        .unwrap();
+
+        let cast = load_cast(&first, &cast_path, &bible, &vieneu_policy(), true).unwrap();
+        let voice = cast
+            .get("anonymous:anon-1")
+            .expect("anonymous slot assigned");
+        let stored: Value = crate::read_json(&bible).unwrap();
+        assert_eq!(stored, json!({"characters": []}), "not a Bible character");
+
+        let second = d.join("script-02.json");
+        std::fs::write(&second, r#"{"roster":["anonymous:anon-1"],"segments":[]}"#).unwrap();
+        let again = load_cast(&second, &cast_path, &bible, &vieneu_policy(), true).unwrap();
+        assert_eq!(again.get("anonymous:anon-1"), Some(voice));
+    }
+
+    #[test]
     fn never_overwrites_an_existing_assignment() {
         let d = tmpdir("stable");
         let script = d.join("script-01.json");
@@ -467,6 +518,36 @@ mod tests {
             !cast_path.exists(),
             "read-only mode must not create the file"
         );
+    }
+
+    #[test]
+    fn a_broad_character_tag_does_not_force_a_default_preset() {
+        let d = tmpdir("clone-before-preset");
+        std::fs::write(
+            d.join("voice-pool.json"),
+            r#"{"young-female-1":{"file":"refs/young-female-1.mp3","tags":["young","female"]},
+                "young-male-1":{"file":"refs/young-male-1.mp3","tags":["young","male"]}}"#,
+        )
+        .unwrap();
+        let script = d.join("script-01.json");
+        std::fs::write(&script, r#"{"roster":["Hệ thống"],"segments":[]}"#).unwrap();
+        let bible = d.join("bible.json");
+        std::fs::write(
+            &bible,
+            r#"{"characters":[{"name":"Hệ thống","voice_hint":"adult male",
+                "tags":["system"],"proper_aliases":[]}]}"#,
+        )
+        .unwrap();
+
+        let cast = load_cast(
+            &script,
+            &d.join("cast-vieneu.json"),
+            &bible,
+            &vieneu_policy(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(cast.get("Hệ thống").unwrap(), "young-male-1");
     }
 
     #[test]
@@ -827,7 +908,8 @@ mod tests {
     }
 
     #[test]
-    fn hint_tags_backfill_a_bible_that_predates_tags() {        // No `tags` key at all: the voice_hint still routes to the pool.
+    fn hint_tags_backfill_a_bible_that_predates_tags() {
+        // No `tags` key at all: the voice_hint still routes to the pool.
         let d = tmpdir("pool-hint");
         pool_fixture(&d);
         let script = d.join("script-01.json");
