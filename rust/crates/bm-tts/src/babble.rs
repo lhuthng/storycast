@@ -8,11 +8,12 @@
 //! words that were never in the text. The guard catches that after the fact and
 //! generates again.
 //!
-//! It only looks at chunks of at most [`MAX_SYLLABLES`] syllables and no emotion
-//! cue, because that is the regime where it can count. Past three syllables the
-//! speech bursts merge into each other and the count stops meaning anything, so
-//! the guard says "fine" rather than guessing — a guard that fires on long chunks
-//! would regenerate good audio.
+//! For chunks of at most [`MAX_SYLLABLES`] syllables and no emotion cue, it
+//! compares speech bursts with syllables. Past three syllables those bursts merge
+//! and the count stops meaning anything, so long chunks are not judged that way.
+//! They still get one unambiguous check: reaching the model-generated frame cap
+//! means the generator failed to emit its end-of-speech token. Accepting such a
+//! take can preserve a babbled tail or a repeated phrase, so it is regenerated.
 //!
 //! Two signals, from an A/B over 720 chunks:
 //!
@@ -147,7 +148,8 @@ pub fn suspect(
         };
     }
     let syl = syllable_count(phonemes);
-    if syl == 0 || syl > MAX_SYLLABLES || phonemes.contains("<|emotion_") {
+    let hit_cap = frames >= cap_frames.saturating_sub(1);
+    if syl == 0 || phonemes.contains("<|emotion_") {
         return Verdict {
             suspect: false,
             syllables: syl,
@@ -155,10 +157,23 @@ pub fn suspect(
             frames: 0,
         };
     }
+    if syl > MAX_SYLLABLES {
+        // Burst counting is not reliable for continuous long-form speech, but
+        // running into the hard frame ceiling is: the generator did not stop.
+        // Do not use a duration heuristic here. The ceiling is the model's own
+        // failure signal, and regenerating is safer than publishing a take that
+        // may contain the babbled or repeated tail seen in production.
+        return Verdict {
+            suspect: hit_cap,
+            syllables: syl,
+            bursts: 0,
+            frames,
+        };
+    }
     let bursts = count_speech_bursts(pcm, sample_rate);
-    let hit_cap = syl <= 2 && frames >= cap_frames.saturating_sub(1);
+    let short_hit_cap = syl <= 2 && hit_cap;
     Verdict {
-        suspect: bursts > syl || hit_cap,
+        suspect: bursts > syl || short_hit_cap,
         syllables: syl,
         bursts,
         frames,
@@ -224,13 +239,20 @@ mod tests {
         assert!(!v.suspect, "{v:?}");
     }
 
-    /// Past three syllables the burst count stops meaning anything, so the guard
-    /// must not fire on long chunks even when the counts disagree.
+    /// Burst counting is meaningless for long chunks, but a long generation that
+    /// reaches its hard frame cap missed the stop token and must be retried.
     #[test]
-    fn a_long_chunk_is_never_suspect() {
-        let v = suspect(&clicks(9, 48_000), 48_000, "a b c d e f g", 40, 39);
-        assert!(!v.suspect, "{v:?}");
-        assert_eq!(v.frames, 0, "a skipped check reports no frame count");
+    fn a_long_chunk_is_only_suspect_when_it_hits_the_frame_cap() {
+        let v = suspect(&clicks(9, 48_000), 48_000, "a b c d e f g", 40, 30);
+        assert!(!v.suspect, "burst disagreement alone is not enough: {v:?}");
+        assert_eq!(
+            v.frames, 30,
+            "a skipped burst check still reports its length"
+        );
+
+        let v = suspect(&clicks(9, 48_000), 48_000, "a b c d e f g", 40, 40);
+        assert!(v.suspect, "the hard cap is an unambiguous failure: {v:?}");
+        assert_eq!(v.frames, 40);
     }
 
     #[test]
