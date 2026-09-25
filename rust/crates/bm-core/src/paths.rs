@@ -173,13 +173,16 @@ impl Layout {
         self.work.join("output")
     }
 
-    /// The digest's first pass: read the chapter, report the cast and the story.
+    /// The chapter attribution template. The automatic worker adds its prepared
+    /// events and immutable-speaker contract; the manual manager also uses the
+    /// legacy raw-chapter rendering of this file.
     pub fn prompt(&self) -> PathBuf {
         self.root.join("prompts/analyze.txt")
     }
 
-    /// The digest's second pass: the cast is already resolved, so this one only
-    /// has to split the chapter and tag it.
+    /// The audio-staging contract. The automatic builder appends the immutable
+    /// speaker map and prepared-source obligations; the manual manager renders
+    /// the legacy full script contract directly.
     pub fn script_prompt(&self) -> PathBuf {
         self.root.join("prompts/script.txt")
     }

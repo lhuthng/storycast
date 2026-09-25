@@ -51,7 +51,10 @@ impl PhonemeDict {
         let mmap = unsafe { Mmap::map(&file)? };
 
         if mmap.len() < 32 || &mmap[0..4] != b"SEAP" {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid dictionary format"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid dictionary format",
+            ));
         }
         let version = u32::from_le_bytes(mmap[4..8].try_into().unwrap());
 
@@ -65,7 +68,10 @@ impl PhonemeDict {
 
         let (string_base, sections) = if version >= 2 {
             if mmap.len() < 48 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "Truncated v2 header"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Truncated v2 header",
+                ));
             }
             let section_count = u32::from_le_bytes(mmap[32..36].try_into().unwrap()) as usize;
             let sections_pos = u32::from_le_bytes(mmap[36..40].try_into().unwrap()) as usize;
@@ -73,7 +79,10 @@ impl PhonemeDict {
             for i in 0..section_count {
                 let p = sections_pos + i * 12;
                 if p + 12 > mmap.len() {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Truncated section table"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Truncated section table",
+                    ));
                 }
                 let kind = u32::from_le_bytes(mmap[p..p + 4].try_into().unwrap());
                 let count = u32::from_le_bytes(mmap[p + 4..p + 8].try_into().unwrap());
@@ -99,9 +108,12 @@ impl PhonemeDict {
     }
 
     fn get_string(&self, id: u32) -> &str {
-        if id >= self.string_count { return ""; }
+        if id >= self.string_count {
+            return "";
+        }
         let off_ptr = self.string_offsets_pos + (id as usize * 4);
-        let offset = u32::from_le_bytes(self.mmap[off_ptr..off_ptr + 4].try_into().unwrap()) as usize;
+        let offset =
+            u32::from_le_bytes(self.mmap[off_ptr..off_ptr + 4].try_into().unwrap()) as usize;
 
         let start = self.string_base + offset;
         let mut end = start;
@@ -172,7 +184,8 @@ impl PhonemeDict {
     /// input. A non-English pipeline routing on that reads the Indonesian
     /// name Gadjah as the English "gad jah".
     pub fn has_english(&self, word: &str) -> bool {
-        self.lookup_merged(word).is_some_and(|p| p.starts_with("<en>"))
+        self.lookup_merged(word)
+            .is_some_and(|p| p.starts_with("<en>"))
             || self.lookup_common(word).is_some()
     }
 

@@ -230,8 +230,15 @@ mod tests {
         }
         let got = tunnel_targets(&st).await;
         let addrs: Vec<&str> = got.iter().map(|t| t.addr.as_str()).collect();
-        assert_eq!(addrs, vec!["10.0.0.5", "192.168.2.2"], "sorted remotes only");
-        assert!(!got.iter().any(|t| t.ssh.local), "local never tunnels to itself");
+        assert_eq!(
+            addrs,
+            vec!["10.0.0.5", "192.168.2.2"],
+            "sorted remotes only"
+        );
+        assert!(
+            !got.iter().any(|t| t.ssh.local),
+            "local never tunnels to itself"
+        );
     }
 
     #[tokio::test]
@@ -258,7 +265,10 @@ mod tests {
             format!("{DEFAULT_HOOK_PORT}:127.0.0.1:8901"),
             "argv must forward {DEFAULT_HOOK_PORT} -> api 8901: {args:?}"
         );
-        assert!(args.contains(&"-N".to_string()), "no remote command: {args:?}");
+        assert!(
+            args.contains(&"-N".to_string()),
+            "no remote command: {args:?}"
+        );
         assert!(
             args.contains(&"ExitOnForwardFailure=yes".to_string()),
             "a failed bind must kill the client: {args:?}"

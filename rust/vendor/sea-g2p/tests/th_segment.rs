@@ -14,9 +14,7 @@ fn spelling_normalization() {
 
 #[test]
 fn segments_with_dictionary() {
-    let trie = WordTrie::from_words([
-        "เขา", "ฉลาด", "และ", "พอ", "ที่", "จะ", "ซ่อน", "สติปัญญา", "คน",
-    ]);
+    let trie = WordTrie::from_words(["เขา", "ฉลาด", "และ", "พอ", "ที่", "จะ", "ซ่อน", "สติปัญญา", "คน"]);
     let toks = segment("เขาฉลาดและซ่อนสติปัญญา", &trie);
     let words: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
     assert_eq!(words, ["เขา", "ฉลาด", "และ", "ซ่อน", "สติปัญญา"]);
@@ -37,7 +35,11 @@ fn frequency_breaks_the_tie_fewest_pieces_cannot() {
     // สากล|คน and สาก|ลคน both cost two words; only frequency separates
     // them, and สากล ("international") is far more common than สาก.
     let pairs: Vec<(&str, u64)> = vec![
-        ("สากล", 5000), ("คน", 90000), ("สาก", 40), ("ลคน", 3), ("โอลิมปิก", 900),
+        ("สากล", 5000),
+        ("คน", 90000),
+        ("สาก", 40),
+        ("ลคน", 3),
+        ("โอลิมปิก", 900),
     ];
     let trie = WordTrie::from_frequencies(pairs);
     let toks = segment("โอลิมปิกสากลคน", &trie);

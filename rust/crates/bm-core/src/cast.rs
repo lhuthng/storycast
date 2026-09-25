@@ -319,6 +319,13 @@ pub fn load_cast(
         if cast.contains_key(name) {
             continue;
         }
+        // The crowd is a chorus, not a cast: an unnamed speaker borrows the
+        // Narrator's voice below rather than rolling for one. Leaving it out of
+        // the roll also keeps a near-duplicate clone from being spent — and
+        // then held as `used` — on a one-off street greeting.
+        if crate::digest::is_anonymous_speaker(name) {
+            continue;
+        }
         // The pool rolls first: compatible samples, least-used wins. A sample
         // name persists like any clone's, so a later swap is just a swap. If
         // descriptive tags do not match, try the character's voice hint before
@@ -398,6 +405,21 @@ pub fn load_cast(
         }
     }
 
+    // Every unnamed speaker speaks in the Narrator's voice — and this runs
+    // after the roll, so a cast file that still holds a numbered slot's own
+    // clone (or a hand-picked anonymous voice) is corrected, not honoured, the
+    // next time the cast is written.
+    if let Some(narrator) = cast.get("Narrator").cloned() {
+        let anonymous: Vec<String> = speakers
+            .iter()
+            .filter(|name| crate::digest::is_anonymous_speaker(name))
+            .cloned()
+            .collect();
+        for name in anonymous {
+            cast.insert(name, narrator.clone());
+        }
+    }
+
     if save {
         // Persist keys, not names — a renamed voice must not orphan the cast.
         write_cast(&policy.engine, cast_path, &cast)?;
@@ -455,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn anonymous_slots_receive_stable_voices_without_bible_entries() {
+    fn anonymous_speakers_borrow_the_narrator_voice_without_bible_entries() {
         let d = tmpdir("anonymous-slot");
         let bible = d.join("bible.json");
         std::fs::write(&bible, r#"{"characters":[]}"#).unwrap();
@@ -463,22 +485,29 @@ mod tests {
         let first = d.join("script-01.json");
         std::fs::write(
             &first,
-            r#"{"roster":["Narrator","anonymous:anon-1"],
-                "segments":[{"speaker":"anonymous:anon-1","text":"Mở cửa!"}]}"#,
+            r#"{"roster":["Narrator","Anonymous"],
+                "segments":[{"speaker":"Anonymous","text":"Mở cửa!"}]}"#,
         )
         .unwrap();
 
         let cast = load_cast(&first, &cast_path, &bible, &vieneu_policy(), true).unwrap();
-        let voice = cast
-            .get("anonymous:anon-1")
-            .expect("anonymous slot assigned");
+        assert_eq!(
+            cast.get("Anonymous"),
+            cast.get("Narrator"),
+            "the crowd speaks in the Narrator's voice"
+        );
         let stored: Value = crate::read_json(&bible).unwrap();
         assert_eq!(stored, json!({"characters": []}), "not a Bible character");
 
+        // A legacy script's numbered slot resolves to the same voice, and a cast
+        // file that already held a clone of its own is corrected on load.
         let second = d.join("script-02.json");
         std::fs::write(&second, r#"{"roster":["anonymous:anon-1"],"segments":[]}"#).unwrap();
+        let created = Cast::from_iter([("anonymous:anon-1".to_string(), "Bảo An".to_string())]);
+        write_cast("vieneu", &cast_path, &created).unwrap();
         let again = load_cast(&second, &cast_path, &bible, &vieneu_policy(), true).unwrap();
-        assert_eq!(again.get("anonymous:anon-1"), Some(voice));
+        assert_eq!(again.get("anonymous:anon-1"), again.get("Narrator"));
+        assert_ne!(again.get("anonymous:anon-1"), Some(&"Bảo An".to_string()));
     }
 
     #[test]

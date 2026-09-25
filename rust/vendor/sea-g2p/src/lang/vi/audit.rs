@@ -33,12 +33,12 @@
 //! Because groups 3 and 4 must be declared explicitly, any unknown character
 //! is reported by default. That is the point: silence must be opt-in.
 
-use std::collections::HashSet;
 use once_cell::sync::Lazy;
+use std::collections::HashSet;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::lang::vi::resources::{
-    SYMBOLS_MAP, SUPERSCRIPTS_MAP, SUBSCRIPTS_MAP, CURRENCY_SYMBOL_MAP,
+    CURRENCY_SYMBOL_MAP, SUBSCRIPTS_MAP, SUPERSCRIPTS_MAP, SYMBOLS_MAP,
 };
 
 /// Characters with no lookup-table entry that a dedicated pass still converts
@@ -52,9 +52,9 @@ static READ_BY_PASS: Lazy<HashSet<char>> = Lazy::new(|| {
     s.insert('/'); // tech pass -> "gạch chéo"; fraction pass -> "trên"
     s.insert('\\'); // tech pass -> "gạch chéo"
     s.insert(':'); // tech pass -> "hai chấm"; ratio pass -> "trên"
-    // Absolute value: "|x|" -> "giá trị tuyệt đối của x". A lone bar with no
-    // closing partner, as in the conditional probability "P(A|B)", is still
-    // dropped — a known gap, not a silent one.
+                   // Absolute value: "|x|" -> "giá trị tuyệt đối của x". A lone bar with no
+                   // closing partner, as in the conditional probability "P(A|B)", is still
+                   // dropped — a known gap, not a silent one.
     s.insert('|');
     s
 });
@@ -66,18 +66,30 @@ static INTENTIONALLY_DROPPED: Lazy<HashSet<char>> = Lazy::new(|| {
     let mut s = HashSet::new();
     // Sentence punctuation: kept as prosody or folded into comma/period by the
     // final stage, never spoken as a word.
-    for c in ".,!?;".chars() { s.insert(c); }
+    for c in ".,!?;".chars() {
+        s.insert(c);
+    }
     // Quotes, including curly and guillemet forms that sanitize_unicode folds
     // into the straight ASCII quote.
-    for c in "'\"\u{2018}\u{2019}\u{201C}\u{201D}\u{201E}\u{00AB}\u{00BB}".chars() { s.insert(c); }
+    for c in "'\"\u{2018}\u{2019}\u{201C}\u{201D}\u{201E}\u{00AB}\u{00BB}".chars() {
+        s.insert(c);
+    }
     // Brackets: the enclosed text survives; only the pair becomes a comma.
-    for c in "()[]{}".chars() { s.insert(c); }
+    for c in "()[]{}".chars() {
+        s.insert(c);
+    }
     // Hyphen / underscore: the final stage turns them into a word boundary.
-    for c in "-_\u{2013}\u{2014}\u{2212}".chars() { s.insert(c); }
+    for c in "-_\u{2013}\u{2014}\u{2212}".chars() {
+        s.insert(c);
+    }
     // Invisible formatting characters, removed by sanitize_unicode up front.
-    for c in "\u{200B}\u{200C}\u{200D}\u{2060}\u{FEFF}\u{034F}\u{180E}\u{00AD}".chars() { s.insert(c); }
+    for c in "\u{200B}\u{200C}\u{200D}\u{2060}\u{FEFF}\u{034F}\u{180E}\u{00AD}".chars() {
+        s.insert(c);
+    }
     // Ellipsis forms, folded to a single period before any pass runs.
-    for c in "\u{2024}\u{2025}\u{2026}".chars() { s.insert(c); }
+    for c in "\u{2024}\u{2025}\u{2026}".chars() {
+        s.insert(c);
+    }
     s
 });
 

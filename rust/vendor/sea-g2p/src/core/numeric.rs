@@ -96,12 +96,7 @@ fn script_value(table: &[char; 10], c: char) -> Option<char> {
 /// as a score. Both are digit-dash-digit and only context tells them apart,
 /// so the caller picks the default its register needs; a range between large
 /// numbers is always read as a range regardless.
-pub fn expand(
-    text: &str,
-    w: &NumericWords,
-    digit: DigitFn,
-    cardinal: CardinalFn,
-) -> String {
+pub fn expand(text: &str, w: &NumericWords, digit: DigitFn, cardinal: CardinalFn) -> String {
     // superscripts and subscripts first: they are single characters that the
     // digit patterns below cannot see
     let mut out = expand_scripts(text, w, digit);
@@ -116,11 +111,20 @@ pub fn expand(
             match exp.strip_prefix('-') {
                 Some(rest) => format!(
                     " {} {} {} {} {} {} ",
-                    &c[1], w.times, cardinal("10"), w.power, w.minus, cardinal(rest)
+                    &c[1],
+                    w.times,
+                    cardinal("10"),
+                    w.power,
+                    w.minus,
+                    cardinal(rest)
                 ),
                 None => format!(
                     " {} {} {} {} {} ",
-                    &c[1], w.times, cardinal("10"), w.power, cardinal(exp)
+                    &c[1],
+                    w.times,
+                    cardinal("10"),
+                    w.power,
+                    cardinal(exp)
                 ),
             }
         })
@@ -130,7 +134,13 @@ pub fn expand(
         .replace_all(&out, |c: &Captures| {
             let exp = &c[2];
             match exp.strip_prefix('-') {
-                Some(rest) => format!(" {} {} {} {} ", cardinal(&c[1]), w.power, w.minus, cardinal(rest)),
+                Some(rest) => format!(
+                    " {} {} {} {} ",
+                    cardinal(&c[1]),
+                    w.power,
+                    w.minus,
+                    cardinal(rest)
+                ),
                 None => format!(" {} {} {} ", cardinal(&c[1]), w.power, cardinal(exp)),
             }
         })
@@ -151,7 +161,11 @@ pub fn expand(
     // A dash between two numbers is a range in prose and a subtraction in an
     // equation; nothing inside the pattern distinguishes them, so the
     // presence of an equals sign decides.
-    let joiner = if RE_HAS_EQUALS.is_match(&out) { w.minus } else { w.to };
+    let joiner = if RE_HAS_EQUALS.is_match(&out) {
+        w.minus
+    } else {
+        w.to
+    };
     out = RE_RANGE
         .replace_all(&out, |c: &Captures| {
             format!(" {} {} {} ", cardinal(&c[1]), joiner, cardinal(&c[2]))
@@ -163,7 +177,9 @@ pub fn expand(
         .into_owned();
 
     RE_SUBTRACT
-        .replace_all(&out, |c: &Captures| format!("{} {} {}", &c[1], w.minus, &c[2]))
+        .replace_all(&out, |c: &Captures| {
+            format!("{} {} {}", &c[1], w.minus, &c[2])
+        })
         .into_owned()
 }
 

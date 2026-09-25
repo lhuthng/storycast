@@ -35,7 +35,7 @@ pub(crate) const REFRESH_TICKS: u64 = 4;
 use crate::tui::{
     app::App,
     draw::draw,
-    input::{dispatch, dispatch_op, handle_key},
+    input::{dispatch, dispatch_op, handle_key, mouse::handle_mouse},
     jobs::DoneKind,
     jobs::{fetch_state, run_jobs, Ev, Job},
     model::reported_alias,
@@ -44,7 +44,7 @@ use crate::tui::{
 use bm_core::Layout;
 use bm_proto::{Heartbeat, Machine, Op, OpRequest, Task, TaskState};
 use crossterm::{
-    event::{self, Event, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -57,11 +57,20 @@ pub async fn run(api: &str, layout: Layout) -> anyhow::Result<()> {
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    // Enable capture through the initialized backend. Some terminals flush
+    // the alternate-screen transition separately from the mouse mode, so
+    // combining both commands before constructing the backend can leave the
+    // app in raw mode without receiving mouse events.
+    execute!(terminal.backend_mut(), EnableMouseCapture)?;
     let result = run_loop(api, layout, &mut terminal).await;
     // Always restore the terminal, even when the loop returned an error —
     // otherwise a crash leaves the operator in raw mode with no cursor.
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     result
 }
@@ -137,14 +146,21 @@ async fn run_loop(
             }
         }
         if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
+            match event::read()? {
+                Event::Mouse(mouse) => {
+                    if handle_mouse(&mut app, mouse, &http, &job_tx).await {
+                        break;
+                    }
+                }
                 // Terminals that report key release would otherwise fire every
                 // binding twice.
-                if key.kind == KeyEventKind::Press
-                    && handle_key(&mut app, key, &http, &job_tx).await
+                Event::Key(key)
+                    if key.kind == KeyEventKind::Press
+                        && handle_key(&mut app, key, &http, &job_tx).await =>
                 {
                     break;
                 }
+                _ => {}
             }
         }
         app.tick += 1;

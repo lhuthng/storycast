@@ -18,25 +18,21 @@
 //! genuine English words, then the rightmost-longest split, then fewer pieces —
 //! which is what makes "fine tune" win over "fin etune".
 
-use std::io;
-use regex::Regex;
 use once_cell::sync::Lazy;
+use regex::Regex;
+use std::io;
 
 use crate::lang::en::top_words::EN_TOP_WORDS;
 
 pub use crate::core::dict::PhonemeDict;
 
-static RE_TOKEN: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(<en>.*?</en>)|(\w+(?:['’]\w+)*)|([^\w\s])").unwrap()
-});
+static RE_TOKEN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)(<en>.*?</en>)|(\w+(?:['’]\w+)*)|([^\w\s])").unwrap());
 
-static RE_TAG_CONTENT: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(\w+(?:['’]\w+)*)|([^\w\s])").unwrap()
-});
+static RE_TAG_CONTENT: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(\w+(?:['’]\w+)*)|([^\w\s])").unwrap());
 
-static RE_TAG_STRIP: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)</?en>").unwrap()
-});
+static RE_TAG_STRIP: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)</?en>").unwrap());
 
 static VI_ACCENTS: &str = "àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ";
 
@@ -58,7 +54,9 @@ fn has_vowel_and_consonant(s: &str) -> bool {
         } else if lc.is_alphabetic() {
             has_c = true;
         }
-        if has_v && has_c { return true; }
+        if has_v && has_c {
+            return true;
+        }
     }
     false
 }
@@ -131,23 +129,31 @@ impl G2PEngine {
     fn cached_lookup_merged(&self, word: &str) -> Option<String> {
         {
             let r = self.merged_cache.read().unwrap();
-            if let Some(v) = r.get(word) { return Some(v.clone()); }
+            if let Some(v) = r.get(word) {
+                return Some(v.clone());
+            }
         }
         {
             let m = self.missing_merged.read().unwrap();
-            if m.contains(word) { return None; }
+            if m.contains(word) {
+                return None;
+            }
         }
         match self.dict.lookup_merged(word) {
             Some(s) => {
                 let val = s.to_string();
                 let mut w = self.merged_cache.write().unwrap();
-                if w.len() >= 10_000 { w.clear(); }
+                if w.len() >= 10_000 {
+                    w.clear();
+                }
                 w.insert(word.to_string(), val.clone());
                 Some(val)
             }
             None => {
                 let mut m = self.missing_merged.write().unwrap();
-                if m.len() < 50_000 { m.insert(word.to_string()); }
+                if m.len() < 50_000 {
+                    m.insert(word.to_string());
+                }
                 None
             }
         }
@@ -156,23 +162,31 @@ impl G2PEngine {
     fn cached_lookup_common(&self, word: &str) -> Option<(String, String)> {
         {
             let r = self.common_cache.read().unwrap();
-            if let Some(v) = r.get(word) { return Some(v.clone()); }
+            if let Some(v) = r.get(word) {
+                return Some(v.clone());
+            }
         }
         {
             let m = self.missing_common.read().unwrap();
-            if m.contains(word) { return None; }
+            if m.contains(word) {
+                return None;
+            }
         }
         match self.dict.lookup_common(word) {
             Some((v, e)) => {
                 let val = (v.to_string(), e.to_string());
                 let mut w = self.common_cache.write().unwrap();
-                if w.len() >= 5_000 { w.clear(); }
+                if w.len() >= 5_000 {
+                    w.clear();
+                }
                 w.insert(word.to_string(), val.clone());
                 Some(val)
             }
             None => {
                 let mut m = self.missing_common.write().unwrap();
-                if m.len() < 50_000 { m.insert(word.to_string()); }
+                if m.len() < 50_000 {
+                    m.insert(word.to_string());
+                }
                 None
             }
         }
@@ -241,10 +255,16 @@ impl G2PEngine {
         // morphemes are not balanced, and it broke "vin|homes" into
         // "vinh|omes".
         fn better(a: &Path, b: &Path) -> bool {
-            if a.cost != b.cost { return a.cost < b.cost; }
-            if a.top != b.top { return a.top > b.top; }
+            if a.cost != b.cost {
+                return a.cost < b.cost;
+            }
+            if a.top != b.top {
+                return a.top > b.top;
+            }
             for (x, y) in a.lens.iter().rev().zip(b.lens.iter().rev()) {
-                if x != y { return x > y; }
+                if x != y {
+                    return x > y;
+                }
             }
             a.lens.len() < b.lens.len()
         }
@@ -252,7 +272,12 @@ impl G2PEngine {
         let chars: Vec<char> = word.chars().collect();
         let n = chars.len();
         let mut dp: Vec<Option<Path>> = vec![None; n + 1];
-        dp[0] = Some(Path { cost: 0, top: 0, lens: Vec::new(), phones: Vec::new() });
+        dp[0] = Some(Path {
+            cost: 0,
+            top: 0,
+            lens: Vec::new(),
+            phones: Vec::new(),
+        });
 
         for i in 0..n {
             let Some(base) = dp[i].clone() else { continue };
@@ -307,7 +332,9 @@ impl G2PEngine {
         // Cache the result, `None` included, so the work is not repeated.
         {
             let mut w = self.segmentation_cache.write().unwrap();
-            if w.len() >= 5_000 { w.clear(); }
+            if w.len() >= 5_000 {
+                w.clear();
+            }
             w.insert(cache_key, result.clone());
         }
 
@@ -317,25 +344,36 @@ impl G2PEngine {
     /// Character-by-character fallback, the last resort when `segment_oov` also
     /// fails.
     fn char_fallback(&self, content: &str, lang: &str) -> String {
-        content.chars().map(|c| {
-            let cl = c.to_lowercase().to_string();
-            if let Some(cp) = self.cached_lookup_merged(&cl) {
-                cp.replace("<en>", "").trim().to_string()
-            } else if let Some((v, e)) = self.cached_lookup_common(&cl) {
-                let p = if lang == "en" && !e.is_empty() { e } else {
-                    if !v.is_empty() { v } else { e }
-                };
-                p.replace("<en>", "").trim().to_string()
-            } else {
-                cl
-            }
-        }).collect::<Vec<String>>().join("")
+        content
+            .chars()
+            .map(|c| {
+                let cl = c.to_lowercase().to_string();
+                if let Some(cp) = self.cached_lookup_merged(&cl) {
+                    cp.replace("<en>", "").trim().to_string()
+                } else if let Some((v, e)) = self.cached_lookup_common(&cl) {
+                    let p = if lang == "en" && !e.is_empty() {
+                        e
+                    } else {
+                        if !v.is_empty() {
+                            v
+                        } else {
+                            e
+                        }
+                    };
+                    p.replace("<en>", "").trim().to_string()
+                } else {
+                    cl
+                }
+            })
+            .collect::<Vec<String>>()
+            .join("")
     }
 
     pub fn phonemize(&self, text: &str) -> String {
         // Curly to straight apostrophe, so "i’m" finds the dictionary entry
         // "i'm" when a caller invokes G2P directly, bypassing the Normalizer.
-        let text: std::borrow::Cow<str> = if text.contains('\u{2019}') || text.contains('\u{2018}') {
+        let text: std::borrow::Cow<str> = if text.contains('\u{2019}') || text.contains('\u{2018}')
+        {
             std::borrow::Cow::Owned(text.replace(['\u{2019}', '\u{2018}'], "'"))
         } else {
             std::borrow::Cow::Borrowed(text)
@@ -345,7 +383,10 @@ impl G2PEngine {
 
         for cap in RE_TOKEN.captures_iter(text) {
             if let Some(en_tag) = cap.get(1) {
-                let content = RE_TAG_STRIP.replace_all(en_tag.as_str(), "").trim().to_string();
+                let content = RE_TAG_STRIP
+                    .replace_all(en_tag.as_str(), "")
+                    .trim()
+                    .to_string();
                 for scall in RE_TAG_CONTENT.captures_iter(&content) {
                     if let Some(sw) = scall.get(1) {
                         let word = sw.as_str().to_string();
@@ -389,7 +430,8 @@ impl G2PEngine {
                     tokens.push(Token {
                         lang: "common".to_string(),
                         content: word.as_str().to_string(),
-                        phone: Some(format!("\x1F{}\x1F{}\x1F",
+                        phone: Some(format!(
+                            "\x1F{}\x1F{}\x1F",
                             vi.trim(),
                             en.replace("<en>", "").trim()
                         )),
@@ -398,7 +440,11 @@ impl G2PEngine {
                 } else {
                     let has_vi_accent = lw.chars().any(|c| VI_ACCENTS.contains(c));
                     tokens.push(Token {
-                        lang: if has_vi_accent { "vi".to_string() } else { "en".to_string() },
+                        lang: if has_vi_accent {
+                            "vi".to_string()
+                        } else {
+                            "en".to_string()
+                        },
                         content: word.as_str().to_string(),
                         phone: None,
                         is_explicit_en: false,
@@ -427,10 +473,14 @@ impl G2PEngine {
             } else {
                 let phone = if let Some(p) = t.phone {
                     if p.starts_with('\x1F') && p.ends_with('\x1F') {
-                        let inner = &p[1..p.len()-1];
+                        let inner = &p[1..p.len() - 1];
                         let sep = inner.find('\x1F').unwrap_or(inner.len());
                         if t.lang == "en" {
-                            let mut p_val = if sep + 1 <= inner.len() { inner[sep+1..].to_string() } else { String::new() };
+                            let mut p_val = if sep + 1 <= inner.len() {
+                                inner[sep + 1..].to_string()
+                            } else {
+                                String::new()
+                            };
                             // Rule for 'a': if English style but not in <en> tag, use 'ɐ'
                             if t.content.to_lowercase() == "a" && !t.is_explicit_en {
                                 p_val = "ɐ".to_string();
@@ -459,7 +509,8 @@ impl G2PEngine {
             }
         }
 
-        let mut joined = result.join(" ")
+        let mut joined = result
+            .join(" ")
             .replace(" .", ".")
             .replace(" ,", ",")
             .replace(" !", "!")
@@ -469,8 +520,12 @@ impl G2PEngine {
         // Collapse repeated punctuation, mirroring the Normalizer: "..." and
         // "…" become ".", ",," becomes ",". Safe because phoneme strings never
         // contain '.' or ',' themselves.
-        while joined.contains("..") { joined = joined.replace("..", "."); }
-        while joined.contains(",,") { joined = joined.replace(",,", ","); }
+        while joined.contains("..") {
+            joined = joined.replace("..", ".");
+        }
+        while joined.contains(",,") {
+            joined = joined.replace(",,", ",");
+        }
         joined
     }
 
@@ -488,11 +543,15 @@ impl G2PEngine {
         while i < n {
             if tokens[i].lang == "common" {
                 let start = i;
-                while i < n && tokens[i].lang == "common" { i += 1; }
+                while i < n && tokens[i].lang == "common" {
+                    i += 1;
+                }
                 let end = i - 1;
 
                 let is_stop_punct = |t: &Token| -> bool {
-                    t.content.chars().next()
+                    t.content
+                        .chars()
+                        .next()
                         .map(|c| t.content.len() == c.len_utf8() && ".!?;:()[]{}".contains(c))
                         .unwrap_or(false)
                 };
@@ -506,8 +565,12 @@ impl G2PEngine {
                 let mut left_dist = 999;
                 let mut d = 0;
                 for l in (0..start).rev() {
-                    if is_stop_punct(&tokens[l]) { break; }
-                    if tokens[l].lang == "punct" { continue; }
+                    if is_stop_punct(&tokens[l]) {
+                        break;
+                    }
+                    if tokens[l].lang == "punct" {
+                        continue;
+                    }
                     d += 1;
                     if tokens[l].lang == "vi" || tokens[l].lang == "en" {
                         left_anchor = Some(tokens[l].lang.clone());
@@ -520,8 +583,12 @@ impl G2PEngine {
                 let mut right_dist = 999;
                 let mut d = 0;
                 for r in (end + 1)..n {
-                    if is_stop_punct(&tokens[r]) { break; }
-                    if tokens[r].lang == "punct" { continue; }
+                    if is_stop_punct(&tokens[r]) {
+                        break;
+                    }
+                    if tokens[r].lang == "punct" {
+                        continue;
+                    }
                     d += 1;
                     if tokens[r].lang == "vi" || tokens[r].lang == "en" {
                         right_anchor = Some(tokens[r].lang.clone());
@@ -530,34 +597,35 @@ impl G2PEngine {
                     }
                 }
 
-                let final_lang = if let (Some(l), Some(r)) = (left_anchor.as_ref(), right_anchor.as_ref()) {
-                    if right_dist < left_dist {
-                        r.clone()
-                    } else if left_dist < right_dist {
-                        l.clone()
-                    } else {
-                        // On a tie: a shared word that is a REAL word sitting
-                        // next to an English word usually belongs to that
-                        // English phrase ("let's go ăn" -> "go" is English;
-                        // "muốn go to market" -> "go to" is English). Single
-                        // letters are the exception ("a" in "a còng", "i" in
-                        // "core i chín"): they keep the right-anchor preference
-                        // so they are not dragged into English.
-                        let run_is_bare_letters = (start..=end)
-                            .all(|k| tokens[k].content.chars().count() == 1);
-                        if !run_is_bare_letters && (l == "en" || r == "en") {
-                            "en".to_string()
-                        } else {
+                let final_lang =
+                    if let (Some(l), Some(r)) = (left_anchor.as_ref(), right_anchor.as_ref()) {
+                        if right_dist < left_dist {
                             r.clone()
+                        } else if left_dist < right_dist {
+                            l.clone()
+                        } else {
+                            // On a tie: a shared word that is a REAL word sitting
+                            // next to an English word usually belongs to that
+                            // English phrase ("let's go ăn" -> "go" is English;
+                            // "muốn go to market" -> "go to" is English). Single
+                            // letters are the exception ("a" in "a còng", "i" in
+                            // "core i chín"): they keep the right-anchor preference
+                            // so they are not dragged into English.
+                            let run_is_bare_letters =
+                                (start..=end).all(|k| tokens[k].content.chars().count() == 1);
+                            if !run_is_bare_letters && (l == "en" || r == "en") {
+                                "en".to_string()
+                            } else {
+                                r.clone()
+                            }
                         }
-                    }
-                } else if let Some(l) = left_anchor {
-                    l
-                } else if let Some(r) = right_anchor {
-                    r
-                } else {
-                    default_lang.to_string()
-                };
+                    } else if let Some(l) = left_anchor {
+                        l
+                    } else if let Some(r) = right_anchor {
+                        r
+                    } else {
+                        default_lang.to_string()
+                    };
 
                 for idx in start..=end {
                     tokens[idx].lang = final_lang.clone();

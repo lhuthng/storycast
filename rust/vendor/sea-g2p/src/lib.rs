@@ -60,14 +60,19 @@ impl G2P {
     fn new(dict_path: &str) -> PyResult<Self> {
         let engine = g2p::G2PEngine::new(dict_path)
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        Ok(G2P { engine, thai: std::sync::OnceLock::new() })
+        Ok(G2P {
+            engine,
+            thai: std::sync::OnceLock::new(),
+        })
     }
 
     /// Phonemize Indonesian text: normalize, then read each token from the
     /// Indonesian dictionary, the English engine, or the rules.
     fn phonemize_id(&self, text: &str) -> String {
         let id = lang::id::Indonesian::new();
-        id.phonemize_with(text, &self.engine.dict, |latin| self.engine.phonemize(latin))
+        id.phonemize_with(text, &self.engine.dict, |latin| {
+            self.engine.phonemize(latin)
+        })
     }
 
     /// Normalize Indonesian text without phonemizing.
@@ -91,7 +96,10 @@ impl G2P {
     fn normalize_id_batch(&self, py: Python<'_>, texts: Vec<String>) -> Vec<String> {
         py.allow_threads(|| {
             use rayon::prelude::*;
-            texts.into_par_iter().map(|t| lang::id::normalizer::normalize(&t)).collect()
+            texts
+                .into_par_iter()
+                .map(|t| lang::id::normalizer::normalize(&t))
+                .collect()
         })
     }
 
@@ -139,7 +147,9 @@ impl G2P {
 
     /// Phonemize a batch of Thai texts in parallel.
     fn phonemize_th_batch(&self, py: Python<'_>, texts: Vec<String>) -> Vec<String> {
-        let th = self.thai.get_or_init(|| lang::th::Thai::new(&self.engine.dict));
+        let th = self
+            .thai
+            .get_or_init(|| lang::th::Thai::new(&self.engine.dict));
         py.allow_threads(|| {
             use rayon::prelude::*;
             texts
@@ -152,8 +162,13 @@ impl G2P {
     /// Segment Thai text into words. Returns `(text, known)` pairs, where
     /// `known` is `None` for non-Thai runs passed through verbatim.
     fn segment_th(&self, text: &str) -> Vec<(String, Option<bool>)> {
-        let th = self.thai.get_or_init(|| lang::th::Thai::new(&self.engine.dict));
-        th.segment(text).into_iter().map(|t| (t.text, t.known)).collect()
+        let th = self
+            .thai
+            .get_or_init(|| lang::th::Thai::new(&self.engine.dict));
+        th.segment(text)
+            .into_iter()
+            .map(|t| (t.text, t.known))
+            .collect()
     }
 
     /// Phonemize Thai text: normalize, segment, then read each token — Thai
@@ -161,24 +176,44 @@ impl G2P {
     /// engine that serves English elsewhere, so code-switched text comes out
     /// as one phoneme string.
     fn phonemize_th(&self, text: &str) -> String {
-        let th = self.thai.get_or_init(|| lang::th::Thai::new(&self.engine.dict));
-        th.phonemize_with(text, &self.engine.dict, |latin| self.engine.phonemize(latin))
+        let th = self
+            .thai
+            .get_or_init(|| lang::th::Thai::new(&self.engine.dict));
+        th.phonemize_with(text, &self.engine.dict, |latin| {
+            self.engine.phonemize(latin)
+        })
     }
 
     #[pyo3(signature = (text, punc_norm=false))]
     fn phonemize(&self, text: &str, punc_norm: bool) -> PyResult<String> {
-        let input = if punc_norm { crate::punc::apply_punc_norm(text) } else { text.to_string() };
+        let input = if punc_norm {
+            crate::punc::apply_punc_norm(text)
+        } else {
+            text.to_string()
+        };
         Ok(self.engine.phonemize(&input))
     }
 
     #[pyo3(signature = (texts, punc_norm=false))]
-    fn phonemize_batch(&self, py: Python<'_>, texts: Vec<String>, punc_norm: bool) -> PyResult<Vec<String>> {
+    fn phonemize_batch(
+        &self,
+        py: Python<'_>,
+        texts: Vec<String>,
+        punc_norm: bool,
+    ) -> PyResult<Vec<String>> {
         py.allow_threads(|| {
             use rayon::prelude::*;
-            Ok(texts.into_par_iter().map(|t| {
-                let input = if punc_norm { crate::punc::apply_punc_norm(&t) } else { t };
-                self.engine.phonemize(&input)
-            }).collect())
+            Ok(texts
+                .into_par_iter()
+                .map(|t| {
+                    let input = if punc_norm {
+                        crate::punc::apply_punc_norm(&t)
+                    } else {
+                        t
+                    };
+                    self.engine.phonemize(&input)
+                })
+                .collect())
         })
     }
 }

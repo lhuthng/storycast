@@ -856,6 +856,11 @@ pub struct AnalyzerSettings {
     pub opencode_model: String,
     #[serde(default)]
     pub openrouter_model: String,
+    /// The model service's base URL, so a box behind a proxy or a gateway
+    /// talks to the same endpoint the inductor does. Empty means "the inductor
+    /// said nothing" and the box keeps its own, like every other field here.
+    #[serde(default)]
+    pub openrouter_url: String,
     #[serde(default)]
     pub local_model: String,
     #[serde(default)]

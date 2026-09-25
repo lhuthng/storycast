@@ -214,9 +214,7 @@ impl Inner {
                     } else if !here && t.state == TaskState::Done {
                         t.state = TaskState::Pending;
                         t.updated = now;
-                    } else if !here
-                        && matches!(t.state, TaskState::Assigned | TaskState::Running)
-                    {
+                    } else if !here && matches!(t.state, TaskState::Assigned | TaskState::Running) {
                         t.lease_until = Some(now + super::lease_for(Stage::Render));
                         t.updated = now;
                     }

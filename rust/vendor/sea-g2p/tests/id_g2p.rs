@@ -69,7 +69,10 @@ fn code_switching_goes_to_the_english_engine() {
     let eng = engine();
     let id = Indonesian::new();
     let out = read(&eng, &id, "saya pakai iPhone dan Facebook");
-    assert!(!out.contains("iphone") && !out.contains("facebook"), "{out}");
+    assert!(
+        !out.contains("iphone") && !out.contains("facebook"),
+        "{out}"
+    );
     // the Indonesian around it still reads as Indonesian
     assert!(out.starts_with("sa ja"), "{out}");
 }
@@ -93,7 +96,10 @@ fn english_routing_is_a_dictionary_test_not_an_engine_test() {
     assert_eq!(read(&eng, &id, "gadjah"), "ɡa d͡ʒah");
     // a word the English dictionary really has still goes there
     let out = read(&eng, &id, "iphone");
-    assert!(out.contains('ˈ'), "expected English stress marks, got {out}");
+    assert!(
+        out.contains('ˈ'),
+        "expected English stress marks, got {out}"
+    );
 }
 
 #[test]

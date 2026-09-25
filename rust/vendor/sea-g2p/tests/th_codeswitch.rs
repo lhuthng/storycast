@@ -56,7 +56,10 @@ fn brand_names_are_read_as_english() {
     // the Thai around them still reads as Thai
     assert!(out.contains("pʰom"), "{out}");
     // and the Latin is phonemised, not passed through
-    assert!(!out.contains("iPhone") && !out.contains("Facebook"), "{out}");
+    assert!(
+        !out.contains("iPhone") && !out.contains("Facebook"),
+        "{out}"
+    );
     assert_fully_read(&out, "ผมใช้ iPhone และ Facebook");
 }
 

@@ -7,13 +7,13 @@ fn read(w: &str) -> String {
 
 #[test]
 fn ordinary_words() {
-    assert_eq!(read("สวัสดี"), "sa˨˩ wat̚˨˩ diː˧");   // อักษรนำ: ส leads วัส
-    assert_eq!(read("ครับ"), "kʰrap̚˦˥");             // true cluster
-    assert_eq!(read("เขา"), "kʰaw˩˩˦");               // เ-า diphthong
-    assert_eq!(read("ผู้คน"), "pʰuː˥˩ kʰon˧");        // no coda stealing
-    assert_eq!(read("คน"), "kʰon˧");                  // inherent /o/
+    assert_eq!(read("สวัสดี"), "sa˨˩ wat̚˨˩ diː˧"); // อักษรนำ: ส leads วัส
+    assert_eq!(read("ครับ"), "kʰrap̚˦˥"); // true cluster
+    assert_eq!(read("เขา"), "kʰaw˩˩˦"); // เ-า diphthong
+    assert_eq!(read("ผู้คน"), "pʰuː˥˩ kʰon˧"); // no coda stealing
+    assert_eq!(read("คน"), "kʰon˧"); // inherent /o/
     assert_eq!(read("เดิน"), "dɤːn˧");
-    assert_eq!(read("ไทย"), "tʰaj˧");                 // silent ย
+    assert_eq!(read("ไทย"), "tʰaj˧"); // silent ย
 }
 
 #[test]
@@ -25,9 +25,9 @@ fn tone_mark_position() {
 
 #[test]
 fn silent_letters_and_ro_han() {
-    assert_eq!(read("หลอก"), "lɔːk̚˨˩");   // silent ห lends high class
+    assert_eq!(read("หลอก"), "lɔːk̚˨˩"); // silent ห lends high class
     assert_eq!(read("ให้"), "haj˥˩");
-    assert_eq!(read("ธรรม"), "tʰam˧");      // ro han
+    assert_eq!(read("ธรรม"), "tʰam˧"); // ro han
     assert_eq!(read("ละคร"), "la˦˥ kʰɔːn˧"); // lone ร final takes /ɔː/
 }
 

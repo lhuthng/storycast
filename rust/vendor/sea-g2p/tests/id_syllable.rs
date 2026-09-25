@@ -51,6 +51,14 @@ fn output_groups_match_syllable_count() {
     let dict = PhonemeDict::new(&path).expect("shipped dictionary");
     let id = Indonesian::new();
     // saya makan is sa-ya ma-kan: four syllables, four groups
-    assert_eq!(id.phonemize("saya makan", &dict).split_whitespace().count(), 4);
-    assert_eq!(id.phonemize("menyembunyikan", &dict).split_whitespace().count(), 5);
+    assert_eq!(
+        id.phonemize("saya makan", &dict).split_whitespace().count(),
+        4
+    );
+    assert_eq!(
+        id.phonemize("menyembunyikan", &dict)
+            .split_whitespace()
+            .count(),
+        5
+    );
 }

@@ -63,8 +63,6 @@ struct Inner {
     front: FrontEnd,
     roster: Roster,
     synth: Mutex<Synth>,
-    max_chars: usize,
-    min_chunk_chars: usize,
 }
 
 impl Server {
@@ -92,8 +90,6 @@ impl Server {
             front,
             roster,
             synth: Mutex::new(synth),
-            max_chars: 256,
-            min_chunk_chars: 20,
         });
     }
 
@@ -112,9 +108,7 @@ impl Inner {
         temperature: f64,
         seed: u64,
     ) -> anyhow::Result<Vec<f32>> {
-        let chunks = self
-            .front
-            .chunks(text, self.max_chars, self.min_chunk_chars);
+        let chunks = self.front.chunks_sentence_level(text);
         if chunks.chunks.is_empty() {
             return Ok(Vec::new());
         }
@@ -254,10 +248,12 @@ async fn voices(State(s): State<Arc<Server>>) -> Response {
 /// never disagree about what a voice is.
 async fn roster(State(s): State<Arc<Server>>) -> Response {
     match s.inner() {
-        Some(i) => {
-            Json(bm_core::voices::voices_from_labels("vieneu", &labels(&i.roster), &[]))
-                .into_response()
-        }
+        Some(i) => Json(bm_core::voices::voices_from_labels(
+            "vieneu",
+            &labels(&i.roster),
+            &[],
+        ))
+        .into_response(),
         None => loading(),
     }
 }

@@ -29,9 +29,27 @@ const PREPOSED: [char; 5] = ['เ', 'แ', 'โ', 'ใ', 'ไ'];
 
 /// Marks that can never begin a cluster: they attach to a preceding consonant.
 fn is_dependent(c: char) -> bool {
-    matches!(c,
-        'ะ' | 'ั' | 'า' | 'ำ' | 'ิ' | 'ี' | 'ึ' | 'ื' | 'ุ' | 'ู' | '็'
-        | '่' | '้' | '๊' | '๋' | '์' | 'ํ' | '๎' | 'ฺ')
+    matches!(
+        c,
+        'ะ' | 'ั'
+            | 'า'
+            | 'ำ'
+            | 'ิ'
+            | 'ี'
+            | 'ึ'
+            | 'ื'
+            | 'ุ'
+            | 'ู'
+            | '็'
+            | '่'
+            | '้'
+            | '๊'
+            | '๋'
+            | '์'
+            | 'ํ'
+            | '๎'
+            | 'ฺ'
+    )
 }
 
 pub fn is_thai(c: char) -> bool {
@@ -110,7 +128,10 @@ pub struct WordTrie {
 
 impl WordTrie {
     pub fn new() -> Self {
-        Self { root: Node::default(), unknown_per_char: 30.0 }
+        Self {
+            root: Node::default(),
+            unknown_per_char: 30.0,
+        }
     }
 
     pub fn insert_with_cost(&mut self, word: &str, cost: f32) {
@@ -210,7 +231,10 @@ fn segment_thai_run(s: &str, trie: &WordTrie) -> Vec<Token> {
     let mut k = n;
     while k > 0 {
         let (prev, start, known) = back[k].expect("reachable by construction");
-        pieces.push(Token { text: s[start..bounds[k]].to_string(), known: Some(known) });
+        pieces.push(Token {
+            text: s[start..bounds[k]].to_string(),
+            known: Some(known),
+        });
         k = prev;
     }
     pieces.reverse();
@@ -243,7 +267,10 @@ pub fn segment(text: &str, trie: &WordTrie) -> Vec<Token> {
         if is_thai {
             out.extend(segment_thai_run(buf, trie));
         } else {
-            out.push(Token { text: std::mem::take(buf), known: None });
+            out.push(Token {
+                text: std::mem::take(buf),
+                known: None,
+            });
             return;
         }
         buf.clear();
@@ -254,7 +281,10 @@ pub fn segment(text: &str, trie: &WordTrie) -> Vec<Token> {
         // them is the normalizer's job, exactly like Vietnamese "v.v".
         if c == 'ๆ' || c == 'ฯ' {
             flush(&mut buf, buf_is_thai, &mut out);
-            out.push(Token { text: c.to_string(), known: Some(true) });
+            out.push(Token {
+                text: c.to_string(),
+                known: Some(true),
+            });
             continue;
         }
         let t = is_thai(c);

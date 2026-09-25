@@ -149,7 +149,16 @@ fn strip_tags(html: &str) -> String {
 }
 
 /// Decode the handful of entities that actually show up in story pages.
-fn decode_entities(s: &str) -> String {
+///
+/// `pub(crate)`, not private: the digest's `prepare_chapter` runs the same
+/// decoder over chapters read with [`read_local`]. Chapters crawled before the
+/// generic numeric-entity support landed (the `&#x27;két&#x27;` shape) keep the
+/// raw forms on disk, and the digest is the stage where the mismatch bites —
+/// the model reads `&#x27;` and answers `'`, then the source gate refuses the
+/// one-character difference for every racer and the chapter can never digest.
+/// One decoder, run at the same boundary the crawler decodes at, so prepared
+/// text and the model's natural output agree again.
+pub(crate) fn decode_entities(s: &str) -> String {
     if !s.contains('&') {
         return s.to_string();
     }
@@ -176,6 +185,31 @@ fn decode_entities(s: &str) -> String {
             }
         }
         if !matched {
+            // ponytail: generic numeric entities (&#39; &#x27;) — named list alone
+            // leaves hex variants like &#x27; raw in source, model decodes to '
+            // and source gate then fails verbatim compare. The body spans the
+            // whole entity INCLUDING the leading `&` (tail starts at it): slicing
+            // from 1 dropped the `&`, every `strip_prefix("&#…")` missed, and the
+            // branch silently passed numeric entities through raw — which is how
+            // `&#x27;két&#x27;` reached disk after this code existed.
+            if let Some(semi) = tail.find(';').filter(|&p| p < 10) {
+                let body = &tail[..semi];
+                let code = if let Some(hex) = body
+                    .strip_prefix("&#x")
+                    .or_else(|| body.strip_prefix("&#X"))
+                {
+                    u32::from_str_radix(hex, 16).ok()
+                } else if let Some(dec) = body.strip_prefix("&#") {
+                    dec.parse::<u32>().ok()
+                } else {
+                    None
+                };
+                if let Some(c) = code.and_then(char::from_u32) {
+                    out.push(c);
+                    rest = &tail[semi + 1..];
+                    continue;
+                }
+            }
             out.push('&');
             rest = &tail[1..];
         }
@@ -193,6 +227,67 @@ fn is_chapter_heading(line: &str) -> bool {
             .unwrap_or(false),
         None => false,
     }
+}
+
+/// True for a standalone line copied from Storya rather than the novel.
+///
+/// These markers are deliberately conjunctive. A story may legitimately say
+/// that a task was completed, include an author's `PS:`, or mention a platform;
+/// only the site-shaped combinations are removed. In particular, the false
+/// completion footer needs all three fingerprints (`Hệ thống`, `chiếc đỉnh`,
+/// `hậu cung`, and `Truyện đã hoàn thành`) so ordinary prose is never mistaken
+/// for site metadata.
+fn is_storya_artifact(line: &str) -> bool {
+    let line = line.trim();
+    let lower = line.to_lowercase();
+    let normalized = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    normalized == "cài đặt đọc"
+        || normalized == "người trên vạn người"
+        || ((lower.contains("đọc online")
+            || lower.contains("cập nhật nhanh nhất")
+            || lower.contains("nền tảng đọc truyện"))
+            && lower.contains("storya"))
+        || (lower.contains("hệ thống")
+            && lower.contains("chiếc đỉnh")
+            && lower.contains("hậu cung")
+            && lower.contains("truyện đã hoàn thành"))
+        || lower.starts_with("ps:")
+        || lower.starts_with("p/s:")
+}
+
+/// Remove known site metadata and decode entities at the chapter boundary.
+///
+/// This runs for freshly crawled pages, existing local chapter files, and the
+/// digest preparer. Keeping one function at all three boundaries is what makes
+/// a workspace created by an older binary safe: bad source data is repaired on
+/// read instead of being blessed by the source-alignment gate and spoken.
+pub(crate) fn sanitize_chapter_text(text: &str) -> String {
+    let decoded = decode_entities(text);
+    let mut paragraphs = Vec::new();
+    for line in decoded.lines() {
+        let line = line.trim();
+        if line.is_empty() || is_storya_artifact(line) {
+            continue;
+        }
+        // Storya repeats the chapter as `81. Chương 81: ...` beside the real
+        // `Chương 81: ...` headline. The numbered copy is metadata; the clean
+        // headline is retained and spoken once by the title renderer.
+        let bytes = line.as_bytes();
+        let numbered_heading = bytes.first().is_some_and(u8::is_ascii_digit)
+            && line
+                .split_once(". ")
+                .map(|(_, rest)| is_chapter_heading(rest))
+                .unwrap_or(false);
+        if numbered_heading {
+            continue;
+        }
+        paragraphs.push(line);
+    }
+    if paragraphs.is_empty() {
+        return String::new();
+    }
+    format!("{}\n", paragraphs.join("\n\n"))
 }
 
 /// Extract readable chapter text from a story page.
@@ -251,14 +346,14 @@ pub fn clean_storya_html(html: &str) -> String {
     out.extend(body[start_idx..].iter().cloned());
 
     let joined = out.join("\n\n");
-    format!("{}\n", joined.trim())
+    sanitize_chapter_text(&joined)
 }
 
 /// Read a chapter that is already on disk.
 pub fn read_local(path: &Path) -> Result<String> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(format!("{}\n", text.trim()))
+    Ok(sanitize_chapter_text(&text))
 }
 
 /// Fetch (or read) a chapter and persist the cleaned text.
@@ -314,6 +409,22 @@ mod tests {
     }
 
     #[test]
+    fn decodes_numeric_entities_in_both_radixes() {
+        // The ch79 shape, verbatim: the generic branch used to slice off the
+        // leading `&`, so every numeric entity passed through raw — and the
+        // digest's source gate then refused the decoded answer the model
+        // naturally gives, stranding the chapter on every racer.
+        assert_eq!(
+            decode_entities("&#x27;két&#x27; một tiếng"),
+            "'két' một tiếng"
+        );
+        assert_eq!(decode_entities("&#39;hắn&#39; nói"), "'hắn' nói");
+        assert_eq!(decode_entities("&quot;Ừm&quot;"), "\"Ừm\"");
+        // A semicolon nearby but no entity body stays raw, not mangled.
+        assert_eq!(decode_entities("a & b; c"), "a & b; c");
+    }
+
+    #[test]
     fn chapter_heading_detection() {
         assert!(is_chapter_heading("Chương 12"));
         assert!(is_chapter_heading("Chương 12: Tên"));
@@ -333,6 +444,20 @@ mod tests {
         assert!(!out.contains(SITE_BYLINE_PREFIX), "{out}");
         assert!(!out.contains("Đọc online"), "{out}");
         assert!(out.contains("Đây là một câu văn dài"), "{out}");
+    }
+
+    #[test]
+    fn sanitizes_storya_metadata_without_touching_story_prose() {
+        let raw = "Chương 81: Liền phòng ngự\n\n81. Chương 81: Liền phòng ngự\n\nCài đặt đọc\n\nNgười Trên Vạn Người\n\nNgười Trên Vạn Người thuộc thể loại Xuyên Không, chương 81 tiếp tục diễn biến hấp dẫn của câu chuyện. Đọc online miễn phí, cập nhật nhanh nhất tại Storya - nền tảng đọc truyện chất lượng cao.\n\nHắn đã hoàn thành nhiệm vụ.\n\nHệ thống thực thể dưới dạng chiếc đỉnh. Main bá, không hậu cung. Truyện đã hoàn thành\n\nPS: sẽ cập nhật sau.\n\nCánh cửa k&#x27;két&#x27; một tiếng.";
+        let out = sanitize_chapter_text(raw);
+
+        assert!(out.starts_with("Chương 81: Liền phòng ngự\n\nHắn đã hoàn thành nhiệm vụ."));
+        assert!(out.ends_with("Cánh cửa k'két' một tiếng.\n"));
+        assert!(!out.contains("81. Chương"));
+        assert!(!out.contains("Storya"));
+        assert!(!out.contains("Truyện đã hoàn thành"));
+        assert!(!out.contains("PS:"));
+        assert!(!out.contains("&#"));
     }
 
     #[tokio::test]

@@ -146,7 +146,10 @@ pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
             };
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("  {:<16}", format!("{} ({})", machine_label(m), machine_kind(m))),
+                    format!(
+                        "  {:<16}",
+                        format!("{} ({})", machine_label(m), machine_kind(m))
+                    ),
                     app.style(Color::Cyan),
                 ),
                 Span::raw(format!("{:<9}", policy_summary(m))),

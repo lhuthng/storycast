@@ -35,7 +35,9 @@ pub struct AbbrevTable {
 
 impl AbbrevTable {
     pub fn new() -> Self {
-        Self { map: HashMap::new() }
+        Self {
+            map: HashMap::new(),
+        }
     }
 
     pub fn insert(&mut self, key: &'static str, reading: Reading) {

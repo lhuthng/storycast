@@ -932,15 +932,10 @@ async fn run_merge(
             std::fs::create_dir_all(&seg_dir)?;
             for name in &takes {
                 let dest = seg_dir.join(name);
-                if dest
-                    .metadata()
-                    .map(|m| m.len() > 1000)
-                    .unwrap_or(false)
-                {
+                if dest.metadata().map(|m| m.len() > 1000).unwrap_or(false) {
                     continue;
                 }
-                let url =
-                    format!("{inductor}/api/segment?chapter={n}&engine={engine}&name={name}");
+                let url = format!("{inductor}/api/segment?chapter={n}&engine={engine}&name={name}");
                 let bytes = http
                     .get(&url)
                     .send()
@@ -954,14 +949,13 @@ async fn run_merge(
                 if bytes.len() <= 1000 {
                     anyhow::bail!("segment {name} pulled {} bytes — not a take", bytes.len());
                 }
-                std::fs::write(&dest, &bytes)
-                    .with_context(|| format!("storing segment {name}"))?;
+                std::fs::write(&dest, &bytes).with_context(|| format!("storing segment {name}"))?;
             }
         }
-    }    // Everything the merge writes goes into one per-chapter scratch directory
-    // under `.bm/`, never into `output/`. `assemble` hands back the mp3 (or a
-    // wav when ffmpeg is missing) and `publish` renames it out to `output/`,
-    // after which the whole scratch directory can go.
+    } // Everything the merge writes goes into one per-chapter scratch directory
+      // under `.bm/`, never into `output/`. `assemble` hands back the mp3 (or a
+      // wav when ffmpeg is missing) and `publish` renames it out to `output/`,
+      // after which the whole scratch directory can go.
     let scratch = layout.scratch_ch(n);
     // The inductor's plan names the files; a worker that recomputed them would
     // look for legacy names and find nothing. An empty list is an old inductor:
@@ -1196,14 +1190,32 @@ fn heartbeat_now(
     sidecar_keep: bool,
 ) -> Heartbeat {
     let (cpu_pct, mem_pct, mem_gb, sidecars, sidecar_gb) = probe.sample();
+    // A completed stage must not survive the task boundary as a live-looking
+    // heartbeat. `clear_task` normally removes the whole block together, but
+    // the completion report and the next status poll are separate concurrent
+    // operations. If a poll observes the terminal activity after the task id
+    // has already been cleared, report the authoritative state instead of
+    // resurrecting `digest chN done` as though the worker were still working.
+    let stale_completion = p.task_id.is_none() && p.activity.contains(" done");
+    let (task_id, stage, chapter, progress, activity) = if stale_completion {
+        (None, None, None, 0.0, "idle".to_string())
+    } else {
+        (
+            p.task_id.clone(),
+            p.stage.as_deref().and_then(bm_proto::Stage::parse),
+            p.chapter,
+            p.frac,
+            p.activity.clone(),
+        )
+    };
     Heartbeat {
         worker_id: who.worker_id.clone(),
         addr: who.addr.clone(),
-        task_id: p.task_id.clone(),
-        stage: p.stage.as_deref().and_then(bm_proto::Stage::parse),
-        chapter: p.chapter,
-        progress: p.frac,
-        activity: p.activity.clone(),
+        task_id,
+        stage,
+        chapter,
+        progress,
+        activity,
         eta_secs: None,
         ts: bm_proto::now_secs(),
         hostname: who.hostname.clone(),
@@ -1512,12 +1524,10 @@ async fn run_offer(
             let (units, unit_files) = match render_action(offer.render_units.as_deref()) {
                 // Old inductor: plan from the local script, keep files
                 // locally, upload nothing — exactly as before the migration.
-                RenderAction::Legacy => {
-                    (
-                        run_render(layout, n, &offer.engine, &sidecar.tts(), shared).await?,
-                        Vec::new(),
-                    )
-                }
+                RenderAction::Legacy => (
+                    run_render(layout, n, &offer.engine, &sidecar.tts(), shared).await?,
+                    Vec::new(),
+                ),
                 // The offer names no units at all: nothing to speak.
                 RenderAction::Noop => (0, Vec::new()),
                 // The takes this offer carries, minus what this box already has.
@@ -1827,7 +1837,17 @@ async fn worker_loop(
         };
         set_task(&shared, &offer);
         let t0 = Instant::now();
-        let res = match run_offer(&layout, &settings, &offer, &shared, &mut sidecar, Some((&http, inductor.as_str())), true).await {
+        let res = match run_offer(
+            &layout,
+            &settings,
+            &offer,
+            &shared,
+            &mut sidecar,
+            Some((&http, inductor.as_str())),
+            true,
+        )
+        .await
+        {
             Ok(r) => r,
             Err(e) => TaskResult {
                 ok: false,
@@ -1840,6 +1860,13 @@ async fn worker_loop(
                 unit_files: Vec::new(),
             },
         };
+        // The stage is over as soon as `run_offer` returns. Do not leave its
+        // terminal `... done` activity visible while the completion report is
+        // being retried: from the worker's point of view it is idle, and the
+        // report transport is bookkeeping, not work. The task id is also
+        // cleared here so a status poll cannot mistake the old stage for a
+        // live offer while `/api/complete` is in flight.
+        clear_task(&shared);
         println!("[{}] {}", if res.ok { "ok" } else { "FAIL" }, res.detail);
         // Reports must land: a lost merge report strands a finished mp3 on
         // this machine until the lease expires. Retry, then move on.
@@ -1887,7 +1914,6 @@ async fn worker_loop(
         // Reclaiming it is a job for a `gc` pass that knows the chapter is
         // finished, not for the worker that just produced it.
         let _ = (offer.render_units.as_deref(), reported);
-        clear_task(&shared);
     }
 }
 
@@ -1902,7 +1928,7 @@ fn hostname_simple() -> String {
 /// the tunnel), every pass would otherwise log the same failure with no
 /// remedy attached — which is how a real problem becomes unreadable noise.
 fn tunnel_missing_hint(task_id: &str, attempt: u64) {
-    if attempt % 12 == 0 {
+    if attempt.is_multiple_of(12) {
         println!(
             "hook: {task_id} still unreported — no tunnel answers on 127.0.0.1:{}; \
              the inductor's lease reaper will requeue it if this tunnel never comes back",
@@ -2127,12 +2153,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_completed_activity_without_a_task_is_reported_as_idle() {
+        let p = Progress {
+            task_id: None,
+            stage: Some("digest".into()),
+            chapter: Some(7),
+            frac: 1.0,
+            activity: "digest ch7 done (12 segments)".into(),
+            pending: None,
+        };
+        let who = WorkerIdentity {
+            worker_id: "w1".into(),
+            addr: "127.0.0.1".into(),
+            hostname: "box".into(),
+            alias: "owl".into(),
+        };
+        let mut probe = LoadProbe::new();
+        let beat = heartbeat_now(&p, &who, &mut probe, true);
+        assert_eq!(beat.task_id, None);
+        assert_eq!(beat.stage, None);
+        assert_eq!(beat.chapter, None);
+        assert_eq!(beat.progress, 0.0);
+        assert_eq!(beat.activity, "idle");
+    }
+
+    #[test]
     fn load_probe_reports_nothing_then_sane_values() {
         // First sample primes the CPU delta (a 0.0 would read as idle,
         // not unknown); the second must be real percentages on any box.
         let mut probe = LoadProbe::new();
         let (cpu, mem, gb, sidecars, sidecar_gb) = probe.sample();
-        assert_eq!((cpu, mem, gb), (None, None, None), "the first beat has no delta yet");
+        assert_eq!(
+            (cpu, mem, gb),
+            (None, None, None),
+            "the first beat has no delta yet"
+        );
         // A census, not a delta: the count is real on the very first beat.
         let sidecars = sidecars.expect("the count is always reported");
         assert!(sidecar_gb.expect("rss always measures") >= 0.0);
@@ -2641,9 +2696,17 @@ mod tests {
         let shared: Shared = Arc::new(Mutex::new(Progress::default()));
         let mut sidecar = Sidecar::new(&format!("http://{addr}"));
 
-        let res = run_offer(&layout, &Settings::default(), &offer, &shared, &mut sidecar, None, true)
-            .await
-            .expect("a batch renders");
+        let res = run_offer(
+            &layout,
+            &Settings::default(),
+            &offer,
+            &shared,
+            &mut sidecar,
+            None,
+            true,
+        )
+        .await
+        .expect("a batch renders");
         assert!(res.ok);
         assert_eq!(res.units, 10, "ten takes spoken, ten reported");
         assert_eq!(
@@ -2666,9 +2729,17 @@ mod tests {
         // skipped, so a retry after a partial batch re-speaks only the gap.
         std::fs::remove_file(seg.join(&units[4].name)).unwrap();
         calls.store(0, Ordering::SeqCst);
-        let res = run_offer(&layout, &Settings::default(), &offer, &shared, &mut sidecar, None, true)
-            .await
-            .expect("the retry renders");
+        let res = run_offer(
+            &layout,
+            &Settings::default(),
+            &offer,
+            &shared,
+            &mut sidecar,
+            None,
+            true,
+        )
+        .await
+        .expect("the retry renders");
         assert_eq!(res.units, 1, "only the missing take is re-spoken");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(seg.join(&units[4].name).is_file(), "and it landed");
@@ -2870,6 +2941,11 @@ mod tests {
             "bible={bible_json}\nchapter={chapter_text}\n",
         )
         .unwrap();
+        std::fs::write(
+            layout.script_prompt(),
+            "bible={bible_json}\ncast={cast_json}\nmusic={music_palette}\neffects={effect_tags}\ninjects={inject_sounds}\nchapter={chapter_text}\n",
+        )
+        .unwrap();
         // The digest reads the music palette out of the scene map — it is the
         // vocabulary the prompt offers and the validator accepts — so a worker
         // with no `assets/` cannot be handed a chapter to digest at all.
@@ -2928,7 +3004,16 @@ mod tests {
         // The digest itself is *expected* to fail — the fixture answers `{}`,
         // which is not a valid digest, so the one repair attempt fails too.
         // What is under test is where the request went and what it asked for.
-        let _ = run_offer(&layout, &box_settings, &offer, &shared, &mut sidecar, None, true).await;
+        let _ = run_offer(
+            &layout,
+            &box_settings,
+            &offer,
+            &shared,
+            &mut sidecar,
+            None,
+            true,
+        )
+        .await;
 
         let bodies = seen.lock().unwrap().clone();
         assert!(
@@ -3002,7 +3087,7 @@ mod census_probe {
     #[test]
     #[ignore = "starts the real bm-tts and loads the model — run deliberately, see the doc comment"]
     fn the_census_finds_a_real_bm_tts_and_reads_its_rss() {
-        let layout = Layout::new(&repo_root());
+        let layout = Layout::new(repo_root());
         let (bin, args) = layout.sidecar_command(SIDECAR_PORT);
         // Fail loudly rather than skipping: a check that quietly does nothing
         // when it cannot run is worse than no check.

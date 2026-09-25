@@ -443,7 +443,10 @@ pub(crate) fn do_command(
                     title: "Relink to the box's current address".into(),
                     danger: false,
                     body: vec![
-                        format!("{} no longer answers — EC2 public IPs change on every", m.addr),
+                        format!(
+                            "{} no longer answers — EC2 public IPs change on every",
+                            m.addr
+                        ),
                         "stop/start and spot relaunch.".into(),
                         String::new(),
                         "The account is read, the box is matched by its EC2 instance id,".into(),

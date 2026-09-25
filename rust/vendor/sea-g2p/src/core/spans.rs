@@ -46,33 +46,27 @@ pub struct SpanWords {
 /// Reading the tag itself turned `<math>b²</math>` into "less than math
 /// greater than b squared", so the delimiters are stripped and the content
 /// kept — the symbol stage inside it then voices the operators.
-static RE_TAG: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)</?(?:math|en)>").unwrap()
-});
+static RE_TAG: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)</?(?:math|en)>").unwrap());
 
 /// Identifier-shaped runs: licence plates, model numbers, order codes. The
 /// digits in them are not quantities — a Thai plate `กก 1234` is four
 /// figures, not one thousand two hundred and thirty-four — so they are read
 /// out one by one.
 static RE_PLATE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"(?i)([A-Za-z\u{0E01}-\u{0E4E}]{1,3})\s?(\d{2,5})(?:\s?([A-Za-z]{1,3}))?\b",
-    )
-    .unwrap()
+    Regex::new(r"(?i)([A-Za-z\u{0E01}-\u{0E4E}]{1,3})\s?(\d{2,5})(?:\s?([A-Za-z]{1,3}))?\b")
+        .unwrap()
 });
 
-static RE_EMAIL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b").unwrap()
-});
-static RE_URL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(?:https?://|www\.)[a-z0-9.\-/_%?=&#]+").unwrap()
-});
+static RE_EMAIL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b").unwrap());
+static RE_URL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\b(?:https?://|www\.)[a-z0-9.\-/_%?=&#]+").unwrap());
 
 /// Domain suffixes read as words rather than spelled: everyone says "com",
 /// nobody says "see oh em".
 const WORD_SUFFIXES: &[&str] = &[
-    "com", "net", "org", "edu", "gov", "info", "biz", "io", "co", "id",
-    "th", "vn", "my", "sg", "ph", "asia", "shop", "site", "app", "dev",
+    "com", "net", "org", "edu", "gov", "info", "biz", "io", "co", "id", "th", "vn", "my", "sg",
+    "ph", "asia", "shop", "site", "app", "dev",
 ];
 
 /// Expand every address-like span. `read_word` phonemises an ordinary word,
@@ -99,7 +93,13 @@ pub fn expand(text: &str, w: &SpanWords) -> String {
             // at all.
             let mut prefix = String::new();
             let rest = if let Some(r) = span.strip_prefix("https://") {
-                prefix = format!("{} {} {} {} ", (w.spell)("https"), w.colon, w.slash, w.slash);
+                prefix = format!(
+                    "{} {} {} {} ",
+                    (w.spell)("https"),
+                    w.colon,
+                    w.slash,
+                    w.slash
+                );
                 r
             } else if let Some(r) = span.strip_prefix("http://") {
                 prefix = format!("{} {} {} {} ", (w.spell)("http"), w.colon, w.slash, w.slash);

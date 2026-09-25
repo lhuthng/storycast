@@ -848,11 +848,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("models")).unwrap();
         std::fs::write(d.join("voices.json"), r#"{"Want":"refs/w.mp3"}"#).unwrap();
-        std::fs::write(
-            d.join("models/voices.json"),
-            r#"{"presets":{"Have":{}}}"#,
-        )
-        .unwrap();
+        std::fs::write(d.join("models/voices.json"), r#"{"presets":{"Have":{}}}"#).unwrap();
         // No venv here, so nothing can be baked — and nothing breaks.
         assert!(bake_missing_voices(&d).is_empty());
         // No bake file at all: also nothing, not an error.

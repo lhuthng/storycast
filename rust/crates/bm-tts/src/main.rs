@@ -90,8 +90,12 @@ async fn main() -> Result<()> {
     // The load is blocking CPU/IO: keep it off the async threads so the bound
     // listener can answer 503 while it runs.
     let started = std::time::Instant::now();
-    let (models, codec, dict, voices_path) =
-        (args.models.clone(), args.codec.clone(), args.dict.clone(), args.voices.clone());
+    let (models, codec, dict, voices_path) = (
+        args.models.clone(),
+        args.codec.clone(),
+        args.dict.clone(),
+        args.voices.clone(),
+    );
     let threads = args.threads;
     let (front, roster, synth) =
         tokio::task::spawn_blocking(move || -> Result<(FrontEnd, Roster, Synth)> {

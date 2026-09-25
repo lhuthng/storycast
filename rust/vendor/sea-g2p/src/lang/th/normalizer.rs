@@ -47,8 +47,19 @@ use crate::core::units::{self, UnitWords};
 /// Words that license a Roman numeral in Thai. Reign names dominate:
 /// รัชกาลที่ ๙ is written with a Latin numeral as often as a Thai one.
 const ROMAN: RomanCues = RomanCues {
-    words: &["รัชกาลที่", "รัชกาล", "ที่", "เล่มที่", "บทที่", "ครั้งที่",
-             "ศตวรรษที่", "ลำดับที่", "ฉบับที่", "ภาคที่", "สมัยที่"],
+    words: &[
+        "รัชกาลที่",
+        "รัชกาล",
+        "ที่",
+        "เล่มที่",
+        "บทที่",
+        "ครั้งที่",
+        "ศตวรรษที่",
+        "ลำดับที่",
+        "ฉบับที่",
+        "ภาคที่",
+        "สมัยที่",
+    ],
 };
 
 /// Thai words for the pieces of an email address or URL.
@@ -100,8 +111,8 @@ const UNITS: UnitWords = UnitWords {
 use super::resources::{
     thai_digit_to_ascii, TH_ABBREV, TH_LATIN_LETTERS, TH_LATIN_UNITS, TH_SYMBOLS, TH_UNITS,
 };
-use crate::core::abbrev::Reading;
 use super::segment::normalize_spelling;
+use crate::core::abbrev::Reading;
 
 // ── Stage 1: spelling ───────────────────────────────────────────────────────
 
@@ -137,8 +148,7 @@ fn stage_spans(text: &str) -> String {
 /// weekday reading safe, the same policy Vietnamese uses for T2–T7.
 ///
 /// Longest alternatives first: อา and พฤ must win over อ and พ.
-static RE_WEEKDAY: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"วัน\s*(อา|พฤ|จ|อ|พ|ศ|ส)\.").unwrap());
+static RE_WEEKDAY: Lazy<Regex> = Lazy::new(|| Regex::new(r"วัน\s*(อา|พฤ|จ|อ|พ|ศ|ส)\.").unwrap());
 
 fn stage_weekdays(text: &str) -> String {
     RE_WEEKDAY
@@ -163,7 +173,14 @@ static RE_ABBREV: Lazy<Regex> = Lazy::new(|| {
     let mut keys: Vec<&str> = TH_ABBREV.replacement_keys().collect();
     // longest first: ตร.กม. must win over ตร. and กม.
     keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
-    Regex::new(&keys.iter().map(|k| regex::escape(k)).collect::<Vec<_>>().join("|")).unwrap()
+    Regex::new(
+        &keys
+            .iter()
+            .map(|k| regex::escape(k))
+            .collect::<Vec<_>>()
+            .join("|"),
+    )
+    .unwrap()
 });
 
 /// Expand table entries. Runs before the date and number stages because Thai
@@ -183,23 +200,30 @@ fn stage_abbreviations(text: &str) -> String {
 
 // ── Stage 3: datetime ───────────────────────────────────────────────────────
 
-static RE_DATE_SLASH: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b").unwrap()
-});
+static RE_DATE_SLASH: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b").unwrap());
 /// `14:30` — a colon is unambiguous, so no cue is needed.
-static RE_TIME_COLON: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\b(\d{1,2}):(\d{2})\s*(?:นาฬิกา|น\.)?").unwrap()
-});
+static RE_TIME_COLON: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\b(\d{1,2}):(\d{2})\s*(?:นาฬิกา|น\.)?").unwrap());
 /// `14.30 น.` — the dotted form REQUIRES the นาฬิกา / น. cue. A period
 /// between digits is a decimal point far more often than a clock separator:
 /// without the cue "3.14 เมตร" was read as "3 นาฬิกา 14 นาที".
-static RE_TIME_DOT: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\b(\d{1,2})\.(\d{2})\s*(?:นาฬิกา|น\.)").unwrap()
-});
+static RE_TIME_DOT: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\b(\d{1,2})\.(\d{2})\s*(?:นาฬิกา|น\.)").unwrap());
 
 const MONTH_BY_NUM: [&str; 12] = [
-    "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
-    "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม",
+    "มกราคม",
+    "กุมภาพันธ์",
+    "มีนาคม",
+    "เมษายน",
+    "พฤษภาคม",
+    "มิถุนายน",
+    "กรกฎาคม",
+    "สิงหาคม",
+    "กันยายน",
+    "ตุลาคม",
+    "พฤศจิกายน",
+    "ธันวาคม",
 ];
 
 /// Dates and clock times.
@@ -244,9 +268,8 @@ fn read_clock(c: &Captures) -> String {
 // ── Stage 4: phones ─────────────────────────────────────────────────────────
 
 /// Thai mobile and landline numbers, written 08x-xxx-xxxx or as one run.
-static RE_PHONE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\b0\d{1,2}[- ]?\d{3}[- ]?\d{3,4}\b").unwrap()
-});
+static RE_PHONE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\b0\d{1,2}[- ]?\d{3}[- ]?\d{3,4}\b").unwrap());
 
 /// Phone numbers are identifiers, not quantities: every figure is spoken
 /// separately, and the leading zero must survive — read as a cardinal "081"
@@ -259,13 +282,11 @@ fn stage_phones(text: &str) -> String {
 
 // ── Stage 5: units ──────────────────────────────────────────────────────────
 
-static RE_CURRENCY_PREFIX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"([฿$€£¥₩])\s*([\d,]+(?:\.\d+)?)").unwrap()
-});
+static RE_CURRENCY_PREFIX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"([฿$€£¥₩])\s*([\d,]+(?:\.\d+)?)").unwrap());
 static RE_PERCENT: Lazy<Regex> = Lazy::new(|| Regex::new(r"([\d,]+(?:\.\d+)?)\s*%").unwrap());
-static RE_DEGREE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"([\d,]+(?:\.\d+)?)\s*°\s*([CF])?").unwrap()
-});
+static RE_DEGREE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"([\d,]+(?:\.\d+)?)\s*°\s*([CF])?").unwrap());
 
 /// Currency, percentage and temperature, all of which put the unit **after**
 /// the quantity when spoken even when written before it (฿500 -> ห้าร้อยบาท).
@@ -326,9 +347,7 @@ fn stage_math(text: &str) -> String {
 /// "ISBN 3211812164, ISBN ..." looked like grouped digits and was read as the
 /// cardinal three billion two hundred eleven million … instead of figure by
 /// figure.
-static RE_NUMBER: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\d+(?:,\d{3})*(?:\.\d+)?").unwrap()
-});
+static RE_NUMBER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\d+(?:,\d{3})*(?:\.\d+)?").unwrap());
 
 /// Read one written number, honouring thousands separators and a decimal
 /// point. Long digit runs with no separators (phone numbers, IDs) are read

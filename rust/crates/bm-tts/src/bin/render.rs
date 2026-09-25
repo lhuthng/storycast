@@ -31,8 +31,6 @@ fn main() -> Result<()> {
     let mut raw: Option<String> = None;
     let mut temp = 0.8f64;
     let mut seed = 0u64;
-    let mut max_chars = 256usize;
-    let mut min_chunk_chars = 20usize;
     let mut threads = 0usize;
     let mut texts_file: Option<String> = None;
     let mut anchor_file: Option<String> = None;
@@ -57,8 +55,11 @@ fn main() -> Result<()> {
             "--raw" => raw = Some(next(&mut i)?),
             "--temp" => temp = next(&mut i)?.parse()?,
             "--seed" => seed = next(&mut i)?.parse()?,
-            "--max-chars" => max_chars = next(&mut i)?.parse()?,
-            "--min-chunk-chars" => min_chunk_chars = next(&mut i)?.parse()?,
+            // Kept accepted for old command lines; sentence-level chunking is
+            // now unconditional, so these packing controls no longer apply.
+            "--max-chars" | "--min-chunk-chars" => {
+                let _ = next(&mut i)?;
+            }
             "--threads" => threads = next(&mut i)?.parse()?,
             "--texts" => texts_file = Some(next(&mut i)?),
             // Use this anchor instead of the voice's own. Diagnostic only:
@@ -128,7 +129,7 @@ fn main() -> Result<()> {
             continue;
         }
         let started = std::time::Instant::now();
-        let chunks = front.chunks(&text, max_chars, min_chunk_chars);
+        let chunks = front.chunks_sentence_level(&text);
         let mut wavs = Vec::with_capacity(chunks.chunks.len());
         for ch in &chunks.chunks {
             let phonemes = front.phonemize_with_emotions(ch);

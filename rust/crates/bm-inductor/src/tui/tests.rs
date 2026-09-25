@@ -1000,7 +1000,10 @@ fn the_run_screen_shows_each_machines_work_split() {
     ];
     app.screen = Screen::Run;
     let text = render_text(&mut app, 140, 44);
-    assert!(text.contains("work split"), "the section is titled:\n{text}");
+    assert!(
+        text.contains("work split"),
+        "the section is titled:\n{text}"
+    );
     for row in ["local (local)", "box-2 (rmt)", "box-1 (aws)"] {
         assert!(text.contains(row), "missing `{row}`:\n{text}");
     }
@@ -1745,6 +1748,26 @@ fn every_dashboard_header_reads_in_full_at_the_100_column_floor() {
 }
 
 #[test]
+fn a_tall_dashboard_gives_extra_rows_to_the_worker_list() {
+    let mut app = stats_app();
+    for i in 0..8 {
+        app.beats.push(beat(
+            &format!("worker-{i}"),
+            &format!("192.0.2.{i}"),
+            2,
+            &format!("worker-{i}"),
+        ));
+    }
+    let text = render_text(&mut app, 140, 44);
+    for i in 0..8 {
+        assert!(
+            text.contains(&format!("worker-{i}")),
+            "worker {i} was clipped:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn the_workers_headers_fit_their_columns() {
     // Regression guard for the `box cp` crop: the full-tier load columns
     // must be at least as wide as their headers (the `box cpu` cell carries
@@ -2031,6 +2054,78 @@ fn the_log_pane_has_one_title_aliases_and_local_time() {
     );
 }
 
+#[tokio::test]
+async fn paging_up_past_the_log_stops_at_the_buffers_own_top() {
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://x");
+    for i in 0..20 {
+        app.log_at(Level::Info, format!("line {i}"));
+    }
+    // A page is a page: the draw publishes the pane height, so the test pins
+    // it to 4 and the walk is in screenfuls, not an arbitrary 5.
+    app.events_rows = 4;
+
+    // One page back is 4 lines; a page and a half lands on 4's second press…
+    handle_key(&mut app, key(KeyCode::PageUp), &http, &job_tx).await;
+    assert_eq!(app.events_scroll, 4);
+    handle_key(&mut app, key(KeyCode::PageUp), &http, &job_tx).await;
+    assert_eq!(app.events_scroll, 8);
+
+    // …and the walk back costs exactly what the walk out did.
+    handle_key(&mut app, key(KeyCode::PageDown), &http, &job_tx).await;
+    assert_eq!(app.events_scroll, 4);
+    handle_key(&mut app, key(KeyCode::PageDown), &http, &job_tx).await;
+    assert_eq!(
+        app.events_scroll, 0,
+        "a second page-down is already at newest"
+    );
+
+    // Far more pages than lines: the buffer's own top is a real edge, not a
+    // number that runs to a thousand.
+    for _ in 0..50 {
+        handle_key(&mut app, key(KeyCode::PageUp), &http, &job_tx).await;
+    }
+    assert_eq!(
+        app.events_scroll, 20,
+        "scroll stopped at the buffer length, not 400"
+    );
+    // At that edge the title names the edge instead of showing a stuck count.
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains("oldest kept line"),
+        "the top of the buffer is legible:\n{text}"
+    );
+}
+
+#[test]
+fn a_new_line_holds_the_reading_position_instead_of_shoving_it() {
+    // The scroll offset is a distance from the live tail, so an arriving line
+    // grows that distance and the line under the operator's eyes stays put.
+    // Pinned to newest, the tail simply follows.
+    let mut app = App::new("http://x");
+    for i in 0..10 {
+        app.log_at(Level::Info, format!("line {i}"));
+    }
+    app.events_scroll = 3;
+    // The top visible line is `len - scroll`; that index must survive a push.
+    let top_before = app.events[app.events.len() - app.events_scroll]
+        .text
+        .clone();
+    app.log_at(Level::Info, "arrives while reading");
+    assert_eq!(app.events_scroll, 4, "the distance grew by exactly one");
+    let top_after = &app.events[app.events.len() - app.events_scroll];
+    assert_eq!(
+        top_after.text, top_before,
+        "the view is still on the same line"
+    );
+
+    // Pinned to newest, arrivals scroll by — the tail follows.
+    app.events_scroll = 0;
+    app.log_at(Level::Info, "tail follows");
+    assert_eq!(app.events_scroll, 0);
+}
+
 #[test]
 fn log_lines_use_reported_aliases_when_beats_carry_them() {
     // The mismatch: the Workers pane said `marmot` while the log line
@@ -2261,8 +2356,14 @@ fn workers_pane_hides_ghosts_of_offline_boxes() {
         .and_then(|(_, rest)| rest.split_once("╭"))
         .map(|(block, _)| block)
         .unwrap_or_default();
-    assert!(!workers.contains("marmot"), "ghost rows never draw:\n{text}");
-    assert!(text.contains("0 live"), "the count drops with them:\n{text}");
+    assert!(
+        !workers.contains("marmot"),
+        "ghost rows never draw:\n{text}"
+    );
+    assert!(
+        text.contains("0 live"),
+        "the count drops with them:\n{text}"
+    );
 }
 
 #[test]
@@ -4207,7 +4308,10 @@ async fn roster_job_shows_disk_first_without_contacting_anyone() {
         Ev::Roster(Ok(r)) => {
             assert_eq!(r.source, "offline");
             assert_eq!(r.cast.get("A").map(String::as_str), Some("Đức Trí"));
-            assert!(!r.voices.is_empty(), "catalogue lists voices with no sidecar");
+            assert!(
+                !r.voices.is_empty(),
+                "catalogue lists voices with no sidecar"
+            );
         }
         Ev::Roster(Err(e)) => panic!("local roster failed: {e}"),
         _ => panic!("the first event must be the local roster"),
@@ -5499,7 +5603,14 @@ fn machines_pane_names_the_kind_and_the_address() {
     for head in ["machine", "kind", "ip"] {
         assert!(text.contains(head), "missing `{head}` column:\n{text}");
     }
-    for cell in ["local", "rmt", "aws", "127.0.0.1", "192.168.2.2", "52.2.2.2"] {
+    for cell in [
+        "local",
+        "rmt",
+        "aws",
+        "127.0.0.1",
+        "192.168.2.2",
+        "52.2.2.2",
+    ] {
         assert!(text.contains(cell), "missing `{cell}`:\n{text}");
     }
     // Default policy reads at a glance, most-preferred first.
