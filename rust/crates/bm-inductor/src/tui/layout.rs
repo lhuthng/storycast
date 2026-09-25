@@ -39,27 +39,61 @@ pub(crate) fn size_class(w: u16, h: u16) -> Size {
     }
 }
 
-/// Pane heights, per tier. Named rather than inlined so the compile-time guard
+/// Pane heights, per tier. Named rather than inlined so the compile-time guards
 /// below and the renderer cannot drift apart.
 ///
+/// **These are floors, not the heights the panes get.** A fixed row count per
+/// pane is wrong in both directions at once: a one-box cluster was shown an
+/// eight-row Machines pane that was mostly border, and a nine-box cluster had
+/// three machines clipped with nothing saying so. Each pane is now given
+/// `max(its floor, its content)`, and the slack goes to Logs — see `draw`.
+///
 /// The header is the one-row identity strip (workspace, profile, engine,
-/// chapter range, theme chip). The full tier ran 31 of its 32 rows, so it
-/// fits exactly; the compact tier sits on its 20-row floor and stays without.
+/// chapter range, theme chip). The floors below are what must fit when there is
+/// almost nothing to show, and the guards prove the sum fits the tier.
 pub(crate) const FULL_HEADER_H: u16 = 1;
 
-pub(crate) const FULL_MACHINES_H: u16 = 8;
+/// Machines, full tier: border + table header, then one row a machine. The
+/// floor is the empty state (two lines of explanation) and the ceiling is a
+/// long roster, which scrolls rather than eating the dashboard.
+pub(crate) const FULL_MACHINES_MIN_H: u16 = 3;
 
-pub(crate) const FULL_WORKERS_H: u16 = 8;
+pub(crate) const FULL_MACHINES_MAX_H: u16 = 6;
 
-pub(crate) const FULL_TASKS_H: u16 = 7;
+/// Workers, full tier: border + table header + one row a live worker.
+///
+/// The ceiling is 11 so eight workers are all visible at once, which is the
+/// most a cluster this size ever has. Past that the pane scrolls rather than
+/// taking the log's rows.
+pub(crate) const FULL_WORKERS_MIN_H: u16 = 3;
 
+pub(crate) const FULL_WORKERS_MAX_H: u16 = 11;
+
+/// Tasks and Stats, full tier: border + one line a stage, next to Stats.
+pub(crate) const FULL_TASKS_MIN_H: u16 = 3;
+
+pub(crate) const FULL_TASKS_MAX_H: u16 = 6;
+
+/// **Logs is the flexible pane.** Every other height is its content's, so the
+/// terminal's spare rows land here rather than in empty borders.
 pub(crate) const FULL_EVENTS_MIN_H: u16 = 5;
 
 pub(crate) const FULL_FOOTER_H: u16 = 3;
 
-pub(crate) const COMPACT_MACHINES_H: u16 = 6;
+/// Same floors, compact tier. Tasks and Stats are drawn here too — the tier
+/// used to drop them and leave a roll-up in the footer, which meant a 76-column
+/// terminal could not show what was failing.
+pub(crate) const COMPACT_MACHINES_MIN_H: u16 = 3;
 
-pub(crate) const COMPACT_WORKERS_H: u16 = 6;
+pub(crate) const COMPACT_MACHINES_MAX_H: u16 = 4;
+
+pub(crate) const COMPACT_WORKERS_MIN_H: u16 = 3;
+
+pub(crate) const COMPACT_WORKERS_MAX_H: u16 = 5;
+
+pub(crate) const COMPACT_TASKS_MIN_H: u16 = 3;
+
+pub(crate) const COMPACT_TASKS_MAX_H: u16 = 3;
 
 pub(crate) const COMPACT_EVENTS_MIN_H: u16 = 4;
 
@@ -72,13 +106,13 @@ pub(crate) const COMPACT_FOOTER_H: u16 = 4;
 /// The compact tier gets shorter labels because it has 76 columns to work with;
 /// every key is described in full on the help screen, which `?` opens.
 pub(crate) const KEYS_FULL: [&str; 2] = [
-    "Tab jobs · K tasks · i inspect · P policy · D digest · R run · S cast · f pane",
+    "Tab jobs · K tasks · i inspect · P policy · D digest · c crawl · R run · S cast · f pane · M mouse",
     ":add :prov :drop :translate :crawl :retry :reconcile :backend :stop :swap :voices · r · ? · q",
 ];
 
 pub(crate) const KEYS_COMPACT: [&str; 2] = [
     "Tab jobs · K tasks · i inspect · P policy · R run · S cast",
-    ":add :prov :drop :translate :crawl :stop :retry :swap :voices · ? q : cmd",
+    ":add :prov :drop :translate :crawl :stop :retry :swap :voices · M copy · ? q",
 ];
 
 /// Compact-tier column widths. The full tier has slack and keeps its widths
@@ -177,13 +211,28 @@ pub(crate) const fn width_of(s: &str) -> usize {
 
 // Proved at compile time: a widened column, a taller pane or one more key hint
 // must not silently start clipping on the smallest terminal of its tier.
+//
+// The **floors** are what must fit, because that is the case where there is
+// nothing to show and every pane is at its minimum: a longer list of content
+// takes rows from Logs, which is the pane meant to absorb them.
 const _: () = assert!(
-    COMPACT_MACHINES_H + COMPACT_WORKERS_H + COMPACT_EVENTS_MIN_H + COMPACT_FOOTER_H <= MIN_H,
-    "the compact tier must fit inside MIN_H"
+    COMPACT_MACHINES_MIN_H
+        + COMPACT_WORKERS_MIN_H
+        + COMPACT_TASKS_MIN_H
+        + COMPACT_EVENTS_MIN_H
+        + COMPACT_FOOTER_H
+        <= MIN_H,
+    "the compact tier's floors must fit inside MIN_H"
 );
 const _: () = assert!(
-    FULL_MACHINES_H + FULL_WORKERS_H + FULL_TASKS_H + FULL_EVENTS_MIN_H + FULL_FOOTER_H <= FULL_H,
-    "the full tier must fit inside FULL_H"
+    FULL_HEADER_H
+        + FULL_MACHINES_MIN_H
+        + FULL_WORKERS_MIN_H
+        + FULL_TASKS_MIN_H
+        + FULL_EVENTS_MIN_H
+        + FULL_FOOTER_H
+        <= FULL_H,
+    "the full tier's floors must fit inside FULL_H"
 );
 const _: () = assert!(
     cols(&COMPACT_MACHINE_COLS) + 2 <= MIN_W,

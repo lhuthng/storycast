@@ -15,10 +15,12 @@ use super::jobs::{
     BackgroundJob, DoneKind, Ev, Job, ProfileReq, Res, WorkspaceReq,
 };
 use super::layout::{
-    cols, size_class, width_of, Size, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H, COMPACT_MACHINES_H,
-    COMPACT_MACHINE_COLS, COMPACT_WORKERS_H, COMPACT_WORKER_COLS, FULL_EVENTS_MIN_H, FULL_FOOTER_H,
-    FULL_H, FULL_MACHINES_H, FULL_TASKS_H, FULL_W, FULL_WORKERS_H, KEYS_COMPACT, KEYS_FULL, MIN_H,
-    MIN_W,
+    cols, size_class, width_of, Size, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H,
+    COMPACT_MACHINES_MAX_H, COMPACT_MACHINES_MIN_H, COMPACT_MACHINE_COLS, COMPACT_TASKS_MAX_H,
+    COMPACT_TASKS_MIN_H, COMPACT_WORKERS_MAX_H, COMPACT_WORKERS_MIN_H, COMPACT_WORKER_COLS,
+    FULL_EVENTS_MIN_H, FULL_FOOTER_H, FULL_H, FULL_HEADER_H, FULL_MACHINES_MAX_H,
+    FULL_MACHINES_MIN_H, FULL_TASKS_MAX_H, FULL_TASKS_MIN_H, FULL_W, FULL_WORKERS_MAX_H,
+    FULL_WORKERS_MIN_H, KEYS_COMPACT, KEYS_FULL, MIN_H, MIN_W,
 };
 use super::model::*;
 use super::screen::*;
@@ -1818,16 +1820,53 @@ fn compact_columns_fit_a_minimum_width_terminal() {
 
 #[test]
 fn compact_layout_fits_the_hard_minimum() {
-    let panes = COMPACT_MACHINES_H + COMPACT_WORKERS_H + COMPACT_EVENTS_MIN_H + COMPACT_FOOTER_H;
+    // The **floors**, because that is the case where every pane has nothing to
+    // show and is therefore at its minimum. Longer content takes its rows out
+    // of Logs, which is the pane meant to give them up.
+    let panes = COMPACT_MACHINES_MIN_H
+        + COMPACT_WORKERS_MIN_H
+        + COMPACT_TASKS_MIN_H
+        + COMPACT_EVENTS_MIN_H
+        + COMPACT_FOOTER_H;
     assert!(
         panes <= MIN_H,
-        "compact panes need {panes} rows, floor is {MIN_H}"
+        "compact floors need {panes} rows, floor is {MIN_H}"
     );
     // The full tier must not be tighter than the compact one.
-    let full = FULL_MACHINES_H + FULL_WORKERS_H + FULL_TASKS_H + FULL_EVENTS_MIN_H + FULL_FOOTER_H;
+    let full = FULL_HEADER_H
+        + FULL_MACHINES_MIN_H
+        + FULL_WORKERS_MIN_H
+        + FULL_TASKS_MIN_H
+        + FULL_EVENTS_MIN_H
+        + FULL_FOOTER_H;
     assert!(
         full <= FULL_H,
-        "full panes need {full} rows, threshold is {FULL_H}"
+        "full floors need {full} rows, threshold is {FULL_H}"
+    );
+}
+
+/// A pane's ceiling must not be so high that one busy pane crowds out the rest.
+///
+/// The ceilings exist so a thirty-machine cluster scrolls instead of pushing
+/// Logs and the footer off the screen. This is the arithmetic behind that: at
+/// the ceiling, **Logs still gets its readable floor** and the footer is never
+/// squeezed out.
+#[test]
+fn a_busy_pane_at_its_ceiling_still_leaves_the_log_and_the_footer_room() {
+    let worst = FULL_MACHINES_MAX_H + FULL_WORKERS_MAX_H + FULL_TASKS_MAX_H;
+    let rest = FULL_HEADER_H + worst + FULL_EVENTS_MIN_H + FULL_FOOTER_H;
+    assert!(
+        rest <= FULL_H,
+        "every pane at its ceiling needs {rest} rows, threshold is {FULL_H} — \
+         a busy cluster would push the log off the screen"
+    );
+    // The compact tier is the tighter one and has the smaller ceilings, so it
+    // is the one that actually has to hold.
+    let compact_worst = COMPACT_MACHINES_MAX_H + COMPACT_WORKERS_MAX_H + COMPACT_TASKS_MAX_H;
+    let compact_rest = compact_worst + COMPACT_EVENTS_MIN_H + COMPACT_FOOTER_H;
+    assert!(
+        compact_rest <= MIN_H,
+        "compact ceilings need {compact_rest} rows, floor is {MIN_H}"
     );
 }
 
@@ -1873,9 +1912,16 @@ fn every_dashboard_header_reads_in_full_at_the_100_column_floor() {
     }
 }
 
+/// A pane is sized to its content, and the content is what the terminal can
+/// actually show.
+///
+/// This replaced a fixed row count per pane, under which a one-box cluster was
+/// shown an eight-row Machines pane that was mostly border and a ten-worker
+/// cluster had workers clipped with nothing saying so.
 #[test]
-fn a_tall_dashboard_gives_extra_rows_to_the_worker_list() {
+fn every_live_worker_is_visible_on_a_terminal_that_can_hold_them() {
     let mut app = stats_app();
+    let before = app.live_workers().len();
     for i in 0..8 {
         app.beats.push(beat(
             &format!("worker-{i}"),
@@ -1884,6 +1930,10 @@ fn a_tall_dashboard_gives_extra_rows_to_the_worker_list() {
             &format!("worker-{i}"),
         ));
     }
+    // The pane is sized from the same filtered set the renderer draws, so the
+    // count that drives the layout is the count of rows on screen.
+    let live = app.live_workers().len();
+    assert_eq!(live, before + 8, "the fixture's own beats count too");
     let text = render_text(&mut app, 140, 44);
     for i in 0..8 {
         assert!(
@@ -1891,6 +1941,78 @@ fn a_tall_dashboard_gives_extra_rows_to_the_worker_list() {
             "worker {i} was clipped:\n{text}"
         );
     }
+}
+
+/// Tasks and Stats are drawn in the compact tier too.
+///
+/// They used to be carved out of the Workers pane *only on the full tier*, so
+/// on a 76x24 terminal — the default on most setups — both were simply not
+/// drawn, and the footer carried a roll-up instead. A pane that cannot be seen
+/// is a pane that cannot answer the question you opened the dashboard to ask.
+#[test]
+fn the_compact_tier_still_shows_tasks_and_stats() {
+    let mut app = stats_app();
+    let text = render_text(&mut app, 80, 24);
+    assert!(
+        text.contains("╭Tasks"),
+        "no Tasks pane on a default terminal:\n{text}"
+    );
+    assert!(
+        text.contains("╭Stats"),
+        "no Stats pane on a default terminal:\n{text}"
+    );
+    assert!(
+        text.contains("╭Logs"),
+        "and the log is still there:\n{text}"
+    );
+    // Every pane has to fit the compact floor, or something is pushed off.
+    for pane in ["╭Machines", "╭Workers", "╭Tasks", "╭Stats", "╭Logs"] {
+        assert!(text.contains(pane), "{pane} missing:\n{text}");
+    }
+}
+
+/// The log is the one pane that grows, because a message is the point of it.
+///
+/// Before this change the spare rows went to the worker list, which meant a
+/// terminal with room to spare still showed a five-line log on a failing
+/// cluster. Everything else now takes exactly its content, so whatever is left
+/// lands here.
+#[test]
+fn the_log_takes_the_rows_the_other_panes_do_not_need() {
+    // `stats_app` has machines and workers, so the three content panes are all
+    // above their floors and the difference between these two renders is the
+    // log.
+    let mut app = stats_app();
+    let short = render_text(&mut app, 140, 32);
+    let tall = render_text(&mut app, 140, 52);
+
+    // Measured from the rendered box itself: the number of rows between the
+    // Logs top border and the footer. Counting lines that look like log lines
+    // would pass whether the pane grew or not.
+    let log_height = |t: &str| -> usize {
+        let lines: Vec<&str> = t.lines().collect();
+        let top = lines
+            .iter()
+            .position(|l| l.contains("╭Logs"))
+            .unwrap_or_else(|| panic!("no Logs pane in:\n{t}"));
+        let bottom = lines
+            .iter()
+            .rposition(|l| l.contains("Tab jobs") || l.contains(":add"))
+            .unwrap_or_else(|| panic!("no footer in:\n{t}"));
+        bottom
+            .checked_sub(top)
+            .expect("the log sits above the footer")
+    };
+    assert!(
+        log_height(&short) >= FULL_EVENTS_MIN_H as usize,
+        "the log lost its floor at the tier threshold:\n{short}"
+    );
+    assert!(
+        log_height(&tall) > log_height(&short),
+        "a taller terminal must grow the log, not the borders: {} -> {}",
+        log_height(&short),
+        log_height(&tall)
+    );
 }
 
 #[test]
@@ -5623,6 +5745,170 @@ async fn the_theme_cycle_lands_on_the_same_theme_every_time() {
         handle_key(&mut app, key(KeyCode::Char('C')), &http, &job_tx).await;
         assert_eq!(theme_label(), expected);
     }
+}
+
+/// The mouse can be handed back to the terminal, so an error can be copied.
+///
+/// While mouse reporting is on the terminal routes every drag to the program
+/// instead of treating it as a selection, which is why an error message could
+/// not be highlighted and copied — the one thing anybody wants to do with an
+/// error. `M` turns reporting off and back on again.
+#[tokio::test]
+async fn the_mouse_can_be_handed_back_to_the_terminal_to_copy_an_error() {
+    let mut app = App::new("http://127.0.0.1:8901");
+    let http = http_client();
+    let job_tx = job_channel();
+    assert!(
+        app.mouse_capture,
+        "reporting starts on, so panes are clickable"
+    );
+
+    handle_key(&mut app, key(KeyCode::Char('M')), &http, &job_tx).await;
+    assert!(
+        !app.mouse_capture,
+        "M must hand the mouse back for selection"
+    );
+    assert!(
+        app.mouse_toggle,
+        "and ask the loop, which owns the terminal, to do it"
+    );
+    assert!(
+        app.status.text.contains("select"),
+        "the status line must say what M did, or it is a key nobody finds again: {}",
+        app.status.text
+    );
+
+    // And back again, because click-to-select is worth having too.
+    app.mouse_toggle = false;
+    handle_key(&mut app, key(KeyCode::Char('M')), &http, &job_tx).await;
+    assert!(app.mouse_capture);
+    assert!(app.mouse_toggle);
+}
+
+/// `M` is a new key, so it must not have been somebody else's.
+///
+/// `m` is the documented alias for `:m` (reconcile) and is deliberately left
+/// alone: two keys one letter apart doing unrelated things is exactly how a
+/// dashboard grows a wrong muscle memory.
+#[tokio::test]
+async fn the_mouse_key_does_not_collide_with_the_reconcile_alias() {
+    let (job_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    let http = http_client();
+    handle_key(&mut app, key(KeyCode::Char('m')), &http, &job_tx).await;
+    assert!(app.mouse_capture, "lowercase m must not toggle the mouse");
+    assert!(!app.mouse_toggle);
+    // The existing guarantee still holds: a bare m from Normal mode dispatches
+    // nothing and opens nothing.
+    assert!(matches!(app.screen, Screen::Normal));
+    assert!(rx.try_recv().is_err(), "a bare m must dispatch nothing");
+}
+
+/// The crawl view answers the question the dashboard could not: what is
+/// actually in force, and what will this book fetch.
+#[tokio::test]
+async fn the_crawl_key_answers_what_is_in_force() {
+    let dir = std::env::temp_dir().join("bm-crawlview-render");
+    let _ = std::fs::remove_dir_all(&dir);
+    let layout = bm_core::Layout::new(&dir);
+    std::fs::create_dir_all(layout.settings().parent().unwrap()).unwrap();
+    std::fs::write(
+        layout.settings(),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "crawl": { "mode": "script", "script": "crawl/truyencom.lua", "pace_ms": 0 }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.layout = layout.clone();
+    let http = http_client();
+    let job_tx = job_channel();
+    handle_key(&mut app, key(KeyCode::Char('c')), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Crawl { .. }),
+        "c opens the crawl view, not nothing"
+    );
+
+    let text = render_text(&mut app, 120, 44);
+    // The three things the question is made of: the method, the crawler, and
+    // the limits.
+    assert!(text.contains("mode"), "{text}");
+    assert!(text.contains("script"), "{text}");
+    assert!(text.contains("truyencom.lua"), "{text}");
+    assert!(text.contains("max_fetches"), "{text}");
+    // And the two faults a hand-edited settings file causes without saying so.
+    assert!(
+        text.contains("NOT FOUND"),
+        "a crawler that is not there must say so on screen:\n{text}"
+    );
+    assert!(
+        text.contains("pacing off"),
+        "pace 0 is a decision, so it is flagged:\n{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Uppercase `C` is the palette cycle, so the two must not trade places.
+#[tokio::test]
+async fn the_crawl_key_does_not_steal_the_palette_cycle() {
+    let (job_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    let http = http_client();
+    let before = app.theme;
+    handle_key(&mut app, key(KeyCode::Char('C')), &http, &job_tx).await;
+    assert_ne!(app.theme, before, "C still cycles the palette");
+    assert!(matches!(app.screen, Screen::Normal), "C opens nothing");
+
+    app.theme = before;
+    handle_key(&mut app, key(KeyCode::Char('c')), &http, &job_tx).await;
+    assert_eq!(
+        app.theme, before,
+        "c must not change the theme — it only opens the view"
+    );
+    assert!(matches!(app.screen, Screen::Crawl { .. }));
+    assert!(
+        rx.try_recv().is_err(),
+        "the view reads; it dispatches nothing"
+    );
+}
+
+/// A view nobody can find is a view that does not exist.
+#[test]
+fn the_crawl_view_is_in_the_footer_and_the_help_screen() {
+    assert!(
+        KEYS_FULL.iter().any(|k| k.contains("c crawl")),
+        "{KEYS_FULL:?}"
+    );
+    let mut help_app = App::new("http://127.0.0.1:8901");
+    help_app.screen = Screen::Help { scroll: 0 };
+    let help = render_text(&mut help_app, 140, 60);
+    assert!(
+        help.contains("crawl view"),
+        "the help screen must list it:\n{help}"
+    );
+}
+
+/// The key that turns the mouse off has to be findable without being told.
+#[test]
+fn the_mouse_key_is_in_the_footer_and_the_help_screen() {
+    // One line a tier is enough — what must not happen is the key being
+    // nowhere in the footer, which is how it is never found.
+    for (tier, lines) in [("full", &KEYS_FULL), ("compact", &KEYS_COMPACT)] {
+        assert!(
+            lines.iter().any(|k| k.contains('M')),
+            "the {tier} footer must name the mouse key: {lines:?}"
+        );
+    }
+    // The help screen is where a key nobody uses daily is looked up.
+    let mut help_app = App::new("http://127.0.0.1:8901");
+    help_app.screen = Screen::Help { scroll: 0 };
+    let help = render_text(&mut help_app, 140, 60);
+    assert!(
+        help.contains("select") && help.contains("copy"),
+        "the help screen must explain what M is for:\n{help}"
+    );
 }
 
 #[tokio::test]

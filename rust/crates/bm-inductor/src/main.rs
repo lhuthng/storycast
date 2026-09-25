@@ -389,6 +389,32 @@ pub struct ProvisionOutcome {
     pub reachable: bool,
     /// The log, one line per step, prefixed with the address.
     pub lines: Vec<String>,
+    /// Why the run stopped, when it stopped before a step could log it —
+    /// a missing local build, an unreadable profile pointer. Carried rather
+    /// than recovered by grepping `lines`: the dashboard used to scan the log
+    /// for the words "missing"/"not found"/"failed", and every pre-flight
+    /// message that did not use one of them ("no TTS sidecar binary for …")
+    /// left the machine pane reporting a bare `provision INCOMPLETE` and
+    /// telling the operator to retry the same click forever.
+    pub stop: Option<String>,
+}
+
+/// A run that stopped before any step: the message is logged *and* carried,
+/// so the log and the machine pane cannot disagree about why.
+fn stopped(
+    log: &mut bm_core::provision::LiveLog,
+    addr: &str,
+    why: impl std::fmt::Display,
+    reachable: bool,
+) -> ProvisionOutcome {
+    let why = why.to_string();
+    log.push(format!("[{addr}] {why}"));
+    ProvisionOutcome {
+        ready: false,
+        reachable,
+        stop: Some(why),
+        lines: std::mem::take(&mut log.lines),
+    }
 }
 
 /// Blocking provision run shared by the CLI and the TUI background task.
@@ -414,6 +440,7 @@ pub fn provision_machine(
         return ProvisionOutcome {
             ready: true,
             reachable: true,
+            stop: None,
             lines: vec![format!(
                 "[{addr}] local machine — runs from the repo, nothing to provision"
             )],
@@ -434,27 +461,25 @@ pub fn provision_machine(
     // "no agent binary for /"), no binary can be pushed, no worker launched.
     // Name the network cause and stop.
     if !pre.reachable {
-        log.push(format!(
-            "[{addr}] cannot provision: the box never answered ssh ({}) — check it is up, and that its address is reachable from here (an EC2 private IP like 172.31.x.x is only routable from inside the VPC; the pool prefers public IPs)",
-            pre.note
-        ));
-        return ProvisionOutcome {
-            ready: false,
-            reachable: false,
-            lines: log.lines,
-        };
+        return stopped(
+            &mut log,
+            addr,
+            format!(
+                "cannot provision: the box never answered ssh ({}) — check it is up, and that its address is reachable from here (an EC2 private IP like 172.31.x.x is only routable from inside the VPC; the pool prefers public IPs)",
+                pre.note
+            ),
+            false,
+        );
     }
     let pointer = match bm_core::profile::read_pointer(&layout.root) {
         Ok(p) => p,
         Err(_) => {
-            log.push(format!(
-                "[{addr}] no local profile loaded — load one first (`:profile` in the dashboard; `tools/profile.sh fetch/unpack <name>`) — workers verify it at startup"
-            ));
-            return ProvisionOutcome {
-                ready: false,
-                reachable: true,
-                lines: log.lines,
-            };
+            return stopped(
+                &mut log,
+                addr,
+                "no local profile loaded — load one first (`:profile` in the dashboard; `tools/profile.sh fetch/unpack <name>`) — workers verify it at startup",
+                true,
+            );
         }
     };
     log.push(format!(
@@ -464,26 +489,12 @@ pub fn provision_machine(
     ));
     let binary = match agent_binary_for(pre.os.as_str(), pre.arch.as_str(), layout) {
         Ok(b) => b,
-        Err(e) => {
-            log.push(format!("[{addr}] {e}"));
-            return ProvisionOutcome {
-                ready: false,
-                reachable: true,
-                lines: log.lines,
-            };
-        }
+        Err(e) => return stopped(&mut log, addr, e, true),
     };
     log.push(format!("[{addr}] agent binary: {}", binary.display()));
-    let tts = match tts_binary_for(pre.os.as_str(), pre.arch.as_str(), layout) {
+    let tts = match tts_binary_for(pre.os.as_str(), pre.arch.as_str(), layout, &mut log, addr) {
         Ok(b) => b,
-        Err(e) => {
-            log.push(format!("[{addr}] {e}"));
-            return ProvisionOutcome {
-                ready: false,
-                reachable: true,
-                lines: log.lines,
-            };
-        }
+        Err(e) => return stopped(&mut log, addr, e, true),
     };
     log.push(format!("[{addr}] tts sidecar: {}", tts.display()));
     let mut m = Machine::new(addr, user, port, key, "worker");
@@ -504,6 +515,7 @@ pub fn provision_machine(
     ProvisionOutcome {
         ready: after.configured(env!("CARGO_PKG_VERSION")),
         reachable: true,
+        stop: None,
         lines: log.lines,
     }
 }
@@ -637,13 +649,57 @@ async fn cmd_serve(
 /// else needs its cross build present; a missing one is a build error naming
 /// the exact command, never a guess that ships the wrong executable.
 ///
-/// Pick the TTS sidecar binary for the target platform.
+/// Pick the TTS sidecar binary for the target platform, building a cross
+/// target on demand — the same bargain [`agent_binary_for`] strikes, with one
+/// difference: this one is a **release** build (bm-tts's hot loop is a
+/// hand-written SIMD matvec, and a debug build gives all of that back), so the
+/// build is minutes rather than seconds and the log says so before it starts.
 ///
-/// Unlike [`agent_binary_for`], this one is a **release** build: bm-tts's hot
-/// loop is a hand-written SIMD matvec, and a debug build would give all of that
-/// back. Missing is a build error, not a guess — `make tts` produces the
-/// linux/x86_64 one.
-fn tts_binary_for(os: &str, arch: &str, layout: &Layout) -> anyhow::Result<std::path::PathBuf> {
+/// A staged binary that predates its sources is *used*, with a warning. The
+/// agent's freshness rule forces a rebuild because the version gate then ships
+/// a stale agent forever; the sidecar carries no version, so the honest fix
+/// there is to say the box is running an older sidecar, not to silently spend
+/// a multi-minute release build on every `:prov` because someone edited
+/// bm-core. `make tts` rebuilds it whenever you want.
+fn tts_binary_for(
+    os: &str,
+    arch: &str,
+    layout: &Layout,
+    log: &mut bm_core::provision::LiveLog,
+    addr: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    match tts_binary_staged(os, arch, layout) {
+        Ok(b) => {
+            if tts_is_stale(&b, layout) {
+                log.push(format!(
+                    "[{addr}] staged bm-tts is older than its sources — this box runs the last sidecar built; `make tts` rebuilds it"
+                ));
+            }
+            Ok(b)
+        }
+        Err(staged) => {
+            // The cross candidates are buildable, and a `:prov` clicked in the
+            // dashboard should heal the gap rather than send the operator to a
+            // shell.
+            if let Some(cand) = buildable_tts_candidates(os, arch, layout)
+                .into_iter()
+                .next()
+            {
+                log.push(format!(
+                    "[{addr}] no TTS sidecar built yet — cross-building it now (release build, several minutes; the first one also fetches the ONNX Runtime)"
+                ));
+                build_tts_binary(&cand, layout)?;
+                return Ok(cand);
+            }
+            Err(staged)
+        }
+    }
+}
+
+/// The pick among sidecar binaries already on disk. Platform-pure, no side
+/// effects — the piece tests can exercise without a toolchain, and the error
+/// [`tts_binary_for`] falls back from.
+fn tts_binary_staged(os: &str, arch: &str, layout: &Layout) -> anyhow::Result<std::path::PathBuf> {
     for cand in tts_candidates(os, arch, layout) {
         if cand.is_file() {
             return Ok(cand);
@@ -657,6 +713,128 @@ fn tts_binary_for(os: &str, arch: &str, layout: &Layout) -> anyhow::Result<std::
             .collect::<Vec<_>>()
             .join(" or ")
     )
+}
+
+/// True when a staged sidecar is older than the workspace sources it was built
+/// from. A warning, never a rebuild — see [`tts_binary_for`] for why.
+fn tts_is_stale(bin: &std::path::Path, layout: &Layout) -> bool {
+    !staged_is_fresh_against(bin, &["crates/bm-tts/src"], layout)
+}
+
+/// The sidecar targets this host can actually cross-build: exactly one.
+///
+/// linux/x86_64, because it is the target whose ONNX Runtime `make runtime`
+/// stages — a build that cannot find its runtime library is a build that
+/// cannot happen, and a *wrong* runtime would link a binary that dies on the
+/// box. The native candidate is out (it exists exactly when this host *is* the
+/// target, and `ort`'s own `download-binaries` covers that case without a
+/// cross toolchain), and linux/aarch64 keeps the manual command in the error
+/// until a `runtime-aarch64` target exists to stage its library.
+fn buildable_tts_candidates(os: &str, arch: &str, layout: &Layout) -> Vec<std::path::PathBuf> {
+    if (os, arch) != ("linux", "x86_64") {
+        return Vec::new();
+    }
+    tts_candidates(os, arch, layout)
+        .into_iter()
+        .take(1)
+        .collect()
+}
+
+/// Cross-build the sidecar into the exact path a candidate names, staging the
+/// shared ONNX Runtime it links against first.
+///
+/// The runtime is staged by shelling out to `make runtime` rather than
+/// reimplemented here: the URL and the sha256 that pins it live in the
+/// Makefile, and a second copy of a checksum is a checksum that will rot.
+fn build_tts_binary(cand: &std::path::Path, layout: &Layout) -> anyhow::Result<()> {
+    let target = cross_target_of(cand)?;
+    let rust_dir = workspace_dir_above_target(cand)?;
+    // The runtime goes where `tts_runtime_dir` will look for it, so the box
+    // gets pushed the library this binary actually links against.
+    let runtime = rust_dir.join("target").join("ort-linux-x64");
+    // A staging failure is not fatal on its own: a runtime already sitting
+    // there is all the build needs, and the build's own linker error is the
+    // honest report if it is not. Keep the reason and move on.
+    let stage_note = stage_onnx_runtime(layout, &runtime)
+        .err()
+        .map(|e| e.to_string());
+    let mut cmd = std::process::Command::new("cargo-zigbuild");
+    for tool in ["zig", "cargo-zigbuild"] {
+        if tool_on_path(tool).is_none() {
+            anyhow::bail!(
+                "{tool} not found: the TTS cross-build needs it (`cargo install cargo-zigbuild`; zig from `brew install zig` or https://ziglang.org/download){}",
+                stage_note
+                    .map(|n| format!("; staging the ONNX Runtime also failed: {n}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    let shim_dir = tool_on_path("cargo-zigbuild")
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .expect("probed above");
+    cmd.args([
+        "zigbuild",
+        "--release",
+        "--target",
+        &target,
+        "-p",
+        "bm-tts",
+        "--bin",
+        "bm-tts",
+        "--manifest-path",
+    ])
+    .arg(rust_dir.join("Cargo.toml"))
+    .env("ORT_LIB_LOCATION", &runtime)
+    .env("ORT_PREFER_DYNAMIC_LINK", "1")
+    // A GUI launch (or a desktop shortcut) inherits a PATH without
+    // `~/.cargo/bin`, and the linker is looked up by name from there.
+    .env("PATH", path_with_shim(shim_dir));
+    let out = cmd
+        .output()
+        .map_err(|e| anyhow::anyhow!("running cargo-zigbuild: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tail: String = stderr
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .rev()
+            .take(12)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n  ");
+        anyhow::bail!("cross build of bm-tts for {target} failed:\n  {tail}");
+    }
+    if !cand.is_file() {
+        anyhow::bail!(
+            "cross build reported success but {} is still missing",
+            cand.display()
+        )
+    }
+    Ok(())
+}
+
+/// `make runtime`, unless the shared library is already staged. Idempotent in
+/// the Makefile too — this only saves the round trip of spawning it.
+fn stage_onnx_runtime(layout: &Layout, dir: &std::path::Path) -> anyhow::Result<()> {
+    if dir.join("libonnxruntime.so").is_file() && dir.join("libonnxruntime.so.1").is_file() {
+        return Ok(());
+    }
+    let out = std::process::Command::new("make")
+        .arg("-C")
+        .arg(&layout.root)
+        .arg("runtime")
+        .output()
+        .map_err(|e| anyhow::anyhow!("running `make runtime`: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!(
+            "staging the ONNX Runtime failed: {}",
+            bm_core::util::head_chars(err.trim(), 300)
+        );
+    }
+    Ok(())
 }
 
 /// Where `make runtime` staged the shared ONNX Runtime to push alongside the
@@ -740,15 +918,26 @@ fn buildable_agent_candidates(os: &str, arch: &str, layout: &Layout) -> Vec<std:
 /// third-party crates come from the registry lockfile, which a version bump
 /// already invalidates through the rebuild it forces.
 fn staged_is_fresh(bin: &std::path::Path, layout: &Layout) -> bool {
+    staged_is_fresh_against(
+        bin,
+        &[
+            "crates/bm-agent/src",
+            "crates/bm-core/src",
+            "crates/bm-proto/src",
+        ],
+        layout,
+    )
+}
+
+/// The same question for a different set of sources — the sidecar is built
+/// from its own crate, not the agent's, and measuring it against the agent's
+/// dirs would call it stale on every unrelated edit.
+fn staged_is_fresh_against(bin: &std::path::Path, dirs: &[&str], layout: &Layout) -> bool {
     let built = match std::fs::metadata(bin).and_then(|m| m.modified()) {
         Ok(t) => t,
         Err(_) => return false,
     };
-    for dir in [
-        "crates/bm-agent/src",
-        "crates/bm-core/src",
-        "crates/bm-proto/src",
-    ] {
+    for dir in dirs {
         if sources_newer_than(&layout.root.join("rust").join(dir), built) {
             return false;
         }
@@ -787,30 +976,21 @@ fn sources_newer_than(dir: &std::path::Path, built: std::time::SystemTime) -> bo
 fn build_agent_binary(cand: &std::path::Path) -> anyhow::Result<()> {
     let target = cross_target_of(cand)?;
     let rust_dir = workspace_dir_above_target(cand)?;
-    // A rustup shim dir (~/.cargo/bin) is missing from a non-login shell's
-    // PATH — the same trap the Makefile's CARGO fallback covers — so probe
-    // there before declaring the toolchain absent.
-    let on_path = |tool: &str| {
-        std::env::var_os("PATH")
-            .map(|paths| std::env::split_paths(&paths).any(|d| d.join(tool).is_file()))
-            .unwrap_or(false)
-            || std::env::var("HOME")
-                .map(|h| {
-                    std::path::Path::new(&h)
-                        .join(".cargo/bin")
-                        .join(tool)
-                        .is_file()
-                })
-                .unwrap_or(false)
-    };
     for tool in ["zig", "cargo-zigbuild"] {
-        if !on_path(tool) {
+        if tool_on_path(tool).is_none() {
             anyhow::bail!(
                 "{tool} not found: the linux agent cross-build needs it (`cargo install cargo-zigbuild`; zig from `brew install zig` or https://ziglang.org/download)"
             );
         }
     }
-    let out = std::process::Command::new("cargo-zigbuild")
+    let mut cmd = std::process::Command::new(tool_on_path("cargo-zigbuild").expect("probed above"));
+    // The rustup shim dir is missing from a non-login shell's PATH, and `zig cc`
+    // is looked up by name from there — so the dir goes on the PATH of the
+    // build, not just into the existence check.
+    let shim_dir = tool_on_path("cargo-zigbuild")
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .expect("probed above");
+    let out = cmd
         .args([
             "zigbuild",
             "--target",
@@ -820,6 +1000,7 @@ fn build_agent_binary(cand: &std::path::Path) -> anyhow::Result<()> {
             "--manifest-path",
         ])
         .arg(rust_dir.join("Cargo.toml"))
+        .env("PATH", path_with_shim(shim_dir))
         .output()
         .map_err(|e| anyhow::anyhow!("running cargo-zigbuild: {e}"))?;
     if !out.status.success() {
@@ -843,6 +1024,33 @@ fn build_agent_binary(cand: &std::path::Path) -> anyhow::Result<()> {
         )
     }
     Ok(())
+}
+
+/// This process's PATH with `dir` in front — the shape a build needs when the
+/// linker lives in a rustup shim dir the environment forgot.
+fn path_with_shim(dir: std::path::PathBuf) -> std::ffi::OsString {
+    let old = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs = vec![dir];
+    dirs.extend(std::env::split_paths(&old));
+    std::env::join_paths(dirs).unwrap_or(old)
+}
+
+/// Where a build tool actually is, looking in `~/.cargo/bin` as well as PATH:
+/// a rustup shim dir is missing from a non-login shell's PATH — the same trap
+/// the Makefile's CARGO fallback covers — and the dashboard is often launched
+/// from somewhere that has no PATH at all. Returns the full path, because a
+/// check that accepts a tool the exec cannot find is a check that lies.
+fn tool_on_path(tool: &str) -> Option<std::path::PathBuf> {
+    let dirs = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if let Some(found) = dirs.iter().map(|d| d.join(tool)).find(|c| c.is_file()) {
+        return Some(found);
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::Path::new(&h).join(".cargo/bin").join(tool))
+        .filter(|c| c.is_file())
 }
 
 /// The cross target a candidate names: its grandparent directory under
@@ -2459,6 +2667,143 @@ mod tests {
         );
         // The macOS sidecar is self-contained: no runtime travels with it.
         assert!(tts_runtime_dir("macos", "aarch64", &layout).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_sidecar_is_picked_from_disk_or_named_in_the_error() {
+        let dir = std::env::temp_dir().join(format!("bm-tts-stage{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = bm_core::Layout::new(&dir);
+        // Nothing staged: the error has to name the platform and the way to
+        // fix it, because that string is what the machine pane shows.
+        let err = tts_binary_staged("linux", "x86_64", &layout).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("linux/x86_64"), "{msg}");
+        assert!(msg.contains("make tts"), "{msg}");
+        // Staged: picked, and only for the platform that built it.
+        let cross = dir.join("rust/target/x86_64-unknown-linux-gnu/release/bm-tts");
+        std::fs::create_dir_all(cross.parent().unwrap()).unwrap();
+        std::fs::write(&cross, b"fake").unwrap();
+        assert_eq!(
+            tts_binary_staged("linux", "x86_64", &layout).unwrap(),
+            cross
+        );
+        assert!(tts_binary_staged("linux", "aarch64", &layout).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_linux_x86_64_gets_an_on_demand_sidecar_build() {
+        // The build stages its ONNX Runtime through `make runtime`, which
+        // knows one target. Offering aarch64 here would link a binary against
+        // the wrong library, and offering the native candidate would build a
+        // sidecar whose runtime is never pushed to the box.
+        let dir = std::env::temp_dir().join(format!("bm-tts-build{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = bm_core::Layout::new(&dir);
+        let cands = buildable_tts_candidates("linux", "x86_64", &layout);
+        assert_eq!(
+            cands,
+            vec![dir.join("rust/target/x86_64-unknown-linux-gnu/release/bm-tts")]
+        );
+        for (os, arch) in [
+            ("linux", "aarch64"),
+            ("macos", "aarch64"),
+            ("windows", "x86_64"),
+        ] {
+            assert!(
+                buildable_tts_candidates(os, arch, &layout).is_empty(),
+                "{os}/{arch} must not be offered a build this host cannot finish"
+            );
+        }
+        // Same on a linux/x86_64 host: the native `target/release/bm-tts` is
+        // never the candidate, so the built artifact is the one provisioning
+        // pushes and the one `make tts` produces.
+        assert!(!cands.contains(&dir.join("rust/target/release/bm-tts")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_old_sidecar_is_reported_but_never_silently_rebuilt() {
+        // The agent rebuilds a stale staged binary because the version gate
+        // would otherwise ship it forever. The sidecar has no such gate, and a
+        // release cross-build costs minutes — so a stale one warns instead,
+        // and only `make tts` spends the time.
+        let dir = std::env::temp_dir().join(format!("bm-tts-stale{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = bm_core::Layout::new(&dir);
+        let src = dir.join("rust/crates/bm-tts/src/lib.rs");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, b"fn main() {}").unwrap();
+        let bin = dir.join("rust/target/x86_64-unknown-linux-gnu/release/bm-tts");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&bin, b"fake").unwrap();
+        assert!(
+            !tts_is_stale(&bin, &layout),
+            "built after the source: fresh"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&src, b"fn main() { /* newer */ }").unwrap();
+        assert!(tts_is_stale(&bin, &layout), "older than the source: warn");
+        // A source the sidecar does not build from is not a reason to call it
+        // stale — the agent's dirs would otherwise do it on every edit.
+        let _ = std::fs::remove_dir_all(src.parent().unwrap());
+        std::fs::create_dir_all(dir.join("rust/crates/bm-agent/src")).unwrap();
+        std::fs::write(
+            dir.join("rust/crates/bm-agent/src/main.rs"),
+            b"fn main() { /* newer */ }",
+        )
+        .unwrap();
+        assert!(!tts_is_stale(&bin, &layout));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stopped_run_carries_why_it_stopped() {
+        // The pane used to print a bare "provision INCOMPLETE" for every
+        // pre-flight failure, because the reason was recovered by grepping
+        // the log. It is carried instead, so the log and the pane can never
+        // disagree.
+        let mut log = bm_core::provision::LiveLog::new(None);
+        let out = stopped(
+            &mut log,
+            "10.0.0.1",
+            "no TTS sidecar binary for linux/x86_64",
+            true,
+        );
+        assert!(!out.ready);
+        assert!(out.reachable);
+        assert_eq!(
+            out.stop.as_deref(),
+            Some("no TTS sidecar binary for linux/x86_64")
+        );
+        assert_eq!(out.lines.len(), 1);
+        assert_eq!(
+            out.lines[0],
+            "[10.0.0.1] no TTS sidecar binary for linux/x86_64"
+        );
+    }
+
+    #[test]
+    fn a_staged_onnx_runtime_skips_the_make() {
+        // The fixture root has no Makefile, so `make -C <root> runtime` can
+        // only fail: an `Ok` here is proof the staged library short-circuits
+        // the spawn, and an `Err` is proof the guard is really looking at
+        // both names rather than trusting one.
+        let dir = std::env::temp_dir().join(format!("bm-ort{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = bm_core::Layout::new(&dir);
+        let ort = dir.join("rust/target/ort-linux-x64");
+        std::fs::create_dir_all(&ort).unwrap();
+        std::fs::write(ort.join("libonnxruntime.so"), b"x").unwrap();
+        assert!(
+            stage_onnx_runtime(&layout, &ort).is_err(),
+            "one of the two names is not a staged runtime"
+        );
+        std::fs::write(ort.join("libonnxruntime.so.1"), b"x").unwrap();
+        assert!(stage_onnx_runtime(&layout, &ort).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

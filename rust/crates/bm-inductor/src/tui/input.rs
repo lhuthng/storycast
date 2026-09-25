@@ -4,6 +4,7 @@ pub(crate) mod cast;
 mod cloud;
 pub(crate) mod command;
 mod confirm;
+mod crawl;
 mod digest;
 mod help;
 mod jobs;
@@ -140,6 +141,9 @@ pub(crate) async fn handle_key(
     }
     if let Screen::Help { scroll } = app.screen.clone() {
         return help::key_help(app, scroll, key).await;
+    }
+    if let Screen::Crawl { scroll } = app.screen.clone() {
+        return crawl::key_crawl(app, scroll, key).await;
     }
     if let Screen::Machine(_) = app.screen.clone() {
         return machine::key_machine(app, key).await;

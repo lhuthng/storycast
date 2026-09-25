@@ -7,6 +7,7 @@ use crate::tui::{
     jobs::Job,
     model::{beat_backed, live_beats},
     screen::{PickStage, Screen},
+    style::Level,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::time::{Duration, Instant};
@@ -38,6 +39,26 @@ pub(crate) async fn handle_mouse(
                     row_y,
                 } => {
                     app.focused_panel = panel;
+                    // Clicking the log means "I want to read this, and copy
+                    // it" — so the click itself hands the mouse back to the
+                    // terminal. Without mouse reporting the drag becomes a
+                    // selection, which is the only way to get a failure out of
+                    // a dashboard.
+                    //
+                    // Sticky, and only `M` brings it back. It cannot be
+                    // "click anywhere else to restore", because once reporting
+                    // is off the app receives no clicks at all — a mid-drag
+                    // restore would also yank the selection out from under the
+                    // pointer. The status line says how, and what was given up.
+                    if panel == Panel::Events && app.mouse_capture {
+                        app.mouse_capture = false;
+                        app.mouse_toggle = true;
+                        app.set_status(
+                            Level::Info,
+                            "mouse off — drag to select and copy the log · M restores \
+                             click-to-select and the wheel",
+                        );
+                    }
                     if panel == Panel::Machines && mouse.row >= row_y {
                         let index = row_start + usize::from(mouse.row - row_y);
                         if index < app.machines.len() {
@@ -247,6 +268,9 @@ fn scroll(app: &mut App, target: HitTarget, direction: i8) {
                         };
                     }
                 }
+                ListTarget::Crawl => {
+                    // Keys only: the crawl view is read with ↑↓ and PgUp/PgDn.
+                }
                 ListTarget::TaskDetail => {
                     if let Screen::TaskDetail(v) = &mut app.screen {
                         v.scroll = if direction < 0 {
@@ -260,7 +284,7 @@ fn scroll(app: &mut App, target: HitTarget, direction: i8) {
             }
             if matches!(
                 kind,
-                ListTarget::Jobs | ListTarget::Help | ListTarget::TaskDetail
+                ListTarget::Jobs | ListTarget::Help | ListTarget::Crawl | ListTarget::TaskDetail
             ) {
                 return;
             }
@@ -278,7 +302,6 @@ fn scroll(app: &mut App, target: HitTarget, direction: i8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::style::Level;
     use ratatui::layout::Rect;
 
     #[test]
@@ -342,6 +365,99 @@ mod tests {
         .await;
         assert_eq!(app.selected, 1);
         assert_eq!(app.focused_panel, Panel::Machines);
+    }
+
+    /// A helper so each test can say "click here" instead of spelling out a
+    /// whole `MouseEvent`.
+    async fn click(app: &mut App, column: u16, row: u16) -> bool {
+        let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_mouse(
+            app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            &reqwest::Client::new(),
+            &job_tx,
+        )
+        .await
+    }
+
+    fn logs_region(app: &mut App) {
+        app.add_hit_region(
+            Rect::new(0, 0, 80, 24),
+            HitTarget::Panel {
+                panel: Panel::Events,
+                row_start: 0,
+                row_y: 0,
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn clicking_the_log_hands_the_mouse_back_so_it_can_be_selected() {
+        let mut app = App::new("http://unused");
+        logs_region(&mut app);
+        app.mouse_capture = true;
+
+        click(&mut app, 10, 9).await;
+
+        // The click itself has to turn reporting off — the user asked for it
+        // by clicking the thing they want to read, not by finding a key.
+        assert!(!app.mouse_capture, "the click must release the mouse");
+        // And the event loop must be told to act on it, not merely told.
+        assert!(app.mouse_toggle, "the event loop needs the release request");
+        let status = app.status.text.to_lowercase();
+        assert!(
+            status.contains("drag") && status.contains("select") && status.contains("copy"),
+            "the status must say what to do next, got {status:?}"
+        );
+        // The escape hatch is named, because it is the only way back.
+        assert!(
+            status.contains("m restores"),
+            "the status must name the way back"
+        );
+        // Clicking the log is also just focusing it.
+        assert_eq!(app.focused_panel, Panel::Events);
+    }
+
+    #[tokio::test]
+    async fn clicking_the_log_again_does_not_ask_for_the_mouse_back() {
+        let mut app = App::new("http://unused");
+        logs_region(&mut app);
+        // The app only gets here with reporting already off, so the click
+        // the user makes to "copy" is really the terminal's own selection,
+        // and any second request would be a toggle fighting the user.
+        app.mouse_capture = false;
+        app.mouse_toggle = false;
+
+        click(&mut app, 10, 9).await;
+
+        assert!(
+            !app.mouse_toggle,
+            "a second click on the log must not re-request the release"
+        );
+    }
+
+    #[tokio::test]
+    async fn clicking_a_machine_does_not_take_the_mouse_away() {
+        let mut app = App::new("http://unused");
+        app.mouse_capture = true;
+        app.add_hit_region(
+            Rect::new(0, 0, 80, 24),
+            HitTarget::Panel {
+                panel: Panel::Machines,
+                row_start: 0,
+                row_y: 0,
+            },
+        );
+
+        click(&mut app, 4, 3).await;
+
+        assert!(app.mouse_capture, "only the log gives the mouse back");
+        assert!(!app.mouse_toggle);
     }
 
     #[test]
