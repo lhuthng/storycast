@@ -165,6 +165,7 @@ mod tests {
             detail: "render ch7 (1 calls)".into(),
             duration_secs: 12.0,
             bible_delta: None,
+            crawl: None,
             units: 1,
             script: None,
             text: None,

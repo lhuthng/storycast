@@ -392,12 +392,28 @@ impl Inner {
         } else {
             Vec::new()
         };
+        // The crawl stage's three extra facts: where the chapter lives, which
+        // crawler fetches it, and how many times this row has already been
+        // tried (so a script can try a mirror on the second go).
+        let (crawl_url, crawl_spec) = if t.stage == Stage::Crawl {
+            (
+                Some(self.crawl_url(n)),
+                Some(bm_core::crawl::spec_from_settings(
+                    &self.layout,
+                    &self.settings,
+                )),
+            )
+        } else {
+            (None, None)
+        };
         TaskOffer {
             task_id: t.id(),
             chapter: n,
             stage: t.stage,
             root: self.layout.root.display().to_string(),
-            url: (t.stage == Stage::Crawl).then(|| self.settings.chapter_url(n)),
+            url: crawl_url,
+            crawl: crawl_spec,
+            attempt: t.attempts + 1,
             tts_url: t.stage.needs_tts().then_some(tts_url),
             engine: self.settings.engine.clone(),
             model_order: self.settings.model_order.clone(),
@@ -447,6 +463,19 @@ impl Inner {
         }
     }
 
+    /// Where a chapter lives: the frozen index's answer when there is one, and
+    /// the URL template otherwise.
+    ///
+    /// The index is read from disk rather than rebuilt here — an offer is not
+    /// the place for a network walk — so a mapping rebuilt since (by `:crawl`,
+    /// by `:translate`, or by hand) takes effect on the next offer, and a
+    /// workspace that never built one keeps working off its template.
+    fn crawl_url(&self, n: u32) -> String {
+        bm_core::crawl::CrawlIndex::load(&self.layout)
+            .and_then(|i| i.url(n).map(str::to_string))
+            .unwrap_or_else(|| self.settings.chapter_url(n))
+    }
+
     /// Apply a worker report. Returns a human-readable line for the event log.
     pub fn complete(&mut self, c: &Complete) -> String {
         // Snapshot what the transition needs, then mutate — the borrow checker
@@ -463,6 +492,22 @@ impl Inner {
                 mp3_b64: Option<String>,
             },
             Failed,
+            /// The site has no such chapter. Terminal, strike-free, and the
+            /// artifact does not exist by definition — so the digest closes at
+            /// the same time, or the chapter waits forever on a crawl that will
+            /// never produce text.
+            Absent {
+                chapter: u32,
+                reason: String,
+            },
+            /// A refusal that will not improve on a retry (a login wall, a 404
+            /// on a URL the index named). Shelved at once **with the class on
+            /// the row**: three attempts at a paywall prove nothing a single
+            /// one did not, and they cost a worker and an hour.
+            Shelved {
+                task_id: String,
+                detail: String,
+            },
         }
         // **The operator is authoritative for the chapter they digested by hand.**
         //
@@ -502,25 +547,87 @@ impl Inner {
             {
                 Outcome::Stale
             }
-            Some(t) => {
-                if c.ok {
-                    Outcome::Done {
-                        chapter: t.chapter,
-                        stage: t.stage,
-                        delta: c.bible_delta.clone(),
-                        script: c.script.clone(),
-                        text: c.text.clone(),
-                        mp3_b64: c.mp3_b64.clone(),
-                    }
-                } else {
-                    Outcome::Failed
-                }
-            }
+            Some(t) => match (&c.crawl, c.ok) {
+                // Before `ok`: an absent chapter is reported successfully (there
+                // was nothing to fail at), and either way it is terminal and
+                // strike-free.
+                (Some(r), _) if r.verdict == bm_proto::CrawlVerdict::Absent => Outcome::Absent {
+                    chapter: t.chapter,
+                    reason: if r.detail.is_empty() {
+                        "the site has no chapter here".into()
+                    } else {
+                        r.detail.clone()
+                    },
+                },
+                // A refusal the crawler itself classified as terminal — a bot
+                // check it knows will not clear, a login wall, a gone page.
+                // Retrying is what the class says not to do.
+                (Some(r), false) if !r.retryable() => Outcome::Shelved {
+                    task_id: c.task_id.clone(),
+                    detail: format!(
+                        "ch{} blocked [{}]: {}",
+                        t.chapter,
+                        if r.class.is_empty() {
+                            "unknown"
+                        } else {
+                            &r.class
+                        },
+                        r.detail
+                    ),
+                },
+                (_, true) => Outcome::Done {
+                    chapter: t.chapter,
+                    stage: t.stage,
+                    delta: c.bible_delta.clone(),
+                    script: c.script.clone(),
+                    text: c.text.clone(),
+                    mp3_b64: c.mp3_b64.clone(),
+                },
+                _ => Outcome::Failed,
+            },
         };
         match outcome {
             Outcome::Unknown => return format!("unknown task {}", c.task_id),
             Outcome::Stale => {
                 return format!("{}: stale report for {} ignored", c.worker_id, c.task_id)
+            }
+            Outcome::Absent { chapter, reason } => {
+                // A chapter the site does not have is *finished work*, not
+                // missing work: the crawl has no artifact and never will, so
+                // leaving the row `Pending` would re-offer it every run and
+                // leaving the digest waiting would stall the whole chain (a
+                // digest waits for its predecessor). Both close here, with the
+                // reason on the row where `Enter` can show it.
+                let now = now_secs();
+                for (stage, detail) in [
+                    (Stage::Crawl, format!("not on the site: {reason}")),
+                    (
+                        Stage::Digest,
+                        "skipped: the site has no such chapter".to_string(),
+                    ),
+                ] {
+                    let t = self.ensure_task(chapter, stage);
+                    if t.state != TaskState::Done {
+                        t.state = TaskState::Done;
+                        t.detail = detail;
+                        t.attempts = 0;
+                        t.clear_holders();
+                        t.lease_until = None;
+                        t.updated = now;
+                    }
+                }
+                self.push_event(
+                    "info",
+                    format!("ch{chapter} is not on the site ({reason}) — crawl and digest closed"),
+                );
+                self.save();
+                // Closing a chapter may have drained the queue — trip the
+                // armed latch, exactly as a completion does.
+                self.maybe_auto_shutdown();
+                return format!("ch{chapter} absent: {reason}");
+            }
+            Outcome::Shelved { task_id, detail } => {
+                return self.shelve_now(&task_id, &detail);
             }
             Outcome::Done {
                 chapter,
@@ -827,6 +934,42 @@ impl Inner {
     /// The cost is honest and small: a retry is cheap, because `pending_units`
     /// skips the takes whose files did land, so a batch that got nine of ten
     /// re-speaks one.
+    /// Park a row immediately, without spending the three strikes a retry
+    /// ladder exists to spend on *uncertain* failures.
+    ///
+    /// Same end state as [`Inner::fail_task`] reaching its cap — `Shelved`,
+    /// holders cleared, the reason on the row — reached in one step because the
+    /// crawler already classified the refusal as terminal.
+    fn shelve_now(&mut self, task_id: &str, detail: &str) -> String {
+        let rows = self.covered_rows(task_id);
+        let mut n = 0;
+        for id in &rows {
+            if let Some(t) = self.tasks.get_mut(id) {
+                t.state = TaskState::Shelved;
+                t.detail = detail.to_string();
+                t.assigned_to = None;
+                t.racers.clear();
+                t.lease_until = None;
+                t.batch.clear();
+                t.updated = now_secs();
+                n += 1;
+            }
+        }
+        self.push_event(
+            "error",
+            format!(
+                "{task_id} SHELVED without retry: {} (press u to requeue)",
+                bm_core::util::head_chars(detail, 200)
+            ),
+        );
+        self.save();
+        self.maybe_auto_shutdown();
+        format!(
+            "{n} row(s) shelved: {}",
+            bm_core::util::head_chars(detail, 120)
+        )
+    }
+
     fn fail_task(&mut self, task_id: &str, worker_id: &str, detail: String) -> String {
         // A digest racer failing while others still hold the row: drop just
         // this holder, strike nothing. The race continues; the row is

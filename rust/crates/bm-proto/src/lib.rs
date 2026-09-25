@@ -681,6 +681,12 @@ pub struct Complete {
     /// Crawl stage: the cleaned chapter text, for the same reason.
     #[serde(default)]
     pub text: Option<String>,
+    /// Crawl stage: what happened when it was not a plain success. `ok: false`
+    /// cannot say whether a chapter is *absent* (a terminal non-failure) or
+    /// *blocked in a way that will never retry* (a login wall, a 404), and the
+    /// difference is three wasted attempts and a shelved row.
+    #[serde(default)]
+    pub crawl: Option<CrawlReport>,
     /// Merge stage: the final mp3, base64. Small enough for LAN; this is how
     /// a remote merge's product comes home without shared storage.
     #[serde(default)]
@@ -867,6 +873,116 @@ pub struct AnalyzerSettings {
     pub ollama_url: String,
 }
 
+/// Everything one crawl needs that the worker cannot derive locally.
+///
+/// The **script travels with the offer** rather than being read on the worker.
+/// A box that has not been re-provisioned then still runs the crawler the
+/// operator edited, a worker needs no profile tree at all to crawl, and the
+/// inductor stays the single source of truth for what a run does — the same
+/// argument the analyzer block above is built on.
+///
+/// An empty `engine` is the built-in path: GET `url` and run the crate's own
+/// extractor. That is what an old inductor's offer means too (the field is
+/// simply absent), so either side may be upgraded first.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct CrawlSpec {
+    /// `lua` | `js` | empty for the built-in fetcher.
+    #[serde(default)]
+    pub engine: String,
+    /// The script's path, for every message about it.
+    #[serde(default)]
+    pub script: String,
+    /// The script's source.
+    #[serde(default)]
+    pub source: String,
+    /// The workspace's `crawl.params`, opaque to the host and passed verbatim
+    /// to the script. Deliberately not a schema: the moment the host validates
+    /// its keys, the site-specific part of crawling is hardcoded again.
+    #[serde(default)]
+    pub params: serde_json::Map<String, serde_json::Value>,
+    /// The built-in mapping, used when the manifest has no URL for a chapter.
+    #[serde(default)]
+    pub url_template: String,
+    /// Extra headers on every fetch the crawler makes (a referer, a session
+    /// cookie the operator pasted in).
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub user_agent: String,
+    /// Minimum ms between two fetches of one host. `0` is off.
+    #[serde(default)]
+    pub pace_ms: u64,
+    #[serde(default)]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub max_seconds: u64,
+    #[serde(default)]
+    pub max_fetches: u32,
+}
+
+/// Redacted on purpose: a spec carries whatever headers the operator set, and
+/// one of them may well be a session cookie.
+impl std::fmt::Debug for CrawlSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CrawlSpec")
+            .field("engine", &self.engine)
+            .field("script", &self.script)
+            .field("source_bytes", &self.source.len())
+            .field("params", &self.params.keys().collect::<Vec<_>>())
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+/// Which of the three things a crawl concluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrawlVerdict {
+    /// A chapter came back and is in `text`.
+    Text,
+    /// The site has no such chapter. Terminal, and **not** a failure: a range
+    /// that runs past the end of a book must not shelve twenty rows for it.
+    Absent,
+    /// The site refused, with a class that decides whether another attempt is
+    /// worth a box.
+    Blocked,
+}
+
+/// How a crawl turned out, when `ok: false` alone cannot say — which is every
+/// case where the answer is not "try again".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrawlReport {
+    pub verdict: CrawlVerdict,
+    /// Human-readable cause, shown on the ledger row (the `Enter` key).
+    #[serde(default)]
+    pub detail: String,
+    /// The blocked class, e.g. `challenge` | `rate_limit` | `gone`. Empty for
+    /// the other verdicts.
+    #[serde(default)]
+    pub class: String,
+    /// Seconds the script asked to wait, when it knew.
+    #[serde(default)]
+    pub retry_after: Option<u64>,
+    /// Network round trips the chapter cost, for the pacing conversation.
+    #[serde(default)]
+    pub fetches: u32,
+}
+
+impl CrawlReport {
+    /// Whether another attempt is worth a worker. Absent chapters are not
+    /// retried (there is nothing to fetch), and neither are terminal refusals.
+    pub fn retryable(&self) -> bool {
+        match self.verdict {
+            CrawlVerdict::Text => false,
+            CrawlVerdict::Absent => false,
+            CrawlVerdict::Blocked => matches!(
+                self.class.as_str(),
+                "rate_limit" | "challenge" | "empty" | "unknown" | ""
+            ),
+        }
+    }
+}
+
 /// A worker asking for work.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRequest {
@@ -886,6 +1002,16 @@ pub struct TaskOffer {
     /// Where to fetch the chapter from (crawl stage).
     #[serde(default)]
     pub url: Option<String>,
+    /// How to crawl this chapter (crawl stage). Absent — from an older
+    /// inductor — means the built-in fetcher against `url`, which is exactly
+    /// the behaviour that predates scripted crawls.
+    #[serde(default)]
+    pub crawl: Option<CrawlSpec>,
+    /// 1-based attempt count for this task, so a crawler can try a mirror or
+    /// back off on the second go instead of failing identically three times.
+    /// Absent means 1.
+    #[serde(default)]
+    pub attempt: u32,
     /// TTS sidecar base URL (render stage).
     #[serde(default)]
     pub tts_url: Option<String>,
@@ -1106,6 +1232,15 @@ pub enum Op {
     Translate,
     /// Persist the URL template and probe one crawl — "set up link crawling".
     CrawlSetup,
+    /// Adopt operator-supplied chapter text: the manual half of crawling, and
+    /// the escape hatch for a single page a script cannot fetch.
+    ///
+    /// Carries the chapter number and the files (or literal text) to adopt.
+    /// The text goes through the *same* boundary the crawler uses — site
+    /// metadata out, entities decoded, a body too short to be a chapter
+    /// refused — so importing a truncated paste fails here rather than three
+    /// stages downstream.
+    Import,
     /// Read the sidecar roster, apply the accent policy, write the cast.
     Voices,
     /// Repoint one character's voice and invalidate only its cached segments.
@@ -1181,6 +1316,7 @@ impl Op {
         match self {
             Op::Translate => "translate",
             Op::CrawlSetup => "crawl-setup",
+            Op::Import => "import",
             Op::Voices => "voices",
             Op::SwapVoice => "swap-voice",
             Op::PreviewVoice => "preview-voice",
@@ -1205,6 +1341,7 @@ impl Op {
         [
             Op::Translate,
             Op::CrawlSetup,
+            Op::Import,
             Op::Voices,
             Op::SwapVoice,
             Op::PreviewVoice,
@@ -1254,6 +1391,12 @@ pub struct OpRequest {
     pub count: Option<u32>,
     #[serde(default)]
     pub url_template: Option<String>,
+    /// Files to adopt on `import` — one or more paths on the inductor's own
+    /// filesystem. A path that does not exist is taken as literal chapter text,
+    /// which is what makes a pasted chapter work as well as a drag-dropped
+    /// file: most terminals deliver a drop as a pasted path, not an event.
+    #[serde(default)]
+    pub paths: Vec<String>,
     #[serde(default)]
     pub engine: Option<String>,
     #[serde(default)]
@@ -1495,6 +1638,7 @@ mod tests {
         for op in [
             Op::Translate,
             Op::CrawlSetup,
+            Op::Import,
             Op::Voices,
             Op::SwapVoice,
             Op::PreviewVoice,
@@ -1772,6 +1916,8 @@ mod tests {
             stage: Stage::Render,
             root: "/r".into(),
             url: None,
+            crawl: None,
+            attempt: 1,
             tts_url: Some("http://127.0.0.1:8818".into()),
             engine: "vieneu".into(),
             model_order: vec![],
@@ -1864,6 +2010,8 @@ mod tests {
             stage: Stage::Digest,
             root: "/r".into(),
             url: None,
+            crawl: None,
+            attempt: 1,
             tts_url: None,
             engine: "vieneu".into(),
             model_order: vec![],

@@ -215,6 +215,7 @@ pub(crate) async fn report(
         detail,
         duration_secs: 0.0,
         bible_delta: Some(delta.clone()),
+        crawl: None,
         units: 0,
         script: Some(script.clone()),
         text: None,

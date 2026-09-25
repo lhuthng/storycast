@@ -142,22 +142,110 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
             ))
         }
         TextKind::CrawlTemplate => {
+            // Empty is not an error — it means "probe without saving one".
+            // `:crawl` is also the command that runs a crawler's `discover()`,
+            // and a slug site has **no** chapter-number URL to save: refusing
+            // the empty line would make the one probe command useless for
+            // exactly the shape of site that most needs probing. `None`
+            // (rather than `Some("")`) is what leaves the saved template
+            // alone.
             let template = prompt.buf.trim().to_string();
-            if template.is_empty() {
-                return Err("URL template is empty".into());
-            }
-            if !template.contains("{n}") {
-                return Err(
-                    "template must contain {n} — that is where the chapter number goes".into(),
-                );
-            }
+            let url_template = if template.is_empty() {
+                None
+            } else {
+                if !template.contains("{n}") {
+                    // A site we have a crawler for is very often a site whose
+                    // URLs cannot be templated — the number is in the URL but
+                    // behind a slug nothing can invent. Saying only "must
+                    // contain {n}" sends the reader round the same loop, so the
+                    // refusal names the crawler and the way through.
+                    if let Some(site) = bm_core::crawl::for_url(&template) {
+                        return Err(if site.is_crawlable() {
+                            format!(
+                                "{} is known: its crawler is {} — its chapter URLs carry a title \
+                                 slug, so there is no chapter-number template to write. Submit an \
+                                 empty line to probe, then set \"crawl\".\"script\" to that path \
+                                 (and \"crawl\".\"params\".\"book\" to this URL).",
+                                site.host, site.script
+                            )
+                        } else {
+                            format!(
+                                "{} is known and we have no crawler for it: {}. Pick another site, \
+                                 or write one against assets/crawl/templates/truyencom.lua.",
+                                site.host,
+                                site.caveat.unwrap_or("nothing on file")
+                            )
+                        });
+                    }
+                    return Err(
+                        "template must contain {n} — that is where the chapter number goes (or \
+                         clear the line to probe without saving one)"
+                            .into(),
+                    );
+                }
+                Some(template)
+            };
             Ok(op_job(
                 app,
                 &app.http,
                 OpRequest {
                     op: Op::CrawlSetup,
-                    url_template: Some(template),
+                    url_template,
                     start: Some(app.setting_u32("start", 1)),
+                    ..Default::default()
+                },
+            ))
+        }
+        // `:import` — adopt a chapter the crawler could not fetch.
+        //
+        // `<chapter> <path>`, or just `<path>` when the file is named
+        // `ch34.txt`: the number comes from the operator or from the filename,
+        // **never** from the order things were dropped in, because guessing is
+        // how chapter 34 becomes 33 with four hundred chapters behind it.
+        TextKind::Import => {
+            let buf = prompt.buf.trim();
+            if buf.is_empty() {
+                return Err("nothing to import — give a chapter number and a path".into());
+            }
+            let (chapter, rest) = match buf.split_once(char::is_whitespace) {
+                Some((first, rest)) if first.chars().all(|c| c.is_ascii_digit()) => {
+                    let n: u32 = first
+                        .parse()
+                        .map_err(|_| format!("{first:?} is not a chapter number"))?;
+                    (Some(n), rest.trim())
+                }
+                _ => (None, buf),
+            };
+            if let Some(0) = chapter {
+                return Err("chapter 0 is not a chapter — the index starts at 1".into());
+            }
+            // A lone number is a number with nothing to import: say so here
+            // rather than letting it become a "path" that does not exist.
+            if chapter.is_none() && buf.chars().all(|c| c.is_ascii_digit()) {
+                return Err("give the path too — `:import 34 /tmp/ch34.txt`".into());
+            }
+            if rest.is_empty() {
+                return Err("give the path too — `:import 34 /tmp/ch34.txt`".into());
+            }
+            // A comma or newline separates several files; anything that is not
+            // a file and not prose is refused by the importer, which is the one
+            // place that rule lives.
+            let paths: Vec<String> = rest
+                .split([',', '\n'])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            if paths.is_empty() {
+                return Err("give the path too — `:import 34 /tmp/ch34.txt`".into());
+            }
+            Ok(op_job(
+                app,
+                &app.http,
+                OpRequest {
+                    op: Op::Import,
+                    chapter,
+                    paths,
                     ..Default::default()
                 },
             ))

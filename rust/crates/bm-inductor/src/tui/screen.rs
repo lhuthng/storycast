@@ -40,6 +40,12 @@ pub(crate) enum TextKind {
     SoundLevel(bm_core::audio_pool::PoolKind, String),
     Translate,
     CrawlTemplate,
+    /// `:import` — `<chapter> <path>`: text the operator supplies instead of a
+    /// fetch. A **path**, not a paste: a terminal delivers a dropped file as its
+    /// path, and a chapter pasted into a single-line prompt would submit on the
+    /// first newline (so a whole chapter is `:import` over the API, or saved to
+    /// a file first).
+    Import,
     /// `:workspace` — list, switch or create. Switching only moves the
     /// `.bm/active-workspace` pointer, but the ledger, settings and data the
     /// running cluster reads all move with it, so the dispatch is gated on a
@@ -87,6 +93,65 @@ impl TextPrompt {
 
     pub(crate) fn len(&self) -> usize {
         self.buf.chars().count()
+    }
+
+    /// The site the buffer names, if this prompt takes a URL and the buffer
+    /// holds one we have a crawler for.
+    ///
+    /// Recomputed from the buffer on every keystroke rather than cached, because
+    /// the answer is a function of what is on screen and a stale answer is the
+    /// kind of lie this whole module exists to avoid. It is `None` for every
+    /// other prompt and for a URL we have nothing on, so the caller can simply
+    /// ask.
+    pub(crate) fn known_site(&self) -> Option<&'static bm_core::crawl::KnownSite> {
+        if self.kind != TextKind::CrawlTemplate {
+            return None;
+        }
+        // A template with a `{n}` in it is not a site URL — it is already a
+        // mapping, and matching one against the registry would only ever match a
+        // registry entry that happens to contain the same host, which says
+        // nothing about whether the template is the right one for the site.
+        if self.buf.contains("{n}") {
+            return None;
+        }
+        bm_core::crawl::for_url(&self.buf)
+    }
+
+    /// The note to show under the prompt for a recognised URL: which crawler,
+    /// what shape it is written against, and the one thing to know first.
+    ///
+    /// The paste block is deliberately **not** included. This is an 88-column
+    /// dialog, not a terminal, and ten lines of JSON in it would push the input
+    /// line itself off the top of a laptop screen. `bm-inductor check` prints
+    /// the block for the person who wants to copy it.
+    pub(crate) fn known_note(&self) -> Option<String> {
+        let site = self.known_site()?;
+        let mut s = format!("known site · {} · ", site.host);
+        if site.is_crawlable() {
+            s.push_str(&format!("crawler {}", site.script));
+        } else {
+            s.push_str("no bundled crawler");
+        }
+        s.push_str(&format!(" · {}", site.language));
+        if site.url_template.is_empty() && site.is_crawlable() {
+            s.push_str(" · no {n} in its URLs: submit empty and set crawl.script");
+        }
+        if !site.language.starts_with("Vietnamese") {
+            // Said here, and only here: a Vietnamese G2P applied to another
+            // language does not fail, it mispronounces, and the person watching
+            // a hundred renders is the only one who can tell.
+            s.push_str(&format!(
+                "\nheads up · the voices and the G2P are Vietnamese, so this {} text will \
+                 be pronounced against Vietnamese syllable rules — expect it to sound wrong, \
+                 not to error.",
+                site.language
+            ));
+        }
+        if let Some(c) = site.caveat {
+            s.push('\n');
+            s.push_str(c);
+        }
+        Some(s)
     }
 
     pub(crate) fn byte_at(&self, char_idx: usize) -> usize {
