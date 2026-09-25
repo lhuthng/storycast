@@ -16,6 +16,7 @@ pub(crate) mod app;
 pub(crate) mod audio;
 pub(crate) mod audition;
 pub(crate) mod clipboard;
+pub(crate) mod crawl;
 pub(crate) mod draw;
 pub(crate) mod input;
 pub(crate) mod jobs;
@@ -39,7 +40,7 @@ use crate::tui::{
     jobs::DoneKind,
     jobs::{fetch_state, run_jobs, Ev, Job},
     model::reported_alias,
-    style::{seen_label, worker_alias, Conn},
+    style::{seen_label, worker_alias, Conn, Level},
 };
 use bm_core::Layout;
 use bm_proto::{Heartbeat, Machine, Op, OpRequest, Task, TaskState};
@@ -161,6 +162,22 @@ async fn run_loop(
                     break;
                 }
                 _ => {}
+            }
+        }
+        // The key handler cannot reach the terminal, so `m` leaves its intent on
+        // the App and the loop — the one place holding the terminal — carries
+        // it out. Cleared unconditionally, including on the failing path, so a
+        // refused toggle cannot be retried for ever.
+        if std::mem::take(&mut app.mouse_toggle) {
+            let r = if app.mouse_capture {
+                execute!(terminal.backend_mut(), EnableMouseCapture)
+            } else {
+                execute!(terminal.backend_mut(), DisableMouseCapture)
+            };
+            // A terminal that refuses the mode change is not a reason to kill a
+            // running dashboard; the status line already said what was asked.
+            if let Err(e) = r {
+                app.set_status(Level::Warn, format!("mouse mode unchanged: {e}"));
             }
         }
         app.tick += 1;

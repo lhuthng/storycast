@@ -474,6 +474,11 @@ pub(crate) enum Screen {
     Policy(PolicyView),
     /// The digest manager: every chapter, and a manual two-round digest for one.
     Digest(DigestView),
+    /// What the crawl settings actually are, this book's links, the crawlers
+    /// on this machine, and the sites we know. Scroll only.
+    Crawl {
+        scroll: usize,
+    },
 }
 
 /// Chapter numbers per row in the digest manager's grid.

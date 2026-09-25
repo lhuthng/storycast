@@ -392,18 +392,42 @@ mod tests {
     #[test]
     fn pasted_text_imports_under_the_number_typed_and_goes_through_the_boundary() {
         let l = layout("paste");
-        // The paste carries site metadata and a raw entity: both are the
-        // crawler's problem to solve, so they must be solved here too.
+        // The paste carries a raw entity and a stray entity-encoded quote: the
+        // boundary handles those, because they are not about any one site. It
+        // does **not** handle the site's own lines — a paste is whatever the
+        // operator copied, and the operator is the one who decides what a
+        // chapter is.
         let raw = format!(
-            "Chương 9: Tên chương\n\nNgười Trên Vạn Người\n\nStorya thể loại Đọc online\n\n{}&#x27;két&#x27; một tiếng.\n",
+            "Chương 9: Tên chương\n\n{}&#x27;két&#x27; một tiếng.\n",
             "Nội dung chương này đủ dài để vượt qua ngưỡng kiểm tra. ".repeat(8)
         );
         let (done, _) = import_all(&l, Some(9), &[raw]).unwrap();
         assert_eq!(done[0].n, 9);
         let written = std::fs::read_to_string(l.chapter_txt(9)).unwrap();
-        assert!(!written.contains("Storya"), "{written}");
         assert!(written.contains("'két'"), "{written}");
+        assert!(!written.contains("&#"), "entities are decoded: {written}");
         assert!(written.ends_with('\n'));
+    }
+
+    #[test]
+    fn an_import_does_not_silently_edit_the_operators_words() {
+        // The host no longer knows what any site's furniture looks like, so it
+        // cannot remove any. A paste that brought the site's own lines keeps
+        // them: that is the operator's text until they change it, and a
+        // boundary that guesses would delete a line of the novel on a language
+        // nobody wrote a list for.
+        let l = layout("verbatim");
+        let raw = format!(
+            "Chương 9: Tên chương\n\nCài đặt đọc\n\n{}xin chào một tiếng.\n",
+            "Nội dung chương này đủ dài để vượt qua ngưỡng kiểm tra. ".repeat(8)
+        );
+        let (done, _) = import_all(&l, Some(9), &[raw]).unwrap();
+        assert_eq!(done[0].n, 9);
+        let written = std::fs::read_to_string(l.chapter_txt(9)).unwrap();
+        assert!(
+            written.contains("Cài đặt đọc"),
+            "the operator's text is stored as given: {written}"
+        );
     }
 
     #[test]

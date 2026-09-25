@@ -2824,16 +2824,29 @@ mod tests {
     }
 
     #[test]
-    fn site_metadata_never_enters_the_source_contract() {
+    fn the_digest_does_not_edit_a_chapters_words() {
+        // The digest used to strip Storya's furniture here, on the way into the
+        // prompt. It does not any more: the crawler owns that, and a stored
+        // chapter is whatever the crawler (or the operator who pasted it) wrote.
+        //
+        // What still has to hold is the *source contract* — every sentence in
+        // the chapter is an event the model must cover, and the alignment gate
+        // below it is unchanged by any of this.
         let prepared = prepare_chapter(
-            "Chương 81: Liền phòng ngự\n\n81. Chương 81: Liền phòng ngự\n\nCài đặt đọc\n\nNgười Trên Vạn Người\n\nNgười Trên Vạn Người thuộc thể loại Xuyên Không, chương 81 tiếp tục diễn biến hấp dẫn của câu chuyện. Đọc online miễn phí, cập nhật nhanh nhất tại Storya - nền tảng đọc truyện chất lượng cao.\n\nHắn đã hoàn thành nhiệm vụ.\n\nHệ thống thực thể dưới dạng chiếc đỉnh. Main bá, không hậu cung. Truyện đã hoàn thành\n\nPS: sẽ cập nhật sau.",
+            "Chương 81: Liền phòng ngự\n\nCài đặt đọc\n\nHắn đã hoàn thành nhiệm vụ.\n\nHệ thống thực thể dưới dạng chiếc đỉnh. Truyện đã hoàn thành",
         );
 
-        assert_eq!(prepared.events.len(), 1);
-        assert_eq!(prepared.events[0].text, "Hắn đã hoàn thành nhiệm vụ.");
-        assert!(!prepared.prompt_json.contains("Storya"));
-        assert!(!prepared.prompt_json.contains("Truyện đã hoàn thành"));
-        assert!(!prepared.prompt_json.contains("PS:"));
+        // The furniture is present because nobody here was asked to remove it …
+        assert!(
+            prepared.prompt_json.contains("Cài đặt đọc"),
+            "the digest is not the place that knows what a site prints: {}",
+            prepared.prompt_json
+        );
+        // … and it is *owed*, not skipped: every line is an event, and a
+        // response that quietly left one out is refused by the gate.
+        assert_eq!(prepared.events.len(), 3);
+        assert_eq!(prepared.events[0].text, "Cài đặt đọc");
+        assert_eq!(prepared.events[1].text, "Hắn đã hoàn thành nhiệm vụ.");
     }
 
     #[test]
