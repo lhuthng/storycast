@@ -403,27 +403,85 @@ async fn drop_machine(State(st): State<Shared>, Query(q): Query<AddrQuery>) -> i
 async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResult> {
     match req.op {
         bm_proto::Op::Translate => {
-            let mut inner = st.lock().await;
             let (start, count) = (req.start.unwrap_or(1), req.count.unwrap_or(1));
+            // The chapter index first, and **outside the lock**: building it can
+            // walk a listing page, and a scheduler holding the ledger across a
+            // network round trip is a stalled cluster. This is the one place a
+            // `discover()` runs — once per range, on the inductor — which is
+            // what keeps ten workers from each re-reading the same index.
+            let (index, index_note) = {
+                let inner = st.lock().await;
+                if inner.settings.crawl.is_manual() {
+                    (None, String::new())
+                } else {
+                    let (layout, settings) = (inner.layout.clone(), inner.settings.clone());
+                    drop(inner);
+                    match tokio::task::spawn_blocking(move || {
+                        bm_core::crawl::chapter_index(&layout, &settings, start, count, false)
+                    })
+                    .await
+                    {
+                        Ok(Ok(idx)) => (Some(idx), String::new()),
+                        // A broken crawler is worth knowing about *now*: the
+                        // alternative is N worker tasks failing identically.
+                        Ok(Err(e)) => (None, format!("; no chapter index ({e:#})")),
+                        Err(_) => (
+                            None,
+                            "; no chapter index (the index thread panicked)".into(),
+                        ),
+                    }
+                }
+            };
+            let mut inner = st.lock().await;
             // Reconcile first: enqueue alone only tops up crawl+digest, so a
             // range whose render/merge tasks went missing (reset ledger, older
             // builds) would digest and then idle with nothing offerable.
             inner.reconcile(start, count);
+            let absent = index.as_ref().map(|i| inner.apply_index(i)).unwrap_or(0);
             let (crawls, digests) = inner.enqueue_translate(start, count);
+            let absent_note = if absent > 0 {
+                format!("; {absent} chapter(s) are not on the site")
+            } else {
+                String::new()
+            };
             Json(OpResult::ok(format!(
-                "translate ch{start}..: {crawls} crawls + {digests} digests queued"
+                "translate ch{start}..: {crawls} crawls + {digests} digests queued{absent_note}{index_note}"
             )))
         }
+        bm_proto::Op::Import => {
+            // Reading a file and rewriting a chapter is local, blocking disk
+            // work, so it runs off the runtime and without the ledger lock.
+            let layout = { st.lock().await.layout.clone() };
+            let (chapter, paths) = (req.chapter, req.paths.clone());
+            let done = match tokio::task::spawn_blocking(move || {
+                bm_core::crawl::import::import_all(&layout, chapter, &paths)
+            })
+            .await
+            {
+                Ok(Ok((done, line))) => Ok((done, line)),
+                Ok(Err(e)) => Err(format!("import refused: {e:#}")),
+                Err(e) => Err(format!("import failed: {e}")),
+            };
+            let (done, line) = match done {
+                Ok(v) => v,
+                Err(msg) => return Json(OpResult::fail(msg)),
+            };
+            let mut inner = st.lock().await;
+            for got in &done {
+                inner.mark_imported(got.n, got.bytes);
+            }
+            Json(OpResult::ok(format!("imported {line}")))
+        }
         bm_proto::Op::CrawlSetup => {
-            let (layout, template) = {
+            let (layout, settings) = {
                 let mut inner = st.lock().await;
                 if let Some(t) = req.url_template.clone() {
                     inner.settings.url_template = t.clone();
                     let _ = inner.settings.save(&inner.layout.settings());
                 }
-                (inner.layout.clone(), inner.settings.url_template.clone())
+                (inner.layout.clone(), inner.settings.clone())
             };
-            Json(op_crawl_setup(&layout, &template, req.start.unwrap_or(1)).await)
+            Json(op_crawl_setup(&layout, &settings, req.start.unwrap_or(1)).await)
         }
         bm_proto::Op::Voices => {
             let (layout, engine) = {
@@ -682,44 +740,66 @@ async fn op_reconcile(
     ))
 }
 
-/// Persist the URL template and probe-crawl one chapter to prove the
-/// selector still produces plausible text.
-async fn op_crawl_setup(_layout: &bm_core::Layout, template: &str, sample: u32) -> OpResult {
-    let url = template.replace("{n}", &sample.to_string());
-    let text = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .unwrap()
-        .get(&url)
-        .header("User-Agent", "Mozilla/5.0")
-        .send()
-        .await
-    {
-        Ok(r) => match r.text().await {
-            Ok(t) => t,
-            Err(e) => return OpResult::fail(format!("probe crawl: read failed: {e:#}")),
-        },
-        Err(e) => return OpResult::fail(format!("probe crawl: fetch failed: {e:#}")),
-    };
-    let cleaned = bm_core::crawl::clean_storya_html(&text);
-    let first = cleaned.lines().next().unwrap_or("").to_string();
-    let looks_right =
-        cleaned.len() > 200 && (first.starts_with("Chương ") || first.contains("chương"));
-    // A probe that reads but looks wrong is a *failure* with a diagnosis, not a
-    // success with a caveat: `ok` drives the colour, so it must say `false`.
-    let message = format!(
-        "probe ch{sample}: {} chars, headline {first:?} — {}",
-        cleaned.len(),
-        if looks_right {
-            "selector OK"
+/// Persist the URL template and prove the crawler works — through the **same
+/// provider a worker will use**.
+///
+/// This used to fetch the chapter itself with its own client and its own copy
+/// of the extraction rules, which made it a fourth fetcher and a probe of
+/// something no worker would ever run: a script-mode workspace could be probed
+/// "OK" while every real task failed. Now it builds the chapter index (so a
+/// script's `discover()` has its say, exactly as `:translate` will ask it) and
+/// runs one crawl through the configured provider, reporting the verdict the
+/// provider reached.
+async fn op_crawl_setup(
+    layout: &bm_core::Layout,
+    settings: &bm_core::config::Settings,
+    sample: u32,
+) -> OpResult {
+    let (layout, settings) = (layout.clone(), settings.clone());
+    let sample = sample.max(1);
+    let probed = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        let index = bm_core::crawl::chapter_index(&layout, &settings, sample, 1, false)?;
+        let spec = bm_core::crawl::spec_from_settings(&layout, &settings);
+        let url = index.url(sample).map(str::to_string);
+        let provider = bm_core::crawl::Provider::new(&spec);
+        let how = if provider.is_scripted() {
+            format!("{} {}", spec.engine, spec.script)
         } else {
-            "SELECTOR SUSPECT (short or no headline)"
-        }
-    );
-    if looks_right {
-        OpResult::ok(message)
-    } else {
-        OpResult::fail(message)
+            "built-in fetcher".to_string()
+        };
+        let crawled = provider.crawl(sample, url.as_deref(), 1)?;
+        Ok(match &crawled.outcome {
+            bm_core::crawl::CrawlOutcome::Text { text, .. } => {
+                // The text **is** the verdict: it arrived, and it cleared the
+                // provider's own length and size guards, which is the only
+                // definition of a chapter the host has. The headline is printed
+                // because the operator is the one who can say whether it is
+                // their book — a "does this look like a chapter" test in Rust
+                // would be a fact about one site's language, which is exactly
+                // what the script owns now.
+                let first = text.lines().next().unwrap_or("");
+                format!(
+                    "probe ch{sample} via {how}: {} bytes, headline {:?} — read it: if that is \
+                     not the chapter, the selector matched the wrong thing",
+                    text.len(),
+                    bm_core::util::head_chars(first, 60)
+                )
+            }
+            bm_core::crawl::CrawlOutcome::Absent { reason } => {
+                format!("probe ch{sample} via {how}: the site has no such chapter ({reason})")
+            }
+            bm_core::crawl::CrawlOutcome::Blocked(b) => format!(
+                "probe ch{sample} via {how} BLOCKED [{}]: {}",
+                b.class.as_str(),
+                b.detail
+            ),
+        })
+    })
+    .await;
+    match probed {
+        Ok(Ok(message)) => OpResult::ok(message),
+        Ok(Err(e)) => OpResult::fail(format!("probe crawl failed: {e:#}")),
+        Err(e) => OpResult::fail(format!("probe crawl failed: {e}")),
     }
 }
 /// Read the sidecar roster, enforce the accent policy on the cast file, and

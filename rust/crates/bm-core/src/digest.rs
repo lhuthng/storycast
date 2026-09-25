@@ -416,6 +416,50 @@ struct PreparedChapter {
     prompt_json: String,
 }
 
+impl PreparedChapter {
+    /// How many events are dialogue, as decided by the quote delimiters alone.
+    fn dialogue_count(&self) -> usize {
+        self.events.iter().filter(|e| e.kind == "dialogue").count()
+    }
+
+    /// One line saying how this chapter was split, and what to check if the
+    /// split looks wrong.
+    ///
+    /// This exists because of a **blind spot, not a bug**. Narration and
+    /// dialogue are told apart by quote marks and nothing else — `"`, `“` and
+    /// `「`. So a chapter that arrives with no quote marks in it is one long run
+    /// of narration, and from there *nothing downstream complains*: the
+    /// attribution answer is complete, the source gate is satisfied, the
+    /// chapter renders, and every ledger row is green — while the whole book is
+    /// read in a single voice. The validators can only catch a model that
+    /// disagrees with *the text it was given*; they cannot catch text that never
+    /// offered a speaker to disagree with.
+    ///
+    /// Which is why the message is worded as a thing to check and not an
+    /// accusation. A genuinely single-voice chapter is a real thing — a scene
+    /// description, a dream sequence — and blaming the crawler on every one of
+    /// them would train the operator to ignore the line exactly when it matters.
+    fn split_summary(&self) -> String {
+        let dialogue = self.dialogue_count();
+        let narration = self.events.len() - dialogue;
+        let mut s = format!(
+            "   prepared {} event(s): {narration} narration, {dialogue} dialogue",
+            self.events.len()
+        );
+        if self.events.is_empty() {
+            s.push_str(" — nothing to attribute; the chapter text is empty");
+        } else if dialogue == 0 {
+            s.push_str(
+                " — no dialogue found, so all of it will be read in one voice. That is correct \
+                 if the chapter really is narration. If people are talking in it, the quote \
+                 marks are not in the text: check the crawler's container selector, and \
+                 whether this site marks speech with something other than \" or “",
+            );
+        }
+        s
+    }
+}
+
 fn prepared_event(id: usize, kind: &str, text: &str) -> Option<PreparedEvent> {
     let text = text.trim();
     if text.is_empty() {
@@ -894,6 +938,13 @@ fn assemble_outcome(
     let data = merge_rounds(context, script);
 
     let mut log = Vec::new();
+    // First line, before anything the model said. The split is decided from the
+    // text alone, so this is the earliest a bad crawl is visible — and the only
+    // place a *silent* one is, since a chapter with no dialogue has nothing for
+    // any validator to object to. It is here rather than in the automatic path
+    // because the manual path is where a person is standing there able to act
+    // on it, and both paths need the same answer.
+    log.push(prepare_chapter(text).split_summary());
     let warnings = warn_vietnamese(&data, bible);
 
     // Grammar fixes must reference text that is actually in the chapter.
@@ -2185,6 +2236,98 @@ fn validate_source_alignment(data: &Value, prepared: &PreparedChapter) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The chain the whole program rests on, as one test: **a crawler's output
+    /// decides whether the model is asked a question at all.**
+    ///
+    /// `prepare_chapter` decides narration-vs-dialogue from quote marks alone —
+    /// `"`, `“`, `「`. So a crawler that returns a container with no quote marks
+    /// in it, or that picks a site which marks speech some other way, hands the
+    /// digest one long run of narration. From there *nothing complains*: the
+    /// attribution answer is complete, the source gate passes, the chapter
+    /// renders, every ledger row is green — and the book is read in one voice.
+    ///
+    /// That is why the split is printed. A validator can only catch a model
+    /// disagreeing with the text it was given; it cannot catch text that never
+    /// offered a speaker to disagree with.
+    #[test]
+    fn the_digest_reports_a_chapter_whose_crawler_kept_no_quote_marks() {
+        // The clean shape, for contrast: a real quote mark is found, and the
+        // chapter genuinely has two people in it.
+        let clean = "Chương 1: Gặp gỡ\n\nHắn đứng đợi. \"Ừm?\" hắn hỏi.";
+        let p = prepare_chapter(clean);
+        assert!(p.dialogue_count() > 0, "a real quote mark must be seen");
+        let s = p.split_summary();
+        assert!(s.contains("1 dialogue"), "{s}");
+        assert!(!s.contains("no dialogue found"), "a false alarm: {s}");
+
+        // The broken shape: the same prose with the quote marks gone, which is
+        // what a crawler selecting the wrong container returns.
+        let stripped = "Chương 1: Gặp gỡ\n\nHắn đứng đợi. Ừm? hắn hỏi.";
+        let p = prepare_chapter(stripped);
+        assert_eq!(
+            p.dialogue_count(),
+            0,
+            "the whole point: with no quote mark there is no dialogue to find"
+        );
+        let s = p.split_summary();
+        assert!(s.contains("0 dialogue"), "{s}");
+        // …and the line points at the thing to check, because a count on its
+        // own is trivia.
+        assert!(s.contains("crawler's container selector"), "{s}");
+    }
+
+    /// The same line, for a chapter that is legitimately all narration, must
+    /// *not* blame the crawler — or it stops being read.
+    #[test]
+    fn the_split_report_does_not_blame_the_crawler_on_a_quiet_chapter() {
+        let p = prepare_chapter("Chương 2: Một cảnh\n\nHắn lật trang sách.");
+        assert_eq!(p.dialogue_count(), 0);
+        let s = p.split_summary();
+        assert!(s.contains("0 dialogue"), "{s}");
+        // Conditional, because a single-voice chapter is a real thing: the line
+        // has to concede it before naming the alternative.
+        assert!(
+            s.contains("correct if the chapter really is narration"),
+            "the caveat must come before the suggestion: {s}"
+        );
+        assert!(!s.contains("left the crawler"), "no accusation, ever: {s}");
+    }
+
+    /// An empty chapter says so rather than claiming zero dialogue of a chapter
+    /// that does not exist.
+    #[test]
+    fn the_split_report_says_so_when_there_is_nothing_to_split() {
+        let p = prepare_chapter("");
+        assert!(
+            p.split_summary().contains("nothing to attribute"),
+            "{}",
+            p.split_summary()
+        );
+    }
+
+    /// The line as it actually reaches an operator: first entry in the log of
+    /// `assemble_outcome`, so it is present for the worker's run *and* for the
+    /// by-hand one. Asserted on the log rather than on `split_summary` because
+    /// the placement is the part that can silently regress.
+    #[test]
+    fn the_split_is_the_first_thing_the_digest_log_says() {
+        let text = "Chương 1: Gặp gỡ\n\nHắn đứng đợi. \"Ừm?\" hắn hỏi.";
+        let bible = serde_json::json!({});
+        let context = serde_json::json!({"speakers": {}, "roster": []});
+        let script = serde_json::json!({
+            "segments": [{
+                "source_id": "e0001", "speaker": "Narrator",
+                "text": "Hắn đứng đợi.", "mood": "calm", "scene": "room"
+            }]
+        });
+        let out = assemble_outcome(&bible, &context, &script, text).expect("assembles");
+        assert!(
+            out.log[0].contains("event(s):") && out.log[0].contains("dialogue"),
+            "the split must be the first thing said, got {:?}",
+            out.log[0]
+        );
+    }
 
     #[test]
     fn fences_are_stripped() {

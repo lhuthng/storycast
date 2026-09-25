@@ -658,30 +658,63 @@ async fn child_stderr_tail(stderr: &mut Option<tokio::process::ChildStderr>) -> 
 // stages (blocking work runs in spawn_blocking; heartbeats stay live)
 // ---------------------------------------------------------------------------
 
-async fn run_crawl(layout: &Layout, n: u32, url: &str, shared: &Shared) -> Result<(u64, String)> {
-    set_progress(shared, 0.05, format!("fetch ch{n}"));
-    let text = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()?
-        .get(url)
-        .header("User-Agent", "Mozilla/5.0")
-        .send()
-        .await
-        .with_context(|| format!("fetching {url}"))?
-        .text()
-        .await?;
-    let cleaned = bm_core::crawl::clean_storya_html(&text);
-    if cleaned.len() < 200 {
-        anyhow::bail!("ingested text suspiciously short ({} chars)", cleaned.len());
+/// Crawl one chapter, through whichever provider the offer named.
+///
+/// The stage itself is now thin on purpose: *how* a chapter is obtained is a
+/// script's business (or the built-in fetcher's), and the only things this
+/// function owns are the ones that are the same for every provider — the
+/// progress line, the artifact write, and the verdict that travels back in the
+/// completion.
+///
+/// **On a blocking thread.** The provider uses a blocking HTTP client and runs
+/// an interpreter, so it cannot live inside the async task: `spawn_blocking`
+/// keeps the heartbeat alive and keeps a nested runtime out of a tokio worker.
+async fn run_crawl(
+    layout: &Layout,
+    n: u32,
+    spec: bm_proto::CrawlSpec,
+    url: Option<String>,
+    attempt: u32,
+    shared: &Shared,
+) -> Result<(u64, Option<String>, bm_proto::CrawlReport)> {
+    let how = if spec.engine.is_empty() {
+        "built-in".to_string()
+    } else {
+        format!("{} {}", spec.engine, spec.script)
+    };
+    set_progress(shared, 0.05, format!("crawl ch{n} ({how})"));
+    let crawled = tokio::task::spawn_blocking(move || {
+        bm_core::crawl::Provider::new(&spec).crawl(n, url.as_deref(), attempt)
+    })
+    .await
+    .context("the crawl thread panicked")??;
+
+    let report = bm_core::crawl::report_of(&crawled);
+    for line in &crawled.log {
+        println!("crawl ch{n}: {line}");
     }
-    let dest = layout.chapter_txt(n);
-    bm_core::atomic_write(&dest, &cleaned)?;
-    set_progress(
-        shared,
-        1.0,
-        format!("crawled ch{n} ({} chars)", cleaned.len()),
-    );
-    Ok((1, cleaned))
+    let text = match &crawled.outcome {
+        bm_core::crawl::CrawlOutcome::Text { text, .. } => {
+            bm_core::atomic_write(&layout.chapter_txt(n), text)?;
+            set_progress(
+                shared,
+                1.0,
+                format!("{how} crawled ch{n} ({} bytes)", text.len()),
+            );
+            Some(text.clone())
+        }
+        // Nothing to write: the site has no such chapter. A terminal
+        // non-failure, so no strike and no artifact.
+        bm_core::crawl::CrawlOutcome::Absent { reason } => {
+            set_progress(shared, 1.0, format!("ch{n} is not on the site: {reason}"));
+            None
+        }
+        bm_core::crawl::CrawlOutcome::Blocked(b) => {
+            set_progress(shared, 1.0, format!("crawl ch{n} blocked: {}", b.detail));
+            None
+        }
+    };
+    Ok((1, text, report))
 }
 
 async fn run_digest(
@@ -1441,15 +1474,45 @@ async fn run_offer(
     }
     match offer.stage {
         Crawl => {
-            let url = offer.url.clone().unwrap_or_else(|| settings.chapter_url(n));
-            let (units, text) = run_crawl(layout, n, &url, shared).await?;
+            // The offer's spec is authoritative: it carries the script the
+            // inductor read, so a box that has not been re-provisioned still
+            // runs the crawler the operator edited. An offer without one (an
+            // older inductor) falls back to this box's own settings, which is
+            // the pre-script behaviour.
+            let spec = offer
+                .crawl
+                .clone()
+                .unwrap_or_else(|| bm_core::crawl::spec_from_settings(layout, settings));
+            let (units, text, report) = run_crawl(
+                layout,
+                n,
+                spec,
+                offer.url.clone(),
+                offer.attempt.max(1),
+                shared,
+            )
+            .await?;
+            // An absent chapter is a *success* whose artifact does not exist;
+            // a block is a failure whose message and class travel back so the
+            // inductor can shelve it at once when retrying would prove nothing.
+            let ok = text.is_some() || report.verdict == bm_proto::CrawlVerdict::Absent;
+            let detail = match (&report.verdict, &text) {
+                (bm_proto::CrawlVerdict::Text, Some(t)) => {
+                    format!("crawled ch{n} ({} bytes)", t.len())
+                }
+                (bm_proto::CrawlVerdict::Absent, _) => {
+                    format!("ch{n} is not on the site: {}", report.detail)
+                }
+                _ => format!("crawl ch{n} blocked [{}]: {}", report.class, report.detail),
+            };
             Ok(TaskResult {
-                ok: true,
-                detail: format!("crawled ch{n}"),
+                ok,
+                detail,
                 delta: None,
                 units,
                 script: None,
-                text: Some(text),
+                text,
+                crawl: Some(report),
                 mp3_b64: None,
                 unit_files: Vec::new(),
             })
@@ -1494,6 +1557,7 @@ async fn run_offer(
                 units: 1,
                 script: Some(script),
                 text: None,
+                crawl: None,
                 mp3_b64: None,
                 unit_files: Vec::new(),
             })
@@ -1577,6 +1641,7 @@ async fn run_offer(
                 units,
                 script: None,
                 text: None,
+                crawl: None,
                 mp3_b64: None,
                 unit_files,
             })
@@ -1626,6 +1691,7 @@ async fn run_offer(
                 units: 1,
                 script: None,
                 text: None,
+                crawl: None,
                 mp3_b64: mp3,
                 unit_files: Vec::new(),
             })
@@ -1641,6 +1707,11 @@ struct TaskResult {
     units: u64,
     script: Option<Value>,
     text: Option<String>,
+    /// Crawl only: what happened, when "ok" alone cannot say it — an absent
+    /// chapter and a login wall are both `ok: false`-shaped facts with entirely
+    /// different consequences, and the inductor cannot tell them apart from a
+    /// boolean and a sentence.
+    crawl: Option<bm_proto::CrawlReport>,
     mp3_b64: Option<String>,
     unit_files: Vec<bm_proto::UnitFile>,
 }
@@ -1856,6 +1927,7 @@ async fn worker_loop(
                 units: 0,
                 script: None,
                 text: None,
+                crawl: None,
                 mp3_b64: None,
                 unit_files: Vec::new(),
             },
@@ -1880,6 +1952,7 @@ async fn worker_loop(
             units: res.units,
             script: res.script,
             text: res.text,
+            crawl: res.crawl,
             mp3_b64: res.mp3_b64,
             unit_files: res.unit_files,
         };
@@ -2057,8 +2130,23 @@ async fn main() -> Result<()> {
             };
             match stage.as_str() {
                 "crawl" => {
-                    let url = url.unwrap_or_else(|| settings.chapter_url(chapter));
-                    run_crawl(&layout, chapter, &url, &shared).await?;
+                    // Standalone: no offer, so this box's own settings decide,
+                    // and `--url` overrides the manifest's answer.
+                    let spec = bm_core::crawl::spec_from_settings(&layout, &settings);
+                    let (_, text, report) =
+                        run_crawl(&layout, chapter, spec, url, 1, &shared).await?;
+                    match (report.verdict, text) {
+                        (bm_proto::CrawlVerdict::Text, Some(t)) => {
+                            println!("crawled ch{chapter}: {} bytes", t.len())
+                        }
+                        (bm_proto::CrawlVerdict::Absent, _) => {
+                            println!("ch{chapter} is not on the site: {}", report.detail)
+                        }
+                        _ => println!(
+                            "crawl ch{chapter} blocked [{}]: {}",
+                            report.class, report.detail
+                        ),
+                    }
                 }
                 "digest" => {
                     let bible: Value = serde_json::from_str(
@@ -2670,6 +2758,8 @@ mod tests {
             stage: bm_proto::Stage::Render,
             root: root.display().to_string(),
             url: None,
+            crawl: None,
+            attempt: 1,
             tts_url: Some(format!("http://{addr}")),
             engine: "vieneu".into(),
             model_order: vec![],
@@ -2971,6 +3061,8 @@ mod tests {
             stage: bm_proto::Stage::Digest,
             root: dir.display().to_string(),
             url: None,
+            crawl: None,
+            attempt: 1,
             tts_url: None,
             engine: "vieneu".into(),
             model_order: vec![],

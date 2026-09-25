@@ -1,0 +1,91 @@
+<!--
+FIXTURE — captured verbatim from a live site, not hand-written.
+  https://readnovelfull.com/the-sword-god-of-the-universe.html
+  fetched 2026-09-25 with a browser UA; HTTP 200, no bot check.
+  A 30-chapter completed book, so this index is COMPLETE and untruncated.
+
+Kept: <div id="list-chapter"> in full, byte for byte — six
+<ul class="list-chapter"> columns inside a bootstrap row, 30 <li> links of the
+form /{book-slug}/chapter-{n}-{title-slug}.html, each with a title attribute
+and a <span class="nchr-text">.
+
+The reason this site needs a `discover` at all, and cannot be templated: the
+chapter number is in the URL, but it is NOT the last thing in it. There is a
+title slug between the number and ".html", and no {n} expansion can invent a
+title slug. So the index has to be read from somewhere.
+
+**And this index is capped.** On a 2730-chapter book
+(facing-an-ancient-god-for-a-year.html) the very same container lists only
+chapters 2..30 — six short columns, no pagination, no "view all", and no
+/chapters or ?page= endpoint (both 404). A discover() that trusts this page as
+the whole book reports total = 30, the host believes it, and every chapter past
+30 is marked *absent*, which is terminal. That is how a 2730-chapter novel
+becomes a 30-chapter one with a clean ledger.
+
+The way out is the chapter page's own `id="next_chap"` link, which carries the
+full next URL including its slug. The walk is sequential and costs one fetch per
+chapter — see readnovelfull.lua.
+-->
+<html lang="en"><head><meta charset="utf-8"></head><body>
+<div class="col-xs-12" id="list-chapter"><div class="row" id="chapter-archive"><div class="panel panel-default"><div class="panel-collapse collapse in"><div class="panel-body"><div class="row"><div class="col-xs-12 col-sm-4 col-md-4"><ul class="list-chapter"><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-1-genius-of-the-jing-clan.html"
+       title="Chapter 1 Genius of the Jing Clan"><span class="nchr-text">Chapter 1 Genius of the Jing Clan</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-2-hit-the-jackpot.html"
+       title="Chapter 2 Hit the Jackpot"><span class="nchr-text">Chapter 2 Hit the Jackpot</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-3-the-ultimate-divine-power-of-the-arch-of-heaven.html"
+       title="Chapter 3 The ultimate divine power of the Arch of Heaven"><span class="nchr-text">Chapter 3 The ultimate divine power of the Arch of Heaven</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-4-contrast.html"
+       title="Chapter 4 Contrast"><span class="nchr-text">Chapter 4 Contrast</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-5-the-fickleness-of-life.html"
+       title="Chapter 5 The Fickleness of Life"><span class="nchr-text">Chapter 5 The Fickleness of Life</span></a></li></ul></div><div class="col-xs-12 col-sm-4 col-md-4"><ul class="list-chapter"><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-6-the-fortune-collection-plan.html"
+       title="Chapter 6 The Fortune-Collection Plan"><span class="nchr-text">Chapter 6 The Fortune-Collection Plan</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-7-moonbeam-sword.html"
+       title="Chapter 7 Moonbeam Sword"><span class="nchr-text">Chapter 7 Moonbeam Sword</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-8-one-hit-one-kill.html"
+       title="Chapter 8 One Hit, One Kill"><span class="nchr-text">Chapter 8 One Hit, One Kill</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-9-formidable-prediction.html"
+       title="Chapter 9 Formidable Prediction"><span class="nchr-text">Chapter 9 Formidable Prediction</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-10-the-shadow-gale-wolf.html"
+       title="Chapter 10 The Shadow Gale Wolf"><span class="nchr-text">Chapter 10 The Shadow Gale Wolf</span></a></li></ul></div><div class="col-xs-12 col-sm-4 col-md-4"><ul class="list-chapter"><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-11-jing-yan-ecstatic.html"
+       title="Chapter 11 Jing Yan, Ecstatic"><span class="nchr-text">Chapter 11 Jing Yan, Ecstatic</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-12-breaking-through-the-fifth-heaven.html"
+       title="Chapter 12 Breaking Through the Fifth Heaven"><span class="nchr-text">Chapter 12 Breaking Through the Fifth Heaven</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-13-the-stone-spotted-tiger-king.html"
+       title="Chapter 13 The Stone-spotted Tiger King"><span class="nchr-text">Chapter 13 The Stone-spotted Tiger King</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-14-its-show-time.html"
+       title="Chapter 14 It’s Show Time"><span class="nchr-text">Chapter 14 It’s Show Time</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-15-thats-unbelievable.html"
+       title="Chapter 15 That’s Unbelievable"><span class="nchr-text">Chapter 15 That’s Unbelievable</span></a></li></ul></div></div><div class="row"><div class="col-xs-12 col-sm-4 col-md-4"><ul class="list-chapter"><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-16-one-sword-strike-one-man-kicked-into-the-air.html"
+       title="Chapter 16 One Sword Strike, One Man Kicked Into the Air"><span class="nchr-text">Chapter 16 One Sword Strike, One Man Kicked Into the Air</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-17-sources-for-sale.html"
+       title="Chapter 17 Sources For Sale"><span class="nchr-text">Chapter 17 Sources For Sale</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-18-a-wicked-person.html"
+       title="Chapter 18 A Wicked Person"><span class="nchr-text">Chapter 18 A Wicked Person</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-19-wang-he-in-astonishment.html"
+       title="Chapter 19 Wang He in Astonishment"><span class="nchr-text">Chapter 19 Wang He in Astonishment</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-20-great-harvest.html"
+       title="Chapter 20 Great Harvest"><span class="nchr-text">Chapter 20 Great Harvest</span></a></li></ul></div><div class="col-xs-12 col-sm-4 col-md-4"><ul class="list-chapter"><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-21-breaking-through-the-sixth-heaven.html"
+       title="Chapter 21 Breaking Through the Sixth Heaven"><span class="nchr-text">Chapter 21 Breaking Through the Sixth Heaven</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-22-abilities-test-once-more.html"
+       title="Chapter 22 Abilities Test, Once More"><span class="nchr-text">Chapter 22 Abilities Test, Once More</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-23-the-center-of-attention.html"
+       title="Chapter 23 The Center of Attention"><span class="nchr-text">Chapter 23 The Center of Attention</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-24-thats-impossible.html"
+       title="Chapter 24 That’s Impossible!"><span class="nchr-text">Chapter 24 That’s Impossible!</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-25-jing-yan-vs.html"
+       title="Chapter 25 Jing Yan vs"><span class="nchr-text">Chapter 25 Jing Yan vs</span></a></li></ul></div><div class="col-xs-12 col-sm-4 col-md-4"><ul class="list-chapter"><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-26-two-astonished-elders.html"
+       title="Chapter 26 Two Astonished Elders"><span class="nchr-text">Chapter 26 Two Astonished Elders</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-27-knocked-into-the-air.html"
+       title="Chapter 27 Knocked Into the Air"><span class="nchr-text">Chapter 27 Knocked Into the Air</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-28-thanks-for-your-generosity.html"
+       title="Chapter 28 Thanks for Your Generosity"><span class="nchr-text">Chapter 28 Thanks for Your Generosity</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-29-the-arrangement-for-jing-yan.html"
+       title="Chapter 29 The Arrangement for Jing Yan"><span class="nchr-text">Chapter 29 The Arrangement for Jing Yan</span></a></li><li><span class="glyphicon glyphicon-certificate"></span>&nbsp;
+    <a href="/the-sword-god-of-the-universe/chapter-30-i-cant.html"
+       title="Chapter 30 I Can’t!"><span class="nchr-text">Chapter 30 I Can’t!</span></a></li></ul></div></div></div></div></div><div class="loading"></div></div></div>
+</body></html>

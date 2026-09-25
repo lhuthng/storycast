@@ -699,14 +699,115 @@ impl Inner {
         ))
     }
 
+    /// Record what the chapter index says about a range, before anything is
+    /// queued from it.
+    ///
+    /// A chapter the site does not have is **finished work, not missing work**:
+    /// the crawl will never produce an artifact, so the row closes (strike-free)
+    /// and the digest closes with it — a digest waits for its predecessor, and
+    /// leaving one waiting on a chapter that cannot exist stalls the chain behind
+    /// it. Returns how many chapters were closed this way.
+    pub fn apply_index(&mut self, index: &bm_core::crawl::CrawlIndex) -> usize {
+        let mut closed = 0;
+        for (n, entry) in index.chapters() {
+            if !entry.absent {
+                continue;
+            }
+            // Never overwrite work that exists: a stale index must not erase a
+            // chapter somebody imported by hand.
+            if self.layout.chapter_txt(*n).is_file() {
+                continue;
+            }
+            let reason = if entry.title.trim().is_empty() {
+                "the chapter index has no chapter here".to_string()
+            } else {
+                entry.title.clone()
+            };
+            for (stage, detail) in [
+                (Stage::Crawl, format!("not on the site: {reason}")),
+                (Stage::Digest, "skipped: not on the site".to_string()),
+            ] {
+                let t = self.ensure_task(*n, stage);
+                if t.state != TaskState::Done {
+                    t.state = TaskState::Done;
+                    t.detail = detail;
+                    t.attempts = 0;
+                    t.clear_holders();
+                    t.lease_until = None;
+                    t.updated = now_secs();
+                    closed += 1;
+                }
+            }
+        }
+        if closed > 0 {
+            self.save();
+        }
+        closed
+    }
+
+    /// Close a chapter's crawl because the operator supplied its text.
+    ///
+    /// This is what makes manual import a *supply path* rather than a mode: the
+    /// chapter's crawl is done by definition, so its row is Done and the digest
+    /// becomes offerable — and a chapter that was shelved on a broken selector
+    /// gets its digest requeued by the same call.
+    pub fn mark_imported(&mut self, n: u32, bytes: usize) -> bool {
+        let now = now_secs();
+        {
+            let t = self.ensure_task(n, Stage::Crawl);
+            t.state = TaskState::Done;
+            t.attempts = 0;
+            t.detail = format!("imported ({bytes} bytes)");
+            t.clear_holders();
+            t.lease_until = None;
+            t.batch.clear();
+            t.updated = now;
+        }
+        let requeued = {
+            let d = self.ensure_task(n, Stage::Digest);
+            let was = d.state;
+            if matches!(was, TaskState::Shelved | TaskState::Failed) {
+                d.state = TaskState::Pending;
+                d.attempts = 0;
+                d.detail = "requeued: text imported".into();
+                d.clear_holders();
+                d.lease_until = None;
+                d.updated = now;
+            }
+            matches!(was, TaskState::Shelved | TaskState::Failed)
+        };
+        self.push_event(
+            "ok",
+            format!(
+                "ch{n} imported ({bytes} bytes) — crawl done, digest {}",
+                if requeued { "requeued" } else { "queued" }
+            ),
+        );
+        self.save();
+        true
+    }
+
     /// Enqueue crawl+digest for chapters missing scripts (idempotent).
+    ///
+    /// **In manual mode nothing is fetched**, so a chapter with no text gets no
+    /// crawl row at all: a task no worker can run is a row that fails three
+    /// times and shelves. What it gets instead is a line in the event log naming
+    /// it, and the digest that would consume it waits on an upstream row that is
+    /// not there — which is exactly "blocked, pending an operator", without a
+    /// new task state to explain.
     pub fn enqueue_translate(&mut self, start: u32, count: u32) -> (usize, usize) {
         let (mut crawls, mut digests) = (0, 0);
+        let manual = self.settings.crawl.is_manual();
+        let mut needs_import: Vec<u32> = Vec::new();
         for n in start..start + count {
             if !self.layout.chapter_txt(n).is_file() {
-                let t = self.ensure_task(n, Stage::Crawl);
-                if t.state == TaskState::Pending {
-                    crawls += 1;
+                if manual {
+                    needs_import.push(n);
+                } else {
+                    let t = self.ensure_task(n, Stage::Crawl);
+                    if t.state == TaskState::Pending {
+                        crawls += 1;
+                    }
                 }
             }
             if !self.layout.script(n).is_file() {
@@ -726,6 +827,28 @@ impl Inner {
                     digests += 1;
                 }
             }
+        }
+        if !needs_import.is_empty() {
+            // Named, not counted: the operator's next move is `:import` with a
+            // file, and a bare number would not say which chapters to fetch.
+            let shown: Vec<String> = needs_import
+                .iter()
+                .take(12)
+                .map(|n| format!("ch{n}"))
+                .collect();
+            self.push_event(
+                "warn",
+                format!(
+                    "manual crawl: {} chapter(s) need text — `:import` a file for {}{}",
+                    needs_import.len(),
+                    shown.join(", "),
+                    if needs_import.len() > shown.len() {
+                        " …"
+                    } else {
+                        ""
+                    }
+                ),
+            );
         }
         self.save();
         (crawls, digests)
