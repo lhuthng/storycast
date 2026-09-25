@@ -333,6 +333,7 @@ async fn task(
                 units,
                 script,
                 text,
+                crawl,
                 mp3_b64,
                 unit_files,
             } = done;
@@ -346,6 +347,7 @@ async fn task(
                 units,
                 script,
                 text,
+                crawl,
                 mp3_b64,
                 unit_files,
             };
@@ -372,6 +374,10 @@ async fn task(
                 units: 0,
                 script: None,
                 text: None,
+                // The failure path has no verdict to carry: the error text
+                // above is the diagnosis, and an unclassified failure takes
+                // the ordinary strike ladder.
+                crawl: None,
                 mp3_b64: None,
                 unit_files: Vec::new(),
             };

@@ -1637,6 +1637,10 @@ mod tests {
         let (_d, mut inner) = fixture();
         inner.settings.analyzer = "gemini".into();
         inner.settings.engine = "gemini".into();
+        // The default mode is manual (nothing fetches); this test is about the
+        // crawl offer's contents, so turn the scripted path on.
+        inner.settings.crawl.mode = "script".into();
+        inner.settings.url_template = "https://site.example/chuong-{n}".into();
         inner.enqueue_translate(1, 1);
         inner
             .workers
@@ -2525,6 +2529,7 @@ mod tests {
             detail: String::new(),
             duration_secs: 30.0,
             bible_delta: None,
+            crawl: None,
             units: 0,
             script: None,
             text: None,
@@ -2888,12 +2893,211 @@ mod tests {
             detail: detail.into(),
             duration_secs: 12.5,
             bible_delta: None,
+            crawl: None,
             units: 0,
             script: None,
             text: None,
             mp3_b64: None,
             unit_files: Vec::new(),
         }
+    }
+
+    /// How a report's crawl verdict is shaped, for the tests below.
+    fn crawl_report(
+        verdict: bm_proto::CrawlVerdict,
+        class: &str,
+        detail: &str,
+    ) -> bm_proto::CrawlReport {
+        bm_proto::CrawlReport {
+            verdict,
+            class: class.into(),
+            detail: detail.into(),
+            retry_after: None,
+            fetches: 1,
+        }
+    }
+
+    /// A chapter the site does not have is **finished work, not missing work**:
+    /// strike-free, and its digest closes with it — a digest waits on its
+    /// predecessor, so leaving one waiting on a chapter that cannot exist stalls
+    /// the chain behind it.
+    #[test]
+    fn an_absent_chapter_closes_its_crawl_and_digest_without_a_strike() {
+        let (_d, mut inner) = fixture();
+        let mut t = Task::new(381, Stage::Crawl);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w1".into());
+        t.lease_until = Some(now_secs() + 600);
+        inner.tasks.insert("crawl:381".into(), t);
+        inner.ensure_task(381, Stage::Digest);
+
+        let mut c = completion("w1", "crawl:381", true, "ch381 is not on the site");
+        c.crawl = Some(crawl_report(
+            bm_proto::CrawlVerdict::Absent,
+            "",
+            "past the end of the book (380 chapters)",
+        ));
+        let line = inner.complete(&c);
+        assert!(line.contains("absent"), "{line}");
+        let crawl = &inner.tasks["crawl:381"];
+        assert_eq!(crawl.state, TaskState::Done);
+        assert_eq!(crawl.attempts, 0, "an absent chapter is not a strike");
+        assert!(crawl.detail.contains("past the end"), "{}", crawl.detail);
+        let digest = &inner.tasks["digest:381"];
+        assert_eq!(digest.state, TaskState::Done, "the digest must not wait");
+        assert!(
+            digest.detail.contains("no such chapter"),
+            "{}",
+            digest.detail
+        );
+    }
+
+    /// A refusal the crawler itself classified as terminal shelves on the first
+    /// report; a *retryable* one takes the ordinary strike ladder. Three
+    /// attempts at a login wall prove nothing a single one did not.
+    #[test]
+    fn a_terminal_block_shelves_at_once_and_a_retryable_one_does_not() {
+        for (class, terminal) in [
+            ("login_required", true),
+            ("gone", true),
+            ("rate_limit", false),
+        ] {
+            let (_d, mut inner) = fixture();
+            let mut t = Task::new(7, Stage::Crawl);
+            t.state = TaskState::Running;
+            t.assigned_to = Some("w1".into());
+            t.lease_until = Some(now_secs() + 600);
+            inner.tasks.insert("crawl:7".into(), t);
+
+            let mut c = completion("w1", "crawl:7", false, "blocked");
+            c.crawl = Some(crawl_report(
+                bm_proto::CrawlVerdict::Blocked,
+                class,
+                "HTTP 401",
+            ));
+            let line = inner.complete(&c);
+            let row = &inner.tasks["crawl:7"];
+            if terminal {
+                assert_eq!(row.state, TaskState::Shelved, "{class}: {line}");
+                assert_eq!(row.attempts, 0, "{class}: no strike spent on a wall");
+                assert!(row.detail.contains(class), "{class}: {}", row.detail);
+            } else {
+                assert_eq!(row.state, TaskState::Pending, "{class}: {line}");
+                assert_eq!(row.attempts, 1, "{class}: the ladder, not the wall");
+            }
+        }
+    }
+
+    /// The chapter index closes what the site does not have **before** anything
+    /// is queued — and never overwrites a chapter that already has text.
+    #[test]
+    fn the_index_closes_chapters_that_are_not_on_the_site() {
+        let (_d, mut inner) = fixture();
+        let mut index = bm_core::crawl::CrawlIndex::from_template("https://x/{n}", 1, 3, "h");
+        index.chapters.insert(
+            2,
+            bm_core::crawl::index::Chapter {
+                url: None,
+                title: "past the end of the book".into(),
+                absent: true,
+            },
+        );
+        assert_eq!(inner.apply_index(&index), 2, "crawl + digest for ch2");
+        assert_eq!(inner.tasks["crawl:2"].state, TaskState::Done);
+        assert_eq!(inner.tasks["digest:2"].state, TaskState::Done);
+        assert!(inner.tasks["crawl:2"].detail.contains("past the end"));
+        assert!(
+            !inner.tasks.contains_key("crawl:1"),
+            "a chapter the index maps is left to the enqueue, not closed here"
+        );
+
+        // A stale index (the site was reorganised, or a mapping was rebuilt)
+        // must not erase a chapter somebody imported by hand.
+        std::fs::create_dir_all(inner.layout.chapters()).unwrap();
+        std::fs::write(inner.layout.chapter_txt(3), "Chương 3\n").unwrap();
+        index.chapters.insert(
+            3,
+            bm_core::crawl::index::Chapter {
+                url: None,
+                title: String::new(),
+                absent: true,
+            },
+        );
+        assert_eq!(inner.apply_index(&index), 0);
+        assert!(
+            !inner.tasks.contains_key("crawl:3"),
+            "no row is invented for a chapter that has text"
+        );
+    }
+
+    /// An import *is* the crawl: the row closes, and a digest that had struck
+    /// out on a broken selector is queued again.
+    #[test]
+    fn an_import_closes_the_crawl_and_requeues_a_shelved_digest() {
+        let (_d, mut inner) = fixture();
+        let mut c = Task::new(9, Stage::Crawl);
+        c.state = TaskState::Shelved;
+        c.attempts = 3;
+        inner.tasks.insert("crawl:9".into(), c);
+        let mut d = Task::new(9, Stage::Digest);
+        d.state = TaskState::Shelved;
+        d.attempts = 15;
+        inner.tasks.insert("digest:9".into(), d);
+
+        assert!(inner.mark_imported(9, 4096));
+        assert_eq!(inner.tasks["crawl:9"].state, TaskState::Done);
+        assert!(inner.tasks["crawl:9"].detail.contains("imported"));
+        assert_eq!(inner.tasks["digest:9"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["digest:9"].attempts, 0, "fresh attempts");
+    }
+
+    /// In manual mode nothing is fetched, so a chapter with no text gets **no
+    /// crawl row**: a task no worker can run is a row that fails three times
+    /// and shelves. It gets a line in the log naming it instead.
+    #[test]
+    fn a_manual_workspace_queues_no_crawl_a_worker_could_not_run() {
+        let d = tempfile::tempdir().unwrap();
+        let layout = Layout::new(d.path());
+        layout.ensure().unwrap();
+        let mut settings = Settings::default();
+        settings.crawl.mode = "manual".into();
+        let mut inner = Inner::new(layout, settings);
+
+        let (crawls, digests) = inner.enqueue_translate(1, 3);
+        assert_eq!(crawls, 0, "manual mode fetches nothing");
+        assert!(digests > 0, "the digests exist and wait for the text");
+        assert!(
+            !inner.tasks.keys().any(|k| k.starts_with("crawl:")),
+            "no crawl row at all: {:?}",
+            inner.tasks.keys().collect::<Vec<_>>()
+        );
+        let said: Vec<&str> = inner
+            .events
+            .iter()
+            .map(|e| e.text.as_str())
+            .filter(|t| t.contains("need text"))
+            .collect();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("ch1") && said[0].contains(":import"),
+            "{said:?}"
+        );
+
+        // And the same call in script mode queues crawls, as it always has.
+        // (`Settings::default()` is manual now — a fresh workspace names no
+        // site; a scripted one says so explicitly.)
+        let d2 = tempfile::tempdir().unwrap();
+        let layout2 = Layout::new(d2.path());
+        layout2.ensure().unwrap();
+        let mut scripted = Settings::default();
+        scripted.crawl.mode = "script".into();
+        scripted.url_template = "https://site.example/chuong-{n}".into();
+        let mut inner2 = Inner::new(layout2, scripted);
+        let (crawls2, _) = inner2.enqueue_translate(1, 3);
+        assert_eq!(crawls2, 3);
+        // …and the out-of-the-box default is manual, which is the first half
+        // of this test: nothing fetches until the operator says how chapters
+        // arrive.
     }
 
     #[test]

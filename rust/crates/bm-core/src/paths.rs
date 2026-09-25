@@ -117,6 +117,40 @@ impl Layout {
         self.chapters().join(format!("ch{n:02}.txt"))
     }
 
+    /// The chapter index: the frozen `n -> url` mapping a crawl run works from.
+    ///
+    /// An artifact, not state, and deliberately a file an operator can read and
+    /// hand-edit — for a book whose URLs are arbitrary slugs, authoring this by
+    /// hand is more reliable than any script that re-derives it.
+    pub fn crawl_index(&self) -> PathBuf {
+        self.data().join("crawl-index.json")
+    }
+
+    /// The crawl scripts a profile ships: `assets/crawl/`.
+    ///
+    /// Under `assets/` because that is what a profile *is* (see
+    /// `profile::LIVE_DIRS`) and what provisioning rsyncs to every worker, so a
+    /// script and the assets it needs travel together.
+    pub fn crawl_scripts(&self) -> PathBuf {
+        self.assets().join("crawl")
+    }
+
+    /// The active workspace's own crawlers: `workspaces/<name>/crawl/`.
+    ///
+    /// Profile crawlers (`assets/crawl/`) are shared by every workspace on this
+    /// root and replaced wholesale by `:profile load`; a book whose site needs
+    /// its own crawler therefore lives here, where `:profile load` cannot reach
+    /// it and a second workspace never sees it. Searched **first** by
+    /// `crawl::resolve_script`, so a same-named file shadows the profile's —
+    /// the workspace's answer wins over the profile's.
+    ///
+    /// Provisioning rsyncs this directory to every worker (see
+    /// `provision::steps::install_sources`) and the stamp hashes it, so an edit
+    /// here reaches the cluster with the next `:prov`.
+    pub fn crawl_workspace(&self) -> PathBuf {
+        self.work.join("crawl")
+    }
+
     pub fn script(&self, n: u32) -> PathBuf {
         self.data().join(format!("script-{n:02}.json"))
     }

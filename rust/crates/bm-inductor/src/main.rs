@@ -193,6 +193,27 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Check a link before you build a workspace around it: one request, and a
+    /// verdict on whether a crawl of that page would produce a chapter.
+    ///
+    /// **Paste a URL and find out in a second**, rather than finding out from
+    /// ten workers failing at once. A site behind a bot check costs a cluster an
+    /// afternoon to discover; this costs one request.
+    ///
+    /// Reads the active workspace's `crawl.user_agent` and `crawl.headers` when
+    /// they are set, so a check goes out exactly as a real crawl would — a
+    /// session cookie you are relying on is part of what is being checked, and
+    /// `bm-inductor check` is how you confirm the cookie still works. Writes
+    /// nothing, and exits non-zero when the page is not a chapter, so a setup
+    /// script can gate on it.
+    Check {
+        /// The URL to check. A chapter, not a book index: the question is whether
+        /// a *chapter* comes back.
+        url: String,
+        /// Per-request timeout.
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
+    },
     /// Link a machine by name: remembers how to reach it so `provision --box`
     /// needs no flags. Writes `.bm/machines.json`, which is ignored.
     Link {
@@ -1844,7 +1865,86 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Cmd::Check { url, timeout } => cmd_check(settings.clone(), url, timeout).await,
     }
+}
+
+/// The link check, on a blocking thread.
+///
+/// **The crawl HTTP client cannot be built or dropped inside a tokio task**, and
+/// this is the same constraint the provider works under: `reqwest::blocking`
+/// owns a runtime of its own. `spawn_blocking` keeps it off the async worker and
+/// keeps that runtime out of the way — without it the command panics on drop
+/// before it prints anything.
+async fn cmd_check(settings: Settings, url: String, timeout: u64) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(move || cmd_check_blocking(&settings, &url, timeout))
+        .await
+        .map_err(|e| anyhow::anyhow!("the link check panicked: {e}"))?
+}
+
+fn cmd_check_blocking(settings: &Settings, url: &str, timeout: u64) -> anyhow::Result<()> {
+    let opts = bm_core::crawl::probe::Options {
+        // The workspace's own agent and headers, so a check goes out exactly as
+        // a crawl would — including a session cookie that is part of the setup
+        // being validated.
+        user_agent: settings.crawl.user_agent.clone(),
+        headers: settings.crawl.headers.clone(),
+        timeout_secs: timeout,
+    };
+    let check = bm_core::crawl::probe::probe(url, &opts)?;
+
+    println!("{}", check.url);
+    if check.final_url != check.url {
+        println!("  -> {}", check.final_url);
+    }
+    println!(
+        "  HTTP {}  ·  {} bytes  ·  {} bytes of prose",
+        check.status, check.bytes, check.text_bytes
+    );
+    if !check.guess.is_empty() {
+        println!("  title: {}", check.guess);
+    }
+    let mark = if check.verdict.crawlable() {
+        "ok"
+    } else if check.retryable() {
+        "blocked (retryable)"
+    } else {
+        "blocked"
+    };
+    println!("  {mark}: {}", check.detail);
+
+    // A recognised site gets its crawler named, whether the check passed or not:
+    // the person who is about to paste this URL into `settings.json` is the one
+    // who needs to know which script to put there, and a check that says "ok"
+    // without it has left the actual work undone.
+    if let Some(site) = bm_core::crawl::for_url(url) {
+        print!("{}", bm_core::crawl::known::note(site));
+    }
+
+    // A non-`Ok` verdict is a **failed check**, so a script can gate on it — but
+    // the reason is always printed first, because "exit 1" on its own helps
+    // nobody choose between a cookie, a browser user agent, and a different site.
+    if !check.verdict.crawlable() {
+        if check.verdict == bm_core::crawl::probe::Verdict::Cloudflare {
+            // Say what is actually true, because the plausible-sounding wrong
+            // answer here costs an afternoon of someone's time.
+            println!(
+                "\n  Cloudflare is refusing this client, and nothing in this repo\n  \
+                 bypasses that: no TLS-fingerprint spoofing, no browser engine,\n  \
+                 no challenge solver. The crawler speaks HTTP/1.1 with rustls and\n  \
+                 a header-shaped request, and some sites refuse that on the\n  \
+                 fingerprint alone.\n\n  \
+                 Two things are worth trying, in this order:\n    \
+                 1. a real browser user agent — the default \"Mozilla/5.0\" is\n       \
+                 thin, and \"crawl\".\"user_agent\" is a one-line change;\n    \
+                 2. a session cookie: open the page in a browser, solve the\n       \
+                 challenge, copy the cf_clearance cookie into\n       \
+                 \"crawl\".\"headers\", and run this command again to confirm it."
+            );
+        }
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// `digest` — the analyzer's answer for one chapter, and nothing else.

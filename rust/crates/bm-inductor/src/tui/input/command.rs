@@ -30,6 +30,8 @@ pub(crate) enum Command {
     DropMachine,
     Translate,
     CrawlSetup,
+    /// Adopt chapter text the operator supplies — the manual half of crawling.
+    Import,
     Voices,
     SwapVoice,
     Cast,
@@ -115,6 +117,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["relink"], desc: Some("re-point a drifted EC2 box at its current public IP — matched by instance id, then :prov"), cmd: Command::Relink },
     Word { key: Some('t'), names: &["translate"], desc: Some("enqueue crawl + digest for a chapter range"), cmd: Command::Translate },
     Word { key: Some('c'), names: &["crawl"], desc: Some("save the URL template, then probe-crawl one chapter"), cmd: Command::CrawlSetup },
+    Word { key: Some('i'), names: &["import"], desc: Some("adopt a chapter from a file — `:import 34 /tmp/ch34.txt`"), cmd: Command::Import },
     Word { key: Some('v'), names: &["voices"], desc: Some("re-read the roster, enforce the accent policy, refill gaps"), cmd: Command::Voices },
     Word { key: Some('s'), names: &["swap"], desc: Some("repoint one character — destructive, see below"), cmd: Command::SwapVoice },
     Word { key: Some('S'), names: &["cast"], desc: Some("cast overview: every speaker × voice, read-only"), cmd: Command::Cast },
@@ -473,9 +476,20 @@ pub(crate) fn do_command(
             let current = app.setting_str("url_template", "");
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::CrawlTemplate,
-                "Crawl setup — save the URL template",
-                "must contain {n}; one chapter is probe-crawled to check the selector",
+                "Crawl setup — save the URL template, then probe one chapter",
+                "must contain {n} (the chapter number) — or leave it empty to probe without \
+                 saving one, which is what a crawler with a discover() needs",
                 &current,
+            ));
+        }
+        Command::Import => {
+            let chapter = app.setting_u32("start", 1);
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::Import,
+                "Import — adopt chapter text from a file",
+                "`<chapter> <path>`, e.g. `34 /tmp/ch34.txt` — or just the path, if it is named `ch34.txt`. \
+                 The text goes through the same cleaning and length check a crawl does.",
+                &format!("{chapter} "),
             ));
         }
         Command::SshKey => {

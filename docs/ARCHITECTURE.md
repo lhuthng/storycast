@@ -1,5 +1,61 @@
 # Architecture — how Storycast works under the hood
 
+## In plain words
+
+*You can stop reading after this section.*
+
+A book goes through four steps, in order, one chapter at a time:
+
+1. **Get the text.** Either you drop files in, or a small script fetches the
+   chapter from a website. (That part is [CRAWLING.md](CRAWLING.md).)
+2. **Work out who is speaking.** An AI reads the chapter and labels each piece
+   as narration or as a particular character.
+3. **Speak it.** Each labelled piece is turned into audio, using that
+   character's voice, with pauses.
+4. **Glue it together.** One MP3 per chapter, in order.
+
+The AI is used in step 2 and in *writing* the performance (where the pauses go,
+how a line should be read). The actual speaking in step 3 is `bm-tts`: with the
+built-in Vieneu voices that is local, costs nothing per chapter and needs no
+internet. (Other TTS backends can be configured instead; they cost money and
+have their own limits — see the README.)
+
+**Why it is split across several machines.** Rendering a whole book on one
+machine is slow, and most of that time is the machine's own limit rather than
+the work being hard. So there is a coordinator (the *inductor*) that decides
+what each machine should be doing and holds the to-do list, and *workers* that
+each grab one task and report back. The to-do list is a file — a ledger — and
+it is the only thing that is really "state". If the coordinator dies, the
+workers keep their current task and the ledger is the thing that gets read back.
+
+**What each piece is, and which you can ignore:**
+
+| Piece | What it is | Do you touch it? |
+| --- | --- | --- |
+| The inductor | The coordinator, and the dashboard you drive it from | You use it; you do not change it |
+| Workers | Identical boxes that each run one step for one chapter | You do not touch it |
+| The ledger | A file listing every task and its state | Only to read, when something went wrong |
+| Crawler scripts | One small file per website, saying where the text is | **Yes — this is the part you will write** |
+| Prompts | How the AI casts and performs your book | **Yes — this is the part that makes it sound like your book** |
+| The voices | Built-in Vietnamese voices, or ones you clone from a clip | Only if you want your own |
+
+**The two things that will surprise you**, both deliberate:
+
+- **Nothing is fetched until you say so.** A new workspace has no crawler and
+  downloads nothing. A program that starts hammering a website it was never
+  pointed at is a bad neighbour, and this one is trying not to be.
+- **It never tries to get around a site that blocks it.** No browser, no
+  solving bot checks, no pretending to be a different program. If a site
+  refuses it, the honest answer is that the site refused. It would rather tell
+  you than quietly spend a day retrying.
+
+**The parts that are genuinely hard**, and where the detail below earns its
+length: not restarting work that was already done, telling a finished stage
+from a stalled one, and stopping a doomed task early instead of burning an
+afternoon on it. Everything else is plumbing.
+
+## For people changing the machine
+
 Companion to the [README](../README.md), which is the "how do I run it" guide.
 This one is the "why is it built this way" guide. Everything here describes
 code that exists in this repo — five Rust crates plus a Python enrollment
@@ -30,11 +86,17 @@ runtime. The `python/` tree that remains is the enrollment tooling — the last
 thing still needing an interpreter, until that is ported too. It is not on the
 serving path, so a worker needs no Python at all.
 
-## 1. One idea: work is a ledger of tasks, not a loop
+## 1. One idea: work is a list of tasks, not a loop
 
-Every unit of work is a `(stage, chapter)` pair held in one place — the
-**ledger** (`ledger.json`, in the active workspace; see "Config lives next to
-the ledger" below) — with one of six states:
+*This section is about the one decision the whole system rests on. If you only
+remember one thing: there is no "run the book" loop anywhere in this program.
+Instead, every piece of work is a separate row in a file, and the program works
+by deciding who should do which row next.*
+
+Every unit of work is one *stage* of one *chapter* — the pair `(crawl, 34)`,
+`(digest, 34)`, `(render, 34)`, `(merge, 34)`. All of these rows live together
+in one file, the **ledger** (`ledger.json`, inside the book you are working on;
+see "Config lives next to the ledger" below). Every row is in one of six states:
 
 ```mermaid
 stateDiagram-v2
@@ -55,68 +117,82 @@ stateDiagram-v2
     S --> P: "u" — retry, strikes forgiven
 ```
 
-The two edges back to `Pending` are **not** the same edge, and the difference is
-the whole failure policy: a report that fails costs a strike, silence costs
-nothing.
+Look closely at the diagram: **two different arrows lead back to `Pending`**, and
+the difference between them is the entire failure policy of this program. One
+means *"the machine tried and reported that it failed"*, and that costs the task
+a mark against it. The other means *"the machine stopped answering"*, and that
+costs nothing. A computer that crashed has not done anything wrong.
 
-* **offer** — a worker asks `POST /api/offer`; the inductor only offers a task
-  when its *upstream* stages are `Done` (crawl → digest → render → merge), so
-  ordering is a property of the data, not of luck.
-* **lease** — a running task has a deadline per stage (crawl 10 min, digest 20
-  min, render 90 min, merge 30 min). An expired lease returns the task to the
-  pool **without a strike**: silence is not failure. A background `reap` runs
-  every 10 s and also re-queues tasks stranded on workers that stopped sending
-  heartbeats (~90 s window).
-* **an expiry on a *live* worker is a different event, and says so.** The
-  strike-free rule above is written for a worker that died — it deserves nothing
-  and needs nobody. A worker that is **alive and stuck** looks identical from
-  here (fresh beat, task never finished), and the requeue is silent, so the task
-  is handed out again and again with nothing anywhere saying so. `reap` therefore
-  counts expiries that happened **while the holder was still beating**
-  (`Task.expiries`) and emits its own event — a `warn` on the first, an `error`
+The jargon, defined once here:
+
+* **A worker** is a machine that does the work. **The inductor** is the
+  coordinator that decides who does what. **A heartbeat** is a worker saying
+  "still here" every few seconds.
+* **offer** — a worker asks the inductor "what should I do?" The inductor only
+  offers a stage when the stages before it are finished (crawl -> digest ->
+  render -> merge), so the order things happen in is guaranteed by the data
+  rather than by luck.
+* **lease** — a time limit on one running task (crawl 10 min, digest 20 min,
+  render 90 min, merge 30 min). If the time runs out, the task goes back on the
+  pile **without a mark against it**, because silence is not failure. A
+  background job called `reap` does this every 10 seconds, and also rescues
+  tasks stranded on workers that stopped sending heartbeats (~90 s window).
+* **an expiry on a worker that is still alive is a different event, and says
+  so.** The rule above is written for a machine that *died* — it deserves
+  nothing and needs nobody. A machine that is **alive and stuck** looks exactly
+  the same from here: fresh heartbeat, task never finished. Because the
+  re-queueing is silent, the task gets handed out again and again with nothing
+  anywhere recording that it keeps happening. So `reap` also counts expiries that
+  happened **while the machine was still sending heartbeats**
+  (`Task.expiries`) and logs its own event — a `warn` on the first, an `error`
   from the second, naming the row, the worker and where to look. On 2026-09-22
   two digest rows looped that way for ~80 minutes while the TUI showed a
   percentage that never moved, and this distinction is what was missing.
-* **strikes** — three failed attempts shelve a task so it stops being retried
-  forever. The operator lifts this with `u` (blanket retry) or per task from
-  the K ledger (`u` retry, `F` force — which also deletes the stage's on-disk
-  artifact, so reconcile cannot mistake stale output for a finished chapter).
+* **strikes** — three failed attempts shelve a task, so a task that cannot
+  succeed does not get retried for ever. The operator lifts this with `u` (retry
+  everything) or per task from the K ledger (`u` retry, `F` force — which also
+  deletes that stage's output file, so nothing downstream can mistake old output
+  for a finished chapter).
 
-Because state lives only in the ledger plus artifacts on disk, any process can
-die at any moment. Restarting the inductor re-reads the ledger; restarting a
-worker is enough for it to be picked up again, because the inductor is the one
-asking — there is no registration it has to get back in on (§7).
+**Why this matters more than it looks:** because all the state lives in the
+ledger file plus files on disk, any program here can be killed at any moment
+without losing anything. Restart the coordinator and it re-reads the list;
+restart a worker and its work is simply handed out again, because the
+coordinator is the one asking — there is no list of "who is online" that a
+restarted worker has to get itself back onto (section 7).
+| File | What is in it |
+| --- | --- |
+| `settings.json` | Your preferences for *this book*, including ssh details |
+| `machines.json` | How to reach each machine, written when a box is added with `:a`, `link` or `provision` |
+| `ledger.json` | Only ever the task list, plus which machines are alive |
 
-### Config lives next to the ledger, not in it
-
-Three files, three jobs: **`settings.json`** (app-wide defaults for *this book*,
-including `ssh.{user,port,key}`), **`machines.json`** (per-machine connection
-config, keyed by address, written when a box is bound with `:a`, `link` or
-`provision`), and **`ledger.json`** (runtime only: task states plus per-machine
-liveness under `machine_state`). The API joins config with runtime and serves
-the same `Machine` shape as always, so the TUI never sees the split.
+The API joins these together and shows one "machine" shape to the TUI, so the
+dashboard never has to know they were separate.
 
 **Where the first two live is the one thing to get right**, because the answer
-is "it depends" and the wrong half is silent: `Layout::state_file` puts
-`settings.json` and `ledger.json` **under the active workspace**
-(`workspaces/<name>/`) and falls back to `.bm/` only when there is no workspace
-— legacy mode, where `work == root`. So a per-book setting like `render_batch`
-lives in `workspaces/<name>/settings.json`, while `machines.json` and the
-profile pointer are machine-global and stay in `.bm/` whichever book is active.
-Both halves are per-book state that the workspace switch moves; anything an
-operator is told to edit should name the workspace form unless they are on a
-bare checkout.
+is "it depends" and getting the wrong half fails silently. `settings.json` and
+`ledger.json` sit **inside the book you are working on**
+(`workspaces/<name>/`), and only fall back to `.bm/` when there is no book
+selected — the older single-book mode, where `work == root`. So a per-book
+setting like `render_batch` lives in `workspaces/<name>/settings.json`, while
+`machines.json` and the profile pointer are machine-wide and stay in `.bm/`
+whichever book is active. If you are told to edit a file, it should name the
+`workspaces/<name>/` form unless you are on a bare checkout with no books.
 
-One chain resolves the ssh key, highest wins: the machine's own entry, else
-the app default, else ssh decides (agent / `~/.ssh/config` — no key at all is
-legal, not a gap). The machine overlay prints the winner and its source, so a
-mispointed key names where it was set. `.env` holds API keys only; the SSH key
-is a *path*, which is config, not a secret.
+For the ssh key, three places are tried in order and the first hit wins: the
+machine's own entry, then the app-wide default, then letting ssh decide for
+itself (an agent, or `~/.ssh/config` — having no key at all is a valid choice,
+not a gap). The machine screen prints the winner and *where it came from*, so a
+key pointing at the wrong place tells you which line set it. `.env` holds API
+keys only. An ssh key is a *path* to a file, which is configuration, not a
+secret.
 
 ### Two scopes: the book, and the machine
 
-`Layout` is a **pair** of paths, not one, and almost every bug in this area is
-somebody using the wrong half:
+A **workspace** is one book. The program is built around the idea that some
+things belong to the book you are working on and some things belong to the
+machine itself, and mixing them up is the source of most bugs in this area.
+`Layout` is a *pair* of folders, not one:
 
 ```mermaid
 flowchart TB
@@ -129,62 +205,196 @@ flowchart TB
     WORK --> W2["data/ · output/ · scratch/"]
 ```
 
-* **`work`** — the book: `ledger()`, `settings()`, `data()`, `script(n)`,
-  `cast(e)`, `seg_dir(e, n)`, `bible()`, `output()`, `scratch()`. These are
-  `workspaces/<name>/…` when a workspace is selected, and `root` itself when one
-  is not.
-* **`root`** — the machine: `machines()`, `roster()`, `voice_refs()`,
-  `voice_samples()`, `assets()`, `pools()`, `scene_map()`, `prompts`, `models/`,
-  `profiles/`, `tools/`, and the `.bm/` pointers (`.bm/profile`,
-  `.bm/active-workspace`, `.bm/aws*`).
+* **The book** (`workspaces/<name>/`, or the checkout root itself when no book
+  is selected): the task list, the settings, the chapter text, the scripts, the
+  cast, the character bible, the finished MP3s.
+* **The machine** (always the checkout root): which boxes exist, the voice
+  roster, the shared assets and prompts, the AWS account, and which profile is
+  loaded.
 
-Three constructors, and **picking the wrong one is silent**:
+In code these are the two halves of `Layout`: `work` and `root`. There are three
+ways to build one, and **picking the wrong one fails silently**:
 
 | | |
 |---|---|
-| `Layout::new(root)` | `work = root`. **Tests and legacy mode only.** |
-| `Layout::resolve(root)` | Follows `.bm/active-workspace`; **refuses** a stale pointer. Every *runner* — `serve`, `provision`, `bm-agent`, `roster`, `segments`, `digest`. |
-| `Layout::resolve_or_root(root)` | Falls back to the root and hands the error back. **The management plane only** — the dashboard and `workspace`, which must open on the broken pointer they exist to repair. |
+| `Layout::new(root)` | Treats the root as the book. **Only for tests and the old single-book mode.** |
+| `Layout::resolve(root)` | Reads `.bm/active-workspace` and **refuses** to run if it points at a book that does not exist. This is what every command that does actual work uses — `serve`, `provision`, `bm-agent`, `roster`, `segments`, `digest`. |
+| `Layout::resolve_or_root(root)` | Falls back to the root but hands the error back to the caller. **Only the dashboard and the `workspace` command**, because those are the tools you would use to *fix* a broken pointer and so must still open when it is broken. |
 
-No pointer file means this root *is* the workspace: a fresh clone just works and
-state appears under it on demand. Only a *stale* pointer is an error, because
-silently running at the root would scatter one book's state where another was
-expected. A **worker** root (`$HOME/bm-worker`) is flat — no pointer, so
-`work == root` there too, which is what makes the same binary work on both ends.
+If there is no pointer file, this checkout *is* the book — a fresh clone works
+immediately. Only a pointer that points at nothing is an error, because quietly
+running in the wrong place would scatter one book's files where another book was
+expected. On a worker (`$HOME/bm-worker`) there is no pointer at all, so the two
+folders are the same one, which is what lets the same program run on both ends.
 
-### The profile is the other pointer, and it is verified
+### The profile is the other pointer, and it is checked
 
-`assets/` and `prompts/` are the *profile*: the live, git-ignored tree that
-decides how a book sounds and how it is dramatized. `.bm/profile` names which
-profile the tree claims to be, plus the **hash of its contents**.
+`assets/` and `prompts/` are the **profile**: the live, git-ignored set of files
+that decides how your book sounds and how it is dramatized. The file
+`.bm/profile` records which profile that tree claims to be, *and a fingerprint
+(hash) of its contents*.
 
-`bm_core::profile::verify` is the load gate: the pointer must exist **and** the
-live tree must still hash to what it claims. Anything that *runs* calls it
-first; the TUI, which loads and switches profiles, does not. That asymmetry is
-deliberate — a dashboard that refused to open because the tree drifted could not
-be used to fix the drift.
+`bm_core::profile::verify` is the gate every program checks before it runs
+anything — the pointer must exist **and** the files on disk must still hash to
+what the pointer claims. The TUI is the one exception, and that is on purpose: a
+dashboard that refused to open because the files had drifted would be no use for
+fixing the drift.
 
-The hash is computed as sha256 over `path + NUL + content-hash` lines in sorted
-order, and the parallel version **must stay byte-identical** to the sequential
-one: every box's pointer was computed that way, so a different order would read
-as false "profile drift" on every machine at once.
+The fingerprint is a sha256 over `path + NUL + content-hash` lines in sorted
+order, and the version that runs in parallel **must produce byte-identical
+output** to the one that runs in sequence: every machine's pointer was computed
+the sequential way, so a different order would look like false "your files have
+drifted" warnings on every machine at once.
 
-This is why every box's marker tag records the profile hash it was launched for
-— and why `:profile` → `load` is a **required step before `:up`**. A box is a
-faithful mirror of one profile; launching one into a pool that has since changed
-profiles is the mismatch the tag exists to catch.
+This is also why each box's marker records the profile hash it was started for,
+and why `:profile` then `load` is a step you must do before `:up`. A box is a
+faithful copy of one profile; starting one into a group that has since switched
+profile is the mismatch the marker exists to catch.
 
 ## 2. The stages (bm-core)
 
-* **crawl** (`crawl.rs`) — fetch `url_template` with `{n}` replaced, extract and
-  clean the chapter body. `POST /api/op {"op":"crawl-setup"}` saves the template
-  and probe-crawls one chapter, so a bad selector fails loudly *before* you
-  enqueue a range.
-* **digest** (`digest/`) — two constrained LLM calls per chapter, with speaker
-  identity fixed between them. The chapter is first prepared *deterministically*
-  (`prepare_chapter`): the text is split into ordered events, each with a stable
-  id (`e0001`…) and a `kind` of `narration` or `dialogue`, decided by quote
-  delimiters alone — no model, no rewrite, headline events dropped.
+The four stages are the actual work. Each one takes one chapter, produces one
+file, and that file is what the next stage reads.
+
+**The stage boundary that matters is crawl -> digest, and it is not a
+handoff — it is a dependency.** What the crawler kept decides what the digest is
+even asked to do, and the link has no gap in it:
+
+```
+script -> chapter text -> the prepared split -> attribution -> staging -> audio
+```
+
+The middle of that chain is where the coupling lives, and it is worth stating
+plainly because it is invisible when it works. `prepare_chapter` decides
+narration-vs-dialogue **from quote marks alone** (`"`, `“`, `「`) — no model is
+involved. So a crawler that returns a container with no quote marks in it
+produces a chapter that is entirely narration, and from there *nothing
+downstream fails*: the attribution answer is complete, `validate_source_alignment`
+is satisfied, the chapter renders, every ledger row is green — while the book is
+read in one voice.
+
+That is the shape of the whole failure policy here, and it is deliberate: the
+validators exist to catch a **model disagreeing with the text it was given**,
+because that is the only thing a validator can do. None of them can catch text
+that never offered a speaker to disagree with. So the digest prints the split —
+`prepared 52 event(s): 21 narration, 31 dialogue` — as the first line of its
+log, in `assemble_outcome` and therefore in **both** the automatic and the
+by-hand path. It is worded as something to check rather than an accusation,
+because a genuinely single-voice chapter is a real thing and a warning that
+fires on every quiet chapter is a warning the operator learns to ignore.
+
+Two more links in the same chain, for the same reason:
+
+* **Left-over page furniture becomes the model's homework.** Nav links, a
+  duplicated title, a site footer: nothing refuses them, and each becomes an
+  event that must be attributed and consumed exactly once. A dirty crawl makes
+  the source gate *harder to satisfy* in direct proportion to how dirty it was.
+* **Paragraph breaks are load-bearing.** A site that separates paragraphs with
+  two carriage returns and no `<p>` yields one 8,000-character line, which
+  clears `MIN_CHAPTER_BYTES` (200) without complaint and yields an audio file
+  with no pause in it. This is why the split on CR lives in `truyencom.lua`
+  rather than in Rust: it is a fact about that website.
+
+So the design rule that follows, and the one the templates are written to show:
+**the script's job is to hand over prose and nothing else.** Everything the
+crawler fails to strip becomes work the model must account for, at the far end
+of a pipeline where it is expensive to notice.
+
+* **crawl** (`crawl/`) — get the text of one chapter and clean it up.
+  **Nothing is fetched by default**: a new workspace adopts chapters from files
+  you supply (`:import`). If you set `crawl.mode: "script"`, it runs your
+  **crawler script** instead — a small Lua or JavaScript file, looked for in
+  your own book's `crawl/` folder first (so your crawler wins over the shared
+  one) and in `assets/crawl/` after that. Whatever the script returns is
+  written to `data/chapters/chNN.txt`.
+  The program supplies the script with tools (`fetch`, `select`, `select_text`,
+  `strip_tags`, `sanitize`, `challenge`) and a time budget. **Every rule about
+  a particular website lives in the script**, not in the program: which part of
+  the page is the story, where it starts and stops. That is a fact about a
+  website, not about this program, so it belongs next to whoever can read the
+  page.
+  The one exception is `challenge(page)`, which spots a Cloudflare
+  "are you a robot" page — including the version that arrives saying `200 OK`,
+  where there is no error status to notice. Without it, the program would
+  cheerfully save the bot-check page as if it were a chapter of your book.
+  The mapping from chapter number to URL is worked out once and frozen into
+  `data/crawl-index.json`. `POST /api/op {"op":"crawl-setup"}` saves your
+  template and then tries one chapter **through exactly the same code a worker
+  would use**, so a broken selector fails loudly *before* you queue a whole
+  range. The manual default is on purpose: a workspace with no novel in it has
+  not named a site, and any other default would fetch *something* the first
+  time you pressed the button.
+  Full details: [CRAWLING.md](CRAWLING.md), which also has a section you can
+  paste into an AI chat to have a crawler written for you.
+* **the link check** (`crawl/probe.rs`, `bm-inductor check <url>`) — one
+  request to a URL you paste in, and a plain answer to "would this page give us
+  a chapter?". It exists because a group of machines **cannot notice** a site
+  that has started refusing them. It notices one machine at a time, a minute
+  apart, for an afternoon. It uses your own user agent and headers, so if you
+  are relying on a session cookie this is the command that tells you whether it
+  still works, and it exits with an error code when the answer is no, so a
+  setup script can check it. It writes nothing and fixes nothing. It just names
+  the problem in a second instead of in a day.
+* **the known-sites registry** (`crawl/known.rs`) — a short list of websites
+  this project has already written a crawler for, so you do not have to. For a
+  URL it recognises, it knows the crawler, knows what shape that site is, and
+  can print the settings block that makes it run (generated from the settings
+  type, so it cannot go out of date). `check` prints it, and the TUI's `:crawl`
+  prompt shows it while you type. **Sites that are blocked are in the list too,
+  with the reason** — "this one refuses us" is an answer, and leaving it out
+  just means somebody spends the same afternoon finding out. Nothing uses this
+  list to make decisions; it only tells you things.
+* **digest** (`digest/`) — decide who speaks each line, and how it should be
+  performed. This is the stage that uses the AI, in two calls per chapter.
+  The chapter is first **cut into pieces by the program, not by a model**: the
+  text is split into ordered events, each with a stable id (`e0001`…) and a kind
+  of `narration` or `dialogue`, decided by quote marks alone. No model, no
+  rewriting, and the chapter heading is thrown out.
+  The **first call** (attribution) shows those pieces along with the character
+  bible and asks for one thing: which character speaks each piece. A validator
+  then *proves* the answer is complete and in order — narration must be the
+  Narrator, dialogue must be a real character or a reusable anonymous voice slot
+  (`anonymous:anon-N`), and dialogue may never fall back to the Narrator.
+  The **second call** (staging) gets the same pieces and that now-fixed answer,
+  and chooses only presentation: where to split lines, small grammar fixes,
+  mood, scene, music, effects, sounds. **It is not allowed to name a speaker** —
+  the program attaches the validated answer after the fact, precisely so that a
+  model trying to write a better audio prompt cannot quietly turn a character's
+  line back into narration.
+  A final check (`validate_source_alignment`) proves the finished script against
+  the original text: every piece was used exactly once, in order; no stray quote
+  mark leaked into the spoken text; and a line split for a sound or because it
+  was too long for one audio request keeps the same speaker. Each call gets
+  **one chance to fix its own answer**. Anonymous speakers are given stable
+  voices from the pool but never become part of the character bible.
+  Only the inductor ever writes `data/bible.json` and the cast files. Workers
+  send their finished script and their changes back with their report, so two
+  machines can never overwrite each other's notes. If a digest comes back with
+  a *changed* script, the chapter's render and merge are thrown away and
+  requeued — otherwise the audio would speak the old version with the new
+  staging. The "analyzer" (which AI service to use) is swappable
+  (`opencode | openrouter | gemini | local`) with a fallback chain.
+  **You can also run this stage by hand** (press `D`) — this is the way out
+  when every AI service is unavailable, rate-limited, returning errors, or
+  simply when you would rather use a model you already have open in a browser.
+  The program puts round one's prompt on your clipboard; you paste the answer
+  back; same for round two.
+  One honest limitation: **the by-hand route does not yet enforce the same
+  rules.** The manual manager still uses the older two-pass templates and
+  answer-checking, so it does not run `prepare_chapter` or
+  `validate_source_alignment` — meaning a chapter you finish by hand can still
+  end up with the attribution the automatic route would have rejected. Until
+  it is switched over, the automatic path and `bm-inductor digest` are the two
+  that hold the line. They do share `assemble_outcome`, so the finished file is
+  built the same way either way, and a refusal is still the validator's own
+  complaint.
+  Hand-finished work is reported over `/api/complete` under the reserved
+  `operator` id, which is also what makes finishing by hand win a race: the row
+  goes `Done`, and a machine still grinding on it finds a row it no longer owns,
+  so its report is discarded as stale. `:off` / `:on` stop and restore digest
+  work on every machine — `:off` saves each machine's whole policy to
+  `.bm/digest-suspend.json` first, so `:on` restores *what each machine had*
+  rather than switching everything on.
   The **attribution pass** renders those events with the bible and asks only for
   chapter identity fields plus a complete `speakers` map. Its validator proves
   every event has one answer in source order: narration maps to `Narrator`;
@@ -230,111 +440,75 @@ profiles is the mismatch the tag exists to catch.
   across every machine — `:off` snapshots each box's whole policy to
   `.bm/digest-suspend.json` first, so `:on` restores *what each box had* rather
   than switching digest on everywhere.
-* **render** (`bm-agent/src/tts.rs` + `python/`) — speaks each script segment
-  through the engine. Vieneu runs as an HTTP sidecar on `127.0.0.1:8818` per
-  machine, **worker-owned and warm across offers** (see §4): one sidecar per
-  box, never duplicated, and recycled on a memory budget rather than only when
-  it goes idle.
+* **render** (`bm-agent/src/tts.rs` + `python/`) — turn each piece of the
+  script into actual audio. The built-in Vieneu voices run as a small HTTP
+  service on `127.0.0.1:8818` on each machine, **owned by that machine and kept
+  warm between tasks** (see section 4): one service per box, never duplicated,
+  and put away on a memory budget rather than only when it has nothing to do.
 
-  A render is **one task per take** — `render:<ch>:<pos>` — where a take is one
-  unit of `plan_render` (a run on the local engine, a line in the cloud). Its
-  name is a hash of the inputs that produce it:
-  `take_key = sha256(engine | voice_key | text | temperature | silence_p)` and
-  `file = t-<take_key[..16]>.wav`, so *holding the file is proof of holding the
-  right bytes* and a changed input is a different name rather than the same
-  name with different audio.
-
-  **One offer, `render_batch` takes.** A take is scheduled, gated and settled on
-  its own ledger row — that is what makes a local edit cost one segment instead
-  of a chapter — but the *assignment* covers a slice of one chapter at once:
-  `Settings::render_batch` takes per offer, five by default, clamped to 1–64 by
-  `Settings::render_batch()`. The reason is that a worker pays a fixed cost per
-  offer — a round trip, a heartbeat, a completion report, a unit collection —
-  and a chapter is dozens of takes. The grouping is recorded on the row the
-  offer names (`Task::batch`) and nowhere else, so the completion gate and the
-  settle both read it from the ledger; **no word of it travels on the wire**,
-  because the offer already carried `render_units` as a list. A batch never
-  spans two chapters: the progress line and the
-  inductor's unit collection are all keyed by chapter. The lease grows with the
-  batch (capped at 4× the stage's own) so a long batch does not expire under a
-  box that is simply working.
-
-  The chapter's takes and their files are recorded in `data/render-NN.json`
-  (**the render plan**, `bm-core/src/assemble/renderplan.rs`), written by the
-  inductor and never re-derived. That plan is the single namer: the offer, the
-  completion gate, the offer-time heal, `segments`, and the merger all read it,
-  which is what removed the five independent re-derivations that used to
-  disagree: a name computed from the script, cast, bible and engine at offer
-  time, again for the force list, again on the worker's disk, again at the
-  completion gate, and again by the merger — each against whatever state those
-  files happened to be in.
-
-  A chapter with **no** stored plan predates this and is *adopted*: the first
-  plan records every wav already on disk and marks only the genuinely absent
-  takes as work, so writing one re-speaks nothing. Where the store already has
-  the files, that adoption is exact; where a text changed *before* the plan
-  existed it is a deliberate one-time blind spot, caught by the first edit
-  after (see the module docs in `renderplan.rs`).
-
-  So an offer carries **one take and nothing else**: voice, text, parameters,
-  the file to write, and the chapter's `cast_hash`. It ships no script and no
-  cast, because a take is self-sufficient — there is nothing on the box the
-  worker has to look up. The worker skips a take whose file it already holds
-  (`pending_units` in `bm-agent`, the same present-and-non-trivial test
-  `assemble` applies), and a render report is gated on that file being present:
-  the worker's word is not evidence. `render_force` is therefore empty in the
-  normal case (content addressing is the force list); the one exception is an
-  **adopted** pre-plan file that this store lacks, which is forced explicitly.
-
-  A local edit is consequently **one segment, not a chapter**: the plan's diff
-  names the changed takes, deletes exactly the files they superseded, and
-  requeues only those. A chapter is **shared, not owned**: no row ever carries
-  affinity — not for a chapter, not for a batch — so every worker is
-  independent and any box may take any take. What keeps a merge possible is
-  the **store**, not a pin: every render report ships the wavs it produced
-  (`Complete.unit_files`), `/api/complete` stores them *before* the row turns
-  `Done`, and `collect_units` pulls any still missing from the box that just
-  answered — so once a chapter's takes are `Done` this disk holds all of them.
-  A box that already holds a file pushes nothing (the store is idempotent by
-  name). Only workers advertising the `render-segments` capability are offered
-  renders.
-* **merge** (`assemble/`, `ambience.rs`) — concatenates segments with
-  `gap_ms` pauses and optional ambience beds keyed by the script's `scene`
-  labels, and writes `output/Ch.N - Title.mp3`. It is offered only when the
-  plan is **covered** — every take's task `Done`, which is the same question
-  the mixer asks, so the two cannot disagree. The offer carries the plan's
-  file list (`merge_takes`, in mix order): the mixer cannot re-derive a
-  content-addressed take name from the script and the cast and must not try.
-  A merge task carries **no affinity**: it runs wherever it is offered, and
-  the only precondition is the store — a merge is offered just when this disk
-  already holds every segment (`missing_wavs` empty); a starved one heals its
-  render (requeues the takes the store lacks) and yields to the next stage.
-  A merge that starts anyway and finds a piece missing pulls it from the
-  inductor's store (`GET /api/segment`, over the reverse tunnel), so the
-  segments come from the one disk guaranteed complete. A local merge ships no
-  mp3 — the file itself is the evidence. A remote merge ships its mp3 home,
-  base64, inside the report.
+  A render is **one task per take** — `render:<chapter>:<position>` — where a
+  *take* is one unit of work from `plan_render` (one run of the local engine, or
+  one line sent to a cloud service). The take is named by a hash of everything
+  that produces it:
+  `take_key = sha256(engine | voice_key | text | temperature | silence_p)`, and
+  the file is `t-<take_key[..16]>.wav`. So *having the file is proof that the
+  right bytes exist*, and changing any input gives a different name rather than
+  quietly overwriting — which is what makes stopping and restarting safe, and
+  what makes "did this already render?" answerable without rendering it again.
+  The order of the pieces is worked out once, by the machine handing the task
+  out, and the same list travels with the task to the machine doing the mixing —
+  so the two can never disagree about what order things go in. That list is
+  `merge_takes`, in mix order. The mixer is *not* allowed to work the order out
+  for itself from the script and the cast: the take names are hashes, and
+  re-deriving a hash is exactly the sort of thing that silently disagrees.
+* **merge** (`assemble/`, `ambience.rs`) — join the pieces into one MP3, adding
+  the pauses, music and effects the staging asked for.
+  A merge task carries **no affinity**: it runs wherever it is offered, and the
+  only precondition is that the files are there — a merge is offered just when
+  this disk already holds every piece (`missing_wavs` empty). A machine that is
+  missing some heals its own render (requeues the takes it lacks) and then
+  yields to the next stage.
+  If a merge starts anyway and finds a piece missing, it fetches it from the
+  inductor's store (`GET /api/segment`, over the reverse tunnel), so the pieces
+  come from the one disk that is guaranteed to be complete. A merge on the
+  inductor itself ships no MP3 — the finished file on disk *is* the evidence. A
+  merge on a remote machine sends its MP3 home, base64-encoded, inside its
+  report.
 
 ## 3. The control API (bm-inductor, axum, default :8901)
 
-| Endpoint | What it does |
-|---|---|
-| `GET /api/state` | The whole world for the TUI: `tasks`, `machines`, `beats`, `counts`, `settings`, `events` |
-| `POST /api/offer` | A worker asks for work; answers with a task offer (or nothing) |
-| `POST /api/complete` | A worker reports done/failed (+ artifacts: script, text, bible delta, mp3, rendered wavs — `unit_files` stored before the row turns Done) |
-| `POST /api/segment` | A worker uploads one rendered wav (name validated against the expected set) |
-| `GET /api/segment` | A merge worker pulls one rendered wav it lacks from the inductor's store |
-| `POST /api/heartbeat` | Progress: stage, chapter, %, activity, ETA |
-| `GET /api/roster` | The resolved voice roster (catalogue + pool + policy verdicts) |
-| `POST /api/op` | Operator ops: `translate`, `crawl-setup`, `voices`, `swap-voice`, `preview-voice`, `eta`, `requeue`, `retry`, `retry-task` |
+One HTTP service, running on the coordinator, on port 8901 by default. The
+machines call it; it never calls them (see section 7). The whole surface is
+thirteen routes, and there is nothing else:
 
-Every state change the scheduler makes also appends an **event** to an
-in-memory ring buffer (`bm-inductor/src/state/`): completions with duration,
-failures **with the worker's own error text**, lease expiries, orphan
-requeues, and operator actions. `/api/state` exposes it and the TUI folds it
-into the Events pane, deduplicating by monotonic id — which is how a digest
-failing on a distant box becomes a readable line on your screen instead of a
-stuck row.
+| Endpoint | What it is for |
+| --- | --- |
+| `GET /api/task` | A machine asking "what should I do?" — answered with a task, or with nothing |
+| `POST /api/register` | A machine saying hello for the first time |
+| `POST /api/heartbeat` | A machine reporting progress: which stage, which chapter, what percent, an ETA |
+| `POST /api/complete` | A machine reporting a task finished or failed, plus the files it produced |
+| `POST /api/segment` | A machine handing over one rendered audio file |
+| `GET /api/segment` | A machine fetching one audio file it does not have |
+| `GET /api/state` | The dashboard asking for everything it displays |
+| `GET /api/roster` | The voice roster as resolved: catalogue, pool, and the policy's verdicts |
+| `POST /api/op` | Operator actions: start a range, retry, switch profile, and so on |
+| `POST`/`DELETE /api/machines` | Adding and removing a machine |
+| `POST /api/machines/state` | Setting whether a machine is allowed to work |
+| `POST /api/machines/policy` | Setting which stages a machine will run |
+| `POST /api/relink` | Re-pointing a cloud box whose address has changed |
+
+Every change the scheduler makes also writes an **event** into a ring buffer held
+in memory: completions with how long they took, failures **carrying the
+machine's own error text**, lease expiries, tasks rescued after a machine died,
+and anything you did. `/api/state` hands these over and the dashboard folds
+them into its Events pane, dropping duplicates by a counter that only ever goes
+up. That is how a digest failing on a distant machine becomes a readable line on
+your screen rather than a row that simply stops moving.
+
+There is **no authentication**, and that is worth knowing rather than an
+oversight: this is plain HTTP on a trusted network, and an API key sent along
+with a task crosses that network. Keep it on a network you trust, and do not
+expose it to the internet.
 
 ## 4. Provisioning, and why second runs are fast
 
@@ -347,9 +521,11 @@ visible in the TUI log (the machine overlay shows which key won —
    python present, enrolled voices, TTS up, and the **provision stamp**.
 2. **decide** — compute a local stamp (`compute_provision_stamp`): two SHA-256
    digests, one over the *sources* (`prompts/`, requirements, cast files, scene
-   map, agent version) and one over the *voices* (`voices.json` content plus
-   `refs/` file signatures). Compare against the stamp the target stored at
-   `~/.bm-worker/.provision_stamp.json` during its last provision.
+   map, crawl scripts — the profile's `assets/crawl/` **and** the active
+   workspace's `crawl/`, both by content — and agent version) and one over the
+   *voices* (`voices.json` content plus `refs/` file signatures). Compare
+   against the stamp the target stored at `~/.bm-worker/.provision_stamp.json`
+   during its last provision.
    3. **do only what changed** — sources unchanged: skip the whole rsync pass;
        voices unchanged: skip `ensure_voices`; the sidecar and its ONNX runtime
        already staged: skip the ~700 MB push of `models/`. Local copies compare

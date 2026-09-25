@@ -152,6 +152,56 @@ pub fn compute_provision_stamp(
         sources.update([0]);
     }
 
+    // The crawl scripts, by **content**: they are small, and they decide which
+    // bytes become a chapter. A worker left holding a stale crawler would fetch
+    // something different from what the inductor's own probe read, and the
+    // directory signature would only catch that if the mtime moved — which
+    // `cp -p`, a checkout and rsync all decline to guarantee. Both sources are
+    // hashed: the profile's shared `assets/crawl/` and the active workspace's
+    // own `crawl/` (which `resolve_script` searches first), so an edit to
+    // either drifts the stamp and reaches every box with the next `:prov`.
+    {
+        // The workspace's dir, by `Layout::resolve_or_root`'s semantics: a
+        // missing or stale pointer means the root *is* the workspace, whose
+        // crawlers live at `<root>/crawl`. The same dir `install_sources`
+        // pushes, so the stamp and the sync can never disagree about what
+        // "the workspace's crawler" is.
+        let ws = std::fs::read_to_string(repo_root.join(".bm/active-workspace"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let ws_dir = repo_root.join("workspaces").join(&ws);
+        let ws_crawl = if !ws.is_empty() && ws_dir.is_dir() {
+            ws_dir.join("crawl")
+        } else {
+            repo_root.join("crawl")
+        };
+        let mut files = Vec::new();
+        let mut stack = vec![repo_root.join("assets/crawl"), ws_crawl];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.filter_map(|e| e.ok()) {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    files.push(p);
+                }
+            }
+        }
+        files.sort();
+        for p in files {
+            let (Ok(rel), Ok(bytes)) = (p.strip_prefix(repo_root), std::fs::read(&p)) else {
+                continue;
+            };
+            sources.update(rel.display().to_string().as_bytes());
+            sources.update([0]);
+            sources.update(&bytes);
+            sources.update([0]);
+        }
+    }
+
     // The Rust sidecar's artifacts. Hashed by *signature*, not content: `models/`
     // is 668 MB and a single clip-sized read of it would cost more than the
     // provisioning this is meant to skip. `manifest.json` is read by content
@@ -418,6 +468,48 @@ mod tests {
             !edited.sources_in_sync(&compute_provision_stamp(&root, "0.2.0", &agent_bin(&root))),
             "a new clip must resync sources"
         );
+    }
+
+    /// The active workspace's own crawlers are sources too: an edit there must
+    /// drift the stamp, or `:prov` reports "in sync" and every box keeps the
+    /// old crawler while the inductor probes through the new one.
+    #[test]
+    fn a_workspace_crawler_edit_drifts_the_stamp() {
+        let root = stamp_fixture("wscrawl");
+        std::fs::create_dir_all(root.join(".bm")).unwrap();
+        std::fs::write(root.join(".bm/active-workspace"), "book\n").unwrap();
+        std::fs::create_dir_all(root.join("workspaces/book/crawl")).unwrap();
+        std::fs::write(root.join("workspaces/book/crawl/site.lua"), "v1").unwrap();
+        let a = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+
+        // Editing the workspace crawler is a source change.
+        std::fs::write(root.join("workspaces/book/crawl/site.lua"), "v2").unwrap();
+        let b = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        assert_ne!(
+            a.sources_hash, b.sources_hash,
+            "a workspace crawler edit must resync sources"
+        );
+
+        // A different workspace's dir is a different input: switching the
+        // pointer to a book with another crawler drifts the stamp as well.
+        std::fs::create_dir_all(root.join("workspaces/other/crawl")).unwrap();
+        std::fs::write(root.join("workspaces/other/crawl/site.lua"), "other").unwrap();
+        std::fs::write(root.join(".bm/active-workspace"), "other\n").unwrap();
+        let c = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        assert_ne!(
+            b.sources_hash, c.sources_hash,
+            "switching workspaces must resync sources"
+        );
+
+        // A stale pointer falls back to the root's own `crawl/` — the same
+        // directory `install_sources` pushes in that case, never the missing
+        // workspace's.
+        std::fs::write(root.join(".bm/active-workspace"), "gone\n").unwrap();
+        std::fs::create_dir_all(root.join("crawl")).unwrap();
+        std::fs::write(root.join("crawl/site.lua"), "legacy").unwrap();
+        let d = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        assert_ne!(c.sources_hash, d.sources_hash);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A rebuild under the same version redeploys the agent and nothing else.
