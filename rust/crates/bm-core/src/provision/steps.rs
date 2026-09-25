@@ -357,7 +357,7 @@ echo "probe=done"
         let script = format!(
             "mkdir -p $HOME/{d}/models $HOME/{d}/prompts $HOME/{d}/assets/effects \
              $HOME/{d}/assets/music $HOME/{d}/refs $HOME/{d}/data/chapters \
-             $HOME/{d}/data/audio $HOME/{d}/output && echo READY",
+             $HOME/{d}/data/audio $HOME/{d}/crawl $HOME/{d}/output && echo READY",
             d = REMOTE_DIR
         );
         let (code, stdout, stderr) = self.run(&script, 30)?;
@@ -387,12 +387,13 @@ echo "probe=done"
 
     /// Push the source files the worker needs (never the inductor's state).
     ///
-    /// Two halves, from two different places. `prompts`, `assets` and `refs`
+    /// Three halves, from three different places. `prompts`, `assets` and `refs`
     /// are profile content and live at the root. The cast files are the
     /// *book's* — `data/` is in the active workspace — so they are read
     /// through the layout; naming them root-relative shipped no cast at all
     /// the moment a workspace was selected, and the worker then rendered with
-    /// the catalogue's default voices.
+    /// the catalogue's default voices. The workspace's own crawlers are
+    /// per-book too and ride along (see the `crawl/` push below).
     pub fn install_sources(
         &self,
         layout: &crate::Layout,
@@ -403,6 +404,23 @@ echo "probe=done"
             if src.exists() {
                 self.rsync_push(&src, rel, true, progress(live, rel))?;
             }
+        }
+        // The active workspace's crawlers, so a book whose site needs its own
+        // script keeps it out of the shared profile tree and still reaches
+        // every box. Searched first by `crawl::resolve_script`, a same-named
+        // file here shadows the profile's. `--delete` keeps the copy an exact
+        // mirror of the workspace's dir; when the dir is gone locally the rm
+        // below clears what a previous provision left, so a worker never
+        // holds a crawler its own inductor can no longer resolve.
+        let ws_crawl = layout.crawl_workspace();
+        if ws_crawl.is_dir() {
+            self.rsync_push(&ws_crawl, "crawl", true, progress(live, "crawl"))?;
+        } else {
+            let script = format!(
+                "rm -rf $HOME/{d}/crawl && echo CRAWL-CLEARED",
+                d = REMOTE_DIR
+            );
+            let _ = self.run(&script, 10)?;
         }
         for (engine, rel) in [
             ("vieneu", "data/cast-vieneu.json"),

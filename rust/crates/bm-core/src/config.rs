@@ -44,11 +44,141 @@ pub const DEFAULT_RENDER_BATCH: u32 = 5;
 /// one that runs slower than it asked.
 pub const MAX_RENDER_BATCH: u32 = 64;
 
+/// How this workspace crawls, and what a crawl script may spend.
+///
+/// `mode` is the only switch that changes *where the text comes from*:
+///
+/// * `script` (the default) — the crawler named by `script` decides. An empty
+///   `script` means the built-in fetcher, which is `url_template` plus the
+///   element `params.extract` names and nothing else: it knows no site, so it
+///   is the fallback for a workspace whose script cannot be read;
+/// * `manual` (the default) — nothing is fetched. Chapters are adopted from
+///   files the operator supplies (`:import`), one at a time. A workspace that
+///   wants the automatic path says `mode: "script"`.
+/// * `script` — the crawler named by `script` decides. An empty `script` means
+///   the built-in fetcher, which is `url_template` plus the element
+///   `params.extract` names and nothing else: it knows no site.
+///
+/// **Why manual is the default.** Every workspace starts with no novel in it —
+/// the operator has not chosen a site yet, and the wrong default fetches:
+/// `mode: script` + a template would have a fresh workspace crawl the bundled
+/// crawler's home site the first time `:translate` ran. Starting closed makes
+/// the first crawl a decision the operator makes about *their* site, and the
+/// import path needs no crawler at all.
+///
+/// **Migration is still the identity for old workspaces.** The bundled default
+/// is what a settings file written before `crawl` existed *named implicitly*,
+/// so deserializing a file without a `crawl` block keeps it: such a workspace
+/// loads `mode: script` with the bundled Storya crawler, and its book crawls
+/// byte-identically on the first run after upgrading. The manual default
+/// applies only to a workspace created *after* this change — whose settings
+/// say `manual` explicitly, or nothing yet at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CrawlSettings {
+    /// `script` | `manual`. **`manual` is the default** (see the type docs); a
+    /// settings file that predates the whole `crawl` block keeps `script` —
+    /// see [`CrawlSettings::legacy_default`].
+    pub mode: String,
+    /// The crawler. A relative name is resolved against the active workspace
+    /// first (`crawl/mysite.lua` there is this book's own crawler, synced to
+    /// every worker with the sources), then the root, then `assets/` — which
+    /// is why a profile can ship one. `.js`/`.mjs` picks the JavaScript
+    /// engine, anything else Lua. Empty means the built-in fetcher.
+    pub script: String,
+    /// Passed to the script verbatim and never validated: a new site should be
+    /// zero changes to Rust.
+    pub params: serde_json::Map<String, serde_json::Value>,
+    /// Extra headers on every fetch: a `Referer` some sites require, or a
+    /// session cookie the operator pasted in. Secrets here live in the
+    /// workspace's `settings.json`, not in `.env` — a deliberate trade, since a
+    /// crawl header is per-book configuration and not a provider key.
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Empty means the built-in browser-ish default.
+    pub user_agent: String,
+    /// Minimum gap between two fetches of the same host, in milliseconds.
+    ///
+    /// **On by default, and that is the point.** A cluster pointed at one site
+    /// is the thing that gets a novel scraper banned: ten workers leasing crawl
+    /// tasks all arrive at once. Rotating an address is not the fix — the new one
+    /// is throttled the same, because the pacing was the problem. `0` disables
+    /// it for a local fixture server.
+    pub pace_ms: u64,
+    /// Per-request timeout.
+    pub timeout_secs: u64,
+    /// Wall-clock budget for one chapter, engine time included: what stops an
+    /// infinite `next`-link loop from owning a worker.
+    pub max_seconds: u64,
+    /// Network round trips one chapter may make. A listing walk spends several.
+    pub max_fetches: u32,
+}
+
+impl Default for CrawlSettings {
+    /// The default for **`Settings::default()`** — a workspace being created
+    /// now, which has named no site yet: `manual`, so nothing is fetched until
+    /// the operator says how chapters arrive.
+    ///
+    /// This is deliberately **not** the default a *deserialized* settings file
+    /// gets for an absent `crawl` block — see [`Self::legacy_default`].
+    fn default() -> Self {
+        CrawlSettings {
+            mode: "manual".into(),
+            script: String::new(),
+            params: serde_json::Map::new(),
+            headers: std::collections::BTreeMap::new(),
+            user_agent: String::new(),
+            pace_ms: 750,
+            timeout_secs: 60,
+            max_seconds: 180,
+            max_fetches: 64,
+        }
+    }
+}
+
+impl CrawlSettings {
+    /// What a settings file written before `crawl` existed deserializes to:
+    /// **the bundled scripted crawler**, byte-identically to what the old Rust
+    /// path fetched for it. That file named a `url_template` and nothing else,
+    /// and the whole point of the crawl-script rework is that the same book
+    /// crawls the same way after upgrading — a manual default here would turn
+    /// every existing workspace off the moment the binary was replaced.
+    ///
+    /// Reached only when the block is *missing*: a file that says `"crawl":
+    // {"mode": "manual"}` said so and is honoured, like any explicit value.
+    pub fn legacy_default() -> Self {
+        CrawlSettings {
+            mode: "script".into(),
+            script: crate::crawl::DEFAULT_SCRIPT.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Whether anything is fetched at all.
+    pub fn is_manual(&self) -> bool {
+        self.mode.eq_ignore_ascii_case("manual")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Where chapters come from, e.g. `https://site/truyen/x/chuong-{n}`.
+    ///
+    /// The built-in mapping: `{n}` is substituted (and `{n:03}` zero-pads) once
+    /// per chapter, and it is what fills the chapter index when a crawl script
+    /// has no `discover()`. A site whose URLs are slugs needs the script's
+    /// `discover` (or a hand-authored index) instead — see [`CrawlSettings`].
     pub url_template: String,
+    /// How chapters are crawled. See [`CrawlSettings`].
+    ///
+    /// The `#[serde(default)]` on this field (via the type's own `default`
+    /// attribute) resolves through [`CrawlSettings::legacy_default`]: a file
+    /// with no `crawl` block at all is an *old* workspace, and old workspaces
+    /// keep crawling the bundled script. `Settings::default()` — a workspace
+    /// being created now — gets `manual`, because a fresh workspace has named
+    /// no site and must not fetch one.
+    #[serde(default = "CrawlSettings::legacy_default")]
+    pub crawl: CrawlSettings,
     /// `vieneu` (local, unlimited) or `gemini` (cloud, quota-limited).
     pub engine: String,
     /// Chapter range the cluster is currently working on.
@@ -172,6 +302,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             url_template: "https://storya.click/truyen/nguoi-tren-van-nguoi/chuong-{n}".into(),
+            crawl: CrawlSettings::default(),
             engine: "vieneu".into(),
             start: 1,
             count: 1,
@@ -214,9 +345,14 @@ impl Settings {
         Ok(())
     }
 
-    /// Expand `{n}` in the chapter URL template.
+    /// Expand the chapter URL template: `{n}` and the padded `{n:03}`.
+    ///
+    /// **Every occurrence**, not just the first — `…/chuong-{n}?page={n}` is a
+    /// real template shape and this behaviour is asserted below. The padded form
+    /// lives here rather than in a script because `chapter-{n:03}` is 80% of the
+    /// cases that would otherwise need one.
     pub fn chapter_url(&self, n: u32) -> String {
-        self.url_template.replace("{n}", &n.to_string())
+        crate::crawl::expand_template(&self.url_template, n)
     }
 
     /// The analyzer values the digest lane reads, as the block that travels
@@ -405,6 +541,48 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(s.chapter_url(12), "https://x/chuong-12?page=12");
+        // The padded form, which is the whole reason this is not a bare
+        // `replace`: a site numbering `chapter-001` needs no script.
+        let padded = Settings {
+            url_template: "https://x/chapter-{n:03}".into(),
+            ..Default::default()
+        };
+        assert_eq!(padded.chapter_url(7), "https://x/chapter-007");
+    }
+
+    #[test]
+    fn a_workspace_written_before_scripted_crawls_still_crawls_the_same_way() {
+        // The migration promise: a settings.json that only ever named a
+        // url_template loads as `mode: script` with the bundled crawler, and
+        // that crawler is handed the same URL the old Rust path expanded.
+        // The absent `crawl` block means *old workspace*, so it keeps the
+        // scripted default — the manual default is for workspaces created now.
+        let old: Settings =
+            serde_json::from_str(r#"{"url_template":"https://storya.click/truyen/x/chuong-{n}"}"#)
+                .unwrap();
+        assert_eq!(old.crawl.mode, "script");
+        assert_eq!(old.crawl.script, crate::crawl::DEFAULT_SCRIPT);
+        assert!(!old.crawl.is_manual(), "the old workspace still fetches");
+        assert_eq!(
+            old.chapter_url(34),
+            "https://storya.click/truyen/x/chuong-34"
+        );
+        // A workspace created now defaults to manual: nothing fetches until
+        // the operator says how chapters arrive.
+        let fresh = Settings::default();
+        assert!(fresh.crawl.is_manual(), "the fresh default does not fetch");
+        assert!(fresh.crawl.script.is_empty());
+        // …and an explicit value is honoured. A block that names no script is
+        // the built-in fetcher (`script` fills from the per-field default, which
+        // is empty — the operator named no crawler); a block naming one gets it.
+        let plain: Settings = serde_json::from_str(r#"{"crawl":{"script":""}}"#).unwrap();
+        assert_eq!(plain.crawl.script, "");
+        assert!(plain.crawl.params.is_empty());
+        let named: Settings =
+            serde_json::from_str(r#"{"crawl":{"mode":"script","script":"assets/crawl/site.lua"}}"#)
+                .unwrap();
+        assert_eq!(named.crawl.script, "assets/crawl/site.lua");
+        assert!(!named.crawl.is_manual());
     }
 
     #[test]

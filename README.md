@@ -1,10 +1,67 @@
 # Storycast — a web novel becomes a multi-voice audiobook
 
-Point Storycast at any chapter URL template and it crawls, dramatizes, and
-speaks the book: **`Ch.42 - The Title.mp3`**, a voice per character, pauses,
-optional ambience — chapter after chapter, on this machine or a LAN/cloud
-cluster. Born from Vietnamese web novels, raised international: any novel,
-any site, any language your prompt can dramatize.
+Point Storycast at a novel — chapter files you supply, or any chapter URL a
+small crawler script can fetch — and it dramatizes and speaks the book:
+**`Ch.42 - The Title.mp3`**, a voice per character, pauses, optional ambience —
+chapter after chapter, on this machine or a LAN/cloud cluster. Born from
+Vietnamese web novels, raised international: any novel, any site, any language
+your prompt can dramatize.
+
+---
+
+## If you just want your book as audio
+
+*You can stop reading after this section. Everything below is for people
+changing the machine itself.*
+
+You need three things: an LLM API key, the `bm-tts` voices (downloaded once),
+and your book's text — either text files you already have, or a website it is
+on.
+
+**1. Tell it where the book is.** If you have the text, drop files in and
+import them. If it is a website, check the site first — one command, and it
+tells you whether the site will serve you at all:
+
+```bash
+bm-inductor check https://your-site.example/book/chapter-1
+```
+
+That one request saves the alternative, which is finding out from ten workers
+failing at once, an hour apart, on a day. If the site is one Storycast already
+has a crawler for, the command prints the settings to paste; if the site is
+blocked, it says so in a sentence rather than leaving you to guess.
+
+**2. Start the book.** `bm-inductor tui` opens the dashboard, then:
+
+```
+:t 1 50          # chapters 1..50: fetch, cast, speak, merge
+:e               # how much is left
+```
+
+That is the whole run. The four stages then keep themselves going: each chapter
+is fetched, someone is assigned to each line, the audio is generated, and the
+chapter is saved. You can watch it, and you can fix by hand anything it got
+wrong — but for a book of any length you will not be watching it.
+
+**3. Take the files.** Finished chapters land in `output/`, named
+`Ch.N - Title.mp3`. That is the deliverable — everything else is machinery.
+
+**What it costs, honestly.** Roughly two LLM calls per chapter — one to work out
+who is speaking, one to write the performance — and that is the entire
+per-chapter cost of the intelligent part. Speaking is local with the built-in
+voices and costs nothing per chapter. So the bill scales with how many chapters
+you render, and adding workers changes how long it takes, not what it costs.
+
+**What it will not do.** It will not get past a site that blocks it: no browser
+engine, no challenge solver, and no intention of adding either. Roughly one
+novel site in three refuses a program, and no amount of retrying changes that.
+It also will not do voices well for a language it was not built around — the
+built-in voices are Vietnamese. Cloning your own voice from a short clip works
+in any language and is the way around that.
+
+**Before you spend a day on it:** the single most common way this fails is
+pointing it at a site that serves a bot check instead of a chapter. Run
+`bm-inductor check` on one real chapter URL first. It costs a second.
 
 ## Clone vs. bring
 
@@ -23,7 +80,8 @@ Everything book-specific is runtime-created and git-ignored:
 
 | Created by you / at runtime | What it is |
 | --- | --- |
-| `url_template` in `workspaces/<name>/settings.json` | Chapter URLs, `{n}` = number. **The only novel-specific setting you must change** |
+| `url_template` + `crawl` in `workspaces/<name>/settings.json` | Where chapters come from: `{n}` = number, and the [crawl script](docs/CRAWLING.md) that fetches them. **The only novel-specific settings you must change.** New workspaces default to `crawl.mode: "manual"` — nothing fetches until you name a crawler and set `"mode": "script"` |
+| `workspaces/<name>/crawl/*.lua` \| `*.js` | Your crawler, per book. `assets/crawl/templates/` has five to start from, four of them written against a page captured from the live site they are for: `storya.lua` (the site this was built for), `truyencom.lua` (the easy shape), `madara.lua` (a paginated listing), `readnovelfull.lua` (slug URLs and a book index that stops at 30 chapters), `webnovel.lua` (the hard shape — and a site behind a bot check). Synced to every worker with the next provision. See [docs/CRAWLING.md](docs/CRAWLING.md) |
 | `prompts/script.txt` | Your style/language, if the example doesn't fit |
 | `voices.json`, `voice-pool.json`, `refs/` | Cloned voices + clips (skip to use catalogue voices) |
 | `data/`, `output/` | Scripts, bible, cached audio, finished MP3s |
@@ -42,7 +100,7 @@ Four stages per chapter:
 
 ```mermaid
 flowchart TB
-    URL["chapter URL<br/>url_template, {n} substituted"] -->|crawl| TEXT["clean chapter text"]
+    IDX["crawl-index.json<br/>n → url, built once per range"] -->|crawl| TEXT["clean chapter text"]
     TEXT -->|digest| SCRIPT["script-NN.json<br/>segments · speakers · moods · scenes"]
     BIBLE[("bible.json<br/>who the characters are")] -.->|"prompt context"| SCRIPT
     SCRIPT -.->|"bible delta + roster"| BIBLE
@@ -56,7 +114,43 @@ The dotted edges matter: **the bible is both digest input and output**, and the
 cast is derived from the digest — so chapter 40 keeps chapter 1's voice for a
 character with no hand config.
 
-- **crawl** — fetch chapter `{n}` from the URL template, clean to plain text.
+### The crawler is not a detail. It is the first three stages' input.
+
+One thing is worth understanding before you write one, because it explains every
+rule in the [crawling guide](docs/CRAWLING.md):
+
+> **Your crawler decides what the AI is even asked to do. A cleaner chapter
+> makes the rest of the program work; it does not merely sound nicer.**
+
+Three links, each of which fails *quietly*:
+
+- **Quote marks decide who speaks.** Before any AI is involved, the chapter is
+  cut into pieces and each is labelled narration or dialogue — decided by `"`,
+  `“` and `「` and nothing else. A crawler that returns a container with no
+  quote marks in it produces a book narrated by a single voice, with no error
+  anywhere: the script is complete, the checks pass, the audio renders. The
+  digest now prints the split first thing so you can see it coming
+  (`prepared 52 event(s): 21 narration, 31 dialogue`).
+- **Left-over page furniture becomes the AI's homework.** Nav links, a
+  duplicated title, a site footer: nothing refuses them. They each become a
+  piece of the chapter that must be attributed and used exactly once. A dirty
+  crawl makes the digest measurably harder, and the first thing to break is the
+  check that every piece was used.
+- **Paragraph breaks are not decoration.** A site that separates paragraphs with
+  two carriage returns and no `<p>` hands over one 8,000-character line, which
+  passes the "is this even a chapter" length check and yields an audio file with
+  no pause in it anywhere.
+
+The payoff runs both ways: **the cleaner the input, the more a digest refusal
+means "the model got this chapter wrong" rather than "the input was junk".** No
+check further down can catch text that never offered a speaker to disagree with.
+
+- **crawl** — **manual by default**: a new workspace fetches nothing, and
+  chapters come from files (`:import 34 ch34.txt`). Set `"mode": "script"` with
+  a crawler and it turns `n` into a chapter: expand `{n}`, or read the site's
+  index and follow links, then pick the body off the page. Which element that
+  is and where it starts and stops are in the script's own table, not in Rust.
+  See [docs/CRAWLING.md](docs/CRAWLING.md).
 - **digest** — the chapter is split *deterministically* into `narration`/
   `dialogue` events with stable ids, then **one** LLM call answers cast + script
   together in strict JSON → `data/script-NN.json`. A gate then rejects the answer
@@ -74,42 +168,102 @@ The **inductor** owns this state (the task ledger) and hands chapters to
 
 ## 2. Install
 
-Needs **Rust** 1.75+, **zig** (`bm-tts` cross-build), **Python 3** (bake weights
-once; enroll clone voices), and an analyzer: Gemini key,
-[opencode](https://opencode.ai), OpenRouter, or local Ollama.
+You need four things: **Rust** 1.75 or newer, **zig** (used to build the speech
+program for other platforms), **Python 3** (used once, to prepare the voices and
+to record your own), and a way to reach an AI model — a Gemini key, an
+[opencode](https://opencode.ai) login, an OpenRouter key, or Ollama running on
+your own machine.
 
 ```bash
 git clone lhuthng/storycast.git
 cd storycast
-make build               # Rust workspace
-make tts                 # bm-tts sidecar + ONNX runtime
+make build               # builds the Rust programs
+make tts                 # builds the speech program and its speech runtime
 
 cp .env.example .env     # add your key(s)
 #   GEMINI_API_KEY=...      (or OPENROUTER_API_KEY, or nothing for opencode)
 #   TTS_ENGINE=vieneu       (default; `gemini` for the API engine)
 ```
 
-**`.env` never leaves this machine.** Provisioning does not copy it; the
-inductor sends each worker the keys the offered stage will read, with the task.
-A remote digest works with nothing configured on the box — but keys cross the
-LAN in the offer, so keep the control API on a trusted network (unauthenticated
-plain HTTP, like every sidecar call here).
+**Two things about security, so there are no surprises.**
 
-`bm-tts` serves Vieneu over HTTP on each worker. Weights come once from
-Hugging Face, flattened by `python3 tools/bake-models.py` into `models/`
-(`--check` re-verifies); provisioning pushes the bytes, so a worker needs no
-internet and no Python to speak. Clone voices enroll on the inductor at bake time.
+First: **`.env` never leaves the machine you created it on.** When you add more
+machines later, they are *not* given this file. Instead, each machine is sent
+just the one key that the work it has been handed actually needs. So a remote
+machine can do the work without ever holding your keys as a whole. The catch is
+that those keys do cross the network with the task, so keep everything on a
+network you trust — there is no password on the internal connection, the same as
+every other local service here.
 
+Second: **the built-in voices are downloaded once, then they are yours.** They
+come from Hugging Face a single time and are converted into plain files by
+`python3 tools/bake-models.py` (`--check` re-verifies them). From then on the
+machines that speak need no internet connection at all, and no Python either.
 ### Your novel (required)
 
+Chapters arrive one of two ways.
+
+**Manual (the default).** Nothing fetches until you say so. Drop text files
+into the workspace and import them:
+
 ```bash
-make tui        # press c, then paste, e.g. https://example.com/truyen/any-novel/chapter-{n}
+:import 34 ch34.txt     # or ch34.txt / 34.txt / chapter-034.txt — the number comes from the name
 ```
 
-`{n}` is the chapter number. The TUI saves it to
-`workspaces/<name>/settings.json` and probe-crawls one chapter to prove the
-selector finds the text. **Only novel-specific setting you must change**
-(plus `prompts/script.txt` if you want a different style).
+**Scripted.** Set `"mode": "script"` and name a crawler:
+
+```json
+"crawl": { "mode": "script", "script": "crawl/mysite.lua",
+            "params": { "entry": "https://site.example/truyen/ten-truyen" } }
+```
+
+A crawler is a small Lua or JavaScript file — one `crawl(input)` that returns
+the chapter text, an optional `discover(input)` for sites whose URLs are slugs.
+Write one without reading much of anything:
+
+0. **`bm-inductor check <a chapter url>`** — one request, and a verdict on
+   whether a crawl of that page would produce a chapter. Do this *first*. The
+   alternative is finding out from ten workers failing at once, an afternoon
+   apart, which is how a site behind a bot check costs you a day. It reads the
+   workspace's `crawl.user_agent` and `crawl.headers`, so it also confirms a
+   session cookie still works.
+   If the site is one this project already has a crawler for, `check` says so
+   and prints the settings block to paste — and the TUI says the same thing
+   while you type into `:crawl`. Sites we have *checked and cannot crawl* are
+   listed too, with the reason, so the same afternoon is not spent twice.
+1. Save one chapter page (and the book's index page for slugs):
+   `curl -A "Mozilla/5.0" -o ch1.html https://…/chuong-1`
+2. **Paste that HTML into any AI chat together with §4 of
+   [docs/CRAWLING.md](docs/CRAWLING.md) — it is a self-contained brief (the
+   contract, the host functions, the refusal classes) written exactly for
+   this.** Ask for a Lua script; the chat investigates the selectors and hands
+   back a working crawler. Start from a template if you would rather not begin
+   from nothing:   `templates/truyencom.lua` is the easy shape (the chapter URL
+   is a function of `n`), `templates/madara.lua` a paginated listing,
+   `templates/readnovelfull.lua` a site whose URLs carry a title slug *and*
+   whose book index stops at 30 chapters, `templates/webnovel.lua` the hard
+   one — slug URLs, a container one level deeper than the obvious one, a
+   paid-chapter flag. `templates/storya.lua` is the crawler the pipeline
+   shipped with, kept for workspaces whose settings predate the `crawl`
+   block; a new workspace names no crawler at all.
+3. Put it at `workspaces/<name>/crawl/mysite.lua` (per book, synced to every
+   worker by the next provision), point `crawl.script` at it, and probe with
+   `c` in the TUI — the probe runs the real crawler over a real chapter and
+   shows the verdict, so tuning is evidence, not guessing.
+
+**If a site refuses you.** `bm-inductor check` names a Cloudflare challenge as
+one rather than calling it a 403. There is no bypass here and there is not going
+to be: no TLS-fingerprint spoofing, no browser engine, no challenge solver. The
+crawler speaks HTTP/1.1 with rustls and a header-shaped request, and some sites
+refuse that on the fingerprint alone. What is left is a real browser user agent
+in `crawl.user_agent` (the default `Mozilla/5.0` is thin) and, for the rest, a
+`cf_clearance` cookie you solve in a browser and paste into `crawl.headers`.
+Both are one-line changes, and `check` tells you whether either worked.
+
+The chapter text must be prose with paragraph breaks — no navigation, no
+comment sections, no repeated headline; the length guard refuses under 200
+bytes and the size guard refuses a whole-page scrape. Everything else about the
+format is [docs/CRAWLING.md §4](docs/CRAWLING.md).
 
 ### Cloned voices (optional)
 
@@ -183,8 +337,6 @@ the voice:
 
 ## 3. Start it — three ways, easiest first
 
-Same shape everywhere: **one inductor, many workers, the inductor dials.**
-
 ```mermaid
 flowchart TB
     TUI["TUI<br/>operator's only interface"] --> IND["bm-inductor<br/>scheduler + control API :8901"]
@@ -196,13 +348,28 @@ flowchart TB
     AWS -.->|"inductor fetches missing units"| STORE
 ```
 
-Workers are small HTTP servers that answer questions and are **never told
-where the inductor is** — a public box cannot reach a laptop behind NAT, and
-the version that tried forked local/remote through launcher, offer *and*
-artifact path. Inverting removed the requirement: the inductor already has a
-route, because it launched them. Firewall: inbound **22** (provisioning) and
-the **task port** (work). Miss the second and the failure is quiet — 22 open,
-8917 closed, box looks healthy, never driven.
+**Start with A.** It is two commands and no configuration, and it produces real
+audio on your own machine. B is the same thing with a dashboard. C and D are
+only worth the setup once A works for you and you actually want it finished
+faster.
+
+There is one idea behind all four, and it is worth knowing even if you only
+ever use A: **one coordinator, any number of workers, and the coordinator is the
+one that reaches out.** The machines doing the work never try to phone home.
+
+**Why it is built that way**, because it is not an arbitrary choice. Each worker
+is a small web server that answers questions, and it is never told where the
+coordinator is. The alternative — workers calling in — does not work at all for
+a rented machine, which cannot reach a laptop sitting behind a home router, and
+the version that tried it had to fork the code in three separate places. Turning
+it around removes the problem entirely: the coordinator already knows how to
+reach them, because it is the one that started them.
+
+One practical consequence, because it fails quietly: on a machine you add
+yourself you must open **two** ports. Port 22 (ssh) gets you in to set it up;
+the **task port** is what actually carries the work. Open the first and forget
+the second and everything looks fine — the machine is reachable, it looks
+healthy, it is just never given anything to do.
 
 ### A. Solo, headless
 
@@ -352,7 +519,8 @@ at top).
 | `assets/*` | Clips, pools, scene map, licenses (tracked) |
 | `voices.default.json` | Catalogue voices (tracked) |
 | `output/Ch.N - Title.mp3` | **Finished chapters** |
-| `data/chapters/NN.txt` · `data/script-NN.json` | Crawled text · dramatized script |
+| `data/chapters/NN.txt` · `data/script-NN.json` | Crawled (or imported) text · dramatized script |
+| `data/crawl-index.json` | The chapter index: `n → url` for the current range. Hand-editable — the escape hatch for slug URLs |
 | `data/bible.json` · `data/cast-vieneu.json` | Character bible · speaker→voice (one per engine) |
 | `data/audio/segments-vieneu-NN/` | Cached segment audio — resumable renders |
 | `voices.json` · `voice-pool.json` · `refs/` | Clone mapping · sample pool · clips |
@@ -381,16 +549,36 @@ text, scripts, cast, segment audio and finished MP3s stay — future runs reuse 
 
 ## 5. When something fails
 
-- Fail 3× → **shelved** (stops starving healthy chapters). **K** shows the
-  worker's full error on `Enter`; `u` re-queues (forgives strikes), `F`
-  re-runs from scratch and clears partial output (e.g. stale `script-NN.json`).
-- Worker died or lease expired → re-queued automatically — **silence is never
-  punished as failure**.
-- Events pane logs every completion, failure, expiry, operator action; same
-  stream on `/api/state` → `events`.
-- Full guide: **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)**
-- Under the hood: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
-- Plans (any-provider LLM, AWS EC2 + S3): **[docs/ROADMAP.md](docs/ROADMAP.md)**
+In plain terms, and in the order worth trying them. The full guide is
+**[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)**.
+
+**Nothing is being fetched, or the wrong text is being fetched.**
+Run `bm-inductor check <a real chapter url>` first, every time. One request, one
+answer. A site that has started refusing you is the most common cause by a long
+way, and it is the one thing a group of machines cannot tell you on its own.
+
+**The book comes out in one voice.** The chapter had no quote marks in it, so
+there was nothing for the program to tell narration from dialogue. The digest
+prints the split on its first line — `prepared 52 event(s): 21 narration, 31
+dialogue` — and **zero dialogue on a chapter where people are talking means your
+crawler**, not the AI. See [the crawling guide](docs/CRAWLING.md#the-one-thing-worth-understanding).
+
+**One chapter produced a wall of noise.** The crawler took the whole page instead
+of the story, so nav links and footers became things the AI had to account for.
+The program notices this shape and calls it "selector matched the whole page".
+
+**A chapter will not finish.** It is retried, and after three failures it is put
+aside rather than retried for ever. The task list (**K**) shows the reason in
+the machine's own words. `u` releases them, and `u 24` releases one chapter.
+
+**A machine looks fine but never gets work.** Usually one port: port 22 is open
+so you can log in, but the **task port** is closed, so nothing is ever sent to
+it. The machine is healthy and idle, which is the confusing part.
+
+**Everything stalled and you do not know why.** `e` estimates what is left. If
+the percentage is not moving, look at the Events pane — it records every
+completion, failure, expiry and action in one stream, and it is the same stream
+`/api/state` serves.
 
 ---
 
@@ -401,26 +589,44 @@ make test                            # cargo test --workspace + clippy -D warnin
 cargo test -p bm-inductor tui::      # just the TUI tests
 ```
 
-Suite never touches the network: TEST-NET SSH targets, stubbed LLM/TTS, TUI
-renders to an in-memory backend.
+The suite never touches the network: the ssh targets are documentation-only
+addresses, the AI and speech services are stubbed, and the dashboard renders to
+an in-memory screen.
 
 Local-only design notes (`.docs/` is git-ignored): `TUI_UX_AUDIT.md`,
 `VOICE_CONFIG_PROPOSAL.md`, `PLAN.md`.
 
 ## 7. Honest limitations
 
-- **Vieneu** is local/free but heavy (~1.7 GB) and Vietnamese-first. Other
-  languages: `TTS_ENGINE=gemini`, or adapt `python/tts_router.py`.
-- **Gemini TTS** free tier ~10 calls/day (app subscription doesn't raise API
-  limits); AI Studio pay-as-you-go is pennies/chapter.
-- **Digest burns LLM tokens** (~2 calls/chapter: attribution then staging, plus
-  one repair per refused pass); free tiers rate-limit — analyzer falls through a
-  model list automatically.
-- **Digest refuses instead of guessing.** A chapter that fails attribution or
-  source validation is re-attempted, not shipped, so a bad script cannot land.
-  Unnamed dialogue uses stable `anonymous:anon-N` voice slots rather than being
-  guessed as Narrator or inserted into the character Bible. The manual digest
-  manager (`D`) still runs the legacy raw-chapter prompts and does not yet
-  enforce the automatic source gate.
-- **Crawling** needs a predictable `{n}` URL and findable body; `c` in the TUI
-  probe-crawls one chapter before you commit a range.
+The things that will cost you time, in the order they are likely to.
+
+- **The built-in voices are Vietnamese.** Vieneu is local and free, but it is
+  built for Vietnamese and it is what this project grew up on. In another
+  language it will not error — it will just pronounce your book against
+  Vietnamese syllable rules and sound wrong, which is worse. Three ways out:
+  `TTS_ENGINE=gemini` for a cloud engine, adapt `python/tts_router.py` for
+  another, or **clone a voice from your own recording** (`refs/`), which works
+  in any language and is the one most people are happy with. `bm-inductor check`
+  prints a warning when a site's text is not Vietnamese.
+- **Vieneu is heavy** — about 1.7 GB of model files and roughly 2.9 GB of memory
+  while it is running. A small cloud instance will not hold it; the README's
+  sizing notes say which instance types do.
+- **Gemini's free tier is about 10 calls a day**, and paying for the app does
+  not raise that. On their pay-as-you-go API it is pennies per chapter.
+- **Each chapter costs about two AI calls** — one to work out who is speaking,
+  one to write the performance — plus one more each time the program asks for a
+  correction. Free tiers rate-limit, so the analyzer falls through a list of
+  models automatically rather than stopping.
+- **The program refuses rather than guesses.** A chapter that fails a check is
+  retried, not shipped, so a bad performance cannot slip into your library.
+  Dialogue from a character it has not met gets a stable unnamed voice instead
+  of being dumped on the Narrator or written into the cast. One honest gap: the
+  by-hand digest (press `D`) still uses the older prompts and does not yet
+  enforce the same checks as the automatic route.
+- **A site you cannot fetch, you cannot use.** There is no browser here and no
+  attempt to get around a refusal, so a site that blocks programs needs either
+  text files or a different source. This is a deliberate line: the program would
+  rather tell you a site said no than spend your afternoon retrying it.
+- **Nothing is fetched until you say so.** You have to name a crawler. The
+  upside is that a fresh install never starts hammering a website it was never
+  pointed at.
