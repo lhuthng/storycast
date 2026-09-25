@@ -22,9 +22,9 @@
 //!   reach: lead words must sit immediately before the number, keywords may be
 //!   up to three words away.
 
-use std::collections::{HashMap, HashSet};
-use once_cell::sync::Lazy;
 use crate::core::abbrev::{AbbrevTable, Reading};
+use once_cell::sync::Lazy;
+use std::collections::{HashMap, HashSet};
 
 /// Every letter of the Vietnamese alphabet that carries a diacritic, lowercase
 /// then uppercase. Two passes depend on this being the *complete* list:
@@ -35,59 +35,114 @@ pub const VI_LETTERS: &str = "àáảãạăắằẳẵặâấầẩẫậèé
 
 pub static VI_LETTER_NAMES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    m.insert("a", "a"); m.insert("b", "bê"); m.insert("c", "xê");
-    m.insert("d", "đê"); m.insert("đ", "đê"); m.insert("e", "e");
-    m.insert("ê", "ê"); m.insert("f", "ép"); m.insert("g", "gờ");
-    m.insert("h", "hát"); m.insert("i", "i"); m.insert("j", "giây");
-    m.insert("k", "ca"); m.insert("l", "lờ"); m.insert("m", "mờ");
-    m.insert("n", "nờ"); m.insert("o", "ô"); m.insert("ô", "ô");
-    m.insert("ơ", "ơ"); m.insert("p", "phê"); m.insert("q", "qui");
-    m.insert("r", "rờ"); m.insert("s", "ét"); m.insert("t", "tê");
-    m.insert("u", "u"); m.insert("ư", "ư"); m.insert("v", "vê");
-    m.insert("w", "vê kép"); m.insert("x", "ích"); m.insert("y", "y");
+    m.insert("a", "a");
+    m.insert("b", "bê");
+    m.insert("c", "xê");
+    m.insert("d", "đê");
+    m.insert("đ", "đê");
+    m.insert("e", "e");
+    m.insert("ê", "ê");
+    m.insert("f", "ép");
+    m.insert("g", "gờ");
+    m.insert("h", "hát");
+    m.insert("i", "i");
+    m.insert("j", "giây");
+    m.insert("k", "ca");
+    m.insert("l", "lờ");
+    m.insert("m", "mờ");
+    m.insert("n", "nờ");
+    m.insert("o", "ô");
+    m.insert("ô", "ô");
+    m.insert("ơ", "ơ");
+    m.insert("p", "phê");
+    m.insert("q", "qui");
+    m.insert("r", "rờ");
+    m.insert("s", "ét");
+    m.insert("t", "tê");
+    m.insert("u", "u");
+    m.insert("ư", "ư");
+    m.insert("v", "vê");
+    m.insert("w", "vê kép");
+    m.insert("x", "ích");
+    m.insert("y", "y");
     m.insert("z", "dét");
     m
 });
 
 pub static MEASUREMENT_KEY_VI: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    m.insert("km", "ki lô mét"); m.insert("dm", "đê xi mét");
-    m.insert("cm", "xen ti mét"); m.insert("mm", "mi li mét");
-    m.insert("nm", "na nô mét"); m.insert("µm", "mic rô mét");
-    m.insert("μm", "mic rô mét"); m.insert("m", "mét");
-    m.insert("kg", "ki lô gam"); m.insert("g", "gam"); m.insert("µg", "mic rô gam");
-    m.insert("mg", "mi li gam"); m.insert("km2", "ki lô mét vuông");
-    m.insert("m2", "mét vuông"); m.insert("cm2", "xen ti mét vuông");
-    m.insert("mm2", "mi li mét vuông"); m.insert("ha", "héc ta");
-    m.insert("km3", "ki lô mét khối"); m.insert("m3", "mét khối");
-    m.insert("cm3", "xen ti mét khối"); m.insert("mm3", "mi li mét khối");
-    m.insert("l", "lít"); m.insert("dl", "đê xi lít");
-    m.insert("ml", "mi li lít"); m.insert("hl", "héc tô lít");
-    m.insert("kw", "ki lô oát"); m.insert("mw", "mê ga oát");
-    m.insert("gw", "gi ga oát"); m.insert("kwh", "ki lô oát giờ"); m.insert("kWh", "ki lô oát giờ");
-    m.insert("mwh", "mê ga oát giờ"); m.insert("wh", "oát giờ");
+    m.insert("km", "ki lô mét");
+    m.insert("dm", "đê xi mét");
+    m.insert("cm", "xen ti mét");
+    m.insert("mm", "mi li mét");
+    m.insert("nm", "na nô mét");
+    m.insert("µm", "mic rô mét");
+    m.insert("μm", "mic rô mét");
+    m.insert("m", "mét");
+    m.insert("kg", "ki lô gam");
+    m.insert("g", "gam");
+    m.insert("µg", "mic rô gam");
+    m.insert("mg", "mi li gam");
+    m.insert("km2", "ki lô mét vuông");
+    m.insert("m2", "mét vuông");
+    m.insert("cm2", "xen ti mét vuông");
+    m.insert("mm2", "mi li mét vuông");
+    m.insert("ha", "héc ta");
+    m.insert("km3", "ki lô mét khối");
+    m.insert("m3", "mét khối");
+    m.insert("cm3", "xen ti mét khối");
+    m.insert("mm3", "mi li mét khối");
+    m.insert("l", "lít");
+    m.insert("dl", "đê xi lít");
+    m.insert("ml", "mi li lít");
+    m.insert("hl", "héc tô lít");
+    m.insert("kw", "ki lô oát");
+    m.insert("mw", "mê ga oát");
+    m.insert("gw", "gi ga oát");
+    m.insert("kwh", "ki lô oát giờ");
+    m.insert("kWh", "ki lô oát giờ");
+    m.insert("mwh", "mê ga oát giờ");
+    m.insert("wh", "oát giờ");
     // Bare "w" only matches with a number in front ("550 W", "320w"), so a
     // standalone letter w still reads as "vê kép".
     m.insert("w", "oát");
-    m.insert("hz", "héc"); m.insert("khz", "ki lô héc");
-    m.insert("mhz", "mê ga héc"); m.insert("ghz", "gi ga héc");
-    m.insert("pa", "pascal"); m.insert("kpa", "kilopascal");
-    m.insert("mpa", "megapascal"); m.insert("bar", "bar");
-    m.insert("mbar", "millibar"); m.insert("atm", "atmosphere");
-    m.insert("psi", "__start_en__p s i__end_en__"); m.insert("j", "joule");
-    m.insert("kj", "kilojoule"); m.insert("cal", "calorie");
-    m.insert("kcal", "kilocalorie"); m.insert("h", "giờ");
-    m.insert("p", "phút"); m.insert("s", "giây"); m.insert("sqm", "mét vuông");
-    m.insert("cum", "mét khối"); m.insert("gb", "gigabyte");
-    m.insert("mb", "megabyte"); m.insert("kb", "kilobyte");
-    m.insert("tb", "terabyte"); m.insert("db", "decibel");
-    m.insert("oz", "ounce"); m.insert("lb", "pound");
-    m.insert("lbs", "pounds"); m.insert("ft", "feet");
-    m.insert("in", "inch"); m.insert("dpi", "__start_en__d p i__end_en__");
-    m.insert("ph", "phê hát"); m.insert("gbps", "gigabits per second");
+    m.insert("hz", "héc");
+    m.insert("khz", "ki lô héc");
+    m.insert("mhz", "mê ga héc");
+    m.insert("ghz", "gi ga héc");
+    m.insert("pa", "pascal");
+    m.insert("kpa", "kilopascal");
+    m.insert("mpa", "megapascal");
+    m.insert("bar", "bar");
+    m.insert("mbar", "millibar");
+    m.insert("atm", "atmosphere");
+    m.insert("psi", "__start_en__p s i__end_en__");
+    m.insert("j", "joule");
+    m.insert("kj", "kilojoule");
+    m.insert("cal", "calorie");
+    m.insert("kcal", "kilocalorie");
+    m.insert("h", "giờ");
+    m.insert("p", "phút");
+    m.insert("s", "giây");
+    m.insert("sqm", "mét vuông");
+    m.insert("cum", "mét khối");
+    m.insert("gb", "gigabyte");
+    m.insert("mb", "megabyte");
+    m.insert("kb", "kilobyte");
+    m.insert("tb", "terabyte");
+    m.insert("db", "decibel");
+    m.insert("oz", "ounce");
+    m.insert("lb", "pound");
+    m.insert("lbs", "pounds");
+    m.insert("ft", "feet");
+    m.insert("in", "inch");
+    m.insert("dpi", "__start_en__d p i__end_en__");
+    m.insert("ph", "phê hát");
+    m.insert("gbps", "gigabits per second");
     m.insert("mbps", "megabits per second");
     m.insert("kbps", "kilobits per second");
-    m.insert("gallon", "gallon"); m.insert("mol", "mol");
+    m.insert("gallon", "gallon");
+    m.insert("mol", "mol");
     m.insert("mmol", "mi li mol");
     m.insert("ms", "mi li giây");
     // "M", "B" and "K" are deliberately absent. Guessing a magnitude from one
@@ -97,7 +152,8 @@ pub static MEASUREMENT_KEY_VI: Lazy<HashMap<&'static str, &'static str>> = Lazy:
     // "100tr" keeps its expansion — "tr" is not a letter name, so reading it
     // out would give "tê rờ".
     // Compound electrical units written camelCase (mAh/Ah); kWh/Wh/mWh above.
-    m.insert("mah", "mi li am pe giờ"); m.insert("ah", "am pe giờ");
+    m.insert("mah", "mi li am pe giờ");
+    m.insert("ah", "am pe giờ");
     // Pressure written with an element symbol. The key also stops the
     // concatenation splitter cutting "mmHg" into "mm" + "Hg", which left the
     // mercury unread: "120 mmHg" came out "một trăm hai mươi mi li mét hg".
@@ -106,7 +162,8 @@ pub static MEASUREMENT_KEY_VI: Lazy<HashMap<&'static str, &'static str>> = Lazy:
     m.insert("cmh2o", "xen ti mét nước");
     // Micro prefix on the mole. Without the key the "µ" was dropped and
     // "80 µmol/L" read "tám mươi mol trên lít" — a millionfold error.
-    m.insert("µmol", "mic rô mol"); m.insert("μmol", "mic rô mol");
+    m.insert("µmol", "mic rô mol");
+    m.insert("μmol", "mic rô mol");
     // Read with English letters. The key also keeps the splitter off "mEq",
     // which it would otherwise cut into "m" + "Eq" and read "mét eq".
     m.insert("meq", "__start_en__m e q__end_en__");
@@ -128,17 +185,16 @@ pub static MEASUREMENT_KEY_VI: Lazy<HashMap<&'static str, &'static str>> = Lazy:
 /// a brand name can collide with.
 pub static CHEMICAL_ELEMENTS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
-        "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne",
-        "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca",
-        "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
-        "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr",
-        "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In", "Sn",
-        "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd",
-        "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb",
-        "Lu", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
-        "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th",
-        "Pa", "U", "Np", "Pu", "Am", "Cm",
-    ].into_iter().collect()
+        "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S",
+        "Cl", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga",
+        "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd",
+        "Ag", "Cd", "In", "Sn", "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm",
+        "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta", "W", "Re", "Os",
+        "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th", "Pa",
+        "U", "Np", "Pu", "Am", "Cm",
+    ]
+    .into_iter()
+    .collect()
 });
 
 /// Does `word` parse as a chemical formula — every segment an element symbol,
@@ -152,7 +208,9 @@ pub static CHEMICAL_ELEMENTS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 /// camelCase they are.
 pub fn is_chemical_formula(word: &str) -> bool {
     let chars: Vec<char> = word.chars().collect();
-    if chars.is_empty() || !word.is_ascii() { return false; }
+    if chars.is_empty() || !word.is_ascii() {
+        return false;
+    }
     let mut segs: Vec<&'static str> = Vec::new();
     let mut i = 0usize;
     while i < chars.len() {
@@ -160,121 +218,200 @@ pub fn is_chemical_formula(word: &str) -> bool {
             i += 1;
             continue;
         }
-        if !chars[i].is_ascii_uppercase() { return false; }
+        if !chars[i].is_ascii_uppercase() {
+            return false;
+        }
         // Longest symbol first: "Cl" before "C", so "Cl" is not read as C + l.
         let two: String = chars[i..(i + 2).min(chars.len())].iter().collect();
         let one: String = chars[i..i + 1].iter().collect();
         if two.len() == 2 && chars[i + 1].is_ascii_lowercase() {
             match CHEMICAL_ELEMENTS.get(two.as_str()) {
-                Some(sym) => { segs.push(sym); i += 2; continue; }
+                Some(sym) => {
+                    segs.push(sym);
+                    i += 2;
+                    continue;
+                }
                 None => return false,
             }
         }
         match CHEMICAL_ELEMENTS.get(one.as_str()) {
-            Some(sym) => { segs.push(sym); i += 1; }
+            Some(sym) => {
+                segs.push(sym);
+                i += 1;
+            }
             None => return false,
         }
     }
-    if segs.len() < 2 { return false; }
-    !segs.windows(2).any(|w: &[&str]| w[0].len() == 2 && w[0] == w[1])
+    if segs.len() < 2 {
+        return false;
+    }
+    !segs
+        .windows(2)
+        .any(|w: &[&str]| w[0].len() == 2 && w[0] == w[1])
 }
 
 pub static CURRENCY_KEY: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    m.insert("usd", "__start_en__u s d__end_en__"); m.insert("vnd", "việt nam đồng");
-    m.insert("vnđ", "việt nam đồng"); m.insert("đ", "đồng");
-    m.insert("v n d", "việt nam đồng"); m.insert("v n đ", "việt nam đồng");
-    m.insert("€", "euro"); m.insert("euro", "euro");
-    m.insert("eur", "euro"); m.insert("¥", "yên");
-    m.insert("yên", "yên"); m.insert("jpy", "yên"); m.insert("%", "phần trăm");
+    m.insert("usd", "__start_en__u s d__end_en__");
+    m.insert("vnd", "việt nam đồng");
+    m.insert("vnđ", "việt nam đồng");
+    m.insert("đ", "đồng");
+    m.insert("v n d", "việt nam đồng");
+    m.insert("v n đ", "việt nam đồng");
+    m.insert("€", "euro");
+    m.insert("euro", "euro");
+    m.insert("eur", "euro");
+    m.insert("¥", "yên");
+    m.insert("yên", "yên");
+    m.insert("jpy", "yên");
+    m.insert("%", "phần trăm");
     m
 });
 
 pub static ACRONYMS_EXCEPTIONS_VI: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    m.insert("CĐV", "cổ động viên"); m.insert("HĐND", "hội đồng nhân dân");
-    m.insert("HĐQT", "hội đồng quản trị"); m.insert("TAND", "tòa án nhân dân");
-    m.insert("BHXH", "bảo hiểm xã hội"); m.insert("BHTN", "bảo hiểm thất nghiệp");
-    m.insert("TP.HCM", "thành phố hồ chí minh"); m.insert("VN", "việt nam");
-    m.insert("UBND", "uỷ ban nhân dân"); m.insert("TP", "thành phố");
-    m.insert("HCM", "hồ chí minh"); m.insert("HN", "hà nội");
-    m.insert("BTC", "ban tổ chức"); m.insert("CLB", "câu lạc bộ");
-    m.insert("HTX", "hợp tác xã"); m.insert("NXB", "nhà xuất bản");
-    m.insert("TW", "trung ương"); m.insert("CSGT", "cảnh sát giao thông");
-    m.insert("LHQ", "liên hợp quốc"); m.insert("THCS", "trung học cơ sở");
-    m.insert("THPT", "trung học phổ thông"); m.insert("ĐH", "đại học");
-    m.insert("HLV", "huấn luyện viên"); m.insert("GS", "giáo sư");
-    m.insert("TS", "tiến sĩ"); m.insert("TNHH", "trách nhiệm hữu hạn");
-    m.insert("VĐV", "vận động viên"); m.insert("TPHCM", "thành phố hồ chí minh");
-    m.insert("PGS", "phó giáo sư"); m.insert("SP500", "ét pê năm trăm");
-    m.insert("PGS.TS", "phó giáo sư tiến sĩ"); m.insert("GS.TS", "giáo sư tiến sĩ");
-    m.insert("ThS", "thạc sĩ"); m.insert("Th.S", "thạc sĩ"); m.insert("BS", "bác sĩ");
+    m.insert("CĐV", "cổ động viên");
+    m.insert("HĐND", "hội đồng nhân dân");
+    m.insert("HĐQT", "hội đồng quản trị");
+    m.insert("TAND", "tòa án nhân dân");
+    m.insert("BHXH", "bảo hiểm xã hội");
+    m.insert("BHTN", "bảo hiểm thất nghiệp");
+    m.insert("TP.HCM", "thành phố hồ chí minh");
+    m.insert("VN", "việt nam");
+    m.insert("UBND", "uỷ ban nhân dân");
+    m.insert("TP", "thành phố");
+    m.insert("HCM", "hồ chí minh");
+    m.insert("HN", "hà nội");
+    m.insert("BTC", "ban tổ chức");
+    m.insert("CLB", "câu lạc bộ");
+    m.insert("HTX", "hợp tác xã");
+    m.insert("NXB", "nhà xuất bản");
+    m.insert("TW", "trung ương");
+    m.insert("CSGT", "cảnh sát giao thông");
+    m.insert("LHQ", "liên hợp quốc");
+    m.insert("THCS", "trung học cơ sở");
+    m.insert("THPT", "trung học phổ thông");
+    m.insert("ĐH", "đại học");
+    m.insert("HLV", "huấn luyện viên");
+    m.insert("GS", "giáo sư");
+    m.insert("TS", "tiến sĩ");
+    m.insert("TNHH", "trách nhiệm hữu hạn");
+    m.insert("VĐV", "vận động viên");
+    m.insert("TPHCM", "thành phố hồ chí minh");
+    m.insert("PGS", "phó giáo sư");
+    m.insert("SP500", "ét pê năm trăm");
+    m.insert("PGS.TS", "phó giáo sư tiến sĩ");
+    m.insert("GS.TS", "giáo sư tiến sĩ");
+    m.insert("ThS", "thạc sĩ");
+    m.insert("Th.S", "thạc sĩ");
+    m.insert("BS", "bác sĩ");
     m.insert("KS", "kỹ sư");
-    m.insert("UAE", "u a e"); m.insert("CUDA", "cu đa");
+    m.insert("UAE", "u a e");
+    m.insert("CUDA", "cu đa");
     // Common agency, organisation and sector abbreviations. Matched on word
     // boundaries, so they cannot fire inside a longer word.
-    m.insert("QĐND", "quân đội nhân dân"); m.insert("CAND", "công an nhân dân");
-    m.insert("BCH", "ban chấp hành"); m.insert("TBT", "tổng bí thư");
-    m.insert("ĐHQG", "đại học quốc gia"); m.insert("KCN", "khu công nghiệp");
-    m.insert("GTVT", "giao thông vận tải"); m.insert("TDTT", "thể dục thể thao");
-    m.insert("BĐBP", "bộ đội biên phòng"); m.insert("KHCN", "khoa học công nghệ");
-    m.insert("BV", "bệnh viện"); m.insert("BQP", "bộ quốc phòng");
+    m.insert("QĐND", "quân đội nhân dân");
+    m.insert("CAND", "công an nhân dân");
+    m.insert("BCH", "ban chấp hành");
+    m.insert("TBT", "tổng bí thư");
+    m.insert("ĐHQG", "đại học quốc gia");
+    m.insert("KCN", "khu công nghiệp");
+    m.insert("GTVT", "giao thông vận tải");
+    m.insert("TDTT", "thể dục thể thao");
+    m.insert("BĐBP", "bộ đội biên phòng");
+    m.insert("KHCN", "khoa học công nghệ");
+    m.insert("BV", "bệnh viện");
+    m.insert("BQP", "bộ quốc phòng");
     // Documents, administration, safety.
-    m.insert("GPLX", "giấy phép lái xe"); m.insert("CMND", "chứng minh nhân dân");
-    m.insert("CCCD", "căn cước công dân"); m.insert("PCCC", "phòng cháy chữa cháy");
-    m.insert("ATGT", "an toàn giao thông"); m.insert("TNGT", "tai nạn giao thông");
-    m.insert("BHYT", "bảo hiểm y tế"); m.insert("ATTP", "an toàn thực phẩm");
-    m.insert("ĐKKD", "đăng ký kinh doanh"); m.insert("MST", "mã số thuế");
+    m.insert("GPLX", "giấy phép lái xe");
+    m.insert("CMND", "chứng minh nhân dân");
+    m.insert("CCCD", "căn cước công dân");
+    m.insert("PCCC", "phòng cháy chữa cháy");
+    m.insert("ATGT", "an toàn giao thông");
+    m.insert("TNGT", "tai nạn giao thông");
+    m.insert("BHYT", "bảo hiểm y tế");
+    m.insert("ATTP", "an toàn thực phẩm");
+    m.insert("ĐKKD", "đăng ký kinh doanh");
+    m.insert("MST", "mã số thuế");
     // Ministries and departments, hyphenated and run-together spellings alike.
-    m.insert("TN-MT", "tài nguyên môi trường"); m.insert("TNMT", "tài nguyên môi trường");
-    m.insert("GD-ĐT", "giáo dục đào tạo"); m.insert("GDĐT", "giáo dục đào tạo");
+    m.insert("TN-MT", "tài nguyên môi trường");
+    m.insert("TNMT", "tài nguyên môi trường");
+    m.insert("GD-ĐT", "giáo dục đào tạo");
+    m.insert("GDĐT", "giáo dục đào tạo");
     m.insert("KH-CN", "khoa học công nghệ");
-    m.insert("LĐ-TB-XH", "lao động thương binh xã hội"); m.insert("LĐTBXH", "lao động thương binh xã hội");
-    m.insert("NN-PTNT", "nông nghiệp phát triển nông thôn"); m.insert("NNPTNT", "nông nghiệp phát triển nông thôn");
-    m.insert("VH-TT-DL", "văn hóa thể thao du lịch"); m.insert("VHTTDL", "văn hóa thể thao du lịch");
-    m.insert("TT-TT", "thông tin truyền thông"); m.insert("TTTT", "thông tin truyền thông");
+    m.insert("LĐ-TB-XH", "lao động thương binh xã hội");
+    m.insert("LĐTBXH", "lao động thương binh xã hội");
+    m.insert("NN-PTNT", "nông nghiệp phát triển nông thôn");
+    m.insert("NNPTNT", "nông nghiệp phát triển nông thôn");
+    m.insert("VH-TT-DL", "văn hóa thể thao du lịch");
+    m.insert("VHTTDL", "văn hóa thể thao du lịch");
+    m.insert("TT-TT", "thông tin truyền thông");
+    m.insert("TTTT", "thông tin truyền thông");
     // Geography, organisations, groups of people.
-    m.insert("ĐBSCL", "đồng bằng sông cửu long"); m.insert("MTTQ", "mặt trận tổ quốc");
-    m.insert("ĐBQH", "đại biểu quốc hội"); m.insert("VKS", "viện kiểm sát");
-    m.insert("HS-SV", "học sinh sinh viên"); m.insert("HSSV", "học sinh sinh viên");
-    m.insert("SV", "sinh viên"); m.insert("GV", "giáo viên");
+    m.insert("ĐBSCL", "đồng bằng sông cửu long");
+    m.insert("MTTQ", "mặt trận tổ quốc");
+    m.insert("ĐBQH", "đại biểu quốc hội");
+    m.insert("VKS", "viện kiểm sát");
+    m.insert("HS-SV", "học sinh sinh viên");
+    m.insert("HSSV", "học sinh sinh viên");
+    m.insert("SV", "sinh viên");
+    m.insert("GV", "giáo viên");
     m.insert("CBCNV", "cán bộ công nhân viên");
     // Companies and official documents.
-    m.insert("CP", "cổ phần"); m.insert("NĐ-CP", "nờ đê xê phê");
-    m.insert("TT-BTC", "tê tê bê tê xê"); m.insert("QĐ-TTg", "qui đê tê tê giê");
+    m.insert("CP", "cổ phần");
+    m.insert("NĐ-CP", "nờ đê xê phê");
+    m.insert("TT-BTC", "tê tê bê tê xê");
+    m.insert("QĐ-TTg", "qui đê tê tê giê");
     // Justice, land, budget, labour.
-    m.insert("VKSND", "viện kiểm sát nhân dân"); m.insert("GPMB", "giải phóng mặt bằng");
-    m.insert("NSNN", "ngân sách nhà nước"); m.insert("XKLĐ", "xuất khẩu lao động");
-    m.insert("UBMTTQ", "uỷ ban mặt trận tổ quốc"); m.insert("HĐLĐ", "hợp đồng lao động");
+    m.insert("VKSND", "viện kiểm sát nhân dân");
+    m.insert("GPMB", "giải phóng mặt bằng");
+    m.insert("NSNN", "ngân sách nhà nước");
+    m.insert("XKLĐ", "xuất khẩu lao động");
+    m.insert("UBMTTQ", "uỷ ban mặt trận tổ quốc");
+    m.insert("HĐLĐ", "hợp đồng lao động");
     // Technology and commerce.
-    m.insert("CNTT", "công nghệ thông tin"); m.insert("TMĐT", "thương mại điện tử");
+    m.insert("CNTT", "công nghệ thông tin");
+    m.insert("TMĐT", "thương mại điện tử");
     // Business and finance.
-    m.insert("TNDN", "thu nhập doanh nghiệp"); m.insert("TNCN", "thu nhập cá nhân");
-    m.insert("GTGT", "giá trị gia tăng"); m.insert("BCTC", "báo cáo tài chính");
-    m.insert("ĐHĐCĐ", "đại hội đồng cổ đông"); m.insert("TGĐ", "tổng giám đốc");
-    m.insert("PTGĐ", "phó tổng giám đốc"); m.insert("Cty", "công ty");
+    m.insert("TNDN", "thu nhập doanh nghiệp");
+    m.insert("TNCN", "thu nhập cá nhân");
+    m.insert("GTGT", "giá trị gia tăng");
+    m.insert("BCTC", "báo cáo tài chính");
+    m.insert("ĐHĐCĐ", "đại hội đồng cổ đông");
+    m.insert("TGĐ", "tổng giám đốc");
+    m.insert("PTGĐ", "phó tổng giám đốc");
+    m.insert("Cty", "công ty");
     // The all-caps variant: only "Cty" was listed, so "CTY" fell through to the
     // acronym branch and was spelled out instead of expanded.
     m.insert("CTY", "công ty");
     m.insert("TNHH MTV", "trách nhiệm hữu hạn một thành viên");
     // Ministries written with "&". Masked early, since the special character
     // would otherwise be rewritten before the abbreviation is recognised.
-    m.insert("GD&ĐT", "giáo dục đào tạo"); m.insert("TN&MT", "tài nguyên môi trường");
-    m.insert("KH&CN", "khoa học công nghệ"); m.insert("LĐ-TB&XH", "lao động thương binh xã hội");
-    m.insert("KH&ĐT", "kế hoạch đầu tư"); m.insert("KHĐT", "kế hoạch đầu tư");
-    m.insert("TT&TT", "thông tin truyền thông"); m.insert("TTTT", "thông tin truyền thông");
-    m.insert("VH-TT&DL", "văn hóa thể thao du lịch"); m.insert("VHTTDL", "văn hóa thể thao du lịch");
+    m.insert("GD&ĐT", "giáo dục đào tạo");
+    m.insert("TN&MT", "tài nguyên môi trường");
+    m.insert("KH&CN", "khoa học công nghệ");
+    m.insert("LĐ-TB&XH", "lao động thương binh xã hội");
+    m.insert("KH&ĐT", "kế hoạch đầu tư");
+    m.insert("KHĐT", "kế hoạch đầu tư");
+    m.insert("TT&TT", "thông tin truyền thông");
+    m.insert("TTTT", "thông tin truyền thông");
+    m.insert("VH-TT&DL", "văn hóa thể thao du lịch");
+    m.insert("VHTTDL", "văn hóa thể thao du lịch");
     m.insert("CT&XH", "chính trị xã hội");
     // Broadcasting. Listing the compound lets the bare "PT" go to the English
     // list, where the gym sense ("anh PT ở phòng tập") belongs.
     m.insert("PT-TH", "phát thanh truyền hình");
     m.insert("PTTH", "phát thanh truyền hình");
     // Document reference numbers.
-    m.insert("TT-BYT", "tê tê bê y tê"); m.insert("CT-TTg", "xê tê tê tê giê");
+    m.insert("TT-BYT", "tê tê bê y tê");
+    m.insert("CT-TTg", "xê tê tê tê giê");
     m.insert("UBND-VP", "uỷ ban nhân dân vê phê");
-    m.insert("QH11", "quốc hội mười một"); m.insert("QH12", "quốc hội mười hai");
-    m.insert("QH13", "quốc hội mười ba"); m.insert("QH14", "quốc hội mười bốn");
-    m.insert("QH15", "quốc hội mười lăm"); m.insert("QH16", "quốc hội mười sáu");
+    m.insert("QH11", "quốc hội mười một");
+    m.insert("QH12", "quốc hội mười hai");
+    m.insert("QH13", "quốc hội mười ba");
+    m.insert("QH14", "quốc hội mười bốn");
+    m.insert("QH15", "quốc hội mười lăm");
+    m.insert("QH16", "quốc hội mười sáu");
     // Note: weekday abbreviations T2..T7 and CN are resolved by context in
     // expand_weekday_abbr, which requires a time cue ("sáng", "chiều", "từ",
     // "đến"). They are deliberately absent from this table, since a hard
@@ -328,10 +465,14 @@ pub static TECHNICAL_TERMS: Lazy<HashMap<&'static str, &'static str>> = Lazy::ne
 // letter names instead.
 pub static DOMAIN_SUFFIX_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    m.insert("com", "com"); m.insert("vn", "vê nờ");
-    m.insert("net", "nét"); m.insert("org", "o rờ gờ");
-    m.insert("edu", "ê đu"); m.insert("gov", "gờ o vê");
-    m.insert("io", "i ô"); m.insert("biz", "biz");
+    m.insert("com", "com");
+    m.insert("vn", "vê nờ");
+    m.insert("net", "nét");
+    m.insert("org", "o rờ gờ");
+    m.insert("edu", "ê đu");
+    m.insert("gov", "gờ o vê");
+    m.insert("io", "i ô");
+    m.insert("biz", "biz");
     m.insert("info", "info");
     m
 });
@@ -352,119 +493,237 @@ pub static CURRENCY_SYMBOL_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy
 
 pub static ROMAN_NUMERALS: Lazy<HashMap<char, i32>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    m.insert('I', 1); m.insert('V', 5); m.insert('X', 10);
-    m.insert('L', 50); m.insert('C', 100); m.insert('D', 500);
+    m.insert('I', 1);
+    m.insert('V', 5);
+    m.insert('X', 10);
+    m.insert('L', 50);
+    m.insert('C', 100);
+    m.insert('D', 500);
     m.insert('M', 1000);
     m
 });
 
 pub static ABBRS: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    m.insert("v.v", " vân vân"); m.insert("v/v", " về việc");
+    m.insert("v.v", " vân vân");
+    m.insert("v/v", " về việc");
     m.insert("đ/c", "địa chỉ");
     m
 });
 
 pub static SYMBOLS_MAP: Lazy<HashMap<char, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    m.insert('&', " và "); m.insert('+', " cộng "); m.insert('=', " bằng ");
-    m.insert('#', " thăng "); m.insert('>', " lớn hơn "); m.insert('<', " nhỏ hơn ");
-    m.insert('≥', " lớn hơn hoặc bằng "); m.insert('≤', " nhỏ hơn hoặc bằng ");
-    m.insert('±', " cộng trừ "); m.insert('≈', " xấp xỉ "); m.insert('/', " trên ");
-    m.insert('√', " căn bậc hai "); m.insert('∛', " căn bậc ba "); m.insert('∜', " căn bậc bốn ");
-    m.insert('→', " đến "); m.insert('÷', " chia "); m.insert('*', " sao ");
-    m.insert('×', " nhân "); m.insert('^', " mũ "); m.insert('~', " khoảng ");
-    m.insert('%', " phần trăm "); m.insert('$', " đô la "); m.insert('€', " ê rô ");
-    m.insert('£', " bảng "); m.insert('¥', " yên "); m.insert('₩', " won ");
-    m.insert('₭', " kíp "); m.insert('₱', " bê xô "); m.insert('฿', " bạc ");
-    m.insert('Ω', " ôm "); m.insert('@', " a còng "); m.insert('≠', " khác ");
-    m.insert('∀', " với mọi "); m.insert('∏', " tích "); m.insert('∈', " thuộc ");
+    m.insert('&', " và ");
+    m.insert('+', " cộng ");
+    m.insert('=', " bằng ");
+    m.insert('#', " thăng ");
+    m.insert('>', " lớn hơn ");
+    m.insert('<', " nhỏ hơn ");
+    m.insert('≥', " lớn hơn hoặc bằng ");
+    m.insert('≤', " nhỏ hơn hoặc bằng ");
+    m.insert('±', " cộng trừ ");
+    m.insert('≈', " xấp xỉ ");
+    m.insert('/', " trên ");
+    m.insert('√', " căn bậc hai ");
+    m.insert('∛', " căn bậc ba ");
+    m.insert('∜', " căn bậc bốn ");
+    m.insert('→', " đến ");
+    m.insert('÷', " chia ");
+    m.insert('*', " sao ");
+    m.insert('×', " nhân ");
+    m.insert('^', " mũ ");
+    m.insert('~', " khoảng ");
+    m.insert('%', " phần trăm ");
+    m.insert('$', " đô la ");
+    m.insert('€', " ê rô ");
+    m.insert('£', " bảng ");
+    m.insert('¥', " yên ");
+    m.insert('₩', " won ");
+    m.insert('₭', " kíp ");
+    m.insert('₱', " bê xô ");
+    m.insert('฿', " bạc ");
+    m.insert('Ω', " ôm ");
+    m.insert('@', " a còng ");
+    m.insert('≠', " khác ");
+    m.insert('∀', " với mọi ");
+    m.insert('∏', " tích ");
+    m.insert('∈', " thuộc ");
     m.insert('∃', " tồn tại ");
     // Arrow family. Only "→" was mapped before, so "⇒" (implication) and the
     // bidirectional forms were deleted outright — silently changing the meaning
     // of a logical statement.
-    m.insert('←', " ngược lại "); m.insert('↔', " tương đương ");
-    m.insert('⇒', " suy ra "); m.insert('⇐', " ngược lại "); m.insert('⇔', " tương đương ");
-    m.insert('∑', " tổng "); m.insert('∩', " giao "); m.insert('∪', " hội ");
-    m.insert('¬', " phủ định "); m.insert('∞', " vô cùng "); m.insert('α', " an pha ");
-    m.insert('β', " bê ta "); m.insert('γ', " ga ma "); m.insert('δ', " đen ta ");
-    m.insert('ε', " ép si lon "); m.insert('ϵ', " thuộc "); m.insert('ζ', " de ta ");
-    m.insert('η', " ê ta "); m.insert('θ', " thê ta "); m.insert('ι', " i ô ta ");
-    m.insert('κ', " cáp ba "); m.insert('λ', " lam đa "); m.insert('ᴧ', " và ");
-    m.insert('μ', " muy "); m.insert('Δ', " đen ta "); m.insert('ν', " nu ");
+    m.insert('←', " ngược lại ");
+    m.insert('↔', " tương đương ");
+    m.insert('⇒', " suy ra ");
+    m.insert('⇐', " ngược lại ");
+    m.insert('⇔', " tương đương ");
+    m.insert('∑', " tổng ");
+    m.insert('∩', " giao ");
+    m.insert('∪', " hội ");
+    m.insert('¬', " phủ định ");
+    m.insert('∞', " vô cùng ");
+    m.insert('α', " an pha ");
+    m.insert('β', " bê ta ");
+    m.insert('γ', " ga ma ");
+    m.insert('δ', " đen ta ");
+    m.insert('ε', " ép si lon ");
+    m.insert('ϵ', " thuộc ");
+    m.insert('ζ', " de ta ");
+    m.insert('η', " ê ta ");
+    m.insert('θ', " thê ta ");
+    m.insert('ι', " i ô ta ");
+    m.insert('κ', " cáp ba ");
+    m.insert('λ', " lam đa ");
+    m.insert('ᴧ', " và ");
+    m.insert('μ', " muy ");
+    m.insert('Δ', " đen ta ");
+    m.insert('ν', " nu ");
     // U+2206 INCREMENT is the "mathematical delta" editors often insert in
     // place of Greek Δ ("Q = mc∆t", "F = k∆l"). It belonged to no table before
     // and was therefore deleted in silence.
     m.insert('∆', " đen ta ");
-    m.insert('ξ', " xi xi "); m.insert('ο', " o mi ron "); m.insert('π', " pi ");
-    m.insert('ρ', " ro "); m.insert('σ', " xích ma "); m.insert('τ', " tao ");
-    m.insert('υ', " úp si lon "); m.insert('φ', " phi "); m.insert('χ', " chi ");
-    m.insert('ψ', " si "); m.insert('ω', " ô me ga "); m.insert('©', " bản quyền ");
+    m.insert('ξ', " xi xi ");
+    m.insert('ο', " o mi ron ");
+    m.insert('π', " pi ");
+    m.insert('ρ', " ro ");
+    m.insert('σ', " xích ma ");
+    m.insert('τ', " tao ");
+    m.insert('υ', " úp si lon ");
+    m.insert('φ', " phi ");
+    m.insert('χ', " chi ");
+    m.insert('ψ', " si ");
+    m.insert('ω', " ô me ga ");
+    m.insert('©', " bản quyền ");
     // ── Maths symbols that used to be swallowed by RE_CLEAN_OTHERS ──────────
-    m.insert('∫', " tích phân "); m.insert('∮', " tích phân đường ");
-    m.insert('∂', " đạo hàm riêng "); m.insert('∇', " nabla ");
-    m.insert('∝', " tỉ lệ với "); m.insert('∠', " góc ");
-    m.insert('⊥', " vuông góc với "); m.insert('∥', " song song với ");
-    m.insert('⊂', " là tập con của "); m.insert('⊆', " là tập con của ");
-    m.insert('⊃', " chứa "); m.insert('⊇', " chứa ");
-    m.insert('∅', " tập rỗng "); m.insert('∉', " không thuộc ");
-    m.insert('≡', " tương đương "); m.insert('≅', " đồng dạng "); m.insert('∼', " tương đương ");
-    m.insert('∴', " suy ra "); m.insert('∵', " bởi vì ");
+    m.insert('∫', " tích phân ");
+    m.insert('∮', " tích phân đường ");
+    m.insert('∂', " đạo hàm riêng ");
+    m.insert('∇', " nabla ");
+    m.insert('∝', " tỉ lệ với ");
+    m.insert('∠', " góc ");
+    m.insert('⊥', " vuông góc với ");
+    m.insert('∥', " song song với ");
+    m.insert('⊂', " là tập con của ");
+    m.insert('⊆', " là tập con của ");
+    m.insert('⊃', " chứa ");
+    m.insert('⊇', " chứa ");
+    m.insert('∅', " tập rỗng ");
+    m.insert('∉', " không thuộc ");
+    m.insert('≡', " tương đương ");
+    m.insert('≅', " đồng dạng ");
+    m.insert('∼', " tương đương ");
+    m.insert('∴', " suy ra ");
+    m.insert('∵', " bởi vì ");
     // Capital sigma, both the Greek letter U+03A3 and the summation sign
     // U+2211. Neither was mapped, so summations vanished from the output.
-    m.insert('Σ', " xích ma "); m.insert('∑', " xích ma ");
-    m.insert('⋅', " nhân "); m.insert('·', " nhân "); m.insert('∓', " trừ cộng ");
+    m.insert('Σ', " xích ma ");
+    m.insert('∑', " xích ma ");
+    m.insert('⋅', " nhân ");
+    m.insert('·', " nhân ");
+    m.insert('∓', " trừ cộng ");
     // Blackboard-bold number sets.
-    m.insert('ℝ', " tập số thực "); m.insert('ℕ', " tập số tự nhiên ");
-    m.insert('ℤ', " tập số nguyên "); m.insert('ℚ', " tập số hữu tỉ ");
+    m.insert('ℝ', " tập số thực ");
+    m.insert('ℕ', " tập số tự nhiên ");
+    m.insert('ℤ', " tập số nguyên ");
+    m.insert('ℚ', " tập số hữu tỉ ");
     m.insert('ℂ', " tập số phức ");
-    m.insert('½', " một phần hai "); m.insert('¼', " một phần tư "); m.insert('¾', " ba phần tư ");
-    m.insert('⅓', " một phần ba "); m.insert('⅔', " hai phần ba ");
-    m.insert('⅕', " một phần năm "); m.insert('⅖', " hai phần năm "); m.insert('⅗', " ba phần năm "); m.insert('⅘', " bốn phần năm ");
-    m.insert('⅙', " một phần sáu "); m.insert('⅚', " năm phần sáu ");
-    m.insert('⅛', " một phần tám "); m.insert('⅜', " ba phần tám ");
-    m.insert('⅝', " năm phần tám "); m.insert('⅞', " bảy phần tám ");
+    m.insert('½', " một phần hai ");
+    m.insert('¼', " một phần tư ");
+    m.insert('¾', " ba phần tư ");
+    m.insert('⅓', " một phần ba ");
+    m.insert('⅔', " hai phần ba ");
+    m.insert('⅕', " một phần năm ");
+    m.insert('⅖', " hai phần năm ");
+    m.insert('⅗', " ba phần năm ");
+    m.insert('⅘', " bốn phần năm ");
+    m.insert('⅙', " một phần sáu ");
+    m.insert('⅚', " năm phần sáu ");
+    m.insert('⅛', " một phần tám ");
+    m.insert('⅜', " ba phần tám ");
+    m.insert('⅝', " năm phần tám ");
+    m.insert('⅞', " bảy phần tám ");
     m
 });
 
 pub static SUPERSCRIPTS_MAP: Lazy<HashMap<char, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    m.insert('⁰', " không "); m.insert('¹', " một "); m.insert('²', " bình phương ");
+    m.insert('⁰', " không ");
+    m.insert('¹', " một ");
+    m.insert('²', " bình phương ");
     m.insert('³', " lập phương ");
     // ⁴-⁹ are read as "mũ X". ² and ³ keep the idiomatic Vietnamese forms
     // "bình phương" and "lập phương".
-    m.insert('⁴', " mũ bốn "); m.insert('⁵', " mũ năm ");
-    m.insert('⁶', " mũ sáu "); m.insert('⁷', " mũ bảy "); m.insert('⁸', " mũ tám ");
+    m.insert('⁴', " mũ bốn ");
+    m.insert('⁵', " mũ năm ");
+    m.insert('⁶', " mũ sáu ");
+    m.insert('⁷', " mũ bảy ");
+    m.insert('⁸', " mũ tám ");
     m.insert('⁹', " mũ chín ");
-    m.insert('ⁿ', " mũ n "); m.insert('ⁱ', " mũ i ");
+    m.insert('ⁿ', " mũ n ");
+    m.insert('ⁱ', " mũ i ");
     // A lone superscript sign; the "⁻³" cluster is handled earlier by the
     // signed-exponent pass.
-    m.insert('⁻', " trừ "); m.insert('⁺', " cộng ");
+    m.insert('⁻', " trừ ");
+    m.insert('⁺', " cộng ");
     // Modifier-letter exponents ("2ˣ = 32", "eˣ"), previously deleted.
-    m.insert('ˣ', " mũ x "); m.insert('ʸ', " mũ y "); m.insert('ᵏ', " mũ k ");
+    m.insert('ˣ', " mũ x ");
+    m.insert('ʸ', " mũ y ");
+    m.insert('ᵏ', " mũ k ");
     m.insert('ᵗ', " mũ t ");
     m
 });
 
 pub static SUBSCRIPTS_MAP: Lazy<HashMap<char, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    m.insert('₀', " không "); m.insert('₁', " một "); m.insert('₂', " hai ");
-    m.insert('₃', " ba "); m.insert('₄', " bốn "); m.insert('₅', " năm ");
-    m.insert('₆', " sáu "); m.insert('₇', " bảy "); m.insert('₈', " tám ");
+    m.insert('₀', " không ");
+    m.insert('₁', " một ");
+    m.insert('₂', " hai ");
+    m.insert('₃', " ba ");
+    m.insert('₄', " bốn ");
+    m.insert('₅', " năm ");
+    m.insert('₆', " sáu ");
+    m.insert('₇', " bảy ");
+    m.insert('₈', " tám ");
     m.insert('₉', " chín ");
     // Letter subscripts (aᵢ, xₙ) read by letter name; previously deleted.
-    m.insert('ᵢ', " i "); m.insert('ⱼ', " j "); m.insert('ₐ', " a "); m.insert('ₑ', " e ");
-    m.insert('ₒ', " o "); m.insert('ₓ', " x "); m.insert('ₕ', " h "); m.insert('ₖ', " k ");
-    m.insert('ₗ', " l "); m.insert('ₘ', " m "); m.insert('ₙ', " n "); m.insert('ₚ', " p ");
-    m.insert('ₛ', " s "); m.insert('ₜ', " t "); m.insert('ᵣ', " r "); m.insert('ᵤ', " u ");
-    m.insert('ᵥ', " v "); m.insert('₊', " cộng "); m.insert('₋', " trừ ");
+    m.insert('ᵢ', " i ");
+    m.insert('ⱼ', " j ");
+    m.insert('ₐ', " a ");
+    m.insert('ₑ', " e ");
+    m.insert('ₒ', " o ");
+    m.insert('ₓ', " x ");
+    m.insert('ₕ', " h ");
+    m.insert('ₖ', " k ");
+    m.insert('ₗ', " l ");
+    m.insert('ₘ', " m ");
+    m.insert('ₙ', " n ");
+    m.insert('ₚ', " p ");
+    m.insert('ₛ', " s ");
+    m.insert('ₜ', " t ");
+    m.insert('ᵣ', " r ");
+    m.insert('ᵤ', " u ");
+    m.insert('ᵥ', " v ");
+    m.insert('₊', " cộng ");
+    m.insert('₋', " trừ ");
     m
 });
 
 pub static WORD_LIKE_ACRONYMS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     let mut s = HashSet::new();
     let words = [
-        "UNESCO", "NASA", "NATO", "ASEAN", "OPEC", "SARS", "FIFA", "UNIC", "RAM", "VRAM", "COVID", "IELTS", "STEM",
+        "UNESCO",
+        "NASA",
+        "NATO",
+        "ASEAN",
+        "OPEC",
+        "SARS",
+        "FIFA",
+        "UNIC",
+        "RAM",
+        "VRAM",
+        "COVID",
+        "IELTS",
+        "STEM",
         // "ROM" belongs beside "RAM": both are said as a syllable, not spelled.
         "ROM",
         "ISO",
@@ -473,32 +732,133 @@ pub static WORD_LIKE_ACRONYMS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
         // entry and still matches first.
         "SEA",
         // Sport, organisations, examinations, everyday life — all read as words.
-        "UEFA", "EURO", "VAR", "ASIAD", "INTERPOL", "UNICEF",
-        "TOEFL", "TOEIC", "PISA", "STEAM", "SAT", "GMAT",
+        "UEFA",
+        "EURO",
+        "VAR",
+        "ASIAD",
+        "INTERPOL",
+        "UNICEF",
+        "TOEFL",
+        "TOEIC",
+        "PISA",
+        "STEAM",
+        "SAT",
+        "GMAT",
         // Said as a word in Vietnamese finance ("ê-bít-đa"), not spelled out;
         // the English dictionary has it as ˈɛbɪtdə.
         "EBITDA",
-        "AIDS", "MERS", "ECMO", "LASIK",
-        "FED", "NASDAQ", "UPCOM", "FOMO", "YOLO", "ASAP",
-        "RADAR", "LASER", "LIDAR", "SONAR", "SCUBA", "GIF", "JPEG", "UNIX", "WIFI",
-        "SIM", "LED", "VIP", "SPA", "GYM", "POS",
-        "SWAT", "SEAL", "WASP", "COBOL", "BASIC", "OLED", "COVAX", "BRICS", "APEC", "VUCA", "PERMA", "DINK",
-        "MENA", "EPIC", "OASIS", "BASE", "DART", "IDEA", "CHAOS", "SMART", "FANG", "BLEU", "REST", "ERROR",
+        "AIDS",
+        "MERS",
+        "ECMO",
+        "LASIK",
+        "FED",
+        "NASDAQ",
+        "UPCOM",
+        "FOMO",
+        "YOLO",
+        "ASAP",
+        "RADAR",
+        "LASER",
+        "LIDAR",
+        "SONAR",
+        "SCUBA",
+        "GIF",
+        "JPEG",
+        "UNIX",
+        "WIFI",
+        "SIM",
+        "LED",
+        "VIP",
+        "SPA",
+        "GYM",
+        "POS",
+        "SWAT",
+        "SEAL",
+        "WASP",
+        "COBOL",
+        "BASIC",
+        "OLED",
+        "COVAX",
+        "BRICS",
+        "APEC",
+        "VUCA",
+        "PERMA",
+        "DINK",
+        "MENA",
+        "EPIC",
+        "OASIS",
+        "BASE",
+        "DART",
+        "IDEA",
+        "CHAOS",
+        "SMART",
+        "FANG",
+        "BLEU",
+        "REST",
+        "ERROR",
         // Machine learning and modern software, all said as words rather than
         // spelled. "GAN" is the urgent one: "gan" is a valid syllable AND a
         // Vietnamese dictionary word, so without an entry the arbiter read the
         // network as the organ — the same trap that once made "MIT" -> "mít".
-        "SOTA", "BERT", "RAG", "ONNX", "ReLU", "ELO", "CAPTCHA",
+        "SOTA",
+        "BERT",
+        "RAG",
+        "ONNX",
+        "ReLU",
+        "ELO",
+        "CAPTCHA",
         // Pronounceable acronyms from other fields, spelled out until now:
         // "ELISA" was "e lờ i ét a". "PET" is here rather than left to the
         // arbiter because "pet" is not a Vietnamese word, so nothing else
         // stops it being spelled.
-        "ELISA", "SCADA", "MOSFET", "NEET", "REIT", "EBIT", "GINI", "NSAID", "PET",
-        "SELECT", "FROM", "WHERE", "ORDER", "BY", "LIMIT", "OFFSET", "GROUP", "HAVING", "JOIN", "LEFT", "RIGHT", 
-        "INNER", "OUTER", "ON", "AS", "AND", "OR", "NOT", "IN", "BETWEEN", "LIKE", "IS", "NULL", "TRUE", "FALSE", 
-        "CASE", "WHEN", "THEN", "ELSE", "END", "UNION", "INTERSECT", "EXCEPT", "DESC"
+        "ELISA",
+        "SCADA",
+        "MOSFET",
+        "NEET",
+        "REIT",
+        "EBIT",
+        "GINI",
+        "NSAID",
+        "PET",
+        "SELECT",
+        "FROM",
+        "WHERE",
+        "ORDER",
+        "BY",
+        "LIMIT",
+        "OFFSET",
+        "GROUP",
+        "HAVING",
+        "JOIN",
+        "LEFT",
+        "RIGHT",
+        "INNER",
+        "OUTER",
+        "ON",
+        "AS",
+        "AND",
+        "OR",
+        "NOT",
+        "IN",
+        "BETWEEN",
+        "LIKE",
+        "IS",
+        "NULL",
+        "TRUE",
+        "FALSE",
+        "CASE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "END",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+        "DESC",
     ];
-    for w in words { s.insert(w); }
+    for w in words {
+        s.insert(w);
+    }
     s
 });
 
@@ -511,10 +871,12 @@ pub static WORD_LIKE_ACRONYMS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 pub static ENGLISH_AMPERSAND: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     let mut s = HashSet::new();
     let words = [
-        "RD", "MA", "SP", "PG", "ATT", "HM", "FB", "QA", "RB", "TC",
-        "JJ", "PL", "MM", "BW", "GT", "AE", "BQ", "DG", "SM", "BB", "PC",
+        "RD", "MA", "SP", "PG", "ATT", "HM", "FB", "QA", "RB", "TC", "JJ", "PL", "MM", "BW", "GT",
+        "AE", "BQ", "DG", "SM", "BB", "PC",
     ];
-    for w in words { s.insert(w); }
+    for w in words {
+        s.insert(w);
+    }
     s
 });
 
@@ -555,11 +917,9 @@ pub static ACRONYMS_SPELL_EN: &[&str] = &[
     "IT", "US", "UK", "AI", "ID", "IP", "PC", "TV", "CD", "DVD",
     // "CI" travels with "CD" ("quy trình CI/CD"); without an entry the pair read
     // "xê i trên c d", one half Vietnamese and the other English.
-    "CI",
-    "USB", "GPS", "SUV", "CEO", "CFO", "CTO", "GDP", "FBI", "CIA", "NBA",
+    "CI", "USB", "GPS", "SUV", "CEO", "CFO", "CTO", "GDP", "FBI", "CIA", "NBA",
     // "URL" is read "u rờ lờ" in Vietnamese, so it takes the default too.
-    "DJ", "IQ", "EQ", "MV", "EP", "SEO", "AM", "PM",
-    "NY", "HP",
+    "DJ", "IQ", "EQ", "MV", "EP", "SEO", "AM", "PM", "NY", "HP",
     // Foreign universities, organisations and brands. Unlike BA/CO/MA (which
     // compete with real Vietnamese words), these have no Vietnamese reading
     // to lose, so pinning them costs nothing. Listed even when the fallback
@@ -569,34 +929,31 @@ pub static ACRONYMS_SPELL_EN: &[&str] = &[
     // "WHO" and "WTO" are deliberately absent: Vietnamese reads both with
     // Vietnamese letter names ("vê kép hát ô", "vê kép tê ô"), which is what
     // the default now gives. The rest of the UN family stays English.
-    "UN", "IMF", "WB", "ADB", "OECD", "UNDP", "UNHCR", "ILO", "IAEA",
-    "IBM", "BMW", "LG", "MSI", "AMD", "TSMC", "VW", "GM",
-    "BBC", "CNN", "HBO", "MTV", "ESPN", "NFL", "MLB", "UFC", "PSG",
+    "UN", "IMF", "WB", "ADB", "OECD", "UNDP", "UNHCR", "ILO", "IAEA", "IBM", "BMW", "LG", "MSI",
+    "AMD", "TSMC", "VW", "GM", "BBC", "CNN", "HBO", "MTV", "ESPN", "NFL", "MLB", "UFC", "PSG",
     "HSBC", "ANZ", "UOB", "DBS", "KFC",
     // ── Added when the default flipped to Vietnamese letter names ───────────
     // Everything below used to reach the English reading through the fallback.
     // Computing and the web, where the English letters are what practitioners
     // and advertising both say.
-    "API", "SDK", "CPU", "GPU", "SSD", "HDD", "OS", "SSL", "HTTP", "HTML",
-    "CSS", "SQL", "XML", "DNS", "LAN", "HDMI", "UI", "UX", "QR", "NFC",
-    "VR", "AR", "GPT", "LLM", "OCR", "SMS", "MMS", "CMS", "CRM", "ERP",
+    "API", "SDK", "CPU", "GPU", "SSD", "HDD", "OS", "SSL", "HTTP", "HTML", "CSS", "SQL", "XML",
+    "DNS", "LAN", "HDMI", "UI", "UX", "QR", "NFC", "VR", "AR", "GPT", "LLM", "OCR", "SMS", "MMS",
+    "CMS", "CRM", "ERP",
     // Data sizes. "GB" is more often said "gi ga bai" than spelled at all;
     // listing it here only preserves the previous reading rather than claiming
     // it is right — a Fixed entry per unit would be the real fix.
-    "GB", "TB", "MB", "KB",
-    // Business, finance and currency codes.
-    "KPI", "OKR", "IPO", "NDA", "MOU", "SME", "CV", "MBA", "ROE",
-    "USD", "EUR", "GBP", "JPY", "CNY",
-    // Media, entertainment and remaining brands.
+    "GB", "TB", "MB", "KB", // Business, finance and currency codes.
+    "KPI", "OKR", "IPO", "NDA", "MOU", "SME", "CV", "MBA", "ROE", "USD", "EUR", "GBP", "JPY",
+    "CNY", // Media, entertainment and remaining brands.
     "MC", "VJ", "BTS", "ASMR", "AFK", "GPA", "CBRE", "KOL", "PT",
     // Hardware, networking and medical imaging. Foreign coinages that never
     // acquired a Vietnamese letter reading: "máy ATM", "máy CNC", "xét nghiệm
     // PCR" and "dùng VPN" are all said with English letters.
-    "ATM", "VPN", "CNC", "PCR", "LCD", "RGB", "IPS", "VGA", "FPS",
-    "FTP", "MRI", "CT", "ECG", "EEG", "ICU", "BMI", "IVF", "HPV",
+    "ATM", "VPN", "CNC", "PCR", "LCD", "RGB", "IPS", "VGA", "FPS", "FTP", "MRI", "CT", "ECG", "EEG",
+    "ICU", "BMI", "IVF", "HPV",
     // Economics and markets, where the English letters came in with the term.
-    "CPI", "FDI", "ODA", "FTA", "ETF", "ROA", "EPS",
-    "ASR", "TTS", "AQI", "CTR", "ROAS", "ML", "DB", "RTX", "MRSA", "ASQ",
+    "CPI", "FDI", "ODA", "FTA", "ETF", "ROA", "EPS", "ASR", "TTS", "AQI", "CTR", "ROAS", "ML", "DB",
+    "RTX", "MRSA", "ASQ",
     // Machine learning initialisms. Spelled, but with ENGLISH letter names —
     // Vietnamese practitioners say "eo-ét-ti-em", not "lờ ét tê mờ".
     "LSTM", "RNN", "NLP", "TPU", "SLM", "WER", "CER", "VAE", "MoE",
@@ -647,16 +1004,24 @@ pub static VI_ABBREV: Lazy<AbbrevTable> = Lazy::new(|| {
         t.insert(k, Reading::Expand(v));
     }
     for (k, v) in TECHNICAL_TERMS.iter() {
-        if !t.contains(k) { t.insert(k, Reading::Fixed(v)); }
+        if !t.contains(k) {
+            t.insert(k, Reading::Fixed(v));
+        }
     }
     for k in WORD_LIKE_ACRONYMS.iter() {
-        if !t.contains(k) { t.insert(*k, Reading::WordEn); }
+        if !t.contains(k) {
+            t.insert(*k, Reading::WordEn);
+        }
     }
     for k in ACRONYMS_SPELL_EN {
-        if !t.contains(k) { t.insert(k, Reading::LettersEn); }
+        if !t.contains(k) {
+            t.insert(k, Reading::LettersEn);
+        }
     }
     for k in ACRONYMS_SPELL_VI {
-        if !t.contains(k) { t.insert(k, Reading::LettersNative); }
+        if !t.contains(k) {
+            t.insert(k, Reading::LettersNative);
+        }
     }
     t
 });
@@ -671,11 +1036,33 @@ pub static COMBINED_EXCEPTIONS: Lazy<HashMap<String, String>> = Lazy::new(|| {
 pub static DATE_KEYWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     let mut s = HashSet::new();
     let words = [
-        "vào", "ngày", "hôm", "hôm nay", "hôm qua", "hôm kia", "mai", "ngày mai", "ngày kia",
-        "sinh", "sinh nhật", "kỷ niệm", "lễ", "tết", "diễn ra", "tổ chức", "thứ", "tuần", "tháng", "năm",
-        "phiên", "mùng", "mồng"
+        "vào",
+        "ngày",
+        "hôm",
+        "hôm nay",
+        "hôm qua",
+        "hôm kia",
+        "mai",
+        "ngày mai",
+        "ngày kia",
+        "sinh",
+        "sinh nhật",
+        "kỷ niệm",
+        "lễ",
+        "tết",
+        "diễn ra",
+        "tổ chức",
+        "thứ",
+        "tuần",
+        "tháng",
+        "năm",
+        "phiên",
+        "mùng",
+        "mồng",
     ];
-    for w in words { s.insert(w); }
+    for w in words {
+        s.insert(w);
+    }
     s
 });
 
@@ -692,7 +1079,9 @@ pub static DATE_LEAD_WORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
         // Time markers: "trước 30/4", "từ 1/8", "hết 31/8", "hạn 20/11".
         "trước", "từ", "hết", "hạn", "đợt", "nghỉ", "lúc",
     ];
-    for w in words { s.insert(w); }
+    for w in words {
+        s.insert(w);
+    }
     s
 });
 
@@ -706,26 +1095,83 @@ pub static DATE_LEAD_WORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 pub static ROMAN_KEYWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     let mut s = HashSet::new();
     let words = [
-        "kỷ", "kỉ", "chương", "phần", "hồi", "quyển", "tập", "kỳ", "kì",
-        "khoản", "điều", "mục", "đời", "vua", "chiến", "hội", "khóa", "khoá",
-        "đệ", "triều", "quý", "lần", "vòng", "thứ",
+        "kỷ",
+        "kỉ",
+        "chương",
+        "phần",
+        "hồi",
+        "quyển",
+        "tập",
+        "kỳ",
+        "kì",
+        "khoản",
+        "điều",
+        "mục",
+        "đời",
+        "vua",
+        "chiến",
+        "hội",
+        "khóa",
+        "khoá",
+        "đệ",
+        "triều",
+        "quý",
+        "lần",
+        "vòng",
+        "thứ",
         // Names of monarchs and popes, which regularly carry Roman numerals.
         // Safe to list because only an uppercase numeral directly after them
         // can match.
-        "louis", "napoléon", "napoleon", "henry", "george", "charles",
-        "elizabeth", "edward", "william", "james", "richard", "john",
-        "philip", "philippe", "frederick", "ferdinand", "peter", "pierre",
-        "catherine", "pius", "benedict", "leo", "gregory", "otto",
+        "louis",
+        "napoléon",
+        "napoleon",
+        "henry",
+        "george",
+        "charles",
+        "elizabeth",
+        "edward",
+        "william",
+        "james",
+        "richard",
+        "john",
+        "philip",
+        "philippe",
+        "frederick",
+        "ferdinand",
+        "peter",
+        "pierre",
+        "catherine",
+        "pius",
+        "benedict",
+        "leo",
+        "gregory",
+        "otto",
     ];
-    for w in words { s.insert(w); }
+    for w in words {
+        s.insert(w);
+    }
     s
 });
 
 pub static MATH_KEYWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     let mut s = HashSet::new();
     let words = [
-        "cộng", "trừ", "nhân", "chia", "bằng", "sin", "cos", "tan", "log", "sqrt", "xác suất", "tỷ lệ", "tỉ lệ"
+        "cộng",
+        "trừ",
+        "nhân",
+        "chia",
+        "bằng",
+        "sin",
+        "cos",
+        "tan",
+        "log",
+        "sqrt",
+        "xác suất",
+        "tỷ lệ",
+        "tỉ lệ",
     ];
-    for w in words { s.insert(w); }
+    for w in words {
+        s.insert(w);
+    }
     s
 });

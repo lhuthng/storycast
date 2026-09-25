@@ -8,6 +8,7 @@ mod digest;
 mod help;
 mod jobs;
 mod machine;
+pub(crate) mod mouse;
 mod normal;
 mod picker;
 mod policy;

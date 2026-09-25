@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 /// proper-name token ("Lý cô nương", "Dịch sư phụ", "lão Ngô", "nữ tử áo
 /// trắng") stay: the name does the identifying.
 /// Names themselves are never touched by this list — only `proper_aliases`.
-const ALIAS_STOP: [&str; 54] = [
+const ALIAS_STOP: [&str; 75] = [
     "hắn",
     "nàng",
     "ta",
@@ -44,6 +44,8 @@ const ALIAS_STOP: [&str; 54] = [
     "cháu gái",
     "tiểu thư",
     "công tử",
+    "tiểu nam hài",
+    "nữ nhân này",
     // Titles and offices: every sect has one, and offices change hands.
     "tiền bối",
     "sư phụ",
@@ -54,6 +56,10 @@ const ALIAS_STOP: [&str; 54] = [
     "thánh nữ",
     "phu nhân",
     "lão gia",
+    "các hạ",
+    "đại vương",
+    "vương",
+    "tiên nữ",
     // Roles and relations: generic by definition.
     "thuộc hạ",
     "quản gia",
@@ -61,6 +67,18 @@ const ALIAS_STOP: [&str; 54] = [
     "lão già",
     "lão giả",
     "lão đầu",
+    // Kinship and address: who the word points at is decided by who is
+    // speaking, so storing it hands every future speaker's master, brother or
+    // disciple to whichever character claimed the word first. "sư phụ" was
+    // here already; the rest of the family belongs with it.
+    "đồ nhi",
+    "đệ tử",
+    "sư điệt",
+    "ca ca",
+    "đại ca",
+    "hiền đệ",
+    "hiền huynh",
+    "lão hữu",
     // Self-references: first-person pronouns wearing a noun's clothes.
     "bản tôn",
     "bổn hoàng",
@@ -70,7 +88,14 @@ const ALIAS_STOP: [&str; 54] = [
     "một thanh niên",
     "một phàm nhân",
     "phàm nhân này",
+    "bọn họ",
+    "thiếu niên này",
+    "vị thiếu niên này",
+    "hai vị cô nương",
+    "hai cô gái",
     // Species nouns used as names: any second dog/crow/centipede hijacks them.
+    "chó",
+    "tiểu cẩu",
     "chú chó",
     "con chó",
     "cẩu nhi",
@@ -256,10 +281,18 @@ fn alias_owner(form: &str, owner: &str, bible: &Value) -> Option<String> {
         })
 }
 
+/// Whether a surface form's owner depends on the local scene rather than the
+/// form itself. These are safe to interpret from nearby narration, but unsafe
+/// to store in a chapter-wide map: `Đồ nhi` may address Chung Thanh in one
+/// exchange and Lạc Lan Tuyết in another in the same chapter.
+pub(crate) fn is_scenario_dependent(form: &str) -> bool {
+    ALIAS_STOP.contains(&form.trim().to_lowercase().as_str())
+}
+
 /// Proper-name forms may join the bible; pronouns/generics stay chapter-local.
 fn promotable(form: &str, owner: &str, bible: &Value, log: &mut Vec<String>) -> Option<String> {
     let f = form.trim();
-    if f.is_empty() || ALIAS_STOP.contains(&f.to_lowercase().as_str()) || f.chars().count() < 2 {
+    if f.is_empty() || is_scenario_dependent(f) || f.chars().count() < 2 {
         return None;
     }
     if let Some(conflict) = alias_owner(f, owner, bible) {
@@ -309,6 +342,27 @@ fn attach_aliases(
     }
 }
 
+/// Drop the stop-listed forms from one character's alias list, keeping the
+/// character's own name even when the words are generic ("Quản gia" is
+/// somebody's name — identity beats ambiguity).
+///
+/// **One implementation, two callers, and that is the point.** A scrub and a
+/// reconcile fold have to agree on what may sit in `proper_aliases`, or the
+/// fold re-imports exactly the generic the scrub just removed. That was the
+/// hole: `apply_merges` copied the absorbed entry's aliases wholesale, so a
+/// scrub could never win — bare "sư phụ" / "tiểu thư" kept coming back onto
+/// the wrong character, and `validate_digest_identity` then read them as
+/// exclusive ownership, failing a *correct* chapter-local resolution
+/// ("sư phụ" is whoever is speaking's own master) as
+/// `mention "sư phụ" is owned by {"Thanh Sơn lão tổ"}, not "Dịch Phong"`.
+fn strip_stopped_aliases(name: &str, aliases: &mut Vec<String>) {
+    let name_low = name.trim().to_lowercase();
+    aliases.retain(|a| {
+        let low = a.trim().to_lowercase();
+        low == name_low || !ALIAS_STOP.contains(&low.as_str())
+    });
+}
+
 /// Drop ambiguous surface forms from every character's `proper_aliases`.
 ///
 /// The legacy this cleans: `merge_bible` used to attach bare generics before
@@ -334,28 +388,24 @@ pub fn scrub_ambiguous_aliases(bible: &mut Value) -> Vec<String> {
         let Some(aliases) = c.get_mut("proper_aliases").and_then(|a| a.as_array_mut()) else {
             continue;
         };
-        let before = aliases.len();
-        aliases.retain(|a| {
-            let Some(form) = a.as_str() else {
-                return true;
-            };
-            let low = form.trim().to_lowercase();
-            // Identity beats ambiguity: a character keeps its own name.
-            if low == name.trim().to_lowercase() {
-                return true;
-            }
-            !ALIAS_STOP.contains(&low.as_str())
-        });
-        if aliases.len() < before {
-            let kept: Vec<&str> = aliases
-                .iter()
-                .filter_map(|a| a.as_str())
-                .collect();
-            log.push(format!(
-                "   bible scrub {name:?}: dropped {} ambiguous alias(es), kept {kept:?}",
-                before - aliases.len()
-            ));
+        let mut forms: Vec<String> = aliases
+            .iter()
+            .filter_map(|a| a.as_str().map(String::from))
+            .collect();
+        let before = forms.len();
+        strip_stopped_aliases(&name, &mut forms);
+        if forms.len() == before {
+            continue;
         }
+        let kept = forms.clone();
+        aliases.clear();
+        for f in forms {
+            aliases.push(json!(f));
+        }
+        log.push(format!(
+            "   bible scrub {name:?}: dropped {} ambiguous alias(es), kept {kept:?}",
+            before - kept.len()
+        ));
     }
     log
 }
@@ -363,6 +413,16 @@ pub fn scrub_ambiguous_aliases(bible: &mut Value) -> Vec<String> {
 /// Fold a digest's new-character/alias findings into the shared bible.
 pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String> {
     let mut log = Vec::new();
+
+    // Heal before writing. A bible polluted by an older merge keeps a bare
+    // generic on the wrong character for ever otherwise: the scrub was reachable
+    // only through an operator's `:reconcile` press, and a fold then handed the
+    // same words back, so the entry could never be cleaned and the ownership
+    // check went on failing *correct* chapter-local resolutions. The bible has
+    // exactly one writer, so cleaning it here is the same guarantee the merges
+    // below already have — and it costs nothing on a clean bible, because the
+    // scrub is idempotent.
+    log.extend(scrub_ambiguous_aliases(bible));
 
     let new_chars = data
         .get("new_characters")
@@ -591,6 +651,8 @@ pub fn apply_merges(bible: &mut Value, merges: &[BibleMerge]) -> (Vec<BibleMerge
                     aliases.push(a);
                 }
             }
+            // A fold must not re-import a generic a scrub just removed.
+            strip_stopped_aliases(canonical, &mut aliases);
             target["proper_aliases"] = json!(aliases);
             let mut seen: Vec<String> = target
                 .get("chapters_seen")
@@ -953,5 +1015,77 @@ mod tests {
         );
         // Second run is a no-op: the scrub is idempotent.
         assert!(scrub_ambiguous_aliases(&mut bible).is_empty());
+    }
+
+    #[test]
+    fn a_fold_never_re_imports_a_generic_alias() {
+        // The hole a scrub could never win through: `apply_merges` copied the
+        // absorbed entry's aliases wholesale, so "Sư phụ" came back onto the
+        // character every reconcile had just removed it from — and
+        // `validate_digest_identity` then read it as exclusive ownership.
+        let mut bible = json!({"characters": [
+            {"name": "Thanh Sơn lão tổ", "proper_aliases":
+                ["Thanh Sơn lão tổ", "Sư phụ", "sư tôn"]},
+            {"name": "Thanh Sơn", "proper_aliases": ["lão đầu", "Lục Thanh Sơn"]},
+        ]});
+        let merges = vec![(
+            "Thanh Sơn lão tổ".to_string(),
+            vec!["Thanh Sơn".to_string()],
+        )];
+        let (applied, _) = apply_merges(&mut bible, &merges);
+        assert_eq!(applied.len(), 1, "the fold applied");
+        let aliases = alias_list(&bible, "Thanh Sơn lão tổ");
+        for generic in ["Sư phụ", "sư tôn", "lão đầu"] {
+            assert!(
+                !aliases.iter().any(|a| a == generic),
+                "{generic:?} must not survive the fold: {aliases:?}"
+            );
+        }
+        assert!(
+            aliases.contains(&"Lục Thanh Sơn".to_string()),
+            "a proper name still joins: {aliases:?}"
+        );
+    }
+
+    #[test]
+    fn merge_bible_heals_an_already_polluted_alias_list() {
+        // Nobody presses reconcile on a machine nobody drives, so the legacy
+        // pollution has to be cleaned by the writer that already runs: the
+        // merge on every digest completion.
+        let mut bible = json!({"characters": [{
+            "name": "Thanh Sơn lão tổ", "personality": "p", "voice_hint": "elderly male",
+            "tags": [], "proper_aliases":
+                ["Thanh Sơn lão tổ", "Sư phụ", "tiểu thư", "Lục Thanh Sơn"],
+            "first_seen": "01", "chapters_seen": []
+        }]});
+        let data = json!({
+            "new_characters": [], "new_aliases": {},
+            "roster": ["Thanh Sơn lão tổ"], "segments": []
+        });
+        let log = merge_bible(&mut bible, &data, "01");
+        assert_eq!(
+            alias_list(&bible, "Thanh Sơn lão tổ"),
+            vec!["Thanh Sơn lão tổ", "Lục Thanh Sơn"],
+            "the generic goes, the name stays"
+        );
+        assert!(
+            log.iter().any(|l| l.contains("scrub")),
+            "the repair is said out loud: {log:?}"
+        );
+    }
+
+    /// The alias list of the named character, as owned strings.
+    fn alias_list(bible: &Value, name: &str) -> Vec<String> {
+        bible["characters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap()["proper_aliases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.as_str().map(String::from))
+            .collect()
     }
 }

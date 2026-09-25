@@ -1,7 +1,7 @@
 //! Machines pane.
 use crate::tui::style::Conn;
 use crate::tui::{
-    app::App,
+    app::{App, Panel},
     layout::COMPACT_MACHINE_COLS,
     model::{clamp_scroll, live_workers, machine_kind, machine_label, policy_summary},
     style::{
@@ -31,7 +31,7 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
     };
     // The right-hand title is the cluster count, where an operator checks
     // "how many boxes am I actually running" without counting rows.
-    let block = super::pane_block(app, title)
+    let block = super::pane_block_for(app, Some(Panel::Machines), title)
         .border_style(border)
         .title_bottom(Line::from(format!("{} up", app.machines.len())).right_aligned());
 
@@ -127,4 +127,5 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
         .header(Row::new(header).style(style_bold_of(colour, Color::Gray)))
         .block(block);
     f.render_widget(table, area);
+    super::draw_fixed_scrollbar(f, app, area, start, len);
 }

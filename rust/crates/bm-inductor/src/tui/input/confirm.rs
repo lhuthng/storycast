@@ -75,7 +75,10 @@ pub(crate) async fn key_confirm(
                 }
                 ConfirmAction::RelinkMachine { old_addr } => {
                     let Some(m) = app.machine_by_addr(&old_addr).cloned() else {
-                        app.set_status(Level::Warn, format!("{old_addr} is no longer in the registry"));
+                        app.set_status(
+                            Level::Warn,
+                            format!("{old_addr} is no longer in the registry"),
+                        );
                         return true;
                     };
                     dispatch(

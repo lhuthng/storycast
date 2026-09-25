@@ -61,33 +61,46 @@ static VI_LETTER_SET: Lazy<HashSet<char>> = Lazy::new(|| VI_LETTERS.chars().coll
 static IRREDUCIBLE: Lazy<HashMap<char, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
     // German sharp s. "Straße" -> "Strasse", the accepted ASCII spelling.
-    m.insert('ß', "ss"); m.insert('ẞ', "SS");
+    m.insert('ß', "ss");
+    m.insert('ẞ', "SS");
     // Nordic o with stroke: Ø / ø.
-    m.insert('ø', "o"); m.insert('Ø', "O");
-    m.insert('ǿ', "o"); m.insert('Ǿ', "O");
+    m.insert('ø', "o");
+    m.insert('Ø', "O");
+    m.insert('ǿ', "o");
+    m.insert('Ǿ', "O");
     // Ligatures.
-    m.insert('æ', "ae"); m.insert('Æ', "AE");
-    m.insert('œ', "oe"); m.insert('Œ', "OE");
+    m.insert('æ', "ae");
+    m.insert('Æ', "AE");
+    m.insert('œ', "oe");
+    m.insert('Œ', "OE");
     // Polish l with stroke: "Łódź" -> "Lodz".
-    m.insert('ł', "l"); m.insert('Ł', "L");
+    m.insert('ł', "l");
+    m.insert('Ł', "L");
     // Icelandic thorn and eth. Note that Croatian "đ" is NOT here: it is a
     // Vietnamese letter, already pronounceable, and VI_LETTERS keeps it.
-    m.insert('þ', "th"); m.insert('Þ', "TH");
-    m.insert('ð', "d"); m.insert('Ð', "D");
+    m.insert('þ', "th");
+    m.insert('Þ', "TH");
+    m.insert('ð', "d");
+    m.insert('Ð', "D");
     // Maltese and Sami strokes.
-    m.insert('ħ', "h"); m.insert('Ħ', "H");
-    m.insert('ŧ', "t"); m.insert('Ŧ', "T");
+    m.insert('ħ', "h");
+    m.insert('Ħ', "H");
+    m.insert('ŧ', "t");
+    m.insert('Ŧ', "T");
     // Turkish dotless i. Its capital "I" is plain ASCII already; the dotted
     // capital "İ" decomposes to I + dot above and needs no entry.
     m.insert('ı', "i");
     // Kra and eng, from older Greenlandic and from Sami orthography.
     m.insert('ĸ', "k");
-    m.insert('ŋ', "ng"); m.insert('Ŋ', "NG");
+    m.insert('ŋ', "ng");
+    m.insert('Ŋ', "NG");
     // Ligatures and typographic leftovers that would otherwise be the only
     // holes in Latin-1 Supplement and Latin Extended-A: Dutch IJ, Catalan
     // l·l, the deprecated 'n, and the long s.
-    m.insert('ĳ', "ij"); m.insert('Ĳ', "IJ");
-    m.insert('ŀ', "l"); m.insert('Ŀ', "L");
+    m.insert('ĳ', "ij");
+    m.insert('Ĳ', "IJ");
+    m.insert('ŀ', "l");
+    m.insert('Ŀ', "L");
     m.insert('ŉ', "n");
     m.insert('ſ', "s");
     m

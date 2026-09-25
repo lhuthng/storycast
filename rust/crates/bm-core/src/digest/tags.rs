@@ -1,6 +1,148 @@
 use super::canon::{resolve_speaker, VI_DIACRITICS};
 use anyhow::{anyhow, Result};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+/// Prompt-side synonyms for the closed sound vocabularies.
+///
+/// Each target must itself be a canonical palette name, effect-pool tag, or
+/// inject-pool sound. Missing files mean there are no aliases, which keeps
+/// existing profiles working.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct TagAliases {
+    pub music: BTreeMap<String, String>,
+    pub effect: BTreeMap<String, String>,
+    pub sound: BTreeMap<String, String>,
+}
+
+impl TagAliases {
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default())
+            }
+            Err(error) => {
+                return Err(anyhow!(
+                    "reading tag aliases from {}: {error}",
+                    path.display()
+                ));
+            }
+        };
+        serde_json::from_str(&text)
+            .map_err(|error| anyhow!("parsing tag aliases from {}: {error}", path.display()))
+    }
+
+    pub fn validate(
+        &self,
+        palette: &[String],
+        effect_tags: &[String],
+        sounds: impl IntoIterator<Item = String>,
+    ) -> Result<()> {
+        fn check(
+            kind: &str,
+            aliases: &BTreeMap<String, String>,
+            canonical: &BTreeSet<String>,
+        ) -> Result<()> {
+            for (alias, target) in aliases {
+                if alias.trim().is_empty() {
+                    anyhow::bail!("{kind} alias has an empty name");
+                }
+                if target.trim().is_empty() {
+                    anyhow::bail!("{kind} alias {alias:?} has an empty target");
+                }
+                if canonical.contains(alias) {
+                    anyhow::bail!("{kind} alias {alias:?} shadows a canonical name");
+                }
+                if !canonical.contains(target) {
+                    anyhow::bail!("{kind} alias {alias:?} points to unknown target {target:?}");
+                }
+            }
+            Ok(())
+        }
+
+        let palette = palette.iter().cloned().collect::<BTreeSet<_>>();
+        let effect_tags = effect_tags.iter().cloned().collect::<BTreeSet<_>>();
+        let sounds = sounds.into_iter().collect::<BTreeSet<_>>();
+        check("music", &self.music, &palette)?;
+        check("effect", &self.effect, &effect_tags)?;
+        check("sound", &self.sound, &sounds)?;
+        Ok(())
+    }
+}
+
+fn canonical_tag<'a>(aliases: &'a BTreeMap<String, String>, value: &str) -> Option<&'a str> {
+    aliases.get(value.trim()).map(String::as_str)
+}
+
+/// Replace known prompt-side synonyms in-place, before any closed-vocabulary
+/// validator sees the script. This keeps the alias decision out of LLM repair
+/// rounds and writes only canonical values to the finished script.
+pub fn apply_tag_aliases(data: &mut Value, aliases: &TagAliases) {
+    let Some(segments) = data.get_mut("segments").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for segment in segments {
+        let Some(segment) = segment.as_object_mut() else {
+            continue;
+        };
+        if let Some(canonical) = segment
+            .get("music")
+            .and_then(Value::as_str)
+            .and_then(|value| canonical_tag(&aliases.music, value))
+        {
+            segment.insert("music".into(), Value::String(canonical.into()));
+        }
+        if let Some(effects) = segment.get_mut("effect").and_then(Value::as_array_mut) {
+            for effect in effects {
+                if let Some(canonical) = effect
+                    .as_str()
+                    .and_then(|value| canonical_tag(&aliases.effect, value))
+                {
+                    *effect = Value::String(canonical.into());
+                }
+            }
+        }
+        // A stop names the same inject vocabulary as its start, so both follow
+        // the same alias map and cannot drift into unmatched names.
+        for key in ["sound", "stop"] {
+            if let Some(canonical) = segment
+                .get(key)
+                .and_then(Value::as_str)
+                .and_then(|value| canonical_tag(&aliases.sound, value))
+            {
+                segment.insert(key.into(), Value::String(canonical.into()));
+            }
+        }
+    }
+}
+
+/// Effect tags are optional scoring hints. Once aliases have run, a tag with
+/// no pooled sound cannot affect the mix, so drop it rather than rejecting the
+/// whole chapter or mapping it to an unrelated ambience. This is deliberately
+/// separate from music/sound validation: those fields choose a required track
+/// and must remain strict.
+pub fn discard_unknown_effect_tags(data: &mut Value, valid_tags: &[String]) {
+    let Some(segments) = data.get_mut("segments").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for segment in segments {
+        let Some(effects) = segment
+            .as_object_mut()
+            .and_then(|segment| segment.get_mut("effect"))
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        effects.retain(|effect| {
+            effect
+                .as_str()
+                .is_some_and(|tag| valid_tags.iter().any(|valid| valid == tag))
+        });
+    }
+}
 
 /// The gender/age prefixes a `voice_hint` is allowed to start with.
 const VOICE_HEADS: [&str; 6] = [
@@ -264,13 +406,20 @@ pub fn validate_script(
         }
     }
 
-    // Every word of the chapter is spoken exactly once: adjacent segments
-    // carrying the same line mean the quote was emitted both as narration and
-    // as dialogue, and the mix would speak it twice in two voices. Non-adjacent
-    // repeats are left alone — a cry repeated pages apart is the chapter's
-    // business — but the same sentence twice in a row is never a decision,
-    // only a split the model failed to make.
-    let mut prev: Option<(usize, String)> = None;
+    // Every word of the chapter is spoken exactly once. Two adjacent segments
+    // carrying the same text is only a fault when they are the SAME source
+    // event: a split that repeated the whole line instead of partitioning it.
+    // The rule originally caught a quote emitted twice — once for its speaker
+    // and once inside a Narrator segment — but `prepare_chapter` now lifts every
+    // quote out of narration before either pass runs, so that shape cannot
+    // reach here. What does reach here is a chapter that genuinely says the
+    // same thing twice, ch6's street crowd calling `"Dịch sư phụ."` on two
+    // consecutive lines: two distinct events, both spoken, and refusing them
+    // stalled the chapter on every racer. Distinct events are left alone; the
+    // source gate still proves no event's text was dropped, doubled or
+    // reordered. Without source ids (a script from the manual prompt) nothing
+    // else can catch the old failure, so the plain adjacency rule stays.
+    let mut prev: Option<(usize, String, Option<String>, String)> = None;
     for (i, s) in segments.iter().enumerate() {
         if crate::util::is_sound_item(s) {
             continue;
@@ -283,14 +432,40 @@ pub fn validate_script(
         if text.is_empty() {
             continue;
         }
-        if let Some((j, ref last)) = prev {
+        let source = s
+            .get("source_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let speaker = s
+            .get("speaker")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if let Some((j, ref last, ref last_source, ref last_speaker)) = prev {
             if *last == text {
-                anyhow::bail!(
-                    "segments {j} and {i} speak the same line twice — a quoted line belongs ONLY to its speaker's segment, never also to a Narrator one"
-                );
+                match (last_source, source.as_deref()) {
+                    (Some(a), Some(b)) if a == b => anyhow::bail!(
+                        "segments {j} and {i} repeat source {a:?} word for word — a split partitions the line into two different halves, it never repeats the whole text"
+                    ),
+                    (Some(_), Some(_)) => {}
+                    _ => {
+                        // ponytail: chorus exception — two different voices saying the
+                        // same line (e.g. "Tiên sinh." x2) is sequential TTS, not a
+                        // Narrator double-speak. Anything involving Narrator or the
+                        // same speaker is still refused.
+                        if !(last_speaker != &speaker
+                            && last_speaker != "Narrator"
+                            && speaker != "Narrator")
+                        {
+                            anyhow::bail!(
+                                "segments {j} and {i} speak the same line twice — a quoted line belongs ONLY to its speaker's segment, never also to a Narrator one"
+                            )
+                        }
+                    }
+                }
             }
         }
-        prev = Some((i, text));
+        prev = Some((i, text, source, speaker));
     }
 
     Ok(())
@@ -591,7 +766,7 @@ fn needs_company(w: &str) -> bool {
 ///
 /// Deliberately untouched: Hừ (contempt — no tag fits), Ừm (a spoken
 /// acknowledgment), exclamations (Ồ, Hả, Trời ơi — spoken words), tongue
-/// clicks, and narration verbs. Only what the prompt's rule 9 names.
+/// clicks, and narration verbs. Only what the prompt's rule 7 names.
 pub fn retag_text(text: &str) -> Option<String> {
     // A tag already present: only trim a matching literal run immediately
     // after it ("[cười] Ha ha ha..." → "[cười]"). Never add a second tag, and
@@ -612,7 +787,10 @@ pub fn retag_text(text: &str) -> Option<String> {
             }
             let run = match kind {
                 0 => match_sound_run(&rest[k..], Sound::Laugh),
-                1 => match_sound_run(&rest[k..], Sound::Sigh),
+                1 => ["một hơi rồi", "một tiếng", "một hơi"]
+                    .iter()
+                    .find_map(|suffix| rest[k..].strip_prefix(suffix).map(|_| k + suffix.len()))
+                    .or_else(|| match_sound_run(&rest[k..], Sound::Sigh)),
                 _ => match_sound_run(&rest[k..], Sound::Cough),
             };
             if let Some(len) = run {
@@ -699,6 +877,30 @@ enum Sound {
 /// punctuation), or `None`. Word boundaries on both sides: `ha` inside
 /// `hai` (number two) or `aha` (eureka) never matches.
 fn match_sound_run(s: &str, kind: Sound) -> Option<usize> {
+    if kind == Sound::Sigh {
+        // The corpus spells a sigh both as the engine tag's own name and as a
+        // written action with a quantifier. Match the longest form first so
+        // `một hơi rồi` cannot leave a grammatical stub behind.
+        for phrase in [
+            "thở dài một hơi rồi",
+            "thở dài một tiếng",
+            "thở dài một hơi",
+            "thở dài",
+        ] {
+            let matches = s
+                .get(..phrase.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(phrase));
+            let boundary = s
+                .get(phrase.len()..)
+                .and_then(|rest| rest.chars().next())
+                .map(|ch| !ch.is_alphabetic())
+                .unwrap_or(true);
+            if matches && boundary {
+                return Some(phrase.len());
+            }
+        }
+    }
+
     let chars: Vec<(usize, char)> = s.char_indices().collect();
     let n = chars.len();
     let mut i = 0usize;
@@ -848,6 +1050,72 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn unknown_effect_tags_are_dropped_after_alias_resolution() {
+        let mut data = json!({
+            "segments": [{
+                "speaker": "Narrator",
+                "text": "Một nhát chém xuống.",
+                "effect": ["battle", "stone", 7]
+            }]
+        });
+        discard_unknown_effect_tags(&mut data, &["battle".into(), "sword".into()]);
+        assert_eq!(data["segments"][0]["effect"], json!(["battle"]));
+    }
+
+    #[test]
+    fn tag_alias_targets_must_be_real_canonical_names() {
+        let aliases: TagAliases = serde_json::from_value(json!({
+            "music": {"calm": "quiet"},
+            "effect": {"people": "crowd"},
+            "sound": {"footsteps": "footstep-stone"}
+        }))
+        .unwrap();
+        aliases
+            .validate(
+                &pal(),
+                &["street", "crowd", "market"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+                ["footstep-stone", "footstep-wood"]
+                    .iter()
+                    .map(|s| s.to_string()),
+            )
+            .unwrap();
+
+        let bad: TagAliases =
+            serde_json::from_value(json!({"music": {"calm": "not-a-palette-name"}})).unwrap();
+        let err = bad
+            .validate(&pal(), &[], std::iter::empty())
+            .expect_err("an unknown target must be caught before a digest starts");
+        assert!(err.to_string().contains("not-a-palette-name"), "{err}");
+    }
+
+    #[test]
+    fn tag_aliases_canonicalize_every_closed_sound_vocabulary() {
+        let aliases: TagAliases = serde_json::from_value(json!({
+            "music": {"calm": "quiet"},
+            "effect": {"people": "crowd"},
+            "sound": {"footsteps": "footstep-stone"}
+        }))
+        .unwrap();
+        let mut script = json!({
+            "segments": [
+                {"music": " calm ", "effect": ["street", "people"]},
+                {"sound": "footsteps"},
+                {"stop": "footsteps"}
+            ]
+        });
+
+        apply_tag_aliases(&mut script, &aliases);
+
+        assert_eq!(script["segments"][0]["music"], json!("quiet"));
+        assert_eq!(script["segments"][0]["effect"], json!(["street", "crowd"]));
+        assert_eq!(script["segments"][1]["sound"], json!("footstep-stone"));
+        assert_eq!(script["segments"][2]["stop"], json!("footstep-stone"));
+    }
+
     fn bible_with(name: &str, aliases: &[&str]) -> Value {
         json!({"characters": [{
             "name": name,
@@ -922,6 +1190,21 @@ mod tests {
             Some("[thở dài] đứa trẻ này...".into())
         );
         assert_eq!(
+            retag_text("Bành Anh thở dài một tiếng, nói:"),
+            Some("Bành Anh [thở dài] nói:".into()),
+            "the Vietnamese written form carries a quantifier that the tag replaces"
+        );
+        assert_eq!(
+            retag_text("Bành Anh thở dài một hơi rồi mới cất lời:"),
+            Some("Bành Anh [thở dài] mới cất lời:".into()),
+            "the connective belongs to the written sigh, not the spoken words"
+        );
+        assert_eq!(
+            retag_text("Bành Anh [thở dài] một tiếng, nói:"),
+            Some("Bành Anh [thở dài] nói:".into()),
+            "a quantifier after the tag is still part of the written sound"
+        );
+        assert_eq!(
             retag_text("\"Khụ khụ, thôi không được đâu.\""),
             Some("\"[hắng giọng] thôi không được đâu.\"".into())
         );
@@ -971,8 +1254,8 @@ mod tests {
             "segments": [{"speaker": "Ghost", "text": "hi", "direction": "Say calm in Vietnamese: hi"}],
             "roster": ["Narrator"]
         });
-        let err = validate_script(&data, &json!({"characters": []}), &ctx_of(&data), &pal())
-            .unwrap_err();
+        let err =
+            validate_script(&data, &json!({"characters": []}), &ctx_of(&data), &pal()).unwrap_err();
         assert!(err.to_string().contains("unknown speaker"), "{err}");
         // ...and the same script passes when the cast pass listed the speaker.
         let listed = json!({"roster": ["Narrator", "Ghost"]});
@@ -987,7 +1270,13 @@ mod tests {
             "segments": [{"speaker": "Narrator", "text": "hi"}],
             "roster": ["Narrator"]
         });
-        validate_script(&no_dir, &json!({"characters": []}), &ctx_of(&no_dir), &pal()).unwrap();
+        validate_script(
+            &no_dir,
+            &json!({"characters": []}),
+            &ctx_of(&no_dir),
+            &pal(),
+        )
+        .unwrap();
 
         let bad_hint = json!({
             "segments": [{"speaker": "Narrator", "text": "hi"}],
@@ -1089,6 +1378,47 @@ mod tests {
         validate_script(&d, &bible, &ctx_of(&d), &[]).unwrap();
     }
 
+    /// ch6's street: two consecutive lines both hail `"Dịch sư phụ."`. They are
+    /// two source events and both are spoken, so identical text next door is
+    /// legal — only a split that repeats its own event is not.
+    #[test]
+    fn the_duplicate_line_rule_reads_source_ids_not_adjacency() {
+        let bible = json!({"characters": []});
+        let crowd = json!({
+            "segments": [
+                {"source_id": "e0002", "speaker": "Anonymous", "text": "Dịch sư phụ."},
+                {"source_id": "e0003", "speaker": "Anonymous", "text": "Dịch sư phụ."}
+            ],
+            "roster": ["Anonymous"]
+        });
+        validate_script(&crowd, &bible, &ctx_of(&crowd), &pal()).unwrap();
+
+        // One event, both halves the whole line: that is the split the rule is
+        // for, and the message has to name the event the repair must fix.
+        let split = json!({
+            "segments": [
+                {"source_id": "e0002", "speaker": "Anonymous", "text": "Dịch sư phụ."},
+                {"source_id": "e0002", "speaker": "Anonymous", "text": "Dịch sư phụ."}
+            ],
+            "roster": ["Anonymous"]
+        });
+        let err = validate_script(&split, &bible, &ctx_of(&split), &pal()).unwrap_err();
+        assert!(err.to_string().contains("e0002"), "{err}");
+        assert!(err.to_string().contains("partitions"), "{err}");
+
+        // No ids at all — a script from the manual prompt, where nothing else
+        // can catch a line spoken twice.
+        let legacy = json!({
+            "segments": [
+                {"speaker": "Narrator", "text": "Hắn gật đầu."},
+                {"speaker": "Narrator", "text": "Hắn gật đầu."}
+            ],
+            "roster": ["Narrator"]
+        });
+        let err = validate_script(&legacy, &bible, &ctx_of(&legacy), &pal()).unwrap_err();
+        assert!(err.to_string().contains("same line twice"), "{err}");
+    }
+
     #[test]
     fn validate_effect_tags_accepts_pool_tags_and_old_digests() {
         let fx = ["rain".to_string(), "night".to_string()];
@@ -1127,13 +1457,10 @@ mod tests {
             hold: None,
             level: None,
         };
-        let pool: ClipPool = [
-            ("blood", mk(1.1, "hit")),
-            ("boil", mk(51.0, "overlap")),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect();
+        let pool: ClipPool = [("blood", mk(1.1, "hit")), ("boil", mk(51.0, "overlap"))]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
         // A line, then the sound items that follow it. Every sound below sits
         // where the script would have written one: between two halves.
         let doc = |sounds: Value| {
@@ -1253,11 +1580,8 @@ mod tests {
         for key in ["sound_after", "stop_after"] {
             let mut line = json!({"speaker": "Narrator", "text": "x"});
             line[key] = json!("page-turn");
-            let err = validate_injects(
-                &json!({"segments": [line], "roster": ["Narrator"]}),
-                &pool,
-            )
-            .unwrap_err();
+            let err = validate_injects(&json!({"segments": [line], "roster": ["Narrator"]}), &pool)
+                .unwrap_err();
             assert!(
                 err.to_string().contains("prompt-side field"),
                 "{key}: {err}"
@@ -1366,10 +1690,8 @@ mod tests {
         assert!(err.to_string().contains("chapter number"), "{err}");
         let err = validate_title(&doc("Dao")).unwrap_err();
         assert!(err.to_string().contains("one word"), "{err}");
-        let err = validate_title(&doc(
-            "một hai ba bốn năm sáu bảy tám chín mười mười một",
-        ))
-        .unwrap_err();
+        let err =
+            validate_title(&doc("một hai ba bốn năm sáu bảy tám chín mười mười một")).unwrap_err();
         assert!(err.to_string().contains("not a sentence"), "{err}");
     }
 

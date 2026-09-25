@@ -1,12 +1,17 @@
 //! Confirm overlay.
-use crate::tui::{app::App, screen::Confirm, style::centered};
+use crate::tui::{
+    app::{App, HitTarget},
+    screen::Confirm,
+    style::centered,
+};
 use ratatui::{
+    layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
-pub(crate) fn draw_confirm(f: &mut ratatui::Frame, app: &App, c: &Confirm) {
+pub(crate) fn draw_confirm(f: &mut ratatui::Frame, app: &mut App, c: &Confirm) {
     let width = 76.min(f.area().width);
     let height = (c.body.len() as u16 + 5).min(f.area().height);
     let area = centered(f.area(), width, height);
@@ -25,6 +30,24 @@ pub(crate) fn draw_confirm(f: &mut ratatui::Frame, app: &App, c: &Confirm) {
         Span::styled("Esc / n ", app.style(Color::Red)),
         Span::raw("cancel"),
     ]));
+
+    let button_y = area.y + c.body.len() as u16 + 2;
+    let inner_x = area.x + 1;
+    let inner_w = area.width.saturating_sub(2);
+    let confirm_w = (inner_w / 2).max(1);
+    app.add_hit_region(
+        Rect::new(inner_x, button_y, confirm_w, 1),
+        HitTarget::Confirm { confirm: true },
+    );
+    app.add_hit_region(
+        Rect::new(
+            inner_x + confirm_w,
+            button_y,
+            inner_w.saturating_sub(confirm_w),
+            1,
+        ),
+        HitTarget::Confirm { confirm: false },
+    );
 
     f.render_widget(
         Paragraph::new(lines)

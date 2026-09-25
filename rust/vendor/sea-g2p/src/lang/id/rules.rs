@@ -50,11 +50,30 @@ const DIPHTHONGS: &[(&str, &str)] = &[("ai", "aj"), ("au", "aw"), ("oi", "oj")];
 
 fn single(c: char) -> Option<&'static str> {
     Some(match c {
-        'a' => "a", 'i' => "i", 'u' => "u", 'o' => "o",
-        'b' => "b", 'c' => "t͡ʃ", 'd' => "d", 'f' => "f", 'g' => "ɡ",
-        'h' => "h", 'j' => "d͡ʒ", 'k' => "k", 'l' => "l", 'm' => "m",
-        'n' => "n", 'p' => "p", 'q' => "k", 'r' => "r", 's' => "s",
-        't' => "t", 'v' => "v", 'w' => "w", 'y' => "j", 'z' => "z",
+        'a' => "a",
+        'i' => "i",
+        'u' => "u",
+        'o' => "o",
+        'b' => "b",
+        'c' => "t͡ʃ",
+        'd' => "d",
+        'f' => "f",
+        'g' => "ɡ",
+        'h' => "h",
+        'j' => "d͡ʒ",
+        'k' => "k",
+        'l' => "l",
+        'm' => "m",
+        'n' => "n",
+        'p' => "p",
+        'q' => "k",
+        'r' => "r",
+        's' => "s",
+        't' => "t",
+        'v' => "v",
+        'w' => "w",
+        'y' => "j",
+        'z' => "z",
         'x' => "ks",
         _ => return None,
     })
@@ -63,10 +82,8 @@ fn single(c: char) -> Option<&'static str> {
 /// Every phoneme this module can emit, longest first so the tie-bar
 /// affricates are matched before their first character.
 const INVENTORY: &[&str] = &[
-    "t͡ʃ", "d͡ʒ", "ŋ", "ɲ", "ʃ", "ɡ", "ʔ", "ə",
-    "a", "i", "u", "e", "o",
-    "p", "b", "t", "d", "k", "f", "v", "s", "z", "x", "h", "m", "n",
-    "l", "r", "w", "j",
+    "t͡ʃ", "d͡ʒ", "ŋ", "ɲ", "ʃ", "ɡ", "ʔ", "ə", "a", "i", "u", "e", "o", "p", "b", "t", "d", "k",
+    "f", "v", "s", "z", "x", "h", "m", "n", "l", "r", "w", "j",
 ];
 
 /// Split a mapping such as "ŋɡ", "ks" or "aj" into individual phonemes.
@@ -107,7 +124,11 @@ pub fn g2p_word_with(word: &str, e_is_e: &[usize]) -> Vec<String> {
         }
         let c = w[i];
         if c == 'e' {
-            out.push(if e_is_e.contains(&e_index) { "e".into() } else { "ə".into() });
+            out.push(if e_is_e.contains(&e_index) {
+                "e".into()
+            } else {
+                "ə".into()
+            });
             e_index += 1;
         } else if let Some(p) = single(c) {
             push_phones(&mut out, p);

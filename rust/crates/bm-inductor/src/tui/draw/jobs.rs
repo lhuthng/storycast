@@ -4,7 +4,10 @@
 //! title carries the same split the footer only totals: running against
 //! queued. Running sorts first — the queued tail is history, the running row
 //! is where an operator's eye lands.
-use crate::tui::{app::App, style::centered_padded, style::spinner};
+use crate::tui::{
+    app::{App, HitTarget, ListTarget},
+    style::{centered_padded, spinner},
+};
 use ratatui::{
     layout::{Constraint, Rect},
     style::{Color, Style},
@@ -22,9 +25,17 @@ fn secs_label(secs: u64) -> String {
     }
 }
 
-pub(crate) fn draw_jobs(f: &mut ratatui::Frame, app: &App, scroll: usize) {
+pub(crate) fn draw_jobs(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
     let area = centered_padded(f.area(), 76, 18, 1);
     f.render_widget(Clear, area);
+    app.add_hit_region(
+        area,
+        HitTarget::List {
+            kind: ListTarget::Jobs,
+            row_start: scroll,
+            row_y: area.y + 2,
+        },
+    );
 
     let bold = app.style_bold(Color::White);
     let dim = Style::default().fg(Color::DarkGray);

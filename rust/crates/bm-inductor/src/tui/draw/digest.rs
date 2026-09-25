@@ -1,6 +1,6 @@
 //! The digest manager overlay: the chapter list, and one chapter's two rounds.
 use crate::tui::{
-    app::App,
+    app::{App, HitTarget, ListTarget},
     // Aliased to the **view's** constant rather than declared here: the arrow
     // keys navigate by `screen::DIGEST_COLS`, so a draw that picked its own width
     // would lay the numbers out in rows the keys do not believe in.
@@ -32,17 +32,23 @@ fn overlay_height(area: ratatui::layout::Rect, open: bool) -> u16 {
     if open {
         return 18.min(area.height);
     }
-    area.height
-        .saturating_sub(2)
-        .min(34)
-        .max(8)
-        .min(area.height)
+    area.height.saturating_sub(2).clamp(8, 34).min(area.height)
 }
 
-pub(crate) fn draw_digest(f: &mut ratatui::Frame, app: &App, v: &DigestView) {
+pub(crate) fn draw_digest(f: &mut ratatui::Frame, app: &mut App, v: &DigestView) {
     let height = overlay_height(f.area(), v.open.is_some());
     let area = centered(f.area(), WIDTH, height);
     f.render_widget(Clear, area);
+    if v.open.is_none() {
+        app.add_hit_region(
+            area,
+            HitTarget::List {
+                kind: ListTarget::Digest,
+                row_start: 0,
+                row_y: area.y + 4,
+            },
+        );
+    }
     let dim = Style::default().fg(Color::DarkGray);
     // "Digested" is asked of the layout — the same `Layout::digested` the keys
     // and the filter use, because the cursor indexes the filtered rows and a

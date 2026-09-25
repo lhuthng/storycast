@@ -780,8 +780,7 @@ pub fn ec2_id_from_note(note: &str) -> Option<String> {
     let hexlen = id[2..].len();
     if (8..=17).contains(&hexlen) && id[2..].chars().all(|c| c.is_ascii_hexdigit()) {
         Some(id.to_string())
-    }
-    else {
+    } else {
         None
     }
 }
@@ -854,11 +853,17 @@ mod note_id_tests {
         );
         // A new note that already names an id is left alone.
         assert_eq!(
-            preserve_ec2_id("EC2 i-09def58f197d3092c (running)", "EC2 i-0fffffff (stopped)"),
+            preserve_ec2_id(
+                "EC2 i-09def58f197d3092c (running)",
+                "EC2 i-0fffffff (stopped)"
+            ),
             "EC2 i-0fffffff (stopped)"
         );
         // Never EC2-born: nothing to preserve.
-        assert_eq!(preserve_ec2_id("added by hand", "provisioning (p)"), "provisioning (p)");
+        assert_eq!(
+            preserve_ec2_id("added by hand", "provisioning (p)"),
+            "provisioning (p)"
+        );
     }
 
     #[test]

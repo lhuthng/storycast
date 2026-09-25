@@ -204,7 +204,10 @@ async fn drive(state: Shared, layout: Layout, peer: Peer, http: reqwest::Client)
         // connection as a cancel — and the next poll hands it fresh work.
         // Digest-only: a render's units land with its report, so killing it
         // mid-batch would discard audio that already exists.
-        let running = job.as_ref().map(|(_, _, h)| !h.is_finished()).unwrap_or(false);
+        let running = job
+            .as_ref()
+            .map(|(_, _, h)| !h.is_finished())
+            .unwrap_or(false);
         if running {
             if let Some((tid, stage, h)) = job.as_ref() {
                 if *stage == Stage::Digest {
@@ -218,14 +221,20 @@ async fn drive(state: Shared, layout: Layout, peer: Peer, http: reqwest::Client)
                             .unwrap_or(false)
                     };
                     if settled {
-                        println!("dispatch: {} {tid} — race lost, stopping this box", peer.addr);
+                        println!(
+                            "dispatch: {} {tid} — race lost, stopping this box",
+                            peer.addr
+                        );
                         h.abort();
                         job = None;
                     }
                 }
             }
         }
-        let running = job.as_ref().map(|(_, _, h)| !h.is_finished()).unwrap_or(false);
+        let running = job
+            .as_ref()
+            .map(|(_, _, h)| !h.is_finished())
+            .unwrap_or(false);
         if !running && beat.task_id.is_none() {
             // The lock is taken in its own block **on purpose**. Writing
             // `if let Some(o) = state.lock().await.offer(..)` looks identical
@@ -244,15 +253,22 @@ async fn drive(state: Shared, layout: Layout, peer: Peer, http: reqwest::Client)
                 let (st, lay, cl, pr) = (state.clone(), layout.clone(), http.clone(), peer.clone());
                 let tid = offer.task_id.clone();
                 let stage = offer.stage;
-                job = Some((tid, stage, tokio::spawn(async move {
-                    run_one(&st, &lay, &cl, &pr, offer).await;
-                })));
+                job = Some((
+                    tid,
+                    stage,
+                    tokio::spawn(async move {
+                        run_one(&st, &lay, &cl, &pr, offer).await;
+                    }),
+                ));
             }
         }
         // Poll hot exactly once after a task completes: the work just drained
         // the queue one take deeper, and the offer that answers it is already
         // waiting. Any other iteration is steady state.
-        let running_now = job.as_ref().map(|(_, _, h)| !h.is_finished()).unwrap_or(false);
+        let running_now = job
+            .as_ref()
+            .map(|(_, _, h)| !h.is_finished())
+            .unwrap_or(false);
         let just_finished = was_running && !running_now;
         was_running = running_now;
         tokio::time::sleep(if just_finished { HOT } else { POLL }).await;
@@ -339,9 +355,7 @@ async fn tell_sidecar_policy(
         .map_err(|e| format!("no answer ({e:#})"))?;
     match resp.status() {
         s if s.is_success() => Ok(()),
-        reqwest::StatusCode::NOT_FOUND => {
-            Err("worker predates the sidecar-policy endpoint".into())
-        }
+        reqwest::StatusCode::NOT_FOUND => Err("worker predates the sidecar-policy endpoint".into()),
         s => Err(format!("worker answered {s}")),
     }
 }
@@ -465,7 +479,10 @@ async fn run_one(
             let mut inner = state.lock().await;
             inner.release_render_rows(&task_id, "worker's policy turns render off")
         };
-        println!("dispatch: {} {task_id} — refused (render off by policy); {line}", peer.addr);
+        println!(
+            "dispatch: {} {task_id} — refused (render off by policy); {line}",
+            peer.addr
+        );
         return;
     }
     // Read once, then decide. Decoding straight from the response would treat
@@ -676,7 +693,7 @@ mod tests {
     }
 
     fn beat(sidecar_keep: Option<bool>) -> Heartbeat {
-        let b = Heartbeat {
+        Heartbeat {
             worker_id: "w1".into(),
             addr: "127.0.0.1".into(),
             task_id: None,
@@ -695,8 +712,7 @@ mod tests {
             sidecar_gb: None,
             capabilities: vec![],
             sidecar_keep,
-        };
-        b
+        }
     }
 
     /// A worker stub that answers 200 and records how many instruction
@@ -867,6 +883,10 @@ mod tests {
         assert_eq!(t.state, bm_proto::TaskState::Pending, "back to the pool");
         assert_eq!(t.attempts, 0, "a policy refusal is not a strike");
         assert_eq!(t.assigned_to, None);
-        assert!(t.detail.contains("policy"), "the ledger says why: {}", t.detail);
+        assert!(
+            t.detail.contains("policy"),
+            "the ledger says why: {}",
+            t.detail
+        );
     }
 }

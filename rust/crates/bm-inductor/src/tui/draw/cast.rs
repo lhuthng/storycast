@@ -1,6 +1,6 @@
 //! Cast overview overlay.
 use crate::tui::{
-    app::App,
+    app::{App, HitTarget, ListTarget},
     layout::{cols, size_class, Size, CAST_COLS_NARROW, CAST_COLS_WIDE},
     model::{clamp_scroll, filtered_cast_rows, Verdict},
     screen::CastView,
@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 
 /// The whole cast in one table: speaker, voice, that voice's metadata, and how
 /// the assignment stands against the policy and the rest of the cast.
-pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
+pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) {
     // In the compact tier the overlay takes the whole screen: a 108-wide table
     // centred in a 76-column terminal loses 32 columns to margins it cannot
     // spare.
@@ -52,6 +52,15 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
 
     let all = app.cast_rows();
     let list = filtered_cast_rows(&all, &view.filter);
+    let body = rows_area[2].height.saturating_sub(3) as usize;
+    app.add_hit_region(
+        rows_area[2],
+        HitTarget::List {
+            kind: ListTarget::Cast,
+            row_start: view.scroll,
+            row_y: rows_area[2].y + 2,
+        },
+    );
 
     // Summary: the health of the cast in one line, before any row is read.
     let mut in_use: BTreeMap<&str, usize> = BTreeMap::new();
@@ -128,7 +137,6 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &App, view: &CastView) {
 
     // Header + two borders are inside `rows_area[2]`; only what is left can
     // hold rows.
-    let body = rows_area[2].height.saturating_sub(3) as usize;
     if all.is_empty() {
         let msg = if app.roster.is_none() {
             if app.roster_loading {

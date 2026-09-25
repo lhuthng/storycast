@@ -383,19 +383,20 @@
     }
   },
   "layers": {
-    "_note": "effect: the layer that must stay sparse. A window opens on a scene that names effect tags and lasts at least min_span_s, is clipped to max_window_s, waits cooldown_s of silence after the previous window closed, and the chapter may not spend more than max_coverage of its runtime on the layer. `trim` is the layer's one master gain, multiplied into each rule's own `level`: a rule's `level` says how a storm balances against a hearth, `trim` says the whole layer is too hot, and keeping those separate is what makes retuning it one edit instead of thirteen. music: continuous, deliberately below the effect layer's loud scenes, lifted to pause_level inside a planned pause. ramp_s is how long that lift takes and must stay well under the shortest pause, or the lift never arrives. xfade_s is the crossfade where the track changes — and a track changes exactly where the script changes its `music` value, so that knob is what makes an in-chapter change audible as a change rather than a cut. inject: spot effects the script places itself — a hit holds its whole clip as silence, an overlap costs no time and runs under the following speech, a trail holds `default_hold_s` solo and tails under it; a stop fades a running tail over `stop_fade_s` (3 s — a shorter fade reads as a cut), a retrigger over `fade_s`, a natural tail-end over `tail_fade_s` (1 s, clamped to half the clip — a tail, not a third of the sound); a `looped` bed is filled by repeating the clip with a `loop_xfade_s` crossfade at each seam. NOTE ON `speed`: the merge tempoes the SPEECH only, then places both layers against the delivered clock, so nothing here is ever heard at atempo.",
+    "_note": "effect: the layer that must stay sparse. A window opens on a scene that names effect tags and lasts at least min_span_s, is clipped to max_window_s, waits cooldown_s of silence after the previous window closed, and the chapter may not spend more than max_coverage of its runtime on the layer. `trim` is the layer's one master gain, multiplied into each rule's own `level`: a rule's `level` says how a storm balances against a hearth, `trim` says the whole layer is too hot, and keeping those separate is what makes retuning it one edit instead of thirteen. music: continuous, deliberately below the effect layer's loud scenes, lifted to pause_level inside a planned pause. ramp_s is how long that lift takes and must stay well under the shortest pause, or the lift never arrives. xfade_s is the crossfade where the track changes — and a track changes exactly where the script changes its `music` value, so that knob is what makes an in-chapter change audible as a change rather than a cut. The chapter's FIRST cue is pulled back to the head of the timeline whatever line names its mood, so the music comes up under the headline and fades in, and `fade_s` is the layer's head and tail — 3 s, not the 0.3 s of the other two layers, because a cue arriving or leaving inside a third of a second reads as a cut. `end_fade_s` is the effect layer's closing edge: a looped bed whose window reaches the end of the chapter fades over that instead of being cut on `fade_s` at the mix's edge. inject: spot effects the script places itself — a hit holds its whole clip as silence, an overlap costs no time and runs under the following speech, a trail holds `default_hold_s` solo and tails under it; a stop fades a running tail over `stop_fade_s` (3 s — a shorter fade reads as a cut), a retrigger over `fade_s`, a natural tail-end over `tail_fade_s` (1 s, clamped to half the clip — a tail, not a third of the sound); a `looped` bed is filled by repeating the clip with a `loop_xfade_s` crossfade at each seam. NOTE ON `speed`: the merge tempoes the SPEECH only, then places both layers against the delivered clock, so nothing here is ever heard at atempo.",
     "effect": {
       "max_coverage": 0.35,
       "cooldown_s": 45.0,
       "min_span_s": 20.0,
       "max_window_s": 75.0,
       "fade_s": 0.3,
+      "end_fade_s": 3.0,
       "trim": 0.5
     },
     "music": {
       "level": 0.06,
       "pause_level": 0.085,
-      "fade_s": 0.3,
+      "fade_s": 3.0,
       "xfade_s": 2.0,
       "ramp_s": 0.6
     },
@@ -415,7 +416,7 @@
     "require_narration": true
   },
   "reverb_presets": {
-    "hall": "aecho=0.8:0.65:40|60:0.35|0.25",
+    "hall": "aecho=0.8:0.55:25|55|95|140|190|250:0.4|0.32|0.26|0.2|0.15|0.1",
     "cave": "aecho=0.8:0.55:120|200:0.5|0.4"
   },
   "duck": {
@@ -423,6 +424,7 @@
     "threshold": 0.02,
     "ratio": 6.0,
     "attack": 20,
-    "release": 400
+    "release": 400,
+    "head_key": 0.0
   }
 }

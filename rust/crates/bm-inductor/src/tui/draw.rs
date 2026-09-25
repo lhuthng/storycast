@@ -20,11 +20,10 @@ mod tasks;
 mod workers;
 
 use crate::tui::{
-    app::App,
+    app::{App, HitTarget, Panel},
     layout::{
         size_class, Size, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H, COMPACT_MACHINES_H,
-        COMPACT_WORKERS_H, FULL_EVENTS_MIN_H, FULL_FOOTER_H, FULL_HEADER_H, FULL_MACHINES_H,
-        FULL_TASKS_H, FULL_WORKERS_H, MIN_H, MIN_W,
+        FULL_EVENTS_MIN_H, FULL_FOOTER_H, FULL_HEADER_H, FULL_MACHINES_H, MIN_H, MIN_W,
     },
     screen::Screen,
     style::centered_padded,
@@ -41,10 +40,62 @@ use ratatui::{
 /// rounded outline plus one hue separates chrome from data, which is what
 /// makes a five-pane dashboard scannable.
 pub(crate) fn pane_block(app: &App, title: impl Into<Line<'static>>) -> Block<'static> {
+    pane_block_for(app, None, title)
+}
+
+/// A dashboard pane border. The focused pane gets a brighter border so mouse
+/// focus is visible without hiding a row behind a synthetic status message.
+/// Draw a deliberately fixed one-cell scroll thumb. Ratatui's stock
+/// scrollbar makes the thumb length proportional to the viewport, which makes
+/// a large list look like it has a large handle. The cross is always one cell;
+/// only its vertical position changes.
+pub(crate) fn draw_fixed_scrollbar(
+    f: &mut ratatui::Frame,
+    app: &App,
+    area: Rect,
+    position: usize,
+    content_length: usize,
+) {
+    let track_h = area.height.saturating_sub(2) as usize;
+    let x = area.x.saturating_add(area.width.saturating_sub(1));
+    if track_h == 0 || area.width == 0 {
+        return;
+    }
+    f.render_widget(
+        Paragraph::new("│"),
+        Rect::new(x, area.y + 1, 1, track_h as u16),
+    );
+    let max = content_length.saturating_sub(1);
+    let y = if max == 0 {
+        area.y + 1
+    } else {
+        let offset = position
+            .min(max)
+            .checked_mul(track_h - 1)
+            .and_then(|scaled| scaled.checked_div(max))
+            .unwrap_or(0) as u16;
+        area.y + 1 + offset
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled("╋", app.style(Color::Cyan)))),
+        Rect::new(x, y, 1, 1),
+    );
+}
+
+pub(crate) fn pane_block_for(
+    app: &App,
+    panel: Option<Panel>,
+    title: impl Into<Line<'static>>,
+) -> Block<'static> {
+    let colour = if panel.is_some_and(|p| p == app.focused_panel) {
+        Color::Cyan
+    } else {
+        crate::tui::style::theme_accent()
+    };
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(app.style(crate::tui::style::theme_accent()))
+        .border_style(app.style(colour))
         .title(title.into())
 }
 
@@ -167,6 +218,7 @@ fn draw_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
 }
 
 pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
+    app.clear_hit_regions();
     let area = f.area();
     let size = size_class(area.width, area.height);
     if size == Size::TooSmall {
@@ -176,29 +228,25 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
     let compact = size == Size::Compact;
 
-    // Compact gives up the Tasks pane — its numbers move to the footer — so
-    // that Logs keeps rows. Logs is the pane that must stay readable. The
-    // header is full-tier only: the compact tier sits exactly on its 20-row
-    // floor, and the identity it carries lives in the footer there.
-    let (machines_h, workers_h) = if compact {
-        (COMPACT_MACHINES_H, COMPACT_WORKERS_H)
-    } else {
-        (FULL_MACHINES_H, FULL_WORKERS_H)
-    };
+    // Workers owns the flexible middle of the dashboard. Its renderer decides
+    // how much room the live rows need and places Tasks/Stats beneath them;
+    // Machines and Logs remain bounded, independently scrollable panes.
     let constraints: Vec<Constraint> = if compact {
         vec![
-            Constraint::Length(machines_h),
-            Constraint::Length(workers_h),
+            Constraint::Length(COMPACT_MACHINES_H),
+            Constraint::Min(3),
             Constraint::Min(COMPACT_EVENTS_MIN_H),
             Constraint::Length(COMPACT_FOOTER_H),
         ]
     } else {
         vec![
             Constraint::Length(FULL_HEADER_H),
-            Constraint::Length(machines_h),
-            Constraint::Length(workers_h),
-            Constraint::Length(FULL_TASKS_H),
-            Constraint::Min(FULL_EVENTS_MIN_H),
+            Constraint::Length(FULL_MACHINES_H),
+            // Workers is the only flexible full-tier pane. Keeping Logs at its
+            // readable floor means terminal height beyond the base layout goes
+            // to live worker rows, which is what the tall-layout test expects.
+            Constraint::Min(3),
+            Constraint::Length(FULL_EVENTS_MIN_H),
             Constraint::Length(FULL_FOOTER_H),
         ]
     };
@@ -212,21 +260,60 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         workers::draw_workers(f, app, root[1], compact);
         events::draw_events(f, app, root[2]);
         footer::draw_footer(f, app, root[3], true);
+        app.add_hit_region(
+            root[0],
+            HitTarget::Panel {
+                panel: Panel::Machines,
+                row_start: app.machine_scroll,
+                row_y: root[0].y + 2,
+            },
+        );
+        app.add_hit_region(
+            root[2],
+            HitTarget::Panel {
+                panel: Panel::Events,
+                row_start: 0,
+                row_y: root[2].y + 1,
+            },
+        );
+        app.add_hit_region(
+            root[3],
+            HitTarget::Panel {
+                panel: Panel::Footer,
+                row_start: 0,
+                row_y: root[3].y,
+            },
+        );
     } else {
         draw_header(f, app, root[0]);
         machines::draw_machines(f, app, root[1], compact);
         workers::draw_workers(f, app, root[2], compact);
-        // The tasks row splits: the queue summary keeps the left, the
-        // Stats matrix (workers × stages plus TUI-side ETA) takes a fixed
-        // 46 on the right — 38 of columns, 6 of gaps, 2 of border.
-        let task_row = RLayout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(30), Constraint::Length(46)])
-            .split(root[3]);
-        tasks::draw_tasks(f, app, task_row[0]);
-        stats::draw_stats(f, app, task_row[1]);
-        events::draw_events(f, app, root[4]);
-        footer::draw_footer(f, app, root[5], false);
+        events::draw_events(f, app, root[3]);
+        footer::draw_footer(f, app, root[4], false);
+        app.add_hit_region(
+            root[1],
+            HitTarget::Panel {
+                panel: Panel::Machines,
+                row_start: app.machine_scroll,
+                row_y: root[1].y + 2,
+            },
+        );
+        app.add_hit_region(
+            root[3],
+            HitTarget::Panel {
+                panel: Panel::Events,
+                row_start: 0,
+                row_y: root[3].y + 1,
+            },
+        );
+        app.add_hit_region(
+            root[4],
+            HitTarget::Panel {
+                panel: Panel::Footer,
+                row_start: 0,
+                row_y: root[4].y,
+            },
+        );
     }
 
     // Overlays paint last and cover everything beneath them. They are rendered

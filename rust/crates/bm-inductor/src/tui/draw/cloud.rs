@@ -5,7 +5,7 @@
 //! that may be linked to nothing. The mark this view adds — "not in registry" —
 //! is the whole point of showing the two side by side.
 use crate::tui::{
-    app::App,
+    app::{App, HitTarget, ListTarget},
     model::{clamp_scroll, is_live_state},
     screen::CloudView,
     style::{cell, centered_padded, empty_body, selection_bg, style_bold_of, style_of},
@@ -28,7 +28,7 @@ fn address(i: &bm_core::provision::AwsInstance) -> String {
     }
 }
 
-pub(crate) fn draw_cloud(f: &mut ratatui::Frame, app: &App, view: &CloudView) {
+pub(crate) fn draw_cloud(f: &mut ratatui::Frame, app: &mut App, view: &CloudView) {
     // The overlay has its own borders to pay for, so a narrow terminal gets the
     // whole screen rather than a squeezed table with margins it cannot spare.
     let area = centered_padded(f.area(), 108, 30, 2);
@@ -81,6 +81,14 @@ pub(crate) fn draw_cloud(f: &mut ratatui::Frame, app: &App, view: &CloudView) {
     f.render_widget(Paragraph::new(Line::from(summary)), rows_area[0]);
 
     let body = rows_area[1].height.saturating_sub(3) as usize;
+    app.add_hit_region(
+        rows_area[1],
+        HitTarget::List {
+            kind: ListTarget::Cloud,
+            row_start: view.scroll,
+            row_y: rows_area[1].y + 2,
+        },
+    );
     if let Some(e) = &app.cloud_error {
         f.render_widget(
             empty_body(vec![

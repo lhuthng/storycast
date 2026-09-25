@@ -129,8 +129,8 @@ impl RenderPlan {
             .iter()
             .enumerate()
             .map(|(pos, u)| {
-                let voice_key =
-                    crate::voices::key_for_name(engine, &u.voice).unwrap_or_else(|| fold_voice(&u.voice));
+                let voice_key = crate::voices::key_for_name(engine, &u.voice)
+                    .unwrap_or_else(|| fold_voice(&u.voice));
                 let key = take_key(engine, &voice_key, &u.text, u.temperature, u.silence_p);
                 Take {
                     pos,
@@ -440,11 +440,31 @@ mod tests {
             take_key("vieneu", "duc-tri", "xin chào", 0.5, 0.15),
             "a key that moved on its own would re-render the book every pass"
         );
-        assert_ne!(base, take_key("vieneu", "duc-tri", "xin chào!", 0.5, 0.15), "text");
-        assert_ne!(base, take_key("vieneu", "adam", "xin chào", 0.5, 0.15), "voice");
-        assert_ne!(base, take_key("vieneu", "duc-tri", "xin chào", 0.6, 0.15), "temperature");
-        assert_ne!(base, take_key("vieneu", "duc-tri", "xin chào", 0.5, 0.20), "silence");
-        assert_ne!(base, take_key("gemini", "duc-tri", "xin chào", 0.5, 0.15), "engine");
+        assert_ne!(
+            base,
+            take_key("vieneu", "duc-tri", "xin chào!", 0.5, 0.15),
+            "text"
+        );
+        assert_ne!(
+            base,
+            take_key("vieneu", "adam", "xin chào", 0.5, 0.15),
+            "voice"
+        );
+        assert_ne!(
+            base,
+            take_key("vieneu", "duc-tri", "xin chào", 0.6, 0.15),
+            "temperature"
+        );
+        assert_ne!(
+            base,
+            take_key("vieneu", "duc-tri", "xin chào", 0.5, 0.20),
+            "silence"
+        );
+        assert_ne!(
+            base,
+            take_key("gemini", "duc-tri", "xin chào", 0.5, 0.15),
+            "engine"
+        );
         assert_eq!(base.len(), TAKE_KEY_CHARS);
         assert_eq!(take_file(&base), format!("t-{base}.wav"));
     }
@@ -475,8 +495,16 @@ mod tests {
             write_take(&dir, t.legacy.as_deref().unwrap());
         }
         let up = reconcile(None, plan, &dir);
-        assert!(up.dirty.is_empty(), "adopted takes are not work: {:?}", up.dirty);
-        assert!(up.stale.is_empty(), "nothing was superseded: {:?}", up.stale);
+        assert!(
+            up.dirty.is_empty(),
+            "adopted takes are not work: {:?}",
+            up.dirty
+        );
+        assert!(
+            up.stale.is_empty(),
+            "nothing was superseded: {:?}",
+            up.stale
+        );
         assert_eq!(up.adopted, 2);
         assert!(up.plan.takes.iter().all(|t| t.adopted));
         assert!(up.plan.covered(&dir));
@@ -555,16 +583,33 @@ mod tests {
         ];
         let plan2 = plan_of(&after, &c, &dir);
         let up = reconcile(Some(&adopted), plan2, &dir);
-        assert_eq!(up.dirty.len(), 1, "only the edited take is work: {:?}", up.dirty);
-        assert_eq!(up.plan.takes[0].take_key, adopted.takes[0].take_key, "A is carried");
-        assert_eq!(up.plan.takes[0].file, adopted.takes[0].file, "and keeps its file");
-        assert_ne!(up.plan.takes[1].take_key, adopted.takes[1].take_key, "B changed");
+        assert_eq!(
+            up.dirty.len(),
+            1,
+            "only the edited take is work: {:?}",
+            up.dirty
+        );
+        assert_eq!(
+            up.plan.takes[0].take_key, adopted.takes[0].take_key,
+            "A is carried"
+        );
+        assert_eq!(
+            up.plan.takes[0].file, adopted.takes[0].file,
+            "and keeps its file"
+        );
+        assert_ne!(
+            up.plan.takes[1].take_key, adopted.takes[1].take_key,
+            "B changed"
+        );
         assert!(
             up.stale.contains(&adopted.takes[1].file),
             "B's old bytes are stale: {:?}",
             up.stale
         );
-        assert!(!up.stale.contains(&adopted.takes[0].file), "A's file must survive");
+        assert!(
+            !up.stale.contains(&adopted.takes[0].file),
+            "A's file must survive"
+        );
     }
 
     #[test]
@@ -594,8 +639,14 @@ mod tests {
         );
         assert_eq!(up.plan.takes[1].file, adopted.takes[1].file);
         assert_eq!(up.plan.cast_hash.len(), 16);
-        assert_ne!(up.plan.cast_hash, adopted.cast_hash, "the voice collection moved");
-        assert!(!up.stale.contains(&adopted.takes[1].file), "B's file survives");
+        assert_ne!(
+            up.plan.cast_hash, adopted.cast_hash,
+            "the voice collection moved"
+        );
+        assert!(
+            !up.stale.contains(&adopted.takes[1].file),
+            "B's file survives"
+        );
     }
 
     #[test]
@@ -620,7 +671,11 @@ mod tests {
             plan_of(&[json!({"speaker": "A", "text": "một"})], &c, &dir),
             &dir,
         );
-        assert!(up.dirty.is_empty(), "the surviving take keeps its cache: {:?}", up.dirty);
+        assert!(
+            up.dirty.is_empty(),
+            "the surviving take keeps its cache: {:?}",
+            up.dirty
+        );
         assert_eq!(up.plan.takes[0].take_key, adopted.takes[0].take_key);
         assert_eq!(up.plan.takes[0].file, adopted.takes[0].file);
         assert!(
@@ -640,9 +695,17 @@ mod tests {
         let up1 = reconcile(None, plan1, &dir);
         // Simulate the take having been rendered under its canonical name.
         write_take(&dir, &up1.plan.takes[0].file);
-        let up_a = reconcile(Some(&up1.plan), plan_of(&[json!({"speaker": "A", "text": "hai"})], &c, &dir), &dir);
+        let up_a = reconcile(
+            Some(&up1.plan),
+            plan_of(&[json!({"speaker": "A", "text": "hai"})], &c, &dir),
+            &dir,
+        );
         assert_eq!(up_a.dirty.len(), 1);
-        let up_b = reconcile(Some(&up_a.plan), plan_of(&[json!({"speaker": "A", "text": "một"})], &c, &dir), &dir);
+        let up_b = reconcile(
+            Some(&up_a.plan),
+            plan_of(&[json!({"speaker": "A", "text": "một"})], &c, &dir),
+            &dir,
+        );
         assert!(
             up_b.dirty.is_empty(),
             "the original file is still there under its content name"

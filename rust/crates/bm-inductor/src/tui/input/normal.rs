@@ -33,6 +33,16 @@ pub(crate) async fn normal_key(
             }
         }
         KeyCode::Char('?') => app.screen = Screen::Help { scroll: 0 },
+        KeyCode::Char('f') => {
+            app.focused_panel = app.focused_panel.next();
+            app.set_status(
+                Level::Info,
+                format!(
+                    "focus: {} — click a pane or use f to cycle",
+                    app.focused_panel.label()
+                ),
+            );
+        }
         KeyCode::Char(':') => {
             // Command mode: every operator action behind a prompt, so a stray
             // keypress can never provision, reconcile or stop anything.
@@ -74,10 +84,14 @@ pub(crate) async fn normal_key(
         KeyCode::Home => app.selected = 0,
         KeyCode::End => app.selected = app.machines.len().saturating_sub(1),
         KeyCode::PageUp => {
-            app.events_scroll = app.events_scroll.saturating_add(5);
+            // A page is a page: the draw publishes the pane's row count, so
+            // one press is one screenful and the walk back to the newest line
+            // costs exactly what the walk out did (or one `G`). The old
+            // fixed 5 made the buffer a hundred presses each way.
+            app.scroll_events_older(app.events_rows.max(1));
         }
         KeyCode::PageDown => {
-            app.events_scroll = app.events_scroll.saturating_sub(5);
+            app.scroll_events_newer(app.events_rows.max(1));
         }
         KeyCode::Char('G') => {
             app.events_scroll = 0;

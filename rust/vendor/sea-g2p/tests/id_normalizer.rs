@@ -23,7 +23,10 @@ fn rupiah_reads_the_amount_then_the_unit() {
 fn mark_inside_a_quote_beats_the_one_after_it() {
     // Dropping the quotes leaves «? ,» side by side; only the question mark
     // may reach the TTS, or it reads two breaks where the writer put one.
-    assert_eq!(normalize("\"mau ke mana?\", tanyanya"), "mau ke mana? tanyanya");
+    assert_eq!(
+        normalize("\"mau ke mana?\", tanyanya"),
+        "mau ke mana? tanyanya"
+    );
     // The pipeline flattens newlines to spaces, so marks split by one
     // land side by side and must collapse the same way.
     assert_eq!(normalize("selesai.\n, lanjut"), "selesai. lanjut");
@@ -32,8 +35,10 @@ fn mark_inside_a_quote_beats_the_one_after_it() {
 #[test]
 fn chat_contractions_expand() {
     // yg and dgn look like pronounceable words to a rule engine
-    assert_eq!(normalize("yg penting tdk lupa dgn tugasnya"),
-               "yang penting tidak lupa dengan tugasnya");
+    assert_eq!(
+        normalize("yg penting tdk lupa dgn tugasnya"),
+        "yang penting tidak lupa dengan tugasnya"
+    );
 }
 
 #[test]
@@ -45,7 +50,10 @@ fn initialisms_are_spelled_with_indonesian_letter_names() {
 #[test]
 fn a_cue_word_is_not_repeated() {
     // "pukul 14:30" was coming out as "pukul pukul empat belas"
-    assert_eq!(normalize("pukul 14:30"), "pukul empat belas lewat tiga puluh menit");
+    assert_eq!(
+        normalize("pukul 14:30"),
+        "pukul empat belas lewat tiga puluh menit"
+    );
     assert!(normalize("jam 14:30").starts_with("jam"));
     // with no cue at all, one is supplied
     assert!(normalize("14:30").starts_with("pukul"));
@@ -68,7 +76,10 @@ fn nothing_is_deleted_in_silence() {
 
 #[test]
 fn plain_text_is_untouched() {
-    assert_eq!(normalize("saya makan nasi goreng"), "saya makan nasi goreng");
+    assert_eq!(
+        normalize("saya makan nasi goreng"),
+        "saya makan nasi goreng"
+    );
 }
 
 #[test]
@@ -205,7 +216,10 @@ fn a_diacritic_folds_onto_its_letter_instead_of_eating_it() {
     assert_eq!(normalize("khemaṁ"), "khemam");
     assert_eq!(normalize("café"), "cafe");
     // ordinary text is untouched
-    assert_eq!(normalize("Saya makan nasi goreng"), "Saya makan nasi goreng");
+    assert_eq!(
+        normalize("Saya makan nasi goreng"),
+        "Saya makan nasi goreng"
+    );
 }
 
 #[test]
@@ -219,7 +233,11 @@ fn the_audit_reports_what_the_residual_stage_actually_deletes() {
     // but reported rather than silent
     assert_eq!(audit_unmapped("pasaгan"), vec!['г']);
     // and ordinary Indonesian stays quiet
-    for s in ["Saya makan nasi goreng di warung", "Harga BBM naik 10%", "do'a Jum'at"] {
+    for s in [
+        "Saya makan nasi goreng di warung",
+        "Harga BBM naik 10%",
+        "do'a Jum'at",
+    ] {
         assert_eq!(audit_unmapped(s), Vec::<char>::new(), "{s}");
     }
 }

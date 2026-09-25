@@ -262,12 +262,7 @@ pub(crate) fn submit(
 /// Returns whether a registry was actually written — the caller uses it to
 /// decide whether to tell the inductor the sound design changed. A refused
 /// removal is not a design change, and a notification for it would be noise.
-pub(crate) fn apply_removal(
-    app: &mut App,
-    layer: PoolKind,
-    name: &str,
-    view: SoundView,
-) -> bool {
+pub(crate) fn apply_removal(app: &mut App, layer: PoolKind, name: &str, view: SoundView) -> bool {
     if let Err(e) = loaded(app) {
         app.set_status(Level::Warn, e);
         return false;

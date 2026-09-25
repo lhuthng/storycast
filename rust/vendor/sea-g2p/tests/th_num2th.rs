@@ -3,10 +3,10 @@
 use sea_g2p_rs::lang::th::num2th::{n2w, n2w_decimal, n2w_single};
 #[test]
 fn tens_alternations() {
-    assert_eq!(n2w("10"), "สิบ");         // not หนึ่งสิบ
+    assert_eq!(n2w("10"), "สิบ"); // not หนึ่งสิบ
     assert_eq!(n2w("15"), "สิบห้า");
-    assert_eq!(n2w("20"), "ยี่สิบ");       // not สองสิบ
-    assert_eq!(n2w("21"), "ยี่สิบเอ็ด");   // final 1 -> เอ็ด
+    assert_eq!(n2w("20"), "ยี่สิบ"); // not สองสิบ
+    assert_eq!(n2w("21"), "ยี่สิบเอ็ด"); // final 1 -> เอ็ด
     assert_eq!(n2w("31"), "สามสิบเอ็ด");
     assert_eq!(n2w("101"), "หนึ่งร้อยเอ็ด");
 }

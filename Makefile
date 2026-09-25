@@ -5,16 +5,22 @@
 #   make tui                    live cluster dashboard (needs the inductor up)
 #   make serve                  run the inductor (START=1 COUNT=100 by default)
 #   make agent                  run a local worker (needs the inductor up)
+#   make digest-assistant API=… KEY=… MODEL=…   be the digestor yourself
 #   make provision ADDR=<ip>    onboard a machine by address (one-shot)
 #   make provision BOX=<name>    onboard a linked machine (see `link` below)
 #   make link NAME=<n> ADDR=<ip>  remember a machine in .bm/machines.json
 #   make test                   full test suite + clippy
 #
 # Variables (override with `make tui API=http://box:8901`):
-#   API    inductor base URL            (default http://127.0.0.1:8901)
-#   START  first chapter for serve      (default 1)
-#   COUNT  how many chapters            (default 100)
-#   BOX    linked box name for provision (default box-1 when linked)
+#   API        inductor base URL        (default http://127.0.0.1:8901)
+#              — for `digest-assistant` this is the **model** API instead,
+#                e.g. https://openrouter.ai/api/v1; the inductor it reports to
+#                is this machine's own control port from settings.
+#   START      first chapter for serve  (default 1)
+#   COUNT      how many chapters        (default 100)
+#   BOX        linked box name for provision (default box-1 when linked)
+#   KEY        API key for `digest-assistant` (required there; never written to .env)
+#   MODEL      the model to answer with  (required there)
 
 RUST_DIR := rust
 BIN := $(RUST_DIR)/target/debug
@@ -26,10 +32,14 @@ CARGO := $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
 CARGO_BIN_DIR := $(patsubst %/,%,$(dir $(CARGO)))
 ZIG := $(shell command -v zig 2>/dev/null || echo $(CARGO_BIN_DIR)/zig)
 API ?= http://127.0.0.1:8901
+# `digest-assistant` reads API as the *model* service, so it needs a model
+# default of its own; this is what API falls back to there when it still holds
+# the inductor's loopback address.
+MODEL_API ?= https://openrouter.ai/api/v1
 START ?= 1
 COUNT ?= 100
 
-.PHONY: build build-inductor tui serve agent provision link test
+.PHONY: build build-inductor tui serve agent digest-assistant provision link test
 
 build:
 	$(CARGO) build --workspace --manifest-path $(RUST_DIR)/Cargo.toml
@@ -50,6 +60,44 @@ serve: build-inductor
 
 agent: build-inductor
 	$(BIN)/bm-agent worker --inductor $(API)
+
+# The digest assistant: be the analyzer yourself while the cluster's has no
+# quota. It runs the worker's own two prompts (attribution, then staging), the
+# same validators, and reports every accepted chapter to the inductor's
+# /api/complete under the reserved `operator` id — so the ledger, the bible and
+# the cast move exactly as they do for a worker.
+#
+# Three things, and the three are the whole contract:
+#
+#   API    the **model** API — where the two digest calls go
+#          (default https://openrouter.ai/api/v1). NOT the inductor.
+#   KEY    the credential for that API, and it is also how the service is
+#          identified: `sk-or-` is OpenRouter, `AIza` is Google. So there is no
+#          backend to name and nothing in settings to edit.
+#   MODEL  the model that answers.
+#
+# The inductor is not a variable: it is this machine's own control API on the
+# port in settings, exactly as `make tui` assumes, and it must already be up —
+# the report is the only thing that makes a chapter count. The key is passed to
+# the process env and never written to `.env`, so a borrowed or expiring one is
+# not persisted.
+#
+# Chapters run from the one after the last digested one to the end of the book,
+# in order, because each chapter's bible delta lands on its predecessor's.
+digest-assistant: build-inductor
+ifndef KEY
+	$(error KEY is required: make digest-assistant KEY=<api-key> MODEL=<model>)
+endif
+ifndef MODEL
+	$(error MODEL is required: make digest-assistant KEY=<api-key> MODEL=<model>)
+endif
+	@case '$(API)' in \
+		http://127.0.0.1:*|*localhost*) model_api='$(MODEL_API)' ;; \
+		*) model_api='$(API)' ;; \
+	esac; \
+	echo "digest-assistant: model API $$model_api · model $(MODEL) · reporting to the local inductor"; \
+	OPENROUTER_API_KEY='$(KEY)' GEMINI_API_KEY='$(KEY)' $(BIN)/bm-inductor backup \
+		--api "$$model_api" --model '$(MODEL)'
 
 provision: build tts
 ifdef ADDR

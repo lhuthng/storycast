@@ -54,7 +54,9 @@ impl Thai {
     pub fn new(dict: &PhonemeDict) -> Self {
         let freqs = dict.section_entries(SECTION_TH_FREQ);
         if freqs.is_empty() {
-            return Self { trie: WordTrie::from_words(dict.section_keys(SECTION_TH)) };
+            return Self {
+                trie: WordTrie::from_words(dict.section_keys(SECTION_TH)),
+            };
         }
         // The 2,767 keys carrying an empty pronunciation stay in the
         // segmenter's vocabulary on purpose. Dropping them looks right — a
@@ -80,7 +82,9 @@ impl Thai {
         let pairs = freqs
             .into_iter()
             .map(|(w, n)| (w, n.parse::<u64>().unwrap_or(1)));
-        Self { trie: WordTrie::from_frequencies(pairs) }
+        Self {
+            trie: WordTrie::from_frequencies(pairs),
+        }
     }
 
     pub fn segment(&self, text: &str) -> Vec<Token> {

@@ -1,6 +1,6 @@
 //! One task in full.
 use crate::tui::{
-    app::App,
+    app::{App, HitTarget, ListTarget},
     model::age_secs,
     screen::TaskDetail,
     style::{centered_padded, empty_body, state_color, worker_racing},
@@ -13,9 +13,17 @@ use ratatui::{
 };
 
 /// One task in full: everything the ledger knows, `detail` first among them.
-pub(crate) fn draw_task_detail(f: &mut ratatui::Frame, app: &App, view: &TaskDetail) {
+pub(crate) fn draw_task_detail(f: &mut ratatui::Frame, app: &mut App, view: &TaskDetail) {
     let area = centered_padded(f.area(), 92, 22, 2);
     f.render_widget(Clear, area);
+    app.add_hit_region(
+        area,
+        HitTarget::List {
+            kind: ListTarget::TaskDetail,
+            row_start: view.scroll,
+            row_y: area.y + 1,
+        },
+    );
 
     let id = format!("{}:{}", view.stage, view.chapter);
     let found = app
