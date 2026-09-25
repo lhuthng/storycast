@@ -8,7 +8,20 @@ __pycache__/
 # cache: machine-local state. Shipped profiles live as GitHub releases
 # (`tools/profile.sh fetch <name>`); only the fixture in rust/fixtures/ is
 # tracked, so the suite never needs the network.
-/assets/
+#
+# **Except the bundled crawlers.** `assets/crawl/templates/` is tracked, and
+# has to be: `crawl::DEFAULT_SCRIPT` and every `KnownSite::script` name files in
+# it, and a crawler that is not on disk is not an error — `resolve_script`
+# returns nothing and the crawl quietly takes the built-in fetcher's path. So a
+# clone that ignored this directory could not crawl at all until somebody
+# fetched a profile, and would say nothing about why. Git cannot un-ignore a
+# file inside an ignored directory, hence the per-entry form below.
+/assets/*
+!/assets/crawl/
+/assets/crawl/*
+!/assets/crawl/templates/
+!/assets/crawl/templates/*.lua
+!/assets/crawl/templates/*.js
 /prompts/
 /workspaces/
 /profiles/

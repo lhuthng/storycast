@@ -274,7 +274,7 @@ select_all(html, sel)    -> [ { text, html, attrs } ] attributes included
 select_text(html, sel)   -> string                    first match, as prose
 strip_tags(html)         -> string
 decode_entities(s)       -> string
-sanitize(text)           -> string                    the chapter boundary
+sanitize(text)           -> string                    shape only: entities, line breaks
 readable(html)           -> { title, text }           generic prose heuristic
 abs_url(base, href)      -> string
 chapter_url(template, n) -> string                    the host's own {n}/{n:03} expansion
@@ -325,11 +325,22 @@ one table at the top of `storya.lua`, where the operator who can read the page
 will find them. A host function that already knows your site is exactly the
 hardcoding this replaces.
 
-What the host does insist on is the *shape*. `sanitize` — site metadata out,
-entities decoded — runs over whatever a script returns, and the length guard
-refuses a body too short to be a chapter, so a chapter is a chapter however it
-was obtained and "the selector missed" fails at the crawl rather than three
-stages downstream.
+What the host does insist on is the *shape*, and only the shape: `sanitize`
+decodes entities, drops carriage returns, and puts one line per paragraph with
+blank lines between — nothing else. It runs over whatever a script returns, and
+the length guard refuses a body too short to be a chapter, so a chapter is a
+chapter however it was obtained and "the selector missed" fails at the crawl
+rather than three stages downstream.
+
+Which *lines* are the site's is not in that list, on purpose. The host used to
+carry a list of Storya's junk lines (`Cài đặt đọc`, `PS:`, the false
+"Truyện đã hoàn thành" footer) and drop them for every site — which meant
+every other site's chapters were quietly filtered by a Vietnamese word list, and
+a new site's own furniture would have had to be added *in Rust* to be removed.
+Those rules now live in `SITE.artifact` in `storya.lua` / `storya.js`, next to
+the selectors, and the host has no vocabulary at all. The consequence is
+deliberate: a chapter that reached the boundary with junk in it keeps the junk,
+whether it was crawled or pasted. Removing it is the crawler's job.
 
 `select_text` is the one to reach for first: point it at a container and get
 prose back, paragraphs separated by blank lines. `select` answers the same
@@ -398,6 +409,13 @@ workspace asks for it.
 ---
 
 ## 5. The bundled crawlers
+
+This one directory is the only part of `assets/` that is tracked in git, and
+it has to be: `crawl.script` defaults to one of these files, and a crawler that
+is not on disk is **not an error** — the lookup finds nothing and the crawl
+quietly runs without selectors. So a fresh clone has all six of them without
+fetching a profile. (`git check-ignore assets/scene-map.json` says ignored;
+`git check-ignore assets/crawl/templates/storya.lua` says nothing.)
 
 | file | what it is |
 | --- | --- |
@@ -624,9 +642,11 @@ a chapter you already have.
 * The number comes from **you or the filename**, never from the order things
   arrived in: `ch34.txt`, `34.txt`, `chapter-034.txt`, `034 - Tên chương.txt`
   all work, and a file with no number is refused rather than guessed at.
-* The text goes through the **same boundary a crawl does** — site metadata out,
-  entities decoded, anything under 200 bytes refused — so a truncated file fails
-  during the import, named, instead of at the digest three stages later.
+* The text goes through the **same boundary a crawl does** — entities decoded,
+  paragraph shape, anything under 200 bytes refused — so a truncated file fails
+  during the import, named, instead of at the digest three stages later. The
+  boundary does **not** clean the site's furniture out of a paste: that was
+  never site-agnostic, so what you pasted is what is stored.
 * A whole batch validates before any of it lands: a three-file import that fails
   on the second writes nothing.
 * Importing over a chapter that is already digested is refused (it would leave

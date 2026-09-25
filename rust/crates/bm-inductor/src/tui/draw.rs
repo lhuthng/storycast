@@ -2,6 +2,7 @@
 mod cast;
 mod cloud;
 mod confirm;
+mod crawl;
 mod digest;
 mod events;
 mod footer;
@@ -22,8 +23,11 @@ mod workers;
 use crate::tui::{
     app::{App, HitTarget, Panel},
     layout::{
-        size_class, Size, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H, COMPACT_MACHINES_H,
-        FULL_EVENTS_MIN_H, FULL_FOOTER_H, FULL_HEADER_H, FULL_MACHINES_H, MIN_H, MIN_W,
+        size_class, Size, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H, COMPACT_MACHINES_MAX_H,
+        COMPACT_MACHINES_MIN_H, COMPACT_TASKS_MAX_H, COMPACT_TASKS_MIN_H, COMPACT_WORKERS_MAX_H,
+        COMPACT_WORKERS_MIN_H, FULL_EVENTS_MIN_H, FULL_FOOTER_H, FULL_HEADER_H,
+        FULL_MACHINES_MAX_H, FULL_MACHINES_MIN_H, FULL_TASKS_MAX_H, FULL_TASKS_MIN_H,
+        FULL_WORKERS_MAX_H, FULL_WORKERS_MIN_H, MIN_H, MIN_W,
     },
     screen::Screen,
     style::centered_padded,
@@ -217,6 +221,106 @@ fn draw_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
     );
 }
 
+/// The border, and the chrome inside it, that every pane spends before its
+/// first row of content.
+///
+/// **These are the numbers the panes themselves subtract**, so a change to a
+/// pane's header has to change this or the pane is sized against a fiction.
+/// Machines spends 3 (border + table header), the others 2 (border only).
+const MACHINES_CHROME: u16 = 3;
+
+const PANE_CHROME: u16 = 2;
+
+/// Column floors for the Tasks/Stats row.
+///
+/// `STATS_MIN_W` is not a guess: it is the sum of that table's own column
+/// widths (10+5+6+6+5+6) plus the two border columns, which is the point at
+/// which its stage columns start clipping into each other. Tasks is a text
+/// list, so it only needs enough for a stage name and a count.
+const STATS_MIN_W: u16 = 40;
+
+const TASKS_MIN_W: u16 = 24;
+
+/// The ceiling a pane gets at a given terminal height.
+///
+/// **The ceilings scale, and that is the point.** A fixed cap means a pane is
+/// the same size on a 32-row terminal and a 60-row one, so the extra rows go
+/// to Logs while a pane that genuinely has ten workers still shows five. A
+/// tall terminal should be able to show the cluster it has.
+///
+/// The fraction is a share of the *whole* frame, so a busy pane cannot take
+/// the screen: at any height the other panes' floors plus the log's floor are
+/// still reserved, and the `*_MAX_H` constants are the floor of this ceiling
+/// for the smallest terminal of the tier — which is what the compile-time
+/// guard proves.
+fn soft_ceiling(base: u16, share: u16, frame_h: u16) -> u16 {
+    base.max(frame_h * share / 4)
+}
+
+/// Rows the Machines pane wants: one per machine, plus its chrome, clamped to
+/// the tier's floor and the scaled ceiling.
+///
+/// The ceiling is the point of the ceiling. A cluster with thirty machines
+/// should scroll, not push Logs and the footer off the screen — and the pane
+/// already clamps its scroll to the rows it can show.
+fn machines_height(app: &App, compact: bool, frame_h: u16) -> u16 {
+    let (min, base) = if compact {
+        (COMPACT_MACHINES_MIN_H, COMPACT_MACHINES_MAX_H)
+    } else {
+        (FULL_MACHINES_MIN_H, FULL_MACHINES_MAX_H)
+    };
+    // The empty state draws two lines of guidance, not a header row.
+    let want = if app.machines.is_empty() {
+        PANE_CHROME + 2
+    } else {
+        MACHINES_CHROME + app.machines.len() as u16
+    };
+    want.clamp(min, soft_ceiling(base, 1, frame_h))
+}
+
+/// Rows the Workers pane wants: one per live worker, plus a table header.
+///
+/// Stale and ghost beats are filtered out of the pane by the renderer, so the
+/// count is taken the same way here — sizing the pane from the raw heartbeat
+/// list would reserve rows for rows that are never drawn, which is the exact
+/// "too tall" this replaces.
+fn workers_height(app: &App, compact: bool, frame_h: u16) -> u16 {
+    let (min, base) = if compact {
+        (COMPACT_WORKERS_MIN_H, COMPACT_WORKERS_MAX_H)
+    } else {
+        (FULL_WORKERS_MIN_H, FULL_WORKERS_MAX_H)
+    };
+    let live = app.live_workers().len();
+    let want = if live == 0 {
+        PANE_CHROME + 2
+    } else {
+        PANE_CHROME + 1 + live as u16
+    };
+    // Half the frame's worth of ceiling: workers are the pane that grows with
+    // the cluster, so they get the larger share. Still bounded, because the
+    // other panes' floors and the log's floor are reserved first.
+    want.clamp(min, soft_ceiling(base, 2, frame_h))
+}
+
+/// Rows the Tasks/Stats row wants: one line per stage, plus the border.
+///
+/// Stats draws a header and one row per worker next to it, so the taller of the
+/// two decides. An empty cluster still gets the floor, because both panes say
+/// something useful when there is nothing running.
+fn tasks_height(app: &App, compact: bool, frame_h: u16) -> u16 {
+    let (min, base) = if compact {
+        (COMPACT_TASKS_MIN_H, COMPACT_TASKS_MAX_H)
+    } else {
+        (FULL_TASKS_MIN_H, FULL_TASKS_MAX_H)
+    };
+    let stages = app.counts.as_object().map(|o| o.len() as u16).unwrap_or(1);
+    let stats = (PANE_CHROME + 1 + app.live_workers().len() as u16).min(6);
+    // A quarter of the frame, and never more than the stats table needs.
+    (PANE_CHROME + stages)
+        .max(stats)
+        .clamp(min, soft_ceiling(base, 1, frame_h))
+}
+
 pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
     app.clear_hit_regions();
     let area = f.area();
@@ -228,25 +332,34 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
     let compact = size == Size::Compact;
 
-    // Workers owns the flexible middle of the dashboard. Its renderer decides
-    // how much room the live rows need and places Tasks/Stats beneath them;
-    // Machines and Logs remain bounded, independently scrollable panes.
+    // Every pane but Logs is sized to its content; **Logs takes the slack**.
+    //
+    // That is the whole change. The old layout handed each pane a fixed row
+    // count, so a one-box cluster got an eight-row Machines pane that was
+    // mostly border, a nine-box cluster had machines clipped with nothing
+    // saying so, Tasks and Stats were dropped outright in the compact tier,
+    // and terminal height beyond the fixed set was spent on empty borders
+    // rather than on the log — the one pane where a message is the point.
+    let machines_h = machines_height(app, compact, area.height);
+    let workers_h = workers_height(app, compact, area.height);
+    let tasks_h = tasks_height(app, compact, area.height);
     let constraints: Vec<Constraint> = if compact {
         vec![
-            Constraint::Length(COMPACT_MACHINES_H),
-            Constraint::Min(3),
+            Constraint::Length(machines_h),
+            Constraint::Length(workers_h),
+            Constraint::Length(tasks_h),
             Constraint::Min(COMPACT_EVENTS_MIN_H),
             Constraint::Length(COMPACT_FOOTER_H),
         ]
     } else {
         vec![
             Constraint::Length(FULL_HEADER_H),
-            Constraint::Length(FULL_MACHINES_H),
-            // Workers is the only flexible full-tier pane. Keeping Logs at its
-            // readable floor means terminal height beyond the base layout goes
-            // to live worker rows, which is what the tall-layout test expects.
-            Constraint::Min(3),
-            Constraint::Length(FULL_EVENTS_MIN_H),
+            Constraint::Length(machines_h),
+            Constraint::Length(workers_h),
+            Constraint::Length(tasks_h),
+            // The only flexible row. Everything above is its content's height,
+            // so whatever the terminal has spare is spent here.
+            Constraint::Min(FULL_EVENTS_MIN_H),
             Constraint::Length(FULL_FOOTER_H),
         ]
     };
@@ -255,47 +368,29 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         .constraints(constraints)
         .split(area);
 
+    // Tasks and Stats sit side by side. Both are `Min`, not `Length`, because a
+    // fixed 46 columns for Stats meant a 200-column terminal gave it 46 and
+    // handed the other 154 to a text list — and a 76-column terminal landed
+    // exactly on the edge, where the stage columns in Stats clipped. Stats
+    // needs 38 columns of table before its border, so that is its floor.
+    let task_row = RLayout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(TASKS_MIN_W), Constraint::Min(STATS_MIN_W)])
+        .split(if compact { root[2] } else { root[3] });
+    tasks::draw_tasks(f, app, task_row[0]);
+    stats::draw_stats(f, app, task_row[1]);
+
     if compact {
         machines::draw_machines(f, app, root[0], compact);
-        workers::draw_workers(f, app, root[1], compact);
-        events::draw_events(f, app, root[2]);
-        footer::draw_footer(f, app, root[3], true);
+        workers::draw_workers(f, app, root[1], true);
+        events::draw_events(f, app, root[3]);
+        footer::draw_footer(f, app, root[4], true);
         app.add_hit_region(
             root[0],
             HitTarget::Panel {
                 panel: Panel::Machines,
                 row_start: app.machine_scroll,
                 row_y: root[0].y + 2,
-            },
-        );
-        app.add_hit_region(
-            root[2],
-            HitTarget::Panel {
-                panel: Panel::Events,
-                row_start: 0,
-                row_y: root[2].y + 1,
-            },
-        );
-        app.add_hit_region(
-            root[3],
-            HitTarget::Panel {
-                panel: Panel::Footer,
-                row_start: 0,
-                row_y: root[3].y,
-            },
-        );
-    } else {
-        draw_header(f, app, root[0]);
-        machines::draw_machines(f, app, root[1], compact);
-        workers::draw_workers(f, app, root[2], compact);
-        events::draw_events(f, app, root[3]);
-        footer::draw_footer(f, app, root[4], false);
-        app.add_hit_region(
-            root[1],
-            HitTarget::Panel {
-                panel: Panel::Machines,
-                row_start: app.machine_scroll,
-                row_y: root[1].y + 2,
             },
         );
         app.add_hit_region(
@@ -312,6 +407,36 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 panel: Panel::Footer,
                 row_start: 0,
                 row_y: root[4].y,
+            },
+        );
+    } else {
+        draw_header(f, app, root[0]);
+        machines::draw_machines(f, app, root[1], compact);
+        workers::draw_workers(f, app, root[2], compact);
+        events::draw_events(f, app, root[4]);
+        footer::draw_footer(f, app, root[5], false);
+        app.add_hit_region(
+            root[1],
+            HitTarget::Panel {
+                panel: Panel::Machines,
+                row_start: app.machine_scroll,
+                row_y: root[1].y + 2,
+            },
+        );
+        app.add_hit_region(
+            root[4],
+            HitTarget::Panel {
+                panel: Panel::Events,
+                row_start: 0,
+                row_y: root[4].y + 1,
+            },
+        );
+        app.add_hit_region(
+            root[5],
+            HitTarget::Panel {
+                panel: Panel::Footer,
+                row_start: 0,
+                row_y: root[5].y,
             },
         );
     }
@@ -333,6 +458,7 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Screen::TaskDetail(d) => task_detail::draw_task_detail(f, app, &d),
         Screen::Sound(v) => sound::draw_sound(f, app, &v),
         Screen::Cloud(v) => cloud::draw_cloud(f, app, &v),
+        Screen::Crawl { scroll } => crawl::draw_crawl(f, app, scroll),
         _ => {}
     }
 }

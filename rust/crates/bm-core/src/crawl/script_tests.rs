@@ -238,6 +238,12 @@ fn site_golden(name: &str) -> String {
 
 /// The two templates, read from the repo rather than inlined: these tests are
 /// the gate for those *files*, so reading them is the point.
+///
+/// The directory is tracked (`.gitignore` excludes the rest of the live profile
+/// tree and un-ignores `assets/crawl/templates/`), so these run on a fresh
+/// clone. While the whole of `assets/` was ignored they read machine-local
+/// state, and passed or failed depending on whether somebody had fetched a
+/// profile.
 fn template(file: &str) -> String {
     std::fs::read_to_string(format!(
         "{}/../../../assets/crawl/templates/{file}",

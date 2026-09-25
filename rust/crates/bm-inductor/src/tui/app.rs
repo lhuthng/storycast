@@ -4,6 +4,7 @@ use crate::tui::{
     audio::Player,
     input::dispatch,
     jobs::{fetch_state, BackgroundJob, DoneKind, Ev, Job},
+    model::{beat_backed, live_beats},
     model::{cast_rows, parse_stats, registry_machines, CastRow, WorkerStats},
     screen::Screen,
     sound::SoundData,
@@ -85,6 +86,7 @@ pub(crate) enum ListTarget {
     Jobs,
     Policy,
     Help,
+    Crawl,
     TaskDetail,
 }
 
@@ -207,6 +209,19 @@ pub(crate) struct App {
     /// the panes already read — false exactly when the theme is `Mono` — so
     /// "no bold/fg for terminals that cannot show it" keeps working.
     pub(crate) theme: Theme,
+    /// Whether the terminal is reporting mouse events to us.
+    ///
+    /// **This is the reason an error message could not be copied out of the
+    /// dashboard.** While mouse reporting is on, the terminal hands every drag
+    /// to the program instead of treating it as a selection, so there is no way
+    /// to highlight a stack trace and copy it — the single most useful thing to
+    /// do with an error. `m` turns reporting off, selection works normally,
+    /// and `m` again brings the click-to-select panes back.
+    pub(crate) mouse_capture: bool,
+    /// Set by the key handler, consumed by the event loop, which is the only
+    /// place holding the terminal. The handler cannot talk to the terminal
+    /// directly, so it leaves the intent here and the loop carries it out.
+    pub(crate) mouse_toggle: bool,
     pub(crate) status: LogLine,
     pub(crate) conn: Conn,
     pub(crate) tick: u64,
@@ -283,6 +298,8 @@ impl App {
             catchup_jobs: Vec::new(),
             command_return: None,
             theme: Theme::default(),
+            mouse_capture: true,
+            mouse_toggle: false,
             status: LogLine {
                 level: Level::Info,
                 wall: bm_proto::now_secs(),
@@ -461,6 +478,21 @@ impl App {
             wall: bm_proto::now_secs(),
             text: text.into(),
         });
+    }
+
+    /// The worker rows the Workers pane will actually draw, and nothing else.
+    ///
+    /// **The layout sizes this pane from this number**, so it has to be the
+    /// same set the renderer draws — stale beats and ghost rows included in the
+    /// count would reserve rows for rows that never appear, which is exactly
+    /// the too-tall pane this replaced. One definition, used by both, is the
+    /// only way that stays true when either filter changes.
+    pub(crate) fn live_workers(&self) -> Vec<&bm_proto::Heartbeat> {
+        let now = bm_proto::now_secs();
+        live_beats(&self.beats, now)
+            .into_iter()
+            .filter(|b| beat_backed(&self.machines, b))
+            .collect()
     }
 
     pub(crate) fn set_status(&mut self, level: Level, text: impl Into<String>) {

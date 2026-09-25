@@ -179,6 +179,8 @@ git clone lhuthng/storycast.git
 cd storycast
 make build               # builds the Rust programs
 make tts                 # builds the speech program and its speech runtime
+                         # (you can skip this: adding a machine to the pool
+                         #  builds the speech program for that machine itself)
 
 cp .env.example .env     # add your key(s)
 #   GEMINI_API_KEY=...      (or OPENROUTER_API_KEY, or nothing for opencode)

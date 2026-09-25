@@ -38,6 +38,11 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
             "click rows/panes · wheel scrolls · double-click activates",
         ),
         (
+            "M",
+            "hand the mouse back to the terminal — drag to select and copy, \
+             press M again for click-to-select",
+        ),
+        (
             "K",
             "task ledger: every task, its failure detail, and a re-queue key",
         ),
@@ -54,7 +59,13 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
             "background jobs: running against queued, elapsed time, activity",
         ),
         ("D / :digest", "digest manager: every chapter, manual digest by clipboard"),
-        ("R", "system overview: preview everything"),            ("PgUp PgDn", "page through the log   (G returns to newest)"),
+        (
+            "c",
+            "crawl view: the settings in force, this book's chapter links, the crawlers \
+             on this machine, and the sites we know",
+        ),
+        ("R", "system overview: preview everything"),
+        ("PgUp PgDn", "page through the log   (G returns to newest)"),
         ("r", "refresh now"),
         ("?", "this help"),
         (
