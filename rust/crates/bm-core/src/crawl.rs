@@ -275,68 +275,33 @@ pub(crate) fn decode_entities(s: &str) -> String {
     out
 }
 
-fn is_chapter_heading(line: &str) -> bool {
-    match line.strip_prefix("Chương ") {
-        Some(rest) => rest
-            .chars()
-            .next()
-            .map(|c| c.is_ascii_digit())
-            .unwrap_or(false),
-        None => false,
-    }
-}
-
-/// True for a standalone line copied from Storya rather than the novel.
+/// Decode entities and normalise the shape of a chapter at the boundary.
 ///
-/// These markers are deliberately conjunctive. A story may legitimately say
-/// that a task was completed, include an author's `PS:`, or mention a platform;
-/// only the site-shaped combinations are removed. In particular, the false
-/// completion footer needs all three fingerprints (`Hệ thống`, `chiếc đỉnh`,
-/// `hậu cung`, and `Truyện đã hoàn thành`) so ordinary prose is never mistaken
-/// for site metadata.
-fn is_storya_artifact(line: &str) -> bool {
-    let line = line.trim();
-    let lower = line.to_lowercase();
-    let normalized = lower.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    normalized == "cài đặt đọc"
-        || normalized == "người trên vạn người"
-        || ((lower.contains("đọc online")
-            || lower.contains("cập nhật nhanh nhất")
-            || lower.contains("nền tảng đọc truyện"))
-            && lower.contains("storya"))
-        || (lower.contains("hệ thống")
-            && lower.contains("chiếc đỉnh")
-            && lower.contains("hậu cung")
-            && lower.contains("truyện đã hoàn thành"))
-        || lower.starts_with("ps:")
-        || lower.starts_with("p/s:")
-}
-
-/// Remove known site metadata and decode entities at the chapter boundary.
+/// **Nothing here is about any one website.** Not which element holds the prose,
+/// not which lines are the site's furniture, not what a chapter headline looks
+/// like in the language the novel is written in: those are facts about a site,
+/// and they live in the crawler script — `SITE.artifact` in
+/// `assets/crawl/templates/storya.lua` is where Storya's own lines are listed,
+/// and a new site adds its own.
 ///
-/// This runs for freshly crawled pages, existing local chapter files, and the
-/// digest preparer. Keeping one function at all three boundaries is what makes
-/// a workspace created by an older binary safe: bad source data is repaired on
-/// read instead of being blessed by the source-alignment gate and spoken.
+/// This function used to hold a list of Storya's junk lines and drop them. That
+/// was the one piece of site knowledge the host had, and it was a lie of the
+/// documented contract ("the host offers primitives and no site knowledge"),
+/// not a feature: it made every *other* site's chapters depend on a Vietnamese
+/// word list, and a site that needs its own filter would have had to be added
+/// here — in Rust, unreviewable by whoever wrote the crawler — to get one.
+///
+/// What is left is what cannot be wrong whatever the site: entities decoded so a
+/// chapter reads the same as it was crawled, carriage returns gone, one line per
+/// paragraph with blank lines between, and a trailing newline. The length guard
+/// then refuses a body too short to be a chapter, so a miss fails at the crawl
+/// rather than three stages downstream.
 pub(crate) fn sanitize_chapter_text(text: &str) -> String {
     let decoded = decode_entities(text);
     let mut paragraphs = Vec::new();
     for line in decoded.lines() {
         let line = line.trim();
-        if line.is_empty() || is_storya_artifact(line) {
-            continue;
-        }
-        // Storya repeats the chapter as `81. Chương 81: ...` beside the real
-        // `Chương 81: ...` headline. The numbered copy is metadata; the clean
-        // headline is retained and spoken once by the title renderer.
-        let bytes = line.as_bytes();
-        let numbered_heading = bytes.first().is_some_and(u8::is_ascii_digit)
-            && line
-                .split_once(". ")
-                .map(|(_, rest)| is_chapter_heading(rest))
-                .unwrap_or(false);
-        if numbered_heading {
+        if line.is_empty() {
             continue;
         }
         paragraphs.push(line);
@@ -378,24 +343,41 @@ mod tests {
     }
 
     #[test]
-    fn chapter_heading_detection() {
-        assert!(is_chapter_heading("Chương 12"));
-        assert!(is_chapter_heading("Chương 12: Tên"));
-        assert!(!is_chapter_heading("Chương trước"));
-        assert!(!is_chapter_heading("Mở đầu"));
+    fn the_boundary_tidies_shape_and_never_vocabulary() {
+        // The host's whole remaining job, on the messiest input there is.
+        let raw =
+            "  Chương 81: Liền phòng ngự  \r\n\r\n\nCánh cửa k&#x27;két&#x27; một tiếng.\r\n\r\n";
+        let out = sanitize_chapter_text(raw);
+        assert_eq!(
+            out,
+            "Chương 81: Liền phòng ngự\n\nCánh cửa k'két' một tiếng.\n"
+        );
+        assert!(!out.contains('\r'), "a stray CR becomes a line of its own");
     }
 
     #[test]
-    fn sanitizes_storya_metadata_without_touching_story_prose() {
-        let raw = "Chương 81: Liền phòng ngự\n\n81. Chương 81: Liền phòng ngự\n\nCài đặt đọc\n\nNgười Trên Vạn Người\n\nNgười Trên Vạn Người thuộc thể loại Xuyên Không, chương 81 tiếp tục diễn biến hấp dẫn của câu chuyện. Đọc online miễn phí, cập nhật nhanh nhất tại Storya - nền tảng đọc truyện chất lượng cao.\n\nHắn đã hoàn thành nhiệm vụ.\n\nHệ thống thực thể dưới dạng chiếc đỉnh. Main bá, không hậu cung. Truyện đã hoàn thành\n\nPS: sẽ cập nhật sau.\n\nCánh cửa k&#x27;két&#x27; một tiếng.";
-        let out = sanitize_chapter_text(raw);
-
-        assert!(out.starts_with("Chương 81: Liền phòng ngự\n\nHắn đã hoàn thành nhiệm vụ."));
-        assert!(out.ends_with("Cánh cửa k'két' một tiếng.\n"));
-        assert!(!out.contains("81. Chương"));
-        assert!(!out.contains("Storya"));
-        assert!(!out.contains("Truyện đã hoàn thành"));
-        assert!(!out.contains("PS:"));
-        assert!(!out.contains("&#"));
+    fn site_words_are_the_scripts_business_and_the_host_leaves_them_alone() {
+        // Every line here is Storya's furniture, and every one of them used to
+        // be dropped by this file. The crawlers drop them instead — that is what
+        // `SITE.artifact` in `storya.lua` / `storya.js` is for, and
+        // `script_tests::the_bundled_crawlers_reproduce_the_rust_extractors_goldens`
+        // is what proves they still land on the same bytes.
+        //
+        // Pinned deliberately: a host that quietly deletes words is a host that
+        // can delete a *novel's* words, on a language nobody wrote a list for.
+        let furniture = [
+            "81. Chương 81: Liền phòng ngự",
+            "Cài đặt đọc",
+            "Truyện đã hoàn thành",
+            "PS: sẽ cập nhật sau.",
+            "Đọc online tại Storya",
+        ];
+        let out = sanitize_chapter_text(&furniture.join("\n\n"));
+        for line in furniture {
+            assert!(
+                out.contains(line),
+                "the host must not know site words: {line:?} was dropped from {out:?}"
+            );
+        }
     }
 }

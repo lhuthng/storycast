@@ -441,6 +441,14 @@ mod tests {
     fn the_registry_points_at_scripts_that_are_there() {
         // A registry that names a file we do not ship is worse than no registry:
         // it is a confident answer that fails at the moment it is trusted.
+        //
+        // Reading the repo's own `assets/crawl/templates/` is the point, not a
+        // shortcut: that directory is **tracked** (see `.gitignore`, which
+        // excludes the rest of the live profile tree and un-ignores this one
+        // directory), so this test passes on a fresh clone with no profile
+        // fetched. It did not always — while the whole of `assets/` was
+        // ignored, this passed only on machines that had fetched a profile, and
+        // a clone could not crawl at all without failing silently.
         let root = format!("{}/../../../assets", env!("CARGO_MANIFEST_DIR"));
         for site in known_sites() {
             if !site.is_crawlable() {
@@ -453,6 +461,19 @@ mod tests {
                 site.host
             );
         }
+        // The one every workspace leans on: `DEFAULT_SCRIPT` is what a settings
+        // file with no `crawl` block deserializes to, so a missing file here is
+        // not one site's problem, it is every uncloned book's.
+        let default = format!(
+            "{root}/{}",
+            crate::crawl::DEFAULT_SCRIPT
+                .strip_prefix("assets/")
+                .unwrap()
+        );
+        assert!(
+            std::path::Path::new(&default).is_file(),
+            "the default crawler is not there: {default}"
+        );
     }
 
     #[test]

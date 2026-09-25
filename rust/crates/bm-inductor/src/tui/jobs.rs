@@ -734,6 +734,40 @@ fn push_label(secs: u64) -> String {
     }
 }
 
+/// Why a provision run did not leave the box ready, in the operator's terms.
+///
+/// The run's own `stop` wins: the pre-flight steps that fail before a step can
+/// log (`no TTS sidecar binary for …`, `no local profile loaded`) have no
+/// shared vocabulary, and a scanner that only knows "missing"/"not found"/
+/// "failed" silently reduced them to "provision INCOMPLETE" — which names no
+/// cause and answers a question the operator never asked. The log scan stays
+/// as the fallback for failures inside the step flow, where the useful line
+/// really is in the log: prefer the inner root cause ("rsync: command not
+/// found") over its wrapper ("agent install failed").
+fn provision_stop_reason(stop: Option<&str>, lines: &[String]) -> String {
+    if let Some(why) = stop.filter(|s| !s.trim().is_empty()) {
+        return bm_core::util::head_chars(why, 160);
+    }
+    /// A log line without its `[addr] ` prefix — the pane already shows the
+    /// machine, and the address is the widest part of the note.
+    fn body(l: &str) -> &str {
+        match l.strip_prefix('[') {
+            Some(rest) => match rest.find(']') {
+                Some(i) => &rest[i + 2..],
+                None => l,
+            },
+            None => l,
+        }
+    }
+    lines
+        .iter()
+        .rev()
+        .find(|l| l.contains("missing") || l.contains("not found"))
+        .or_else(|| lines.iter().rev().find(|l| l.contains("failed")))
+        .map(|l| bm_core::util::head_chars(body(l), 120))
+        .unwrap_or_else(|| "provision INCOMPLETE".to_string())
+}
+
 pub(crate) async fn job_provision(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     layout: bm_core::Layout,
@@ -805,27 +839,9 @@ pub(crate) async fn job_provision(
     match out {
         Ok(out) => {
             let ready = out.ready;
-            let lines = out.lines;
-            // Extract the most actionable line from the provision log:
-            // prefer the inner root cause (e.g. "rsync: command not
-            // found") over the outer wrapper ("agent install failed").
-            let fail_reason = lines
-                .iter()
-                .rev()
-                .find(|l| l.contains("missing") || l.contains("not found"))
-                .or_else(|| lines.iter().rev().find(|l| l.contains("failed")))
-                .map(|l| {
-                    // Strip the "[addr] " prefix if present.
-                    let raw = if let Some(rest) = l.strip_prefix('[') {
-                        rest.find(']').map_or(l.as_str(), |i| &rest[i + 2..])
-                    } else {
-                        l.as_str()
-                    };
-                    bm_core::util::head_chars(raw, 120)
-                })
-                .unwrap_or_default();
             // Lines already streamed live above — `lines` stays for the
-            // `fail_reason` scan only, never re-sent.
+            // reason scan only, never re-sent.
+            let fail_reason = provision_stop_reason(out.stop.as_deref(), &out.lines);
             if ready {
                 // `X` landed while this box was being pushed: the box is
                 // provisioned, but giving it a worker now would leave the
@@ -933,15 +949,12 @@ pub(crate) async fn job_provision(
                 set_machine_state(&api, &layout, &addr, MachineState::Initializing, note).await;
                 send(&tx, Level::Info, format!("[{addr}] {note}"));
             } else {
-                // The note carries the actual failing step from the
-                // provision log (python missing, ssh abort, …) — a
-                // bare "INCOMPLETE" made the machine pane lie about
-                // what the box needs.
-                let reason = if fail_reason.is_empty() {
-                    "provision INCOMPLETE".to_string()
-                } else {
-                    fail_reason
-                };
+                // The note carries the actual failing step — a missing local
+                // build, python missing, an ssh abort — because a bare
+                // "INCOMPLETE" made the machine pane lie about what the box
+                // needs, and ":prov again" is the wrong advice for a failure
+                // that only a build on this machine can fix.
+                let reason = fail_reason;
                 send_update(&tx, MachineState::Error, &reason);
                 set_machine_state(&api, &layout, &addr, MachineState::Error, &reason).await;
                 send(
@@ -2665,5 +2678,62 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
         } => job_preview_local(tx, layout, voice, text).await,
         Job::Workspace { layout, api, req } => job_workspace(tx, layout, api, req).await,
         Job::Profile { layout, api, req } => job_profile(tx, layout, api, req).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_provision_stop_names_the_cause_the_run_carried() {
+        // The pre-flight failure that started all this: the log line is right
+        // there, and it contains none of the words the old scan looked for, so
+        // the pane said "provision INCOMPLETE" and told the operator to retry
+        // the same click. The run now carries the reason, and the pane shows
+        // it whatever the log happens to say.
+        let why = "no TTS sidecar binary for linux/x86_64 at /repo/rust/target/x86_64-unknown-linux-gnu/release/bm-tts (linux/x86_64: `make tts`)";
+        let lines = vec![
+            "[10.0.0.1] profile: xianxia (6b8d5fc00761)".to_string(),
+            format!("[10.0.0.1] {why}"),
+        ];
+        assert_eq!(provision_stop_reason(Some(why), &lines), why);
+        // The scan alone still cannot see it — the honest reason the field
+        // exists, pinned so nobody deletes the field and calls it a cleanup.
+        assert_eq!(provision_stop_reason(None, &lines), "provision INCOMPLETE");
+    }
+
+    #[test]
+    fn a_carried_reason_is_used_verbatim_and_keeps_its_own_words() {
+        let why = "no local profile loaded — load one first (`:profile` in the dashboard)";
+        assert_eq!(
+            provision_stop_reason(Some(why), &["[10.0.0.1] unrelated".to_string()]),
+            why
+        );
+    }
+
+    #[test]
+    fn the_log_scan_still_finds_the_inner_cause_and_drops_the_address() {
+        let lines = vec![
+            "[10.0.0.1] agent install failed: rsync push failed".to_string(),
+            "[10.0.0.1] rsync: command not found".to_string(),
+        ];
+        assert_eq!(
+            provision_stop_reason(None, &lines),
+            "rsync: command not found",
+            "the root cause, not the wrapper, and without the address the pane already shows"
+        );
+    }
+
+    #[test]
+    fn a_failure_with_nothing_to_say_says_only_that_it_is_incomplete() {
+        // The last resort, and the string this whole change exists to avoid.
+        let lines = vec!["[10.0.0.1] starting worker".to_string()];
+        assert_eq!(provision_stop_reason(None, &lines), "provision INCOMPLETE");
+        // An empty carried reason is not a reason.
+        assert_eq!(
+            provision_stop_reason(Some("   "), &lines),
+            "provision INCOMPLETE"
+        );
     }
 }

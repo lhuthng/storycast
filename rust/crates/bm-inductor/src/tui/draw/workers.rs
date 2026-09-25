@@ -1,12 +1,12 @@
 //! Workers pane.
 use crate::tui::{
     app::{App, HitTarget, Panel},
-    layout::{COMPACT_WORKER_COLS, FULL_TASKS_H},
+    layout::COMPACT_WORKER_COLS,
     model::{beat_backed, live_beats, machine_name, reported_alias},
     style::{bar, cell, empty_body, stage_color, style_bold_of, style_of, worker_alias},
 };
 use ratatui::{
-    layout::{Constraint, Direction, Layout as RLayout, Rect},
+    layout::{Constraint, Rect},
     style::Color,
     text::{Line, Span},
     widgets::{Row, Table},
@@ -31,6 +31,11 @@ fn tts_cell(colour: bool, b: &bm_proto::Heartbeat) -> Line<'static> {
     ))
 }
 
+/// `compact` is the tier, not the width: it decides which **columns** exist.
+/// The box name, cpu, ram and tts columns only appear on the full tier, because
+/// the compact column set is measured against `MIN_W` and there is no room for
+/// them there. Height, by contrast, is this pane's content and is settled by
+/// the caller.
 pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &mut App, area: Rect, compact: bool) {
     // Stale beats stay in state for the reaper's accounting but leave the
     // pane: a dead worker drawn as an idle row is indistinguishable from a
@@ -56,31 +61,12 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &mut App, area: Rect, co
         return;
     }
 
-    // Workers are sized to the live set. If there are fewer workers than the
-    // flexible middle can hold, the unused rows go to Tasks/Stats rather than
-    // becoming an empty table pretending to be more data.
-    let task_reserve = if compact { 0 } else { FULL_TASKS_H };
-    let available = inner.height.saturating_sub(task_reserve);
-    let desired = live.len().saturating_add(1).min(usize::from(available)) as u16;
-    let worker_h = if live.is_empty() {
-        3.min(available)
-    } else {
-        desired
-    };
-    let sections = RLayout::default()
-        .direction(Direction::Vertical)
-        .constraints(if compact {
-            vec![Constraint::Length(inner.height)]
-        } else {
-            vec![Constraint::Length(worker_h), Constraint::Min(0)]
-        })
-        .split(inner);
-    let table_area = sections[0];
-    let task_area = if compact {
-        Rect::new(0, 0, 0, 0)
-    } else {
-        sections[1]
-    };
+    // The pane is already sized to its content by `draw`, so this fills it
+    // rather than carving Tasks/Stats out of it. They are siblings in the root
+    // layout now, which is what lets both of them be visible in the compact
+    // tier — they used to be carved out of here, and the carve was skipped
+    // entirely below 100x32.
+    let table_area = inner;
     let body = usize::from(table_area.height.saturating_sub(1));
     app.worker_scroll = app.worker_scroll.min(live.len().saturating_sub(body));
     app.add_hit_region(
@@ -219,14 +205,5 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &mut App, area: Rect, co
         let table = Table::new(rows, widths)
             .header(Row::new(header).style(style_bold_of(colour, Color::Gray)));
         f.render_widget(table, table_area);
-    }
-
-    if !compact && task_area.height > 0 {
-        let task_row = RLayout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(30), Constraint::Length(46)])
-            .split(task_area);
-        super::tasks::draw_tasks(f, app, task_row[0]);
-        super::stats::draw_stats(f, app, task_row[1]);
     }
 }

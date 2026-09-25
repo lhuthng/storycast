@@ -33,6 +33,32 @@ pub(crate) async fn normal_key(
             }
         }
         KeyCode::Char('?') => app.screen = Screen::Help { scroll: 0 },
+        // Hand the mouse back to the terminal.
+        //
+        // While mouse reporting is on, the terminal gives every drag to us
+        // instead of treating it as a selection, so an error message cannot be
+        // highlighted and copied — which is the one thing anybody wants to do
+        // with an error. This is the escape hatch, and it is a toggle rather
+        // than a one-way door because clicking panes is also worth having.
+        //
+        // **`M`, not `m`**: `m` is the documented alias for `:m` (reconcile),
+        // and taking a key that already means something is how a dashboard
+        // grows two spellings for one action. Uppercase `M` is free in both the
+        // bare-key map and the command aliases, and the two sit next to each
+        // other on the keyboard on purpose.
+        KeyCode::Char('M') => {
+            app.mouse_capture = !app.mouse_capture;
+            // The handler has no terminal; the loop owns it and applies this.
+            app.mouse_toggle = true;
+            app.set_status(
+                Level::Info,
+                if app.mouse_capture {
+                    "mouse on — click panes · m again to select and copy text"
+                } else {
+                    "mouse off — drag to select and copy · m again for click-to-select"
+                },
+            );
+        }
         KeyCode::Char('f') => {
             app.focused_panel = app.focused_panel.next();
             app.set_status(
@@ -55,6 +81,11 @@ pub(crate) async fn normal_key(
                 "",
             ));
             app.set_status(Level::Info, "command mode — Enter runs it, Esc closes");
+        }
+        KeyCode::Char('c') => {
+            // The crawl view. Lowercase, because uppercase C is the palette
+            // cycle and the two must never trade places silently.
+            app.screen = Screen::Crawl { scroll: 0 };
         }
         KeyCode::Char('C') => {
             // The theme cycle: default → dim → mono. The palette itself is
