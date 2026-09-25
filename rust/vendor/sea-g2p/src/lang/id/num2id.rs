@@ -11,8 +11,7 @@
 //! miliar, triliun.
 
 const UNITS: [&str; 10] = [
-    "nol", "satu", "dua", "tiga", "empat", "lima", "enam", "tujuh",
-    "delapan", "sembilan",
+    "nol", "satu", "dua", "tiga", "empat", "lima", "enam", "tujuh", "delapan", "sembilan",
 ];
 const SCALES: [&str; 5] = ["", "ribu", "juta", "miliar", "triliun"];
 

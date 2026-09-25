@@ -356,7 +356,8 @@ mod tests {
     }
 
     #[test]
-    fn voices_hash_tracks_the_manifest_and_the_reference_clips() {        let root = stamp_fixture("voices");
+    fn voices_hash_tracks_the_manifest_and_the_reference_clips() {
+        let root = stamp_fixture("voices");
         let base = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
 
         // A rename in voices.json must re-enroll even though the clip is
@@ -457,7 +458,10 @@ mod tests {
         let s = parse_stamp(old).expect("an older payload must not read as garbage");
         assert_eq!(s.agent_version, "0.2.0");
         assert_eq!(s.tts_hash, "", "an absent field means 'this box has none'");
-        assert_eq!(s.agent_hash, "", "ditto: drift once, then the fresh stamp records it");
+        assert_eq!(
+            s.agent_hash, "",
+            "ditto: drift once, then the fresh stamp records it"
+        );
     }
 
     /// The Rust sidecar's artifacts are their own hash: a box on the Python path

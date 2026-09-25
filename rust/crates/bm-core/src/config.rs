@@ -77,6 +77,11 @@ pub struct Settings {
     pub analyzer: String,
     pub opencode_model: String,
     pub openrouter_model: String,
+    /// The model service's base URL. Settings, not a constant, because the
+    /// endpoint a key talks to is a deployment fact: the public one by default,
+    /// a gateway or a proxy in a locked-down network, and an operator pointing
+    /// the digest at a different service should not have to rebuild.
+    pub openrouter_url: String,
     pub local_model: String,
     pub ollama_url: String,
     /// Gemini fallback chain, first tried first.
@@ -180,6 +185,7 @@ impl Default for Settings {
             analyzer: "opencode".into(),
             opencode_model: "opencode/muse-spark-1.3-contributor-free".into(),
             openrouter_model: "google/gemma-4-31b-it:free".into(),
+            openrouter_url: "https://openrouter.ai/api/v1".into(),
             local_model: "gemma-4-12b".into(),
             ollama_url: "http://localhost:11434".into(),
             analyze_models: vec!["gemini-3.5-flash".into()],
@@ -220,6 +226,7 @@ impl Settings {
             analyze_models: Some(self.analyze_models.clone()),
             opencode_model: self.opencode_model.clone(),
             openrouter_model: self.openrouter_model.clone(),
+            openrouter_url: self.openrouter_url.clone(),
             local_model: self.local_model.clone(),
             ollama_url: self.ollama_url.clone(),
         }
@@ -253,6 +260,9 @@ impl Settings {
         }
         if !a.openrouter_model.is_empty() {
             s.openrouter_model = a.openrouter_model.clone();
+        }
+        if !a.openrouter_url.is_empty() {
+            s.openrouter_url = a.openrouter_url.clone();
         }
         if !a.local_model.is_empty() {
             s.local_model = a.local_model.clone();

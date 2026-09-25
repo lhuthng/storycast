@@ -114,7 +114,11 @@ fn store_shipments(
     task_id: &str,
     files: &[bm_proto::UnitFile],
 ) {
-    let Some(chapter) = task_id.split(':').nth(1).and_then(|p| p.parse::<u32>().ok()) else {
+    let Some(chapter) = task_id
+        .split(':')
+        .nth(1)
+        .and_then(|p| p.parse::<u32>().ok())
+    else {
         return;
     };
     let Some(expected) = crate::segments::expected_names(layout, engine, chapter) else {
@@ -214,11 +218,7 @@ async fn put_segment(
 /// it lacks and mixes from a complete set, wherever it runs.
 async fn get_segment(State(st): State<Shared>, Query(q): Query<SegmentQuery>) -> impl IntoResponse {
     let fail = |code: StatusCode, msg: String| {
-        (
-            code,
-            Json(serde_json::json!({"ok": false, "error": msg})),
-        )
-            .into_response()
+        (code, Json(serde_json::json!({"ok": false, "error": msg}))).into_response()
     };
     let (layout, engine) = {
         let inner = st.lock().await;
@@ -239,7 +239,10 @@ async fn get_segment(State(st): State<Shared>, Query(q): Query<SegmentQuery>) ->
     if !expected.contains(&q.name) {
         return fail(
             StatusCode::NOT_FOUND,
-            format!("{} is not an expected file for chapter {}", q.name, q.chapter),
+            format!(
+                "{} is not an expected file for chapter {}",
+                q.name, q.chapter
+            ),
         );
     }
     match std::fs::read(layout.seg_dir(&engine, q.chapter).join(&q.name)) {
@@ -358,9 +361,9 @@ async fn set_task_policy(
             inner.save();
             Json(serde_json::json!({"ok": true}))
         }
-        None => Json(
-            serde_json::json!({"ok": false, "error": format!("unknown machine {}", u.addr)}),
-        ),
+        None => {
+            Json(serde_json::json!({"ok": false, "error": format!("unknown machine {}", u.addr)}))
+        }
     }
 }
 
@@ -381,9 +384,9 @@ async fn relink(State(st): State<Shared>) -> impl IntoResponse {
             Json(serde_json::json!({"ok": true, "lines": lines}))
         }
         Ok(Err(e)) => Json(serde_json::json!({"ok": false, "error": format!("{e:#}")})),
-        Err(e) => Json(
-            serde_json::json!({"ok": false, "error": format!("relink task failed: {e}")}),
-        ),
+        Err(e) => {
+            Json(serde_json::json!({"ok": false, "error": format!("relink task failed: {e}")}))
+        }
     }
 }
 
@@ -1499,13 +1502,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let inner = st.lock().await;
         let policy = inner.machines["192.168.2.2"].task_policy.clone().unwrap();
-        assert_eq!(
-            policy
+        assert!(
+            !policy
                 .iter()
                 .find(|p| p.stage == bm_proto::Stage::Render)
                 .unwrap()
-                .enabled,
-            false
+                .enabled
         );
     }
 

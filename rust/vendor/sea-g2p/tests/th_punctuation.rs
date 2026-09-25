@@ -25,7 +25,8 @@ fn thai() -> (PhonemeDict, Thai) {
 #[test]
 fn terminators_survive_and_attach() {
     let (dict, th) = thai();
-    for (input, mark) in [("เขาชอบไหม?", '?'), ("ดีมาก!", '!'), ("จบแล้ว.", '.')] {
+    for (input, mark) in [("เขาชอบไหม?", '?'), ("ดีมาก!", '!'), ("จบแล้ว.", '.')]
+    {
         let out = th.phonemize(input, &dict);
         assert!(out.ends_with(mark), "{input}: {out}");
         // attached, not a whitespace-separated token of its own

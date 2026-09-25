@@ -168,6 +168,27 @@ fn may_install(configured: bool, force: bool) -> bool {
     force || !configured
 }
 
+/// Whether the model/voice store must be pushed even when the worker already
+/// has the right agent and sidecar. The voice roster lives in
+/// `models/voices.json`, so a clone addition is a model-store change.
+fn models_need_push(remote: Option<&ProvisionStamp>, local: &ProvisionStamp, force: bool) -> bool {
+    force || !remote.is_some_and(|stamp| stamp.tts_in_sync(local))
+}
+
+/// Whether the remote voice store actually contains every clone declared by the
+/// manifest. The stamp is only a cache hint: an older provision bug could write
+/// a fresh stamp after skipping the model push, leaving the box permanently
+/// looking in sync while missing the newly added voice.
+fn voice_store_covers(
+    remote: &[String],
+    manifest: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    manifest
+        .keys()
+        .filter(|name| !name.starts_with('_'))
+        .all(|name| remote.iter().any(|voice| voice == name))
+}
+
 /// The `opencode` step, in two flavours.
 ///
 /// Both start with the same `command -v`: a box that has it pays one round
@@ -405,7 +426,12 @@ echo "probe=done"
         // holding a different declaration is a silent desync.
         let manifest = layout.root.join("voices.json");
         if manifest.exists() {
-            self.rsync_push(&manifest, "voices.json", false, progress(live, "voices.json"))?;
+            self.rsync_push(
+                &manifest,
+                "voices.json",
+                false,
+                progress(live, "voices.json"),
+            )?;
         }
         Ok(())
     }
@@ -800,11 +826,13 @@ pub fn provision(
             .map(|s| s.sources_in_sync(&local_stamp))
             .unwrap_or(false);
     // The voice store now travels inside `models/`, so `tts_hash` covers it and
-    // there is no separate voices check.
-    let models_match = !force
-        && remote_stamp
-            .map(|s| s.tts_in_sync(&local_stamp))
-            .unwrap_or(false);
+    // there is no separate voices check. Also verify the remote names: a stamp
+    // written by the old already-configured path could say “in sync” after it
+    // skipped the model push, which is exactly how Narrator 2 stayed missing.
+    let manifest = crate::pool::load_manifest(&layout.root);
+    let remote_voice_store_complete = voice_store_covers(&probe.voices, &manifest);
+    let models_match =
+        !models_need_push(remote_stamp, &local_stamp, force) && remote_voice_store_complete;
 
     // What the box already is, asked once. This gates the install steps at the
     // bottom of the function as well as the push steps here: on a box that has
@@ -814,6 +842,10 @@ pub fn provision(
     // catch-up that costs a round trip per step and one that costs minutes on a
     // machine that is already working.
     let already = probe.configured(agent_version) && !force;
+    // A voice change is a model-store change. Remember that we pushed the
+    // store so the already-running sidecar is restarted below; otherwise the
+    // new `models/voices.json` is on disk while the old roster stays resident.
+    let mut models_pushed = false;
     // Read here, beside `already`, so the two cannot disagree about what this
     // run is allowed to do — see [`may_install`].
     let installs = may_install(probe.configured(agent_version), force);
@@ -847,6 +879,27 @@ pub fn provision(
             match ssh.install_sources(layout, live.as_ref()) {
                 Ok(()) => log.push(format!("[{}] sources in sync", m.id)),
                 Err(e) => log.push(format!("[{}] source sync failed: {e}", m.id)),
+            }
+        }
+
+        // The voice store lives in `models/voices.json`, not in `voices.json`.
+        // An already-configured worker still needs the model directory pushed
+        // when a new clone was baked; the old branch only synced sources, so
+        // `:prov` could report success while the worker still answered
+        // `unknown voice "Narrator 2"`.
+        if models_match {
+            log.push(format!("[{}] models in sync (cache match)", m.id));
+        } else {
+            log.push(format!("[{}] pushing models/voice store", m.id));
+            match ssh.install_models(&layout.root, live.as_ref()) {
+                Ok(v) => {
+                    models_pushed = true;
+                    log.push(format!("[{}] {v}", m.id));
+                }
+                Err(e) => {
+                    log.push(format!("[{}] model sync failed: {e}", m.id));
+                    return (probe, log.lines);
+                }
             }
         }
     } else {
@@ -902,7 +955,10 @@ pub fn provision(
         } else {
             log.push(format!("[{}] pushing models (~668 MB)", m.id));
             match ssh.install_models(&layout.root, live.as_ref()) {
-                Ok(v) => log.push(format!("[{}] {v}", m.id)),
+                Ok(v) => {
+                    models_pushed = true;
+                    log.push(format!("[{}] {v}", m.id));
+                }
                 Err(e) => {
                     log.push(format!("[{}] {e}", m.id));
                     return (probe, log.lines);
@@ -997,13 +1053,28 @@ pub fn provision(
         Ok(v) => log.push(format!(
             "[{}] {v} — merge stays disabled on this box until ffmpeg is present (apt/dnf install ffmpeg), then force a re-provision",
             m.id
-        )),
-        Err(e) => log.push(format!("[{}] ffmpeg install check failed: {e}", m.id)),
+        )),        Err(e) => log.push(format!("[{}] ffmpeg install check failed: {e}", m.id)),
+    }
+    // The sidecar loads its voice roster at startup. A models push therefore
+    // has to recycle an already-running sidecar; otherwise the new store is
+    // present on disk but the process keeps serving the old 66-voice roster.
+
+    if models_pushed {
+        match ssh.stop_tts() {
+            Ok(()) if probe.tts_up => {
+                log.push(format!("[{}] stopped TTS to reload the voice store", m.id))
+            }
+            Ok(()) => log.push(format!("[{}] cleared stale TTS process", m.id)),
+            Err(e) => log.push(format!(
+                "[{}] could not stop TTS for voice reload: {e}",
+                m.id
+            )),
+        }
     }
 
     // Waits for ready, so this line is a fact and not a hope — see `start_tts`.
-    // A box still loading after the budget is *not* held back here: readiness is
-    // about the binary and the weights (`configured`), and the worker's own
+    // A box still loading after the budget is *not* held back here: readiness
+    // is about the binary and the weights (`configured`), and the worker's own
     // `ensure` now waits for a loading server instead of racing it. Making
     // `configured` depend on a live sidecar was considered and rejected: it
     // would deny a registered box over a sidecar restart and drag
@@ -1102,6 +1173,38 @@ mod tests {
         p.models_present = false;
         p.python_present = true;
         assert!(!p.configured("0.2.0"), "a venv cannot render");
+    }
+
+    #[test]
+    fn a_new_voice_forces_a_model_store_push_on_an_already_configured_box() {
+        let local = ProvisionStamp {
+            tts_hash: "new-store".into(),
+            ..Default::default()
+        };
+        let same = ProvisionStamp {
+            tts_hash: "new-store".into(),
+            ..Default::default()
+        };
+        let old = ProvisionStamp {
+            tts_hash: "old-store".into(),
+            ..Default::default()
+        };
+        assert!(!models_need_push(Some(&same), &local, false));
+        assert!(models_need_push(Some(&old), &local, false));
+        assert!(models_need_push(None, &local, false));
+        assert!(models_need_push(Some(&same), &local, true));
+    }
+
+    #[test]
+    fn a_matching_stamp_cannot_hide_a_missing_voice() {
+        let manifest = [("Narrator".to_string(), "refs/narrator.wav".to_string())]
+            .into_iter()
+            .collect();
+        assert!(voice_store_covers(
+            &["Narrator".into(), "Đức Trí".into()],
+            &manifest
+        ));
+        assert!(!voice_store_covers(&["Đức Trí".into()], &manifest));
     }
 
     #[test]

@@ -99,6 +99,31 @@ fn is_emotion_span(s: &str) -> bool {
     false
 }
 
+/// Turn normalized paragraphs into one chunk per sentence, retaining the
+/// paragraph/sentence gap labels for the audio joiner.
+fn sentence_chunks(paragraphs: Vec<Vec<String>>) -> (Vec<String>, Vec<String>) {
+    let mut chunks = Vec::new();
+    let mut gaps = Vec::new();
+    for sentences in paragraphs {
+        let mut first = true;
+        for sentence in sentences {
+            if sentence.trim().is_empty() {
+                continue;
+            }
+            if !chunks.is_empty() {
+                gaps.push(if first {
+                    "para".into()
+                } else {
+                    "sentence".into()
+                });
+            }
+            chunks.push(sentence);
+            first = false;
+        }
+    }
+    (chunks, gaps)
+}
+
 /// Split on emotion spans, keeping them — the captured-group behaviour of the
 /// reference's `re.split`, so odd indices are the spans.
 ///
@@ -262,6 +287,36 @@ impl FrontEnd {
             .collect();
 
         merge_short_chunks(chunks, gaps, min_chunk_chars)
+    }
+
+    /// One synthesis chunk per normalized sentence.
+    ///
+    /// The ordinary [`Self::chunks`] path may pack several short sentences into
+    /// one TTS request. That is efficient, but it gives the autoregressive model
+    /// a paragraph-sized context in which it can repeat the final sentence. The
+    /// render pipeline keeps its source/run order; this method only changes the
+    /// TTS request boundary, so every sentence is spoken and joined with the
+    /// normal sentence pause.
+    pub fn chunks_sentence_level(&self, text: &str) -> Chunks {
+        if text.is_empty() {
+            return Chunks::default();
+        }
+        let keep_cues = text.contains('[') || text.contains("<|emotion_");
+        let paragraphs = self.normalized_sentences_by_para(text, keep_cues);
+        let (mut chunks, mut gaps) = sentence_chunks(paragraphs);
+        chunks = chunks.iter().map(|c| apply_punc_norm(c)).collect();
+        gaps = gaps
+            .iter()
+            .enumerate()
+            .map(|(i, gap)| {
+                if gap == "para" {
+                    "para".to_string()
+                } else {
+                    classify_gap(&chunks[i]).to_string()
+                }
+            })
+            .collect();
+        Chunks { chunks, gaps }
     }
 
     /// Raw text to paragraphs of normalized sentences.
@@ -786,6 +841,25 @@ fn merge_short_chunks(mut chunks: Vec<String>, mut gaps: Vec<String>, min_chars:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sentence_level_chunking_keeps_one_take_per_sentence() {
+        let (chunks, gaps) = sentence_chunks(vec![
+            vec!["First sentence.".into(), "Second sentence.".into()],
+            vec!["Paragraph two.".into()],
+        ]);
+        assert_eq!(
+            chunks,
+            vec!["First sentence.", "Second sentence.", "Paragraph two."]
+        );
+        assert_eq!(gaps, vec!["sentence", "para"]);
+    }
+
+    #[test]
+    fn sentence_level_chunking_does_not_repack_a_short_sentence() {
+        let (chunks, _) = sentence_chunks(vec![vec!["Ừm!".into(), "Nước chảy mây trôi.".into()]]);
+        assert_eq!(chunks, vec!["Ừm!", "Nước chảy mây trôi."]);
+    }
 
     #[test]
     fn a_question_inside_quotes_does_not_end_a_sentence() {

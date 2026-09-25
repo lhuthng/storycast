@@ -25,10 +25,7 @@ pub struct RomanCues {
 static RE_ROMAN: Lazy<Regex> = Lazy::new(|| {
     // A well-formed numeral, at least two characters so a lone "I" or "V" —
     // almost always an initial — is never claimed.
-    Regex::new(
-        r"(?i)\b(M{0,4}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3}))\b",
-    )
-    .unwrap()
+    Regex::new(r"(?i)\b(M{0,4}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3}))\b").unwrap()
 });
 
 fn value(s: &str) -> Option<u32> {

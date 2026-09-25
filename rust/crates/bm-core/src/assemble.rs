@@ -10,9 +10,9 @@ mod renderplan;
 mod wav;
 
 pub use self::plan::{
-    character_has_lines, drop_headline, expected_wavs, pick_exact, pick_rendered, plan_render,
-    rendered_segments, segment_miss, segments_complete, title_speech, title_speech_for_script,
-    Planned, RenderUnit, RenderedSegment, Run, MAX_SEGMENT_BYTES,
+    character_has_lines, drop_headline, expected_wavs, is_headline, pick_exact, pick_rendered,
+    plan_render, rendered_segments, segment_miss, segments_complete, title_speech,
+    title_speech_for_script, Planned, RenderUnit, RenderedSegment, Run, MAX_SEGMENT_BYTES,
 };
 pub use self::renderplan::{
     reconcile, reconcile_with, take_file, take_key, PlanUpdate, RenderPlan, Take, PLAN_VERSION,
@@ -521,11 +521,7 @@ mod tests {
             mk(&a, Vec::new()),
             mk(
                 &b,
-                crate::ambience::injects_of(
-                    &[serde_json::json!({"sound": "blood"})],
-                    &pool,
-                    2.0,
-                ),
+                crate::ambience::injects_of(&[serde_json::json!({"sound": "blood"})], &pool, 2.0),
             ),
         ];
         // Lay the clock out by hand: slot 0 spans 0.0-1.0, slot 1 starts after
@@ -575,17 +571,18 @@ mod tests {
         let planned = Planned::plan(&segments);
         assert_eq!(planned.speech.len(), 2, "the sound is not a line");
         assert!(
-            !planned
-                .speech
-                .iter()
-                .any(crate::util::is_sound_item),
+            !planned.speech.iter().any(crate::util::is_sound_item),
             "nothing the renderer could read as syntax survives into the speech"
         );
 
         let mut cast = crate::cast::Cast::new();
         cast.insert("A".into(), "Đức Trí".into());
         let wavs = expected_wavs(&planned, &cast, &seg_dir, true, None).unwrap();
-        assert_eq!(wavs.len(), 2, "two halves, two TTS calls, two files: {wavs:?}");
+        assert_eq!(
+            wavs.len(),
+            2,
+            "two halves, two TTS calls, two files: {wavs:?}"
+        );
         silent_wav(&wavs[0], 1.0, 48_000).unwrap();
         silent_wav(&wavs[1], 0.8, 48_000).unwrap();
 

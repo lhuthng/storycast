@@ -308,10 +308,10 @@ async fn task(
     // strikes — three operator policy flips in a row would shelve a chapter
     // for a decision the operator made. 403 is the one status the dispatcher
     // treats as "refused, not failed"; everything else keeps its old shape.
-    let refused = result
-        .as_ref()
-        .err()
-        .is_some_and(|e| e.chain().any(|c| c.downcast_ref::<PolicyRefusal>().is_some()));
+    let refused = result.as_ref().err().is_some_and(|e| {
+        e.chain()
+            .any(|c| c.downcast_ref::<PolicyRefusal>().is_some())
+    });
     if refused {
         return (
             StatusCode::FORBIDDEN,
@@ -474,7 +474,9 @@ async fn sidecar_policy(
     if u.keep {
         println!("sidecar policy: keep — the next render may ensure it again");
     } else {
-        println!("sidecar policy: do not keep — the idle reaper stops it as soon as this worker is idle");
+        println!(
+            "sidecar policy: do not keep — the idle reaper stops it as soon as this worker is idle"
+        );
     }
     // Answered without touching the sidecar's mutex on purpose: a render
     // holds that lock for its whole duration, and an ack that waits behind it
@@ -829,7 +831,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(refused.status(), 401);
-        assert!(push.keep_sidecar(), "a refused request must not change the flag");
+        assert!(
+            push.keep_sidecar(),
+            "a refused request must not change the flag"
+        );
 
         // The real instruction: drop it. Acknowledged immediately — the
         // answer deliberately does not wait on the sidecar's mutex, which a
@@ -935,7 +940,10 @@ mod tests {
         assert_eq!(resp.status(), 403);
         // The render restored the permission on its way out, and the flag
         // itself is untouched — the inductor's instruction still says "drop".
-        assert!(!push.keep_sidecar(), "the endpoint flag stays as the inductor set it");
+        assert!(
+            !push.keep_sidecar(),
+            "the endpoint flag stays as the inductor set it"
+        );
     }
 
     /// A render offered while the policy still says "keep": the normal path.

@@ -248,6 +248,49 @@ impl Inner {
         msg
     }
 
+    /// Remove every ledger row for one downstream stage and chapter.
+    ///
+    /// A forced upstream rerun invalidates the work, not just the current row.
+    /// Keeping a completed render or merge row would let reconcile promote the
+    /// old artifact straight back to `Done` before the replacement can run.
+    fn remove_stage_tasks(&mut self, stage: Stage, chapter: u32) -> usize {
+        let ids: Vec<String> = self
+            .tasks
+            .iter()
+            .filter(|(_, task)| task.stage == stage && task.chapter == chapter)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let count = ids.len();
+        for id in ids {
+            self.tasks.remove(&id);
+        }
+        count
+    }
+
+    /// Put a chapter's merge back in the queue, creating the row if the chapter
+    /// has not reached merge yet. Its old output is the caller's responsibility
+    /// to remove; this method only owns the ledger transition.
+    fn invalidate_merge_task(&mut self, chapter: u32, detail: &str) {
+        let key = format!("{}:{chapter}", Stage::Merge);
+        let now = now_secs();
+        match self.tasks.get_mut(&key) {
+            Some(task) => {
+                task.state = TaskState::Pending;
+                task.attempts = 0;
+                task.clear_holders();
+                task.lease_until = None;
+                task.detail = detail.to_string();
+                task.updated = now;
+            }
+            None => {
+                let mut task = Task::new(chapter, Stage::Merge);
+                task.detail = detail.to_string();
+                task.updated = now;
+                self.tasks.insert(key, task);
+            }
+        }
+    }
+
     /// Retry an individual task by stage and chapter.
     ///
     /// Resets attempts to 0 so the next failure gets a full 3 tries again.
@@ -260,6 +303,29 @@ impl Inner {
     /// `N segments missing` fails again, on the same box, for the same reason:
     /// the retry has to reach the stage that can actually make them.
     pub fn op_retry_task(&mut self, stage: Stage, chapter: u32, force: bool) -> String {
+        // A forced upstream run invalidates every downstream row for this
+        // chapter before the current row is requeued. Otherwise a completed
+        // merge can be promoted back to Done by the next reconcile, or stale
+        // per-take render rows can survive a forced digest and speak the old
+        // script when the new one lands.
+        if force {
+            match stage {
+                Stage::Render => {
+                    let _ = std::fs::remove_file(self.layout.final_mp3(chapter));
+                    self.invalidate_merge_task(chapter, "requeued: render forced");
+                }
+                Stage::Digest => {
+                    self.remove_stage_tasks(Stage::Render, chapter);
+                    self.remove_stage_tasks(Stage::Merge, chapter);
+                    let engine = self.settings.engine.clone();
+                    let _ = std::fs::remove_dir_all(self.layout.seg_dir(&engine, chapter));
+                    let _ = std::fs::remove_file(self.layout.plan(chapter));
+                    let _ = std::fs::remove_file(self.layout.final_mp3(chapter));
+                }
+                _ => {}
+            }
+        }
+
         // A render is one row per take now, so "retry the render" means every
         // take of the chapter — and `force` deletes the cached takes first so
         // the plan's diff makes each of them work again.
@@ -445,8 +511,7 @@ impl Inner {
         // could be rolled automatically but never picked by hand.
         let pooled = bm_core::pool::load_pool(&self.layout.root.join("voice-pool.json"))
             .contains_key(&voice);
-        let manifested = bm_core::pool::load_manifest(&self.layout.root)
-            .contains_key(&voice);
+        let manifested = bm_core::pool::load_manifest(&self.layout.root).contains_key(&voice);
         let admitted = declared || in_use || pooled || manifested;
         if !admitted {
             anyhow::bail!("voice {voice:?} is neither a preset nor an enrolled clone");
@@ -465,9 +530,12 @@ impl Inner {
             let baked = std::fs::read_to_string(self.layout.root.join("models/voices.json"))
                 .ok()
                 .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                .and_then(|v| v.get("presets").and_then(|p| p.as_object()).map(|o| {
-                    o.keys().any(|k| k == &voice || bm_core::util::fold(k) == want)
-                }))
+                .and_then(|v| {
+                    v.get("presets").and_then(|p| p.as_object()).map(|o| {
+                        o.keys()
+                            .any(|k| k == &voice || bm_core::util::fold(k) == want)
+                    })
+                })
                 .unwrap_or(false);
             if !baked {
                 anyhow::bail!(
@@ -789,9 +857,7 @@ impl Inner {
         remove: &[usize],
     ) -> anyhow::Result<String> {
         for t in self.tasks.values() {
-            if t.chapter == chapter
-                && matches!(t.state, TaskState::Assigned | TaskState::Running)
-            {
+            if t.chapter == chapter && matches!(t.state, TaskState::Assigned | TaskState::Running) {
                 anyhow::bail!(
                     "ch{chapter} has {} in flight — wait for it to settle, then recast",
                     t.id()
@@ -809,7 +875,9 @@ impl Inner {
             }
         }
         if fixes.is_empty() && remove.is_empty() {
-            anyhow::bail!("nothing to fix — pass segment indexes with their speakers, or indexes to delete");
+            anyhow::bail!(
+                "nothing to fix — pass segment indexes with their speakers, or indexes to delete"
+            );
         }
         let engine = self.settings.engine.clone();
         let cast = bm_core::cast::read_cast(&engine, &self.layout.cast(&engine));
@@ -891,6 +959,9 @@ impl Inner {
         if !removed.is_empty() {
             parts.push(format!("removed {} duplicated segments", removed.len()));
         }
-        Ok(format!("recast ch{chapter}: {}; re-render queued", parts.join(", ")))
+        Ok(format!(
+            "recast ch{chapter}: {}; re-render queued",
+            parts.join(", ")
+        ))
     }
 }

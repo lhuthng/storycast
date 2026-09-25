@@ -4,6 +4,7 @@ mod api;
 mod aws_ops;
 mod backend;
 mod dispatch;
+mod manual;
 mod roster;
 mod segments;
 mod state;
@@ -137,6 +138,60 @@ enum Cmd {
         /// Print the whole script object instead of a one-line summary.
         #[arg(long)]
         json: bool,
+    },
+    /// Backup digestor: run the digest here, while the cluster's digest has no
+    /// quota, and hand every accepted chapter to a running inductor.
+    ///
+    /// **The worker's own digest, not a second one.** Round 1 renders
+    /// `build_attribution_prompt`, round 2 renders `build_staging_prompt`, and
+    /// the answers are checked by the same validators the automatic path uses —
+    /// the same flow the TUI's `:digest` manager drives by clipboard, with a
+    /// model standing where the operator's pastes would be.
+    ///
+    /// Each finished chapter is reported to `POST /api/complete` under the
+    /// reserved `operator` id, so the ledger, the bible and the cast move
+    /// exactly as they do for a worker, and a race with a box grinding the same
+    /// chapter resolves the way the manual digest's does: the report wins.
+    ///
+    /// A running inductor is a **precondition**, as it is for `tui`: the report
+    /// is the only thing that makes a digest count, so the backend is checked
+    /// first and a missing one is named with what to enter instead of waited on.
+    Backup {
+        /// First chapter. Default: the one after the last digested chapter —
+        /// the only chapter a digest may start from, since each chapter's bible
+        /// delta lands on its predecessor's.
+        start: Option<u32>,
+        /// Last chapter, inclusive. Default: the last chapter the ledger knows
+        /// about, so a bare `backup` carries on to the end of the book.
+        #[arg(long)]
+        through: Option<u32>,
+        /// Which service to call. Default: read off `--api` (a URL containing
+        /// `openrouter` or `googleapis`), then the API key in the environment
+        /// (`sk-or-` → openrouter, `AIza` → gemini), then settings.
+        #[arg(long)]
+        analyzer: Option<String>,
+        /// The model service's base URL — where the two digest calls go. This is
+        /// **not** the inductor: the report target is this machine's own control
+        /// API, `127.0.0.1:<control_port>`, unless `--inductor` says otherwise.
+        #[arg(long, default_value = "https://openrouter.ai/api/v1")]
+        api: String,
+        /// Where the finished chapters are reported. Default: this machine's
+        /// inductor, on the port in settings. Rarely needs saying.
+        #[arg(long)]
+        inductor: Option<String>,
+        /// The model to answer with, on whichever service the key names.
+        #[arg(long)]
+        model: Option<String>,
+        /// How many times to re-ask a round the gate refused, with the
+        /// validator's own complaint attached. The worker's path allows itself
+        /// one repair; a backup digestor is a person-or-model with more
+        /// patience and a chapter nobody else is racing, so it is worth more.
+        /// 0 asks once and reports the refusal.
+        #[arg(long, default_value_t = 3)]
+        retries: u32,
+        /// Analyze and print, but report nothing — a dry run of the prompts.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Link a machine by name: remembers how to reach it so `provision --box`
     /// needs no flags. Writes `.bm/machines.json`, which is ignored.
@@ -532,8 +587,7 @@ async fn cmd_serve(
         let relink_root = drive_root.clone();
         tokio::spawn(async move {
             let root = relink_root;
-            let pool =
-                tokio::task::spawn_blocking(move || crate::aws_ops::pool(&root)).await;
+            let pool = tokio::task::spawn_blocking(move || crate::aws_ops::pool(&root)).await;
             if let Ok(Ok((_cfg, instances))) = pool {
                 let mut inner = relink_shared.lock().await;
                 for line in inner.relink_drifted(&instances) {
@@ -609,7 +663,10 @@ fn agent_binary_for(os: &str, arch: &str, layout: &Layout) -> anyhow::Result<std
             // Cross targets only, and at most one per platform — the build
             // either succeeds (returning the candidate) or its error is the
             // provision failure.
-            if let Some(cand) = buildable_agent_candidates(os, arch, layout).into_iter().next() {
+            if let Some(cand) = buildable_agent_candidates(os, arch, layout)
+                .into_iter()
+                .next()
+            {
                 build_agent_binary(&cand)?;
                 return Ok(cand);
             }
@@ -666,7 +723,11 @@ fn staged_is_fresh(bin: &std::path::Path, layout: &Layout) -> bool {
         Ok(t) => t,
         Err(_) => return false,
     };
-    for dir in ["crates/bm-agent/src", "crates/bm-core/src", "crates/bm-proto/src"] {
+    for dir in [
+        "crates/bm-agent/src",
+        "crates/bm-core/src",
+        "crates/bm-proto/src",
+    ] {
         if sources_newer_than(&layout.root.join("rust").join(dir), built) {
             return false;
         }
@@ -710,12 +771,15 @@ fn build_agent_binary(cand: &std::path::Path) -> anyhow::Result<()> {
     // there before declaring the toolchain absent.
     let on_path = |tool: &str| {
         std::env::var_os("PATH")
-            .map(|paths| {
-                std::env::split_paths(&paths).any(|d| d.join(tool).is_file())
-            })
+            .map(|paths| std::env::split_paths(&paths).any(|d| d.join(tool).is_file()))
             .unwrap_or(false)
             || std::env::var("HOME")
-                .map(|h| std::path::Path::new(&h).join(".cargo/bin").join(tool).is_file())
+                .map(|h| {
+                    std::path::Path::new(&h)
+                        .join(".cargo/bin")
+                        .join(tool)
+                        .is_file()
+                })
                 .unwrap_or(false)
     };
     for tool in ["zig", "cargo-zigbuild"] {
@@ -780,7 +844,8 @@ fn workspace_dir_above_target(cand: &std::path::Path) -> anyhow::Result<std::pat
     cand.ancestors()
         .find(|a| {
             a.file_name().is_some_and(|n| n == "target")
-                && a.parent().is_some_and(|p| p.file_name().is_some_and(|n| n == "rust"))
+                && a.parent()
+                    .is_some_and(|p| p.file_name().is_some_and(|n| n == "rust"))
         })
         .and_then(|a| a.parent())
         .map(|p| p.to_path_buf())
@@ -1613,7 +1678,11 @@ async fn main() -> anyhow::Result<()> {
     // and touches no worker.
     if !matches!(
         &cli.cmd,
-        Cmd::Roster { .. } | Cmd::Digest { .. } | Cmd::Workspace { .. } | Cmd::Aws { .. }
+        Cmd::Roster { .. }
+            | Cmd::Digest { .. }
+            | Cmd::Backup { .. }
+            | Cmd::Workspace { .. }
+            | Cmd::Aws { .. }
     ) {
         check_bins()?;
     }
@@ -1695,6 +1764,32 @@ async fn main() -> anyhow::Result<()> {
                 analyzer.as_deref(),
                 write,
                 json,
+            )
+            .await
+        }
+        Cmd::Backup {
+            start,
+            through,
+            analyzer,
+            api,
+            inductor,
+            model,
+            retries,
+            dry_run,
+        } => {
+            cmd_backup(
+                &layout,
+                settings,
+                BackupOpts {
+                    start,
+                    through,
+                    analyzer,
+                    model,
+                    model_api: api,
+                    inductor,
+                    retries,
+                    dry_run,
+                },
             )
             .await
         }
@@ -1824,6 +1919,250 @@ async fn cmd_digest(
     Ok(())
 }
 
+/// The backup runner's options — bundled so one call carries the whole request.
+struct BackupOpts {
+    start: Option<u32>,
+    through: Option<u32>,
+    analyzer: Option<String>,
+    model: Option<String>,
+    /// The **model service's** base URL, not the inductor's.
+    model_api: String,
+    /// Where the accepted chapters are reported. Defaults to this machine.
+    inductor: Option<String>,
+    /// Re-asks per refused round. See `--retries`.
+    retries: u32,
+    dry_run: bool,
+}
+
+/// `backup` — be the digestor while the cluster's analyzer has no quota.
+///
+/// Chapters are digested **in order**, and the run stops at the first failure:
+/// each chapter's bible delta lands on top of its predecessor's, so skipping
+/// ahead would merge deltas out of order. Nothing is written here — the
+/// inductor is the single writer of the bible and the script, and it does that
+/// when the report lands.
+async fn cmd_backup(
+    layout: &Layout,
+    mut settings: Settings,
+    opts: BackupOpts,
+) -> anyhow::Result<()> {
+    let BackupOpts {
+        start,
+        through,
+        analyzer,
+        model,
+        model_api,
+        inductor,
+        retries,
+        dry_run,
+    } = opts;
+    // **The two addresses are different things, and the difference is the whole
+    // point of this command's arguments.** `model_api` is where the two digest
+    // calls go — a model service. The report goes to an *inductor*, which is
+    // this machine's own control API: it is where the ledger and the bible
+    // live, exactly as it is for `make tui`.
+    let api = inductor.unwrap_or_else(|| format!("http://127.0.0.1:{}", settings.control_port));
+    let model_api = model_api.trim_end_matches('/').to_string();
+    let analyzer = match analyzer {
+        Some(a) => a.to_string(),
+        // The address says which service it is; the key says so when the
+        // address does not say (a gateway at a name of its own). So the
+        // operator passes an API, a key and a model, and never a transport.
+        None if model_api.contains("openrouter") => "openrouter".to_string(),
+        None if model_api.contains("googleapis") => "gemini".to_string(),
+        None if std::env::var("OPENROUTER_API_KEY").is_ok_and(|k| k.starts_with("sk-or-")) => {
+            "openrouter".to_string()
+        }
+        None if std::env::var("GEMINI_API_KEY").is_ok_and(|k| k.starts_with("AIza")) => {
+            "gemini".to_string()
+        }
+        None => settings.analyzer.clone(),
+    };
+    // The model and the endpoint land on whichever fields the chosen service
+    // reads, so one `--model` and one `--api` cover every backend.
+    if let Some(model) = model.filter(|m| !m.trim().is_empty()) {
+        match analyzer.as_str() {
+            "openrouter" => settings.openrouter_model = model,
+            "gemini" => settings.analyze_models = vec![model],
+            "opencode" => settings.opencode_model = model,
+            "local" => settings.local_model = model,
+            other => anyhow::bail!("unknown analyzer {other:?}"),
+        }
+    }
+    if analyzer == "openrouter" {
+        settings.openrouter_url = model_api;
+    }
+    // Where a digest may begin is not a free choice: the deltas have to land in
+    // chapter order, so the only legal start is the chapter after the last one
+    // with a script on disk. Asking for anything else would merge this book's
+    // bible out of order, which is why the guess is the default rather than a
+    // number the operator has to remember.
+    let start = match start {
+        Some(n) => n,
+        None => {
+            let mut n = 1u32;
+            while layout.digested(n) {
+                n += 1;
+            }
+            n
+        }
+    };
+    let last = match through {
+        Some(t) => t,
+        // To the end of the **book the ledger knows about** — the highest
+        // chapter that has a digest row. Not "every chapter file on disk":
+        // `data/chapters/` can hold text for a range this run never enqueued
+        // (200 files against a 100-chapter ledger), and digesting those would
+        // invent a book nobody asked for. A bare `backup` is "carry on with the
+        // book", not "do one chapter and stop".
+        None => {
+            let from_ledger = bm_core::read_json::<serde_json::Value>(&layout.ledger())
+                .ok()
+                .and_then(|doc| {
+                    doc.get("tasks")
+                        .and_then(|t| t.as_array())
+                        .and_then(|tasks| {
+                            tasks
+                                .iter()
+                                .filter(|t| {
+                                    t.get("stage").and_then(|s| s.as_str()) == Some("digest")
+                                })
+                                .filter_map(|t| t.get("chapter").and_then(|c| c.as_u64()))
+                                .max()
+                        })
+                })
+                .map(|max| max as u32);
+            match from_ledger {
+                Some(max) => max,
+                None => {
+                    let mut n = start;
+                    while layout.chapter_txt(n + 1).is_file() {
+                        n += 1;
+                    }
+                    n
+                }
+            }
+        }
+    };
+    if last < start {
+        anyhow::bail!("--through {last} is before ch{start}");
+    }
+    if !layout.chapter_txt(start).is_file() {
+        anyhow::bail!(
+            "ch{start} has no chapter text at {} — crawl it first",
+            layout.chapter_txt(start).display()
+        );
+    }
+    let endpoint = match analyzer.as_str() {
+        "openrouter" => settings.openrouter_url.clone(),
+        "local" => settings.ollama_url.clone(),
+        "opencode" => format!("the {analyzer} CLI"),
+        _ => "https://generativelanguage.googleapis.com".to_string(),
+    };
+    eprintln!(
+        "backup digest: ch{start}..ch{last} via {analyzer} at {endpoint} → reporting to {api}"
+    );
+    let http = reqwest::Client::new();
+    // The backend is a precondition, the same way it is for `make tui`: named
+    // in a second, before the first chapter, so a missing inductor costs a
+    // message instead of a whole range.
+    manual::require_inductor(&api, &http)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let digested = |n: u32| layout.digested(n);
+
+    let mut done = 0u32;
+    for n in start..=last {
+        let mut next =
+            manual::open(layout, n, &digested).map_err(|e| anyhow::anyhow!("ch{n}: {e}"))?;
+        let mut cast: Option<serde_json::Value> = None;
+
+        loop {
+            let (round, prompt) = match &next {
+                manual::Next::Prompt { round, text, .. } => (*round, text.clone()),
+                manual::Next::Done(outcome) => {
+                    if dry_run {
+                        println!(
+                            "ch{n}: {} segments (dry run, not reported)",
+                            outcome.segments
+                        );
+                    } else {
+                        let line = manual::report_or_stop(
+                            &api,
+                            &http,
+                            n,
+                            &outcome.script,
+                            &outcome.delta,
+                            format!("digest ch{n} by backup"),
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("ch{n}: {e}"))?;
+                        println!("ch{n}: {line}");
+                    }
+                    done += 1;
+                    break;
+                }
+            };
+            // Round 1's validated cast rides on round 2's prompt; it is what
+            // round 2 was rendered against and what its answer is checked
+            // against, so it has to be carried forward.
+            if let Some(c) = next.cast() {
+                cast = Some(c.clone());
+            }
+
+            eprintln!(
+                "ch{n}: {} prompt ready ({} bytes) via {analyzer}",
+                round.as_str(),
+                prompt.len()
+            );
+            // A refused round is re-asked with the validator's own words, and
+            // the complaint is the instruction: each retry is a different ask
+            // because the previous one is named in it. Bounded, because a model
+            // that cannot satisfy the gate is a chapter to look at — but not
+            // after a single refusal, which is what cost ch79.
+            let mut accepted = None;
+            let mut complaint = String::new();
+            for attempt in 0..=retries {
+                let asked = if attempt == 0 {
+                    prompt.clone()
+                } else {
+                    eprintln!(
+                        "ch{n}: {} answer refused ({complaint}) — repair {attempt}/{retries}",
+                        round.as_str()
+                    );
+                    manual::repair_prompt(&prompt, &complaint)
+                };
+                let answer = manual::ask(&asked, &analyzer, &settings)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("ch{n} round {}: {e}", round.as_str()))?;
+                match manual::advance(layout, n, round, &answer, cast.as_ref()) {
+                    Ok(step) => {
+                        accepted = Some(step);
+                        break;
+                    }
+                    Err(e) => {
+                        complaint = e;
+                        if attempt == retries {
+                            anyhow::bail!(
+                                "ch{n} round {} refused {attempts} time(s); last: {complaint}",
+                                round.as_str(),
+                                attempts = attempt + 1
+                            );
+                        }
+                    }
+                }
+            }
+            next = accepted.expect("the loop either lands or bails");
+        }
+    }
+    if dry_run {
+        println!("{done} chapter(s) digested, nothing reported (--dry-run)");
+    } else {
+        println!("{done} chapter(s) reported to {api}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1922,10 +2261,22 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let layout = bm_core::Layout::new(&dir);
         let policy = vec![
-            bm_proto::TaskPref { stage: bm_proto::Stage::Merge, enabled: true },
-            bm_proto::TaskPref { stage: bm_proto::Stage::Digest, enabled: true },
-            bm_proto::TaskPref { stage: bm_proto::Stage::Crawl, enabled: true },
-            bm_proto::TaskPref { stage: bm_proto::Stage::Render, enabled: true },
+            bm_proto::TaskPref {
+                stage: bm_proto::Stage::Merge,
+                enabled: true,
+            },
+            bm_proto::TaskPref {
+                stage: bm_proto::Stage::Digest,
+                enabled: true,
+            },
+            bm_proto::TaskPref {
+                stage: bm_proto::Stage::Crawl,
+                enabled: true,
+            },
+            bm_proto::TaskPref {
+                stage: bm_proto::Stage::Render,
+                enabled: true,
+            },
         ];
         bm_core::provision::save_box(
             &layout.machines(),
@@ -1982,12 +2333,10 @@ mod tests {
         // build exists exactly when this host is the target, so a miss there
         // means a broken workspace, not a missing cross toolchain.
         let native = layout.root.join("rust/target/debug/bm-agent");
-        assert!(!buildable_agent_candidates(
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            &layout
-        )
-        .contains(&native));
+        assert!(
+            !buildable_agent_candidates(std::env::consts::OS, std::env::consts::ARCH, &layout)
+                .contains(&native)
+        );
         // A foreign platform always has cross candidates to build.
         let foreign_arch = if std::env::consts::ARCH == "x86_64" {
             "aarch64"
@@ -2029,7 +2378,10 @@ mod tests {
         // comparison never ties on a coarse clock.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         std::fs::write(&src, b"fake newer").unwrap();
-        assert!(!staged_is_fresh(&bin, &layout), "older-than-sources must rebuild");
+        assert!(
+            !staged_is_fresh(&bin, &layout),
+            "older-than-sources must rebuild"
+        );
         assert!(agent_binary_staged("linux", "x86_64", &layout).is_err());
         // No sources at all (a bare fixture, like the routing test above)
         // reads as fresh — only newer sources veto.
@@ -2047,10 +2399,7 @@ mod tests {
         // `debug`, which it rightly refused.
         let cand =
             std::path::Path::new("/repo/rust/target/x86_64-unknown-linux-gnu/debug/bm-agent");
-        assert_eq!(
-            cross_target_of(cand).unwrap(),
-            "x86_64-unknown-linux-gnu"
-        );
+        assert_eq!(cross_target_of(cand).unwrap(), "x86_64-unknown-linux-gnu");
         assert_eq!(
             workspace_dir_above_target(cand).unwrap(),
             std::path::Path::new("/repo/rust")

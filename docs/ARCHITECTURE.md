@@ -180,11 +180,28 @@ profiles is the mismatch the tag exists to catch.
   clean the chapter body. `POST /api/op {"op":"crawl-setup"}` saves the template
   and probe-crawls one chapter, so a bad selector fails loudly *before* you
   enqueue a range.
-* **digest** (`digest/`) — one LLM call per chapter: the prompt
-  (`prompts/analyze.txt`) + the bible + the chapter text in; strict JSON out
-  (`segments`, `roster`, `new_characters`, `aliases`, `fixes`). The inductor is
-  the **single writer** of `data/bible.json` and the cast files — workers send
-  the finished script and their bible delta back inside the completion report,
+* **digest** (`digest/`) — two constrained LLM calls per chapter, with speaker
+  identity fixed between them. The chapter is first prepared *deterministically*
+  (`prepare_chapter`): the text is split into ordered events, each with a stable
+  id (`e0001`…) and a `kind` of `narration` or `dialogue`, decided by quote
+  delimiters alone — no model, no rewrite, headline events dropped.
+  The **attribution pass** renders those events with the bible and asks only for
+  chapter identity fields plus a complete `speakers` map. Its validator proves
+  every event has one answer in source order: narration maps to `Narrator`;
+  dialogue maps to a canonical character or a reusable `anonymous:anon-N` voice
+  slot, never to Narrator. The **staging pass** receives the same events and that
+  immutable map, then chooses only text splits, grammar fixes, mood, scene,
+  music, effects, and sounds. It does not return `speaker`; code attaches the
+  validated map after generation, so a model optimizing a large audio prompt
+  cannot regress dialogue to Narrator.
+  `validate_source_alignment` still proves the finished script against the
+  source: every non-heading event consumed **exactly once, in source order**;
+  no quote delimiter merged into segment text; and a segment split for a sound
+  seam or long TTS line keeps the same `source_id` and therefore the same fixed
+  speaker. Each pass gets **one repair of its own answer**. Anonymous slots are
+  assigned stable pooled voices but never enter the character Bible.
+  The inductor is the **single writer** of `data/bible.json` and the cast files
+  — workers send the finished script and their bible delta back in the report,
   which removes any read-modify-write race between machines. A digest that
   lands a *changed* script invalidates the chapter's render+merge (segments
   and mp3 go, both tasks requeue fresh) — otherwise the kept render would
@@ -195,11 +212,17 @@ profiles is the mismatch the tag exists to catch.
   to reach for when every backend is unavailable — a rate-limited fallback, a 503,
   or simply a model already open in a browser. The operator gets round 1's prompt
   on the clipboard, pastes it into any model, pastes the answer back, and the
-  same for round 2. **It is the same digest, not a looser one**: the prompts are
-  the shipped templates, the answers go through the *same* validators
-  (`manual_accept`), and the result is assembled by the *same* `assemble_outcome`
-  the worker's path uses — so an answer the automatic route would have refused is
-  refused here too, with the validator's own complaint as the message. It is
+  same for round 2.
+  **It is not yet the source-gated digest.** The manual manager still renders the
+  legacy two-pass templates (`build_prompt`, then `build_script_prompt` against
+  round 1's cast) and checks answers with `parse_script`, so it runs neither
+  `prepare_chapter` nor `validate_source_alignment`: a chapter finished by hand
+  can still ship the attribution the automatic path now refuses. Until it is
+  pointed at `build_attribution_prompt` / `parse_attribution` and
+  `build_staging_prompt` / `parse_staged_script`, the automatic route and
+  `bm-inductor digest` are the ones that enforce the contract. The two paths do
+  share `assemble_outcome`, so the artifact is built the same way once accepted,
+  and a refusal is still the validator's own complaint. It is
   reported over `/api/complete` with a worker's own body under the reserved
   `operator` id, which is also what makes finishing by hand win a race: the row
   goes `Done` and the box still grinding on it finds a row it no longer owns, so

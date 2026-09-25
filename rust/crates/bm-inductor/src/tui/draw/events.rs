@@ -1,7 +1,7 @@
 //! Log pane.
 use crate::tui::style::Level;
 use crate::tui::{
-    app::App,
+    app::{App, Panel},
     model::reported_alias,
     style::{empty_body, log_head, style_of, wall_hms, worker_alias},
 };
@@ -16,13 +16,23 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let wrap_w = area.width.saturating_sub(2) as usize;
     let viewport_h = area.height.saturating_sub(2) as usize;
     let total = app.events.len();
+    // Publish the pane's real height so PgUp/PgDn page by exactly what one
+    // screenful shows. The keys are the only place that can know this, and
+    // they run between frames.
+    app.events_rows = viewport_h.max(1);
 
-    let title = if app.events_scroll > 0 {
-        format!("Logs — {} line(s) back · G for newest", app.events_scroll)
-    } else {
+    let title = if app.events_scroll == 0 {
         "Logs".to_string()
+    } else if app.events_scroll >= total {
+        // The buffer keeps EVENT_CAP lines and drops the rest; the top of the
+        // buffer is a real edge, so the title names it instead of showing a
+        // number that looks stuck. Reading is still one `G` (or one run of
+        // PgDn) from the newest line.
+        "Logs — oldest kept line · G for newest".to_string()
+    } else {
+        format!("Logs — {} line(s) back · G for newest", app.events_scroll)
     };
-    let block = super::pane_block(app, title);
+    let block = super::pane_block_for(app, Some(Panel::Events), title);
     if app.events.is_empty() {
         f.render_widget(
             empty_body(vec!["nothing has happened yet".into()]).block(block),
@@ -119,5 +129,14 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             .wrap(Wrap { trim: false })
             .scroll((scroll_row as u16, 0)),
         area,
+    );
+    super::draw_fixed_scrollbar(
+        f,
+        app,
+        area,
+        total
+            .saturating_sub(app.events_scroll)
+            .saturating_sub(viewport_h),
+        total,
     );
 }

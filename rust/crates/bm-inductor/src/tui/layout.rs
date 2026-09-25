@@ -72,7 +72,7 @@ pub(crate) const COMPACT_FOOTER_H: u16 = 4;
 /// The compact tier gets shorter labels because it has 76 columns to work with;
 /// every key is described in full on the help screen, which `?` opens.
 pub(crate) const KEYS_FULL: [&str; 2] = [
-    "Tab jobs · K tasks · i inspect · P policy · D digest · R run · S cast",
+    "Tab jobs · K tasks · i inspect · P policy · D digest · R run · S cast · f pane",
     ":add :prov :drop :translate :crawl :retry :reconcile :backend :stop :swap :voices · r · ? · q",
 ];
 

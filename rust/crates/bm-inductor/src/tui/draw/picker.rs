@@ -1,6 +1,6 @@
 //! Voice picker overlay.
 use crate::tui::{
-    app::App,
+    app::{App, HitTarget, ListTarget},
     model::{clamp_scroll, filtered_characters, filtered_voices, users_of},
     screen::{PickStage, Picker},
     style::{centered, dash_if_empty, empty_body, gender_label, style_bold_of, style_of},
@@ -122,6 +122,14 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
     f.render_widget(Paragraph::new(audition_ctx), rows[2]);
 
     let height = rows[3].height as usize;
+    app.add_hit_region(
+        rows[3],
+        HitTarget::List {
+            kind: ListTarget::Picker,
+            row_start: picker.scroll,
+            row_y: rows[3].y,
+        },
+    );
     let colour = app.colour();
     // Which voice is rendering right now. Read from the `App`, not the picker:
     // the cast overview can start an audition too, so "in flight" is a property

@@ -15,7 +15,10 @@ fn v2_legacy_tables_and_thai_section() {
     assert!(d.lookup_merged("xin").is_some());
     assert!(d.lookup_common("go").is_some() || d.lookup_merged("go").is_some());
     // Thai section resolves with tones intact
-    assert_eq!(d.lookup_section(SECTION_TH, "สวัสดี"), Some("sa˨˩ wat̚˨˩ diː˧"));
+    assert_eq!(
+        d.lookup_section(SECTION_TH, "สวัสดี"),
+        Some("sa˨˩ wat̚˨˩ diː˧")
+    );
     assert_eq!(d.lookup_section(SECTION_TH, "ให้"), Some("haj˥˩"));
     assert!(d.lookup_section(SECTION_TH, "notaword").is_none());
     // absent section kind is a clean miss

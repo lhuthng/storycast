@@ -1,14 +1,25 @@
 //! Help overlay.
-use crate::tui::{app::App, style::centered_padded};
+use crate::tui::{
+    app::{App, HitTarget, ListTarget},
+    style::centered_padded,
+};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph},
 };
 
-pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
+pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
     let area = centered_padded(f.area(), 84, 32, 1);
     f.render_widget(Clear, area);
+    app.add_hit_region(
+        area,
+        HitTarget::List {
+            kind: ListTarget::Help,
+            row_start: 0,
+            row_y: area.y + 1,
+        },
+    );
 
     let bold = app.style_bold(Color::White);
     let dim = Style::default().fg(Color::DarkGray);
@@ -21,6 +32,11 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
     section(&mut lines, "Navigation");
     for (k, v) in [
         ("↑ ↓  k j", "move the machine cursor"),
+        ("f", "cycle visible pane focus"),
+        (
+            "mouse",
+            "click rows/panes · wheel scrolls · double-click activates",
+        ),
         (
             "K",
             "task ledger: every task, its failure detail, and a re-queue key",
@@ -38,8 +54,7 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &App, scroll: usize) {
             "background jobs: running against queued, elapsed time, activity",
         ),
         ("D / :digest", "digest manager: every chapter, manual digest by clipboard"),
-        ("R", "system overview: preview everything"),
-        ("PgUp PgDn", "scroll the log   (G returns to newest)"),
+        ("R", "system overview: preview everything"),            ("PgUp PgDn", "page through the log   (G returns to newest)"),
         ("r", "refresh now"),
         ("?", "this help"),
         (

@@ -131,11 +131,11 @@ fn emails_and_urls_are_read_whole() {
     // dropped — text that says https:// means it — and spelled with Thai
     // letter names, as Vietnamese spells it "hát tê tê phê ét".
     let u = normalize("ดู https://www.google.com");
-    assert!(u.contains("จุด"), "{u}");              // the dots are spoken
+    assert!(u.contains("จุด"), "{u}"); // the dots are spoken
     assert!(u.contains("เอช ที ที พี เอส"), "{u}"); // h-t-t-p-s
-    assert!(u.contains("ทวิภาค"), "{u}");           // colon
-    assert!(u.matches("ทับ").count() >= 2, "{u}");  // slash slash
-    assert!(!u.contains("//"), "{u}");              // never as raw characters
+    assert!(u.contains("ทวิภาค"), "{u}"); // colon
+    assert!(u.matches("ทับ").count() >= 2, "{u}"); // slash slash
+    assert!(!u.contains("//"), "{u}"); // never as raw characters
     let e = normalize("ส่งไป admin@example.com");
     assert!(e.contains("แอท") && e.contains("จุด"), "{e}");
 }
@@ -246,7 +246,12 @@ fn the_audit_is_quiet_on_ordinary_thai() {
     // every mark in the Thai block survives, so none may be reported
     for c in '\u{0E01}'..='\u{0E4E}' {
         let s: String = ['ก', c, 'ก'].iter().collect();
-        assert_eq!(audit_unmapped(&s), Vec::<char>::new(), "{c:?} U+{:04X}", c as u32);
+        assert_eq!(
+            audit_unmapped(&s),
+            Vec::<char>::new(),
+            "{c:?} U+{:04X}",
+            c as u32
+        );
     }
     // and a genuinely undeclared symbol is still caught
     assert_eq!(audit_unmapped("∮ ก"), vec!['∮']);
@@ -262,7 +267,8 @@ fn the_audit_reports_scripts_the_pipeline_deletes() {
     assert_eq!(audit_unmapped("ก Ω ก"), vec!['Ω']);
     assert_eq!(audit_unmapped("ก 日本 ก"), vec!['日', '本']);
     // and ordinary Thai, including code-switched Latin, stays quiet
-    for s in ["เขาฉลาดพอที่จะซ่อนสติปัญญา", "ผมใช้ iPhone ราคา ฿1,250"] {
+    for s in ["เขาฉลาดพอที่จะซ่อนสติปัญญา", "ผมใช้ iPhone ราคา ฿1,250"]
+    {
         assert_eq!(audit_unmapped(s), Vec::<char>::new(), "{s}");
     }
 }
