@@ -63,7 +63,13 @@ pub fn collapse_punct_runs(text: &str) -> String {
                 .as_str()
                 .chars()
                 .filter(|c: &char| !c.is_whitespace())
-                .reduce(|best, c| if punct_rank(c) > punct_rank(best) { c } else { best })
+                .reduce(|best, c| {
+                    if punct_rank(c) > punct_rank(best) {
+                        c
+                    } else {
+                        best
+                    }
+                })
                 .unwrap()
                 .to_string()
         })
@@ -128,8 +134,8 @@ fn soften_short_segments(text: &str) -> String {
         let dot_pos = m.start();
         let segment = &text[last..dot_pos]; // fragment text before the '.'
         let ws = &text[dot_pos + 1..m.end()]; // whitespace after it, preserved
-        // Is there real content (letters or digits) after this dot? If not, it
-        // terminates the last sentence and must stay a period.
+                                              // Is there real content (letters or digits) after this dot? If not, it
+                                              // terminates the last sentence and must stay a period.
         let has_more = text[m.end()..].chars().any(|c: char| c.is_alphanumeric());
 
         result.push_str(segment);
@@ -162,8 +168,8 @@ pub fn apply_punc_norm(text: &str) -> String {
     // sentence.
     if word_count(trimmed) <= SHORT_SENTENCE_MAX_WORDS {
         // Short sentence: force exactly one `.`, whatever it ends with now.
-        let stripped = trimmed
-            .trim_end_matches(|c: char| is_trailing_punct(c) || c.is_whitespace());
+        let stripped =
+            trimmed.trim_end_matches(|c: char| is_trailing_punct(c) || c.is_whitespace());
         if stripped.is_empty() {
             // Nothing but punctuation: a lone period is the sane result.
             return ".".to_string();

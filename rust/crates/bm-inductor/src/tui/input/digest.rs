@@ -13,6 +13,7 @@
 //! manual digest is the automatic one with a person standing in for the model —
 //! which is why it cannot put a chapter into the library that the worker's path
 //! would have refused.
+use crate::manual::Next;
 use crate::tui::input::command::Command;
 use crate::tui::{
     app::App,
@@ -207,6 +208,11 @@ pub(crate) async fn key_digest(
 /// *is* the gesture — the operator presses Enter and then goes straight to their
 /// model. `c` exists to get it back after a failed paste.
 ///
+/// The prompt itself and the refusal for a chapter that is not next come from
+/// [`crate::manual`], the same module the headless backup runner drives: a
+/// manual digest is the worker's digest with a person standing in for the model,
+/// so there is one flow and two ways to carry its prompts.
+///
 /// A re-digest says so in the note: the chapter already has a script, and the
 /// inductor will invalidate the audio built from the old one.
 fn open_chapter(
@@ -214,31 +220,24 @@ fn open_chapter(
     n: u32,
     digested: &dyn Fn(u32) -> bool,
 ) -> Result<DigestChapter, String> {
-    // Manual digest re-digests — plus the one next chapter past the digested
-    // run, so the operator can work ahead of a bottlenecked digest queue. Its
-    // delta then lands on top of its predecessor's, which is the bible order
-    // the workers keep. Anything further ahead is refused: skipping would
-    // merge deltas out of order.
-    if !digested(n) && !(n == 1 || digested(n - 1)) {
-        return Err(format!(
-            "ch{n} is not next — manual digest does the chapter after the last digested one"
-        ));
-    }
-    let step = bm_core::digest::manual_prompt(layout, n, None).map_err(|e| format!("{e:#}"))?;
+    let step = crate::manual::open(layout, n, digested)?;
+    let round = step
+        .round()
+        .ok_or_else(|| format!("ch{n} opened on a finished digest"))?;
     let mut note = format!(
         "{} prompt copied — paste it into your model",
-        step.round.as_str()
+        round.as_str()
     );
     if digested(n) {
         note.push_str(" · this chapter is already digested, so finishing will re-render it");
     }
     // A copy that fails still leaves the chapter open with its prompt visible in
     // the note, so `c` can be retried rather than the whole screen bounced.
-    let _ = clipboard::copy(&step.text);
+    let _ = clipboard::copy(step.text());
     Ok(DigestChapter {
         n,
-        round: step.round,
-        prompt: step.text,
+        round,
+        prompt: step.text().to_string(),
         cast: None,
         note,
         done: false,
@@ -256,28 +255,24 @@ fn accept(
     api: &str,
     http: &reqwest::Client,
 ) -> Result<Option<Job>, String> {
-    let answer = bm_core::digest::manual_accept(layout, ch.n, ch.round, pasted, ch.cast.as_ref())
-        .map_err(|e| format!("{e:#}"))?;
+    let step = crate::manual::advance(layout, ch.n, ch.round, pasted, ch.cast.as_ref())?;
 
-    if let Some(context) = answer.cast {
-        // Round 1 done. Round 2's prompt is rendered *against this cast*, which
-        // is why the context is carried rather than re-derived — the worker makes
-        // exactly this hand-off between its two calls.
-        let step = bm_core::digest::manual_prompt(layout, ch.n, Some(&context))
-            .map_err(|e| format!("{e:#}"))?;
-        let copied = match clipboard::copy(&step.text) {
-            Ok(()) => "script prompt copied".to_string(),
-            Err(e) => format!("script prompt ready, but the copy failed: {e}"),
-        };
-        ch.cast = Some(context);
-        ch.round = step.round;
-        ch.prompt = step.text;
-        ch.note = format!("cast accepted — {copied}");
-        return Ok(None);
-    }
-
-    let Some(outcome) = answer.outcome else {
-        return Err("the answer carried neither a cast nor a script".into());
+    let outcome = match step {
+        Next::Prompt { round, text, cast } => {
+            // Round 1 done. Round 2's prompt is rendered *against this cast*,
+            // which is why the context is carried rather than re-derived — the
+            // worker makes exactly this hand-off between its two calls.
+            let copied = match clipboard::copy(&text) {
+                Ok(()) => "script prompt copied".to_string(),
+                Err(e) => format!("script prompt ready, but the copy failed: {e}"),
+            };
+            ch.cast = cast;
+            ch.round = round;
+            ch.prompt = text;
+            ch.note = format!("cast accepted — {copied}");
+            return Ok(None);
+        }
+        Next::Done(outcome) => outcome,
     };
     ch.done = true;
     ch.note = format!(

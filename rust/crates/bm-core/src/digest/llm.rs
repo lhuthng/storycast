@@ -279,8 +279,15 @@ async fn generate_openrouter(
         .timeout(Duration::from_secs(600))
         .build()
         .map_err(|e| GenError::Fatal(anyhow!(e)))?;
+    // The endpoint is settings, not a constant: the public API by default, a
+    // gateway or a proxy where the key actually lives. The path is appended, so
+    // `API=https://openrouter.ai/api/v1` is the whole address.
+    let url = format!(
+        "{}/chat/completions",
+        settings.openrouter_url.trim_end_matches('/')
+    );
     let resp = client
-        .post("https://openrouter.ai/api/v1/chat/completions")
+        .post(url)
         .header("Authorization", format!("Bearer {key}"))
         .header("HTTP-Referer", "https://github.com/lhuthng/storycast")
         .header("X-Title", "storycast")

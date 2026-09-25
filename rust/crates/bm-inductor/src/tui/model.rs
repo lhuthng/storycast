@@ -380,11 +380,7 @@ pub(crate) fn busy_on(
             continue;
         }
         let here = t.affinity.as_deref().map(on_it).unwrap_or(false)
-            || t
-                .holders()
-                .into_iter()
-                .filter_map(addr_of)
-                .any(on_it);
+            || t.holders().into_iter().filter_map(addr_of).any(on_it);
         if here {
             busy.push(t.id());
         }

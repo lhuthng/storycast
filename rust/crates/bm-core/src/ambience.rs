@@ -156,6 +156,27 @@ pub struct Duck {
     pub attack: u32,
     #[serde(default = "default_release")]
     pub release: u32,
+    /// Gain the key is held at while the chapter's **headline** is spoken.
+    ///
+    /// The headline is the one stretch where the beds are *meant* to arrive:
+    /// the music starts at the top of the chapter and fades up under it (see
+    /// [`MusicLayer::fade_s`]), and a duck that pulls the beds to nothing there
+    /// is how that fade-in came out inaudible — the layer was doing exactly
+    /// what it was told, twenty-something dB down, under the line it was
+    /// written for. `0.0` mutes the key for those few seconds, so the beds sit
+    /// at their own level under the title; `1.0` is the key taken as-is, i.e.
+    /// ducking everywhere, which is what shipped before this field existed.
+    ///
+    /// It costs nothing elsewhere: an effect window cannot open on the headline
+    /// (it names no scene tags, so it has no rule to match), which leaves the
+    /// music as the only layer with anything to say there. The exemption is the
+    /// default because a fade-in nobody can hear is not a fade-in.
+    #[serde(default = "default_head_key")]
+    pub head_key: f64,
+}
+
+fn default_head_key() -> f64 {
+    0.0
 }
 
 fn default_threshold() -> f64 {
@@ -178,6 +199,7 @@ impl Default for Duck {
             ratio: default_ratio(),
             attack: default_attack(),
             release: default_release(),
+            head_key: default_head_key(),
         }
     }
 }
@@ -200,6 +222,13 @@ pub struct EffectLayer {
     /// Fade at each window edge, against a click.
     #[serde(default = "d_fade")]
     pub fade_s: f64,
+    /// Fade at the end of a window that runs to the *end of the chapter* — the
+    /// last thing the layer has to say. A window that stops mid-chapter keeps
+    /// `fade_s`: there is speech after it, and a three-second fade would only
+    /// bleed the bed into the next scene. A chapter that closes on a bed used
+    /// to end on a 0.3 s edge, which is a cut in everything but name.
+    #[serde(default = "d_end_fade")]
+    pub end_fade_s: f64,
     /// Master gain for the layer, multiplied into every rule's own `level`.
     ///
     /// A rule's `level` is the *relative* balance between scenes — a storm
@@ -231,6 +260,9 @@ fn d_max_window() -> f64 {
 fn d_fade() -> f64 {
     0.3
 }
+fn d_end_fade() -> f64 {
+    3.0
+}
 
 impl Default for EffectLayer {
     fn default() -> Self {
@@ -240,6 +272,7 @@ impl Default for EffectLayer {
             min_span_s: d_min_span(),
             max_window_s: d_max_window(),
             fade_s: d_fade(),
+            end_fade_s: d_end_fade(),
             trim: d_effect_trim(),
         }
     }
@@ -256,8 +289,14 @@ pub struct MusicLayer {
     /// this is a *further* lift on top of an already-unducked track.
     #[serde(default = "d_music_pause_level")]
     pub pause_level: f64,
-    /// Fade at the head and tail of the whole layer.
-    #[serde(default = "d_fade")]
+    /// Fade at the head and tail of the whole layer: the opening cue rises out
+    /// of silence *under the headline* and the closing one falls away at the
+    /// chapter's end. Three seconds, not the 0.3 s the short edges of the other
+    /// two layers use — a cue that arrives or leaves inside a third of a second
+    /// reads as a cut, which is exactly what a chapter's first and last moments
+    /// of music must not read as. Clamped to half a run by [`place`], so a
+    /// chapter whose only cue is two seconds long still can't invert.
+    #[serde(default = "d_music_fade")]
     pub fade_s: f64,
     /// Crossfade where the track changes.
     #[serde(default = "d_xfade")]
@@ -274,6 +313,9 @@ fn d_music_level() -> f64 {
 fn d_music_pause_level() -> f64 {
     0.085
 }
+fn d_music_fade() -> f64 {
+    3.0
+}
 fn d_xfade() -> f64 {
     2.0
 }
@@ -286,7 +328,7 @@ impl Default for MusicLayer {
         MusicLayer {
             level: d_music_level(),
             pause_level: d_music_pause_level(),
-            fade_s: d_fade(),
+            fade_s: d_music_fade(),
             xfade_s: d_xfade(),
             ramp_s: d_ramp(),
         }
@@ -887,6 +929,20 @@ pub fn pause_intervals(slots: &[Slot]) -> Vec<(f64, f64)> {
         .collect()
 }
 
+/// Where the chapter's headline ends, in delivered seconds — the stretch where
+/// the duck lets go (see [`Duck::head_key`]).
+///
+/// The headline is the opening turn, and `plan_turns` builds it with neither a
+/// place nor a mood: that pairing is its signature, which makes this a property
+/// of the chapter rather than a number of seconds somebody has to guess at and
+/// keep in step with the writing. A chapter that opens on a scene — or on a
+/// line the analyzer gave a label but no mood — has no headline and no
+/// exemption.
+fn headline_end(slots: &[Slot]) -> Option<f64> {
+    let first = slots.first()?;
+    (first.end > 0.0 && first.scene.is_empty() && first.music.is_empty()).then_some(first.end)
+}
+
 /// Where a beat fits in this chapter, as `turn index -> pre-tempo milliseconds`.
 ///
 /// A beat belongs where a *scene changes and the change is narrated*: the
@@ -1097,7 +1153,9 @@ pub struct MusicRun {
     /// re-looking it up would be a second answer to a question already asked.
     pub level: f64,
     /// Audible coverage ends here; the slice may extend past it into a
-    /// crossfade with the next run.
+    /// crossfade with the next run. The chapter's first run is the exception at
+    /// the other end: it starts at the head of the timeline, under the headline
+    /// (see [`plan_music`]), and the slice is extended back to meet it.
     pub start: f64,
     pub end: f64,
     pub pauses: Vec<(f64, f64)>,
@@ -1120,6 +1178,13 @@ pub struct MusicRun {
 /// in the pool answers contributes nothing — no run, no silent file, no
 /// gap-filling. `none` is a choice; a pool that has lost its last clip for a
 /// mood is a degraded mix, and both are reported once each.
+///
+/// The chapter's *first* run is pulled back to the head of the timeline — the
+/// slot the headline is spoken in — so the music comes up underneath the title
+/// and fades in, rather than hitting at full level on whichever line first
+/// names a mood. It is only the first: every later cue keeps the offset its own
+/// slot gave it, so a gap between two runs stays the silence the script asked
+/// for.
 ///
 /// The layer's own knobs (`level`, `xfade_s`, `ramp_s`) are not read here: they
 /// shape how a run is *rendered*, which is the caller's job.
@@ -1185,6 +1250,11 @@ pub fn plan_music(
     }
     for m in &unpooled {
         eprintln!("music: {m} -> no music there");
+    }
+    // Pulled back, never pushed forward: `min` against the head keeps a cue
+    // that somehow starts before the first slot where it is.
+    if let (Some(first), Some(head)) = (out.first_mut(), slots.first()) {
+        first.start = first.start.min(head.start);
     }
     out
 }
@@ -1911,6 +1981,10 @@ fn clip_path(assets: &Path, file: &str) -> PathBuf {
 /// next track where the previous one's audible coverage ended aligns them.
 /// Gaps wider than the crossfade plus a beat are intentional silence (`none`,
 /// unpooled moods) and keep their hole.
+///
+/// The first run is passed through: [`plan_music`] already moved it to the
+/// head of the timeline, so the chapter opens on it rather than on the first
+/// line that names a mood.
 fn music_starts(runs: &[MusicRun], xfade: f64) -> Vec<f64> {
     let mut out = Vec::with_capacity(runs.len());
     for (n, run) in runs.iter().enumerate() {
@@ -1929,6 +2003,20 @@ fn music_starts(runs: &[MusicRun], xfade: f64) -> Vec<f64> {
     out
 }
 
+/// The two edge fades of one music run: `(fade_in, fade_out)`.
+///
+/// The chapter's first slice rises and its last falls over `fade_s` (3 s). An
+/// opening and a closing are *heard*, and a third of a second of either reads
+/// as a cut — the one thing the layer's first and last moments must not read
+/// as. Everywhere the track changes mid-chapter the edge is the short
+/// `xfade_s` instead, because that seam is covered by the next track arriving.
+fn music_fades(n: usize, last: bool, cfg: &MusicLayer) -> (f64, f64) {
+    (
+        if n == 0 { cfg.fade_s } else { cfg.xfade_s },
+        if last { cfg.fade_s } else { cfg.xfade_s },
+    )
+}
+
 // ---------------------------------------------------------------------------
 // the pass
 // ---------------------------------------------------------------------------
@@ -1942,6 +2030,22 @@ fn music_starts(runs: &[MusicRun], xfade: f64) -> Vec<f64> {
 /// `work` is a directory the caller owns, used for the per-span slices this
 /// pass needs. It is created on demand and never cleaned up here, so pass a
 /// throwaway path — the merge passes its per-chapter scratch directory.
+/// The reverb filter for one slot's piece of the voice track: its span's
+/// preset — unless the voice is the Narrator, who always reads dry.
+fn slot_reverb<'a>(
+    slot: &Slot,
+    spans: &[Span],
+    presets: &'a BTreeMap<String, String>,
+) -> Option<&'a String> {
+    if slot.speaker == "Narrator" {
+        return None;
+    }
+    let span = spans
+        .iter()
+        .find(|s| slot.start >= s.start && slot.start < s.end)?;
+    span.reverb.as_ref().and_then(|r| presets.get(r))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn apply_layers(
     voice_wav: &Path,
@@ -1968,13 +2072,21 @@ pub fn apply_layers(
     //    effect switch because it is part of that layer's scene treatment — an
     //    operator turning the effects off is asking for a plain read, not a
     //    plain read in a cave.
+    //
+    //    Speakers only, never the Narrator: narration is the dry read the room
+    //    plays around, not a voice inside it.
     let work = work.join("layers");
     std::fs::create_dir_all(&work)?;
     let total = read_wav(voice_wav)?.seconds();
     let mut voice_fx = voice_wav.to_path_buf();
     if on.effects && spans.iter().any(|s| s.reverb.is_some()) {
         let mut parts = Vec::new();
-        for (n, span) in spans.iter().enumerate() {
+        for (n, slot) in slots.iter().enumerate() {
+            // Tile contiguously: each piece runs to the next slot's start, so
+            // no gap is lost at a scene change (the old span cut dropped
+            // them). A tail is cut where the next line starts — masking does
+            // the rest, as it did at span ends before.
+            let end = slots.get(n + 1).map(|s| s.start).unwrap_or(slot.end);
             let p = work.join(format!("v{n}.wav"));
             let mut args: Vec<String> = vec![
                 "-y".into(),
@@ -1983,11 +2095,11 @@ pub fn apply_layers(
                 "-i".into(),
                 s(voice_wav.display()),
                 "-ss".into(),
-                format!("{:.3}", span.start),
+                format!("{:.3}", slot.start),
                 "-to".into(),
-                format!("{:.3}", span.end),
+                format!("{:.3}", end),
             ];
-            if let Some(fx) = span.reverb.as_ref().and_then(|r| cfg.reverb_presets.get(r)) {
+            if let Some(fx) = slot_reverb(slot, &spans, &cfg.reverb_presets) {
                 args.push("-af".into());
                 args.push(fx.clone());
             }
@@ -2056,15 +2168,21 @@ pub fn apply_layers(
         args.push(af);
         args.push(s(p.display()));
         ffmpeg(&args)?;
+        // A window that reaches the end of the chapter is the last thing this
+        // layer says, so a looped bed closes over `end_fade_s` instead of being
+        // cut on the mix's edge. Everywhere else the edge is the short
+        // `fade_s`: there is speech after it, and the next scene's bed may
+        // follow.
+        let closing = w.end >= total - 0.05;
         fx_slices.push(Slice {
             path: p,
             start: w.start,
             dur,
             fade_in: cfg.layers.effect.fade_s,
-            fade_out: if clip.looped {
-                cfg.layers.effect.fade_s
-            } else {
-                0.0
+            fade_out: match (clip.looped, closing) {
+                (true, true) => cfg.layers.effect.end_fade_s,
+                (true, false) => cfg.layers.effect.fade_s,
+                (false, _) => 0.0,
             },
         });
         fx_log.push(FxReport {
@@ -2146,20 +2264,13 @@ pub fn apply_layers(
             ),
             s(p.display()),
         ])?;
+        let (fade_in, fade_out) = music_fades(n, last, &cfg.layers.music);
         mu_slices.push(Slice {
             path: p,
             start,
             dur,
-            fade_in: if n == 0 {
-                cfg.layers.music.fade_s
-            } else {
-                cfg.layers.music.xfade_s
-            },
-            fade_out: if last {
-                cfg.layers.music.fade_s
-            } else {
-                cfg.layers.music.xfade_s
-            },
+            fade_in,
+            fade_out,
         });
     }
     let music_mix = if mu_slices.is_empty() {
@@ -2301,7 +2412,10 @@ pub fn apply_layers(
     );
     // Input 0 is the voice key; 1..=beds are the beds in order; the inject
     // track, when there is one, is the last input and never enters `[under]`.
-    let graph = layer_graph(beds.len(), inject_mix.is_some(), &sc);
+    // The headline keeps its own level: the music is under it by design, and
+    // the duck is what was hiding it there.
+    let headline = headline_end(slots).map(|end| (end, duck.head_key));
+    let graph = layer_graph(beds.len(), inject_mix.is_some(), &sc, headline);
     let mut args: Vec<String> = vec!["-y".into(), "-loglevel".into(), "error".into()];
     args.push("-i".into());
     args.push(s(voice_fx.display()));
@@ -2330,6 +2444,14 @@ pub fn apply_layers(
 /// `beds` is how many bed tracks are inputs 1..=beds; the inject track, if
 /// present, is the input right after them.
 ///
+/// `headline` is `(end, key gain)` — the seconds at the head of the chapter
+/// where the sidechain key is held down, so the beds arrive with the title
+/// instead of being ducked under it
+/// ([`Duck::head_key`]). It listens to a *copy* of the voice: the compressor's
+/// key is a split of input 0, never the voice that reaches the mix, because a
+/// key that also changed what the listener hears would be a level edit wearing
+/// a compressor's name.
+///
 /// The limiter is not decoration. Every clip in every pool is normalized to a
 /// **-3 dBTP ceiling** and the layer gains multiply on top of that, but nothing
 /// downstream was enforcing the ceiling on the *sum*: ch9 measured **-0.11
@@ -2338,7 +2460,7 @@ pub fn apply_layers(
 /// headroom left to raise a bed into. `alimiter` is a lookahead limiter, so it
 /// caps the peak without the distortion a clipper would add, and `level=0`
 /// keeps it from re-normalizing the output behind the operator's back.
-fn layer_graph(beds: usize, inject: bool, sc: &str) -> String {
+fn layer_graph(beds: usize, inject: bool, sc: &str, headline: Option<(f64, f64)>) -> String {
     let inject_in = beds + 1;
     let lim = "alimiter=limit=0.589:attack=5:release=100:level=0";
     let tail = |n: usize| format!("amix=inputs={n}:normalize=0[mixed];[mixed]{lim}[a]");
@@ -2346,6 +2468,21 @@ fn layer_graph(beds: usize, inject: bool, sc: &str) -> String {
     if beds == 0 {
         return format!("[0:a][{inject_in}:a]{}", tail(2));
     }
+    // The key, and the voice the mix keeps: the same stream twice, unless the
+    // headline holds the key down — then the voice is split and only the copy
+    // the compressor listens to is attenuated. A gain of 1.0 (or no headline)
+    // is the key taken as-is, which is exactly the graph this used to emit.
+    let (prologue, key, vox) = match headline {
+        Some((end, gain)) if end > 0.0 && gain < 1.0 => (
+            format!(
+                "[0:a]asplit=2[vox][sc];\
+                 [sc]volume=volume='if(lt(t,{end:.3}),{gain:.4},1)':eval=frame[key];"
+            ),
+            "[key]",
+            "[vox]",
+        ),
+        _ => (String::new(), "[0:a]", "[0:a]"),
+    };
     let ins: String = (1..=beds).map(|i| format!("[{i}:a]")).collect();
     let bed_bus = if beds == 1 {
         // A single bed needs no summing before the compressor.
@@ -2355,12 +2492,15 @@ fn layer_graph(beds: usize, inject: bool, sc: &str) -> String {
     };
     if inject {
         format!(
-            "{bed_bus};[under][0:a]{sc}[duck];\
-             [0:a][duck][{inject_in}:a]{}",
+            "{prologue}{bed_bus};[under]{key}{sc}[duck];\
+             {vox}[duck][{inject_in}:a]{}",
             tail(3)
         )
     } else {
-        format!("{bed_bus};[under][0:a]{sc}[duck];[0:a][duck]{}", tail(2))
+        format!(
+            "{prologue}{bed_bus};[under]{key}{sc}[duck];{vox}[duck]{}",
+            tail(2)
+        )
     }
 }
 
@@ -2519,7 +2659,7 @@ mod tests {
               },
               "layers": {
                 "effect": {"max_coverage": 0.35, "cooldown_s": 45.0, "min_span_s": 20.0, "max_window_s": 75.0, "fade_s": 0.3},
-                "music": {"level": 0.06, "pause_level": 0.085, "fade_s": 0.3, "xfade_s": 2.0, "ramp_s": 0.6}
+                "music": {"level": 0.06, "pause_level": 0.085, "fade_s": 3.0, "xfade_s": 2.0, "ramp_s": 0.6}
               },
               "pause": {"pause_s": 1.5, "max_per_chapter": 1, "require_narration": true},
               "reverb_presets": {"hall": "aecho=0.8:0.65:40|60:0.35|0.25"},
@@ -2536,10 +2676,7 @@ mod tests {
     fn fixture_live(tag: &str) -> PathBuf {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "bm-fixture-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("bm-fixture-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         crate::profile::install_fixture(&dir).expect("fixture profile");
         dir
@@ -2685,8 +2822,7 @@ mod tests {
         // is reachable, or a rule is silently scoring zero.
         let shipped = shipped_map();
         let fx = fixture_live("usage-pool");
-        let shipped_pool =
-            crate::audio_pool::load_pool(&fx.join("assets/effect-pool.json"));
+        let shipped_pool = crate::audio_pool::load_pool(&fx.join("assets/effect-pool.json"));
         assert!(!shipped_pool.is_empty());
         let usage = effect_usage(&shipped, &shipped_pool);
         for name in shipped_pool.keys() {
@@ -2813,6 +2949,44 @@ mod tests {
         assert_eq!(runs[0].level, 1.0);
     }
 
+    /// The chapter's first cue opens the chapter: pulled back to the head of
+    /// the timeline it comes up *under the headline* and fades in, instead of
+    /// hitting at full level on the first line that happens to name a mood.
+    /// Later cues are not moved — a gap between two runs is silence the script
+    /// asked for, not a gap to fill.
+    #[test]
+    fn the_chapters_first_cue_starts_at_the_head() {
+        let cfg = scene_map();
+        let pool = music_pool();
+        let slots = vec![
+            // The headline: spoken, and naming no mood of its own.
+            slot("", 0.0, 8.0),
+            // The first line that names one.
+            slot("busy", 8.5, 30.0),
+            // A second mood, which keeps the offset its own slot gave it.
+            slot("quiet", 30.5, 45.0),
+        ];
+        let runs = plan_music(&slots, &[], 1, &pool, &cfg.music_palette);
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert_eq!(runs[0].start, 0.0, "the first cue opens the chapter");
+        assert_eq!(runs[1].start, 30.5, "a later cue keeps its own offset");
+    }
+
+    /// The layer's head and tail fade over three seconds; the seams in between
+    /// stay the short crossfade, because a seam is covered by the next track
+    /// arriving and an edge is not.
+    #[test]
+    fn the_music_layers_edges_fade_over_three_seconds_and_its_seams_do_not() {
+        let cfg = MusicLayer::default();
+        assert_eq!(cfg.fade_s, 3.0, "the layer's head and tail");
+        assert_eq!(music_fades(0, false, &cfg), (3.0, cfg.xfade_s));
+        assert_eq!(music_fades(1, true, &cfg), (cfg.xfade_s, 3.0));
+        // A chapter with one cue is both edges at once.
+        assert_eq!(music_fades(0, true, &cfg), (3.0, 3.0));
+        // And a bed that reaches the end of the chapter closes the same way.
+        assert_eq!(EffectLayer::default().end_fade_s, 3.0);
+    }
+
     /// And the effect layer's, which reaches the pick the same way.
     #[test]
     fn an_effects_own_level_reaches_the_pick() {
@@ -2830,13 +3004,8 @@ mod tests {
             crate::audio_pool::PoolKind::Effect,
             crate::audio_pool::PoolKind::Music,
         ] {
-            let dir = fixture_live(&format!(
-                "unity-{}",
-                kind.registry().replace(".json", "")
-            ));
-            let pool = crate::audio_pool::load_pool(
-                &dir.join("assets").join(kind.registry()),
-            );
+            let dir = fixture_live(&format!("unity-{}", kind.registry().replace(".json", "")));
+            let pool = crate::audio_pool::load_pool(&dir.join("assets").join(kind.registry()));
             assert!(!pool.is_empty());
             for (name, s) in &pool {
                 assert_eq!(
@@ -2991,6 +3160,37 @@ mod tests {
         let merged = build_spans(&timeline(&turns, 0, &BTreeMap::new()).unwrap(), &cfg);
         assert_eq!(merged.len(), 1);
         assert!((merged[0].end - 2.0).abs() < 0.01);
+    }
+
+    /// Narration reads dry in every room: the hall preset is for voices
+    /// inside the scene, and a wet Narrator is what ch77's opening was.
+    #[test]
+    fn reverb_covers_speakers_but_never_the_narrator() {
+        let d = tmpdir("narrator-dry");
+        let a = d.join("a.wav");
+        let b = d.join("b.wav");
+        silent_wav(&a, 1.0, 48_000).unwrap();
+        silent_wav(&b, 1.0, 48_000).unwrap();
+        let cfg = scene_map();
+        // "sect-hall-day" reaches the hall rule, so the span names reverb.
+        let turns = vec![
+            turn(&a, "sect-hall-day", "Narrator"),
+            turn(&b, "sect-hall-day", "Lỗ Đạt Sênh"),
+        ];
+        let slots = timeline(&turns, 300, &BTreeMap::new()).unwrap();
+        let spans = build_spans(&slots, &cfg);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].reverb.as_deref(), Some("hall"));
+        assert_eq!(slot_reverb(&slots[0], &spans, &cfg.reverb_presets), None);
+        assert_eq!(
+            slot_reverb(&slots[1], &spans, &cfg.reverb_presets),
+            cfg.reverb_presets.get("hall"),
+        );
+        // Where the scene names no reverb, nobody gets any.
+        let turns = vec![turn(&a, "street-day", "Lỗ Đạt Sênh")];
+        let slots = timeline(&turns, 300, &BTreeMap::new()).unwrap();
+        let spans = build_spans(&slots, &cfg);
+        assert_eq!(slot_reverb(&slots[0], &spans, &cfg.reverb_presets), None);
     }
 
     /// The complaint the effect gates exist for: a bed under the whole chapter.
@@ -3579,8 +3779,7 @@ mod tests {
     fn every_shipped_effect_rule_resolves_and_daylight_is_a_bed() {
         let cfg = shipped_map();
         let dir = fixture_live("rule-pool");
-        let pool =
-            audio_pool::load_pool(&dir.join("assets/effect-pool.json"));
+        let pool = audio_pool::load_pool(&dir.join("assets/effect-pool.json"));
         assert!(!pool.is_empty(), "the effect pool must load");
         for rule in &cfg.rules {
             if rule.effect.is_empty() {
@@ -4062,13 +4261,13 @@ mod tests {
         let tail3 = format!("[0:a][duck][3:a]amix=inputs=3:normalize=0[mixed];[mixed]{lim}");
         // Beds only: they sum, they duck, they mix with the voice, and the sum
         // is limited. No third input.
-        let g = layer_graph(2, false, sc);
+        let g = layer_graph(2, false, sc, None);
         assert!(g.contains("[1:a][2:a]amix=inputs=2"), "{g}");
         assert!(g.contains(&ducked), "{g}");
         assert!(g.ends_with(&tail2), "{g}");
         // With an inject track, it is input 3 and it enters *after* the duck:
         // never inside `[under]`, or the voice's own compressor eats it.
-        let g = layer_graph(2, true, sc);
+        let g = layer_graph(2, true, sc, None);
         assert!(
             g.contains("[1:a][2:a]amix=inputs=2:normalize=0[under]"),
             "{g}"
@@ -4083,11 +4282,11 @@ mod tests {
             "the inject track must not join the ducked bus: {g}"
         );
         // A single bed needs no summing before the compressor.
-        let g = layer_graph(1, true, sc);
+        let g = layer_graph(1, true, sc, None);
         assert!(g.contains("[1:a]anull[under]"), "{g}");
         assert!(g.contains("[0:a][duck][2:a]amix=inputs=3"), "{g}");
         // No beds at all: nothing to duck, so no compressor in the graph.
-        let g = layer_graph(0, true, sc);
+        let g = layer_graph(0, true, sc, None);
         assert!(
             g.starts_with("[0:a][1:a]amix=inputs=2:normalize=0[mixed]"),
             "{g}"
@@ -4104,13 +4303,74 @@ mod tests {
             (2, true),
             (3, true),
         ] {
-            let g = layer_graph(b, i, sc);
+            let g = layer_graph(b, i, sc, None);
             assert!(
                 g.contains("alimiter=limit=0.589"),
                 "beds={b} inject={i}: {g}"
             );
             assert!(g.ends_with("[a]"), "beds={b} inject={i}: {g}");
         }
+    }
+
+    /// The headline is the one place the beds are meant to arrive, so the key
+    /// is held down there — and it is held down on a *copy* of the voice: the
+    /// voice that reaches the mix must be the one that was rendered, not a key
+    /// with a level edit on it.
+    #[test]
+    fn the_headline_is_exempt_from_the_duck() {
+        let sc = "sidechaincompress=threshold=0.05:ratio=3:attack=20:release=400";
+        let g = layer_graph(2, false, sc, Some((7.4, 0.0)));
+        assert!(g.starts_with("[0:a]asplit=2[vox][sc];"), "{g}");
+        assert!(
+            g.contains("[sc]volume=volume='if(lt(t,7.400),0.0000,1)':eval=frame[key]"),
+            "{g}"
+        );
+        assert!(g.contains(&format!("[under][key]{sc}[duck]")), "{g}");
+        assert!(
+            g.contains("[vox][duck]amix=inputs=2:normalize=0"),
+            "the voice is the copy nothing attenuated: {g}"
+        );
+        // A key taken as-is is the graph every chapter used to get, byte for
+        // byte — no split, no volume filter, nothing to explain.
+        let plain = layer_graph(2, false, sc, Some((7.4, 1.0)));
+        assert!(!plain.contains("asplit"), "{plain}");
+        assert!(!plain.contains("volume"), "{plain}");
+        assert!(
+            plain.contains(&format!("[under][0:a]{sc}[duck]")),
+            "{plain}"
+        );
+        // And no headline at all (a chapter that opens on a scene) is the same
+        // graph as a key taken as-is.
+        assert_eq!(plain, layer_graph(2, false, sc, None));
+    }
+
+    /// The headline is the opening turn with neither a place nor a mood. The
+    /// test is on that pairing, not on "the first slot": a chapter that opens
+    /// on a scene keeps its duck from the first line.
+    #[test]
+    fn the_headline_is_the_first_turn_with_no_place_and_no_mood() {
+        let headline = |end: f64| Slot {
+            scene: String::new(),
+            ..slot("", 0.0, end)
+        };
+        let slots = vec![headline(6.5), slot("quiet", 6.8, 40.0)];
+        assert_eq!(headline_end(&slots), Some(6.5));
+        assert_eq!(
+            headline_end(&[slot("quiet", 0.0, 40.0)]),
+            None,
+            "a mood from the first line means the beds are already wanted"
+        );
+        assert_eq!(
+            headline_end(&[slot("", 0.0, 40.0)]),
+            None,
+            "a place, no mood — a labelled opening line is not the headline"
+        );
+        assert_eq!(headline_end(&[]), None);
+        // The default is the exemption, because that is what makes the layer's
+        // own fade-in audible at all.
+        assert_eq!(Duck::default().head_key, 0.0);
+        // ...and a map that predates the field gets it.
+        assert_eq!(scene_map().duck.head_key, 0.0);
     }
 
     /// A loop is only worth making if the arithmetic is right: too few copies

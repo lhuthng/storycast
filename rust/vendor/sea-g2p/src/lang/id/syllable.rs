@@ -24,10 +24,23 @@
 /// Onset clusters Indonesian permits, all from Dutch, English or Sanskrit
 /// loans. Native roots have no complex onsets.
 const CLUSTERS: &[(&str, &str)] = &[
-    ("p", "r"), ("p", "l"), ("b", "r"), ("b", "l"),
-    ("t", "r"), ("d", "r"), ("k", "r"), ("k", "l"),
-    ("ɡ", "r"), ("ɡ", "l"), ("f", "r"), ("f", "l"),
-    ("s", "p"), ("s", "t"), ("s", "k"), ("s", "w"), ("s", "r"),
+    ("p", "r"),
+    ("p", "l"),
+    ("b", "r"),
+    ("b", "l"),
+    ("t", "r"),
+    ("d", "r"),
+    ("k", "r"),
+    ("k", "l"),
+    ("ɡ", "r"),
+    ("ɡ", "l"),
+    ("f", "r"),
+    ("f", "l"),
+    ("s", "p"),
+    ("s", "t"),
+    ("s", "k"),
+    ("s", "w"),
+    ("s", "r"),
 ];
 
 fn is_vowel(p: &str) -> bool {
@@ -57,14 +70,14 @@ pub fn syllabify(phones: &[String]) -> Vec<String> {
         let (v1, v2) = (pair[0], pair[1]);
         let gap = v2 - v1 - 1; // consonants between the two nuclei
         let start = match gap {
-            0 => v2,                       // di-a
-            1 => v2 - 1,                   // ba-ca
+            0 => v2,     // di-a
+            1 => v2 - 1, // ba-ca
             _ => {
                 let (a, b) = (&phones[v2 - 2], &phones[v2 - 1]);
                 if is_cluster(a, b) {
-                    v2 - 2                 // in-fra
+                    v2 - 2 // in-fra
                 } else {
-                    v2 - 1                 // man-di
+                    v2 - 1 // man-di
                 }
             }
         };

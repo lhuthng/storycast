@@ -14,7 +14,8 @@ The repo is the machine, not the material.
 | --- | --- |
 | `rust/` (five crates) | Pipeline: scheduler, workers, TUI, provisioning — plus `bm-tts`, the local Vieneu TTS sidecar |
 | `python/` | Voice enrollment only (the old sidecar is retired; serving never needs Python) |
-| `prompts/analyze.txt` | **Example** dramatization prompt (Vietnamese web novels) — your main edit for another language/genre; it must return the JSON shape described inside |
+| `prompts/script.txt` | **The staging contract** the automatic digest renders after speakers are fixed: text, TTS, music, effects, and sounds. Your main edit for another language/genre. Ships with the profile; the tracked copy is `rust/fixtures/profile/prompts/` |
+| `prompts/analyze.txt` | Chapter-attribution template used by the automatic first pass; its legacy raw-chapter rendering remains the manual digest manager (`D`) path |
 | `voices.default.json` | Built-in catalogue voices |
 | `assets/`, `Makefile`, `.env.example` | Scene maps, ambience, one-command ops, config template |
 
@@ -23,7 +24,7 @@ Everything book-specific is runtime-created and git-ignored:
 | Created by you / at runtime | What it is |
 | --- | --- |
 | `url_template` in `workspaces/<name>/settings.json` | Chapter URLs, `{n}` = number. **The only novel-specific setting you must change** |
-| `prompts/analyze.txt` | Your style/language, if the example doesn't fit |
+| `prompts/script.txt` | Your style/language, if the example doesn't fit |
 | `voices.json`, `voice-pool.json`, `refs/` | Cloned voices + clips (skip to use catalogue voices) |
 | `data/`, `output/` | Scripts, bible, cached audio, finished MP3s |
 | `.bm/` | Ledger, settings, machines, logs |
@@ -56,8 +57,11 @@ cast is derived from the digest — so chapter 40 keeps chapter 1's voice for a
 character with no hand config.
 
 - **crawl** — fetch chapter `{n}` from the URL template, clean to plain text.
-- **digest** — text + bible + your prompt → one LLM call → strict JSON
-  (speakers, aliases, segments with speaker/mood/scene) → `data/script-NN.json`.
+- **digest** — the chapter is split *deterministically* into `narration`/
+  `dialogue` events with stable ids, then **one** LLM call answers cast + script
+  together in strict JSON → `data/script-NN.json`. A gate then rejects the answer
+  unless every event was spoken exactly once, in source order, with narration on
+  `Narrator` and no quote delimiter inside a segment.
 - **render** — speak each segment with its speaker's voice; every segment is
   cached, so a crash costs seconds, not a chapter.
 - **merge** — segments + gaps + optional effects/music/scene-beats →
@@ -105,7 +109,7 @@ make tui        # press c, then paste, e.g. https://example.com/truyen/any-novel
 `{n}` is the chapter number. The TUI saves it to
 `workspaces/<name>/settings.json` and probe-crawls one chapter to prove the
 selector finds the text. **Only novel-specific setting you must change**
-(plus `prompts/analyze.txt` if you want a different style).
+(plus `prompts/script.txt` if you want a different style).
 
 ### Cloned voices (optional)
 
@@ -133,7 +137,11 @@ the voice:
   segments are one cue, so music changes as often as feeling does (crossfade
   on change). Quiet by design (`level: 0.06` vs effects' `0.08`–`0.22`).
   `none` (or a mood the pool can't answer) plays **no music** — validated at
-  digest time.
+  digest time. The chapter's **first cue is pulled back to the head of the
+  timeline**, so the music comes up *under the title* rather than hitting on
+  the first line that names a mood, and the layer's head and tail fade over
+  `layers.music.fade_s` (3 s) — an opening and a closing, not the 0.3 s edge
+  the sparse layers use.
 - **Place ≠ mood on purpose.** One string doing both once put a hearth under a
   dawn shop: keyword `shop` hit a fire rule before the daylight rule.
 - **`sound` = spot effect between lines.** `segments` holds **lines**
@@ -340,7 +348,7 @@ at top).
 
 | Path | What it is |
 | --- | --- |
-| `prompts/analyze.txt` | **Dramatization prompt — main customization point** (tracked example) |
+| `prompts/script.txt` · `prompts/analyze.txt` | **Digest prompt templates.** Profile tree (git-ignored; tracked copy in `rust/fixtures/profile/prompts/`). The automatic digest renders `analyze.txt` for attribution, then `script.txt` for staging; the manual manager retains its legacy raw-chapter rendering. |
 | `assets/*` | Clips, pools, scene map, licenses (tracked) |
 | `voices.default.json` | Catalogue voices (tracked) |
 | `output/Ch.N - Title.mp3` | **Finished chapters** |
@@ -405,7 +413,14 @@ Local-only design notes (`.docs/` is git-ignored): `TUI_UX_AUDIT.md`,
   languages: `TTS_ENGINE=gemini`, or adapt `python/tts_router.py`.
 - **Gemini TTS** free tier ~10 calls/day (app subscription doesn't raise API
   limits); AI Studio pay-as-you-go is pennies/chapter.
-- **Digest burns LLM tokens** (~1 call/chapter); free tiers rate-limit —
-  analyzer falls through a model list automatically.
+- **Digest burns LLM tokens** (~2 calls/chapter: attribution then staging, plus
+  one repair per refused pass); free tiers rate-limit — analyzer falls through a
+  model list automatically.
+- **Digest refuses instead of guessing.** A chapter that fails attribution or
+  source validation is re-attempted, not shipped, so a bad script cannot land.
+  Unnamed dialogue uses stable `anonymous:anon-N` voice slots rather than being
+  guessed as Narrator or inserted into the character Bible. The manual digest
+  manager (`D`) still runs the legacy raw-chapter prompts and does not yet
+  enforce the automatic source gate.
 - **Crawling** needs a predictable `{n}` URL and findable body; `c` in the TUI
   probe-crawls one chapter before you commit a range.

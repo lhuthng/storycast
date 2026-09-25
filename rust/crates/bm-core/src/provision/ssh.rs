@@ -362,9 +362,8 @@ impl Ssh {
         }
         args.push(src_s);
         args.push(dst);
-        let mut tracker = progress.map(|p| {
-            ProgressTracker::new(p.tx.clone(), self.target.clone(), p.label.to_string())
-        });
+        let mut tracker = progress
+            .map(|p| ProgressTracker::new(p.tx.clone(), self.target.clone(), p.label.to_string()));
         let target = self.target.clone();
         let (code, _, stderr) = with_transport_retries(|| {
             let watch: OutputWatch<'_> = match tracker.as_mut() {
@@ -478,11 +477,7 @@ struct ProgressTracker {
 }
 
 impl ProgressTracker {
-    fn new(
-        tx: tokio::sync::mpsc::UnboundedSender<String>,
-        target: String,
-        label: String,
-    ) -> Self {
+    fn new(tx: tokio::sync::mpsc::UnboundedSender<String>, target: String, label: String) -> Self {
         ProgressTracker {
             tx,
             target,
@@ -741,8 +736,7 @@ mod tests {
             "-c",
             "echo big.bin; for i in 1 2 3 4 5 6; do echo '  100 10% 1.00MB/s 00:00:01'; sleep 0.25; done",
         ]);
-        let watch: OutputWatch<'_> =
-            Some(&mut |out: &str, err: &str| tracker.on_output(out, err));
+        let watch: OutputWatch<'_> = Some(&mut |out: &str, err: &str| tracker.on_output(out, err));
         let (code, _, _) = run_bounded_live(&mut cmd, 30, "fake push", watch).unwrap();
         assert_eq!(code, 0);
         let line = rx.try_recv().expect("first update streams immediately");

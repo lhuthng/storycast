@@ -103,7 +103,11 @@ pub fn n2w_large_number(numbers: &str) -> String {
         let word = n2w_hundreds(group);
         if !word.is_empty() {
             let suffix_idx = i % 3;
-            let main_suffix = if suffix_idx < suffixes.len() { suffixes[suffix_idx] } else { "" };
+            let main_suffix = if suffix_idx < suffixes.len() {
+                suffixes[suffix_idx]
+            } else {
+                ""
+            };
             let ty_count = i / 3;
 
             let mut word_with_suffix = format!("{}{}", word, main_suffix);
@@ -123,7 +127,10 @@ pub fn n2w_large_number(numbers: &str) -> String {
 }
 
 pub fn n2w(number: &str) -> String {
-    let clean_number: String = number.chars().filter(|c: &char| c.is_ascii_digit()).collect();
+    let clean_number: String = number
+        .chars()
+        .filter(|c: &char| c.is_ascii_digit())
+        .collect();
     if clean_number.is_empty() {
         return number.to_string();
     }
@@ -141,7 +148,8 @@ pub fn n2w_single(number: &str) -> String {
         num_str = format!("0{}", &num_str[3..]);
     }
 
-    let res: Vec<String> = num_str.chars()
+    let res: Vec<String> = num_str
+        .chars()
         .filter(|c: &char| c.is_ascii_digit())
         .map(|c: char| units(c).to_string())
         .collect();
@@ -153,7 +161,10 @@ pub fn n2w_single(number: &str) -> String {
 }
 
 pub fn n2w_decimal(number: &str) -> String {
-    let clean_number: String = number.chars().filter(|c: &char| c.is_ascii_digit()).collect();
+    let clean_number: String = number
+        .chars()
+        .filter(|c: &char| c.is_ascii_digit())
+        .collect();
     if clean_number.is_empty() {
         return number.to_string();
     }
@@ -161,7 +172,7 @@ pub fn n2w_decimal(number: &str) -> String {
     let mut res = Vec::new();
     let chars: Vec<char> = clean_number.chars().collect();
     for (i, &d) in chars.iter().enumerate() {
-        if d == '5' && i == chars.len() - 1 && i > 0 && chars[i-1] != '0' {
+        if d == '5' && i == chars.len() - 1 && i > 0 && chars[i - 1] != '0' {
             res.push("lăm".to_string());
         } else {
             let u = units(d);

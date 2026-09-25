@@ -493,7 +493,10 @@ mod tests {
         ];
         let p = planned(&segs);
         assert_eq!(p.speech.len(), 1);
-        assert!(!p.fires_at(0), "no seam before the first line, nothing invented");
+        assert!(
+            !p.fires_at(0),
+            "no seam before the first line, nothing invented"
+        );
     }
 
     #[test]
@@ -552,7 +555,8 @@ mod tests {
     #[test]
     fn expected_wavs_errors_on_an_uncast_speaker() {
         let segs = vec![json!({"speaker": "Nobody", "text": "1"})];
-        let err = expected_wavs(&planned(&segs), &Cast::new(), Path::new("s"), true, None).unwrap_err();
+        let err =
+            expected_wavs(&planned(&segs), &Cast::new(), Path::new("s"), true, None).unwrap_err();
         assert!(err.to_string().contains("no voice for"), "{err}");
     }
 
@@ -593,7 +597,8 @@ mod tests {
         let title = title_speech(&l, 7, &cast, first).unwrap();
         assert_eq!(title.text, "Chương 7, Kiếm khí xung thiên");
         assert_eq!(title.voice, "Đức Trí");
-        let units = plan_render(&planned(&segs), &cast, Path::new("s"), true, Some(&title)).unwrap();
+        let units =
+            plan_render(&planned(&segs), &cast, Path::new("s"), true, Some(&title)).unwrap();
         assert_eq!(units.len(), 2);
         assert_eq!(units[0].tag, "title");
         assert!(
@@ -602,7 +607,8 @@ mod tests {
             units[0].dest
         );
         assert_eq!(units[1].tag, "0000");
-        let wavs = expected_wavs(&planned(&segs), &cast, Path::new("s"), true, Some(&title)).unwrap();
+        let wavs =
+            expected_wavs(&planned(&segs), &cast, Path::new("s"), true, Some(&title)).unwrap();
         assert_eq!(wavs.len(), 2);
         assert!(wavs[0].ends_with("title_Đức Trí.wav"));
     }
@@ -939,14 +945,12 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
             // What the renderer writes now: content-addressed takes. The take
             // carries its own speaker, voice and text.
             if let Some(key) = stem.strip_prefix("t-") {
-                if let Some(take) = takes.iter().find(|t| {
-                    t.get("take_key").and_then(|k| k.as_str()) == Some(key)
-                }) {
+                if let Some(take) = takes
+                    .iter()
+                    .find(|t| t.get("take_key").and_then(|k| k.as_str()) == Some(key))
+                {
                     let v = take.get("voice").and_then(|v| v.as_str()).unwrap_or("");
-                    let vk = take
-                        .get("voice_key")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let vk = take.get("voice_key").and_then(|v| v.as_str()).unwrap_or("");
                     if !want.contains(&norm_voice(v)) && !want.contains(&norm_voice(vk)) {
                         continue;
                     }

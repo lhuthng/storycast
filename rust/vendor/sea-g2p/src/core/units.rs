@@ -73,9 +73,8 @@ static RE_DEG_MIN_SEC: Lazy<Regex> = Lazy::new(|| {
     Regex::new("(\\d+)\\s*°\\s*(\\d+)\\s*['\u{2032}](?:\\s*(\\d+)\\s*[\"\u{2033}])?").unwrap()
 });
 /// `5'6"` — feet and inches, which only ever appear as a pair.
-static RE_FEET_INCH: Lazy<Regex> = Lazy::new(|| {
-    Regex::new("\\b(\\d+)\\s*['\u{2032}]\\s*(\\d+)\\s*[\"\u{2033}]").unwrap()
-});
+static RE_FEET_INCH: Lazy<Regex> =
+    Lazy::new(|| Regex::new("\\b(\\d+)\\s*['\u{2032}]\\s*(\\d+)\\s*[\"\u{2033}]").unwrap());
 /// `3:1`. Safe only after the clock-time pass has taken what it wants; a
 /// ratio and a time are written identically.
 static RE_RATIO: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(\d{1,3})\s*:\s*(\d{1,3})\b").unwrap());
@@ -95,7 +94,11 @@ pub fn expand(text: &str, w: &UnitWords) -> String {
     let out = RE_DEG_MIN_SEC.replace_all(text, |c: &Captures| match c.get(3) {
         Some(sec) => format!(
             " {}° {} {} {} {} ",
-            &c[1], &c[2], w.arcminute, sec.as_str(), w.arcsecond
+            &c[1],
+            &c[2],
+            w.arcminute,
+            sec.as_str(),
+            w.arcsecond
         ),
         None => format!(" {}° {} {} ", &c[1], &c[2], w.arcminute),
     });
@@ -115,12 +118,10 @@ pub fn expand(text: &str, w: &UnitWords) -> String {
                 None => return c[0].to_string(),
             };
             match c.get(4) {
-                Some(second) => {
-                    match read_unit(second.as_str(), c.get(5).map(|m| m.as_str()), w) {
-                        Some(s) => format!("{} {} {} {} ", &c[1], first, w.per, s),
-                        None => c[0].to_string(),
-                    }
-                }
+                Some(second) => match read_unit(second.as_str(), c.get(5).map(|m| m.as_str()), w) {
+                    Some(s) => format!("{} {} {} {} ", &c[1], first, w.per, s),
+                    None => c[0].to_string(),
+                },
                 None => format!("{} {} ", &c[1], first),
             }
         })

@@ -1,6 +1,6 @@
 //! The per-machine work-policy overlay.
 use crate::tui::{
-    app::App,
+    app::{App, HitTarget, ListTarget},
     screen::PolicyView,
     style::{centered, stage_color, style_of},
 };
@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
-pub(crate) fn draw_policy(f: &mut ratatui::Frame, app: &App, v: &PolicyView) {
+pub(crate) fn draw_policy(f: &mut ratatui::Frame, app: &mut App, v: &PolicyView) {
     let area = centered(f.area(), 66, 12);
     f.render_widget(Clear, area);
     let colour = app.colour();
@@ -38,7 +38,9 @@ pub(crate) fn draw_policy(f: &mut ratatui::Frame, app: &App, v: &PolicyView) {
         let name_style = if p.enabled {
             style_of(colour, stage_color(p.stage.as_str()))
         } else {
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM)
         };
         lines.push(Line::from(vec![
             Span::raw(format!(" {cursor}{grab} {mark} ")),
@@ -51,6 +53,15 @@ pub(crate) fn draw_policy(f: &mut ratatui::Frame, app: &App, v: &PolicyView) {
         "  the first enabled stage with work wins; if it has none, the next one",
         dim,
     )));
+
+    app.add_hit_region(
+        area,
+        HitTarget::List {
+            kind: ListTarget::Policy,
+            row_start: 0,
+            row_y: area.y + 3,
+        },
+    );
 
     f.render_widget(
         Paragraph::new(lines).block(

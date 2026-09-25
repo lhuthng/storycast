@@ -373,7 +373,10 @@ async fn shutdown_remotes_http(layout_root: &Path, machines: &[Machine]) -> Vec<
                 Ok(r) if r.status().is_success() => {
                     format!("[{addr}] worker stopping (shutdown acknowledged)")
                 }
-                Ok(r) => format!("[{addr}] shutdown refused ({}) — ssh sweep follows", r.status()),
+                Ok(r) => format!(
+                    "[{addr}] shutdown refused ({}) — ssh sweep follows",
+                    r.status()
+                ),
                 Err(e) => format!("[{addr}] no shutdown answer ({e:#}) — ssh sweep follows"),
             }
         }));
@@ -685,7 +688,8 @@ mod tests {
         let argv: &str = &launch;
         let (a, w) = (
             argv.find("bm-agent").expect("binary in launch"),
-            argv.find("worker --serve-tasks").expect("subcommand in launch"),
+            argv.find("worker --serve-tasks")
+                .expect("subcommand in launch"),
         );
         assert!(a < w, "binary before subcommand: {argv}");
         assert!(

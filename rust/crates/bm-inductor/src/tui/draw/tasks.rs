@@ -1,6 +1,6 @@
 //! Tasks pane plus the full-screen ledger overlay.
 use crate::tui::{
-    app::App,
+    app::{App, HitTarget, ListTarget, Panel},
     layout::size_class,
     layout::Size,
     model::{age_secs, clamp_scroll, filtered_tasks, task_state_counts},
@@ -19,7 +19,7 @@ use ratatui::{
 };
 
 pub(crate) fn draw_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let block = super::pane_block(app, "Tasks");
+    let block = super::pane_block_for(app, Some(Panel::Workers), "Tasks");
     let mut lines: Vec<Line> = Vec::new();
 
     match app.counts.as_object() {
@@ -100,7 +100,7 @@ pub(crate) fn draw_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
 }
 
 /// The Tasks overlay: every task, its state, and the reason it is where it is.
-pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksView) {
+pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &TasksView) {
     // Like the cast overview: full screen on the compact tier, a wide panel
     // otherwise. A ledger table squeezed into 76 columns loses the detail
     // column, which is the one thing this screen exists to show.
@@ -112,8 +112,10 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
     };
     f.render_widget(Clear, area);
 
-    let all = &app.tasks;
-    let shown = filtered_tasks(all, &view.filter);
+    // Clone the compact ledger so hit-region bookkeeping can coexist with the
+    // borrowed rows used by the table renderer.
+    let all = app.tasks.clone();
+    let shown = filtered_tasks(&all, &view.filter);
     let shelved = all.iter().filter(|t| t.state == TaskState::Shelved).count();
     let block = super::pane_block(
         app,
@@ -149,7 +151,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
         format!("{} tasks", all.len()),
         app.style_bold(Color::White),
     )];
-    for (state, n) in task_state_counts(all) {
+    for (state, n) in task_state_counts(&all) {
         summary.push(Span::styled(
             format!("  ·  {n} {}", state.as_str()),
             app.style(state_color(state.as_str())),
@@ -162,6 +164,14 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &App, view: &TasksV
         ));
     }
     f.render_widget(Paragraph::new(Line::from(summary)), rows[0]);
+    app.add_hit_region(
+        rows[2],
+        HitTarget::List {
+            kind: ListTarget::Tasks,
+            row_start: view.scroll,
+            row_y: rows[2].y + 2,
+        },
+    );
 
     // The filter line is always present, like the cast screen's, so an active
     // filter can never be invisible.

@@ -8,7 +8,7 @@
 //! status column says which entries are still reached before the cursor gets
 //! near them.
 use crate::tui::{
-    app::App,
+    app::{App, HitTarget, ListTarget},
     layout::{
         cols, size_class, Size, SOUND_COLS_NARROW, SOUND_COLS_WIDE, SOUND_KEYS_HEAD,
         SOUND_KEYS_REMOVE, SOUND_KEYS_REMOVE_DEAD, SOUND_KEYS_TAIL, SOUND_OVERLAY_H,
@@ -26,7 +26,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Row, Table, Wrap},
 };
 
-pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &App, view: &SoundView) {
+pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &mut App, view: &SoundView) {
     // The compact tier takes the whole screen: a `SOUND_OVERLAY_W`-wide table
     // centred in a 76-column terminal loses a third of its columns to margins
     // it cannot spare.
@@ -55,6 +55,7 @@ pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &App, view: &SoundView) {
             Constraint::Length(2), // the action bar
         ])
         .split(inner);
+    app.add_hit_region(rows_area[0], HitTarget::SoundTabs);
 
     // Tabs, with each layer's size so the screen says how much is behind them.
     let mut tabs: Vec<Span> = Vec::new();
@@ -155,6 +156,14 @@ pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &App, view: &SoundView) {
 
     // The pool itself.
     let body = rows_area[2].height.saturating_sub(3) as usize;
+    app.add_hit_region(
+        rows_area[2],
+        HitTarget::List {
+            kind: ListTarget::Sound,
+            row_start: view.scroll,
+            row_y: rows_area[2].y + 2,
+        },
+    );
     if rows.is_empty() {
         f.render_widget(
             empty_body(vec![

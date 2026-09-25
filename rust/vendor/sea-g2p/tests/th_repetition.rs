@@ -92,7 +92,8 @@ fn paiyannoi_is_silent_and_never_leaks() {
     // ฯ marks an elided remainder and is not pronounced. The rule fallback
     // used to push the raw character into the phoneme string, so Bangkok
     // came out as "kruŋ˧ tʰeːp̚˥˩ ฯ" — a token no voice was trained on.
-    for s in ["กรุงเทพฯ", "สหรัฐฯ", "โปรดเกล้าฯ", "ผมอยู่กรุงเทพฯ ครับ"] {
+    for s in ["กรุงเทพฯ", "สหรัฐฯ", "โปรดเกล้าฯ", "ผมอยู่กรุงเทพฯ ครับ"]
+    {
         let out = th.phonemize(s, &dict);
         assert!(!out.contains('ฯ'), "{s} -> {out}");
         assert!(!out.trim().is_empty(), "{s}");
@@ -112,10 +113,14 @@ fn an_empty_dictionary_entry_is_not_a_pronunciation() {
     for s in ["มปิก", "ดยุค", "ทเทิล", "รปภ.", "ปชช."] {
         let out = th.phonemize(s, &dict);
         assert!(
-            out.chars().any(|c| !c.is_whitespace() && !matches!(c, ',' | '.' | '!' | '?')),
+            out.chars()
+                .any(|c| !c.is_whitespace() && !matches!(c, ',' | '.' | '!' | '?')),
             "{s} read as {out:?}"
         );
-        assert!(!out.chars().any(|c| ('\u{0E01}'..='\u{0E5B}').contains(&c)), "{s} -> {out}");
+        assert!(
+            !out.chars().any(|c| ('\u{0E01}'..='\u{0E5B}').contains(&c)),
+            "{s} -> {out}"
+        );
     }
     // A word whose every consonant carries thanthakhat really is silent, and
     // must stay silent rather than fall back to the raw characters.
@@ -132,10 +137,19 @@ fn a_heteronym_is_chosen_by_its_neighbours() {
     let (dict, th) = thai();
     // เพลา is /pʰeː laː/ "time" and /pʰlaw/ "axle". One token either way, so
     // no segmenter can separate them — only the words around it can.
-    assert!(th.phonemize("เพลาเช้า", &dict).starts_with("pʰeː˧ laː˧"), "morning");
-    assert!(th.phonemize("เพลาบ่าย", &dict).starts_with("pʰeː˧ laː˧"), "afternoon");
+    assert!(
+        th.phonemize("เพลาเช้า", &dict).starts_with("pʰeː˧ laː˧"),
+        "morning"
+    );
+    assert!(
+        th.phonemize("เพลาบ่าย", &dict).starts_with("pʰeː˧ laː˧"),
+        "afternoon"
+    );
     // with no cue, the dictionary's reading stands
-    assert!(th.phonemize("เพลารถยนต์", &dict).starts_with("pʰlaw˧"), "axle");
+    assert!(
+        th.phonemize("เพลารถยนต์", &dict).starts_with("pʰlaw˧"),
+        "axle"
+    );
     assert!(th.phonemize("เพลา", &dict).starts_with("pʰlaw˧"), "bare");
 
     // แหน: the ห is silent in the water fern, read in หวงแหน "to cherish"

@@ -34,10 +34,9 @@ mod steps;
 pub use aws::{
     admits_port, default_security_group_args, default_subnet_args, describe_image_args,
     describe_security_group_args, ec2_id_from_note, instance_line, instance_profile_names_args,
-    keypair_names_args, machine_from_instance, parse_instances, parse_name_list,
-    preserve_ec2_id, profile_object, run_instances_args, sole_name, terminate_args,
-    ubuntu_ami_args, AwsConfig, AwsInstance, DEFAULT_FILE, DEFAULT_TAG, REQUIRED_INGRESS,
-    UBUNTU_LTS,
+    keypair_names_args, machine_from_instance, parse_instances, parse_name_list, preserve_ec2_id,
+    profile_object, run_instances_args, sole_name, terminate_args, ubuntu_ami_args, AwsConfig,
+    AwsInstance, DEFAULT_FILE, DEFAULT_TAG, REQUIRED_INGRESS, UBUNTU_LTS,
 };
 pub use ssh::{resolve_key, KeySource, RsyncProgress, Ssh};
 pub use stamp::{compute_provision_stamp, ProvisionStamp};

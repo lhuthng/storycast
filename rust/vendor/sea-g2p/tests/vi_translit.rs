@@ -30,7 +30,10 @@ fn letters_with_a_stroke_or_ligature_use_the_table() {
 fn vietnamese_letters_are_never_folded() {
     // "ế" decomposes to e + circumflex + acute: without the guard this pass
     // would flatten the language it serves.
-    assert_eq!(fold_foreign_letters("Tiếng Việt đường phố"), "Tiếng Việt đường phố");
+    assert_eq!(
+        fold_foreign_letters("Tiếng Việt đường phố"),
+        "Tiếng Việt đường phố"
+    );
     let all: String = VI_LETTERS.to_string();
     assert_eq!(fold_foreign_letters(&all), all);
 }
@@ -69,5 +72,9 @@ fn every_european_latin_letter_has_an_ascii_form() {
             unfolded.push(c);
         }
     }
-    assert!(unfolded.is_empty(), "letters with no ASCII form: {:?}", unfolded);
+    assert!(
+        unfolded.is_empty(),
+        "letters with no ASCII form: {:?}",
+        unfolded
+    );
 }

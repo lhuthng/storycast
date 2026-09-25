@@ -56,8 +56,19 @@ const UNITS: UnitWords = UnitWords {
 
 /// Words that license a Roman numeral in Indonesian.
 const ROMAN: RomanCues = RomanCues {
-    words: &["perang dunia", "abad", "abad ke-", "bab", "jilid", "ke-",
-             "kelas", "periode", "seri", "bagian", "pasal"],
+    words: &[
+        "perang dunia",
+        "abad",
+        "abad ke-",
+        "bab",
+        "jilid",
+        "ke-",
+        "kelas",
+        "periode",
+        "seri",
+        "bagian",
+        "pasal",
+    ],
 };
 
 /// Indonesian words for the pieces of an email address or URL.
@@ -169,9 +180,8 @@ fn stage_abbreviations(text: &str) -> String {
 ///
 /// The word boundary is what keeps the full spellings out: `hari Senin` does
 /// not match `sen`.
-static RE_WEEKDAY: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(hari)\s+(sen|sel|rab|kam|jum|sab|min)\b\.?").unwrap()
-});
+static RE_WEEKDAY: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\b(hari)\s+(sen|sel|rab|kam|jum|sab|min)\b\.?").unwrap());
 
 fn stage_weekdays(text: &str) -> String {
     RE_WEEKDAY
@@ -192,14 +202,12 @@ fn stage_weekdays(text: &str) -> String {
 
 // ── Stage 2: datetime ───────────────────────────────────────────────────────
 
-static RE_DATE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b").unwrap()
-});
+static RE_DATE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b").unwrap());
 /// The cue word is captured so it is not emitted twice: "pukul 14:30" was
 /// coming out as "pukul pukul empat belas".
-static RE_TIME: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(?:(pukul|jam)\s+)?(\d{1,2}):(\d{2})\b").unwrap()
-});
+static RE_TIME: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\b(?:(pukul|jam)\s+)?(\d{1,2}):(\d{2})\b").unwrap());
 
 fn stage_datetime(text: &str) -> String {
     let out = RE_DATE.replace_all(text, |c: &Captures| {
@@ -228,18 +236,26 @@ fn stage_datetime(text: &str) -> String {
 
 // ── Stage 3: money ──────────────────────────────────────────────────────────
 
-static RE_RUPIAH: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\bRp\.?\s*(\d[\d.]*(?:,\d+)?)").unwrap()
-});
+static RE_RUPIAH: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\bRp\.?\s*(\d[\d.]*(?:,\d+)?)").unwrap());
 
 fn stage_money(text: &str) -> String {
     RE_RUPIAH
-        .replace_all(text, |c: &Captures| format!(" {} rupiah ", read_number(&c[1])))
+        .replace_all(text, |c: &Captures| {
+            format!(" {} rupiah ", read_number(&c[1]))
+        })
         .into_owned()
 }
 
 /// Words that mark what follows as an identifier rather than a quantity.
-const PLATE_CUES: &[&str] = &["plat", "nomor polisi", "nopol", "nomor", "kode", "penerbangan"];
+const PLATE_CUES: &[&str] = &[
+    "plat",
+    "nomor polisi",
+    "nopol",
+    "nomor",
+    "kode",
+    "penerbangan",
+];
 
 /// Licence plates and codes, read figure by figure, gated on a cue.
 fn stage_identifiers(text: &str) -> String {
@@ -292,9 +308,7 @@ fn stage_math(text: &str) -> String {
 
 /// A period only groups thousands when exactly three digits follow it, and a
 /// comma is the decimal mark. This is the reverse of the English convention.
-static RE_NUMBER: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\d+(?:\.\d{3})*(?:,\d+)?").unwrap()
-});
+static RE_NUMBER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\d+(?:\.\d{3})*(?:,\d+)?").unwrap());
 
 fn read_number(s: &str) -> String {
     let (int_part, frac) = match s.split_once(',') {

@@ -12,10 +12,93 @@ use crate::tui::{
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use bm_core::provision::AwsInstance;
 use bm_proto::{Heartbeat, Machine, Op, Roster, Task};
-use ratatui::style::{Color, Style};
+use ratatui::{
+    layout::Rect,
+    style::{Color, Style},
+};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{atomic::AtomicBool, Arc};
 use std::time::Instant;
+
+/// A dashboard pane the mouse can focus. Keeping this separate from `Screen`
+/// means a click never accidentally opens an operator action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Panel {
+    Machines,
+    Workers,
+    Tasks,
+    Events,
+    Footer,
+}
+
+impl Panel {
+    pub(crate) fn next(self) -> Self {
+        const PANELS: [Panel; 4] = [
+            Panel::Machines,
+            Panel::Workers,
+            Panel::Events,
+            Panel::Footer,
+        ];
+        let i = PANELS.iter().position(|p| *p == self).unwrap_or(0);
+        PANELS[(i + 1) % PANELS.len()]
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Machines => "Machines",
+            Self::Workers => "Workers",
+            Self::Tasks => "Tasks",
+            Self::Events => "Logs",
+            Self::Footer => "Status",
+        }
+    }
+}
+
+/// What a click or wheel event hit. Regions are rebuilt by the painter, so
+/// mouse handling never has to duplicate terminal layout arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HitTarget {
+    Panel {
+        panel: Panel,
+        row_start: usize,
+        row_y: u16,
+    },
+    List {
+        kind: ListTarget,
+        row_start: usize,
+        row_y: u16,
+    },
+    Confirm {
+        confirm: bool,
+    },
+    SoundTabs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListTarget {
+    Cast,
+    Tasks,
+    Sound,
+    Picker,
+    Digest,
+    Cloud,
+    Jobs,
+    Policy,
+    Help,
+    TaskDetail,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HitRegion {
+    pub(crate) area: Rect,
+    pub(crate) target: HitTarget,
+}
+
+impl HitRegion {
+    pub(crate) fn new(area: Rect, target: HitTarget) -> Self {
+        Self { area, target }
+    }
+}
 
 pub(crate) struct App {
     pub(crate) api: String,
@@ -47,8 +130,24 @@ pub(crate) struct App {
     pub(crate) events: VecDeque<LogLine>,
     pub(crate) selected: usize,
     pub(crate) machine_scroll: usize,
+    /// Scroll offset for the live worker list; the pane sizes itself around
+    /// the number of visible workers rather than painting empty table rows.
+    pub(crate) worker_scroll: usize,
     /// 0 = pinned to the newest event; N = N rows scrolled back.
+    ///
+    /// N is a *distance from the live tail*, not a frozen index: a new event
+    /// while the view is scrolled back grows N by one so the line under the
+    /// operator's eyes stays put (see `push_log`). It never exceeds
+    /// [`EVENT_CAP`] — the buffer keeps that many lines and no more, so the
+    /// top is a real edge, named as such in the pane title.
     pub(crate) events_scroll: usize,
+    /// The Logs pane's content height in rows, published by the draw and read
+    /// by the page keys. PgUp/PgDn move this many rows, so one press really is
+    /// one screenful: walking back from the top costs the same presses as
+    /// walking out, and `G` (or one run of PgDn) still snaps to newest. The
+    /// hardcoded 5 these replaced made a 500-line buffer a hundred presses each
+    /// way — the reason "scrolled back" felt like a one-way trip.
+    pub(crate) events_rows: usize,
     pub(crate) screen: Screen,
     pub(crate) roster: Option<Roster>,
     pub(crate) roster_loading: bool,
@@ -140,6 +239,13 @@ pub(crate) struct App {
     /// the Cloud view renders the reason rather than an empty account.
     pub(crate) cloud: Vec<AwsInstance>,
     pub(crate) cloud_error: Option<String>,
+    /// The pane highlighted by keyboard focus or a mouse click.
+    pub(crate) focused_panel: Panel,
+    /// Rebuilt on every frame; mouse hit testing is therefore resize-safe.
+    pub(crate) hit_regions: Vec<HitRegion>,
+    /// Coordinates and time of the last left click, used only for activation
+    /// (Enter-equivalent) on a double click.
+    pub(crate) last_click: Option<(u16, u16, Instant)>,
 }
 
 impl App {
@@ -158,7 +264,9 @@ impl App {
             events: VecDeque::with_capacity(EVENT_CAP),
             selected: 0,
             machine_scroll: 0,
+            worker_scroll: 0,
             events_scroll: 0,
+            events_rows: 10,
             screen: Screen::Normal,
             roster: None,
             roster_loading: false,
@@ -193,7 +301,31 @@ impl App {
             player: Player::new(),
             cloud: Vec::new(),
             cloud_error: None,
+            focused_panel: Panel::Machines,
+            hit_regions: Vec::new(),
+            last_click: None,
         }
+    }
+
+    pub(crate) fn clear_hit_regions(&mut self) {
+        self.hit_regions.clear();
+    }
+
+    pub(crate) fn add_hit_region(&mut self, area: Rect, target: HitTarget) {
+        self.hit_regions.push(HitRegion::new(area, target));
+    }
+
+    pub(crate) fn hit_region(&self, x: u16, y: u16) -> Option<HitRegion> {
+        self.hit_regions
+            .iter()
+            .rev()
+            .find(|r| {
+                x >= r.area.x
+                    && x < r.area.x.saturating_add(r.area.width)
+                    && y >= r.area.y
+                    && y < r.area.y.saturating_add(r.area.height)
+            })
+            .copied()
     }
 
     /// Build the audition line index if it is not already here or on its way.
@@ -282,10 +414,45 @@ impl App {
     }
 
     pub(crate) fn push_log(&mut self, line: LogLine) {
+        // A new line must not shove the operator's reading position away. While
+        // the view is scrolled back, the same line stays on screen and the
+        // distance grows by one — so "N back" is always the honest distance
+        // from the live tail, and the cap on the distance is the buffer's own
+        // depth (the oldest line kept), not a number the keys invented.
+        let held = self.events_scroll > 0;
         while self.events.len() >= EVENT_CAP {
             self.events.pop_front();
         }
         self.events.push_back(line);
+        if held {
+            // Eviction from the front doesn't move the held line's distance
+            // from the tail; only the new arrival does. If the held line was
+            // itself evicted, the clamp lands us at the top, which is the only
+            // honest answer.
+            self.events_scroll = (self.events_scroll + 1).min(self.events.len());
+        }
+    }
+
+    /// The farthest the Logs pane may scroll: the whole buffer. The buffer is
+    /// capped at [`EVENT_CAP`], but the scroll writes used to be unbounded —
+    /// PgUp past the cap left the title claiming "852 line(s) back" against a
+    /// 500-line buffer (and a keyboard repeat would walk it into the
+    /// thousands). Every scroll write clamps through this, so the number in
+    /// the title always names lines that exist.
+    pub(crate) fn max_events_scroll(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Raise `events_scroll` (scroll toward older lines), clamped to the
+    /// buffer. The one doorway every "go older" write goes through.
+    pub(crate) fn scroll_events_older(&mut self, by: usize) {
+        self.events_scroll = (self.events_scroll + by).min(self.max_events_scroll());
+    }
+
+    /// Lower `events_scroll` (scroll toward newer lines), clamped at 0.
+    /// The one doorway every "go newer" write goes through.
+    pub(crate) fn scroll_events_newer(&mut self, by: usize) {
+        self.events_scroll = self.events_scroll.saturating_sub(by);
     }
 
     pub(crate) fn log_at(&mut self, level: Level, text: impl Into<String>) {

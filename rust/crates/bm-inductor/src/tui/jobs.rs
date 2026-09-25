@@ -722,6 +722,18 @@ async fn provision_live(
     out
 }
 
+/// Elapsed-push stamp for the provision launch line (`4s`, `3m41s`): the
+/// reason a box's `worker started` can land minutes after faster boxes are
+/// already beating. Same shape as the jobs screen's label, kept beside its
+/// only caller rather than shared.
+fn push_label(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{}s", secs / 60, secs % 60)
+    }
+}
+
 pub(crate) async fn job_provision(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     layout: bm_core::Layout,
@@ -732,6 +744,10 @@ pub(crate) async fn job_provision(
     cancel: Option<Arc<AtomicBool>>,
 ) {
     let addr = machine.addr.clone();
+    // Anchor for the launch line below: the push ahead is blocking and slow
+    // on some boxes, so the worker starts minutes after faster boxes are
+    // already beating — the elapsed on that line is what says so.
+    let t0 = Instant::now();
     send(&tx, Level::Info, format!("[{addr}] provisioning machine…"));
     // Read before the run: the job stamps `provisioning` below, so the state on
     // the way in is the only record that this box was still booting. A failed
@@ -833,7 +849,10 @@ pub(crate) async fn job_provision(
                 send(
                     &tx,
                     Level::Ok,
-                    format!("[{addr}] provision complete — starting its worker"),
+                    format!(
+                        "[{addr}] provision complete in {} — starting its worker",
+                        push_label(t0.elapsed().as_secs())
+                    ),
                 );
                 // Worker half only, never the inductor: a `p` retry
                 // finishes with the box joined, whatever else runs.
@@ -1078,7 +1097,7 @@ pub(crate) async fn job_start_backend(
         &tx,
         Level::Info,
         format!(
-            "starting backend now — {} machine(s) catch up in background…",
+            "starting backend now — {} machine(s) catch up in background, each box's worker starts when its own push lands…",
             targets.len()
         ),
     );
@@ -1338,7 +1357,10 @@ pub(crate) async fn job_save_task_policy(
         Ok(r) => send(
             &tx,
             Level::Error,
-            format!("policy save {addr}: the inductor answered HTTP {}", r.status()),
+            format!(
+                "policy save {addr}: the inductor answered HTTP {}",
+                r.status()
+            ),
         ),
         Err(e) => send(&tx, Level::Error, format!("policy save {addr} failed: {e}")),
     }
@@ -1353,31 +1375,18 @@ pub(crate) async fn job_manual_digest(
     script: serde_json::Value,
     delta: serde_json::Value,
 ) {
-    let url = format!("{}/api/complete", api.trim_end_matches('/'));
-    // The body is a worker's, field for field — the same `Complete` the agent
-    // posts — so the inductor cannot tell the two apart except by who is
-    // claiming the work, which is the one thing that legitimately differs.
-    let body = bm_proto::Complete {
-        worker_id: bm_proto::MANUAL_WORKER.to_string(),
-        task_id: format!("{}:{chapter}", bm_proto::Stage::Digest.as_str()),
-        ok: true,
-        detail: format!("digest ch{chapter} by hand"),
-        duration_secs: 0.0,
-        bible_delta: Some(delta),
-        units: 0,
-        script: Some(script),
-        text: None,
-        mp3_b64: None,
-        unit_files: Vec::new(),
-    };
-    let ev = match http.post(&url).json(&body).send().await {
-        Ok(r) if r.status().is_success() => match r.text().await {
-            Ok(line) => Ok(line.trim().to_string()),
-            Err(e) => Err(format!("the inductor's answer did not arrive: {e}")),
-        },
-        Ok(r) => Err(format!("the inductor answered HTTP {}", r.status())),
-        Err(e) => Err(format!("could not reach the inductor: {e}")),
-    };
+    // One report body, shared with the headless backup runner (`manual::report`):
+    // the inductor cannot tell a by-hand chapter from a backup one except by the
+    // `operator` id they both claim it under.
+    let ev = crate::manual::report(
+        &api,
+        &http,
+        chapter,
+        &script,
+        &delta,
+        format!("digest ch{chapter} by hand"),
+    )
+    .await;
     let _ = tx.send(Ev::ManualDigest(ev));
     let _ = tx.send(Ev::Done(DoneKind::Other));
 }
@@ -1605,10 +1614,7 @@ pub(crate) async fn job_relink_machine(
         machine.name.clone()
     };
     match http
-        .delete(format!(
-            "{api}/api/machines?addr={}",
-            urlencode(&old_addr)
-        ))
+        .delete(format!("{api}/api/machines?addr={}", urlencode(&old_addr)))
         .send()
         .await
     {
@@ -1623,12 +1629,21 @@ pub(crate) async fn job_relink_machine(
             return;
         }
         Err(e) => {
-            send(&tx, Level::Error, format!("relink: drop {old_addr} failed: {e}"));
+            send(
+                &tx,
+                Level::Error,
+                format!("relink: drop {old_addr} failed: {e}"),
+            );
             let _ = tx.send(Ev::Done(DoneKind::Other));
             return;
         }
     }
-    match http.post(format!("{api}/api/machines")).json(&m).send().await {
+    match http
+        .post(format!("{api}/api/machines"))
+        .json(&m)
+        .send()
+        .await
+    {
         Ok(r) if r.status().is_success() => {
             send(
                 &tx,
@@ -1644,7 +1659,11 @@ pub(crate) async fn job_relink_machine(
             Level::Error,
             format!("relink: add {new_addr} rejected: HTTP {}", r.status()),
         ),
-        Err(e) => send(&tx, Level::Error, format!("relink: add {new_addr} failed: {e}")),
+        Err(e) => send(
+            &tx,
+            Level::Error,
+            format!("relink: add {new_addr} failed: {e}"),
+        ),
     }
     // The Cloud view's linked marks are now stale.
     let _ = tx.send(Ev::Cloud(cloud_snapshot(&layout.root).await));
@@ -1791,14 +1810,12 @@ pub(crate) async fn job_load_roster(
     }
     // ...then upgrade to live when the inductor answers with a sidecar
     // behind it. Anything else keeps the local roster already shown.
-    match http.get(format!("{api}/api/roster")).send().await {
-        Ok(r) => match r.json::<Roster>().await {
-            Ok(roster) if roster.source.starts_with("live") => {
+    if let Ok(r) = http.get(format!("{api}/api/roster")).send().await {
+        if let Ok(roster) = r.json::<Roster>().await {
+            if roster.source.starts_with("live") {
                 let _ = tx.send(Ev::Roster(Ok(roster)));
             }
-            _ => {}
-        },
-        Err(_) => {}
+        }
     }
     let _ = tx.send(Ev::Done(DoneKind::Other));
 }

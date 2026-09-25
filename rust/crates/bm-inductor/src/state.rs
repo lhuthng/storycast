@@ -779,7 +779,9 @@ mod tests {
         );
 
         // Any box takes the re-render — no warm-box pin, no cold box.
-        let offer = inner.offer("cold-b").expect("cold box takes the re-render too");
+        let offer = inner
+            .offer("cold-b")
+            .expect("cold box takes the re-render too");
         assert_eq!(offer.task_id, "render:1:0", "one take, A's");
         let units = offer.render_units.as_ref().expect("planned, not legacy");
         assert_eq!(units.len(), 1, "a single segment travels: {units:?}");
@@ -796,7 +798,10 @@ mod tests {
             "a content-addressed take needs no forcing: {:?}",
             offer.render_force
         );
-        assert!(!offer.cast_hash.is_empty(), "the voice collection travels too");
+        assert!(
+            !offer.cast_hash.is_empty(),
+            "the voice collection travels too"
+        );
         assert!(
             seg.join("0001_Adam.wav").is_file(),
             "untouched voices keep their cache"
@@ -994,7 +999,9 @@ mod tests {
         let (_d, mut inner) = fixture();
         inner.workers.insert("w1".into(), "192.168.2.2".into());
         inner.caps.insert("w1".into(), vec!["crawl".into()]);
-        inner.tasks.insert("crawl:5".into(), Task::new(5, Stage::Crawl));
+        inner
+            .tasks
+            .insert("crawl:5".into(), Task::new(5, Stage::Crawl));
         // The offer marks it `Assigned`; put it back so the next box can take it.
         let rearm = |inner: &mut Inner| {
             let t = inner.tasks.get_mut("crawl:5").unwrap();
@@ -1106,7 +1113,12 @@ mod tests {
         inner.workers.insert("rmt-w".into(), "192.0.2.1".into());
         inner.caps.insert(
             "rmt-w".into(),
-            vec!["crawl".into(), "digest".into(), "render".into(), "merge".into()],
+            vec![
+                "crawl".into(),
+                "digest".into(),
+                "render".into(),
+                "merge".into(),
+            ],
         );
         // Pinned to a live, capable box — the local node still takes it.
         let offer = inner.offer("lo-w").expect("local merges anything");
@@ -1728,7 +1740,11 @@ mod tests {
         // mistaken for the new take because the legacy name happened to match.
         assert!(!seg.join("0000_Adam.wav").exists(), "stale segments go");
         let plan = bm_core::assemble::RenderPlan::load(&layout.plan(12)).unwrap();
-        assert!(plan.takes[0].file.starts_with("t-"), "{}", plan.takes[0].file);
+        assert!(
+            plan.takes[0].file.starts_with("t-"),
+            "{}",
+            plan.takes[0].file
+        );
         assert!(!layout.final_mp3(12).exists(), "stale product goes");
     }
 
@@ -1906,7 +1922,11 @@ mod tests {
         assert!(!unit.text.is_empty(), "the worker gets text, not a key");
         assert_eq!(unit.take_key.len(), 16);
         assert_eq!(hash.len(), 16, "the chapter's voice collection hash");
-        assert!(unit.name.starts_with("t-"), "content-addressed: {}", unit.name);
+        assert!(
+            unit.name.starts_with("t-"),
+            "content-addressed: {}",
+            unit.name
+        );
         assert!(force.is_empty(), "a new take needs no forcing");
 
         // Fill the three gaps: nothing is work any more, and the plan covers.
@@ -2035,14 +2055,29 @@ mod tests {
         .unwrap();
         let files = inner.resume_render_after_edit(3, "requeued: retag");
         let after = bm_core::assemble::RenderPlan::load(&layout.plan(3)).unwrap();
-        assert_eq!(after.takes[0].take_key, before.takes[0].take_key, "A is carried");
-        assert_ne!(after.takes[1].take_key, before.takes[1].take_key, "B changed");
+        assert_eq!(
+            after.takes[0].take_key, before.takes[0].take_key,
+            "A is carried"
+        );
+        assert_ne!(
+            after.takes[1].take_key, before.takes[1].take_key,
+            "B changed"
+        );
         assert_eq!(files, 1, "one superseded file, not the chapter");
-        assert!(seg.join(&before.takes[0].file).is_file(), "A's audio survives");
-        assert!(!seg.join(&before.takes[1].file).is_file(), "B's stale file is gone");
+        assert!(
+            seg.join(&before.takes[0].file).is_file(),
+            "A's audio survives"
+        );
+        assert!(
+            !seg.join(&before.takes[1].file).is_file(),
+            "B's stale file is gone"
+        );
         assert_eq!(inner.tasks["render:3:0"].state, TaskState::Done);
         assert_eq!(inner.tasks["render:3:1"].state, TaskState::Pending);
-        assert!(!inner.render_takes_done(3), "the merge waits for the new take");
+        assert!(
+            !inner.render_takes_done(3),
+            "the merge waits for the new take"
+        );
     }
 
     #[test]
@@ -2269,7 +2304,10 @@ mod tests {
             .op_swap_voice("A", "Chưa Từng Có")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("neither a preset nor an enrolled clone"), "{err}");
+        assert!(
+            err.contains("neither a preset nor an enrolled clone"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3022,7 +3060,11 @@ mod tests {
                 "segments":[{"speaker":"A","text":"Nàng nhíu mày."},{"speaker":"Narrator","text":"Đi thôi."}],"fixes":[]}"#,
         )
         .unwrap();
-        std::fs::write(layout.cast("vieneu"), r#"{"Narrator":"Đức Trí","A":"Adam"}"#).unwrap();
+        std::fs::write(
+            layout.cast("vieneu"),
+            r#"{"Narrator":"Đức Trí","A":"Adam"}"#,
+        )
+        .unwrap();
         inner.materialize_render_takes(9);
 
         let msg = inner
@@ -3044,7 +3086,10 @@ mod tests {
         assert!(msg.contains("#0 A→Narrator"), "{msg}");
         assert!(msg.contains("#1 Narrator→A"), "{msg}");
         let back: Value = bm_core::read_json(&layout.script(9)).unwrap();
-        assert_eq!(back["segments"][0]["speaker"], serde_json::json!("Narrator"));
+        assert_eq!(
+            back["segments"][0]["speaker"],
+            serde_json::json!("Narrator")
+        );
         assert_eq!(back["segments"][1]["speaker"], serde_json::json!("A"));
         assert_eq!(
             inner.tasks.get("merge:9").map(|t| t.state),
@@ -3103,11 +3148,7 @@ mod tests {
         // Deleting the duplicated line: indexes run against the script as
         // the operator sees it, sounds included, and the mix comes back.
         let msg = inner
-            .op_recast(
-                9,
-                &[],
-                &[1],
-            )
+            .op_recast(9, &[], &[1])
             .expect("removing a duplicated line applies");
         assert!(msg.contains("removed 1 duplicated segments"), "{msg}");
         let back: Value = bm_core::read_json(&layout.script(9)).unwrap();
@@ -3127,9 +3168,10 @@ mod tests {
         inner.tasks.insert(d.id(), d);
         inner.workers.insert("w1".into(), "127.0.0.1".into());
         inner.workers.insert("w2".into(), "127.0.0.1".into());
-        inner
-            .machines
-            .insert("127.0.0.1".into(), Machine::new("127.0.0.1", "local", 22, None, "both"));
+        inner.machines.insert(
+            "127.0.0.1".into(),
+            Machine::new("127.0.0.1", "local", 22, None, "both"),
+        );
     }
 
     #[test]
@@ -3147,7 +3189,11 @@ mod tests {
         assert_eq!(second.task_id, "digest:1");
         let row = &inner.tasks["digest:1"];
         assert_eq!(row.state, TaskState::Assigned);
-        assert_eq!(row.assigned_to.as_deref(), Some("w1"), "primary keeps its seat");
+        assert_eq!(
+            row.assigned_to.as_deref(),
+            Some("w1"),
+            "primary keeps its seat"
+        );
         assert_eq!(row.racers, vec!["w2".to_string()]);
 
         assert!(
@@ -3167,7 +3213,12 @@ mod tests {
         assert!(!win.contains("stale"), "{win}");
         assert_eq!(inner.tasks["digest:1"].state, TaskState::Done);
 
-        let late = inner.complete(&completion("w1", "digest:1", true, "digest ch1 via opencode"));
+        let late = inner.complete(&completion(
+            "w1",
+            "digest:1",
+            true,
+            "digest ch1 via opencode",
+        ));
         assert!(late.contains("stale"), "{late}");
         let row = &inner.tasks["digest:1"];
         assert_eq!(row.state, TaskState::Done);
@@ -3292,7 +3343,12 @@ mod tests {
         t.assigned_to = Some("w1".into());
         inner.tasks.insert(t.id(), t);
 
-        let msg = inner.complete(&completion("w1", "render:6:1", true, "render ch6 (1 calls)"));
+        let msg = inner.complete(&completion(
+            "w1",
+            "render:6:1",
+            true,
+            "render ch6 (1 calls)",
+        ));
         assert!(
             msg.contains("failed"),
             "an incomplete ok-report fails: {msg}"
@@ -3577,6 +3633,61 @@ mod tests {
     }
 
     #[test]
+    fn forcing_render_requeues_the_merge_for_that_chapter() {
+        let (_d, mut inner) = fixture();
+        let mut merge = Task::new(24, Stage::Merge);
+        merge.state = TaskState::Done;
+        inner.tasks.insert(merge.id(), merge);
+        for pos in 0..2 {
+            let mut render = Task::new_take(24, pos);
+            render.state = TaskState::Done;
+            inner.tasks.insert(render.id(), render);
+        }
+        std::fs::write(inner.layout.final_mp3(24), vec![0u8; 2000]).unwrap();
+
+        let msg = inner.op_retry_task(Stage::Render, 24, true);
+        assert!(msg.contains("forced"), "{msg}");
+        assert_eq!(inner.tasks["merge:24"].state, TaskState::Pending);
+        assert!(!inner.layout.final_mp3(24).exists());
+        assert!(inner
+            .tasks
+            .values()
+            .filter(|t| t.stage == Stage::Render && t.chapter == 24)
+            .all(|t| t.state == TaskState::Pending));
+    }
+
+    #[test]
+    fn forcing_digest_removes_that_chapters_render_and_merge_rows() {
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(layout.script(3), r#"{"segments":[]}"#).unwrap();
+        std::fs::write(layout.final_mp3(3), vec![0u8; 2000]).unwrap();
+        let mut digest = Task::new(3, Stage::Digest);
+        digest.state = TaskState::Done;
+        inner.tasks.insert(digest.id(), digest);
+        for pos in 0..2 {
+            let render = Task::new_take(3, pos);
+            inner.tasks.insert(render.id(), render);
+        }
+        let merge = Task::new(3, Stage::Merge);
+        inner.tasks.insert(merge.id(), merge);
+
+        inner.op_retry_task(Stage::Digest, 3, true);
+
+        assert_eq!(inner.tasks["digest:3"].state, TaskState::Pending);
+        assert!(!inner
+            .tasks
+            .values()
+            .any(|t| t.stage == Stage::Render && t.chapter == 3));
+        assert!(!inner
+            .tasks
+            .values()
+            .any(|t| t.stage == Stage::Merge && t.chapter == 3));
+        assert!(!layout.script(3).exists());
+        assert!(!layout.final_mp3(3).exists());
+    }
+
+    #[test]
     fn a_forced_merge_retry_forces_the_render_that_feeds_it() {
         // The failure this exists for: `merge:24 FAILED (shelved — press u to
         // retry): 42 segments missing in .../segments-vieneu-24: run the render
@@ -3698,7 +3809,9 @@ mod tests {
             t.state = state;
             inner.tasks.insert(t.id(), t);
         }
-        inner.tasks.insert(Task::new(9, Stage::Merge).id(), Task::new(9, Stage::Merge));
+        inner
+            .tasks
+            .insert(Task::new(9, Stage::Merge).id(), Task::new(9, Stage::Merge));
 
         // One run wav short of the set: the merge is not offered, its render
         // is requeued, and the worker leaves with the healing render instead
@@ -3747,7 +3860,9 @@ mod tests {
             t.state = state;
             inner.tasks.insert(t.id(), t);
         }
-        inner.tasks.insert(Task::new(9, Stage::Merge).id(), Task::new(9, Stage::Merge));
+        inner
+            .tasks
+            .insert(Task::new(9, Stage::Merge).id(), Task::new(9, Stage::Merge));
 
         let offer = inner.offer("w1").expect("a ready merge is offerable");
         assert_eq!(offer.task_id, "merge:9");
@@ -3826,7 +3941,10 @@ mod tests {
         ));
         assert!(msg.contains("failed"), "{msg}");
         assert_eq!(inner.tasks["merge:9"].state, TaskState::Pending);
-        assert_eq!(inner.tasks["merge:9"].attempts, 1, "the strike still counts");
+        assert_eq!(
+            inner.tasks["merge:9"].attempts, 1,
+            "the strike still counts"
+        );
         assert_eq!(
             inner.tasks["render:9"].state,
             TaskState::Pending,
@@ -4262,9 +4380,7 @@ mod tests {
 
         let a = inner.plan_units(180).expect("Vân bá must plan");
         assert_eq!(a.len(), 1);
-        let b = inner
-            .plan_units(182)
-            .expect("Nam tử bị thương must plan");
+        let b = inner.plan_units(182).expect("Nam tử bị thương must plan");
         assert_eq!(b.len(), 1);
         assert!(
             crate::segments::expected_names(&layout, &engine, 180).is_some(),
@@ -4275,9 +4391,10 @@ mod tests {
     /// A local worker with every capability, so the offer tests exercise the
     /// policy alone and not a capability gate.
     fn offer_fixture(inner: &mut Inner) {
-        inner
-            .machines
-            .insert("127.0.0.1".into(), Machine::new("127.0.0.1", "local", 22, None, "both"));
+        inner.machines.insert(
+            "127.0.0.1".into(),
+            Machine::new("127.0.0.1", "local", 22, None, "both"),
+        );
         inner.workers.insert("w1".into(), "127.0.0.1".into());
         inner.caps.insert(
             "w1".into(),
@@ -4503,7 +4620,13 @@ mod tests {
     /// their canonical order. Every stage stays enabled.
     fn lead_with(inner: &mut Inner, first: Stage) {
         let mut list: Vec<bm_proto::TaskPref> = Vec::new();
-        for s in [first, Stage::Crawl, Stage::Digest, Stage::Render, Stage::Merge] {
+        for s in [
+            first,
+            Stage::Crawl,
+            Stage::Digest,
+            Stage::Render,
+            Stage::Merge,
+        ] {
             if !list.iter().any(|p| p.stage == s) {
                 list.push(bm_proto::TaskPref {
                     stage: s,
@@ -4568,14 +4691,14 @@ mod tests {
         inner.machines.insert("18.1.1.1".into(), m);
         inner.workers.insert("w1".into(), "18.1.1.1".into());
 
-        let lines = inner.relink_drifted(&[instance(
-            "i-0123456789abcdef0",
-            "52.2.2.2",
-            "172.31.21.86",
-        )]);
+        let lines =
+            inner.relink_drifted(&[instance("i-0123456789abcdef0", "52.2.2.2", "172.31.21.86")]);
         assert!(inner.machines.contains_key("52.2.2.2"));
         assert!(!inner.machines.contains_key("18.1.1.1"));
-        assert_eq!(inner.machines["52.2.2.2"].name, "box-1", "the handle travels");
+        assert_eq!(
+            inner.machines["52.2.2.2"].name, "box-1",
+            "the handle travels"
+        );
         assert_eq!(
             inner.workers.get("w1").map(String::as_str),
             Some("52.2.2.2"),
@@ -4606,14 +4729,14 @@ mod tests {
         );
         inner.workers.insert("w1".into(), "172.31.21.86".into());
 
-        let lines = inner.relink_drifted(&[instance(
-            "i-0123456789abcdef0",
-            "52.2.2.2",
-            "172.31.21.86",
-        )]);
+        let lines =
+            inner.relink_drifted(&[instance("i-0123456789abcdef0", "52.2.2.2", "172.31.21.86")]);
         assert!(!inner.machines.contains_key("172.31.21.86"));
         assert!(inner.machines.contains_key("52.2.2.2"));
-        assert_eq!(inner.workers.get("w1").map(String::as_str), Some("52.2.2.2"));
+        assert_eq!(
+            inner.workers.get("w1").map(String::as_str),
+            Some("52.2.2.2")
+        );
         assert!(
             lines.iter().any(|l| l.contains("ghost")),
             "the fold is explained: {lines:?}"
@@ -4729,7 +4852,8 @@ mod tests {
         // another one. See `a_second_worker_deepens_the_chapter_the_first_one_opened`.
         for pos in 0..6 {
             assert_eq!(
-                inner.tasks[&format!("render:1:{pos}")].affinity, None,
+                inner.tasks[&format!("render:1:{pos}")].affinity,
+                None,
                 "render:1:{pos} stays unpinned: any box takes the next slice"
             );
         }
@@ -4805,7 +4929,12 @@ mod tests {
             t.state = TaskState::Running;
             t.assigned_to = Some("w1".into());
         }
-        inner.complete(&completion("w1", "render:9:0", true, "render ch9 (1 calls)"));
+        inner.complete(&completion(
+            "w1",
+            "render:9:0",
+            true,
+            "render ch9 (1 calls)",
+        ));
         assert_eq!(
             inner.tasks["merge:9"].affinity, None,
             "the first completion writes no pin"
@@ -4818,7 +4947,12 @@ mod tests {
             t.state = TaskState::Running;
             t.assigned_to = Some("w2".into());
         }
-        inner.complete(&completion("w2", "render:9:1", true, "render ch9 (1 calls)"));
+        inner.complete(&completion(
+            "w2",
+            "render:9:1",
+            true,
+            "render ch9 (1 calls)",
+        ));
         assert_eq!(
             inner.tasks["merge:9"].affinity, None,
             "nor does the second — the merge stays unpinned"
