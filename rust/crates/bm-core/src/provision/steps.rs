@@ -169,10 +169,15 @@ fn may_install(configured: bool, force: bool) -> bool {
 }
 
 /// Whether the model/voice store must be pushed even when the worker already
-/// has the right agent and sidecar. The voice roster lives in
-/// `models/voices.json`, so a clone addition is a model-store change.
+/// has the right agent and sidecar.
+///
+/// **Two digests, because `models/` holds two kinds of thing.** The immutable
+/// weights are `tts_hash`; the mutable voice roster — `models/voices.json`, the
+/// file enrollment rewrites — is `voices_hash`. Checking only the first is what
+/// once let an enrolled voice sit on this disk while every log said "in sync";
+/// checking only the second would hide a re-bake behind a 492 KB file.
 fn models_need_push(remote: Option<&ProvisionStamp>, local: &ProvisionStamp, force: bool) -> bool {
-    force || !remote.is_some_and(|stamp| stamp.tts_in_sync(local))
+    force || !remote.is_some_and(|stamp| stamp.tts_in_sync(local) && stamp.voices_in_sync(local))
 }
 
 /// Whether the remote voice store actually contains every clone declared by the
@@ -187,6 +192,40 @@ fn voice_store_covers(
         .keys()
         .filter(|name| !name.starts_with('_'))
         .all(|name| remote.iter().any(|voice| voice == name))
+}
+
+/// The `sha256sum -c` lines for a baked `models/`, taken from its own manifest.
+///
+/// **`models/voices.json` is excluded.** The manifest's entry for it is stale by
+/// design — enrollment rewrites the file after the bake, and the recorded hash
+/// describes the pre-enrollment bytes — so verifying it would fail every
+/// provision of a box that had ever enrolled a voice. Excluding it is the same
+/// immutable/mutable split the stamp's `tts_hash` makes, applied to the one
+/// other place this file is described.
+///
+/// Empty means "nothing to verify": a manifest that is missing, unparseable, or
+/// describing no files. Never a failure in itself — the `manifest.json`
+/// existence check in `install_models` is what refuses an incomplete bake.
+fn model_checksums(models_dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(models_dir.join("manifest.json")) else {
+        return Vec::new();
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(files) = doc.get("files").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = files
+        .iter()
+        .filter(|(name, _)| name.as_str() != "voices.json")
+        .filter_map(|(name, entry)| {
+            let hash = entry.get("sha256")?.as_str()?;
+            Some(format!("{hash}  {name}"))
+        })
+        .collect();
+    out.sort();
+    out
 }
 
 /// The `opencode` step, in two flavours.
@@ -280,11 +319,15 @@ if command -v ffmpeg >/dev/null 2>&1; then
 else
   echo "ffmpeg=absent"
 fi
-# Whichever layout is here. The Rust bake puts the store beside the weights; the
-# Python one keeps it inside the venv, so a rebuild vaporizes it.
-STORE="$HOME/{dir}/models/voices.json"
-[ -f "$STORE" ] || STORE=$(ls $HOME/{dir}/python/.venv/lib/*/site-packages/vieneu/assets/voices_v3_turbo.json 2>/dev/null | head -n 1)
-echo "voices=$([ -n "$STORE" ] && [ -f "$STORE" ] && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(chr(31).join(d.get('presets', d).keys()))" "$STORE" 2>/dev/null)"
+# The roster the sidecar is *serving*, asked of the process that owns the
+# answer rather than re-parsed out of the file it loaded. Two things fall out
+# of that: the list describes what a render will actually find, not what a file
+# says it should; and the probe's last `python3` is gone, which is what used to
+# let a stock box be described as needing Python. `-f` makes a 503 (still
+# loading) an empty answer instead of the error body read as a voice name.
+#
+# The octet 037 separator is `chr(31)`, which the Rust side splits on.
+echo "voices=$(curl -s -f --max-time 3 http://127.0.0.1:{port}/voices 2>/dev/null | tr -d '[]"' | tr ',' '\037')"
 if [ -f "$HOME/{dir}/.provision_stamp.json" ]; then
   echo "stamp=$(tr '\n' ' ' < "$HOME/{dir}/.provision_stamp.json" 2>/dev/null)"
 fi
@@ -526,6 +569,20 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
     ///
     /// 668 MB, and content-addressed by the stamp's `tts_hash`, so a re-provision
     /// with nothing changed costs one rsync delta rather than a transfer.
+    ///
+    /// **What arrives is verified, not assumed.** rsync exiting 0 says the
+    /// *transfer* worked, which is a weaker claim than "the weights are
+    /// intact": a box that dies mid-push, a source file already corrupt on this
+    /// machine, or a `--delete` racing a writer all leave a directory rsync is
+    /// happy with and the sidecar is not. The check used to be that
+    /// `manifest.json` exists — which a half-written bake satisfies perfectly.
+    ///
+    /// So the bake's own `sha256` entries are written out as a `sha256sum -c`
+    /// list and checked on the box, with `models/voices.json` excluded: the
+    /// manifest's entry for it is stale by design, because enrollment rewrites
+    /// the file after the bake. That exclusion is the same immutable/mutable
+    /// split `tts_hash` makes, applied to the one other place the file is
+    /// described.
     pub fn install_models(
         &self,
         root: &Path,
@@ -539,15 +596,36 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
             );
         }
         self.rsync_push(&src, "models", true, progress(live, "models"))?;
+        let sums = model_checksums(&src);
+        if !sums.is_empty() {
+            self.write_model_checksums(&sums)?;
+        }
+        // `sha256sum` is coreutils, so it is present on every platform these
+        // workers run — but "present" is assumed rather than proved, and a box
+        // without it is reported rather than silently reported as verified.
         let script = format!(
             r#"D="$HOME/{d}/models"
-n=$(ls "$D" | wc -l)
 [ -f "$D/manifest.json" ] || {{ echo "models/manifest.json missing — incomplete bake" >&2; exit 8; }}
-echo "MODELS-OK ($n files)"
+n=$(ls "$D" | wc -l)
+L="$HOME/{d}/models.sha256"
+if ! command -v sha256sum >/dev/null 2>&1; then
+  echo "MODELS-OK ($n files, NOT verified — sha256sum absent)" >&2
+  exit 0
+fi
+if [ -f "$L" ]; then
+  if ! out=$(cd "$D" && sha256sum -c "$L" 2>&1); then
+    echo "$out" | grep -v ': OK$' | head -n 5 >&2
+    echo "MODELS-CORRUPT — the weights here do not match the bake; nothing was rendered with them" >&2
+    exit 10
+  fi
+  echo "MODELS-OK ($(wc -l < "$L") files verified)"
+else
+  echo "MODELS-OK ($n files, no checksum list)" >&2
+fi
 "#,
             d = REMOTE_DIR
         );
-        let (code, stdout, stderr) = self.run(&script, 60)?;
+        let (code, stdout, stderr) = self.run(&script, 600)?;
         if code != 0 {
             anyhow::bail!(
                 "installing models failed (exit {code}): {}",
@@ -555,6 +633,28 @@ echo "MODELS-OK ($n files)"
             );
         }
         Ok(stdout.trim().to_string())
+    }
+
+    /// Write the `sha256sum -c` list the verify step reads.
+    ///
+    /// Generated here, from the bake's own declaration, rather than derived on
+    /// the box: the box has no JSON parser left (the probe's `python3` is gone),
+    /// and a shell re-parse of a single-line 492 KB document is exactly the kind
+    /// of thing that works until a voice is named with a brace in it.
+    ///
+    /// It lives at the worker root, not inside `models/`, because that push
+    /// carries `--delete` and would eat it.
+    fn write_model_checksums(&self, sums: &[String]) -> Result<()> {
+        let body = sums.join("\n");
+        let script = format!(
+            "cat > $HOME/{d}/models.sha256 << 'EOF'\n{body}\nEOF\n",
+            d = REMOTE_DIR
+        );
+        let (code, _, stderr) = self.run(&script, 10)?;
+        if code != 0 {
+            anyhow::bail!("failed to write the model checksum list: {}", stderr.trim());
+        }
+        Ok(())
     }
 
     /// Best-effort opencode install for the digest lane. Auth stays manual
@@ -848,7 +948,15 @@ pub fn provision(
     // written by the old already-configured path could say “in sync” after it
     // skipped the model push, which is exactly how Narrator 2 stayed missing.
     let manifest = crate::pool::load_manifest(&layout.root);
-    let remote_voice_store_complete = voice_store_covers(&probe.voices, &manifest);
+    // An *unknown* roster is not a missing one. The probe cannot read the
+    // roster when the sidecar is not answering, and reading that as "this box
+    // knows none of the declared voices" would answer a down sidecar with a
+    // 668 MB model push. `voices_hash` is the primary gate now — it compares
+    // the content of `models/voices.json` against ours — and this check is the
+    // backstop for a stamp that lies, so it only ever *adds* a push when it has
+    // something to say.
+    let remote_voice_store_complete =
+        probe.voices.is_empty() || voice_store_covers(&probe.voices, &manifest);
     let models_match =
         !models_need_push(remote_stamp, &local_stamp, force) && remote_voice_store_complete;
 
@@ -864,6 +972,11 @@ pub fn provision(
     // store so the already-running sidecar is restarted below; otherwise the
     // new `models/voices.json` is on disk while the old roster stays resident.
     let mut models_pushed = false;
+    // And the same flag for the binary itself, which is the one that matters
+    // most: a replaced `bm-tts` on disk does nothing while the old process is
+    // still running it, so a redeploy that does not recycle the sidecar looks
+    // like a successful provision and behaves like no provision at all.
+    let mut tts_pushed = false;
     // Read here, beside `already`, so the two cannot disagree about what this
     // run is allowed to do — see [`may_install`].
     let installs = may_install(probe.configured(agent_version), force);
@@ -887,6 +1000,24 @@ pub fn provision(
                     m.id
                 )),
                 Err(e) => log.push(format!("[{}] agent redeploy failed: {e}", m.id)),
+            }
+        }
+        // The sidecar binary, on the same reasoning as the agent above.
+        //
+        // Without this branch a rebuilt `bm-tts` never reached a configured
+        // box: `tts_hash` covers `models/`, not the binary, and the only push
+        // site lived in the `else` below — which an already-configured box never
+        // reaches. The box kept serving the old sidecar for ever, silently.
+        if !remote_stamp
+            .map(|s| s.tts_bin_in_sync(&local_stamp))
+            .unwrap_or(false)
+        {
+            match ssh.install_tts_runtime(tts_binary, tts_runtime, live.as_ref()) {
+                Ok(v) => {
+                    tts_pushed = true;
+                    log.push(format!("[{}] sidecar drifted, redeployed — {v}", m.id));
+                }
+                Err(e) => log.push(format!("[{}] sidecar redeploy failed: {e}", m.id)),
             }
         }
         if sources_match {
@@ -1077,11 +1208,15 @@ pub fn provision(
     // has to recycle an already-running sidecar; otherwise the new store is
     // present on disk but the process keeps serving the old 66-voice roster.
 
-    if models_pushed {
+    if models_pushed || tts_pushed {
         match ssh.stop_tts() {
-            Ok(()) if probe.tts_up => {
+            Ok(()) if models_pushed && probe.tts_up => {
                 log.push(format!("[{}] stopped TTS to reload the voice store", m.id))
             }
+            Ok(()) if tts_pushed => log.push(format!(
+                "[{}] stopped TTS so the new sidecar binary is the one that runs",
+                m.id
+            )),
             Ok(()) => log.push(format!("[{}] cleared stale TTS process", m.id)),
             Err(e) => log.push(format!(
                 "[{}] could not stop TTS for voice reload: {e}",
@@ -1196,21 +1331,64 @@ mod tests {
     #[test]
     fn a_new_voice_forces_a_model_store_push_on_an_already_configured_box() {
         let local = ProvisionStamp {
-            tts_hash: "new-store".into(),
+            tts_hash: "weights-v1".into(),
+            voices_hash: "store-v1".into(),
             ..Default::default()
         };
-        let same = ProvisionStamp {
-            tts_hash: "new-store".into(),
-            ..Default::default()
-        };
-        let old = ProvisionStamp {
-            tts_hash: "old-store".into(),
-            ..Default::default()
-        };
+        let same = local.clone();
         assert!(!models_need_push(Some(&same), &local, false));
-        assert!(models_need_push(Some(&old), &local, false));
         assert!(models_need_push(None, &local, false));
         assert!(models_need_push(Some(&same), &local, true));
+
+        // A re-bake: the weights moved, the store did not.
+        let rebaked = ProvisionStamp {
+            tts_hash: "weights-v2".into(),
+            ..local.clone()
+        };
+        assert!(
+            models_need_push(Some(&rebaked), &local, false),
+            "a re-bake must resync"
+        );
+
+        // An enrollment: the store moved, the weights did not. This is the case
+        // that used to slip through the gate entirely — `tts_hash` was the whole
+        // check, and it deliberately excludes `models/voices.json`, so a freshly
+        // enrolled voice sat on the inductor while every log said "in sync".
+        let enrolled = ProvisionStamp {
+            voices_hash: "store-v2".into(),
+            ..local.clone()
+        };
+        assert!(
+            models_need_push(Some(&enrolled), &local, false),
+            "an enrollment must reach the box even though the weights are unchanged"
+        );
+    }
+
+    /// The verify list is the weights, and never the one mutable file among them.
+    #[test]
+    fn the_checksum_list_covers_the_weights_and_not_the_voice_store() {
+        let dir = std::env::temp_dir().join("bm-model-checksums");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{"files":{"sea_g2p.bin":{"bytes":1,"sha256":"aa11"},"voices.json":{"bytes":2,"sha256":"bb22"},"config.json":{"bytes":3,"sha256":"cc33"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            model_checksums(&dir),
+            vec![
+                "aa11  sea_g2p.bin".to_string(),
+                "cc33  config.json".to_string()
+            ],
+            "sorted, both weights kept, and the store dropped"
+        );
+
+        // Absent or unparseable means "nothing to verify", not a failure:
+        // `install_models` is what refuses an incomplete bake.
+        std::fs::remove_file(dir.join("manifest.json")).unwrap();
+        assert!(model_checksums(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

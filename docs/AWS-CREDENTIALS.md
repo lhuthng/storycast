@@ -13,7 +13,7 @@ what it is, where it lives, and why.
 | | who it is | what it needs |
 |---|---|---|
 | **The operator's** | an **IAM user created for this app**, stored by `bm-inductor aws login` | EC2, to create and destroy boxes |
-| **The worker's** | the role attached to each box | read the asset plane (S3), once that is wired |
+| **The worker's** | the role attached to each box | nothing — assets arrive by rsync |
 
 (A **box** is the repo's word for a machine running a worker — here, one EC2
 instance. `LinkedBox` is the type, "onboard a box" the verb.)
@@ -164,35 +164,17 @@ role.** The policy cannot create users or read a bucket.
 
 ## The worker's role
 
-The instance profile attached to each box. It needs read access to the asset
-plane, once the S3 publish step exists:
+The instance profile attached to each box. **It needs no permissions at all:**
+assets reach a box by rsync from the inductor, not by a fetch the box
+authenticates, so there is no bucket for it to read.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::<BUCKET>/profiles/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": "s3:ListBucket",
-      "Resource": "arn:aws:s3:::<BUCKET>",
-      "Condition": {
-        "StringLike": { "s3:prefix": "profiles/*" }
-      }
-    }
-  ]
-}
-```
+The role itself is still required, because every launch names an instance
+profile — a box started with no profile cannot assume the role the rest of the
+account expects.
 
-No write, no delete, no other prefix. **S3 is designed but not wired yet** —
-`bm_core::provision::profile_object` computes the key, and nothing calls it. If
-you leave `bucket` empty in the pool definition, assets are rsynced from the
-inductor instead and this role needs no permissions at all — but the role itself
-is still required, because every launch names an instance profile.
+Publishing the weights as a release artifact each box fetches and verifies
+itself is designed in [ARTIFACTS.md](ARTIFACTS.md). That host is a GitHub
+Release rather than S3, so it changes nothing here: still no AWS permissions.
 
 ## One-off setup
 

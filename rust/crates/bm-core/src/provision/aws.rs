@@ -16,9 +16,10 @@
 //! that was already here: `.bm/profile` holds `{name, hash}`, every worker
 //! verifies that hash of `assets/` + `prompts/` at startup, and
 //! `.provision_stamp.json` decides whether a given box needs anything pushed.
-//! [`profile_object`] names the S3 object **by that same hash**, so "which
-//! files" and "do I have the right files" are one value used twice — nothing to
-//! pass around and nothing to compare separately.
+//! Assets reach a box by rsync from this machine — one path, with no second
+//! copy to keep in step and no bucket to create. Publishing the 668 MB of
+//! models as a release artifact a box fetches and verifies itself is designed
+//! in `docs/ARTIFACTS.md`; it is not built.
 //!
 //! Two region-scoped things, and they are maps from the start: an EC2 keypair
 //! belongs to one region, and an AMI is one region's copy of an image. A single
@@ -93,12 +94,13 @@ pub struct AwsConfig {
     /// Security group. **Ingress** is what matters, on two ports — 22 for
     /// provisioning and the task port for the work (see [`REQUIRED_INGRESS`]) —
     /// and both must come from wherever the inductor runs. Egress stays open,
-    /// but not to reach the inductor: it is for chapter URLs, S3 and the Gemini
+    /// but not to reach the inductor: it is for chapter URLs and the Gemini
     /// API.
     pub security_group_id: String,
-    /// IAM instance profile **name**, which is what grants the S3 read. Without
-    /// it a box cannot pull its own asset plane and every launch is a 668 MB
-    /// upload from this machine instead.
+    /// IAM instance profile **name**. Required by [`AwsConfig::missing`], because
+    /// every launch names one — a box started with no profile cannot assume the
+    /// role the rest of the account expects. It needs no permissions of its own:
+    /// assets arrive by rsync, not by a fetch the box authenticates.
     pub iam_instance_profile: String,
     /// Login on the box. `ubuntu` on the stock Ubuntu AMIs, `ec2-user` on AL.
     pub ssh_user: String,
@@ -116,9 +118,6 @@ pub struct AwsConfig {
     /// `ssh_user` — `ubuntu` on Ubuntu, `ec2-user` on Amazon Linux — and the
     /// two are checked together.
     pub images: BTreeMap<String, String>,
-    /// Where the profile bundles are published, content-addressed. Empty turns
-    /// the S3 path off and falls back to rsyncing from here.
-    pub bucket: String,
     /// Ask for spot capacity. Render and merge are both idempotent and the
     /// lease reaper requeues an interrupted task, so a reclaimed box costs a
     /// retry, not a lost chapter.
@@ -148,7 +147,6 @@ impl Default for AwsConfig {
             ssh_user: "ubuntu".into(),
             keypairs: BTreeMap::new(),
             images: BTreeMap::new(),
-            bucket: String::new(),
             spot: true,
             max_workers: 8,
             ttl_hours: 6,
@@ -267,16 +265,6 @@ impl AwsConfig {
         out
     }
 
-    /// Whether this pool can hand a box its asset plane without uploading it
-    /// from here.
-    ///
-    /// Empty bucket is not an error: the rsync path still works and is what a
-    /// LAN pool uses. It is a *degradation*, and a launch should say so rather
-    /// than let 668 MB of egress be discovered on the bill.
-    pub fn publishes_assets(&self) -> bool {
-        !self.bucket.trim().is_empty()
-    }
-
     /// One line for the Machines pane or a `show`, with the secret-free fields.
     pub fn summary(&self) -> String {
         let keypair = self.keypair().unwrap_or("-");
@@ -290,39 +278,12 @@ impl AwsConfig {
             self.instance_type,
             self.disk_gb,
             keypair,
-            if self.publishes_assets() {
-                format!("s3://{}", self.bucket)
-            } else {
-                "assets: rsync from here".into()
-            },
+            "assets: rsync from here",
             self.spot,
             self.max_workers,
             self.ttl_hours,
         )
     }
-}
-
-/// Where a profile's asset plane lives: `s3://<bucket>/profiles/<hash>.tar.zst`.
-///
-/// **Named by the manifest hash**, which is the value already sitting in
-/// `.bm/profile` and the one every worker recomputes and checks at startup. So
-/// the object key is derived from a hash the box already holds — there is no
-/// mapping to keep in sync, and a box cannot be handed a bundle that does not
-/// match the pointer it verifies against.
-///
-/// Re-packing identical content under a different compression level overwrites
-/// the same key with the same tree, which is the correct outcome: the manifest
-/// inside the bundle is what is checked, file by file, before anything moves.
-///
-/// `None` when there is no bucket or no hash — both are "the S3 path is off",
-/// not an error.
-pub fn profile_object(bucket: &str, manifest_hash: &str) -> Option<String> {
-    let bucket = bucket.trim();
-    let hash = manifest_hash.trim();
-    if bucket.is_empty() || hash.is_empty() {
-        return None;
-    }
-    Some(format!("s3://{bucket}/profiles/{hash}.tar.zst"))
 }
 
 /// One JSON file, or `None` when it is absent or unreadable.
@@ -626,11 +587,10 @@ pub fn run_instances_args(
         "--output".into(),
         "json".into(),
     ];
-    // The role the *box* assumes — how it reads its own asset plane without a
-    // key on disk. Required by `missing()` since the pool shape existed, and
-    // never actually sent until now: a launch quietly produced boxes with no
-    // role at all, which is the kind of gap that only shows up as "why can't
-    // this box reach S3" a long way downstream.
+    // The role the *box* assumes. Required by `missing()` since the pool shape
+    // existed, and never actually sent until now: a launch quietly produced
+    // boxes with no role at all, which is the kind of gap that only shows up
+    // as "why has this box no identity" a long way downstream.
     if !cfg.iam_instance_profile.trim().is_empty() {
         args.push("--iam-instance-profile".into());
         args.push(format!("Name={}", cfg.iam_instance_profile));
@@ -927,7 +887,6 @@ mod tests {
             iam_instance_profile: "storycast-worker".into(),
             keypairs: BTreeMap::from([("eu-central-1".to_string(), "storycast".to_string())]),
             images: BTreeMap::from([("eu-central-1".to_string(), "ami-0abc".to_string())]),
-            bucket: "storycast-assets".into(),
             ..Default::default()
         }
     }
@@ -1042,33 +1001,11 @@ mod tests {
     }
 
     #[test]
-    fn the_object_key_is_the_hash_the_worker_already_verifies() {
-        // One identity used twice: the pointer's hash names the object, and the
-        // worker checks the same hash of the unpacked tree. Nothing to keep in
-        // sync, and no way to hand a box a bundle its own pointer disagrees with.
-        assert_eq!(
-            profile_object("storycast-assets", "b20f7789f510").as_deref(),
-            Some("s3://storycast-assets/profiles/b20f7789f510.tar.zst")
-        );
-        // Both halves absent is "the S3 path is off", not an error.
-        assert_eq!(profile_object("", "b20f7789"), None);
-        assert_eq!(profile_object("storycast-assets", "  "), None);
-    }
-
-    #[test]
-    fn a_pool_without_a_bucket_says_so_instead_of_hiding_the_egress() {
-        // An empty bucket is a working configuration — the rsync path — but it
-        // is 668 MB of upload from this machine per box, and the summary is
-        // where that has to be visible before the bill is.
-        let mut c = configured();
-        assert!(c.publishes_assets());
-        assert!(
-            c.summary().contains("s3://storycast-assets"),
-            "{}",
-            c.summary()
-        );
-        c.bucket = String::new();
-        assert!(!c.publishes_assets());
+    fn the_summary_names_the_asset_plane_as_an_rsync_from_here() {
+        // There is one asset plane now, and it is this machine's disk. The
+        // summary is where the 668 MB of upload has to be visible before the
+        // bill is, since that is the cost a launch decides.
+        let c = configured();
         assert!(c.summary().contains("rsync from here"), "{}", c.summary());
     }
 

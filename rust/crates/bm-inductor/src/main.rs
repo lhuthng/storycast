@@ -1242,9 +1242,9 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
             out.push("when none admits you: a closed port makes ssh HANG, it does not".into());
             out.push("refuse, so the symptom is silence.".into());
             out.push(String::new());
-            out.push("`region` is the only thing you must decide. `bucket` is the only".into());
-            out.push("other field worth typing (leave it empty to rsync the assets from".into());
-            out.push("this machine).".into());
+            out.push("`region` is the only field you must decide; `aws discover` fills".into());
+            out.push("the rest. Assets reach a box by rsync from this machine, so there".into());
+            out.push("is no bucket to create.".into());
             out.push(String::new());
             // The identity is not "whatever you already have on this machine".
             // Naming the user here matters: `init` is the first command anyone
@@ -1267,8 +1267,6 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
             out.push("  only. The account's default group is shared with everything else".into());
             out.push("  in the default VPC, so a rule on it is a rule on all of that too.".into());
             out.push("  Name yours with `--security-group` (docs/AWS-IAM-USER.md step 6)".into());
-            out.push("  a bucket — S3 → Create bucket, only if you publish the asset".into());
-            out.push("  plane; leave `bucket` empty and every box rsyncs from here".into());
             out.push(String::new());
             out.push("Creating, tagging and terminating boxes is money and destruction — those are `aws up` / `aws down`, next.".into());
             Ok(out)
@@ -1375,14 +1373,12 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
                     }
                 ));
             }
-            if let Ok(p) = bm_core::profile::read_pointer(root) {
-                match bm_core::provision::profile_object(&cfg.bucket, &p.hash) {
-                    Some(obj) => out.push(format!("asset plane: {obj}")),
-                    None => out.push(
-                        "asset plane: not published — every box would take a 668 MB upload from this machine".into(),
-                    ),
-                }
-            }
+            // One asset plane, and it is this machine's disk. Named rather than
+            // left implicit because it is ~668 MB of upload per box, and this
+            // line is read before a launch spends money.
+            out.push(
+                "asset plane: rsync from this machine (~668 MB per box) — publishing it as a release artifact is designed, not built (docs/ARTIFACTS.md)".into(),
+            );
             let missing = cfg.missing();
             if missing.is_empty() {
                 // "Ready" means ready to *launch*, which is what `missing()`
