@@ -4947,6 +4947,140 @@ mod tests {
         );
     }
 
+    /// A box `RunInstances` returned before the account gave it an address.
+    fn waiting(id: &str, private: &str) -> Machine {
+        let i = instance(id, "", private);
+        bm_core::provision::machine_from_instance(&i, &bm_core::provision::AwsConfig::default())
+    }
+
+    #[test]
+    fn relink_moves_a_waiting_box_to_its_address_and_hands_it_over() {
+        // The whole point of keying a pre-address box by its instance id: there
+        // is a record for the account read to repair. Before this, the entry
+        // either did not exist or sat at an undialable private address for ever.
+        let (_d, mut inner) = fixture();
+        let mut m = waiting("i-0123456789abcdef0", "172.31.21.86");
+        m.name = "box-1".into();
+        assert_eq!(m.state, MachineState::AwaitingIp);
+        inner.machines.insert(m.addr.clone(), m);
+
+        let lines =
+            inner.relink_drifted(&[instance("i-0123456789abcdef0", "52.2.2.2", "172.31.21.86")]);
+        assert!(!inner.machines.contains_key("i-0123456789abcdef0"));
+        let m = &inner.machines["52.2.2.2"];
+        assert_eq!(m.name, "box-1");
+        assert_eq!(
+            m.state,
+            MachineState::Initializing,
+            "a box that has never been pushed to is booting, not rotated"
+        );
+        assert!(
+            m.state_since > 0,
+            "and its deadline restarts from the moment it could actually be dialed — \
+             inheriting the time spent waiting for an address would expire it immediately"
+        );
+        assert!(
+            bm_core::provision::awaiting_onboard(&m.note),
+            "marked as new, so the dashboard onboards it without being asked: {}",
+            m.note
+        );
+        assert_eq!(
+            bm_core::provision::ec2_id_from_note(&m.note).as_deref(),
+            Some("i-0123456789abcdef0"),
+            "and the id still travels, so the next rotation is repairable: {}",
+            m.note
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("address assigned")),
+            "{lines:?}"
+        );
+        // Not a rotation: the operator is not told a working box moved.
+        assert!(!lines.iter().any(|l| l.contains("rotated")), "{lines:?}");
+        let boxes = bm_core::provision::load_boxes(&inner.layout.machines());
+        assert!(boxes.iter().any(|b| b.addr == "52.2.2.2"));
+        assert!(!boxes.iter().any(|b| b.addr == "i-0123456789abcdef0"));
+    }
+
+    #[test]
+    fn relink_does_not_reonboard_a_box_that_was_already_working() {
+        // A box that rotated its address keeps its state, so nothing offers it a
+        // fresh 886 MB push. This is the expensive mistake the marker could
+        // cause if it were written on rotation instead of on address arrival.
+        let (_d, mut inner) = fixture();
+        let mut m = Machine::new("18.1.1.1", "ubuntu", 22, None, "worker");
+        m.note = "EC2 i-0123456789abcdef0 (running)".into();
+        m.set_state(MachineState::Configured);
+        inner.machines.insert("18.1.1.1".into(), m);
+
+        inner.relink_drifted(&[instance("i-0123456789abcdef0", "52.2.2.2", "172.31.21.86")]);
+        let m = &inner.machines["52.2.2.2"];
+        assert_eq!(m.state, MachineState::Configured, "was working, still is");
+        assert!(
+            !bm_core::provision::awaiting_onboard(&m.note),
+            "and nothing queues a push at it: {}",
+            m.note
+        );
+    }
+
+    #[test]
+    fn a_waiting_box_is_what_makes_the_account_get_read() {
+        // The watch's gate. It must be true only while a launch is genuinely in
+        // flight, or the account is read every fifteen seconds for ever.
+        let (_d, mut inner) = fixture();
+        assert!(
+            !inner.has_pending_launch(),
+            "a fresh fixture has nothing in flight"
+        );
+        // A hand-added box is never read about: no EC2 id, nothing to repair.
+        let mut hand = Machine::new("10.0.0.5", "ubuntu", 22, None, "worker");
+        hand.set_state(MachineState::Initializing);
+        inner.machines.insert("10.0.0.5".into(), hand);
+        assert!(
+            !inner.has_pending_launch(),
+            "`Initializing` alone is not a reason to read the account"
+        );
+        // A launched box waiting for its address is.
+        let m = waiting("i-0123456789abcdef0", "172.31.21.86");
+        inner.machines.insert(m.addr.clone(), m);
+        assert!(inner.has_pending_launch());
+        // ...and once it settles, the watch stops.
+        let addr = "i-0123456789abcdef0".to_string();
+        inner.machines.remove(&addr);
+        assert!(!inner.has_pending_launch());
+    }
+
+    #[test]
+    fn a_box_the_account_never_addresses_does_not_wait_for_ever() {
+        // EC2 assigns an address within seconds. Five minutes with none means a
+        // terminated instance or a subnet with no route out, and a row that no
+        // future account read will ever repair is worse than a verdict.
+        let (_d, mut inner) = fixture();
+        let mut m = waiting("i-0123456789abcdef0", "172.31.21.86");
+        m.state_since = bm_proto::now_secs() - (crate::state::ops::BOOT_DEADLINE_SECS + 1);
+        let addr = m.addr.clone();
+        inner.machines.insert(addr, m);
+
+        let lines = inner.expire_initializing();
+        let m = &inner.machines["i-0123456789abcdef0"];
+        assert_eq!(m.state, MachineState::Error);
+        assert!(
+            m.note.contains("no public address"),
+            "the verdict says why, not just that it failed: {}",
+            m.note
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("no public address")),
+            "{lines:?}"
+        );
+        // Not a boot failure: ssh was never the thing being waited for.
+        assert!(!m.note.contains("never answered ssh"), "{}", m.note);
+        assert_eq!(
+            bm_core::provision::ec2_id_from_note(&m.note).as_deref(),
+            Some("i-0123456789abcdef0"),
+            "the id survives the verdict, so the box is still identifiable"
+        );
+    }
+
     // -----------------------------------------------------------------
     // Batched render offers (`Settings::render_batch`)
     // -----------------------------------------------------------------

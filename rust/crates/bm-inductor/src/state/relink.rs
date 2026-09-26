@@ -11,6 +11,7 @@
 
 use super::Inner;
 use bm_core::provision::{ec2_id_from_note, remove_box, save_box, split_machine, AwsInstance};
+use bm_proto::MachineState;
 
 impl Inner {
     /// Reconcile the registry with one account listing. Returns the log lines
@@ -83,6 +84,16 @@ impl Inner {
                     } else {
                         m.name.clone()
                     };
+                    // The box was launched by us and has been sitting at its
+                    // instance id waiting for this address. That is not a
+                    // rotation — nothing has ever been pushed to it — so it
+                    // becomes `Initializing` here, which both restarts the boot
+                    // deadline from the moment it could actually be dialed and
+                    // marks it as *new* for the onboarding trigger below. A box
+                    // that was already running keeps its state untouched: it
+                    // rotated, and re-provisioning a working box is 886 MB of
+                    // work nobody asked for.
+                    let newborn = m.state == MachineState::AwaitingIp;
                     m.addr = i.public_ip.clone();
                     m.id = i.public_ip.clone();
                     for v in self.workers.values_mut() {
@@ -90,14 +101,29 @@ impl Inner {
                             *v = i.public_ip.clone();
                         }
                     }
+                    if newborn {
+                        m.set_state(MachineState::Initializing);
+                        m.note = format!(
+                            "EC2 {} ({}) · {}",
+                            i.id,
+                            i.state,
+                            bm_core::provision::AWAITING_ONBOARD
+                        );
+                    }
                     // Config file: the box moves with its name, key and policy.
                     let (bxo, _) = split_machine(&m, &name);
                     let _ = remove_box(&self.layout.machines(), &canon);
                     let _ = save_box(&self.layout.machines(), &bxo);
                     self.machines.insert(i.public_ip.clone(), m);
                     log.push(format!(
-                        "relink: {name} {canon} → {} · EC2 {} (address rotated)",
-                        i.public_ip, i.id
+                        "relink: {name} {canon} → {} · EC2 {} ({})",
+                        i.public_ip,
+                        i.id,
+                        if newborn {
+                            "address assigned"
+                        } else {
+                            "address rotated"
+                        }
                     ));
                 }
             }

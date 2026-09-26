@@ -308,13 +308,39 @@ impl Task {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+// kebab-case, and it must stay the **same spelling as [`MachineState::as_str`]**:
+// the string form is the wire form. `as_str` is what the TUI posts to
+// `/api/machines/state`, the body is deserialized back into this enum, and a
+// mismatch is a 422 that looks like the update was refused for no reason. One
+// word for every variant but one is what made the divergence invisible until
+// there *was* a two-word variant.
+#[serde(rename_all = "kebab-case")]
 pub enum MachineState {
     /// In the registry, never contacted: a hand-written ledger entry, or a box
     /// the operator added and has not probed. "No opinion formed", which is why
     /// [`Self::accepts_work`] lets it through.
     #[default]
     Unknown,
+    /// **Created, and the account has not given it an address yet.**
+    ///
+    /// The first thing a launched EC2 instance is: `RunInstances` returns a
+    /// pending instance whose `public_ip` field is empty, and the address shows
+    /// up seconds later. Such a box is registered by its *instance id* — stable
+    /// for its whole life — so there is an entry to repair rather than none.
+    ///
+    /// The address column stays blank while this is the state, because an
+    /// attempt to dial here is guaranteed to fail and an address that looks
+    /// reachable while nothing can reach it is the confusion this state exists
+    /// to end. [`Self::dialable`] is the one place that verdict lives.
+    ///
+    /// Like `Initializing`, it carries a deadline: a box the account never
+    /// handed an address to is not coming, and waiting for ever would be a lie.
+    ///
+    /// Spelled `awaiting-ip` rather than `awaiting-address` because it is
+    /// rendered in a fixed-width column beside thirteen other state words, and
+    /// a word the pane truncates to `awaiting-a…` hides the one noun that
+    /// matters. It also matches the column it replaces with `—`.
+    AwaitingIp,
     /// **Created, not yet answering.** A launched EC2 instance spends its first
     /// half-minute here: the account has the box, the box is booting, and
     /// nothing can be pushed to it yet.
@@ -348,6 +374,7 @@ impl MachineState {
     pub fn as_str(self) -> &'static str {
         match self {
             MachineState::Unknown => "unknown",
+            MachineState::AwaitingIp => "awaiting-ip",
             MachineState::Initializing => "initializing",
             MachineState::Probing => "probing",
             MachineState::Configured => "configured",
@@ -381,11 +408,25 @@ impl MachineState {
     pub fn coming_up(self) -> bool {
         matches!(
             self,
-            MachineState::Initializing
+            MachineState::AwaitingIp
+                | MachineState::Initializing
                 | MachineState::Probing
                 | MachineState::Provisioning
                 | MachineState::Configured
         )
+    }
+
+    /// Is there an address to dial for this box?
+    ///
+    /// The scheduler asks every registered box `/status` every couple of
+    /// seconds, and a box the account has not given an address yet has nothing
+    /// to ask. It is keyed by its instance id, which is a *handle* — a name to
+    /// repair the record by — not something ssh can answer on.
+    ///
+    /// `Unknown` deliberately passes: a hand-added machine has never been
+    /// probed, and probing it is the only way to find out.
+    pub fn dialable(self) -> bool {
+        !matches!(self, MachineState::AwaitingIp)
     }
 }
 
@@ -1509,30 +1550,44 @@ mod tests {
         assert_eq!(Stage::parse("nope"), None);
     }
 
+    /// Every variant, so a new one cannot be added without joining the families
+    /// below. This list is the test suite's only exhaustive one on purpose: a
+    /// hardcoded list *inside* a test is how `AwaitingIp` could have shipped
+    /// diverging from its wire form while the test that exists to catch exactly
+    /// that kept passing.
+    const ALL: [MachineState; 9] = [
+        MachineState::Unknown,
+        MachineState::AwaitingIp,
+        MachineState::Initializing,
+        MachineState::Probing,
+        MachineState::Configured,
+        MachineState::Provisioning,
+        MachineState::Online,
+        MachineState::Offline,
+        MachineState::Error,
+    ];
+
     #[test]
     fn every_machine_state_roundtrips_through_its_wire_string() {
         // `as_str` is what the TUI posts to `/api/machines/state` and what the
         // machines pane renders; the enum is what the API deserializes back.
         // A state added to one list and not the other would show up as a
-        // machine whose transition silently 400s, so pin both directions.
-        let all = [
-            MachineState::Unknown,
-            MachineState::Initializing,
-            MachineState::Probing,
-            MachineState::Configured,
-            MachineState::Provisioning,
-            MachineState::Online,
-            MachineState::Offline,
-            MachineState::Error,
-        ];
-        for s in all {
+        // machine whose transition silently 422s, so pin both directions.
+        for s in ALL {
             let wire = serde_json::to_string(&s).unwrap();
             assert_eq!(wire, format!("\"{}\"", s.as_str()), "serde vs as_str");
             assert_eq!(serde_json::from_str::<MachineState>(&wire).unwrap(), s);
+            // One word: the pane's state column is fixed-width, and a word that
+            // wraps or carries punctuation is one the column cannot show. How
+            // wide it may be is the *pane's* business — see `tui/tests.rs`.
+            assert!(
+                !s.as_str().contains('_') && !s.as_str().contains(' '),
+                "{s:?} is one word"
+            );
         }
         // The match in `as_str` is exhaustive, so a new variant cannot compile
         // without a wire name — but it *can* be given a name that collides.
-        let mut names: Vec<&str> = all.iter().map(|s| s.as_str()).collect();
+        let mut names: Vec<&str> = ALL.iter().map(|s| s.as_str()).collect();
         names.sort_unstable();
         let before = names.len();
         names.dedup();
@@ -1558,11 +1613,25 @@ mod tests {
     }
 
     #[test]
+    fn only_an_addressless_box_is_undialable() {
+        // The gate on dialing is exact: every other state is *tried*, because a
+        // failure to answer is itself the information (a box that went quiet is
+        // how `Offline` is reached). Exactly one state has no address to try.
+        for s in ALL {
+            assert_eq!(s.dialable(), s != MachineState::AwaitingIp, "{s:?}");
+        }
+        // And the addressless wait is a wait, not a verdict: it may not be
+        // stamped `Offline` for not answering when it cannot have been asked.
+        assert!(MachineState::AwaitingIp.coming_up());
+    }
+
+    #[test]
     fn coming_up_covers_every_state_that_is_not_a_verdict() {
         // The dispatcher stamps `Offline` on any box that fails to answer
-        // `/status`. These four cannot answer *yet*, and reading a boot as
-        // death is exactly what makes a freshly launched pool look broken.
+        // `/status`. These cannot answer *yet*, and reading a boot as death is
+        // exactly what makes a freshly launched pool look broken.
         for s in [
+            MachineState::AwaitingIp,
             MachineState::Initializing,
             MachineState::Probing,
             MachineState::Provisioning,
@@ -1579,6 +1648,21 @@ mod tests {
             MachineState::Unknown,
         ] {
             assert!(!s.coming_up(), "{s:?} is a verdict, not a wait");
+        }
+        // `ALL` and the four lists above must partition it: every variant is
+        // either coming up or a verdict, and never both.
+        for s in ALL {
+            assert_eq!(
+                s.coming_up(),
+                !matches!(
+                    s,
+                    MachineState::Online
+                        | MachineState::Offline
+                        | MachineState::Error
+                        | MachineState::Unknown
+                ),
+                "{s:?} is in neither family or both"
+            );
         }
     }
 

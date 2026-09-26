@@ -612,11 +612,19 @@ async fn ask(http: &reqwest::Client, base: &str, path: &str, token: &str) -> Opt
 /// box was launched, so a worker is driven because it *is* a worker — not
 /// because some other file remembers its provenance. An operator who wants a
 /// box left alone sets `task_port` to `null` in `machines.json`.
+///
+/// A box with no address is left out. It is registered from the moment it is
+/// launched — that is what makes an account read able to repair it — but until
+/// the account hands it a public address its key is its *instance id*, and there
+/// is no `http://i-0abc…:8917/status` to ask. Polling it would be a guaranteed
+/// connection failure every two seconds, which is noise in the log and a lie in
+/// the workers pane.
 async fn targets(state: &Shared) -> Vec<(String, u16)> {
     let inner = state.lock().await;
     let mut out: Vec<(String, u16)> = inner
         .machines
         .values()
+        .filter(|m| m.state.dialable())
         .filter_map(|m| m.task_port.map(|p| (m.addr.clone(), p)))
         .collect();
     out.sort();
@@ -690,6 +698,61 @@ mod tests {
             );
         }
         inner.machines.insert(addr.to_string(), m);
+    }
+
+    /// A box the account has not given an address yet is tracked, but not
+    /// dialed.
+    ///
+    /// Its key is its instance id — a handle for the account read to repair, not
+    /// something `http` can answer on — so every poll of it would be a
+    /// guaranteed connection failure: noise in the log, and a workers pane full
+    /// of boxes that "did not answer" when they were never asked.
+    #[tokio::test]
+    async fn an_addressless_box_is_tracked_but_never_dialed() {
+        use bm_proto::MachineState;
+        let (_d, st) = state();
+        machine_with_policy(&st, "10.0.0.5", 8917, None).await;
+        {
+            let mut inner = st.lock().await;
+            let i = bm_core::provision::AwsInstance {
+                id: "i-0123456789abcdef0".into(),
+                instance_type: "t3.large".into(),
+                state: "pending".into(),
+                az: "eu-central-1a".into(),
+                spot: false,
+                public_ip: String::new(),
+                private_ip: "172.31.21.86".into(),
+                profile: "p".into(),
+                launch_time: String::new(),
+            };
+            let m = bm_core::provision::machine_from_instance(
+                &i,
+                &bm_core::provision::AwsConfig::default(),
+            );
+            assert_eq!(m.state, MachineState::AwaitingIp);
+            inner.machines.insert(m.addr.clone(), m);
+        }
+        assert_eq!(
+            targets(&st).await,
+            vec![("10.0.0.5".to_string(), 8917)],
+            "only the dialable box is a target"
+        );
+        // Once the account hands it an address, it is a target like any other.
+        {
+            let mut inner = st.lock().await;
+            let mut m = inner.machines.remove("i-0123456789abcdef0").unwrap();
+            m.addr = "52.2.2.2".into();
+            m.id = "52.2.2.2".into();
+            m.set_state(MachineState::Initializing);
+            inner.machines.insert(m.addr.clone(), m);
+        }
+        assert_eq!(
+            targets(&st).await,
+            vec![
+                ("10.0.0.5".to_string(), 8917),
+                ("52.2.2.2".to_string(), 8917)
+            ]
+        );
     }
 
     fn beat(sidecar_keep: Option<bool>) -> Heartbeat {

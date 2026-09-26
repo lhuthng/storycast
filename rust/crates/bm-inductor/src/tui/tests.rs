@@ -5998,6 +5998,154 @@ fn the_state_column_leads_with_a_glyph_and_the_word_stays() {
 }
 
 #[test]
+fn machines_pane_shows_no_address_for_a_box_the_account_has_not_addressed_yet() {
+    // The confusion this ends: a launched box keyed by an address nothing can
+    // dial. `RunInstances` answers before the address exists, and the old
+    // fallback printed the *private* address there — a real-looking IP for a box
+    // across the internet, which the scheduler then failed to reach every two
+    // seconds.
+    let mut app = App::new("http://127.0.0.1:8901");
+    let pending = bm_core::provision::AwsInstance {
+        id: "i-0123456789abcdef0".into(),
+        instance_type: "t3.large".into(),
+        state: "pending".into(),
+        az: "eu-central-1a".into(),
+        spot: false,
+        public_ip: String::new(),
+        private_ip: "172.31.21.86".into(),
+        profile: "p".into(),
+        launch_time: String::new(),
+    };
+    let m = bm_core::provision::machine_from_instance(
+        &pending,
+        &bm_core::provision::AwsConfig::default(),
+    );
+    assert_eq!(m.state, MachineState::AwaitingIp);
+    assert_eq!(
+        super::model::addr_label(&m),
+        "—",
+        "the ip column says nothing rather than something undialable"
+    );
+    assert_eq!(
+        super::model::machine_label(&m),
+        "i-0123456789abcdef0",
+        "but the row is named by the handle the account read repairs it by"
+    );
+    assert_eq!(super::model::machine_kind(&m), "aws");
+    // The private address is not lost — it is in the note, for the detail panel
+    // and for an operator whose inductor sits in the same VPC.
+    assert!(m.note.contains("172.31.21.86"));
+
+    let addressed = bm_core::provision::machine_from_instance(
+        &bm_core::provision::AwsInstance {
+            public_ip: "52.2.2.2".into(),
+            ..pending.clone()
+        },
+        &bm_core::provision::AwsConfig::default(),
+    );
+    assert_eq!(addressed.state, MachineState::Initializing);
+    assert_eq!(super::model::addr_label(&addressed), "52.2.2.2");
+
+    app.machines = vec![m];
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains("◐ awaiting-ip"),
+        "the state says what is being waited for — and fits the column, which \
+         `awaiting-address` did not:\n{text}"
+    );
+    assert!(
+        text.contains("i-0123456789"),
+        "and the handle names the row; the column clips it, leaving the \
+         recognizable head of the id:\n{text}"
+    );
+    assert!(
+        !text.contains("172.31.21.86"),
+        "no undialable address is offered as though it were one:\n{text}"
+    );
+}
+
+#[test]
+fn a_box_whose_address_just_arrived_is_queued_for_onboarding_once() {
+    // `:up 3` used to end with boxes nobody would ever provision: the address
+    // arrives asynchronously, nothing noticed, and the operator was told to
+    // `:prov` each one by hand. The marker `relink` writes is read here.
+    let mut app = App::new("http://x");
+    let mut newborn = named_machine("52.2.2.2", "box-1");
+    newborn.set_state(MachineState::Initializing);
+    newborn.note = format!(
+        "EC2 i-0123456789abcdef0 (running) · {}",
+        bm_core::provision::AWAITING_ONBOARD
+    );
+    let payload = serde_json::json!({ "machines": [newborn.clone()] });
+
+    app.apply_state(payload.clone());
+    assert_eq!(app.pending_onboard.len(), 1, "a new box is offered");
+    assert_eq!(app.pending_onboard[0].addr, "52.2.2.2");
+
+    // The dashboard records the hand-out before dispatching, so the ~800 ms poll
+    // cannot queue a second provision for a box the first job has not reached
+    // yet. Without this the same box would be pushed two or three times.
+    app.onboarded.insert("52.2.2.2".into());
+    app.apply_state(payload.clone());
+    assert!(app.pending_onboard.is_empty(), "not queued twice");
+
+    // The provision job clears the marker by rewriting the note — which is why
+    // the trigger is a note and not a field: nothing has to remember to clear it.
+    let mut taken = newborn.clone();
+    taken.set_state(MachineState::Provisioning);
+    taken.note = "provisioning (p) · EC2 i-0123456789abcdef0".into();
+    app.apply_state(serde_json::json!({ "machines": [taken.clone()] }));
+    assert!(app.pending_onboard.is_empty());
+    assert!(
+        !app.onboarded.contains("52.2.2.2"),
+        "and the guard is released, so a future re-mark would be seen"
+    );
+
+    // A box that was already working carries no marker and is never offered —
+    // the expensive mistake a marker written on *rotation* would cause.
+    let mut working = named_machine("52.2.2.3", "box-2");
+    working.set_state(MachineState::Configured);
+    working.note = "EC2 i-0ffffffffffffffff (running)".into();
+    app.apply_state(serde_json::json!({ "machines": [working] }));
+    assert!(app.pending_onboard.is_empty());
+}
+
+#[test]
+fn machines_pane_shows_every_state_word_whole() {
+    // A state column that truncates the verdict it exists to show is worse than
+    // one with slack: `initializing` rendered as `initializin`, and the first
+    // two-word state would have hidden the noun that carried the meaning. This
+    // is the test that fails when a state is added and the column is not widened
+    // with it.
+    for state in [
+        MachineState::Unknown,
+        MachineState::AwaitingIp,
+        MachineState::Initializing,
+        MachineState::Probing,
+        MachineState::Configured,
+        MachineState::Provisioning,
+        MachineState::Online,
+        MachineState::Offline,
+        MachineState::Error,
+    ] {
+        let mut app = App::new("http://127.0.0.1:8901");
+        let mut m = named_machine("52.2.2.2", "box-1");
+        m.set_state(state);
+        app.machines = vec![m];
+        let text = render_text(&mut app, 140, 44);
+        // The glyph is part of the cell, so this asserts the word is complete
+        // *and* that the pane still renders it with its dot. The trailing space
+        // is what makes it a completeness check rather than a prefix check.
+        let needle = format!(" {} ", state.as_str());
+        assert!(
+            text.contains(&needle),
+            "`{}` is clipped by the state column:\n{text}",
+            state.as_str()
+        );
+    }
+}
+
+#[test]
 fn machines_pane_names_the_kind_and_the_address() {
     // A row reads `box-1 · rmt · 192.168.2.2` — whose box, where it came from,
     // and how to reach it. The old `role` column said only "worker".

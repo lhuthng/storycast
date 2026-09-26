@@ -216,6 +216,44 @@ async fn run_loop(
                 app.backend_start_outstanding = true;
             }
         }
+        // A launched box whose address just arrived onboards itself.
+        //
+        // This is what `:up 3` was missing: `RunInstances` returns before the
+        // instance has an address, the address arrives asynchronously, and
+        // nothing else notices — so a fresh pool used to sit there dialable by
+        // nobody until an operator ran `:relink` and then `:prov` on each box.
+        // The account watch relinks it; this hands it to the same provision job
+        // `:prov` uses, so it is tracked, cancellable and visible in the jobs
+        // screen rather than a special path nobody can see into.
+        if !app.pending_onboard.is_empty() {
+            let machines = std::mem::take(&mut app.pending_onboard);
+            let settings_key = app.ssh_defaults().key;
+            let (layout, api) = (app.layout.clone(), app.api.clone());
+            for machine in machines {
+                // Recorded before the dispatch, not after: the point of the set
+                // is to survive the next poll, and the poll can arrive between
+                // a successful `dispatch` and this line only if the await
+                // below yields — which it does not, but the ordering costs
+                // nothing and the intent is clearer.
+                app.onboarded.insert(machine.addr.clone());
+                app.set_status(
+                    Level::Info,
+                    format!("[{}] address assigned — onboarding it", machine.addr),
+                );
+                dispatch(
+                    &mut app,
+                    &job_tx,
+                    Job::Provision {
+                        layout: layout.clone(),
+                        api: api.clone(),
+                        machine,
+                        force: false,
+                        settings_key: settings_key.clone(),
+                        cancel: None,
+                    },
+                );
+            }
+        }
         // A `B` start asked for work: fire it once the poller reports the
         // inductor is up, and only then.
         if app.conn == Conn::Up {

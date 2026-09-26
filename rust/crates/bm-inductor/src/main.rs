@@ -611,22 +611,50 @@ async fn cmd_serve(
     // `bm-agent/src/hook.rs`) — holding it open costs one idle ssh per box,
     // and gives a finished stage a road home when the uplink blips mid-task.
     tokio::spawn(tunnel::supervise(shared.clone(), port));
-    // Auto-relink once at startup: an EC2 box that cycled while this inductor
-    // was down is sitting in the registry at an address that no longer answers.
+    // Relink once at startup: an EC2 box that cycled while this inductor was
+    // down is sitting in the registry at an address that no longer answers.
     // Best-effort — no account, no creds or an offline CLI only means the
     // repairs wait for the next `:pool` refresh.
     {
         let relink_shared = shared.clone();
         let relink_root = drive_root.clone();
+        tokio::spawn(async move { relink_once(&relink_shared, &relink_root).await });
+    }
+    // ...and then keep watching, while a launch is in flight.
+    //
+    // `RunInstances` answers before the instance has an address, so a box is
+    // registered under its instance id and the address that makes it *usable*
+    // arrives later, asynchronously, with nothing to notify. Waiting for the
+    // operator to run `:relink` is what made `:up 3` end with three boxes the
+    // dashboard could not dial and no indication that anything was missing.
+    //
+    // The watch is self-terminating: it asks `has_pending_launch` first, which is
+    // false once no box is still booting or addressless, so the account is read
+    // only while there is a reason to and a settled cluster polls nothing.
+    // Overlapping ticks are refused rather than queued — an `aws` call is a
+    // process spawn, and stacking them would only make a slow API worse.
+    {
+        let watch_shared = shared.clone();
+        let watch_root = drive_root.clone();
         tokio::spawn(async move {
-            let root = relink_root;
-            let pool = tokio::task::spawn_blocking(move || crate::aws_ops::pool(&root)).await;
-            if let Ok(Ok((_cfg, instances))) = pool {
-                let mut inner = relink_shared.lock().await;
-                for line in inner.relink_drifted(&instances) {
-                    inner.push_event("info", line.clone());
-                    println!("[inductor] {line}");
+            let in_flight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(AWS_WATCH_SECS)).await;
+                if in_flight.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
                 }
+                let pending = watch_shared.lock().await.has_pending_launch();
+                if !pending {
+                    continue;
+                }
+                in_flight.store(true, std::sync::atomic::Ordering::Relaxed);
+                let shared = watch_shared.clone();
+                let root = watch_root.clone();
+                let flag = in_flight.clone();
+                tokio::spawn(async move {
+                    relink_once(&shared, &root).await;
+                    flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                });
             }
         });
     }
@@ -639,6 +667,37 @@ async fn cmd_serve(
     )
     .await?;
     Ok(())
+}
+
+/// How often the account is read while a launch is in flight.
+///
+/// EC2 assigns a public address within a few seconds of `RunInstances`, so a
+/// fifteen-second tick turns a box into a dialable, onboarded worker within one
+/// or two intervals of it becoming one — and the watch stops entirely once the
+/// last box is settled, so the tick rate costs nothing on a running cluster.
+const AWS_WATCH_SECS: u64 = 15;
+
+/// One account read, folded into the registry: every repair `relink_drifted`
+/// found is pushed to the events pane and the log.
+///
+/// The `aws` CLI is a *process*, so this runs on the blocking pool rather than on
+/// an async worker — a two-second spawn in the runtime would stall every other
+/// task on that thread. A failure is not an error to report: no account
+/// configured, no credentials, or an offline CLI all mean the same thing (the
+/// repairs wait for the next attempt), and `pool()` has already logged the noise.
+async fn relink_once(
+    shared: &std::sync::Arc<tokio::sync::Mutex<state::Inner>>,
+    root: &std::path::Path,
+) {
+    let root = root.to_path_buf();
+    let pool = tokio::task::spawn_blocking(move || crate::aws_ops::pool(&root)).await;
+    if let Ok(Ok((_cfg, instances))) = pool {
+        let mut inner = shared.lock().await;
+        for line in inner.relink_drifted(&instances) {
+            inner.push_event("info", line.clone());
+            println!("[inductor] {line}");
+        }
+    }
 }
 
 /// Pick the binaries matching the target platform. `os`/`arch` are the probe's
