@@ -230,6 +230,19 @@ pub(crate) enum Job {
         addr: String,
         task_policy: Vec<bm_proto::TaskPref>,
     },
+    /// Park a machine, or wake it up: one bool of operator intent.
+    ///
+    /// Idempotent, not a toggle, and that is deliberate. The *dashboard* is what
+    /// toggles, from the state it is showing; the request carries the value it
+    /// wants. A toggle would make a retry after a failed `POST` — or a double
+    /// keypress — land back where it started, which is the one outcome nobody
+    /// can see.
+    SetAccepting {
+        api: String,
+        http: reqwest::Client,
+        addr: String,
+        accepting_work: bool,
+    },
     /// Report a digest the operator performed by hand.
     ///
     /// **It posts the same `Complete` a worker posts, to the same endpoint.** The
@@ -340,6 +353,11 @@ impl Job {
             Job::DropMachine { .. } => "drop machine",
             Job::RelinkMachine { .. } => "relink machine",
             Job::SaveTaskPolicy { .. } => "save task policy",
+            Job::SetAccepting {
+                accepting_work: false,
+                ..
+            } => "park machine",
+            Job::SetAccepting { .. } => "wake machine",
             Job::ManualDigest { .. } => "report manual digest",
             Job::DigestPolicy { restore, .. } => {
                 if *restore {
@@ -1376,6 +1394,46 @@ pub(crate) async fn job_save_task_policy(
             ),
         ),
         Err(e) => send(&tx, Level::Error, format!("policy save {addr} failed: {e}")),
+    }
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
+/// Park a machine or wake it up, through the API so the live inductor and the
+/// on-disk `machines.json` agree.
+///
+/// Success is silent — the pane is the feedback, and the `relaxed` state word
+/// only appears once a poll has come back with it. A rejection is named, because
+/// a park that silently did not stick is a box that keeps taking work the
+/// operator believes it has stopped, which is worse than one that refuses
+/// loudly.
+pub(crate) async fn job_set_accepting(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    api: String,
+    http: reqwest::Client,
+    addr: String,
+    accepting_work: bool,
+) {
+    let url = format!("{}/api/machines/accepting", api.trim_end_matches('/'));
+    let body = serde_json::json!({"addr": addr, "accepting_work": accepting_work});
+    match http.post(&url).json(&body).send().await {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => send(
+            &tx,
+            Level::Error,
+            format!(
+                "{} {addr}: the inductor answered HTTP {}",
+                if accepting_work { "wake" } else { "park" },
+                r.status()
+            ),
+        ),
+        Err(e) => send(
+            &tx,
+            Level::Error,
+            format!(
+                "{} {addr} failed: {e}",
+                if accepting_work { "wake" } else { "park" }
+            ),
+        ),
     }
     let _ = tx.send(Ev::Done(DoneKind::Other));
 }
@@ -2650,6 +2708,12 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
             addr,
             task_policy,
         } => job_save_task_policy(tx, api, http, addr, task_policy).await,
+        Job::SetAccepting {
+            api,
+            http,
+            addr,
+            accepting_work,
+        } => job_set_accepting(tx, api, http, addr, accepting_work).await,
         Job::ManualDigest {
             api,
             http,

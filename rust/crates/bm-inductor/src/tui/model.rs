@@ -452,6 +452,24 @@ pub(crate) fn addr_label(m: &Machine) -> String {
     }
 }
 
+/// The `state` column, which is sometimes about intent instead.
+///
+/// A parked box reads `relaxed`, because that is the answer to the question the
+/// column is asked ("why is nothing happening on this box") — and because its
+/// real state is `online`, which would say the opposite.
+///
+/// A verdict still outranks the park. `offline` and `error` are news about a box
+/// and are not made less true by the operator having parked it; showing
+/// `relaxed` over them would hide the one fact worth acting on, on the box the
+/// operator is least likely to look at because they already dealt with it.
+pub(crate) fn work_label(m: &Machine) -> String {
+    match m.state {
+        MachineState::Offline | MachineState::Error => m.state.as_str().to_string(),
+        _ if m.relaxed() => "relaxed".to_string(),
+        _ => m.state.as_str().to_string(),
+    }
+}
+
 /// What kind of box this is, for the Machines pane's `kind` column.
 ///
 /// `local` is the inductor's own node; `aws` is an EC2-launched box, told apart

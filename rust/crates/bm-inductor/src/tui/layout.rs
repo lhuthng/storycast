@@ -105,13 +105,17 @@ pub(crate) const COMPACT_FOOTER_H: u16 = 4;
 /// and the part that fell off the right-hand end held the least guessable keys.
 /// The compact tier gets shorter labels because it has 76 columns to work with;
 /// every key is described in full on the help screen, which `?` opens.
+// `f pane` gave its slot to `z park`: this line is 98 of its 100 columns, and of
+// the two `f` is the one an operator finds without being told (a focus cycle is
+// the first thing anyone tries) while `z` is a new verb nobody would guess. Both
+// remain in full on the help screen, which is what `?` opens.
 pub(crate) const KEYS_FULL: [&str; 2] = [
-    "Tab jobs · K tasks · i inspect · P policy · D digest · c crawl · R run · S cast · f pane · M mouse",
+    "Tab jobs · K tasks · i inspect · P policy · z park · D digest · c crawl · R run · S cast · M mouse",
     ":add :prov :drop :translate :crawl :retry :reconcile :backend :stop :swap :voices · r · ? · q",
 ];
 
 pub(crate) const KEYS_COMPACT: [&str; 2] = [
-    "Tab jobs · K tasks · i inspect · P policy · R run · S cast",
+    "Tab jobs · K tasks · i inspect · P policy · z park · R run · S cast",
     ":add :prov :drop :translate :crawl :stop :retry :swap :voices · M copy · ? q",
 ];
 

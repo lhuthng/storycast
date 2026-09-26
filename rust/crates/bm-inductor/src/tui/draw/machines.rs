@@ -3,7 +3,10 @@ use crate::tui::style::Conn;
 use crate::tui::{
     app::{App, Panel},
     layout::COMPACT_MACHINE_COLS,
-    model::{addr_label, clamp_scroll, live_workers, machine_kind, machine_label, policy_summary},
+    model::{
+        addr_label, clamp_scroll, live_workers, machine_kind, machine_label, policy_summary,
+        work_label,
+    },
     style::{
         cell, empty_body, seen_label, selection_bg, state_glyph_cell, style_bold_of, style_of,
     },
@@ -71,7 +74,7 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
                 cell(addr_label(m)),
                 cell(live_workers(&app.beats, &m.addr, bm_proto::now_secs()).to_string()),
                 cell(policy_summary(m)),
-                state_glyph_cell(colour, m.state.as_str()),
+                state_glyph_cell(colour, &work_label(m)),
             ];
             // The tts column is the widest and the least urgent; in the compact
             // tier it is the first thing to go, so the remaining columns keep

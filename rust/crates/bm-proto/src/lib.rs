@@ -439,6 +439,12 @@ fn default_task_port() -> Option<u16> {
     Some(DEFAULT_TASK_PORT)
 }
 
+/// For fields whose absent-means-`false` reading is the wrong one — see
+/// [`Machine::accepting_work`].
+fn default_true() -> bool {
+    true
+}
+
 /// The port on a worker's **own loopback** that answers the completion hook —
 /// `POST /api/complete` forwarded by the inductor's reverse tunnel, not a
 /// server the worker runs. One constant for both ends: the tunnel is built as
@@ -516,6 +522,29 @@ pub struct Machine {
     /// crawl). Persisted in `machines.json`, so it survives restarts.
     #[serde(default)]
     pub task_policy: Option<Vec<TaskPref>>,
+    /// May the scheduler hand this box new work? `false` is **relaxed**: the
+    /// operator has parked the box, and it takes nothing new until it is
+    /// switched back on.
+    ///
+    /// **Operator intent, deliberately not a [`MachineState`].** The state
+    /// machine answers *how is this box doing* — a fact about the box — while
+    /// this answers *should it be working* — a decision by the operator. Folding
+    /// the two together would break both: a relaxed box is still `Online` (alive
+    /// and answering, just not being given anything), so it must not be stamped
+    /// `Offline` for going quiet, must not inherit the boot deadline, and must
+    /// not report itself as broken in a pane. It is the same reason
+    /// [`Self::task_policy`] is a field and not a state.
+    ///
+    /// It lives beside `task_policy` in `machines.json` for the same reason
+    /// too: a scheduling decision the operator made, which must survive the
+    /// ledger being cleared and the inductor being restarted.
+    ///
+    /// Positive polarity with a `true` default on purpose: a `machines.json`
+    /// written before this field existed is a set of boxes that were all taking
+    /// work, and `#[serde(default)]` on an inverted flag (`paused: bool`) would
+    /// silently park every one of them.
+    #[serde(default = "default_true")]
+    pub accepting_work: bool,
     /// Human-readable note: probe output, error, provision result.
     pub note: String,
 }
@@ -543,8 +572,19 @@ impl Machine {
             tts_url: None,
             task_port: default_task_port(),
             task_policy: None,
+            accepting_work: true,
             note: String::new(),
         }
+    }
+
+    /// Is this box parked by the operator?
+    ///
+    /// Named as a *question about intent* rather than a read of the field, so
+    /// the one rule lives in one place: a relaxed box is withheld work whatever
+    /// its state, and unparking it restores it without anything else having to
+    /// remember what the state was.
+    pub fn relaxed(&self) -> bool {
+        !self.accepting_work
     }
 
     /// The stages this machine may run, most-preferred first. Falls back to the

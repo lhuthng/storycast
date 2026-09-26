@@ -4685,6 +4685,67 @@ mod tests {
     }
 
     #[test]
+    fn a_parked_box_is_offered_nothing_and_wakes_on_the_spot() {
+        // Relax. The whole feature on the inductor's side is this gate, and the
+        // two things worth pinning are the order of the rules and that waking is
+        // complete.
+        let (_d, mut inner) = fixture();
+        offer_fixture(&mut inner);
+        two_ready_stages(&mut inner);
+        // Online, so the *state* gate would happily hand it work — which is the
+        // case that matters: a parked box keeps beating, so anything that relied
+        // on the state to withhold work would keep feeding it.
+        inner
+            .machines
+            .get_mut("127.0.0.1")
+            .unwrap()
+            .set_state(MachineState::Online);
+        assert!(inner.offer("w1").is_some(), "awake boxes are served");
+
+        // Requeue what the first offer took, so the queue is whole for the park.
+        for t in inner.tasks.values_mut() {
+            if t.state == bm_proto::TaskState::Assigned {
+                t.state = bm_proto::TaskState::Pending;
+                t.assigned_to = None;
+                t.lease_until = None;
+            }
+        }
+        inner.machines.get_mut("127.0.0.1").unwrap().accepting_work = false;
+        assert!(
+            inner.offer("w1").is_none(),
+            "a parked box is withheld work whatever its state"
+        );
+        // Nothing was consumed while parked: the queue is intact, not depleted,
+        // which is what makes waking instant rather than a re-plan.
+        assert!(
+            inner
+                .tasks
+                .values()
+                .any(|t| t.state == bm_proto::TaskState::Pending),
+            "parking withholds, it does not discard"
+        );
+        inner.machines.get_mut("127.0.0.1").unwrap().accepting_work = true;
+        assert!(
+            inner.offer("w1").is_some(),
+            "and waking needs nothing beyond the flag — no re-provision, no state change"
+        );
+    }
+
+    #[test]
+    fn a_parked_box_outranks_even_the_state_that_has_no_opinion() {
+        // `Unknown` is the one state the readiness gate deliberately lets
+        // through. Parking must not be let through with it — otherwise the
+        // legacy pull worker, or a hand-written ledger entry, would be the one
+        // box in the cluster that ignores the operator's pause.
+        let (_d, mut inner) = fixture();
+        offer_fixture(&mut inner);
+        two_ready_stages(&mut inner);
+        assert_eq!(inner.machines["127.0.0.1"].state, MachineState::Unknown);
+        inner.machines.get_mut("127.0.0.1").unwrap().accepting_work = false;
+        assert!(inner.offer("w1").is_none(), "parked is parked");
+    }
+
+    #[test]
     fn offer_still_serves_a_machine_with_no_opinion_formed() {
         // `Unknown` is not "not ready" — it is "never contacted": a hand-written
         // ledger, or the legacy pull worker asking before its first beat. Both

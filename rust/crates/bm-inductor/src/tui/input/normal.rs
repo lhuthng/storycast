@@ -154,6 +154,50 @@ pub(crate) async fn normal_key(
                 );
             }
         },
+        // Park the selected box, or wake it: no new work, and its sidecar is
+        // let go so the 2.85 GB it holds goes back to the machine.
+        //
+        // On the key rather than behind a `:` confirmation because it is the
+        // most reversible thing here — one press undoes it, nothing is lost, and
+        // a task already running is allowed to finish. That last part is why
+        // this is not `X`: the stop flow is a verdict about the run, this is a
+        // pause on one box, and confusing the two is how somebody parks a box
+        // expecting the cluster to stop.
+        KeyCode::Char('z') => match app.selected_machine() {
+            None => app.set_status(Level::Warn, "no machine selected"),
+            Some(m) => {
+                let (addr, label) = (m.addr.clone(), crate::tui::model::machine_label(&m));
+                // The intent is known now, but the pane renders what the
+                // inductor last reported — so the status line says what was
+                // asked for, and the state column says what is true once a poll
+                // has come back. They can disagree for under a second; a
+                // status line that claimed more than that would be the lie.
+                let (level, msg) = if m.accepting_work {
+                    (
+                        Level::Info,
+                        format!(
+                            "parking {label} — takes nothing new, finishes what it is on, drops its sidecar"
+                        ),
+                    )
+                } else {
+                    (
+                        Level::Ok,
+                        format!("{label} woken — takes work again on its next ask"),
+                    )
+                };
+                app.set_status(level, msg);
+                dispatch(
+                    app,
+                    job_tx,
+                    Job::SetAccepting {
+                        api: app.api.clone(),
+                        http: http.clone(),
+                        addr,
+                        accepting_work: !m.accepting_work,
+                    },
+                );
+            }
+        },
         // The digest manager. Unlike `P` it needs no machine: it is about the
         // *book*, not a box — every chapter the library knows, and a manual
         // two-round digest for one of them.

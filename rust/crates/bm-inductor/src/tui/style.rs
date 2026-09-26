@@ -207,6 +207,11 @@ pub(crate) fn state_color(s: &str) -> Color {
         }
         "offline" | "failed" | "shelved" | "error" => Color::Red,
         "pending" => Color::Gray,
+        // Parked by the operator. Grey rather than yellow: it is neither a wait
+        // (nothing is coming) nor a fault (nothing is wrong), and the two hues
+        // already mean those. Named explicitly instead of falling through, so a
+        // later state cannot inherit this one's colour by landing on `_`.
+        "relaxed" => Color::Gray,
         _ => Color::Gray,
     }
 }
@@ -393,6 +398,9 @@ pub(crate) fn state_glyph_cell(colour: bool, text: &str) -> Line<'static> {
             "◐ "
         }
         "offline" | "failed" | "shelved" | "error" => "✗ ",
+        // See `state_color`: parked is the hollow circle — nothing running,
+        // nothing wrong, nothing pending.
+        "relaxed" => "○ ",
         _ => "○ ",
     };
     Line::from(Span::styled(

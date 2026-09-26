@@ -55,6 +55,12 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
             "work policy: which stages the selected box may run, in priority order",
         ),
         (
+            "z",
+            "park the selected box (or wake it): it takes nothing new, finishes the task it \
+             is on, and lets its TTS sidecar go so the ~2.85 GB it holds goes back to the \
+             box. Press again to put it back to work",
+        ),
+        (
             "Tab / J",
             "background jobs: running against queued, elapsed time, activity",
         ),

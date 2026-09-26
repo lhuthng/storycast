@@ -72,6 +72,19 @@ pub struct LinkedBox {
     /// is a scheduling decision, not liveness.
     #[serde(default)]
     pub task_policy: Option<Vec<bm_proto::TaskPref>>,
+    /// Parked by the operator: takes no new work until switched back on.
+    ///
+    /// Config, not runtime — it sits beside `task_policy` for the same reason:
+    /// it is a decision the operator made about *scheduling*, and it has to
+    /// survive a ledger clear and an inductor restart. `true` on a file written
+    /// before the field existed, so an older `machines.json` does not silently
+    /// park every box.
+    #[serde(default = "default_true")]
+    pub accepting_work: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_ssh_user() -> String {
@@ -98,6 +111,7 @@ impl LinkedBox {
         );
         m.tts_url = Some(format!("http://127.0.0.1:{TTS_PORT}"));
         m.task_policy = self.task_policy.clone();
+        m.accepting_work = self.accepting_work;
         m
     }
 }
@@ -169,6 +183,7 @@ pub fn split_machine(m: &Machine, name: &str) -> (LinkedBox, MachineRuntime) {
         key: m.ssh_key.clone(),
         role: m.role.clone(),
         task_policy: m.task_policy.clone(),
+        accepting_work: m.accepting_work,
     };
     let rt = MachineRuntime {
         state: m.state,
@@ -196,6 +211,7 @@ pub fn join_machine(bxo: &LinkedBox, rt: Option<&MachineRuntime>) -> Machine {
     m.capabilities = rt.capabilities;
     m.tts_url = rt.tts_url;
     m.task_policy = bxo.task_policy.clone();
+    m.accepting_work = bxo.accepting_work;
     m
 }
 
@@ -232,6 +248,33 @@ pub fn join_all(
 
 #[cfg(test)]
 mod tests {
+    /// A `machines.json` written before parking existed is a set of boxes that
+    /// were all taking work, and it must keep meaning that.
+    ///
+    /// This is the whole reason the flag is `accepting_work: true` rather than
+    /// `paused: false`: serde's default for a missing bool is `false`, so the
+    /// inverted spelling would silently park every box in every existing file —
+    /// and the symptom would be a cluster that stopped working for no reason
+    /// anyone could see in the config, since the field is absent.
+    #[test]
+    fn a_box_from_before_parking_existed_still_takes_work() {
+        let old = r#"{"name":"box-1","addr":"192.168.2.2","user":"thang","port":22}"#;
+        let bxo: super::LinkedBox = serde_json::from_str(old).unwrap();
+        assert!(bxo.accepting_work, "absent must read as awake");
+        assert!(bxo.task_policy.is_none(), "and so must an absent policy");
+        // And the flag survives the config/runtime split, in both directions —
+        // the machine the scheduler sees and the file it is written back to.
+        let mut m = bxo.machine();
+        assert!(!m.relaxed());
+        m.accepting_work = false;
+        let (written, _rt) = super::split_machine(&m, "box-1");
+        assert!(!written.accepting_work);
+        assert!(
+            super::join_machine(&written, None).relaxed(),
+            "a park that did not survive the round trip would be lost on the next save"
+        );
+    }
+
     #[test]
     fn linked_boxes_round_trip_and_upsert_by_addr() {
         let dir = std::env::temp_dir().join("bm-provision-boxes");
@@ -250,6 +293,7 @@ mod tests {
             key: Some("/k/id".into()),
             role: "worker".into(),
             task_policy: None,
+            accepting_work: true,
         };
         super::save_box(&path, &bxo).unwrap();
         // Same address re-binds in place (the name may change); a new
@@ -286,6 +330,7 @@ mod tests {
             key: Some("/k/id".into()),
             role: "worker".into(),
             task_policy: None,
+            accepting_work: true,
         }
         .machine();
         assert_eq!(m.ssh_target(), "thang@10.0.0.9");

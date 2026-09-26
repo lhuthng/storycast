@@ -346,6 +346,44 @@ struct TaskPolicyUpdate {
     task_policy: Vec<bm_proto::TaskPref>,
 }
 
+/// Park a box, or wake it up.
+///
+/// Writes **intent only** — one bool in `machines.json`. Everything that follows
+/// from it is already converged by machinery that exists: `offer` withholds work
+/// because of it (so an in-flight task finishes and nothing new is handed out),
+/// and `dispatch::drive` drops the box's sidecar because of it (so `SIDECAR_IDLE`
+/// later the 2.85 GB is back). Nothing is pushed from here, for exactly the
+/// reason spelled out above `TaskPolicyUpdate`: a one-shot command misses the box
+/// that is down, the inductor that restarts, and the worker busy behind its
+/// timeout.
+///
+/// Idempotent on purpose. The dashboard toggles, so a double-press or a retry
+/// after a failed `POST` must land on a known value rather than flip twice.
+#[derive(Deserialize)]
+struct AcceptingUpdate {
+    addr: String,
+    accepting_work: bool,
+}
+
+async fn set_accepting_work(
+    State(st): State<Shared>,
+    Json(u): Json<AcceptingUpdate>,
+) -> impl IntoResponse {
+    let mut inner = st.lock().await;
+    match inner.machines.get_mut(&u.addr) {
+        Some(m) => {
+            m.accepting_work = u.accepting_work;
+            let addr = u.addr.clone();
+            inner.persist_box(&addr, &addr);
+            inner.save();
+            Json(serde_json::json!({"ok": true, "accepting_work": u.accepting_work}))
+        }
+        None => {
+            Json(serde_json::json!({"ok": false, "error": format!("unknown machine {}", u.addr)}))
+        }
+    }
+}
+
 async fn set_task_policy(
     State(st): State<Shared>,
     Json(u): Json<TaskPolicyUpdate>,
@@ -1462,6 +1500,7 @@ pub fn router(st: Shared) -> Router {
         .route("/api/machines", delete(drop_machine))
         .route("/api/machines/state", post(set_machine_state))
         .route("/api/machines/policy", post(set_task_policy))
+        .route("/api/machines/accepting", post(set_accepting_work))
         .route("/api/relink", post(relink))
         .route("/api/op", post(op))
         .route("/api/state", get(state))
@@ -1757,6 +1796,7 @@ mod tests {
                 key: None,
                 role: "worker".into(),
                 task_policy: None,
+                accepting_work: true,
             },
         )
         .unwrap();
@@ -1848,6 +1888,74 @@ mod tests {
                 "ready — Online on its first beat"
             );
         }
+    }
+
+    /// Parking writes intent, and intent has to outlive the process.
+    ///
+    /// Two things are worth pinning: it lands in `machines.json` (not the
+    /// ledger, which is cleared on a re-provision) and it does **not** disturb
+    /// the state — a park is not a phase change, so a box that is `Online` when
+    /// it is parked must still be `Online` afterwards. Getting that wrong is how
+    /// a parked box would get stamped `Offline` for going quiet, which is the
+    /// one thing the operator did not ask for.
+    #[tokio::test]
+    async fn the_accepting_route_parks_a_box_and_the_park_outlives_a_restart() {
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        let machines_path = layout.machines();
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+            layout,
+            bm_core::config::Settings::default(),
+        )));
+        {
+            let mut inner = st.lock().await;
+            let mut m = Machine::new("192.168.2.2", "thang", 22, None, "worker");
+            m.set_state(MachineState::Online);
+            inner.machines.insert("192.168.2.2".into(), m);
+        }
+        let body = |accepting: bool| {
+            Json(AcceptingUpdate {
+                addr: "192.168.2.2".into(),
+                accepting_work: accepting,
+            })
+        };
+        set_accepting_work(State(st.clone()), body(false)).await;
+        {
+            let inner = st.lock().await;
+            let m = &inner.machines["192.168.2.2"];
+            assert!(m.relaxed());
+            assert_eq!(
+                m.state,
+                MachineState::Online,
+                "a park is intent, not a phase — the box is still alive"
+            );
+        }
+        // Config, not runtime: read straight off the file the next process loads.
+        let boxes = bm_core::provision::load_boxes(&machines_path);
+        assert_eq!(boxes.len(), 1);
+        assert!(
+            !boxes[0].accepting_work,
+            "the park must survive a restart, so it lives beside the policy"
+        );
+        // Idempotent, not a toggle: the same request twice leaves it parked.
+        set_accepting_work(State(st.clone()), body(false)).await;
+        assert!(st.lock().await.machines["192.168.2.2"].relaxed());
+        // And waking is the same call with the other value.
+        set_accepting_work(State(st.clone()), body(true)).await;
+        assert!(!st.lock().await.machines["192.168.2.2"].relaxed());
+        assert!(bm_core::provision::load_boxes(&machines_path)[0].accepting_work);
+        // Unknown addresses are refused, never created — as every machine route is.
+        let reply = set_accepting_work(
+            State(st.clone()),
+            Json(AcceptingUpdate {
+                addr: "10.9.9.9".into(),
+                accepting_work: false,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(reply.status(), axum::http::StatusCode::OK);
+        assert!(!st.lock().await.machines.contains_key("10.9.9.9"));
     }
 
     #[tokio::test]
