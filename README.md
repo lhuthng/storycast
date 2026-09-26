@@ -173,7 +173,7 @@ The **inductor** owns this state (the task ledger) and hands chapters to
 
 ## 2. Install
 
-You need three things: **Rust** 1.75 or newer, **Python 3** (used once, to
+You need three things: **Rust** 1.88 or newer, **Python 3** (used once, to
 prepare the voices and to record your own), and a way to reach an AI model: a
 Gemini key, an [opencode](https://opencode.ai) login, an OpenRouter key, or
 Ollama running on your own machine.
