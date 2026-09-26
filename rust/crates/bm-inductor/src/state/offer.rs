@@ -64,6 +64,16 @@ impl Inner {
             if !m.state.accepts_work() && m.state != bm_proto::MachineState::Unknown {
                 return None;
             }
+            // The operator's pause, and it is second because the two answers are
+            // different questions: the state above is *is this box able*, this is
+            // *should it be working*. A relaxed box is deliberately idle, so it
+            // is withheld work **whatever its state** — including `Unknown`, and
+            // including `Online`. That last one is the whole point: a parked box
+            // keeps beating (it is alive), so the state gate alone would let the
+            // scheduler hand it a task the operator just said not to run.
+            if m.relaxed() {
+                return None;
+            }
         }
         // The memory guardrail, second for the same reason the readiness gate is
         // first: handing work to a box that cannot hold it is a task that fails

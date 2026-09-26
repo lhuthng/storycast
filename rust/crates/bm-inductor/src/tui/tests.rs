@@ -5985,6 +5985,7 @@ fn the_state_column_leads_with_a_glyph_and_the_word_stays() {
         task_port: None,
         task_policy: None,
         note: String::new(),
+        accepting_work: true,
     });
     let text = render_text(&mut app, 140, 44);
     assert!(
@@ -6143,6 +6144,47 @@ fn machines_pane_shows_every_state_word_whole() {
             state.as_str()
         );
     }
+}
+
+#[test]
+fn a_parked_machine_reads_relaxed_but_a_fault_still_outranks_it() {
+    // The state column is asked "why is nothing happening on this box", and for a
+    // parked box the honest answer is `relaxed` — its real state is `online`,
+    // which says the opposite of what the operator did.
+    let mut parked = named_machine("52.2.2.2", "box-1");
+    parked.set_state(MachineState::Online);
+    parked.accepting_work = false;
+    assert_eq!(super::model::work_label(&parked), "relaxed");
+    // Returned to work, the column goes back to reporting the state.
+    parked.accepting_work = true;
+    assert_eq!(super::model::work_label(&parked), "online");
+
+    // A verdict is news about a box and is not made less true by the park.
+    // Showing `relaxed` over it would hide the one fact worth acting on, on the
+    // box the operator is least likely to look at again.
+    for fault in [MachineState::Offline, MachineState::Error] {
+        let mut m = parked.clone();
+        m.set_state(fault);
+        m.accepting_work = false;
+        assert_eq!(
+            super::model::work_label(&m),
+            fault.as_str(),
+            "a parked box that broke must still say so"
+        );
+    }
+
+    // And it reaches the pane, with its own colour and glyph rather than a
+    // clipped state word: `relaxed` is 7 of the column's 13 usable cells.
+    let mut app = App::new("http://127.0.0.1:8901");
+    let mut relaxed = named_machine("52.2.2.2", "box-1");
+    relaxed.set_state(MachineState::Online);
+    relaxed.accepting_work = false;
+    app.machines = vec![relaxed];
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains("○ relaxed"),
+        "parked reads at a glance, hollow dot and all:\n{text}"
+    );
 }
 
 #[test]

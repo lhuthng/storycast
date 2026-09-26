@@ -360,6 +360,30 @@ async fn tell_sidecar_policy(
     }
 }
 
+/// Should this box be holding its TTS sidecar warm?
+///
+/// `None` is "no opinion": a box that has never had its stages edited gets no
+/// instruction at all, and the worker's own default stands — which keeps this
+/// from putting a `keep=true` on the wire for every box in the cluster on every
+/// poll.
+///
+/// A parked box is `Some(false)`, and it is checked **first** so that parking is
+/// expressible without a stored policy. That is the "give the 2.85 GB back" half
+/// of parking, and it is not an optimisation to skip: a box held warm for a
+/// render nobody will send it is the exact waste the operator parked it to stop.
+///
+/// The unpark path needs nothing of its own — it falls back to the policy, so a
+/// box that had render on before is warm again and one that never did stays as
+/// it was. Pure, so the two rules and their order are testable without a poll.
+fn desired_sidecar_keep(m: &bm_proto::Machine) -> Option<bool> {
+    if m.relaxed() {
+        return Some(false);
+    }
+    m.task_policy
+        .as_ref()
+        .map(|p| p.iter().any(|t| t.stage == Stage::Render && t.enabled))
+}
+
 /// The converge step, run once per poll inside `drive`. Updates the book
 /// from the beat, pushes on drift, and logs edge-triggered.
 async fn converge_sidecar_policy(
@@ -375,8 +399,7 @@ async fn converge_sidecar_policy(
         inner
             .machines
             .get(&peer.addr)
-            .and_then(|m| m.task_policy.as_ref())
-            .map(|p| p.iter().any(|t| t.stage == Stage::Render && t.enabled))
+            .and_then(desired_sidecar_keep)
     };
     book.reported = beat.sidecar_keep;
     if book.desired != desired {
@@ -753,6 +776,54 @@ mod tests {
                 ("52.2.2.2".to_string(), 8917)
             ]
         );
+    }
+
+    /// Parked beats the policy, and is expressible *without* one.
+    ///
+    /// The order is the whole content of the function: a box the operator parked
+    /// must give up its sidecar whether or not anyone ever edited its stages, and
+    /// a box they did not park must keep the answer it had before — including
+    /// "no opinion", which is what stops the cluster being told `keep=true`
+    /// every two seconds for ever.
+    #[test]
+    fn parking_a_box_is_how_its_sidecar_gets_let_go() {
+        use bm_proto::{MachineState, Stage, TaskPref};
+        let mut m = bm_proto::Machine::new("10.0.0.5", "ubuntu", 22, None, "worker");
+        m.set_state(MachineState::Online);
+
+        // No policy, awake: nothing to say. The worker's own default stands.
+        assert_eq!(desired_sidecar_keep(&m), None);
+
+        // No policy, parked: the 2.85 GB comes back anyway. The case a
+        // policy-only rule would miss, and the common one — most boxes never
+        // have their stages edited.
+        m.accepting_work = false;
+        assert_eq!(
+            desired_sidecar_keep(&m),
+            Some(false),
+            "parking must not need a stored policy to free the sidecar"
+        );
+
+        // Woken with render off: back to the box's own policy, not to `true` —
+        // waking must not turn a feature back on that the operator chose to skip.
+        let policy = |render: bool| {
+            Some(
+                Stage::DEFAULT_PRIORITY
+                    .iter()
+                    .map(|s| TaskPref {
+                        stage: *s,
+                        enabled: render || *s != Stage::Render,
+                    })
+                    .collect(),
+            )
+        };
+        m.accepting_work = true;
+        m.task_policy = policy(false);
+        assert_eq!(desired_sidecar_keep(&m), Some(false));
+
+        // And with render on, warm again.
+        m.task_policy = policy(true);
+        assert_eq!(desired_sidecar_keep(&m), Some(true));
     }
 
     fn beat(sidecar_keep: Option<bool>) -> Heartbeat {

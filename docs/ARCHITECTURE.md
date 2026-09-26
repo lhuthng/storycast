@@ -660,6 +660,30 @@ read it:
   `unknown` passes deliberately: a hand-added machine has never been probed, and
   probing it is the only way to find out.
 
+The fourth gate is not about the state at all. **`accepting_work`** (`z` in the
+dashboard) is the operator parking a box: it takes nothing new, finishes the task
+it is on, and lets its sidecar go. The state answers *how is this box doing* — a
+fact; this answers *should it be working* — a decision. They are deliberately
+separate, and folding them together breaks both: a parked box is still `online`
+(it is alive and answering), so parking it must not stamp it `offline` for going
+quiet, must not give it a boot deadline, and must not make a pane call it broken.
+It is the same split as `task_policy`, which is also intent and also a field.
+
+The offer gate reads it *second*, after the state, so it applies to every state —
+including `unknown` and including `online`. That order is the point: a parked box
+keeps beating, so anything relying on the state to withhold work would keep
+feeding it.
+
+Parking is also what gives the RAM back. A box holds ~2.85 GB of TTS weights the
+moment its sidecar loads, and holding that warm for a render nobody will send is
+exactly the waste parking exists to stop — so the same desired state drops it,
+through the machinery the render policy already had: `desired_sidecar_keep`
+answers `false` for a parked box *before* it consults the policy, the dispatcher
+converges it on its existing 2 s poll, and the agent's reaper stops the sidecar
+`SIDECAR_IDLE_SECS` (180) later. Nothing pushes a command from the route that
+sets the flag; a one-shot push misses the box that is down, the inductor that
+restarts, and the worker busy behind its timeout.
+
 `awaiting-ip` and `initializing` are the two states with a deadline
 (`BOOT_DEADLINE_SECS`, five minutes). A state with no exit condition is a lie —
 a box terminated before it booted, a box the account never addressed, or one

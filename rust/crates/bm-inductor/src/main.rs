@@ -2092,6 +2092,7 @@ async fn main() -> anyhow::Result<()> {
                 key,
                 role: "worker".into(),
                 task_policy: None,
+                accepting_work: true,
             };
             bm_core::provision::save_box(&layout.machines(), &bxo)?;
             println!("linked {name} -> {}", layout.machines().display());
@@ -2651,6 +2652,7 @@ mod tests {
                 key: None,
                 role: "worker".into(),
                 task_policy: Some(policy.clone()),
+                accepting_work: true,
             },
         )
         .unwrap();
