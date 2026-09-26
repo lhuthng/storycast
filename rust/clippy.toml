@@ -1,0 +1,7 @@
+# The MSRV, mirrored from `rust-version` in Cargo.toml.
+#
+# Without this, clippy lints against whatever API today's stable happens to
+# have and suggests rewrites the project cannot compile: it asked for
+# `as_chunks` over `chunks_exact` in the npy reader, and `slice::as_chunks`
+# needs 1.88. A lint that cannot be acted on is a release that cannot be cut.
+msrv = "1.75"
