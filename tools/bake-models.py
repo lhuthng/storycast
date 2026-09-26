@@ -71,6 +71,30 @@ STORE = pathlib.Path(
     ".venv/lib/python3.12/site-packages/vieneu/assets/voices_v3_turbo.json"
 )
 
+# Copied into the bake but deliberately **not** recorded in the manifest.
+#
+# `models/voices.json` is the voice roster, and unlike everything else here it is
+# not a bake output. Two reasons it cannot be one:
+#
+#   * `pool::bake_missing_voices` rewrites it on the inductor during provisioning
+#     whenever the clone manifest names a voice the store lacks, so its bytes are
+#     expected to change without a re-bake; and
+#   * its source is a *pip-installed package* (`vieneu`), not a pinned revision —
+#     which is why it is the one entry out of seventeen that had drifted here.
+#
+# A recorded `bytes` + `sha256` therefore describe a file the manifest cannot
+# stand behind. Recording it cost two things: `--check` reported a spurious
+# CHANGED after any enrollment, and every consumer had to special-case one entry
+# (the artifact publish gate, and the `sha256sum -c` list provisioning writes).
+# A receipt that is occasionally wrong is worse than a receipt that omits a
+# field, so `voices.json` is copied for the sidecar to load and left out of the
+# record entirely.
+#
+# What it is no longer covered by: `--check`. Its presence is checked instead by
+# the sidecar at startup, the remote roster check in `provision`, and
+# `bake_missing_voices`, which re-enrolls a declared voice the store has lost.
+DERIVED = {"voices.json"}
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
@@ -158,6 +182,10 @@ def main() -> int:
         dst = out / name
         shutil.copy2(src, dst)
         size = dst.stat().st_size
+        if name in DERIVED:
+            # Copied, so the sidecar can load it — never recorded. See DERIVED.
+            print(f"  {size / 1048576:8.1f} MB  {name}  (derived, not recorded)")
+            continue
         total += size
         files[name] = {"bytes": size, "sha256": sha256(dst)}
         print(f"  {size / 1048576:8.1f} MB  {name}")
@@ -167,7 +195,9 @@ def main() -> int:
             "Baked by tools/bake-models.py from the Hugging Face cache. The .data "
             "files must keep these names and stay beside their .onnx: the graph "
             "refers to them by a relative path baked into the file. Verify with "
-            "`python3 tools/bake-models.py --check`."
+            "`python3 tools/bake-models.py --check`. `voices.json` sits in this "
+            "directory but is deliberately absent from `files`: it is derived "
+            "state, not a bake output (see DERIVED in the script)."
         ),
         "backbone_rev": bb.name,
         "codec_rev": cd.name,

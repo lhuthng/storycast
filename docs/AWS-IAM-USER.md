@@ -205,7 +205,7 @@ Every launch names this role, so it has to exist before `aws up`.
 1. **Trusted entity type** — **AWS service**.
 2. **Service or use case** — **EC2**. Then **Next**.
 3. **Permissions policies** — leave it empty and choose **Next**. The worker role
-   needs nothing unless you publish the asset plane to S3 (below).
+   needs nothing: assets reach a box by rsync from the inductor.
 4. **Name, review, and create** — for **Role name** type `storycast-worker`.
    Choose **Create role**.
 
@@ -213,12 +213,6 @@ The console creates the matching **instance profile** for you, with the same
 name — that is the name that goes in `iam_instance_profile`. (With the CLI you
 have to create the instance profile yourself and add the role to it; see the CLI
 section.)
-
-**Only if you set `bucket` in the pool definition:** open the role → the
-**Permissions** tab → **Add permissions** → **Create inline policy** → **JSON**,
-and paste the S3 read policy from
-[AWS-CREDENTIALS.md](AWS-CREDENTIALS.md#the-workers-role). With `bucket` empty
-the boxes rsync their assets from your machine and the role needs nothing.
 
 ### 5. Create the SSH keypair
 
@@ -312,7 +306,6 @@ What the egress is actually for:
 | | |
 |---|---|
 | **Chapter URLs** | the worker crawls them, and that is a real internet fetch |
-| **S3** | if you set `bucket`, the box pulls its own asset plane (not wired yet) |
 | **The Gemini API** | only if you use that engine rather than VieNeu |
 | **The inductor** | **never.** The inductor dials the box, not the other way round |
 
@@ -604,9 +597,9 @@ The JSON in step 1, statement by statement:
   profile. Scoped to one role and to EC2 as the target service, so this cannot be
   used to hand an arbitrary role to an arbitrary service.
 
-**Nothing account-wide, no billing, no S3 write, no IAM beyond passing that one
-role and listing instance profile names.** The user cannot create other users,
-read a bucket, or delete a volume.
+**Nothing account-wide, no billing, no IAM beyond passing that one role and
+listing instance profile names.** The user cannot create other users, touch any
+bucket, or delete a volume.
 
 ### One caveat, stated plainly
 

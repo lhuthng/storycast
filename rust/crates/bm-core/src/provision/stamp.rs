@@ -36,15 +36,35 @@ pub struct ProvisionStamp {
     /// reinstall, then the fresh stamp records the hash).
     #[serde(default)]
     pub agent_hash: String,
+    /// SHA-256 of the `bm-tts` bytes the inductor would push.
+    ///
+    /// The sidecar had no such field, and the consequence was the same silent
+    /// staleness `agent_hash` exists to prevent, one binary over: `tts_hash`
+    /// covers `models/` and not the binary, and `install_tts_runtime` only ran
+    /// on a box that was *not* already configured. So rebuilding the sidecar
+    /// and re-provisioning a working worker changed nothing — the new binary
+    /// never left this disk while the box kept answering with the old one.
+    ///
+    /// `#[serde(default)]` for the same reason as the two above: an older
+    /// stamp parses as "", which reads as drift once, redeploys, and then
+    /// records the real hash.
+    #[serde(default)]
+    pub tts_bin_hash: String,
 }
 
 impl ProvisionStamp {
-    /// Whether the voice store on this box still matches the one we would push.
+    /// Whether the baked voice store on this box still matches the one we would
+    /// push.
     ///
-    /// Kept for the stamp's own round-trip, but **no longer consulted by
-    /// provisioning**: the store travels inside `models/`, so [`Self::tts_in_sync`]
-    /// is what decides. Removing the field would invalidate every stamp already
-    /// on a box for no gain.
+    /// **Consulted again**, with the field's meaning narrowed to make that
+    /// workable: it is `models/voices.json` by content, and nothing else.
+    ///
+    /// It was once computed over the clone manifest and `refs/` and then never
+    /// read — which is how an edited reference clip shipped nowhere while every
+    /// gate reported "in sync". Both of those are pushed by `install_sources`,
+    /// so they now live in `sources_hash`, where the push they gate actually
+    /// reads them. This field covers the one file that push does not carry: the
+    /// store the sidecar loads at startup.
     pub fn voices_in_sync(&self, want: &ProvisionStamp) -> bool {
         self.voices_hash == want.voices_hash
     }
@@ -71,24 +91,42 @@ impl ProvisionStamp {
     pub fn agent_in_sync(&self, want: &ProvisionStamp) -> bool {
         want.agent_hash.is_empty() || self.agent_hash == want.agent_hash
     }
+
+    /// Whether the worker's `bm-tts` binary still matches ours.
+    ///
+    /// Same "no opinion" rule as [`Self::agent_in_sync`]: an empty `want` means
+    /// this inductor has no sidecar staged, so it never claims drift. Without
+    /// that, a host that only bakes models would try to push a binary that does
+    /// not exist on every provision.
+    pub fn tts_bin_in_sync(&self, want: &ProvisionStamp) -> bool {
+        want.tts_bin_hash.is_empty() || self.tts_bin_hash == want.tts_bin_hash
+    }
 }
 
-/// Compute manifest stamp for detecting changes to sources and clone voices.
+/// Compute manifest stamp for detecting changes to sources, voices and sidecars.
 ///
-/// Two SHA-256 digests, each over a canonical (sorted, newline-joined) view of
-/// its inputs, so the same inputs produce the same hex string on any machine:
+/// Four SHA-256 digests, each over a canonical (sorted, newline-joined) view of
+/// its inputs, so the same inputs produce the same hex string on any machine.
+/// Each one gates a *different push*, and the split is what keeps one kind of
+/// change from paying for another:
 ///
 /// * `sources_hash` — `prompts/` by signature, plus the *content* of the small
 ///   manifests the worker must match exactly (`requirements.txt`, the cast
 ///   files, the clone manifest `voices.json`, the scene map and the three
-///   clip-pool registries), plus the effect, music and inject clip
-///   directories by signature, plus the agent version so a release bump
-///   redeploys. (A rebuild under the *same* version is `agent_hash`'s job.)
-/// * `voices_hash` — `voices.json` by content (a rename with identical clips
-///   must re-enroll) and `refs/` by signature only: those clips are megabytes,
-///   and reading them would cost more than the enrollment we are avoiding.
-///   Kept alongside `sources_hash` (which also covers the manifest) because
-///   the stamp payload round-trips it and older stamps are still out there.
+///   clip-pool registries), plus the effect, music, inject **and `refs/`** clip
+///   directories by signature, plus the crawl scripts by content, plus the
+///   agent version so a release bump redeploys. (A rebuild under the *same*
+///   version is `agent_hash`'s job.) **Everything `install_sources` pushes is
+///   in here**, and `refs/` was the one that was not.
+/// * `tts_hash` — the baked `models/` directory **minus `models/voices.json`**,
+///   by signature, plus `manifest.json` by content. Excluding the store is what
+///   lets a newly enrolled voice ship without re-sending 668 MB of weights, and
+///   the set that remains is exactly the immutable one, so this digest is also
+///   the natural name for a published artifact (see `docs/ARTIFACTS.md`).
+/// * `voices_hash` — `models/voices.json` by content: the store the sidecar
+///   loads at startup, which nothing else covers.
+/// * `tts_bin_hash` — the `bm-tts` bytes, by content, so a rebuild reaches a box
+///   that already has the right models.
 pub fn compute_provision_stamp(
     repo_root: &Path,
     agent_version: &str,
@@ -152,6 +190,21 @@ pub fn compute_provision_stamp(
         sources.update([0]);
     }
 
+    // …and the reference clips, because `install_sources` pushes `refs/`
+    // whether or not any digest here mentions it.
+    //
+    // This is a fix, not a nicety. `refs/` used to be folded into `voices_hash`
+    // — a digest provisioning computed, carried, and never read — so adding or
+    // editing a clip drifted no gate at all. A worker kept the stale clip while
+    // every box and every log said "in sync", and a render naming the new voice
+    // failed only on the boxes that never received it. A signature rather than
+    // content, for the reason `refs/` is 125 MB of audio and mtime+size is the
+    // test rsync itself uses.
+    sources.update(b"refs");
+    sources.update([0]);
+    sources.update(signature_of_dir(&repo_root.join("refs")).as_bytes());
+    sources.update([0]);
+
     // The crawl scripts, by **content**: they are small, and they decide which
     // bytes become a chapter. A worker left holding a stale crawler would fetch
     // something different from what the inductor's own probe read, and the
@@ -202,13 +255,18 @@ pub fn compute_provision_stamp(
         }
     }
 
-    // The Rust sidecar's artifacts. Hashed by *signature*, not content: `models/`
-    // is 668 MB and a single clip-sized read of it would cost more than the
-    // provisioning this is meant to skip. `manifest.json` is read by content
-    // because it is the authoritative statement of what the models *are* — a
-    // swapped file under an unchanged manifest is exactly the drift worth
-    // catching, and the directory signature catches it too, but only if the
-    // mtime moved.
+    // The Rust sidecar's *weights*, by directory signature rather than content:
+    // `models/` is 668 MB and reading it would cost more than the provisioning
+    // this digest exists to skip. `manifest.json` is read by content because it
+    // is the authoritative statement of what the models *are* — a swapped file
+    // under an unchanged manifest is exactly the drift worth catching, and the
+    // directory signature only catches it if the mtime moved.
+    //
+    // `models/voices.json` is **excluded by name**, and that exclusion is the
+    // point of this digest rather than a detail: it is the cluster's voice
+    // roster, enrollment rewrites it, it is 492 KB of a 668 MB directory, and
+    // folding it in here would make a single new voice re-send every weight in
+    // the bake. `voices_hash` covers it instead.
     let mut tts = Sha256::new();
     if let Ok(bytes) = std::fs::read(repo_root.join("models/manifest.json")) {
         tts.update(b"models/manifest.json");
@@ -216,40 +274,63 @@ pub fn compute_provision_stamp(
         tts.update(&bytes);
         tts.update([0]);
     }
-    tts.update(signature_of_dir(&repo_root.join("models")).as_bytes());
+    tts.update(signature_of_dir_skipping(&repo_root.join("models"), &[VOICE_STORE]).as_bytes());
     tts.update([0]);
-    // The binary, if it has been built here. Absent is not an error: the models
-    // can be baked on a machine that never builds the Rust sidecar.
-    for rel in ["rust/target/release/bm-tts", "rust/target/debug/bm-tts"] {
-        let p = repo_root.join(rel);
-        if let Ok(meta) = std::fs::metadata(&p) {
-            tts.update(rel.as_bytes());
-            tts.update([0]);
-            tts.update(meta.len().to_string().as_bytes());
-            tts.update([0]);
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            tts.update(mtime.to_string().as_bytes());
-            tts.update([0]);
-        }
+
+    // The sidecar *binary*, by content, in a digest of its own.
+    //
+    // Separate from the weights above because the two drift independently: a
+    // rebuild of `bm-tts` has to reach a box that already holds the right
+    // models, and folding the binary in with them would answer a nine-megabyte
+    // binary change with a 668 MB re-push. Absent is not an error — the models
+    // can be baked on a machine that never builds the sidecar — and an empty
+    // `want` reads as "no opinion" (see `tts_bin_in_sync`).
+    let mut tts_bin = Sha256::new();
+    let mut tts_bin_staged = false;
+    for p in tts_bin_candidates(repo_root) {
+        let Ok(bytes) = std::fs::read(&p) else {
+            continue;
+        };
+        tts_bin_staged = true;
+        let rel = p
+            .strip_prefix(repo_root)
+            .unwrap_or(&p)
+            .display()
+            .to_string();
+        tts_bin.update(rel.as_bytes());
+        tts_bin.update([0]);
+        tts_bin.update(hex_digest(Sha256::digest(&bytes)).as_bytes());
+        tts_bin.update([0]);
     }
 
+    // The store the sidecar loads at startup — and nothing else, because the
+    // clone manifest and `refs/` are both `install_sources`' business and live
+    // in `sources_hash` above. Content, not signature: it is 492 KB, and a
+    // roster that changed at all has to reach the box, mtime or not.
     let mut voices = Sha256::new();
-    if let Ok(bytes) = std::fs::read(repo_root.join("voices.json")) {
+    let store = repo_root.join("models").join(VOICE_STORE);
+    if let Ok(bytes) = std::fs::read(&store) {
+        voices.update("models/voices.json".as_bytes());
+        voices.update([0]);
         voices.update(&bytes);
+        voices.update([0]);
     }
-    voices.update([0]);
-    voices.update(signature_of_dir(&repo_root.join("refs")).as_bytes());
 
     ProvisionStamp {
         agent_version: agent_version.to_string(),
         sources_hash: hex_digest(sources.finalize()),
         voices_hash: hex_digest(voices.finalize()),
         tts_hash: hex_digest(tts.finalize()),
+        // Empty, not the digest of nothing, when no sidecar is staged: this
+        // field is the one whose "empty means no opinion" rule has to be able
+        // to fire, and a hash of zero inputs is still a hash that no remote
+        // box can match — which would read as permanent drift and push a binary
+        // that does not exist here.
+        tts_bin_hash: if tts_bin_staged {
+            hex_digest(tts_bin.finalize())
+        } else {
+            String::new()
+        },
         // Content, not signature: the binary is ~100 MB and hashing it costs
         // ~0.1 s locally, while a stale binary on a worker is silent drift.
         // Absent locally is not an error (see `agent_in_sync`).
@@ -257,6 +338,35 @@ pub fn compute_provision_stamp(
             .map(|bytes| hex_digest(Sha256::digest(&bytes)))
             .unwrap_or_default(),
     }
+}
+
+/// The one mutable file inside the otherwise immutable `models/` bake: the
+/// cluster's voice roster, rewritten by enrollment. Named once, so the digest
+/// that must avoid it and the digest that must cover it cannot drift apart.
+const VOICE_STORE: &str = "voices.json";
+
+/// The sidecar binaries a provision could push, relative to the repo root.
+///
+/// **Release builds, every target.** A debug binary is never pushed, and the
+/// list this replaces named `debug/bm-tts` while missing both cross paths — so
+/// on the one machine shape that actually provisions a Linux box from a Mac,
+/// the binary that gets pushed was not hashed at all and the field would have
+/// been decorative.
+///
+/// Hashing every target rather than only the one this host serves is coarse on
+/// purpose: `compute_provision_stamp` takes no platform, because one inductor
+/// can drive a mixed pool and does not know the target when it hashes. The
+/// coarseness can only cause an *extra* redeploy — a rebuild of a target this
+/// box does not use — never a missed one, and a missed one is the bug.
+fn tts_bin_candidates(repo_root: &Path) -> Vec<std::path::PathBuf> {
+    [
+        "rust/target/x86_64-unknown-linux-gnu/release/bm-tts",
+        "rust/target/aarch64-unknown-linux-gnu/release/bm-tts",
+        "rust/target/release/bm-tts",
+    ]
+    .into_iter()
+    .map(|rel| repo_root.join(rel))
+    .collect()
 }
 
 /// Hex-encode a digest by hand: the repo takes no hex dependency for one call.
@@ -273,6 +383,17 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
 /// runs over `refs/`, where a single clip is megabytes and mtime+size is
 /// exactly the test `copy_dir` and rsync already use to decide "unchanged".
 fn signature_of_dir(dir: &Path) -> String {
+    signature_of_dir_skipping(dir, &[])
+}
+
+/// [`signature_of_dir`], ignoring any entry whose file name is in `extra`.
+///
+/// `models/` needs it: that directory is a 668 MB immutable bake with exactly
+/// one mutable file inside it, and the two have opposite requirements. Skipping
+/// by *name* rather than by content or by listing what to include keeps the
+/// exclusion honest when the bake grows — a new weight is covered by default,
+/// and only `voices.json` is special.
+fn signature_of_dir_skipping(dir: &Path, extra: &[&str]) -> String {
     const SKIP: [&str; 3] = [".venv", "__pycache__", "target"];
     let mut out = String::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -285,7 +406,7 @@ fn signature_of_dir(dir: &Path) -> String {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        if SKIP.contains(&name.as_str()) {
+        if SKIP.contains(&name.as_str()) || extra.contains(&name.as_str()) {
             continue;
         }
         let (Ok(meta), Ok(rel)) = (path.metadata(), path.strip_prefix(dir)) else {
@@ -299,7 +420,7 @@ fn signature_of_dir(dir: &Path) -> String {
             .unwrap_or(0);
         if meta.is_dir() {
             out.push_str(&format!("d {} {}\n", rel.display(), mtime));
-            out.push_str(&signature_of_dir(&path));
+            out.push_str(&signature_of_dir_skipping(&path, extra));
         } else {
             out.push_str(&format!("f {} {} {}\n", rel.display(), meta.len(), mtime));
         }
@@ -405,31 +526,139 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The clone manifest and `refs/` are **sources**, because that is the push
+    /// that carries them.
+    ///
+    /// This test replaces one that asserted the opposite for `refs/` ("a new
+    /// clip must re-enroll" / "refs/ is not part of the sources hash"). Both
+    /// halves were describing a bug rather than a design: `voices_hash` was
+    /// never read, so a new reference clip drifted no gate that any push
+    /// consulted, and the clip shipped nowhere. The gate is now the one the
+    /// push reads.
     #[test]
-    fn voices_hash_tracks_the_manifest_and_the_reference_clips() {
+    fn the_clone_manifest_and_the_reference_clips_are_sources() {
         let root = stamp_fixture("voices");
         let base = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
 
-        // A rename in voices.json must re-enroll even though the clip is
-        // identical: enrollment is keyed by name, not by file. The manifest
-        // also rides the sources sync now, so the worker's copy never drifts
-        // behind the declaration the inductor's warnings are computed against.
+        // A rename in voices.json has to reach the worker's copy, so it is a
+        // source change — and because `install_sources` is what ships the
+        // manifest, it must NOT be a reason to re-push the model store.
         std::fs::write(root.join("voices.json"), r#"{"Storyteller":"refs/n.wav"}"#).unwrap();
         let renamed = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
-        assert!(!base.voices_in_sync(&renamed), "a rename must re-enroll");
         assert!(
             !base.sources_in_sync(&renamed),
             "a rename must resync the manifest"
         );
+        assert!(
+            base.voices_in_sync(&renamed),
+            "…and must not look like a voice-store change"
+        );
+        assert!(base.tts_in_sync(&renamed), "…nor re-send 668 MB of weights");
 
-        // A new clip changes the refs signature without touching the manifest.
+        // A new clip changes the refs signature without touching the manifest —
+        // and `install_sources` pushes `refs/`, so this must drift sources.
         std::fs::write(root.join("refs/m.wav"), vec![2u8; 64]).unwrap();
         let added = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
-        assert!(!renamed.voices_in_sync(&added), "a new clip must re-enroll");
         assert!(
-            renamed.sources_in_sync(&added),
-            "refs/ is not part of the sources hash"
+            !renamed.sources_in_sync(&added),
+            "a new clip must resync the directory that is pushed for it"
         );
+        assert!(
+            renamed.tts_in_sync(&added),
+            "…without re-sending the weights"
+        );
+    }
+
+    /// The store the sidecar loads is its own gate: a newly enrolled voice must
+    /// ship, and must not cost a re-push of the weights it sits among.
+    ///
+    /// This is the split `docs/ARTIFACTS.md` depends on. `models/` is 668 MB of
+    /// immutable bake with one mutable 492 KB file inside it, and before this
+    /// the two were one digest: enrolling a voice re-sent every weight, while
+    /// excluding the store entirely would have hidden the enrollment instead.
+    #[test]
+    fn the_baked_voice_store_is_its_own_gate_and_not_a_model_change() {
+        let root = stamp_fixture("store");
+        std::fs::create_dir_all(root.join("models")).unwrap();
+        std::fs::write(root.join("models/manifest.json"), r#"{"files":{}}"#).unwrap();
+        std::fs::write(root.join("models/sea_g2p.bin"), vec![1u8; 64]).unwrap();
+        std::fs::write(root.join("models/voices.json"), r#"{"presets":{"A":{}}}"#).unwrap();
+        let base = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+
+        // Enrolling a voice rewrites the store and nothing else.
+        std::fs::write(
+            root.join("models/voices.json"),
+            r#"{"presets":{"A":{},"B":{}}}"#,
+        )
+        .unwrap();
+        let enrolled = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        assert!(
+            !base.voices_in_sync(&enrolled),
+            "an enrollment must reach the box"
+        );
+        assert!(
+            base.tts_in_sync(&enrolled),
+            "…and must not re-send 668 MB of weights for a 492 KB file"
+        );
+        assert!(base.sources_in_sync(&enrolled));
+
+        // The weights themselves still drift `tts_hash`, so excluding the store
+        // did not exclude the directory. The size changes because a *signature*
+        // is size+mtime, and a same-size rewrite inside one second is invisible
+        // to it — the limit `manifest.json`-by-content and the publish gate
+        // (`bake-models.py --check`, `16/16 files match`) exist to cover.
+        std::fs::write(root.join("models/sea_g2p.bin"), vec![2u8; 128]).unwrap();
+        let swapped = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        assert!(
+            !enrolled.tts_in_sync(&swapped),
+            "a swapped weight must still resync the store"
+        );
+        assert!(
+            enrolled.voices_in_sync(&swapped),
+            "…without looking like an enrollment"
+        );
+    }
+
+    /// A rebuilt sidecar reaches a box that already has the right models.
+    ///
+    /// The gap this closes: `tts_hash` covers `models/`, not the binary, and
+    /// the sidecar push only ran on a box that was *not* already configured. So
+    /// a rebuilt `bm-tts` never left this disk on a working worker, and the box
+    /// kept serving the old one indefinitely — the `agent_hash` bug, one binary
+    /// over.
+    #[test]
+    fn a_rebuilt_sidecar_drifts_only_the_binary_hash() {
+        let root = stamp_fixture("sidecar-drift");
+        let bin = root.join("rust/target/x86_64-unknown-linux-gnu/release/bm-tts");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"sidecar-bytes-v1").unwrap();
+        let base = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        assert!(!base.tts_bin_hash.is_empty());
+        assert!(base.tts_bin_in_sync(&compute_provision_stamp(&root, "0.2.0", &agent_bin(&root))));
+
+        std::fs::write(&bin, b"sidecar-bytes-v2").unwrap();
+        let rebuilt = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        assert!(
+            !base.tts_bin_in_sync(&rebuilt),
+            "a rebuilt sidecar must redeploy"
+        );
+        assert!(
+            base.sources_in_sync(&rebuilt) && base.tts_in_sync(&rebuilt),
+            "…and must not drag the sources or the weights along"
+        );
+        assert!(base.agent_in_sync(&rebuilt), "…nor the agent");
+
+        // The cross path is the one that actually gets pushed, and the list
+        // this replaced hashed only `target/release` and `target/debug` — so on
+        // a Mac provisioning a Linux box the field would have been empty.
+        assert!(
+            !rebuilt.tts_bin_hash.is_empty(),
+            "the cross build is what provisioning pushes; it must be hashed"
+        );
+
+        // No sidecar on this host means no opinion, never a push of nothing.
+        let none = compute_provision_stamp(&root.join("elsewhere"), "0.2.0", &root.join("a"));
+        assert!(base.tts_bin_in_sync(&none));
     }
 
     #[test]
@@ -554,6 +783,10 @@ mod tests {
             s.agent_hash, "",
             "ditto: drift once, then the fresh stamp records it"
         );
+        assert_eq!(
+            s.tts_bin_hash, "",
+            "ditto for the sidecar: one redeploy, then the hash is recorded"
+        );
     }
 
     /// The Rust sidecar's artifacts are their own hash: a box on the Python path
@@ -599,6 +832,7 @@ mod tests {
             voices_hash: "b".repeat(64),
             tts_hash: "c".repeat(64),
             agent_hash: "d".repeat(64),
+            tts_bin_hash: "e".repeat(64),
         };
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(parse_stamp(&text).unwrap(), s, "a real payload round-trips");
