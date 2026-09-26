@@ -70,6 +70,22 @@ fn split_label(label: &str) -> (String, Vec<String>) {
     (label.trim().to_string(), Vec::new())
 }
 
+/// The voice's own name, out of a roster label.
+///
+/// The sidecar composes `/voices` labels as `"<name> — <description>"` for any
+/// voice that has a description, and as the bare name for one that does not —
+/// so a preset arrives as `"Adam — Nam · Nam · Giọng đọc tự nhiên"` and a
+/// hand-enrolled clone as `"Suneo"`. Anything comparing a store entry against a
+/// *name* has to split first, and has to split it the same way [`voice_from_label`]
+/// does, or a voice the picker shows as a preset is declared in one place and
+/// undeclared in another.
+///
+/// Public because there is now a second caller: the provisioning check that asks
+/// whether every voice in a box's store is declared somewhere.
+pub fn voice_name(label: &str) -> String {
+    split_label(label).0
+}
+
 /// One voice from an SDK `(label, id)` pair.
 ///
 /// A bare label (`label == id`) is an enrolled clone: no gender or accent is
