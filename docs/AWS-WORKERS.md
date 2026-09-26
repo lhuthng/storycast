@@ -72,11 +72,10 @@ Click-by-click for both, including the region trap on the keypair, is
 **Once per pool** — those two `:` commands are the whole setup. `:login` verifies
 the key is an IAM user *before* storing it, and names the account it stored;
 `:discover` reaches AWS for everything else and writes it down, so you never open
-or edit `.bm/aws.json` unless you want to change `region` or `bucket` — the only
-two fields that are ever yours to type (`bucket` can stay empty). Both stream
-their lines into the event pane, exactly as the CLI prints them; the two front
-ends run the same `aws_ops` verbs, so `:login` cannot accept a key the CLI would
-reject.
+or edit `.bm/aws.json` unless you want to change `region` — the only field that
+is ever yours to type. Both stream their lines into the event pane, exactly as
+the CLI prints them; the two front ends run the same `aws_ops` verbs, so `:login`
+cannot accept a key the CLI would reject.
 
 **Load a profile — before you launch anything.** Every box carries a marker tag
 whose *value is the profile hash it was launched for*, and a launch with no
@@ -207,9 +206,9 @@ if it is missing.
 Anything ambiguous is left alone and named: with two instance profiles in the
 account it lists both instead of picking one, and `--instance-profile <name>`
 settles it (checked against the account, so a typo is caught before
-`RunInstances`). `aws show` then lists whatever is still missing, and the only two
-fields that are ever yours to type are `region` and `bucket` (leave `bucket` empty
-to rsync the assets from this machine).
+`RunInstances`). `aws show` then lists whatever is still missing, and the only
+field that is ever yours to type is `region`; assets reach a box by rsync from
+this machine, so there is no bucket to create.
 
 The AMI is written down rather than re-resolved, so it will not move under you —
 `discover` is the one command that looks something up, and everything after it
@@ -350,7 +349,7 @@ Named so the gap is not discovered at the wrong moment.
 | | why it matters |
 |---|---|
 | **The CLI `aws up` still prints only** | `:up` in the dashboard spawns *and registers*, but `bm-inductor aws up` is lines out and nothing else — a box launched there is bound by `link`/`:add` as before. One implementation, one verb; this is the front end not yet taught to link |
-| **The S3 asset publish** | `profile_object()` already computes the key — `s3://<bucket>/profiles/<profile-hash>.tar.zst` — and nothing calls it. Until it does, each box pulls 668 MB of models from your connection. The key is the profile hash every worker already verifies, so there is nothing to pass around and no way to hand a box a bundle its own pointer disagrees with. There is also no `S3Store`: `SegmentStore` has only `LocalStore` |
+| **The artifact plane** | Every new box takes the full ~886 MB upload from your connection, 668 MB of it models that are identical on every machine and change only when you re-bake. Publishing them as a release artifact each box fetches and verifies itself is designed in [ARTIFACTS.md](ARTIFACTS.md) and not built. There is also no `S3Store`: `SegmentStore` has only `LocalStore` |
 | **The TTL reaper** | `ttl_hours` is in the config, sanity-checked by `missing()` and printed in the summary — and enforced by nothing. A box that outlives its work is the whole cost of a cloud pool |
 | **A headless worker-start** | `provision` on the CLI onboards a box but cannot start its worker; only the TUI can (`:prov`, or `:B` for the catch-up). Small to add, and it is what makes a scripted launch possible |
 | **The AMI bake** | Provisioning pushes the whole mirror every time. Baking an image with the models, binaries and ffmpeg already in place drops it to a few MB, and `.provision_stamp.json` already decides what is missing |

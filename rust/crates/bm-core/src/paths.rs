@@ -416,7 +416,7 @@ impl Layout {
     }
 
     /// The AWS worker pool definition: region, type, subnet, security group,
-    /// instance profile, keypair names, bucket, caps.
+    /// instance profile, keypair names, caps.
     ///
     /// At the root rather than in the workspace, for the same reason as
     /// `machines()`: it describes *this machine's access to AWS*, not a book.
