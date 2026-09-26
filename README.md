@@ -634,7 +634,56 @@ the percentage is not moving, look at the Events pane: it records every
 completion, failure, expiry and action in one stream, the same stream
 `/api/state` serves.
 
-## 6. Tests & development
+## 6. Special cases
+
+Things you change by hand, and what has to be told afterwards. Each one is a
+recipe: what you changed, what to press, and why the press is needed.
+
+### You edited `data/script-NN.json`
+
+Changing a segment's `speaker`, or its text, changes that segment and nothing
+else. A take's filename is a hash of engine, voice and text, so the edit gives
+that one segment a new name and every other segment keeps the audio it has.
+
+```
+:m                    # rebuild the render plan from the script
+:retry merge 12       # requeue the merge and delete the stale mp3
+```
+
+`:m` is the render half: the changed segment appears as a pending
+`render:12:<pos>` row and a worker speaks it. The old row is dropped from the
+ledger. It also runs when the coordinator starts, so a restart does the same
+thing.
+
+`:retry merge 12` is not optional, and this is the part that surprises people.
+A finished merge is requeued by itself when the **mix** changes, and the mix
+fingerprint covers `scene`, `music`, the effect and inject pools and the knobs.
+It does not cover `speaker` or `text`. So a speaker edit leaves the chapter
+serving the old voice until the merge is named, and this is what names it. The
+ledger pane does the same thing: select the `merge:12` row, press `u`.
+
+Leave `F` alone for this. Force deletes the cached takes, so the chapter is
+spoken again from the first line.
+
+### There is no command that edits a script for you
+
+Worth saying so you stop looking. `:cast` is a read-only overview of every
+speaker and the voice it has, and the one command that rewrites a cast and
+invalidates the render for you is not on a key. Changing who speaks a line is a
+file edit, followed by the two commands above.
+
+### You changed which voice a character speaks as
+
+That is `:swap`, and it is a different thing reaching much further. It opens a
+picker: choose the character, then the voice, and `Enter` assigns (the audition
+keys play a line without assigning anything). It invalidates that character's
+segment files across every chapter that names them, queues the re-render, and
+prints that you need `:prov` so the workers hold the new voice. The voice must
+be enrolled in the store first (`:A`, or `roster add-sample`), or every render
+naming it fails on the boxes. The recipe above is one chapter; this one is the
+book.
+
+## 7. Tests & development
 
 ```bash
 make test                            # cargo test --workspace + clippy -D warnings
@@ -648,7 +697,7 @@ an in-memory screen.
 Local-only design notes (`.docs/` is git-ignored): `TUI_UX_AUDIT.md`,
 `VOICE_CONFIG_PROPOSAL.md`, `PLAN.md`.
 
-## 7. Honest limitations
+## 8. Honest limitations
 
 The things that will cost you time, in the order they are likely to.
 
