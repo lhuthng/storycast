@@ -198,6 +198,28 @@ and `cargo-zigbuild`. A Mac or an ARM Linux box is a different target, which
 `make tts` does not cover; provisioning stops and prints the command for it
 rather than pushing the wrong binary.
 
+### What platforms this runs on
+
+**Linux and macOS.** That is the whole list, for the machine holding the
+dashboard and for the workers.
+
+Both need `sh`, `ssh` and `rsync` on the machine you run them from, and macOS
+and Linux have all three. Provisioning also detects the remote box with
+`uname` and installs with `apt-get`, so the boxes are Linux or a Mac as well.
+
+**Windows is not supported.** There is no port and no plan for one. The code
+does compile for Windows, and a tagged release carries a `.zip` for it, but that
+binary cannot do the parts that matter: provisioning shells out to `rsync` and
+POSIX `sh`, and `bm-tts` is a Linux build, so a Windows machine has no local
+speech engine and no way to onboard a box. If you are on Windows, use WSL and
+run the Linux build there.
+
+Prebuilt binaries for Linux and macOS, x86_64 and arm64, are attached to each
+[tagged release](https://github.com/lhuthng/storycast/releases). The archive is
+the two programs and this README; the repository is still where the prompts,
+crawlers, scene maps and voice catalogue live, so a release saves you a build,
+not a clone.
+
 ### A note on security
 
 First: **`.env` never leaves the machine you created it on.** When you add more
@@ -608,6 +630,11 @@ Local-only design notes (`.docs/` is git-ignored): `TUI_UX_AUDIT.md`,
 ## 7. Honest limitations
 
 The things that will cost you time, in the order they are likely to.
+
+- **Windows is not a platform this runs on.** Linux and macOS are. The
+  workspace compiles for Windows and a release ships a binary, but provisioning
+  needs `rsync` and `sh` and the speech sidecar is a Linux build, so on Windows
+  the interesting parts do not work. WSL is the answer today.
 
 - **The built-in voices are Vietnamese.** Vieneu is local and free, but it is
   built for Vietnamese and it is what this project grew up on. In another
