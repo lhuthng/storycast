@@ -587,22 +587,57 @@ fn attribution_view(prepared: &PreparedChapter) -> String {
 
 /// Replace one bounded prompt section when the live template still has it.
 ///
-/// Profiles may be older than the binary, so absent section markers are not an
-/// error: the appended contract remains authoritative and placeholder
-/// substitution still works for fixture/custom templates.
+/// Profiles may be older than the binary, so an absent section marker is not a
+/// hard error: the appended contract remains authoritative and placeholder
+/// substitution still works for fixture/custom templates. It is, however,
+/// never silent — the miss is returned so the caller can name it. A template
+/// reword that quietly disabled a replacement is exactly how the code-side and
+/// file-side prompts drift apart, with no error anywhere to say so.
 fn replace_prompt_section(
     body: &mut String,
     start_marker: &str,
     end_marker: &str,
     replacement: &str,
-) {
+) -> bool {
     let Some(start) = body.find(start_marker) else {
-        return;
+        return false;
     };
     let Some(end) = body[start..].find(end_marker).map(|n| start + n) else {
-        return;
+        return false;
     };
     body.replace_range(start..end, &format!("{replacement}\n"));
+    true
+}
+
+/// Replace `needle` and record it when it was absent.
+///
+/// The prose overrides below are authored in this file and matched against the
+/// profile's template by exact text. `String::replace` is silent when the text
+/// has been reworded, which is the failure this wrapper exists to expose: the
+/// digest still runs on the profile's own (older) wording, but the miss lands in
+/// the build warning instead of nowhere.
+fn replace_or_miss(body: &mut String, needle: &str, replacement: &str, missed: &mut Vec<String>) {
+    if !body.contains(needle) {
+        missed.push(head_chars(needle, 48).to_string());
+        return;
+    }
+    *body = body.replace(needle, replacement);
+}
+
+/// Warn, once, about every section a prompt build expected to rewrite but did
+/// not find. Loud, not fatal: a profile predating the binary still digests on
+/// its own wording, and killing it would strand old workspaces over a cosmetic
+/// mismatch. Making these fatal is a one-line change if the noise is wanted.
+fn warn_missing_sections(which: &str, missed: &[String]) {
+    if missed.is_empty() {
+        return;
+    }
+    eprintln!(
+        "{which}: {} code-side override(s) did not match the template, so the \
+         profile's own text is in use: {}",
+        missed.len(),
+        missed.join("; ")
+    );
 }
 
 /// Build the constrained attribution pass.
@@ -621,25 +656,33 @@ fn build_attribution_prompt(
     let path = layout.prompt();
     let template = std::fs::read_to_string(&path)
         .with_context(|| format!("reading prompt template {}", path.display()))?;
-    let mut body = template
-        .replace(
-            "INPUT 2 — one raw chapter text (Vietnamese). Mixes narration and dialogue in \"...\"\nquotes, with pronouns and descriptive aliases instead of names.",
-            "INPUT 2 — the prepared chapter as two lists, in exact source order. `narration_ids` are prose events: the preparer has already spoken them as `Narrator` and they are NOT yours to answer. `dialogue_events` are the quoted lines, each with the stable `id` your answer keys on and its text without quote delimiters.",
-        )
-        .replace(
-            "This is the CONTEXT pass: you read one\nchapter and report WHO is in it and WHAT it is about — the cast and the story.\nYou do NOT write the script. A second pass does that, and it is handed your answer\nas its cast list, so be exact about names and about the surface forms the chapter\nuses: everything downstream is resolved against what you return here.",
-            "This is the ATTRIBUTION pass: prepared narration and dialogue events are already separated deterministically. Resolve the chapter cast and assign one immutable speaker to every event. You do NOT stage audio, choose music, or write segments; the next pass is handed this exact speaker map.",
-        )
-        .replace(
-            "The second pass attributes every line against\n   this map",
-            "The attribution map uses this evidence",
-        )
-        .replace(
-            "`roster` is the cast list the second pass must attribute against: canonical\n   names only, plus \"Narrator\" when the chapter has narration.",
-            "`roster` is the cast list the next pass consumes: canonical names and the\n   reserved `Anonymous` speaker, plus \"Narrator\" when the chapter has narration.",
-        )
-        .replace("{bible_json}", &bible_context(bible))
-        .replace("{chapter_text}", &attribution_view(prepared));
+    let mut missed: Vec<String> = Vec::new();
+    let mut body = template;
+    replace_or_miss(
+        &mut body,
+        "INPUT 2 — one raw chapter text (Vietnamese). Mixes narration and dialogue in \"...\"\nquotes, with pronouns and descriptive aliases instead of names.",
+        "INPUT 2 — the prepared chapter as two lists, in exact source order. `narration_ids` are prose events: the preparer has already spoken them as `Narrator` and they are NOT yours to answer. `dialogue_events` are the quoted lines, each with the stable `id` your answer keys on and its text without quote delimiters.",
+        &mut missed,
+    );
+    replace_or_miss(
+        &mut body,
+        "This is the CONTEXT pass: you read one\nchapter and report WHO is in it and WHAT it is about — the cast and the story.\nYou do NOT write the script. A second pass does that, and it is handed your answer\nas its cast list, so be exact about names and about the surface forms the chapter\nuses: everything downstream is resolved against what you return here.",
+        "This is the ATTRIBUTION pass: prepared narration and dialogue events are already separated deterministically. Resolve the chapter cast and assign one immutable speaker to every event. You do NOT stage audio, choose music, or write segments; the next pass is handed this exact speaker map.",
+        &mut missed,
+    );
+    replace_or_miss(
+        &mut body,
+        "`roster` is the cast list the second pass must attribute against: canonical\n   names only, plus \"Narrator\" when the chapter has narration.",
+        "`roster` is the cast list the next pass consumes: canonical names and the\n   reserved `Anonymous` speaker, plus \"Narrator\" when the chapter has narration.",
+        &mut missed,
+    );
+    replace_or_miss(&mut body, "{bible_json}", &bible_context(bible), &mut missed);
+    replace_or_miss(
+        &mut body,
+        "{chapter_text}",
+        &attribution_view(prepared),
+        &mut missed,
+    );
 
     if let Some(task) = body.find("TASK:") {
         let end = body
@@ -650,19 +693,26 @@ fn build_attribution_prompt(
             task..end,
             "TASK: return only the strict attribution JSON defined at the end of this prompt.\n",
         );
+    } else {
+        missed.push("TASK:".into());
     }
-    replace_prompt_section(
+    if !replace_prompt_section(
         &mut body,
-        "1. mentions records",
+        "1. mentions is chapter-local",
         "2. new_characters",
         "1. `mentions` is chapter-local evidence, not a chapter-wide identity table.\n   Include only exact, name-bearing surface forms that identify the same owner\n   wherever they occur. Omit pronouns and context-dependent role or address terms\n   such as `Đồ nhi`, `đệ tử`, `sư tôn`, or `sư phụ`: different scenes in one chapter\n   can give the same form different owners. A mention never determines who speaks\n   a quote; use the explicit tag in the quote's nearby narration first.\n",
-    );
-    replace_prompt_section(
+    ) {
+        missed.push("rule 1 (mentions)".into());
+    }
+    if !replace_prompt_section(
         &mut body,
         "2. new_characters",
         "3. TITLE:",
         "2. `new_characters` and `new_aliases` are for established proper identities only.\n   A quote whose speaker cannot be identified is an anonymous dialogue speaker, not\n   a new character. Never create a Bible character for a pronoun, generic role, or\n   anonymous passer-by.\n",
-    );
+    ) {
+        missed.push("rule 2 (new_characters)".into());
+    }
+    warn_missing_sections("attribution prompt", &missed);
 
     let contract = r#"
 ---ATTRIBUTION OUTPUT CONTRACT---
@@ -749,22 +799,44 @@ fn build_staging_prompt(
     let injects = crate::ambience::inject_prompt(&crate::audio_pool::load_pool(
         &layout.assets().join("inject-pool.json"),
     ));
-    let mut body = template
-        .replace(
-            "INPUT 2 — the CAST of THIS chapter, already resolved by the context pass, and the\nonly speaker labels you may use. `mentions` maps every surface form the chapter\nuses to its canonical name — use it ONLY to resolve WHO a dialogue tag names,\nnever to decide who speaks a line: a sentence merely containing \"nàng\" or a\ncharacter's name is not spoken by them. Never invent a speaker who is\nnot on the cast list.",
-            "INPUT 2 — the chapter cast and `fixed_speakers`, the complete immutable source-id to speaker map returned by the attribution pass. Do not infer, change, or return a speaker.",
-        )
-        .replace(
-            "INPUT 3 — one raw chapter text (Vietnamese). Mixes narration and dialogue in \"...\"\nquotes, with pronouns and descriptive aliases instead of names.",
-            "INPUT 3 — the same prepared source events shown to the attribution pass. `kind` is authoritative; speakers are already fixed.",
-        )
-        .replace("{bible_json}", &bible_context(bible))
-        .replace("{cast_json}", &cast_context(context))
-        .replace("{music_palette}", &palette)
-        .replace("{effect_tags}", &effects)
-        .replace("{inject_sounds}", &injects)
-        .replace("{chapter_text}", &prepared.prompt_json)
-        .replace("{\"speaker\": \"Narrator\", ", "{\"");
+    let mut missed: Vec<String> = Vec::new();
+    // The acting-mood vocabulary, rendered from the one table the mixer reads
+    // (`assemble::MOOD_TAKE`) so the prompt can only offer words `mood_cluster`
+    // resolves. It was previously written into the file's TASK block, which the
+    // override below deletes — so the analyzer saw no mood list at all and any
+    // coined word silently fell back to `neutral`.
+    let mood_palette = crate::assemble::mood_palette();
+    let mut body = template;
+    replace_or_miss(
+        &mut body,
+        "INPUT 2 — the CAST of THIS chapter, already resolved by the context pass, and the\nonly speaker labels you may use. `mentions` maps every surface form the chapter\nuses to its canonical name — use it ONLY to resolve WHO a dialogue tag names,\nnever to decide who speaks a line: a sentence merely containing \"nàng\" or a\ncharacter's name is not spoken by them. Never invent a speaker who is\nnot on the cast list.",
+        "INPUT 2 — the chapter cast and `fixed_speakers`, the complete immutable source-id to speaker map returned by the attribution pass. Do not infer, change, or return a speaker.",
+        &mut missed,
+    );
+    replace_or_miss(
+        &mut body,
+        "INPUT 3 — one raw chapter text (Vietnamese). Mixes narration and dialogue in \"...\"\nquotes, with pronouns and descriptive aliases instead of names.",
+        "INPUT 3 — the same prepared source events shown to the attribution pass. `kind` is authoritative; speakers are already fixed.",
+        &mut missed,
+    );
+    replace_or_miss(&mut body, "{bible_json}", &bible_context(bible), &mut missed);
+    replace_or_miss(&mut body, "{cast_json}", &cast_context(context), &mut missed);
+    replace_or_miss(&mut body, "{music_palette}", &palette, &mut missed);
+    // `{mood_palette}` is new: profiles written before it lack the placeholder
+    // and that is not a miss worth warning about, so it is replaced outright.
+    body = body.replace("{mood_palette}", &mood_palette);
+    // `{effect_tags}` is deprecated: the effect layer reads `scene` labels, and
+    // rule 9 that used this placeholder is gone. Profiles written before that
+    // still carry it, so it is replaced outright rather than reported as a miss.
+    body = body.replace("{effect_tags}", &effects);
+    replace_or_miss(&mut body, "{inject_sounds}", &injects, &mut missed);
+    replace_or_miss(
+        &mut body,
+        "{chapter_text}",
+        &prepared.prompt_json,
+        &mut missed,
+    );
+    body = body.replace("{\"speaker\": \"Narrator\", ", "{\"");
     if let Some(task) = body.find("TASK:") {
         let end = body
             .find("\nRULES:")
@@ -774,13 +846,18 @@ fn build_staging_prompt(
             task..end,
             "TASK: return only the strict staging JSON defined at the end of this prompt.\n",
         );
+    } else {
+        missed.push("TASK:".into());
     }
-    replace_prompt_section(
+    if !replace_prompt_section(
         &mut body,
         "1. Split on speaker turns:",
         "4. Keep segments short for TTS:",
         "1. Cover every prepared source event exactly once and in source order. A source\n   event may be split into consecutive segments for a long TTS line or a sound seam;\n   every split carries the same `source_id`. Never merge source events.\n2. `kind` is already decided. Use it only to understand the text. Do not return a\n   `kind`, `speaker`, roster, cast, or attribution field; the immutable map in INPUT 2\n   is attached by code after you return.\n3. Narrate every word exactly once. Never include the source headline. A dialogue\n   event and its surrounding narration are already separate source events.\n",
-    );
+    ) {
+        missed.push("rules 1-3 (staging)".into());
+    }
+    warn_missing_sections("staging prompt", &missed);
 
     let contract = r#"
 ---STAGING OUTPUT CONTRACT---
@@ -789,15 +866,23 @@ Return ONE strict JSON object containing only `segments` and `fixes`:
   "segments": [{
     "source_id": "e0001",
     "text": "exact speakable text for this source event",
-    "mood": "English mood",
+    "mood": "one token from the mood palette below",
     "scene": "English place-time label",
-    "music": "one token from the palette",
-    "effect": ["tags from the effect palette"],
+    "music": "one token from the music palette in rule 8",
     "sound_after": "sound name or none",
     "stop_after": "sound name or none"
   }],
   "fixes": []
 }
+
+Emit a field only where it CHANGES. `mood`, `scene` and `music` are carried
+forward: omit the key and the previous segment's value is used. `text` is
+carried forward too — omit it when you neither split the source event nor fix a
+typo, and code fills it from the prepared event. A value you do emit replaces
+the carried one for that segment and every segment after it until the next.
+
+---MOOD PALETTE--- (one token, copied exactly)
+{mood_palette}
 
 Do not return `speaker`: `fixed_speakers` is authoritative and code attaches it.
 The staging pass may split a source event but may never change its identity,
@@ -810,8 +895,9 @@ halves of one line. Two different source events may carry identical text (a
 street crowd hailing the same phrase on two lines); that is two events, not a
 duplicate — answer each, and never merge them.
 
-Follow every audio, grammar, TTS, music, effect, and sound rule in this prompt.
+Follow every audio, grammar, TTS, music and sound rule in this prompt.
 "#;
+    let contract = contract.replace("{mood_palette}", &mood_palette);
     Ok(format!("{body}\n{contract}"))
 }
 
@@ -889,21 +975,55 @@ pub async fn analyze_chapter(
         }
     };
 
+    let mut soft_released: Option<String> = None;
     if let Some(gap) = sound_design_gap(&script, &text, &vocab.injects) {
         progress(
             0.88,
-            format!("sound design incomplete, asking for one repair: {gap}"),
+            format!("sound design incomplete, asking for repairs: {gap}"),
         );
-        let again = repair_once(&staging_prompt, &anyhow::anyhow!(gap), analyzer, settings).await?;
-        dump_raw(layout, "digest-sound-retry", &again);
-        script = parse_staging(&again)?;
-        if let Some(gap) = sound_design_gap(&script, &text, &vocab.injects) {
-            anyhow::bail!("digest staging left the sound design incomplete: {gap}");
+        // The cue scan is a heuristic about prose, not a contradiction: an
+        // idiom trips it with nothing staged, and a gate that can never be
+        // satisfied is a deadlock — every repair burns an LLM call and the
+        // chapter refuses 100% of correct answers. So the block decays: 90%,
+        // then -25% per consecutive failure, and below a coin flip the script
+        // is accepted with a loud warning instead of refused. Deterministic
+        // (no dice): the same chapter always takes the same path, and the loop
+        // always terminates within four evaluations. Check #1 in
+        // `sound_design_gap` stays hard — an unclosed loop bed is corruption,
+        // not judgment.
+        let mut attempt = 0u32;
+        let mut gap = gap;
+        loop {
+            // 0.90, 0.68, 0.51, then 0.38: below a coin flip, accept.
+            if gap_block_p(attempt) < 0.5 {
+                let msg = format!("ch{n} sound-design gate soft-released ({gap})");
+                progress(0.88, format!("WARN: {msg}"));
+                eprintln!("WARN: {msg}");
+                soft_released = Some(msg);
+                break;
+            }
+            let again =
+                repair_once(&staging_prompt, &anyhow::anyhow!(gap.clone()), analyzer, settings)
+                    .await?;
+            dump_raw(layout, "digest-staging-retry", &again);
+            script = parse_staging(&again)?;
+            attempt += 1;
+            match sound_design_gap(&script, &text, &vocab.injects) {
+                Some(g) => gap = g,
+                None => break,
+            }
         }
     }
 
     let data = merge_rounds(&context, &script);
-    let outcome = assemble_outcome(bible, &data, &data, &text)?;
+    let mut outcome = assemble_outcome(bible, &data, &data, &text)?;
+    // `warnings` is dropped by the agent today; `log` is what the worker
+    // prints, so the release lands in both — one for future readers, one
+    // for the operator watching now.
+    if let Some(w) = soft_released {
+        outcome.log.push(format!("   WARN: {w}"));
+        outcome.warnings.push(w);
+    }
     progress(1.0, format!("digest ch{n} done"));
     Ok(outcome)
 }
@@ -1174,7 +1294,7 @@ pub fn manual_accept(
             // The worker asks the model again at this point; the operator is
             // simply told, so they can paste an answer that places the sounds it
             // staged. Same rule, different remedy.
-            if let Some(gap) = sound_design_gap(&script, &text, &vocab.injects) {
+    if let Some(gap) = sound_design_gap(&script, &text, &vocab.injects) {
                 anyhow::bail!("{gap}");
             }
             Ok(ManualAnswer {
@@ -1334,12 +1454,75 @@ fn expand_sound_fields(segments: &[Value]) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+/// Fill fields the staging answer carried forward by omission.
+///
+/// The prompt asks for `mood`/`scene`/`music` only where they change and for
+/// `text` only where it changes, so a segment that omits one inherits the
+/// previous segment's value. `text` falls back to the prepared event's own text
+/// by `source_id` — the split/fix cases must still emit it, which the contract
+/// says outright. This runs before the validators, so they see the same fully
+/// populated segments an older, verboser answer would have produced and nothing
+/// downstream has to know the model-facing shape got smaller.
+fn carry_forward_fields(data: &mut Value, prepared: &PreparedChapter) {
+    let source_text: std::collections::HashMap<&str, &str> = prepared
+        .events
+        .iter()
+        .map(|e| (e.id.as_str(), e.text.as_str()))
+        .collect();
+    let Some(segments) = data.get_mut("segments").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut last: std::collections::HashMap<&'static str, Value> =
+        std::collections::HashMap::new();
+    for segment in segments.iter_mut() {
+        if crate::util::is_sound_item(segment) {
+            continue;
+        }
+        let Some(obj) = segment.as_object_mut() else {
+            continue;
+        };
+        for key in ["mood", "scene", "music"] {
+            if field_is_blank(obj, key) {
+                if let Some(carried) = last.get(key) {
+                    obj.insert(key.to_string(), carried.clone());
+                }
+            } else {
+                last.insert(key, obj.get(key).cloned().unwrap_or(Value::Null));
+            }
+        }
+        if field_is_blank(obj, "text") {
+            if let Some(text) = obj
+                .get("source_id")
+                .and_then(Value::as_str)
+                .and_then(|id| source_text.get(id))
+            {
+                obj.insert("text".into(), json!(*text));
+            }
+        }
+    }
+}
+
+/// Whether a carried field is absent or empty, the two ways a model declines to
+/// state it. An empty array counts, so a deliberate `["rain"]` is a value and a
+/// bare `[]` is not mistaken for one.
+fn field_is_blank(obj: &serde_json::Map<String, Value>, key: &str) -> bool {
+    match obj.get(key) {
+        None | Some(Value::Null) => true,
+        Some(Value::String(s)) => s.trim().is_empty(),
+        Some(Value::Array(a)) => a.is_empty(),
+        _ => false,
+    }
+}
+
 /// Phrases from rule 10's own sweep that are literal on the page in this genre.
 ///
 /// Narrow on purpose: a hit here can fail a chapter, so a word that is usually a
 /// metaphor does not belong on the list. `dao` alone is out for that reason
-/// `dao phay` is in.
-const SOUND_CUES: [&str; 21] = [
+/// `dao phay` is in. Bare `chém` is out for the same reason: ch262's only hit
+/// was the idiom "muốn chém muốn giết" (kill me if you want), no slash staged,
+/// and the gate refused every correct answer. The compounds (`rút kiếm`,
+/// `vung kiếm`) stay; they name an action, not a figure of speech.
+const SOUND_CUES: [&str; 20] = [
     "phun ra",
     "máu tươi",
     "máu văng",
@@ -1359,9 +1542,15 @@ const SOUND_CUES: [&str; 21] = [
     "bắn tên",
     "rút kiếm",
     "vung kiếm",
-    "chém",
     "đâm",
 ];
+
+/// Block probability after `failures` consecutive same-gap failures: 90%,
+/// then -25% each time (0.90, 0.68, 0.51, 0.38...). Pure so the curve is
+/// pinned without spending LLM calls; the caller accepts below a coin flip.
+fn gap_block_p(failures: u32) -> f64 {
+    0.9 * 0.75f64.powi(failures as i32)
+}
 
 /// Two sound-design answers that cannot be right, checked in that order.
 ///
@@ -1836,6 +2025,7 @@ fn parse_staged_script(
     let cleaned = strip_fences(raw);
     let mut data =
         parse_json_repaired(cleaned).with_context(|| "staging is not valid JSON".to_string())?;
+    carry_forward_fields(&mut data, prepared);
     if let Some(segs) = data.get("segments").and_then(|s| s.as_array()).cloned() {
         data["segments"] = json!(expand_sound_fields(&segs)?);
     }
@@ -2415,6 +2605,80 @@ mod tests {
             !ctx.contains("chapters_seen"),
             "context leaked chapter baggage: {ctx}"
         );
+    }
+
+    /// The staging shape asks for `mood`/`scene`/`music`/`text` only where they
+    /// change; code fills the rest. This is the pass that makes the smaller
+    /// answer identical to the older, fully-populated one before any validator
+    /// or the mixer ever sees it.
+    #[test]
+    fn omitted_staging_fields_carry_forward_from_the_previous_segment() {
+        let prepared = prepare_chapter("\"Một.\"\n\nNàng gật đầu.");
+        let narration = prepared
+            .events
+            .iter()
+            .find(|e| e.kind == "narration")
+            .expect("the prose event")
+            .text
+            .clone();
+        let mut data = json!({
+            "segments": [
+                {"source_id": "e0001", "text": "Một.", "mood": "calm",
+                 "scene": "room", "music": "quiet"},
+                {"source_id": "e0002"}
+            ]
+        });
+        carry_forward_fields(&mut data, &prepared);
+        let segs = data["segments"].as_array().unwrap();
+        assert_eq!(segs[1]["mood"], json!("calm"));
+        assert_eq!(segs[1]["scene"], json!("room"));
+        assert_eq!(segs[1]["music"], json!("quiet"));
+        // `text` is filled from the prepared event, so the model never re-types
+        // the chapter it was handed.
+        assert_eq!(segs[1]["text"], json!(narration));
+
+        // A segment that states its own value never inherits the previous one —
+        // this is how a split keeps its two different halves.
+        let mut split = json!({
+            "segments": [
+                {"source_id": "e0001", "text": "Một.", "mood": "calm"},
+                {"source_id": "e0001", "text": "Hai.", "mood": "urgent"},
+                {"source_id": "e0001"}
+            ]
+        });
+        carry_forward_fields(&mut split, &prepared);
+        let segs = split["segments"].as_array().unwrap();
+        assert_eq!(segs[1]["mood"], json!("urgent"));
+        assert_eq!(segs[2]["mood"], json!("urgent"));
+        assert_eq!(segs[1]["text"], json!("Hai."));
+    }
+
+    /// A reworded template must surface as a miss, not vanish. This is the
+    /// mechanism that let `analyze.txt`'s rule 1 drift out of sync unnoticed.
+    #[test]
+    fn a_missing_section_marker_is_reported_not_silently_skipped() {
+        let mut body = String::from("1. something else entirely\n2. new_characters\n");
+        assert!(!replace_prompt_section(
+            &mut body,
+            "1. mentions records",
+            "2. new_characters",
+            "NEW"
+        ));
+        assert_eq!(body, "1. something else entirely\n2. new_characters\n");
+
+        let mut body = String::from("1. mentions records\n2. new_characters\n");
+        assert!(replace_prompt_section(
+            &mut body,
+            "1. mentions records",
+            "2. new_characters",
+            "NEW"
+        ));
+        assert!(body.starts_with("NEW"), "{body}");
+
+        let mut miss = Vec::new();
+        let mut body = String::from("no marker here");
+        replace_or_miss(&mut body, "{chapter_text}", "text", &mut miss);
+        assert_eq!(miss.len(), 1);
     }
 
     #[test]
@@ -3195,6 +3459,33 @@ mod tests {
 
         // 5. A chapter that stages nothing is allowed to place nothing.
         assert!(sound_design_gap(&silent, "Trời hôm nay đẹp.", &pool).is_none());
+    }
+
+    /// The soft-release curve: three blocks, then accept. Pinned because the
+    /// loop's termination hangs on it — a curve that never drops below half
+    /// is the deadlock back again.
+    #[test]
+    fn gap_block_p_releases_on_the_fourth_failure() {
+        assert!((gap_block_p(0) - 0.9).abs() < 1e-9);
+        assert!(gap_block_p(1) >= 0.5);
+        assert!(gap_block_p(2) >= 0.5);
+        assert!(gap_block_p(3) < 0.5);
+    }
+
+    /// ch262's false positive, pinned: bare `chém` is an idiom
+    /// ("muốn chém muốn giết"), not a staged slash, and must not fail a
+    /// chapter that places nothing. The compounds still catch real blades.
+    #[test]
+    fn bare_chem_is_no_sound_cue() {
+        use crate::audio_pool::ClipPool;
+        let pool = ClipPool::new();
+        let line = |t: &str| json!({"speaker": "Narrator", "text": t});
+        let chapter = "Muốn chém muốn giết, người cứ nói thẳng ra một lời.";
+        let silent = json!({"segments": [line(chapter)]});
+        assert!(sound_design_gap(&silent, chapter, &pool).is_none());
+        let chapter2 = "Hắn rút kiếm chém xuống.";
+        let silent2 = json!({"segments": [line(chapter2)]});
+        assert!(sound_design_gap(&silent2, chapter2, &pool).is_some());
     }
 
     /// The two rounds are stitched by key, and each key has one owner.
