@@ -1,4 +1,4 @@
-//! Stage 2 — digest a chapter into `script-NN.json`.
+//! Stage 2, digest a chapter into `script-NN.json`.
 //!
 //! Ported from `analyze.py`. Two behavioural changes are forced by running
 //! across a cluster:
@@ -40,7 +40,7 @@ pub use tags::{
 #[derive(Debug, Clone)]
 pub struct DigestOutcome {
     pub script: Value,
-    /// `{new_characters, new_aliases, roster, speakers}` — merged by the inductor.
+    /// `{new_characters, new_aliases, roster, speakers}`, merged by the inductor.
     pub delta: Value,
     pub segments: usize,
     pub log: Vec<String>,
@@ -97,23 +97,18 @@ fn strip_fences(raw: &str) -> &str {
 /// common mistakes before preserving the normal parse error.
 ///
 /// Prompt answers occasionally put literal quotation marks inside a Vietnamese
-/// `text` value (`... khắc một chữ "Võ" ...`). The first unescaped quote makes
-/// serde treat the rest of the sentence as JSON source and fail. Feeding each
-/// parse error back into the input is safer than guessing from punctuation: the
-/// quote immediately before the error is escaped, and the next parse confirms
-/// whether that interpretation produces valid JSON. Bounded retries keep truly
-/// malformed output from being rewritten indefinitely.
+/// `text` value. The first unescaped quote makes serde treat the rest of the
+/// sentence as JSON source and fail. Feeding each parse error back into the
+/// input is safer than guessing from punctuation: the quote immediately before
+/// the error is escaped, and the next parse confirms the reading. Bounded
+/// retries keep truly malformed output from being rewritten indefinitely.
 ///
-/// **The unambiguous repairs run on every pass, not once.** That is the fix for
-/// ch79's staging answer, which died of `control character found while parsing a
-/// string` on the *repair* attempt as well as the first: escaping control
+/// **The unambiguous repairs run on every pass, not once.** Escaping control
 /// characters requires knowing which quotes open a string, so one unescaped
-/// `"` inside a `text` value puts the scanner outside the string and every later
-/// newline is emitted raw. Escaping quotes afterwards moves that boundary
-/// again — so a pass that only fixes quotes can expose control characters the
-/// first pass could not see, and a pass that only escapes sees the wrong
-/// boundaries. Alternating them until neither changes anything is the only order
-/// that converges on this input.
+/// `"` inside a `text` value puts the scanner outside the string and every
+/// later newline is emitted raw; escaping quotes afterwards moves that
+/// boundary again. Alternating the repairs until neither changes anything is
+/// the only order that converges on such input.
 fn parse_json_repaired(input: &str) -> Result<Value> {
     if let Ok(value) = serde_json::from_str(input) {
         return Ok(value);
@@ -127,7 +122,7 @@ fn parse_json_repaired(input: &str) -> Result<Value> {
     // each quote repair is worse than useless: an escaped quote reads as "a
     // literal quote inside a string", so the scanner never sees the string
     // *close*, swallows the rest of the document, and turns its newlines into
-    // escapes — which is how a repair pass can turn one broken answer into a
+    // escapes, which is how a repair pass can turn one broken answer into a
     // differently broken one. ch79 died of `control character found while
     // parsing a string` twice over for exactly this reason.
     //
@@ -206,7 +201,7 @@ fn json_error_offset(input: &str, error: &serde_json::Error) -> Option<usize> {
 ///
 /// **A quote followed by `:` is a key's closing quote, never the literal one**
 /// inside a value, and escaping it turns `"segments": [...]` into a key that is
-/// no longer a string — `key must be a string`, a new error one step further
+/// no longer a string, `key must be a string`, a new error one step further
 /// from the truth. Skipping those is what keeps the walk on the right quote when
 /// a value holds a raw `"` *and* a raw newline: the scanner is out of sync, so
 /// the first complaint can land anywhere, and the nearest quote is then often
@@ -426,19 +421,17 @@ impl PreparedChapter {
     /// split looks wrong.
     ///
     /// This exists because of a **blind spot, not a bug**. Narration and
-    /// dialogue are told apart by quote marks and nothing else — `"`, `“` and
-    /// `「`. So a chapter that arrives with no quote marks in it is one long run
-    /// of narration, and from there *nothing downstream complains*: the
-    /// attribution answer is complete, the source gate is satisfied, the
-    /// chapter renders, and every ledger row is green — while the whole book is
-    /// read in a single voice. The validators can only catch a model that
-    /// disagrees with *the text it was given*; they cannot catch text that never
-    /// offered a speaker to disagree with.
+    /// dialogue are told apart by quote marks and nothing else, so a chapter
+    /// with no quote marks is one long run of narration, and from there
+    /// *nothing downstream complains*: every ledger row is green while the
+    /// whole book is read in a single voice. The validators can only catch a
+    /// model that disagrees with *the text it was given*; they cannot catch
+    /// text that never offered a speaker to disagree with.
     ///
     /// Which is why the message is worded as a thing to check and not an
-    /// accusation. A genuinely single-voice chapter is a real thing — a scene
-    /// description, a dream sequence — and blaming the crawler on every one of
-    /// them would train the operator to ignore the line exactly when it matters.
+    /// accusation. A genuinely single-voice chapter is a real thing, and
+    /// blaming the crawler on every one of them would train the operator to
+    /// ignore the line exactly when it matters.
     fn split_summary(&self) -> String {
         let dialogue = self.dialogue_count();
         let narration = self.events.len() - dialogue;
@@ -480,7 +473,7 @@ fn prepare_chapter(text: &str) -> PreparedChapter {
     // metadata. Sanitize at the same boundary the crawler and local reader use,
     // so those artifacts never receive source ids or become obligations for the
     // model. A decoded `&quot;` becomes a real quote delimiter, which
-    // `prepare_chapter` then splits on — exactly what a properly crawled
+    // `prepare_chapter` then splits on, exactly what a properly crawled
     // chapter would have carried.
     let text = crate::crawl::sanitize_chapter_text(text);
     let chars: Vec<(usize, char)> = text.char_indices().collect();
@@ -616,8 +609,8 @@ fn replace_prompt_section(
 ///
 /// Dialogue detection is not a model decision: `prepare_chapter` has already
 /// marked every event, and narration is attached to `Narrator` by code. The
-/// chapter is therefore shown as answerable `dialogue_events` — each beside its
-/// nearest source narration — plus `narration_ids` the model must not answer. The
+/// chapter is therefore shown as answerable `dialogue_events`, each beside its
+/// nearest source narration, plus `narration_ids` the model must not answer. The
 /// answer map stays small while the tags that actually identify speakers remain
 /// visible. The remaining identity fields are the chapter's own.
 fn build_attribution_prompt(
@@ -920,15 +913,11 @@ pub async fn analyze_chapter(
 /// describe what came out.
 ///
 /// **Shared by the worker's automatic path and the operator's manual one, and
-/// that is the point.** A manual digest that assembled its script differently
-/// would put a chapter into the library that the automatic path would have
-/// refused — and the manual route exists to be *the same digest* with a person
-/// standing in for the model, not a second, looser one. One function, rather
-/// than two that agree today.
-///
-/// The `sound_design_gap` check stays in the callers, because they answer it
-/// differently: the worker asks the model again, the operator is told and gets
-/// to paste a better answer.
+/// that is the point.** The manual route exists to be *the same digest* with a
+/// person standing in for the model, not a second, looser one. One function,
+/// rather than two that agree today. The `sound_design_gap` check stays in
+/// the callers, because they answer it differently: the worker asks the model
+/// again, the operator is told and gets to paste a better answer.
 fn assemble_outcome(
     bible: &Value,
     context: &Value,
@@ -939,7 +928,7 @@ fn assemble_outcome(
 
     let mut log = Vec::new();
     // First line, before anything the model said. The split is decided from the
-    // text alone, so this is the earliest a bad crawl is visible — and the only
+    // text alone, so this is the earliest a bad crawl is visible, and the only
     // place a *silent* one is, since a chapter with no dialogue has nothing for
     // any validator to object to. It is here rather than in the automatic path
     // because the manual path is where a person is standing there able to act
@@ -979,7 +968,7 @@ fn assemble_outcome(
     let script = json!({
         // The chapter's own name, rewritten out of the machine-translated
         // headline the crawl left on line 1. `Layout::chapter_title` prefers
-        // this, so it is the mp3's filename *and* the spoken headline — one
+        // this, so it is the mp3's filename *and* the spoken headline, one
         // value, two consumers, no chance of them disagreeing.
         "title": data.get("title").cloned().unwrap_or(json!("")),
         "atmosphere": data.get("atmosphere").cloned().unwrap_or(json!("")),
@@ -1084,7 +1073,7 @@ pub struct ManualPrompt {
 pub struct ManualAnswer {
     /// Round 1: the cast, to be handed back when asking for round 2.
     pub cast: Option<Value>,
-    /// Round 2: the finished outcome — script assembled, delta ready.
+    /// Round 2: the finished outcome, script assembled, delta ready.
     pub outcome: Option<DigestOutcome>,
 }
 
@@ -1130,7 +1119,7 @@ fn manual_inputs(layout: &Layout, n: u32) -> Result<(Value, String)> {
 /// the same functions: round 1 is [`build_attribution_prompt`] and round 2 is
 /// [`build_staging_prompt`]. A manual digest is the automatic one with a person
 /// (or a backup model) standing in for the analyzer, so a hand-driven chapter
-/// must not be dramatized by a second, looser contract — that was the legacy
+/// must not be dramatized by a second, looser contract, that was the legacy
 /// `build_prompt` / `build_script_prompt` pair, which no longer runs here.
 ///
 /// `cast` is the validated answer to round 1 and is required for round 2: the
@@ -1157,7 +1146,7 @@ pub fn manual_prompt(layout: &Layout, n: u32, cast: Option<&Value>) -> Result<Ma
 /// **The same validators the worker's answers go through, and that is the whole
 /// design.** A manual digest is the automatic one with a person standing in for
 /// the model, so an answer the worker's path would have refused is refused here
-/// too — with the validator's own complaint as the message, because the operator
+/// too, with the validator's own complaint as the message, because the operator
 /// is the one who can act on it.
 ///
 /// Nothing is written. Committing is [`write_script`], called by the caller, so
@@ -1207,7 +1196,7 @@ pub fn write_script(layout: &Layout, n: u32, script: &Value) -> Result<()> {
 /// One generation, retried through rate limits.
 ///
 /// Split out because the digest makes two calls now and the retry policy must
-/// not differ between them — a round that gave up sooner than the other would
+/// not differ between them, a round that gave up sooner than the other would
 /// fail chapters for a reason that has nothing to do with the round.
 async fn generate_retrying(
     prompt: &str,
@@ -1224,7 +1213,7 @@ async fn generate_retrying(
                 // The configured backend and the one that ran are not the same
                 // thing whenever the gemini chain falls back. Say which one
                 // answered, so the operator's screen stops naming a backend that
-                // had already given up — this is the label that read "via gemini"
+                // had already given up, this is the label that read "via gemini"
                 // while opencode was the thing hanging.
                 if backend.as_str() != analyzer {
                     progress(
@@ -1279,7 +1268,7 @@ async fn repair_once(
 ///
 /// The digest throws the model's text away once it parses, which is right for a
 /// run and useless for a post-mortem: "the analyzer placed no sounds" is a
-/// symptom, and the raw is the only place the cause is visible — whether it
+/// symptom, and the raw is the only place the cause is visible, whether it
 /// reasoned about the layer and dropped it, or never considered it at all.
 fn dump_raw(layout: &Layout, round: &str, raw: &str) {
     if std::env::var("BM_DIGEST_RAW").is_err() {
@@ -1293,21 +1282,17 @@ fn dump_raw(layout: &Layout, round: &str, raw: &str) {
 /// Lift the sound fields off the lines and into sibling items at their seams.
 ///
 /// The script pass is asked for a sound as a *field on the line it follows*
-/// rather than as an item of its own, and that is a deliberate concession to the
-/// model, not a design: given an array of objects to write it fills every field
-/// of every object and will not introduce an object it was not handed. Asked for
-/// sound items directly it returns none at all — measured, not assumed (see the
-/// module note on the two rounds). Asked for a field it fills the field.
+/// rather than as an item of its own, and that is deliberate: given an array
+/// of objects, a model fills every field of every object and will not
+/// introduce an object it was not handed (asked for sound items directly it
+/// returns none at all; asked for a field it fills the field).
 ///
 /// So the pipeline does the moving. What lands on disk is still a sibling
-/// `{"sound": ...}` item at the seam, so no renderer is ever handed a line with
-/// a sound on it and `text` is never touched — the shape the script has is
-/// unchanged, only the shape the *prompt* asks for.
-///
-/// Total on purpose: the fields are removed from every line whether or not the
-/// name is any good. A bad one then fails validation with the message that
-/// explains it, instead of sitting on a line being read by nobody — which is the
-/// silent-loss bug this whole area keeps producing.
+/// `{"sound": ...}` item at the seam, so no renderer is ever handed a line
+/// with a sound on it and `text` is never touched. The fields are removed
+/// from every line whether or not the name is any good: a bad one then fails
+/// validation with the message that explains it, instead of sitting on a line
+/// being read by nobody.
 fn expand_sound_fields(segments: &[Value]) -> Result<Vec<Value>> {
     let mut out = Vec::with_capacity(segments.len());
     for (i, s) in segments.iter().enumerate() {
@@ -1352,7 +1337,7 @@ fn expand_sound_fields(segments: &[Value]) -> Result<Vec<Value>> {
 /// Phrases from rule 10's own sweep that are literal on the page in this genre.
 ///
 /// Narrow on purpose: a hit here can fail a chapter, so a word that is usually a
-/// metaphor does not belong on the list. `dao` alone is out for that reason —
+/// metaphor does not belong on the list. `dao` alone is out for that reason
 /// `dao phay` is in.
 const SOUND_CUES: [&str; 21] = [
     "phun ra",
@@ -1383,14 +1368,14 @@ const SOUND_CUES: [&str; 21] = [
 /// Both are things the prompt says in as many words and the model does anyway,
 /// and both are silent failures: the chapter merges, sounds fine at a glance,
 /// and has no sound design where the prose staged one. Neither is a judgment
-/// call, which is why they can be gated at all — a chapter that places three
+/// call, which is why they can be gated at all, a chapter that places three
 /// sounds and misses a fourth is the model's business, and no word list can
 /// second-guess it.
 ///
 /// 1. A `loop`ed bed started and never stopped. The prompt calls this "the one
 ///    way to get a bed wrong": the clip plays once and stops dead. Measured on
-///    ch9 — a 25 s bed opened into a 130 s kitchen, then digital silence.
-/// 2. A chapter that stages a sound and places none at all — the cue list from
+///    ch9, a 25 s bed opened into a 130 s kitchen, then digital silence.
+/// 2. A chapter that stages a sound and places none at all, the cue list from
 ///    rule 10's own last check, matched against the chapter text.
 fn sound_design_gap(
     script: &Value,
@@ -1477,8 +1462,8 @@ fn merge_rounds(context: &Value, script: &Value) -> Value {
 /// A crowd is a chorus, not a cast: every unnamed speaker in a chapter shares
 /// this name and speaks in the Narrator's voice, which is what the script, the
 /// cast file and the mix all show. Numbered slots (`anonymous:anon-1`) are gone
-/// from new digests — near-identical one-off clones for a street greeting were
-/// the loudest thing in a scene — but they still resolve here, and are still
+/// from new digests, near-identical one-off clones for a street greeting were
+/// the loudest thing in a scene, but they still resolve here, and are still
 /// voiced by the Narrator, so chapters already on disk keep rendering.
 pub(crate) const ANONYMOUS_SPEAKER: &str = "Anonymous";
 
@@ -1869,8 +1854,8 @@ fn parse_staged_script(
 ///
 /// The source gate builds its `expected` with `retag_text`, so the answer has
 /// to come through the same door: `"[hắng giọng] Khụ khụ khụ, ban đầu…"` is
-/// stored as `"[hắng giọng] ban đầu…"`. Leaving it is wrong twice over — the
-/// tag *and* the words get spoken — and refusing it stalls a chapter whose
+/// stored as `"[hắng giọng] ban đầu…"`. Leaving it is wrong twice over, the
+/// tag *and* the words get spoken, and refusing it stalls a chapter whose
 /// model is otherwise right, which is exactly what ch22 did across every racer.
 /// `retag_text` is idempotent and word-boundary disciplined, and text with no
 /// written sound is untouched.
@@ -1932,7 +1917,7 @@ fn validate_digest_identity(data: &Value, bible: &Value) -> Result<()> {
             // `roster` is a join key, not a display list: `speaker` is matched
             // against it, and the cast is keyed by the canonical name, so an
             // alias here resolves to no voice. Naming the canonical spelling
-            // is what lets the repair converge — without it the model retries
+            // is what lets the repair converge, without it the model retries
             // the same alias until the racers give up on the chapter.
             let owners = alias_owners(&characters, name);
             if let Some(canonical) = owners.first().filter(|_| owners.len() == 1) {
@@ -2038,8 +2023,8 @@ fn normalized_source(text: &str) -> String {
     crate::util::squeeze_ws(&text)
 }
 
-/// Text with every *written* non-verbal sound — and every tag standing in for
-/// one — removed, so two texts can be compared while ignoring how, or whether,
+/// Text with every *written* non-verbal sound, and every tag standing in for
+/// one, removed, so two texts can be compared while ignoring how, or whether,
 /// they spell laughter, sighs and coughs.
 ///
 /// Longest spellings first: `"thở dài một hơi"` before `"thở dài"`, and a
@@ -2096,7 +2081,7 @@ fn source_text_matches(expected: &str, actual: &[String]) -> bool {
 /// The tag whose written sound is still sitting in the text, as the corpus
 /// actually spells it. `retag_text` only trims a literal run *immediately*
 /// after its tag, so a model that hoists the tag to the head of the line
-/// leaves the words behind — this is the shape being named.
+/// leaves the words behind, this is the shape being named.
 fn leftover_written_sound(text: &str) -> Option<(&'static str, &'static str)> {
     let lower = text.to_lowercase();
     for (tag, spellings) in [
@@ -2116,8 +2101,8 @@ fn leftover_written_sound(text: &str) -> Option<(&'static str, &'static str)> {
 
 /// Explain a mismatch that is *only* about written non-verbal sound.
 ///
-/// This class fails a chapter across every racer — the model adds the tag and
-/// keeps the words it stands for — and the generic "was changed" message gives
+/// This class fails a chapter across every racer, the model adds the tag and
+/// keeps the words it stands for, and the generic "was changed" message gives
 /// the repair nothing to act on. It fires only when the two texts agree once
 /// written sounds are ignored on both sides, so any other disagreement keeps
 /// the honest generic message.
@@ -2240,12 +2225,12 @@ mod tests {
     /// The chain the whole program rests on, as one test: **a crawler's output
     /// decides whether the model is asked a question at all.**
     ///
-    /// `prepare_chapter` decides narration-vs-dialogue from quote marks alone —
+    /// `prepare_chapter` decides narration-vs-dialogue from quote marks alone
     /// `"`, `“`, `「`. So a crawler that returns a container with no quote marks
     /// in it, or that picks a site which marks speech some other way, hands the
     /// digest one long run of narration. From there *nothing complains*: the
     /// attribution answer is complete, the source gate passes, the chapter
-    /// renders, every ledger row is green — and the book is read in one voice.
+    /// renders, every ledger row is green, and the book is read in one voice.
     ///
     /// That is why the split is printed. A validator can only catch a model
     /// disagreeing with the text it was given; it cannot catch text that never
@@ -2278,7 +2263,7 @@ mod tests {
     }
 
     /// The same line, for a chapter that is legitimately all narration, must
-    /// *not* blame the crawler — or it stops being read.
+    /// *not* blame the crawler, or it stops being read.
     #[test]
     fn the_split_report_does_not_blame_the_crawler_on_a_quiet_chapter() {
         let p = prepare_chapter("Chương 2: Một cảnh\n\nHắn lật trang sách.");
@@ -2371,7 +2356,7 @@ mod tests {
     /// stray quote onward, so it emits the newline raw; the quote repair cannot
     /// fix a control-character complaint without corrupting an unrelated key.
     /// Quotes first, then control characters, is the only order that gets this
-    /// through — and it failed on this input and on its own repair before, which
+    /// through, and it failed on this input and on its own repair before, which
     /// is how a chapter was lost to `control character found while parsing a
     /// string` twice over.
     #[test]
@@ -2404,7 +2389,7 @@ mod tests {
     }
 
     /// A literal newline inside a string is ch79's failure in miniature, and it
-    /// is *repaired* rather than reported — the alternative is burning a model
+    /// is *repaired* rather than reported, the alternative is burning a model
     /// call on output this code can fix.
     #[test]
     fn a_raw_control_character_is_repaired_rather_than_reported() {
@@ -2685,7 +2670,7 @@ mod tests {
 
     /// ch6's opening: prose, then a street hailing the same phrase twice on two
     /// consecutive lines. Both are dialogue events, and the answer map holds
-    /// only them — narration is not the model's to answer.
+    /// only them, narration is not the model's to answer.
     #[test]
     fn narration_is_attached_by_code_and_the_map_holds_only_dialogue() {
         let prepared = prepare_chapter(
@@ -2804,7 +2789,7 @@ mod tests {
     #[test]
     fn an_entity_bearing_chapter_prepares_to_the_decoded_text() {
         // ch79 as crawled by the pre-fix crawler: numeric entities raw on
-        // disk. The model reads `&#x27;` and answers `'` — so the prepared
+        // disk. The model reads `&#x27;` and answers `'`, so the prepared
         // events must carry the decoded form, or the source gate refuses the
         // chapter on every racer and it can never digest (the stuck-chapter
         // shape the inductor log showed for ch79/85/91/93/96/100).
@@ -2829,7 +2814,7 @@ mod tests {
         // prompt. It does not any more: the crawler owns that, and a stored
         // chapter is whatever the crawler (or the operator who pasted it) wrote.
         //
-        // What still has to hold is the *source contract* — every sentence in
+        // What still has to hold is the *source contract*, every sentence in
         // the chapter is an event the model must cover, and the alignment gate
         // below it is unchanged by any of this.
         let prepared = prepare_chapter(
@@ -2853,7 +2838,7 @@ mod tests {
     fn a_decoded_quot_becomes_a_dialogue_boundary() {
         // `&quot;` survived the old crawler too, only as raw markup. Decoding
         // turns it into a real quote delimiter, so prepare_chapter splits the
-        // dialogue out exactly as it would for a properly crawled chapter —
+        // dialogue out exactly as it would for a properly crawled chapter
         // and the gate keeps demanding the delimiter-free speech span.
         let prepared =
             prepare_chapter("Chương 1: Gặp gỡ\n\n&quot;Ừm.&quot; hắn đáp, &quot;xong rồi.&quot;");
@@ -2881,7 +2866,7 @@ mod tests {
         ]});
         collapse_redundant_sounds(&mut data);
         // The tag and the words it stands for are spoken as one cough, and the
-        // source verbatim is normalized the same way — one door for both.
+        // source verbatim is normalized the same way, one door for both.
         for i in [0, 1] {
             assert_eq!(
                 data["segments"][i]["text"], "[hắng giọng] ban đầu ta cầm bảo đao.",
@@ -2893,7 +2878,7 @@ mod tests {
 
     #[test]
     fn written_laughter_is_recognized_wherever_it_sits_in_the_line() {
-        // The engine counts `haha` — one word — and a laugh in the middle of a
+        // The engine counts `haha`, one word, and a laugh in the middle of a
         // line. Rule 7 used to describe only "Ha ha" leading a line, which is
         // how ch22 failed on every racer.
         assert_eq!(
@@ -3021,7 +3006,7 @@ mod tests {
             {"name": "Thanh Sơn lão tổ", "proper_aliases": []},
         ]});
         // `roster` is the speaker list, so a character named only in the
-        // narration is genuinely absent from it — and that must not make the
+        // narration is genuinely absent from it, and that must not make the
         // mention illegal.
         let data = json!({
             "roster": ["Narrator", "Thanh Sơn lão tổ"],
@@ -3077,7 +3062,7 @@ mod tests {
     /// This is the concession the whole shape rests on, so it is pinned: the
     /// field must never survive onto a line, `text` must never be touched, a
     /// *bad* name must still be lifted so the validator can refuse it, and a
-    /// blank must be refused here — a blank is a line nobody decided about, and
+    /// blank must be refused here, a blank is a line nobody decided about, and
     /// it was exactly what the model wrote on all 68 lines of a chapter that
     /// stages six kitchen events.
     #[test]
@@ -3099,7 +3084,7 @@ mod tests {
             "{:?}",
             got[0]
         );
-        // The sound lands between the halves — not after the whole line.
+        // The sound lands between the halves, not after the whole line.
         assert_eq!(got[1], json!({"sound": "page-turn"}));
         assert_eq!(got[2], b);
 
@@ -3176,7 +3161,7 @@ mod tests {
             "a mentioned cleaver must not require a chopping sound"
         );
 
-        // 2. The bed opened and never closed — ch9's exact answer.
+        // 2. The bed opened and never closed, ch9's exact answer.
         let unclosed = json!({"segments": [
             line("Sau một hồi cảm khái, hai người liền đi đến phòng bếp."),
             {"sound": "food-prep"},
@@ -3200,7 +3185,7 @@ mod tests {
             "closed must pass"
         );
 
-        // 4. A one-shot needs no stop — only a `looped` sound does.
+        // 4. A one-shot needs no stop, only a `looped` sound does.
         let oneshot = json!({"segments": [
             line("Sau một hồi cảm khái, hai người liền đi đến phòng bếp."),
             {"sound": "coin"},
@@ -3357,7 +3342,7 @@ mod tests {
             .expect_err("round 2 needs round 1");
         assert!(err.to_string().contains("round 1's cast"), "{err}");
 
-        // A garbage paste fails the *worker's* validator — the same one — and
+        // A garbage paste fails the *worker's* validator, the same one, and
         // says so in words the operator can paste back into their model.
         let err =
             manual_accept(&layout, 51, Round::Cast, "not json at all", None).expect_err("not JSON");
@@ -3389,13 +3374,13 @@ mod tests {
 
     /// The happy path, end to end, without a model.
     ///
-    /// Two pastes and a finished chapter — the flow the TUI drives with `c` and
+    /// Two pastes and a finished chapter, the flow the TUI drives with `c` and
     /// `v` and the backup digestor drives with a model, exercised through
     /// `manual_accept` so the seam between the rounds is real rather than
     /// assumed. What this buys that the per-part tests cannot: it proves the
     /// round-1 answer is *usable* as round 2's input.
     ///
-    /// The staging answer names **no speaker at all** — it cannot, and saying so
+    /// The staging answer names **no speaker at all**, it cannot, and saying so
     /// in the fixture is the point: the map round 1 fixed is attached by code,
     /// and the finished script shows both of its decisions (Narrator for the
     /// prose, the anonymous slot for the quote). The `calm` alias must land as
@@ -3414,7 +3399,7 @@ mod tests {
         )
         .unwrap();
 
-        // Round 1: the attribution answer — one entry per *dialogue* event, in
+        // Round 1: the attribution answer, one entry per *dialogue* event, in
         // source order. Narration is not the model's to answer; code owns it.
         let cast = manual_accept(
             &layout,
@@ -3454,7 +3439,7 @@ mod tests {
         assert_eq!(segments[0]["speaker"], json!("Narrator"));
         assert_eq!(segments[1]["speaker"], json!("Anonymous"));
         assert_eq!(segments[0]["music"], json!("quiet"));
-        // The delta is what the inductor merges into the bible — a manual digest
+        // The delta is what the inductor merges into the bible, a manual digest
         // has to produce one, or the next chapter would not know this cast.
         assert!(outcome.delta.get("roster").is_some(), "{:?}", outcome.delta);
         assert!(
@@ -3464,7 +3449,7 @@ mod tests {
         );
 
         // **And the hand-off is real, not decorative.** A staging answer that
-        // drops an event is refused by round 2 — otherwise the source gate is
+        // drops an event is refused by round 2, otherwise the source gate is
         // decorative and a chapter can ship with words the novel never said.
         let err = manual_accept(
             &layout,

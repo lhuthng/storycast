@@ -34,7 +34,7 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
     let mut inner = st.lock().await;
     // A registration is a liveness report with nothing to report yet. It goes
     // through the same `observe` a beat does, so the two routes into the
-    // ledger cannot drift apart — which is what happened when the bookkeeping
+    // ledger cannot drift apart, which is what happened when the bookkeeping
     // lived in two handlers.
     let beat = Heartbeat {
         worker_id: r.worker_id,
@@ -66,7 +66,7 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
 async fn heartbeat(State(st): State<Shared>, Json(h): Json<Heartbeat>) -> impl IntoResponse {
     let mut inner = st.lock().await;
     // Whether the report arrived by post or by the dispatcher's poll, it lands
-    // in the same place — see `state::observe`.
+    // in the same place, see `state::observe`.
     inner.observe(&h);
     inner.save();
     Json(
@@ -88,7 +88,7 @@ async fn task(State(st): State<Shared>, Query(q): Query<TaskQuery>) -> impl Into
 
 async fn complete(State(st): State<Shared>, Json(c): Json<Complete>) -> impl IntoResponse {
     // Shipments first: a Done row's file must already be home when the
-    // ledger says so — on every channel, including the hook's, which has no
+    // ledger says so, on every channel, including the hook's, which has no
     // collection round trip.
     if !c.unit_files.is_empty() {
         let (layout, engine) = {
@@ -106,7 +106,7 @@ async fn complete(State(st): State<Shared>, Json(c): Json<Complete>) -> impl Int
 /// Store the takes a completion report ships, before the row turns Done.
 ///
 /// Same bounds and expected-set check as the upload path; a bad file is
-/// skipped, the completion still applies — a reject must not strand a whole
+/// skipped, the completion still applies, a reject must not strand a whole
 /// finished batch over one corrupt name.
 fn store_shipments(
     layout: &bm_core::Layout,
@@ -151,8 +151,8 @@ struct SegmentQuery {
 /// discard contract: a file is deleted on the worker only after the inductor
 /// returns 200 for that exact file.
 ///
-/// The name is validated against the expected set for (chapter, engine) — a
-/// worker may not write an arbitrary path into the store — and the body
+/// The name is validated against the expected set for (chapter, engine), a
+/// worker may not write an arbitrary path into the store, and the body
 /// against the same size bounds the merger enforces (non-trivial, ≤ 8 MB).
 /// Rejects rather than storing a file the merger would ignore.
 async fn put_segment(
@@ -210,8 +210,8 @@ async fn put_segment(
 
 /// One rendered unit, pulled by a merge worker that does not hold it.
 ///
-/// Same expected-set validation as the upload path — a worker may read only
-/// files the plan names — and the same size floor, so a half-written file is
+/// Same expected-set validation as the upload path, a worker may read only
+/// files the plan names, and the same size floor, so a half-written file is
 /// a 404 rather than a corrupt mix. This is what lets a merge run on any box:
 /// the inductor's store holds every completed take (`collect_units` pulls
 /// each unit home before its completion is applied), so a worker fetches what
@@ -282,7 +282,7 @@ struct AddrQuery {
 /// TUI-driven machine phase transitions (provisioning / error / note) while a
 /// box catches up in the background. Register/heartbeat own Online; this owns
 /// everything before the first beat. Unknown addresses are refused, not
-/// created — creation stays with register and the add-machine flow.
+/// created, creation stays with register and the add-machine flow.
 #[derive(Deserialize)]
 struct MachineStateUpdate {
     addr: String,
@@ -290,7 +290,7 @@ struct MachineStateUpdate {
     #[serde(default)]
     note: String,
     /// A whole new work policy for this machine, when the request carries one.
-    /// Absent means "leave the policy alone" — the provisioning transitions
+    /// Absent means "leave the policy alone", the provisioning transitions
     /// send only state and note. Always a full four-entry list (the policy
     /// panel sends every stage), so `Some` is a replacement, never a merge.
     #[serde(default)]
@@ -310,7 +310,7 @@ async fn set_machine_state(
             m.set_state(u.state);
             if !u.note.is_empty() {
                 // State flows rewrite the note freely, but an EC2 instance id
-                // on it is the box's one stable identity — relink matches by
+                // on it is the box's one stable identity, relink matches by
                 // it, so a note rewrite may never erase it.
                 m.note = bm_core::provision::preserve_ec2_id(&m.note, &u.note);
             }
@@ -329,14 +329,14 @@ async fn set_machine_state(
 }
 
 /// Replace one machine's work policy. Separate from `set_machine_state`
-/// because a policy edit is a scheduling decision, not a phase transition —
+/// because a policy edit is a scheduling decision, not a phase transition
 /// it must not drag the machine's state or note along with it.
 ///
 /// **The sidecar instruction is deliberately *not* sent from here.** A one-shot
 /// push misses every state that matters: the box down at edit time, the box
 /// that reboots later and comes back with the default, the inductor restarted
 /// since, the worker busy behind its 5 s timeout, the hand-edited
-/// `machines.json`. The dispatcher owns convergence instead — it polls every
+/// `machines.json`. The dispatcher owns convergence instead, it polls every
 /// box every 2 s and re-tells a worker whenever what it last delivered differs
 /// from the box's policy (see `dispatch::drive`). One mechanism, reachable
 /// from every state, retried for free by the poll that already exists.
@@ -348,7 +348,7 @@ struct TaskPolicyUpdate {
 
 /// Park a box, or wake it up.
 ///
-/// Writes **intent only** — one bool in `machines.json`. Everything that follows
+/// Writes **intent only**, one bool in `machines.json`. Everything that follows
 /// from it is already converged by machinery that exists: `offer` withholds work
 /// because of it (so an in-flight task finishes and nothing new is handed out),
 /// and `dispatch::drive` drops the box's sidecar because of it (so `SIDECAR_IDLE`
@@ -445,7 +445,7 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             // The chapter index first, and **outside the lock**: building it can
             // walk a listing page, and a scheduler holding the ledger across a
             // network round trip is a stalled cluster. This is the one place a
-            // `discover()` runs — once per range, on the inductor — which is
+            // `discover()` runs, once per range, on the inductor, which is
             // what keeps ten workers from each re-reading the same index.
             let (index, index_note) = {
                 let inner = st.lock().await;
@@ -579,7 +579,7 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
         bm_proto::Op::Retry => {
             let mut inner = st.lock().await;
             // Three scopes, narrowing in this order. A stage + chapter is one
-            // task — what the Tasks screen sends, so one bad digest never
+            // task, what the Tasks screen sends, so one bad digest never
             // re-queues the batch. A chapter alone is every shelved stage of it
             // (`:retry 24`). A stage with no chapter is refused rather than
             // widened to the whole ledger: silently doing more than was asked
@@ -684,7 +684,7 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
 /// Fold duplicates: deterministic canon-key folds over the bible AND the cast
 /// (title/casing/parenthetical variants that never entered the bible) apply
 /// immediately; ambiguous pairs go to the analyzer on the next press.
-/// Certain folds never wait on the LLM — that call takes minutes on
+/// Certain folds never wait on the LLM, that call takes minutes on
 /// rate-limited tiers while the TUI gives up in seconds.
 async fn op_reconcile(
     st: &Shared,
@@ -764,7 +764,7 @@ async fn op_reconcile(
             Err(e) => OpResult::fail(format!("reconcile refused: {e:#}")),
         };
     }
-    // No certain folds. The ambiguous pairs are listed for a human to judge —
+    // No certain folds. The ambiguous pairs are listed for a human to judge
     // the analyzer hallucinates merges for mere token-sharers ("Dịch Phong"
     // into "Tịnh Vô Phong"), so it no longer auto-applies anything here.
     let pairs: Vec<String> = plan
@@ -778,7 +778,7 @@ async fn op_reconcile(
     ))
 }
 
-/// Persist the URL template and prove the crawler works — through the **same
+/// Persist the URL template and prove the crawler works, through the **same
 /// provider a worker will use**.
 ///
 /// This used to fetch the chapter itself with its own client and its own copy
@@ -812,7 +812,7 @@ async fn op_crawl_setup(
                 // provider's own length and size guards, which is the only
                 // definition of a chapter the host has. The headline is printed
                 // because the operator is the one who can say whether it is
-                // their book — a "does this look like a chapter" test in Rust
+                // their book, a "does this look like a chapter" test in Rust
                 // would be a fact about one site's language, which is exactly
                 // what the script owns now.
                 let first = text.lines().next().unwrap_or("");
@@ -917,7 +917,7 @@ async fn state(State(st): State<Shared>) -> impl IntoResponse {
         "machines": inner.machines.values().collect::<Vec<_>>(),
         "beats": inner.beats.values().collect::<Vec<_>>(),
         "counts": inner.counts(),
-        // Per-worker per-stage completions plus per-stage task averages —
+        // Per-worker per-stage completions plus per-stage task averages
         // the Stats pane's matrix and its TUI-side ETA.
         "stats": inner.stats.summary(),
         // Settings ride along so the TUI can prefill prompts with the values
@@ -953,7 +953,7 @@ async fn roster(State(st): State<Shared>) -> Json<Roster> {
 /// anything: the inductor API must be down (its scheduler owns these files
 /// while it answers), and no local worker may be alive (a mid-render worker
 /// keeps rendering the old cast). Remote strays are the operator's
-/// responsibility — the supported flow is X (which sweeps them), then swap.
+/// responsibility, the supported flow is X (which sweeps them), then swap.
 pub(crate) async fn offline_swap(
     api: &str,
     layout: &bm_core::Layout,
@@ -995,7 +995,7 @@ fn offline_swap_apply(
 }
 
 /// Remix with no scheduler: the same `op_remix` against a throwaway Inner,
-/// which persists settings + ledger itself. Same guards as the swap path —
+/// which persists settings + ledger itself. Same guards as the swap path
 /// the inductor API must be down and no local worker alive.
 pub(crate) async fn offline_remix(
     api: &str,
@@ -1035,7 +1035,7 @@ fn offline_remix_apply(
 /// A sound-design write with no scheduler to notice it.
 ///
 /// `:sound` writes the registries itself, so the write succeeds whether or not
-/// the inductor is up — but the invalidation is the *scheduler's* work, and
+/// the inductor is up, but the invalidation is the *scheduler's* work, and
 /// without this path an edit made while the inductor was down would go
 /// unnoticed until the next boot. That was survivable while adoption at boot
 /// was the only mechanism; it is not survivable now that a boot can adopt an
@@ -1043,7 +1043,7 @@ fn offline_remix_apply(
 ///
 /// No `local_workers_alive` guard, unlike the swap and remix paths: those two
 /// delete a voice's cached segments, which a running worker can be mid-write
-/// on. This deletes published mp3s and requeues — the ordinary queue traffic.
+/// on. This deletes published mp3s and requeues, the ordinary queue traffic.
 pub(crate) async fn offline_sound_changed(
     api: &str,
     layout: &bm_core::Layout,
@@ -1066,7 +1066,7 @@ pub(crate) async fn offline_sound_changed(
 /// Build the client used for every TTS-sidecar call.
 ///
 /// `no_proxy` is not optional: the sidecar is a LAN service on loopback, and a
-/// configured `HTTP_PROXY` would otherwise intercept it — which silently
+/// configured `HTTP_PROXY` would otherwise intercept it, which silently
 /// downgrades the roster to the offline fallback and makes previews 502.
 fn sidecar_client(timeout: Duration) -> reqwest::Client {
     reqwest::Client::builder()
@@ -1077,7 +1077,7 @@ fn sidecar_client(timeout: Duration) -> reqwest::Client {
 }
 
 /// Everything about voices that disk alone knows: shipped catalogue, enrolled
-/// clones, pool samples. No sidecar, no inductor — milliseconds, never hangs.
+/// clones, pool samples. No sidecar, no inductor, milliseconds, never hangs.
 fn disk_voices(
     layout: &bm_core::Layout,
     engine: &str,
@@ -1090,7 +1090,7 @@ fn disk_voices(
         }
     }
     // The sample pool rides the same list: a pooled sample shows its tags where
-    // the style was, so the picker filter (`young`) finds it — and a sample the
+    // the style was, so the picker filter (`young`) finds it, and a sample the
     // registry names but nothing enrolled yet still shows, as vetted-at-adding
     // like any clone (the render fails loudly if it never gets enrolled).
     for (name, entry) in bm_core::pool::load_pool(&layout.root.join("voice-pool.json")) {
@@ -1154,7 +1154,7 @@ async fn build_roster(
     cast: BTreeMap<String, String>,
 ) -> Roster {
     // Loopback: a serving sidecar answers in ms, a loading one 503s, a dead
-    // one refuses — none of which is worth more than 2s of picker. (Was 10s
+    // one refuses, none of which is worth more than 2s of picker. (Was 10s
     // × 2: every :s press stared at "loading roster" for 20s+ while booting.)
     let http = sidecar_client(Duration::from_secs(2));
     let mut source = "offline".to_string();
@@ -1203,7 +1203,7 @@ async fn build_roster(
         }
     }
     // The sample pool rides the same list: a pooled sample shows its tags where
-    // the style was, so the picker filter (`young`) finds it — and a sample the
+    // the style was, so the picker filter (`young`) finds it, and a sample the
     // registry names but nothing enrolled yet still shows, as vetted-at-adding
     // like any clone (the render fails loudly if it never gets enrolled).
     for (name, entry) in bm_core::pool::load_pool(&layout.root.join("voice-pool.json")) {
@@ -1276,7 +1276,7 @@ async fn sidecar_serving(base: &str) -> bool {
 /// Start the local sidecar for audition duty unless one already answers.
 ///
 /// Preview/audition is the one path that needs TTS with no render task
-/// running — and since the sidecar's lifecycle went per-task, idle means
+/// running, and since the sidecar's lifecycle went per-task, idle means
 /// down. So the first audition of a quiet cluster boots the server (model
 /// load takes minutes) and leaves it up: stopping it after every sample
 /// would make every audition pay the load again. The binary and argv are
@@ -1325,8 +1325,8 @@ async fn ensure_sidecar(layout: &bm_core::Layout) -> anyhow::Result<()> {
 /// committing a swap.
 ///
 /// Either way the bytes come back in `OpResult::audio_b64` and **nothing is
-/// written here**. The inductor never plays anything — it is a server, and the
-/// speaker is on the client's desk — so it is also the wrong machine to put a
+/// written here**. The inductor never plays anything, it is a server, and the
+/// speaker is on the client's desk, so it is also the wrong machine to put a
 /// file on: a path is useless to a client that does not share this filesystem,
 /// and an audition that lands in `data/` accumulates one clip per voice
 /// auditioned. The client owns the file, because the client owns the speaker.
@@ -1341,7 +1341,7 @@ async fn op_preview_voice(layout: &bm_core::Layout, voice: &str, text: Option<&s
         return OpResult::fail(format!("preview {voice}: {e:#}"));
     }
     // Two routes into the sidecar, and the difference is the point. No text
-    // means `/preview`, which speaks the sidecar's fixed audition line — the
+    // means `/preview`, which speaks the sidecar's fixed audition line, the
     // only way two voice samples are comparable. Text means `/infer`, which is
     // how an operator hears a *real* line from the book instead of a sample.
     let line = text.map(str::trim).filter(|t| !t.is_empty());
@@ -1393,7 +1393,7 @@ async fn op_preview_voice(layout: &bm_core::Layout, voice: &str, text: Option<&s
 ///
 /// Split out from the HTTP call so the contract is testable without a sidecar:
 /// bytes in, base64 out, and **nothing written**. The inductor is the wrong
-/// machine to put a sample on — a path is useless to a client that does not
+/// machine to put a sample on, a path is useless to a client that does not
 /// share this filesystem, and a clip that landed in `data/` would accumulate
 /// one file per voice auditioned, which is exactly what the operator asked it
 /// not to do.
@@ -1418,7 +1418,7 @@ fn audio_result(voice: &str, what: &str, bytes: &[u8]) -> OpResult {
 ///
 /// Only what is on local disk counts. Segments rendered on another box stay
 /// there (merge affinity), and fetching them over ssh would turn a keypress
-/// into a network operation with its own failure modes — the miss says so
+/// into a network operation with its own failure modes, the miss says so
 /// instead, and names what would fix it. Discovery lives in `bm_core` so a
 /// disconnected TUI can run the same lookup against its own checkout.
 fn op_segment(
@@ -1438,14 +1438,14 @@ fn op_segment(
             layout, character, voice, false,
         ));
     }
-    // An exact line plays that sentence or misses honestly — never a nearby
+    // An exact line plays that sentence or misses honestly, never a nearby
     // one. Without it, T triages on a random segment.
     let exact = text.map(str::trim).filter(|t| !t.is_empty());
     if let Some(want) = exact {
         match bm_core::assemble::pick_exact(&cands, character, want) {
             Some(pick) => return serve_segment(pick),
             None => {
-                // The held line never rendered in this voice — the normal
+                // The held line never rendered in this voice, the normal
                 // state for a fresh swap, which renders chapter by chapter.
                 // Fall back to one of hers that did, still zero synthesis:
                 // the served sentence is held, so T compares on it rather
@@ -1570,10 +1570,10 @@ mod tests {
         let up = stub_sidecar(r#"{"allowed_voices":[]}"#).await;
         assert!(sidecar_serving(&up).await);
         // Healthy but stale (a server from before `/policy` existed): not
-        // serving — the agent would refuse it too, so preview must not use it.
+        // serving, the agent would refuse it too, so preview must not use it.
         let stale = stub_sidecar(r#"{"ok":true}"#).await;
         assert!(!sidecar_serving(&stale).await);
-        // Nothing there at all: not serving (and fast — no 5-minute wait).
+        // Nothing there at all: not serving (and fast, no 5-minute wait).
         assert!(!sidecar_serving("http://127.0.0.1:9").await);
     }
 
@@ -1591,7 +1591,7 @@ mod tests {
             .collect()
     }
 
-    /// The policy edit persists — config, not runtime — and sends nothing
+    /// The policy edit persists, config, not runtime, and sends nothing
     /// itself: delivery is the dispatcher's convergence job, which a one-shot
     /// push misses in every state that matters (box down at edit time, box
     /// rebooting into its default, inductor restarted, worker busy behind the
@@ -1782,7 +1782,7 @@ mod tests {
     #[tokio::test]
     async fn register_carries_the_registry_handle_to_the_panes() {
         // The hawk hunt, server side: provision logs the registry handle
-        // while beats carry the OS hostname — the panes can only agree if
+        // while beats carry the OS hostname, the panes can only agree if
         // register keeps the handle on the machine.
         let d = scratch();
         let layout = bm_core::Layout::new(d.path());
@@ -1829,7 +1829,7 @@ mod tests {
     async fn a_beating_worker_clears_a_stale_would_not_start_note() {
         // Provision's verdict outlives its launch: the worker did start
         // (via :B, by hand) but the pane kept saying it would not. The
-        // first beat with a pulse refutes exactly that wording — and a
+        // first beat with a pulse refutes exactly that wording, and a
         // live note is left alone.
         let d = scratch();
         let layout = bm_core::Layout::new(d.path());
@@ -1894,7 +1894,7 @@ mod tests {
     ///
     /// Two things are worth pinning: it lands in `machines.json` (not the
     /// ledger, which is cleared on a re-provision) and it does **not** disturb
-    /// the state — a park is not a phase change, so a box that is `Online` when
+    /// the state, a park is not a phase change, so a box that is `Online` when
     /// it is parked must still be `Online` afterwards. Getting that wrong is how
     /// a parked box would get stamped `Offline` for going quiet, which is the
     /// one thing the operator did not ask for.
@@ -1944,7 +1944,7 @@ mod tests {
         set_accepting_work(State(st.clone()), body(true)).await;
         assert!(!st.lock().await.machines["192.168.2.2"].relaxed());
         assert!(bm_core::provision::load_boxes(&machines_path)[0].accepting_work);
-        // Unknown addresses are refused, never created — as every machine route is.
+        // Unknown addresses are refused, never created, as every machine route is.
         let reply = set_accepting_work(
             State(st.clone()),
             Json(AcceptingUpdate {
@@ -2267,7 +2267,7 @@ mod tests {
             "ch25 is untouched"
         );
 
-        // Stage + chapter: exactly one task — what the Tasks screen sends.
+        // Stage + chapter: exactly one task, what the Tasks screen sends.
         // Both of ch24's stages are shelved again so that "one task" and "every
         // shelved stage of the chapter" cannot produce the same ledger: a
         // chapter-wide dispatch would take `digest:24` too.
@@ -2347,7 +2347,7 @@ mod segment_tests {
 
         // The held line never rendered in Adam's voice, but one of Kiên's
         // did (the fresh-swap state: rendered chapter by chapter). Play
-        // hers, still zero synthesis — and hold it, so T compares on the
+        // hers, still zero synthesis, and hold it, so T compares on the
         // same sentence instead of another random pick.
         let fallback = op_segment(
             &layout,
@@ -2361,7 +2361,7 @@ mod segment_tests {
         assert_eq!(fallback.line_speaker.as_deref(), Some("Kiên"));
         assert!(fallback.audio_b64.is_some(), "bytes, not synthesis");
 
-        // A voice with nothing rendered fails honestly — never synthesizes.
+        // A voice with nothing rendered fails honestly, never synthesizes.
         let miss = op_segment(&layout, "vieneu", "Vũ", "Nobody", None);
         assert!(!miss.ok);
         assert!(
@@ -2374,7 +2374,7 @@ mod segment_tests {
 
     #[test]
     fn segment_matches_keys_names_and_folds() {
-        // Wavs carry whatever the cast held at render time — often a
+        // Wavs carry whatever the cast held at render time, often a
         // lowercase key (`adam`) while the operator asks the display name
         // (`Adam`), or an ASCII slug (`pham-tuyen`) for `Phạm Tuyên`.
         let dir = tempfile::tempdir().unwrap();
@@ -2445,7 +2445,7 @@ mod segment_tests {
         .unwrap();
         let seg = layout.seg_dir("vieneu", 2);
         std::fs::create_dir_all(&seg).unwrap();
-        // Filenames carry whatever the cast held at render time — a key here.
+        // Filenames carry whatever the cast held at render time, a key here.
         std::fs::write(seg.join("0000_adam.wav"), b"RIFF-0").unwrap();
         std::fs::write(seg.join("0001_adam.wav"), b"RIFF-1").unwrap();
 

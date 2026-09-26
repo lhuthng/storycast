@@ -44,22 +44,22 @@ pub struct Probe {
     #[serde(default)]
     pub tts_bin_present: bool,
     /// The ONNX Runtime `libonnxruntime.so.1` beside the binary. Linux links
-    /// it dynamically — a binary without it dies on startup — while macOS
+    /// it dynamically, a binary without it dies on startup, while macOS
     /// links statically and never has it, so readiness only demands it there.
     #[serde(default)]
     pub tts_lib_present: bool,
-    /// A baked `~/{REMOTE_DIR}/models/` — the Rust sidecar's weights.
+    /// A baked `~/{REMOTE_DIR}/models/`, the Rust sidecar's weights.
     #[serde(default)]
     pub models_present: bool,
     /// `ffmpeg` on PATH. The merge stage shells out to it, so a box without it
-    /// provisions cleanly and then fails every merge it is offered — a strike
+    /// provisions cleanly and then fails every merge it is offered, a strike
     /// and a shelved chapter instead of a report. Reported, not gated: merge is
     /// a small share of the work and refusing the box outright would cost more
     /// than it saves.
     #[serde(default)]
     pub ffmpeg_present: bool,
-    /// The sidecar's roster, as `/voices` sends it: **labels, not names** —
-    /// `"<name> — <description>"` for a voice with a description (every preset)
+    /// The sidecar's roster, as `/voices` sends it: **labels, not names**
+    /// `"<name>, <description>"` for a voice with a description (every preset)
     /// and the bare name for one without (every enrolled clone).
     ///
     /// It was documented as "enrolled clone-voice names", which is a guarantee
@@ -137,7 +137,7 @@ impl Probe {
         ) + if self.ffmpeg_present {
             ""
         } else {
-            " · NO FFMPEG — merges will fail here"
+            " · NO FFMPEG, merges will fail here"
         }
     }
 }
@@ -167,7 +167,7 @@ pub fn normalize_os(raw: &str) -> String {
 /// The rule lives here, once, because two call sites read it and a second copy
 /// is how they drift. No on a box that already has everything and was not
 /// forced to redo it: the answer will not change, and `ensure_opencode`'s
-/// install is bounded at ten minutes — spent on every `B` press of a healthy
+/// install is bounded at ten minutes, spent on every `B` press of a healthy
 /// cluster, which is what made a catch-up look like a hang. Yes otherwise,
 /// including on `force`, which is the operator explicitly asking for the slow
 /// path.
@@ -179,8 +179,8 @@ fn may_install(configured: bool, force: bool) -> bool {
 /// has the right agent and sidecar.
 ///
 /// **Two digests, because `models/` holds two kinds of thing.** The immutable
-/// weights are `tts_hash`; the mutable voice roster — `models/voices.json`, the
-/// file enrollment rewrites — is `voices_hash`. Checking only the first is what
+/// weights are `tts_hash`; the mutable voice roster, `models/voices.json`, the
+/// file enrollment rewrites, is `voices_hash`. Checking only the first is what
 /// once let an enrolled voice sit on this disk while every log said "in sync";
 /// checking only the second would hide a re-bake behind a 492 KB file.
 fn models_need_push(remote: Option<&ProvisionStamp>, local: &ProvisionStamp, force: bool) -> bool {
@@ -204,14 +204,14 @@ fn voice_store_covers(
 /// The `sha256sum -c` lines for a baked `models/`, taken from its own manifest.
 ///
 /// **`models/voices.json` is excluded.** The manifest's entry for it is stale by
-/// design — enrollment rewrites the file after the bake, and the recorded hash
-/// describes the pre-enrollment bytes — so verifying it would fail every
+/// design, enrollment rewrites the file after the bake, and the recorded hash
+/// describes the pre-enrollment bytes, so verifying it would fail every
 /// provision of a box that had ever enrolled a voice. Excluding it is the same
 /// immutable/mutable split the stamp's `tts_hash` makes, applied to the one
 /// other place this file is described.
 ///
 /// Empty means "nothing to verify": a manifest that is missing, unparseable, or
-/// describing no files. Never a failure in itself — the `manifest.json`
+/// describing no files. Never a failure in itself, the `manifest.json`
 /// existence check in `install_models` is what refuses an incomplete bake.
 fn model_checksums(models_dir: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(models_dir.join("manifest.json")) else {
@@ -241,7 +241,7 @@ fn model_checksums(models_dir: &Path) -> Vec<String> {
 /// trip either way. The difference is what happens when it does not. On a
 /// fresh or forced provision the box is chased with `npm i -g` (bounded at ten
 /// minutes, and genuinely needed for the digest lane). On a box that already
-/// passed a full provision it is reported instead — the answer is not going to
+/// passed a full provision it is reported instead, the answer is not going to
 /// change because `B` was pressed again, and re-running a failing install on
 /// every press is what made a healthy cluster's start take minutes.
 fn opencode_script(allow_install: bool) -> String {
@@ -253,7 +253,7 @@ npm i -g --prefix "$HOME/.local" opencode-ai >/dev/null 2>&1 && echo "OPENCODE-O
             .into()
     } else {
         r#"command -v opencode >/dev/null 2>&1 && { echo "OPENCODE-OK (present)"; exit 0; }
-echo "OPENCODE-SKIP (already configured — not reinstalling; force a re-provision to try again)""#
+echo "OPENCODE-SKIP (already configured, not reinstalling; force a re-provision to try again)""#
             .into()
     }
 }
@@ -274,14 +274,14 @@ elif command -v dnf >/dev/null 2>&1; then
 elif command -v yum >/dev/null 2>&1; then
   sudo -n yum install -y ffmpeg >/dev/null 2>&1 || install "yum install -y ffmpeg"
 else
-  echo "FFMPEG-SKIP (no known package manager — install ffmpeg by hand)"; exit 0
+  echo "FFMPEG-SKIP (no known package manager, install ffmpeg by hand)"; exit 0
 fi
-if command -v ffmpeg >/dev/null 2>&1; then echo "FFMPEG-OK (installed)"; else echo "FFMPEG-SKIP (install refused — needs sudo? run: sudo apt-get install -y ffmpeg)"; fi
+if command -v ffmpeg >/dev/null 2>&1; then echo "FFMPEG-OK (installed)"; else echo "FFMPEG-SKIP (install refused, needs sudo? run: sudo apt-get install -y ffmpeg)"; fi
 "#
             .into()
     } else {
         r#"if command -v ffmpeg >/dev/null 2>&1; then echo "FFMPEG-OK (present)"; exit 0; fi
-echo "FFMPEG-SKIP (already configured — not reinstalling; force a re-provision to try again)""#
+echo "FFMPEG-SKIP (already configured, not reinstalling; force a re-provision to try again)""#
             .into()
     }
 }
@@ -379,7 +379,7 @@ echo "probe=done"
                         "models" => probe.models_present = v == "present",
                         "ffmpeg" => probe.ffmpeg_present = v == "present",
                         "voices" => {
-                            // Names contain spaces ("Minh Triết") — the probe
+                            // Names contain spaces ("Minh Triết"), the probe
                             // joins them with \x1f, never whitespace.
                             probe.voices = v
                                 .split('\u{1f}')
@@ -439,7 +439,7 @@ echo "probe=done"
     ///
     /// Three halves, from three different places. `prompts`, `assets` and `refs`
     /// are profile content and live at the root. The cast files are the
-    /// *book's* — `data/` is in the active workspace — so they are read
+    /// *book's*, `data/` is in the active workspace, so they are read
     /// through the layout; naming them root-relative shipped no cast at all
     /// the moment a workspace was selected, and the worker then rendered with
     /// the catalogue's default voices. The workspace's own crawlers are
@@ -482,11 +482,11 @@ echo "probe=done"
             }
         }
         // `python/` used to be pushed here. It is not any more: the sidecar is
-        // `bm-tts`, and the one thing a worker still needed Python for —
-        // enrolling a clone — now happens on the inductor, whose store travels
+        // `bm-tts`, and the one thing a worker still needed Python for
+        // enrolling a clone, now happens on the inductor, whose store travels
         // inside `models/voices.json`.
         //
-        // Voice assignments travel with sources (additive only — a worker's
+        // Voice assignments travel with sources (additive only, a worker's
         // segment cache is keyed by voice, so clobbering mid-render would
         // strand it; the voices op is the writer, this is just transport).
         // The clone manifest travels too: nothing on a worker reads it yet,
@@ -509,13 +509,13 @@ echo "probe=done"
     /// Replaces `ensure_python`, which built a 647 MB virtualenv on every
     /// worker. Two files and a symlink do the same job now.
     ///
-    /// The library is pushed under **every** name it is known by — the linker
+    /// The library is pushed under **every** name it is known by, the linker
     /// wants the plain `libonnxruntime.so`, the loader wants the SONAME
     /// `libonnxruntime.so.1`, and the versioned file is what those two point at.
     /// Shipping only one of them produces a failure that names none of this.
     ///
     /// `runtime_dir` is `None` where the sidecar is self-contained (macOS
-    /// links its runtime statically — the native binary runs with no `.so`
+    /// links its runtime statically, the native binary runs with no `.so`
     /// beside it), so only the binary travels.
     pub fn install_tts_runtime(
         &self,
@@ -540,7 +540,7 @@ echo "probe=done"
             libs.sort();
             if libs.is_empty() {
                 anyhow::bail!(
-                    "no libonnxruntime.so* in {} — run `make runtime` first",
+                    "no libonnxruntime.so* in {}, run `make runtime` first",
                     runtime_dir.display()
                 );
             }
@@ -557,7 +557,7 @@ D="$HOME/{d}"
 cd "$D"
 chmod +x bm-tts
 LD_LIBRARY_PATH="$D" ./bm-tts --version >/dev/null 2>&1 || \
-  {{ echo "bm-tts would not run — missing libonnxruntime.so.1 beside it?" >&2; exit 7; }}
+  {{ echo "bm-tts would not run, missing libonnxruntime.so.1 beside it?" >&2; exit 7; }}
 echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
 "#,
             d = REMOTE_DIR
@@ -572,24 +572,19 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
         Ok(stdout.trim().to_string())
     }
 
-    /// Push the baked `models/` directory — the weights the sidecar reads.
+    /// Push the baked `models/` directory, the weights the sidecar reads.
     ///
-    /// 668 MB, and content-addressed by the stamp's `tts_hash`, so a re-provision
+    /// 668 MB, content-addressed by the stamp's `tts_hash`, so a re-provision
     /// with nothing changed costs one rsync delta rather than a transfer.
     ///
     /// **What arrives is verified, not assumed.** rsync exiting 0 says the
-    /// *transfer* worked, which is a weaker claim than "the weights are
-    /// intact": a box that dies mid-push, a source file already corrupt on this
-    /// machine, or a `--delete` racing a writer all leave a directory rsync is
-    /// happy with and the sidecar is not. The check used to be that
-    /// `manifest.json` exists — which a half-written bake satisfies perfectly.
-    ///
-    /// So the bake's own `sha256` entries are written out as a `sha256sum -c`
-    /// list and checked on the box, with `models/voices.json` excluded: the
-    /// manifest's entry for it is stale by design, because enrollment rewrites
-    /// the file after the bake. That exclusion is the same immutable/mutable
-    /// split `tts_hash` makes, applied to the one other place the file is
-    /// described.
+    /// *transfer* worked, which is weaker than "the weights are intact": a box
+    /// that dies mid-push, a corrupt source file, or a `--delete` racing a
+    /// writer all leave a directory rsync is happy with and the sidecar is
+    /// not. So the bake's own `sha256` entries are written out as a
+    /// `sha256sum -c` list and checked on the box, with `models/voices.json`
+    /// excluded: the manifest's entry for it is stale by design, because
+    /// enrollment rewrites the file after the bake.
     pub fn install_models(
         &self,
         root: &Path,
@@ -598,7 +593,7 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
         let src = root.join("models");
         if !src.is_dir() {
             anyhow::bail!(
-                "no {} — run the bake first (`python3 tools/bake-models.py`)",
+                "no {}, run the bake first (`python3 tools/bake-models.py`)",
                 src.display()
             );
         }
@@ -608,21 +603,21 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
             self.write_model_checksums(&sums)?;
         }
         // `sha256sum` is coreutils, so it is present on every platform these
-        // workers run — but "present" is assumed rather than proved, and a box
+        // workers run, but "present" is assumed rather than proved, and a box
         // without it is reported rather than silently reported as verified.
         let script = format!(
             r#"D="$HOME/{d}/models"
-[ -f "$D/manifest.json" ] || {{ echo "models/manifest.json missing — incomplete bake" >&2; exit 8; }}
+[ -f "$D/manifest.json" ] || {{ echo "models/manifest.json missing, incomplete bake" >&2; exit 8; }}
 n=$(ls "$D" | wc -l)
 L="$HOME/{d}/models.sha256"
 if ! command -v sha256sum >/dev/null 2>&1; then
-  echo "MODELS-OK ($n files, NOT verified — sha256sum absent)" >&2
+  echo "MODELS-OK ($n files, NOT verified, sha256sum absent)" >&2
   exit 0
 fi
 if [ -f "$L" ]; then
   if ! out=$(cd "$D" && sha256sum -c "$L" 2>&1); then
     echo "$out" | grep -v ': OK$' | head -n 5 >&2
-    echo "MODELS-CORRUPT — the weights here do not match the bake; nothing was rendered with them" >&2
+    echo "MODELS-CORRUPT, the weights here do not match the bake; nothing was rendered with them" >&2
     exit 10
   fi
   echo "MODELS-OK ($(wc -l < "$L") files verified)"
@@ -668,7 +663,7 @@ fi
     /// (browser login); without it remote digests fail loudly, never silently.
     pub fn ensure_opencode(&self, allow_install: bool) -> Result<String> {
         // `allow_install` is false on a box that already passed a full
-        // provision. The check stays — it is one `command -v` — but the install
+        // provision. The check stays, it is one `command -v`, but the install
         // does not: `npm i -g` is bounded at ten minutes, and on a box whose
         // answer will not change it was ten minutes of a `B` press that looked
         // like a hang. A deliberate re-provision still installs.
@@ -683,7 +678,7 @@ fi
     ///
     /// The merge stage shells out to `ffmpeg`, so a box without it takes every
     /// merge it is offered and fails each one. This installs it from the
-    /// platform's package manager when it is missing — never a hard failure:
+    /// platform's package manager when it is missing, never a hard failure:
     /// a refused install (no sudo, an offline mirror) only warns, and the
     /// worker's `merge` capability gate keeps merge off this box until ffmpeg
     /// appears. Returns a one-line verdict for the provision log.
@@ -710,16 +705,13 @@ fi
     /// Waiting is the point, not politeness. `bm-tts` binds its port before it
     /// loads ~2.85 GB of weights, so between the launch and the first ready
     /// `/health` there is a window where the box has a sidecar that cannot
-    /// answer yet. The old 3-second sleep closed on "model loading" and moved
-    /// on, and the worker's first render — unable to tell "not up yet" from
-    /// "not there" — spawned a **second** model on an 8 GiB box. That is the
-    /// OOM this cluster kept taking.
+    /// answer yet. A short sleep there made the worker's first render spawn a
+    /// **second** model on an 8 GiB box: the OOM this cluster kept taking.
     ///
     /// A ready server answers 200; a loading one answers 503, which `curl`
-    /// reports as success unless told otherwise, so the check is on the *code*.
-    /// The budget is deliberately under the ssh call's own timeout (240 s of
-    /// polling, 300 s allowed) — a sidecar that has not loaded in four minutes
-    /// on a box this repo sizes for is reported, not waited on for ever.
+    /// reports as success unless told otherwise, so the check is on the
+    /// *code*. The budget is deliberately under the ssh call's own timeout
+    /// (240 s of polling, 300 s allowed).
     pub fn start_tts(&self) -> Result<String> {
         let script = format!(
             r#"D="$HOME/{d}"
@@ -735,7 +727,7 @@ for _ in $(seq 1 120); do
   sleep 2
   [ "$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 3 http://127.0.0.1:{port}/health)" = "200" ] && {{ echo "TTS-STARTED"; exit 0; }}
 done
-echo "TTS-STARTING (not ready after 240s — check $D/tts.log)"
+echo "TTS-STARTING (not ready after 240s, check $D/tts.log)"
 "#,
             d = REMOTE_DIR,
             port = TTS_PORT
@@ -783,7 +775,7 @@ echo stopped"#,
     /// The inverted protocol makes a worker accept *instructions*, so it has to
     /// be able to tell its own inductor from anything else that can reach the
     /// port. The secret travels as a file rather than as an argument because
-    /// `argv` is visible in `ps` on every box it was typed on — and it is
+    /// `argv` is visible in `ps` on every box it was typed on, and it is
     /// rewritten on every provision so a rotated token reaches the box without
     /// a manual step.
     pub fn write_cluster_token(&self, token: &str) -> Result<()> {
@@ -806,7 +798,7 @@ echo stopped"#,
     ///
     /// The profile content already travels inside `install_sources`
     /// (prompts + assets ride the sources sync), so this is one small JSON
-    /// file — but without it the worker cannot tell a complete profile from
+    /// file, but without it the worker cannot tell a complete profile from
     /// a half-rsynced one, which is exactly what `verify` refuses to run on.
     pub fn write_profile_pointer(&self, pointer: &crate::profile::Pointer) -> Result<()> {
         let json = serde_json::to_string_pretty(pointer)?;
@@ -841,15 +833,15 @@ echo stopped"#,
 /// locally, offered by the picker, unknown to every other worker).
 ///
 /// **Each store entry is a roster *label*, not a name**, because that is what
-/// the sidecar's `/voices` sends: `"<name> — <description>"` for a voice that
-/// has a description (every preset — this is what the operator reads in the
+/// the sidecar's `/voices` sends: `"<name>, <description>"` for a voice that
+/// has a description (every preset, this is what the operator reads in the
 /// picker) and the bare name for one that does not (every enrolled clone). So
 /// the label is split through [`crate::voices::voice_name`] before any of the
 /// three comparisons, and the *name* is what comes back: "Thái Sơn" is the thing
 /// to add to a manifest, not a 40-character description of it.
 ///
 /// Reported, never deleted: erasing a voice the cast uses would break renders.
-/// The fix is named in the warning — declare it in `voices.json` (with its
+/// The fix is named in the warning, declare it in `voices.json` (with its
 /// `refs/` clip) or drop it from the store.
 pub fn undeclared_voices(
     store: &[String],
@@ -931,13 +923,13 @@ pub fn provision(
         }
     };
     if !probe.reachable {
-        log.push(format!("[{}] unreachable — aborting provision", m.id));
+        log.push(format!("[{}] unreachable, aborting provision", m.id));
         return (probe, log.lines);
     }
 
     // Self-healing enrollment: the manifest may name clones the pushed store
-    // lacks (added or swapped since the last bake). Merging them here — before
-    // the stamp — means the hash drift pushes the fix to workers in this same
+    // lacks (added or swapped since the last bake). Merging them here, before
+    // the stamp, means the hash drift pushes the fix to workers in this same
     // run, instead of warning forever no matter how often `:prov` runs.
     // Voices enrolled nowhere stay missing; the warning below still names
     // exactly those.
@@ -966,8 +958,8 @@ pub fn provision(
     // An *unknown* roster is not a missing one. The probe cannot read the
     // roster when the sidecar is not answering, and reading that as "this box
     // knows none of the declared voices" would answer a down sidecar with a
-    // 668 MB model push. `voices_hash` is the primary gate now — it compares
-    // the content of `models/voices.json` against ours — and this check is the
+    // 668 MB model push. `voices_hash` is the primary gate now, it compares
+    // the content of `models/voices.json` against ours, and this check is the
     // backstop for a stamp that lies, so it only ever *adds* a push when it has
     // something to say.
     let remote_voice_store_complete =
@@ -993,7 +985,7 @@ pub fn provision(
     // like a successful provision and behaves like no provision at all.
     let mut tts_pushed = false;
     // Read here, beside `already`, so the two cannot disagree about what this
-    // run is allowed to do — see [`may_install`].
+    // run is allowed to do, see [`may_install`].
     let installs = may_install(probe.configured(agent_version), force);
 
     if already {
@@ -1021,7 +1013,7 @@ pub fn provision(
         //
         // Without this branch a rebuilt `bm-tts` never reached a configured
         // box: `tts_hash` covers `models/`, not the binary, and the only push
-        // site lived in the `else` below — which an already-configured box never
+        // site lived in the `else` below, which an already-configured box never
         // reaches. The box kept serving the old sidecar for ever, silently.
         if !remote_stamp
             .map(|s| s.tts_bin_in_sync(&local_stamp))
@@ -1030,7 +1022,7 @@ pub fn provision(
             match ssh.install_tts_runtime(tts_binary, tts_runtime, live.as_ref()) {
                 Ok(v) => {
                     tts_pushed = true;
-                    log.push(format!("[{}] sidecar drifted, redeployed — {v}", m.id));
+                    log.push(format!("[{}] sidecar drifted, redeployed, {v}", m.id));
                 }
                 Err(e) => log.push(format!("[{}] sidecar redeploy failed: {e}", m.id)),
             }
@@ -1107,7 +1099,7 @@ pub fn provision(
             }
         } else {
             log.push(format!(
-                "[{}] TTS sidecar binary already present — skipped",
+                "[{}] TTS sidecar binary already present, skipped",
                 m.id
             ));
         }
@@ -1146,7 +1138,7 @@ pub fn provision(
             Err(e) => log.push(format!("[{}] cluster token failed: {e}", m.id)),
         },
         None => log.push(format!(
-            "[{}] no cluster token on this inductor — `serve` generates one; a worker started with --serve-tasks will refuse to run until it does",
+            "[{}] no cluster token on this inductor, `serve` generates one; a worker started with --serve-tasks will refuse to run until it does",
             m.id
         )),
     }
@@ -1166,12 +1158,12 @@ pub fn provision(
             Err(e) => log.push(format!("[{}] profile pointer failed: {e}", m.id)),
         },
         Err(_) => log.push(format!(
-            "[{}] no local profile pointer — load one first (`:profile` in the dashboard, or `tools/profile.sh unpack <name>`), or this worker will refuse to start",
+            "[{}] no local profile pointer, load one first (`:profile` in the dashboard, or `tools/profile.sh unpack <name>`), or this worker will refuse to start",
             m.id
         )),
     }
 
-    // Enrollment moved off the worker — it needs the encoder, which is not on a
+    // Enrollment moved off the worker, it needs the encoder, which is not on a
     // worker any more. A clone declared in `voices.json` but absent from the
     // pushed store therefore cannot render anywhere, and the old flow would
     // have quietly enrolled it on first use. Say so instead.
@@ -1195,7 +1187,7 @@ pub fn provision(
                 .collect();
             if !missing.is_empty() {
                 log.push(format!(
-                    "[{}] declared in voices.json but missing from models/voices.json: {} — enroll on this machine and re-bake, or a render naming one will fail here",
+                    "[{}] declared in voices.json but missing from models/voices.json: {}, enroll on this machine and re-bake, or a render naming one will fail here",
                     m.id,
                     missing.join(", ")
                 ));
@@ -1215,7 +1207,7 @@ pub fn provision(
     match ssh.ensure_ffmpeg(installs) {
         Ok(v) if v.starts_with("FFMPEG-OK") => log.push(format!("[{}] {v}", m.id)),
         Ok(v) => log.push(format!(
-            "[{}] {v} — merge stays disabled on this box until ffmpeg is present (apt/dnf install ffmpeg), then force a re-provision",
+            "[{}] {v}, merge stays disabled on this box until ffmpeg is present (apt/dnf install ffmpeg), then force a re-provision",
             m.id
         )),        Err(e) => log.push(format!("[{}] ffmpeg install check failed: {e}", m.id)),
     }
@@ -1240,7 +1232,7 @@ pub fn provision(
         }
     }
 
-    // Waits for ready, so this line is a fact and not a hope — see `start_tts`.
+    // Waits for ready, so this line is a fact and not a hope, see `start_tts`.
     // A box still loading after the budget is *not* held back here: readiness
     // is about the binary and the weights (`configured`), and the worker's own
     // `ensure` now waits for a loading server instead of racing it. Making
@@ -1249,7 +1241,7 @@ pub fn provision(
     // `may_install` into re-running package installs on a healthy cluster.
     match ssh.start_tts() {
         Ok(v) if v.starts_with("TTS-STARTING") => log.push(format!(
-            "[{}] {v} — the worker will wait for it rather than start a second one; re-run the probe if renders are slow to begin",
+            "[{}] {v}, the worker will wait for it rather than start a second one; re-run the probe if renders are slow to begin",
             m.id
         )),
         Ok(v) => log.push(format!("[{}] tts: {v}", m.id)),
@@ -1267,7 +1259,7 @@ pub fn provision(
     // this log. The fix is one package manager away on every platform.
     if !after.ffmpeg_present {
         log.push(format!(
-            "[{}] ffmpeg is not on PATH — this box can crawl/digest/render but every merge it is offered will fail; install it (apt install ffmpeg / dnf install ffmpeg) and force a re-provision",
+            "[{}] ffmpeg is not on PATH, this box can crawl/digest/render but every merge it is offered will fail; install it (apt install ffmpeg / dnf install ffmpeg) and force a re-provision",
             m.id
         ));
     }
@@ -1288,7 +1280,7 @@ pub fn provision(
         let strays = undeclared_voices(&after.voices, &manifest, &pool, &catalogue);
         if !strays.is_empty() {
             log.push(format!(
-                "[{}] voices in store but declared nowhere (not a preset, not in voices.json, not pooled): {} — add each with its refs/ clip to voices.json and provision again, or drop it from the store; remote renders 500 until then",
+                "[{}] voices in store but declared nowhere (not a preset, not in voices.json, not pooled): {}, add each with its refs/ clip to voices.json and provision again, or drop it from the store; remote renders 500 until then",
                 m.id,
                 strays.join(", ")
             ));
@@ -1366,7 +1358,7 @@ mod tests {
         );
 
         // An enrollment: the store moved, the weights did not. This is the case
-        // that used to slip through the gate entirely — `tts_hash` was the whole
+        // that used to slip through the gate entirely, `tts_hash` was the whole
         // check, and it deliberately excludes `models/voices.json`, so a freshly
         // enrolled voice sat on the inductor while every log said "in sync".
         let enrolled = ProvisionStamp {
@@ -1435,7 +1427,7 @@ mod tests {
     #[test]
     fn a_configured_box_is_checked_but_never_re_installed() {
         // The waste this exists to stop: `ensure_opencode` can spend ten
-        // minutes in `npm i`, and it ran on *every* provision of *every* box —
+        // minutes in `npm i`, and it ran on *every* provision of *every* box
         // including the ones whose answer was not going to change. A catch-up
         // on a working cluster is a verification, so the install half is
         // reserved for a fresh or forced provision.
@@ -1460,7 +1452,7 @@ mod tests {
         // The full path keeps both halves: a fresh box still gets them.
         assert!(opencode_script(true).contains("npm i -g"));
         assert!(ffmpeg_script(true).contains("install -y ffmpeg"));
-        // A box that already has the tool short-circuits in *both* flavours —
+        // A box that already has the tool short-circuits in *both* flavours
         // the flag only decides what happens when it is missing.
         for script in [opencode_script(true), opencode_script(false)] {
             assert!(script.contains(r#"command -v opencode >/dev/null 2>&1 && { echo "OPENCODE-OK (present)"; exit 0; }"#));
@@ -1508,7 +1500,7 @@ mod tests {
     /// The false positive this shape caused, in the numbers it produced.
     ///
     /// It reported all 23 shipped presets on every single provision and told the
-    /// operator to add each one with a `refs/` clip — ~20 MB of audio to clone
+    /// operator to add each one with a `refs/` clip, ~20 MB of audio to clone
     /// voices already present, under names that already exist. Nothing about
     /// those 23 is undeclared: they are the catalogue itself.
     #[test]
@@ -1567,7 +1559,7 @@ mod tests {
     #[test]
     fn a_box_without_ffmpeg_says_so_before_a_merge_fails() {
         // The failure this prevents: a box provisions cleanly, is offered a
-        // merge, and shelves the chapter after a full render lease — with
+        // merge, and shelves the chapter after a full render lease, with
         // nothing anywhere saying the tool was missing.
         let present = Probe {
             reachable: true,
@@ -1623,7 +1615,7 @@ mod tests {
         assert!(p.summary().contains("ssh exit 255"));
     }
 
-    /// The sidecar needs *both* the binary and its weights — a binary with no
+    /// The sidecar needs *both* the binary and its weights, a binary with no
     /// models cannot render, and reads as ready right up until the first task.
     #[test]
     fn the_tts_sidecar_needs_the_binary_and_the_weights() {

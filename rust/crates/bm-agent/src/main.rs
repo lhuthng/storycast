@@ -1,8 +1,8 @@
 //! Worker agent: pull one pipeline stage at a time, run it, report back.
 //!
 //! Two modes:
-//! - `run`    — a single stage for one chapter, standalone (no inductor).
-//! - `worker` — register with the inductor and pull tasks until stopped.
+//! - `run`   , a single stage for one chapter, standalone (no inductor).
+//! - `worker`, register with the inductor and pull tasks until stopped.
 //!
 //! The agent never loads a model and never writes the authoritative bible.
 //! TTS goes through the sidecar over HTTP; the agent owns the sidecar's
@@ -10,7 +10,7 @@
 //! chapters flow through: it is kept warm *across* tasks (a per-task stop would
 //! reload ~2.85 GB for every offer), reaped after an idle interval, dropped
 //! before a merge's ffmpeg pass, and **recycled at a task boundary once it has
-//! outgrown its memory budget** — because a box that renders continuously is
+//! outgrown its memory budget**, because a box that renders continuously is
 //! never idle, so idleness alone is not a memory guard.
 
 mod hook;
@@ -32,7 +32,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const SIDECAR_PORT: u16 = 8818;
 
 /// Sidecar startup budget: how long `/health` is polled before giving up.
-/// The load is minutes on a slow box, so this is generous on purpose — and it
+/// The load is minutes on a slow box, so this is generous on purpose, and it
 /// is the *wait* that prevents a duplicate, not a shorter timeout.
 const SIDECAR_STARTUP_TICKS: usize = 60;
 const SIDECAR_STARTUP_TICK: Duration = Duration::from_secs(5);
@@ -72,7 +72,7 @@ enum Cmd {
     ///
     /// With `--inductor` this dials that inductor and pulls tasks, exactly as
     /// it always has. **Without it the worker is serve-only**: it holds no
-    /// inductor address at all, so it cannot dial one — the inductor does all
+    /// inductor address at all, so it cannot dial one, the inductor does all
     /// the asking and drives this box over `--serve-tasks`. The absence of an
     /// address is the guarantee, not a flag saying "do not dial".
     Worker {
@@ -86,7 +86,7 @@ enum Cmd {
         tts_url: Option<String>,
         /// Answer the inverted protocol on this port: `GET /status`,
         /// `POST /task`, `GET /unit`, `POST /shutdown`. Needs a cluster token
-        /// in `.bm/` — see `bm_core::token`. Required in serve-only mode,
+        /// in `.bm/`, see `bm_core::token`. Required in serve-only mode,
         /// optional alongside `--inductor`.
         #[arg(long)]
         serve_tasks: Option<u16>,
@@ -107,7 +107,7 @@ fn segment_manifest(audio_dir: &std::path::Path) -> Vec<bm_core::segments::Segme
     bm_core::segments::manifest(audio_dir)
 }
 
-/// What the worker is doing right now — the heartbeat source of truth.
+/// What the worker is doing right now, the heartbeat source of truth.
 #[derive(Debug, Clone, Default)]
 struct Progress {
     task_id: Option<String>,
@@ -115,7 +115,7 @@ struct Progress {
     chapter: Option<u32>,
     frac: f32,
     activity: String,
-    /// A stage that finished but was never acknowledged — the completion
+    /// A stage that finished but was never acknowledged, the completion
     /// hook's stash. Written by the task handler (serve mode) the moment a
     /// stage ends, cleared by the hook once the inductor accepts it through
     /// the reverse tunnel, or by the next offer (the inductor is talking
@@ -141,63 +141,34 @@ fn set_progress(shared: &Shared, frac: f32, activity: String) {
 // drift.
 
 /// The share of this box's RAM the TTS sidecar may hold before it is recycled.
-///
-/// The model is ~2.85 GB resident the moment its weights load, so on the
-/// 8 GiB boxes this project provisions that is already ~36% — this is a
-/// *growth* budget, not a size limit, and it has to sit far enough above the
-/// floor that a freshly loaded model is nowhere near it.
-///
-/// A **fraction of the box**, not a fixed number of megabytes, because the two
-/// failure modes are asymmetric: a fixed cap that is too low on a big box
-/// reloads the model for nothing (minutes per recycle), and one that is too
-/// high on a small box never fires before the OOM killer does. The fraction
-/// scales with the machine and needs no configuration to be right.
+/// The loaded model is ~2.85 GB (about 36% of an 8 GiB box), so this is a
+/// growth budget, not a size limit. A fraction of the box rather than a fixed
+/// cap: too low on a big box reloads the model for nothing, too high on a
+/// small box never fires before the OOM killer does.
 const SIDECAR_RSS_FRACTION: f64 = 0.5;
 
 /// Renders one sidecar process may serve before it is recycled regardless of
-/// its measured footprint.
-///
-/// A second trigger on purpose. The RSS reading is the direct guard, but it is
-/// a *sample* — it can miss a slow climb inside one long batch, and on a
-/// platform whose per-process memory is not reported it reads zero, which would
-/// silently disable the whole guard. A count cannot be unavailable and cannot
-/// be misread; it is the coarse backstop under the fine one.
+/// its measured footprint. The RSS reading is a sample that can miss a slow
+/// climb and reads zero on platforms without per-process memory; a count
+/// cannot be unavailable. The coarse backstop under the fine one.
 const SIDECAR_MAX_RENDERS: u64 = 200;
 
-/// The shortest life a sidecar may have before the guard will recycle it again.
-///
-/// Without this the guard has a perverse corner: if the model's baseline
-/// footprint were already over the cap, every task boundary would recycle, and
-/// a box would spend its whole time reloading ~2.85 GB instead of rendering —
-/// a worse failure than the leak it set out to fix. This bounds the cost of a
-/// badly-tuned budget to one reload per interval.
+/// The shortest life a sidecar may have before the guard will recycle it
+/// again. Bounds the cost of a badly-tuned budget (a baseline already over
+/// the cap) to one reload per interval instead of one per task boundary.
 const SIDECAR_MIN_LIFETIME_SECS: u64 = 300;
 
 /// The guard's thresholds, resolved **once per process**.
 ///
-/// Constants with environment overrides rather than a `Settings` field, and the
-/// reason is the trap this repo has already paid for: a provisioned worker has
-/// no `settings.json` at all, so a per-workspace setting would be invisible
-/// exactly on the boxes that hold the leak. This is a property of the *box* —
-/// how much RAM it has — so it belongs to the box's own environment.
-///
-/// The overrides exist to make the numbers **measurable**, which is the only
-/// honest way to set them. The fraction is a judgement (see
-/// [`SIDECAR_RSS_FRACTION`]); the way to replace a judgement with a figure is to
-/// run a box with a known value and read the log, not to reason harder:
-///
-/// ```text
-/// BM_TTS_MAX_RSS_MB=2048 BM_TTS_MAX_RENDERS=50 ./bm-agent --root … worker …
-/// ```
-///
-/// A worker logs the resolved budget once at startup, so a log from a box says
-/// both what was in force and what the guard did with it. Unset is the shipped
-/// default in every case — this adds a knob, it does not move one.
+/// Environment overrides instead of a `Settings` field: a provisioned worker
+/// has no `settings.json` at all, and this is a property of the box (its RAM),
+/// so it belongs to the box's environment. A worker logs the resolved budget
+/// once at startup; unset means the shipped default.
 #[derive(Debug, Clone, Copy)]
 struct Budget {
-    /// An absolute cap in MiB, or `None` to use [`SIDECAR_RSS_FRACTION`] of the
-    /// box's RAM. Absolute when set, because an operator testing a value wants
-    /// *that* value, not that value scaled by whatever the box turns out to be.
+    /// An absolute cap in MiB, or `None` to use [`SIDECAR_RSS_FRACTION`] of
+    /// the box's RAM. Absolute when set: an operator testing a value wants
+    /// that value, not that value scaled by whatever the box turns out to be.
     rss_cap_mib: Option<f64>,
     max_renders: u64,
     min_lifetime_secs: u64,
@@ -214,11 +185,9 @@ impl Default for Budget {
 }
 
 impl Budget {
-    /// The compiled defaults, with any per-box override applied.
-    ///
-    /// Read from the environment here and cached, not consulted per check: the
-    /// value belongs to the box, and a half-written environment must not be able
-    /// to change the guard's thresholds mid-run.
+    /// The compiled defaults with any per-box override applied, read from the
+    /// environment once and cached: a half-written environment must not be
+    /// able to change the guard's thresholds mid-run.
     fn from_env() -> Budget {
         // Two typed readers rather than one generic: a closure's type is fixed
         // by its first use, and `rss_cap_mib` is an `f64` while the other two
@@ -241,8 +210,8 @@ impl Budget {
         }
     }
 
-    /// The cap for a box with `total_bytes` of RAM, in MiB — `None` when the box
-    /// did not report its memory and no absolute cap was given. An unknown
+    /// The cap for a box with `total_bytes` of RAM, in MiB, `None` when the
+    /// box did not report its memory and no absolute cap was given. An unknown
     /// denominator is not a budget; the count trigger still applies.
     fn cap_mib(&self, total_bytes: u64) -> Option<f64> {
         if let Some(cap) = self.rss_cap_mib {
@@ -274,11 +243,10 @@ impl Budget {
 }
 
 /// A render refused because the operator's policy turns render off for this
-/// box. A **type**, so the serve path can tell it apart from every other
-/// render failure: this one answers 403 (strike-free release on the
-/// inductor's side) while a genuine failure answers 200 `ok: false` (a
-/// strike). Hand-rolled `Display`/`Error` rather than `thiserror` — one
-/// two-line type does not want a dependency.
+/// box. A type so the serve path can answer it 403 (strike-free release on
+/// the inductor's side) while a genuine failure answers 200 `ok: false` (a
+/// strike). Hand-rolled `Display`/`Error`: one two-line type wants no
+/// dependency.
 #[derive(Debug)]
 struct PolicyRefusal(&'static str);
 
@@ -295,7 +263,7 @@ struct Sidecar {
     child: Option<tokio::process::Child>,
     /// Renders this worker has spoken through the process **currently on the
     /// port**. Reset whenever a process is started or reaped, so it counts the
-    /// model's work rather than the worker's lifetime — which is the question
+    /// model's work rather than the worker's lifetime, which is the question
     /// the guard is asking.
     served: u64,
     /// When the process currently serving was first used, in Unix seconds.
@@ -314,32 +282,18 @@ struct Sidecar {
 
 /// The memory guard's decision, as a pure function of what was measured.
 ///
-/// Split out from [`Sidecar::over_budget`] because the branches are the part
-/// worth pinning: a guard whose thresholds can only be exercised by holding a
-/// 2.85 GB model is a guard nobody tests, and this one is the difference
-/// between a long render run finishing and an OOM killing the box. Taking the
-/// [`Budget`] as an argument rather than reading the constants also means a test
-/// can assert a *chosen* threshold instead of the one this box happens to have.
+/// Split from [`Sidecar::over_budget`] so every branch is testable without a
+/// 2.85 GB model in the way, and taking the [`Budget`] as an argument so a
+/// test can pin a chosen threshold. Order matters:
 ///
-/// `rss_bytes`/`total_bytes` are the sidecar's resident set and the box's RAM;
-/// `served` is how many takes the process has spoken; `serving_for` is how long
-/// ago it last did, or `None` if it never has.
+/// 1. the cooldown, so a bad budget costs one reload per interval, not one
+///    per boundary;
+/// 2. the render count, deliberately not gated on the memory reading: a count
+///    cannot be unavailable, and gating it is how the whole guard goes
+///    quietly dead on a platform that reports no per-process memory;
+/// 3. the resident set, the direct guard that catches growth inside a batch.
 ///
-/// Order matters and is deliberate:
-///
-/// 1. **The cooldown.** A budget that is wrong — a model whose baseline already
-///    exceeds the cap — would otherwise recycle at *every* task boundary, and
-///    the box would spend its life reloading instead of rendering. This bounds
-///    the cost of a bad number to one reload per interval.
-/// 2. **The render count.** Not gated on the memory reading on purpose: a count
-///    cannot be unavailable, so this trigger still fires on a platform that
-///    reports no per-process memory. Gating it on the census is exactly how the
-///    whole guard would go quietly dead.
-/// 3. **The resident set.** The direct guard, and the one that catches growth
-///    inside a batch that the count has not reached yet.
-///
-/// The reason is returned as text so the log line names the number that fired.
-/// "over budget" with no figures is a guard an operator can only guess at.
+/// The reason is returned as text so the log names the figure that fired.
 fn budget_verdict(
     rss_bytes: u64,
     total_bytes: u64,
@@ -411,7 +365,7 @@ impl Sidecar {
     }
 
     /// Forget the work counted against the process on the port. Called wherever
-    /// a process goes away — a spawn, a stop, a reap — so `served` never
+    /// a process goes away, a spawn, a stop, a reap, so `served` never
     /// describes a model that is no longer there.
     fn forget_work(&mut self) {
         self.served = 0;
@@ -421,7 +375,7 @@ impl Sidecar {
     /// Why the sidecar on this port should be recycled before the next render,
     /// or `None` to leave it alone.
     ///
-    /// Measurement only — the decision is [`budget_verdict`], which is pure so
+    /// Measurement only, the decision is [`budget_verdict`], which is pure so
     /// every branch of it can be tested without a model in the way.
     fn over_budget(&mut self) -> Option<String> {
         let (_, bytes) = sidecar_processes(&mut self.sys);
@@ -436,15 +390,15 @@ impl Sidecar {
     /// Verifies `/policy`, not just `/health`: a stale server from a previous
     /// deploy answers health but lacks the endpoints renders depend on.
     ///
-    /// **The rule that keeps the box alive:** a server that exists but is still
-    /// loading is *waited for*, never raced. `bm-tts` binds its port before the
-    /// ~2.85 GB load, so a bound port answering 503 means "starting" — and
-    /// spawning here would put two models in RAM on an 8 GiB box.
+    /// The rule that keeps the box alive: a server that exists but is still
+    /// loading is *waited for*, never raced. `bm-tts` binds its port before
+    /// the load, so a bound port answering 503 means "starting", and spawning
+    /// here would put two models in RAM on an 8 GiB box.
     async fn ensure(&mut self, layout: &Layout) -> Result<()> {
         if self.serving_current().await {
             return Ok(());
         }
-        // Not ready — but two different things can be in the way, and they want
+        // Not ready, but two different things can be in the way, and they want
         // opposite treatment.
         //
         // **Starting:** a previous attempt (ours, provisioning's detached one,
@@ -452,8 +406,8 @@ impl Sidecar {
         // a second model here is the OOM on an 8 GiB box.
         //
         // **Up but wrong:** `/health` answers and `/policy` does not, which is a
-        // server from an older deploy. It has to go, and it is nobody's child —
-        // `stop` only signals our own — so it is asked over `/shutdown`. Without
+        // server from an older deploy. It has to go, and it is nobody's child
+        // `stop` only signals our own, so it is asked over `/shutdown`. Without
         // this, bind-first would turn "stale sidecar" into a five-minute wait for
         // a server that can never become capable.
         match self.tts().probe().await {
@@ -502,7 +456,7 @@ impl Sidecar {
             }
             if child.try_wait()?.is_some() {
                 // Our child exited. If an instance that is *starting* holds the
-                // port — it won the bind while we were loading — wait for it
+                // port, it won the bind while we were loading, wait for it
                 // rather than failing the render on a race we lost by
                 // microseconds. Only `Loading` qualifies: a server that answers
                 // but is not the one we need will never become ready, and that
@@ -548,8 +502,8 @@ impl Sidecar {
     /// against it.
     ///
     /// `stop` is called in exactly the places where a model is meant to go
-    /// away — the idle reaper, `ensure` finding nothing on the port, and
-    /// `reap_all` — so clearing `served` here is what keeps the count attached
+    /// away, the idle reaper, `ensure` finding nothing on the port, and
+    /// `reap_all`, so clearing `served` here is what keeps the count attached
     /// to a *process* rather than to this worker's lifetime.
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -560,15 +514,12 @@ impl Sidecar {
 
     /// Stop **every** sidecar on this box: the child we spawned, and a server
     /// somebody else started (provisioning's detached `nohup … &`, or the
-    /// inductor's audition server) which is asked to exit over HTTP because it
-    /// is not ours to signal.
+    /// inductor's audition server) which is asked to exit over HTTP because
+    /// it is not ours to signal.
     ///
-    /// Two callers, and they share one reason: the model has to actually be
-    /// gone before the next thing that needs the memory runs. A **merge**, the
-    /// one stage with its own large transient working set — ffmpeg on top of a
-    /// resident 2.85 GB model is the co-residency that OOMs an 8 GiB box — and
-    /// the **memory guard**, which recycles a model that has outgrown its
-    /// budget. Both wait for the port to go quiet, because "asked" is not
+    /// Both callers share one reason: the model must actually be gone before
+    /// the next thing that needs the memory runs (a merge's ffmpeg pass, or
+    /// the memory guard). Both wait for the port to go quiet: "asked" is not
     /// "freed".
     async fn reap_all(&mut self) {
         self.stop();
@@ -593,35 +544,19 @@ impl Sidecar {
         eprintln!("sidecar still answering 5s after shutdown — merge proceeds anyway");
     }
 
-    /// Recycle the model if it has outgrown its budget — **the memory guard**.
+    /// Recycle the model if it has outgrown its budget, **the memory guard**.
     ///
-    /// The leak this exists for: a render is not a pure function of its input
-    /// as far as memory goes. The sidecar's working set grows across a long
-    /// run of inferences (allocator fragmentation, cached activations, whatever
-    /// the ONNX runtime keeps), and nothing returned it to the OS. On a box
-    /// that renders continuously the idle reaper never fires — it is keyed on
-    /// *idleness*, and a busy box is never idle — so RSS climbed until the OOM
-    /// killer or `MEM_PCT_CEILING` on the inductor's side stopped it, both of
-    /// which are consequences rather than cures.
+    /// The sidecar's working set grows across a long run of inferences and
+    /// nothing returns it to the OS, and a busy box is never idle, so the
+    /// idle reaper never fires. Safe on two counts: it runs between tasks
+    /// (the caller invokes it before the first `/infer`; recycling mid-render
+    /// would lose a take, and TTS is stochastic), and it is bounded by the
+    /// [`SIDECAR_MIN_LIFETIME_SECS`] cooldown.
     ///
-    /// Two properties make this safe, and both matter:
-    ///
-    /// * **It runs between tasks, never during one.** The caller invokes it at
-    ///   the top of a render arm, before the first `/infer`. Recycling
-    ///   mid-render would kill the request and lose the take — and TTS is
-    ///   stochastic, so a lost take is not reproducible from its inputs.
-    /// * **It is bounded by a cooldown** (see [`SIDECAR_MIN_LIFETIME_SECS`]), so
-    ///   a budget that is wrong — a model whose baseline already exceeds the
-    ///   cap — degrades into one reload per interval rather than a reload per
-    ///   offer.
-    ///
-    /// The action is `reap_all`, not `stop`, and that is deliberate. This is
-    /// the one case where the worker overrides its own "an adopted server is
-    /// somebody else's to keep" rule: a box about to be killed by its own
-    /// memory cannot leave the decision to whoever started the model. The cost
-    /// is that a local-node audition can be cut short by a recycle — the same
-    /// trade a merge already makes — and the next render starts a fresh server
-    /// this worker owns, so at most one recycle per adoption is ambiguous.
+    /// The action is `reap_all`, not `stop`: the one case where the worker
+    /// overrides its own "an adopted server is somebody else's to keep" rule,
+    /// because a box about to be killed by its own memory cannot leave the
+    /// decision to whoever started the model.
     async fn recycle_if_over_budget(&mut self) {
         let Some(why) = self.over_budget() else {
             return;
@@ -662,7 +597,7 @@ async fn child_stderr_tail(stderr: &mut Option<tokio::process::ChildStderr>) -> 
 ///
 /// The stage itself is now thin on purpose: *how* a chapter is obtained is a
 /// script's business (or the built-in fetcher's), and the only things this
-/// function owns are the ones that are the same for every provider — the
+/// function owns are the ones that are the same for every provider, the
 /// progress line, the artifact write, and the verdict that travels back in the
 /// completion.
 ///
@@ -741,7 +676,7 @@ async fn run_digest(
         };
         // Analyze only, never persist: the inductor is the single writer of
         // the script and the bible. A worker-mode write would land on the
-        // shared disk underneath the winner — a lost digest race's orphaned
+        // shared disk underneath the winner, a lost digest race's orphaned
         // thread finishing late would overwrite the applied script with its
         // own uncanonicalized version. The script travels home in the report.
         let outcome = rt.block_on(bm_core::digest::analyze_chapter(
@@ -772,8 +707,8 @@ async fn run_digest(
     Ok((outcome.delta, outcome.script))
 }
 
-/// What a render offer asks for. Pure, so the zero-units arm — "do nothing
-/// and report success", the easiest arm to write as a fall-through — is
+/// What a render offer asks for. Pure, so the zero-units arm, "do nothing
+/// and report success", the easiest arm to write as a fall-through, is
 /// pinned by a test instead of by inspection.
 ///
 /// The offered list is the chapter's **whole** unit set, not the difference
@@ -784,7 +719,7 @@ async fn run_digest(
 enum RenderAction {
     /// Old inductor (no `render_units`): plan from the local script.
     Legacy,
-    /// The offer names no units at all — an empty chapter. Report `ok` with
+    /// The offer names no units at all, an empty chapter. Report `ok` with
     /// `units: 0` at once.
     Noop,
     /// Consider these units; speak the ones this box does not already hold.
@@ -802,7 +737,7 @@ fn render_action(render_units: Option<&[bm_proto::RenderUnitSpec]>) -> RenderAct
 /// The offered units whose file this box does not already hold, plus every
 /// unit the inductor flagged as forced.
 ///
-/// Forced names are the ones the inductor's own store lacks — the surgical
+/// Forced names are the ones the inductor's own store lacks, the surgical
 /// set a swap or retag just deleted. They render even when this disk holds a
 /// same-named file, or a warm box keeps serving stale bytes under the new
 /// text. Everything else skips on presence, as before.
@@ -900,7 +835,7 @@ async fn run_render(
     // No accent gate: any voice the sidecar can synthesize is allowed. If the
     // engine itself rejects a voice, that failure surfaces from /infer.
     // The render audit log belongs with the rest of the state, not in
-    // `output/`. `output/` holds deliverables and nothing else — a machine
+    // `output/`. `output/` holds deliverables and nothing else, a machine
     // -readable record of TTS calls sitting beside the mp3s is a stray
     // intermediate in the one directory an operator actually looks at.
     let manifest = layout.bm_state().join("render-manifest.jsonl");
@@ -935,7 +870,7 @@ struct MergeJob {
     gap_ms: u32,
     speed: f64,
     on: bm_core::ambience::LayerSwitch,
-    /// The chapter's take files in mix order. Empty means "no plan" — this box
+    /// The chapter's take files in mix order. Empty means "no plan", this box
     /// then names them itself, exactly as before takes were content-addressed.
     takes: Vec<String>,
 }
@@ -956,7 +891,7 @@ async fn run_merge(
     } = job;
     set_progress(shared, 0.1, format!("merge ch{n}"));
     // Pieces, not chapters: a merge runs on any box, so it pulls the takes
-    // it lacks from the inductor — whose store holds every completed take —
+    // it lacks from the inductor, whose store holds every completed take
     // instead of requiring them on local disk. Offer-driven only: the
     // hand-driven path carries no take list and mixes what is here.
     if !takes.is_empty() {
@@ -1040,11 +975,11 @@ async fn run_merge(
 /// Box load for the heartbeat: CPU % plus RAM % and used GiB, sampled on
 /// the beat. sysinfo needs two CPU refreshes to form a delta, so the first
 /// beat reports `None` (the pane shows a dash) and every beat after is a
-/// ~2s average — the cadence heartbeats already run at, no extra timer.
+/// ~2s average, the cadence heartbeats already run at, no extra timer.
 ///
 /// The same sample counts the TTS sidecars, because that is the quantity that
 /// actually kills these boxes: one model is ~2.85 GB and an 8 GiB box cannot
-/// hold two, so `> 1` is not a curiosity to log and move past — it is the OOM
+/// hold two, so `> 1` is not a curiosity to log and move past, it is the OOM
 /// warming up, and nothing in the cluster could see it before.
 struct LoadProbe {
     sys: sysinfo::System,
@@ -1060,7 +995,7 @@ struct LoadProbe {
 /// mem_used_gib, sidecar_count, sidecar_rss_gib)`.
 ///
 /// A named alias because it is a five-tuple threaded from the sampler to the
-/// heartbeat builder and back through the status endpoint — positional and
+/// heartbeat builder and back through the status endpoint, positional and
 /// easy to transpose, so the names belong somewhere.
 type Load = (
     Option<f32>,
@@ -1084,7 +1019,7 @@ impl LoadProbe {
 
     /// One sample. `None` CPU/RAM until the second call: a CPU delta needs two
     /// refreshes, and reporting 0.0 would read as idle rather than unknown. The
-    /// sidecar count is available immediately — it is a census, not a delta.
+    /// sidecar count is available immediately, it is a census, not a delta.
     fn sample(&mut self) -> Load {
         self.sys.refresh_cpu_all();
         self.sys.refresh_memory();
@@ -1128,7 +1063,7 @@ impl LoadProbe {
 /// The refresh the census runs under: RSS, and **no tasks**.
 ///
 /// `System::refresh_processes` ends in `.with_tasks()`, and sysinfo's own
-/// `Default` sets `tasks: true` — because on Linux it lists every *task*
+/// `Default` sets `tasks: true`, because on Linux it lists every *task*
 /// (thread) as a process in its own right, each one carrying its parent's
 /// `/proc/<pid>` and therefore the parent's whole RSS. A sidecar with an
 /// 8-thread ONNX pool was therefore counted as **8 processes holding eight
@@ -1137,8 +1072,8 @@ impl LoadProbe {
 /// `/proc/<pid>/task/<tid>/statm` is byte-identical to the leader's, which is
 /// what made the multiplication exact.
 ///
-/// macOS enumerates no tasks — `Process::thread_kind` is `None` off
-/// Linux/Android — so only the Linux workers were ever wrong, which is why
+/// macOS enumerates no tasks, `Process::thread_kind` is `None` off
+/// Linux/Android, so only the Linux workers were ever wrong, which is why
 /// the pane looked sane on the inductor's own box.
 ///
 /// Named and separate so a test can pin the one flag whose *default* is the
@@ -1153,15 +1088,15 @@ fn census_refresh_kind() -> sysinfo::ProcessRefreshKind {
 /// `(count, total RSS bytes)` of the `bm-tts` processes on this box.
 ///
 /// Matched on the process *name* containing `bm-tts`, which covers both
-/// spellings a worker can run — the provisioned `~/bm-worker/bm-tts` and a
-/// repo build at `rust/target/{debug,release}/bm-tts` — and deliberately not
+/// spellings a worker can run, the provisioned `~/bm-worker/bm-tts` and a
+/// repo build at `rust/target/{debug,release}/bm-tts`, and deliberately not
 /// on argv, which would also match an `ssh … bm-tts` wrapper on the
 /// inductor's own box. `name` comes from the process's own `stat` parse, not
 /// from a refresh flag, so the narrow [`census_refresh_kind`] keeps it.
 ///
 /// One definition, two callers: the heartbeat's load sample, and the sidecar's
 /// own memory guard. Two copies would let the number the panes show and the
-/// number the guard acts on disagree — which is the worst version of this,
+/// number the guard acts on disagree, which is the worst version of this,
 /// because the guard would be recycling on a reading nobody could see.
 fn sidecar_processes(sys: &mut sysinfo::System) -> (u32, u64) {
     sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, census_refresh_kind());
@@ -1194,8 +1129,8 @@ fn wants_shutdown(body: &[u8]) -> bool {
 /// Who this worker is, as every report identifies it.
 ///
 /// A struct rather than four arguments because the identity is passed to two
-/// callers now — the heartbeat loop that pushes beats and the status endpoint
-/// that answers for one — and four strings in the same order is exactly the
+/// callers now, the heartbeat loop that pushes beats and the status endpoint
+/// that answers for one, and four strings in the same order is exactly the
 /// shape that gets transposed silently.
 #[derive(Debug, Clone)]
 struct WorkerIdentity {
@@ -1213,7 +1148,7 @@ struct WorkerIdentity {
 /// worker is doing, depending on which way the report travelled.
 ///
 /// `sidecar_keep` is the worker's own belief about its sidecar: pull mode has
-/// no instruction channel, so it is always `true` here — serve mode passes
+/// no instruction channel, so it is always `true` here, serve mode passes
 /// what the inductor last told it, and the dispatcher's convergence reads
 /// that back to detect a box that rebooted into its default.
 fn heartbeat_now(
@@ -1275,7 +1210,7 @@ fn heartbeat_now(
 ///
 /// `merge` is advertised **only when ffmpeg is on PATH**. The merge stage shells
 /// out to ffmpeg, so a box without it would take every merge offered and fail
-/// each one — three strikes and the chapter shelves. Reporting the capability
+/// each one, three strikes and the chapter shelves. Reporting the capability
 /// truthfully lets the scheduler skip merge here and give the box its other
 /// stages, instead of poisoning the ledger with failures it cannot help.
 fn capabilities() -> Vec<String> {
@@ -1303,7 +1238,7 @@ async fn heartbeat_loop(
         let p = shared.lock().map(|p| p.clone()).unwrap_or_default();
         let body = heartbeat_now(&p, &who, &mut probe, true);
         // The inductor's only command channel: a shutdown latch read on
-        // every answer. Exiting here strands nothing — the inductor
+        // every answer. Exiting here strands nothing, the inductor
         // reaps the lease (no strike) or requeues the ledger on its way
         // down, and an old inductor's `{"ok": true}` parses as "stay".
         if let Ok(resp) = http.post(&url).json(&body).send().await {
@@ -1312,8 +1247,8 @@ async fn heartbeat_loop(
                     // No sidecar is stopped here, and it is a known gap rather
                     // than an oversight: this is the *pull* protocol, whose
                     // sidecar lives in the task loop's own locals and is not
-                    // reachable from this task (the inverted protocol — the one
-                    // the inductor actually drives now — reaps in the
+                    // reachable from this task (the inverted protocol, the one
+                    // the inductor actually drives now, reaps in the
                     // `/shutdown` handler and in `idle_watchdog`). A child left
                     // here is cleaned up by the cluster sweep (`X`) until the
                     // pull path is retired.
@@ -1343,7 +1278,7 @@ fn idle_secs(s: &Settings) -> u64 {
 ///
 /// A busy worker is exempt, and that exemption is load-bearing: the inductor
 /// is blocked inside its own `POST /task` for the whole stage, so no polls
-/// arrive by design — and counting that as idleness would kill a render
+/// arrive by design, and counting that as idleness would kill a render
 /// halfway through.
 async fn idle_watchdog(push: std::sync::Arc<push::Push>, timeout: Duration) {
     loop {
@@ -1359,7 +1294,7 @@ async fn idle_watchdog(push: std::sync::Arc<push::Push>, timeout: Duration) {
             );
             // Do not orphan the sidecar, ours or an adopted one: an exiting
             // worker that leaves a model behind is 2.85 GB held by a box nobody
-            // drives. Safe to wait for the lock — this branch is only reached
+            // drives. Safe to wait for the lock, this branch is only reached
             // when no task is running.
             push.sidecar.lock().await.reap_all().await;
             std::process::exit(0);
@@ -1375,7 +1310,7 @@ fn set_task(shared: &Shared, offer: &TaskOffer) {
         p.frac = 0.0;
         p.activity = format!("{} ch{}", offer.stage, offer.chapter);
         // A new offer is the inductor, talking. Whatever the stash held is
-        // now stale by definition — the task it described has been re-queued
+        // now stale by definition, the task it described has been re-queued
         // and re-decided, so its completion must not land late and surprise
         // the ledger. (The hook had its whole silent window to deliver it.)
         p.pending = None;
@@ -1393,17 +1328,17 @@ fn clear_task(shared: &Shared) {
 }
 
 /// Install the offer's credentials into this process and return the variable
-/// names that were set — never the values, which do not belong in a log.
+/// names that were set, never the values, which do not belong in a log.
 ///
 /// Two consumers read them straight out of the environment: the generation
 /// backends in `bm-core::digest::llm` (which is why a provisioned box used to
-/// die on `GEMINI_API_KEY missing` — `.env` is personal and git-ignored, so it
+/// die on `GEMINI_API_KEY missing`, `.env` is personal and git-ignored, so it
 /// is never one of the files provisioning copies), and the TTS sidecar, a
 /// child process the worker spawns for a render and which inherits this
 /// environment at `spawn()`.
 ///
 /// **The inductor wins.** It holds the only copy the operator maintains, so a
-/// value it sends replaces whatever this box had — a stale key on one machine
+/// value it sends replaces whatever this box had, a stale key on one machine
 /// is precisely the failure this replaces. An *empty* value is skipped rather
 /// than blanked, so a worker whose own `.env` is the only place a key exists
 /// keeps working, and an offer from an inductor that has nothing configured
@@ -1421,7 +1356,7 @@ fn install_credentials(creds: &bm_proto::Credentials) -> Vec<&'static str> {
 
 /// Run one offered task on this box, start to finish.
 ///
-/// **No scheduling calls home.** A worker never asks for work — the offer is
+/// **No scheduling calls home.** A worker never asks for work, the offer is
 /// authoritative and everything scheduling needs arrived inside it. The one
 /// exception is data, not scheduling: a merge pulls the take files it lacks
 /// from the inductor (see `run_merge`), exactly as a render pushes its units
@@ -1436,16 +1371,16 @@ async fn run_offer(
     fetch: Option<(&reqwest::Client, &str)>,
     // Whether a render on this box may ensure a sidecar at all. `false` is
     // the inductor's instruction (`POST /sidecar-policy`): the operator's
-    // policy turned render off, and a render — the one stage that cannot
-    // run without the ~2.85 GB model — is refused rather than served by
+    // policy turned render off, and a render, the one stage that cannot
+    // run without the ~2.85 GB model, is refused rather than served by
     // re-warming it. A snapshot taken per call, so no hidden mutable state
     // sits on `Sidecar` for an offer to read stale.
     keep_sidecar: bool,
 ) -> Result<TaskResult> {
     use bm_proto::Stage::*;
     let n = offer.chapter;
-    // Credentials first: everything below — including the TTS sidecar this
-    // call may spawn — reads them from the environment.
+    // Credentials first: everything below, including the TTS sidecar this
+    // call may spawn, reads them from the environment.
     let installed = install_credentials(&offer.credentials);
     if !installed.is_empty() {
         println!("[ok] credentials from inductor: {}", installed.join(", "));
@@ -1534,7 +1469,7 @@ async fn run_offer(
             // The backend name travels in `offer.analyzer`; what it runs
             // travels in `offer.analyzer_settings`. Both are needed here: this
             // box may have no `.bm/settings.json` at all (provisioning copies
-            // `prompts/`, `python/`, `assets/` and `refs/`, never `.bm/` — that
+            // `prompts/`, `python/`, `assets/` and `refs/`, never `.bm/`, that
             // is the inductor's state), in which case `Settings::load` silently
             // returns `Settings::default()` and the compiled-in model runs
             // instead of the operator's. That is the bug that made a box
@@ -1566,7 +1501,7 @@ async fn run_offer(
             // The sidecar policy first, as a **per-call snapshot** the caller
             // took before this offer ran: an operator who turned render off
             // for this box must not get a model relaunched under them by a
-            // stray or stale render offer. A typed error, not a bare string —
+            // stray or stale render offer. A typed error, not a bare string
             // the serve path answers it with a 403, which the dispatcher
             // reads as "strike-free refusal, release the rows", while every
             // other render failure answers 200 `ok: false`, a strike. A
@@ -1580,14 +1515,14 @@ async fn run_offer(
             }
             // The memory guard, and this is the only place it can safely run:
             // between tasks. A model that has outgrown its budget is recycled
-            // here, before the first `/infer` of this offer — never during one.
+            // here, before the first `/infer` of this offer, never during one.
             // See `Sidecar::recycle_if_over_budget` for what it measures and
             // why it is not the idle reaper's job.
             sidecar.recycle_if_over_budget().await;
             sidecar.ensure(layout).await?;
             let (units, unit_files) = match render_action(offer.render_units.as_deref()) {
                 // Old inductor: plan from the local script, keep files
-                // locally, upload nothing — exactly as before the migration.
+                // locally, upload nothing, exactly as before the migration.
                 RenderAction::Legacy => (
                     run_render(layout, n, &offer.engine, &sidecar.tts(), shared).await?,
                     Vec::new(),
@@ -1601,7 +1536,7 @@ async fn run_offer(
                 //
                 // `render_batch` takes of one chapter arrive per offer; the
                 // worker already loops over a list, so batching changed nothing
-                // here — only how often this arm is entered.
+                // here, only how often this arm is entered.
                 RenderAction::Units => {
                     // Proven non-empty by the match above.
                     let list = offer.render_units.as_deref().unwrap_or(&[]);
@@ -1648,8 +1583,8 @@ async fn run_offer(
         }
         Merge => {
             // Merge needs no TTS, and its ffmpeg pass is the other large
-            // working set on the box: drop the model first — including a
-            // provision-started one this worker never spawned — so the two
+            // working set on the box: drop the model first, including a
+            // provision-started one this worker never spawned, so the two
             // never co-reside in 8 GiB.
             sidecar.reap_all().await;
             let path = run_merge(
@@ -1677,7 +1612,7 @@ async fn run_offer(
             // leaned on `publish()` having renamed the file straight into the
             // inductor's own `output/`, which is only true when the two share
             // a filesystem. Shipping it every time costs a few MB of base64
-            // and removes the branch — and the inductor writes it to
+            // and removes the branch, and the inductor writes it to
             // `final_mp3` either way, idempotently for a box that already put
             // it there.
             let mp3 = Some(base64::Engine::encode(
@@ -1707,7 +1642,7 @@ struct TaskResult {
     units: u64,
     script: Option<Value>,
     text: Option<String>,
-    /// Crawl only: what happened, when "ok" alone cannot say it — an absent
+    /// Crawl only: what happened, when "ok" alone cannot say it, an absent
     /// chapter and a login wall are both `ok: false`-shaped facts with entirely
     /// different consequences, and the inductor cannot tell them apart from a
     /// boolean and a sentence.
@@ -1719,7 +1654,7 @@ struct TaskResult {
 /// Say what the sidecar guard will do, once, when a worker starts.
 ///
 /// The guard's numbers are a judgement until a box has measured them, and a
-/// measurement needs a record of what was in force — otherwise a log full of
+/// measurement needs a record of what was in force, otherwise a log full of
 /// recycles says nothing about which budget produced them. One line, at startup,
 /// in the same place the worker announces itself.
 ///
@@ -1745,7 +1680,7 @@ async fn worker_loop(
         .timeout(Duration::from_secs(30))
         // The inductor is loopback or LAN. An ambient `HTTP_PROXY` would
         // otherwise intercept every register/beat/task/complete and answer in
-        // its place — which surfaces as a 502 from nowhere and a worker that
+        // its place, which surfaces as a 502 from nowhere and a worker that
         // never joins. Same reasoning as `api::sidecar_client`.
         //
         // Deliberately *not* applied to `run_crawl`: a chapter URL is the one
@@ -1788,13 +1723,13 @@ async fn worker_loop(
             busy: std::sync::atomic::AtomicBool::new(false),
             last_contact: std::sync::atomic::AtomicU64::new(bm_proto::now_secs()),
             last_task_end: std::sync::atomic::AtomicU64::new(bm_proto::now_secs()),
-            // The sidecar is kept by default — the render lifecycle is written
-            // against that — and the inductor's `POST /sidecar-policy` is the
+            // The sidecar is kept by default, the render lifecycle is written
+            // against that, and the inductor's `POST /sidecar-policy` is the
             // one thing that may clear it (an operator turning render off).
             keep_sidecar: std::sync::atomic::AtomicBool::new(true),
             // Merge data-plane: the hook base *is* the inductor API through
             // the reverse tunnel. `no_proxy`, like every loopback client
-            // here — an ambient HTTP_PROXY would answer instead of the tunnel.
+            // here, an ambient HTTP_PROXY would answer instead of the tunnel.
             fetch_http: reqwest::Client::builder()
                 .no_proxy()
                 .build()
@@ -1814,7 +1749,7 @@ async fn worker_loop(
 
     // ── Serve-only ──────────────────────────────────────────────────────────
     // No inductor URL means no scheduling calls home, and that is the whole
-    // guarantee: this worker never asks for work — it holds no address to
+    // guarantee: this worker never asks for work, it holds no address to
     // ask at. The one dial-out it keeps is data, not scheduling: a merge
     // pulls the take files it lacks through the reverse tunnel's hook base
     // (which only works while the inductor holds the tunnel open), exactly
@@ -1834,7 +1769,7 @@ async fn worker_loop(
         // across tasks never means holding 2.85 GB indefinitely.
         tokio::spawn(push::sidecar_reaper(push.clone()));
         // The completion hook: a loopback address that **is** the inductor's
-        // control API — the reverse tunnel's far end (bm-inductor's tunnel
+        // control API, the reverse tunnel's far end (bm-inductor's tunnel
         // supervisor). This still dials nothing on its own: the address only
         // works while the inductor holds the tunnel open, and the sender
         // stays silent until the inductor has been silent. The token is the
@@ -1999,7 +1934,7 @@ fn hostname_simple() -> String {
 /// What a hook post that goes nowhere means, said once. When the worker
 /// stashes a completion and the tunnel is down (inductor dead, or older than
 /// the tunnel), every pass would otherwise log the same failure with no
-/// remedy attached — which is how a real problem becomes unreadable noise.
+/// remedy attached, which is how a real problem becomes unreadable noise.
 fn tunnel_missing_hint(task_id: &str, attempt: u64) {
     if attempt.is_multiple_of(12) {
         println!(
@@ -2209,7 +2144,7 @@ async fn main() -> Result<()> {
             let addr = addr.unwrap_or_else(|| "127.0.0.1".into());
             let tts_url = tts_url.unwrap_or_else(|| "http://127.0.0.1:8818".into());
             // Same gate as the inductor: no pointer (or an empty live tree)
-            // means a half-rsynced provision — refuse. Drift is adopted.
+            // means a half-rsynced provision, refuse. Drift is adopted.
             // Provisioning writes the pointer.
             let pointer = bm_core::profile::verify(&layout.root)?;
             println!(
@@ -2297,7 +2232,7 @@ mod tests {
     fn the_sidecar_census_asks_for_memory_and_never_for_tasks() {
         // The 8× regression, pinned where it cannot come back quietly. On
         // Linux sysinfo lists every *task* (thread) as a process in its own
-        // right, each carrying its parent's whole RSS — so asking for tasks
+        // right, each carrying its parent's whole RSS, so asking for tasks
         // turned one 2.4 GiB sidecar with an 8-thread ONNX pool into
         // `8 bm-tts processes … 19.5 GB resident` on an 11.6 GB box, and
         // handed `budget_verdict` a phantom 7.4–41 GB against a 5664 MiB cap.
@@ -2305,7 +2240,7 @@ mod tests {
         // This is a property of the refresh kind, not of any box, so it is
         // assertable on macOS where the bug cannot reproduce: `thread_kind` is
         // `None` off Linux/Android, so the census reads 1 here either way.
-        // Mutate it — drop the `without_tasks()` — and this fails.
+        // Mutate it, drop the `without_tasks()`, and this fails.
         let kind = census_refresh_kind();
         assert!(
             !kind.tasks(),
@@ -2322,8 +2257,8 @@ mod tests {
 
     #[tokio::test]
     async fn reaping_the_sidecar_reaches_one_we_did_not_spawn() {
-        // The provision-started server is nobody's child, so `stop` — a signal
-        // to `self.child` — cannot reach it. That is why the merge and shutdown
+        // The provision-started server is nobody's child, so `stop`, a signal
+        // to `self.child`, cannot reach it. That is why the merge and shutdown
         // paths ask over HTTP, and the assertion is on the *ask*: a refused one
         // is survivable and reported, a missing one is the co-residency OOM.
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -2377,7 +2312,7 @@ mod tests {
     /// The shipped thresholds, spelled out rather than resolved.
     ///
     /// `Budget::from_env()` would make every assertion below depend on the
-    /// shell's environment — the trap the cold-start test already paid for once.
+    /// shell's environment, the trap the cold-start test already paid for once.
     /// A test that wants a different budget says so, which is also how the
     /// overrides themselves are covered.
     fn shipped() -> Budget {
@@ -2400,7 +2335,7 @@ mod tests {
     fn a_sidecar_that_has_grown_past_half_the_box_is_recycled() {
         // The leak this exists for: RSS climbing across a long run of
         // inferences on a box that is never idle. 4 GiB is the budget on an
-        // 8 GiB box, and the reason line has to name the numbers — "over
+        // 8 GiB box, and the reason line has to name the numbers, "over
         // budget" with no figures is a guard an operator can only guess at.
         let why = budget_verdict(4 * 1024 * 1_048_576, BOX_8GIB, 0, Some(10_000), &shipped())
             .expect("at the budget is over the budget");
@@ -2410,7 +2345,7 @@ mod tests {
             "and says where the number came from: {why}"
         );
 
-        // A bigger box gets a bigger budget — the point of a fraction. The same
+        // A bigger box gets a bigger budget, the point of a fraction. The same
         // 4 GiB sidecar is fine on 32 GiB.
         assert_eq!(
             budget_verdict(
@@ -2484,7 +2419,7 @@ mod tests {
     fn a_per_box_override_replaces_the_fraction_and_says_so() {
         // Why the override exists: the fraction is a judgement, and the only
         // honest way to replace it is to run a box with a known value and read
-        // the log. This pins that a set value is used *as given* — an operator
+        // the log. This pins that a set value is used *as given*, an operator
         // testing 2048 MiB wants 2048, not 2048 scaled by the box.
         let tuned = Budget {
             rss_cap_mib: Some(2048.0),
@@ -2522,7 +2457,7 @@ mod tests {
     #[test]
     fn the_startup_line_names_the_budget_that_will_be_applied() {
         // A log full of recycles says nothing unless it also says which budget
-        // produced them — that is the whole reason the line exists, and the
+        // produced them, that is the whole reason the line exists, and the
         // reason it is resolved from the same `from_env` the guard uses.
         let default = shipped().describe(BOX_8GIB);
         assert!(default.contains("4096 MiB"), "{default}");
@@ -2575,7 +2510,7 @@ mod tests {
     async fn a_sidecar_under_budget_is_left_alone() {
         // The other half of the guard: it must not recycle a healthy model.
         // Nothing is listening on this port, so the census finds nothing and
-        // the verdict is `None` — the same answer a well-behaved model gets.
+        // the verdict is `None`, the same answer a well-behaved model gets.
         let mut s = Sidecar::new("http://127.0.0.1:1");
         s.note_renders(3);
         s.serving_since = Some(0);
@@ -2605,7 +2540,7 @@ mod tests {
     #[test]
     fn render_action_pins_the_empty_offer_to_noop() {
         use bm_proto::RenderUnitSpec;
-        // Zero units means "report ok/0 at once" — never a fall-through into
+        // Zero units means "report ok/0 at once", never a fall-through into
         // rendering, and never the legacy path. Since the offer carries the
         // chapter's whole unit set, this arm now only fires for a chapter with
         // no units at all: "this box already holds everything" is decided in
@@ -2634,7 +2569,7 @@ mod tests {
     fn pending_units_skips_what_this_box_already_holds() {
         // Why the offer carries every unit: the inductor cannot see this disk,
         // so the skip has to happen here. A file that is present and
-        // non-trivial is done — the same test `assemble` applies at merge time,
+        // non-trivial is done, the same test `assemble` applies at merge time,
         // so the two cannot disagree about a chapter being ready.
         use bm_proto::RenderUnitSpec;
         let root = std::env::temp_dir().join(format!("bmpend{}", std::process::id()));
@@ -2697,7 +2632,7 @@ mod tests {
         //
         // The sidecar is faked down to the two questions `ensure` asks
         // (`/health` and a `/policy` carrying `allowed_voices`), so this never
-        // spawns a model — and `/infer` counts the calls, because the count is
+        // spawns a model, and `/infer` counts the calls, because the count is
         // the assertion.
         use bm_proto::RenderUnitSpec;
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -2841,7 +2776,7 @@ mod tests {
         // New inductor, command set and clear.
         assert!(wants_shutdown(br#"{"ok":true,"shutdown":true}"#));
         assert!(!wants_shutdown(br#"{"ok":true,"shutdown":false}"#));
-        // Old inductor: no `shutdown` key at all — the default keeps us
+        // Old inductor: no `shutdown` key at all, the default keeps us
         // running, which is what makes either side upgradable on its own.
         assert!(!wants_shutdown(br#"{"ok": true}"#));
         // Garbage is ignored, never acted on.
@@ -2888,7 +2823,7 @@ mod tests {
     #[test]
     fn the_sidecar_argv_points_at_this_box_s_own_tree() {
         // Was `sidecar_python_prefers_the_managed_venv`. The venv order is gone
-        // — there is one binary and one model directory now, and both hang off
+        //, there is one binary and one model directory now, and both hang off
         // the root, so the inductor and a worker resolve the same paths.
         let root = std::env::temp_dir().join(format!("bmtts{}", std::process::id()));
         let layout = Layout::new(&root);
@@ -2902,7 +2837,7 @@ mod tests {
             args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
         };
         // The dictionary and the voice store live inside the model directory,
-        // and the codec shares it — one directory, not three.
+        // and the codec shares it, one directory, not three.
         assert_eq!(
             value_of("--codec"),
             Some(root.join("models").display().to_string())
@@ -2965,7 +2900,7 @@ mod tests {
     /// with `response_body`. Returns `(base_url, bodies)`.
     ///
     /// The repo's own rule for this shape (ROADMAP §1.4: "pin the request shape
-    /// against a local fixture server, no real API keys in tests") — and the
+    /// against a local fixture server, no real API keys in tests"), and the
     /// only way to reach the arm under test, which is a network call by nature.
     fn fixture_server(response_body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
         use std::io::{BufRead, BufReader, Read, Write};
@@ -3014,7 +2949,7 @@ mod tests {
     async fn a_digest_runs_on_the_inductors_analyzer_settings_not_the_boxes_own() {
         // The last mile of the analyzer-settings fix, and the only part a unit
         // test can reach. Deleting the overlay in the `Digest` arm left every
-        // other test in this workspace green — the arm is a network call, so
+        // other test in this workspace green, the arm is a network call, so
         // nothing else looks at it.
         //
         // The `local` backend is the probe: its endpoint is configurable, so
@@ -3036,8 +2971,8 @@ mod tests {
             "bible={bible_json}\ncast={cast_json}\nmusic={music_palette}\neffects={effect_tags}\ninjects={inject_sounds}\nchapter={chapter_text}\n",
         )
         .unwrap();
-        // The digest reads the music palette out of the scene map — it is the
-        // vocabulary the prompt offers and the validator accepts — so a worker
+        // The digest reads the music palette out of the scene map, it is the
+        // vocabulary the prompt offers and the validator accepts, so a worker
         // with no `assets/` cannot be handed a chapter to digest at all.
         std::fs::create_dir_all(layout.assets()).unwrap();
         std::fs::write(
@@ -3093,7 +3028,7 @@ mod tests {
         let shared: Shared = Arc::new(Mutex::new(Progress::default()));
         let mut sidecar = Sidecar::new("http://127.0.0.1:8818");
 
-        // The digest itself is *expected* to fail — the fixture answers `{}`,
+        // The digest itself is *expected* to fail, the fixture answers `{}`,
         // which is not a valid digest, so the one repair attempt fails too.
         // What is under test is where the request went and what it asked for.
         let _ = run_offer(
@@ -3131,11 +3066,11 @@ mod tests {
 /// neither of them can catch the two ways this guard could be dead on arrival:
 /// a process-name match that never matches, and a platform that reports zero
 /// per-process memory. Either would make the whole guard silently inert, and an
-/// inert guard looks exactly like a guard that was never needed — the failure
+/// inert guard looks exactly like a guard that was never needed, the failure
 /// would surface as an OOM, months later, with nothing pointing here.
 ///
 /// Ignored by default because it starts the real binary and loads ~0.9–2.9 GB
-/// (measured: 887 MiB three seconds in, mid-load, on macOS/arm64 — the same
+/// (measured: 887 MiB three seconds in, mid-load, on macOS/arm64, the same
 /// understated-by-~2.8× platform the sizing note warns about). Run it
 /// deliberately, on a box you want to check:
 ///
@@ -3144,20 +3079,20 @@ mod tests {
 /// ```
 ///
 /// The filter must be the **module path**, `census_probe::`. An earlier version of this
-/// comment said `census_against_a_real`, which matches no test name at all — and a filter
+/// comment said `census_against_a_real`, which matches no test name at all, and a filter
 /// that matches nothing still exits 0 with `0 passed; 0 ignored; 30 filtered out`, so a
 /// check nobody ran read exactly like a check that passed.
 ///
 /// **Run it on a Linux box.** The `count == 1` assertion below is the only
 /// place the 8× task-multiplication can be *observed* rather than argued
 /// about: macOS enumerates no tasks, so `sidecar_processes` reads 1 here
-/// whatever the refresh kind says. That is also why the regression shipped —
+/// whatever the refresh kind says. That is also why the regression shipped
 /// the census was only ever exercised on the inductor's own Mac.
 #[cfg(test)]
 mod census_probe {
     use super::*;
 
-    /// Kill the child however this test leaves — including on a panic. A model
+    /// Kill the child however this test leaves, including on a panic. A model
     /// left behind is 2.85 GB held by a box nobody is driving.
     struct Kill(std::process::Child);
     impl Drop for Kill {

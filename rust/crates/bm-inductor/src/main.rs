@@ -80,7 +80,7 @@ enum Cmd {
         #[arg(long)]
         once: bool,
     },
-    /// Voice roster maintenance. Local only — touches no worker.
+    /// Voice roster maintenance. Local only, touches no worker.
     Roster {
         #[command(subcommand)]
         cmd: RosterCmd,
@@ -121,7 +121,7 @@ enum Cmd {
     /// This is the digest stage's question with none of its consequences: no
     /// render is queued, no merge runs, no ledger task is touched, and the
     /// bible is not merged. Nothing is written at all unless `--write` is
-    /// passed, and even then it is only the script file — the same function the
+    /// passed, and even then it is only the script file, the same function the
     /// digest worker calls, so what you read here is exactly what a run would
     /// have produced.
     Digest {
@@ -144,20 +144,15 @@ enum Cmd {
     ///
     /// **The worker's own digest, not a second one.** Round 1 renders
     /// `build_attribution_prompt`, round 2 renders `build_staging_prompt`, and
-    /// the answers are checked by the same validators the automatic path uses —
-    /// the same flow the TUI's `:digest` manager drives by clipboard, with a
-    /// model standing where the operator's pastes would be.
-    ///
-    /// Each finished chapter is reported to `POST /api/complete` under the
-    /// reserved `operator` id, so the ledger, the bible and the cast move
-    /// exactly as they do for a worker, and a race with a box grinding the same
-    /// chapter resolves the way the manual digest's does: the report wins.
-    ///
-    /// A running inductor is a **precondition**, as it is for `tui`: the report
-    /// is the only thing that makes a digest count, so the backend is checked
-    /// first and a missing one is named with what to enter instead of waited on.
+    /// the answers are checked by the same validators the automatic path uses,
+    /// with a model standing where the operator's pastes would be. Each
+    /// finished chapter is reported to `POST /api/complete` under the reserved
+    /// `operator` id, so the ledger, the bible and the cast move exactly as
+    /// they do for a worker, and a race resolves the way the manual digest's
+    /// does: the report wins. A running inductor is a **precondition**, as it
+    /// is for `tui`.
     Backup {
-        /// First chapter. Default: the one after the last digested chapter —
+        /// First chapter. Default: the one after the last digested chapter
         /// the only chapter a digest may start from, since each chapter's bible
         /// delta lands on its predecessor's.
         start: Option<u32>,
@@ -170,7 +165,7 @@ enum Cmd {
         /// (`sk-or-` → openrouter, `AIza` → gemini), then settings.
         #[arg(long)]
         analyzer: Option<String>,
-        /// The model service's base URL — where the two digest calls go. This is
+        /// The model service's base URL, where the two digest calls go. This is
         /// **not** the inductor: the report target is this machine's own control
         /// API, `127.0.0.1:<control_port>`, unless `--inductor` says otherwise.
         #[arg(long, default_value = "https://openrouter.ai/api/v1")]
@@ -189,7 +184,7 @@ enum Cmd {
         /// 0 asks once and reports the refusal.
         #[arg(long, default_value_t = 3)]
         retries: u32,
-        /// Analyze and print, but report nothing — a dry run of the prompts.
+        /// Analyze and print, but report nothing, a dry run of the prompts.
         #[arg(long)]
         dry_run: bool,
     },
@@ -201,7 +196,7 @@ enum Cmd {
     /// afternoon to discover; this costs one request.
     ///
     /// Reads the active workspace's `crawl.user_agent` and `crawl.headers` when
-    /// they are set, so a check goes out exactly as a real crawl would — a
+    /// they are set, so a check goes out exactly as a real crawl would, a
     /// session cookie you are relying on is part of what is being checked, and
     /// `bm-inductor check` is how you confirm the cookie still works. Writes
     /// nothing, and exits non-zero when the page is not a chapter, so a setup
@@ -235,15 +230,15 @@ enum Cmd {
     },
     /// Workspaces: one directory per book under `workspaces/`, holding its
     /// settings, ledger, data and output. Switching only moves the
-    /// `.bm/active-workspace` pointer — nothing is wiped, nothing is mixed.
-    /// Local only — touches no worker.
+    /// `.bm/active-workspace` pointer, nothing is wiped, nothing is mixed.
+    /// Local only, touches no worker.
     Workspace {
         #[command(subcommand)]
         cmd: WorkspaceCmd,
     },
     /// AWS worker pool: the IAM user this app runs as, the definition written
     /// once in `.bm/aws.json`, and what the account actually holds. Local only
-    /// — starts nothing.
+    ///, starts nothing.
     Aws {
         #[command(subcommand)]
         cmd: AwsCmd,
@@ -258,7 +253,7 @@ enum AwsCmd {
     /// Print the least-privilege policy for this app's IAM user, and the
     /// commands that create that user and attach it. Reads no network.
     ///
-    /// The policy is the tracked `aws-policy.json` — one document, used by both
+    /// The policy is the tracked `aws-policy.json`, one document, used by both
     /// this command and `aws iam put-user-policy`, so what you read and what
     /// you install cannot drift apart.
     Policy,
@@ -278,7 +273,7 @@ enum AwsCmd {
     ///
     /// **An IAM user, and nothing else.** The identity is checked with
     /// `sts get-caller-identity` and refused unless it is a `:user/` ARN, so a
-    /// root key or an assumed role cannot be stored — those are the identities
+    /// root key or an assumed role cannot be stored, those are the identities
     /// a dedicated user exists to replace.
     ///
     /// The secret is read from stdin and **never** taken as an argument:
@@ -302,7 +297,7 @@ enum AwsCmd {
     },
     /// Launch boxes and leave them running, tagged, ready to provision.
     ///
-    /// `--dry-run` prints the exact `aws ec2 run-instances` call and stops —
+    /// `--dry-run` prints the exact `aws ec2 run-instances` call and stops
     /// the review step before anything costs money.
     Up {
         /// How many. Refused if it would take the pool past `max_workers`.
@@ -357,7 +352,7 @@ enum RosterCmd {
     /// Add a sample clip to the voice pool: copies it under `refs/`, takes its
     /// tags from the filename (`young-female-4.mp3` → young, female), registers
     /// it in `voice-pool.json`, maps it in `voices.json` so the next provision
-    /// enrolls it on workers — and enrolls it into this machine's own store
+    /// enrolls it on workers, and enrolls it into this machine's own store
     /// right away when it has one, so renders use it immediately.
     AddSample {
         /// Clip to add (mp3/wav/m4a/ogg/flac).
@@ -379,17 +374,17 @@ enum RosterCmd {
 /// one that matters to an operator staring at a box that will not come up.
 /// `!reachable` means ssh never answered, so *nothing* was learned: no
 /// platform, no binary pushed, no stamp read. The failure is a network fact,
-/// not a provisioning one — and a caller that already knows the box was
+/// not a provisioning one, and a caller that already knows the box was
 /// launched seconds ago can keep saying "still booting" instead of "broken".
 pub struct ProvisionOutcome {
     /// The post-provision probe says the box runs this exact agent build with
-    /// TTS — the gate a start hides behind.
+    /// TTS, the gate a start hides behind.
     pub ready: bool,
     /// ssh answered at all.
     pub reachable: bool,
     /// The log, one line per step, prefixed with the address.
     pub lines: Vec<String>,
-    /// Why the run stopped, when it stopped before a step could log it —
+    /// Why the run stopped, when it stopped before a step could log it
     /// a missing local build, an unreadable profile pointer. Carried rather
     /// than recovered by grepping `lines`: the dashboard used to scan the log
     /// for the words "missing"/"not found"/"failed", and every pre-flight
@@ -432,7 +427,7 @@ pub fn provision_machine(
     live: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> ProvisionOutcome {
     if bm_core::is_local_node(addr) {
-        // No mirror to fill: the local worker runs in place from this repo —
+        // No mirror to fill: the local worker runs in place from this repo
         // prompts, assets, models and binaries are read where they stand, so
         // syncing a `~/bm-worker` copy would only spend disk and let a stale
         // copy fail the readiness gate below. Launching the worker stays the
@@ -457,7 +452,7 @@ pub fn provision_machine(
     let pre = probe_ssh.probe();
     log.push(format!("[{addr}] {}", pre.summary()));
     // Unreachable means nothing downstream can run: no platform was learned
-    // (os/arch stay empty — the old flow continued and failed confusingly on
+    // (os/arch stay empty, the old flow continued and failed confusingly on
     // "no agent binary for /"), no binary can be pushed, no worker launched.
     // Name the network cause and stop.
     if !pre.reachable {
@@ -510,7 +505,7 @@ pub fn provision_machine(
         Some(pre),
         live,
     );
-    // Already streamed live inside `provision` — collect silently here.
+    // Already streamed live inside `provision`, collect silently here.
     log.lines.append(&mut flow);
     ProvisionOutcome {
         ready: after.configured(env!("CARGO_PKG_VERSION")),
@@ -522,7 +517,7 @@ pub fn provision_machine(
 
 /// A re-provision must not reset the operator's work policy: the machine
 /// `cmd_provision` registers is fresh (`task_policy: None`), and both
-/// registration paths persist it — the live POST and the ledger fallback.
+/// registration paths persist it, the live POST and the ledger fallback.
 /// Carry the stored policy forward so re-provisioning keeps the order and
 /// toggles from the policy panel.
 fn carry_task_policy(m: &mut Machine, layout: &Layout) {
@@ -561,7 +556,7 @@ async fn cmd_serve(
     let drive_root = drive_layout.root.clone();
     let mut inner = state::Inner::new(layout, settings);
     // No profile, no run. A drifted live tree is adopted by verify
-    // (a `:sound` retune), not refused — only a missing pointer or an
+    // (a `:sound` retune), not refused, only a missing pointer or an
     // empty live tree stops us before touching the ledger.
     let pointer = bm_core::profile::verify(&inner.layout.root)?;
     println!(
@@ -572,7 +567,7 @@ async fn cmd_serve(
     // The cluster token, generated on first use and then stable across
     // restarts: a worker that outlived a restart must not be locked out, and
     // provisioning copies this file to every box it onboards. Only a
-    // fingerprint is printed — the log is not a place for a secret.
+    // fingerprint is printed, the log is not a place for a secret.
     let token = bm_core::token::load_or_create(&inner.layout.root)?;
     println!("cluster token {}", &token[..8.min(token.len())]);
     inner.load_ledger();
@@ -601,19 +596,19 @@ async fn cmd_serve(
         }
     });
     // The driving half. Nothing dials this process, so if this loop is not
-    // running, no work moves at all — the workers are servers waiting to be
+    // running, no work moves at all, the workers are servers waiting to be
     // asked, and this is the only thing that asks.
     let driving = shared.clone();
     tokio::spawn(async move { dispatch::run(driving, drive_layout).await });
     // The reverse tunnels: one ssh client per remote box, forwarding the
     // box's own loopback hook port to this API. A worker uses it only when
     // this process has gone silent on every normal channel (see
-    // `bm-agent/src/hook.rs`) — holding it open costs one idle ssh per box,
+    // `bm-agent/src/hook.rs`), holding it open costs one idle ssh per box,
     // and gives a finished stage a road home when the uplink blips mid-task.
     tokio::spawn(tunnel::supervise(shared.clone(), port));
     // Relink once at startup: an EC2 box that cycled while this inductor was
     // down is sitting in the registry at an address that no longer answers.
-    // Best-effort — no account, no creds or an offline CLI only means the
+    // Best-effort, no account, no creds or an offline CLI only means the
     // repairs wait for the next `:pool` refresh.
     {
         let relink_shared = shared.clone();
@@ -631,7 +626,7 @@ async fn cmd_serve(
     // The watch is self-terminating: it asks `has_pending_launch` first, which is
     // false once no box is still booting or addressless, so the account is read
     // only while there is a reason to and a settled cluster polls nothing.
-    // Overlapping ticks are refused rather than queued — an `aws` call is a
+    // Overlapping ticks are refused rather than queued, an `aws` call is a
     // process spawn, and stacking them would only make a slow API worse.
     {
         let watch_shared = shared.clone();
@@ -673,7 +668,7 @@ async fn cmd_serve(
 ///
 /// EC2 assigns a public address within a few seconds of `RunInstances`, so a
 /// fifteen-second tick turns a box into a dialable, onboarded worker within one
-/// or two intervals of it becoming one — and the watch stops entirely once the
+/// or two intervals of it becoming one, and the watch stops entirely once the
 /// last box is settled, so the tick rate costs nothing on a running cluster.
 const AWS_WATCH_SECS: u64 = 15;
 
@@ -681,7 +676,7 @@ const AWS_WATCH_SECS: u64 = 15;
 /// found is pushed to the events pane and the log.
 ///
 /// The `aws` CLI is a *process*, so this runs on the blocking pool rather than on
-/// an async worker — a two-second spawn in the runtime would stall every other
+/// an async worker, a two-second spawn in the runtime would stall every other
 /// task on that thread. A failure is not an error to report: no account
 /// configured, no credentials, or an offline CLI all mean the same thing (the
 /// repairs wait for the next attempt), and `pool()` has already logged the noise.
@@ -703,23 +698,17 @@ async fn relink_once(
 /// Pick the binaries matching the target platform. `os`/`arch` are the probe's
 /// normalized values, in Rust's spelling (`linux`/`macos`, `x86_64`/`aarch64`).
 ///
-/// A box identical to this machine runs the native build — which is also how a
-/// macOS worker gets its binary with no cross toolchain involved. Anything
-/// else needs its cross build present; a missing one is a build error naming
-/// the exact command, never a guess that ships the wrong executable.
-///
-/// Pick the TTS sidecar binary for the target platform, building a cross
-/// target on demand — the same bargain [`agent_binary_for`] strikes, with one
-/// difference: this one is a **release** build (bm-tts's hot loop is a
-/// hand-written SIMD matvec, and a debug build gives all of that back), so the
-/// build is minutes rather than seconds and the log says so before it starts.
+/// A box identical to this machine runs the native build, which is also how a
+/// macOS worker gets its binary with no cross toolchain. Anything else needs
+/// its cross build present; a missing one is a build error naming the exact
+/// command, never a guess that ships the wrong executable.
 ///
 /// A staged binary that predates its sources is *used*, with a warning. The
-/// agent's freshness rule forces a rebuild because the version gate then ships
-/// a stale agent forever; the sidecar carries no version, so the honest fix
-/// there is to say the box is running an older sidecar, not to silently spend
-/// a multi-minute release build on every `:prov` because someone edited
-/// bm-core. `make tts` rebuilds it whenever you want.
+/// agent's freshness rule forces a rebuild because the version gate would
+/// otherwise ship a stale agent forever; the sidecar carries no version, so
+/// the honest fix is to say the box is running an older sidecar rather than
+/// silently spend a multi-minute release build on every `:prov`. `make tts`
+/// rebuilds it whenever you want.
 fn tts_binary_for(
     os: &str,
     arch: &str,
@@ -756,7 +745,7 @@ fn tts_binary_for(
 }
 
 /// The pick among sidecar binaries already on disk. Platform-pure, no side
-/// effects — the piece tests can exercise without a toolchain, and the error
+/// effects, the piece tests can exercise without a toolchain, and the error
 /// [`tts_binary_for`] falls back from.
 fn tts_binary_staged(os: &str, arch: &str, layout: &Layout) -> anyhow::Result<std::path::PathBuf> {
     for cand in tts_candidates(os, arch, layout) {
@@ -775,7 +764,7 @@ fn tts_binary_staged(os: &str, arch: &str, layout: &Layout) -> anyhow::Result<st
 }
 
 /// True when a staged sidecar is older than the workspace sources it was built
-/// from. A warning, never a rebuild — see [`tts_binary_for`] for why.
+/// from. A warning, never a rebuild, see [`tts_binary_for`] for why.
 fn tts_is_stale(bin: &std::path::Path, layout: &Layout) -> bool {
     !staged_is_fresh_against(bin, &["crates/bm-tts/src"], layout)
 }
@@ -783,7 +772,7 @@ fn tts_is_stale(bin: &std::path::Path, layout: &Layout) -> bool {
 /// The sidecar targets this host can actually cross-build: exactly one.
 ///
 /// linux/x86_64, because it is the target whose ONNX Runtime `make runtime`
-/// stages — a build that cannot find its runtime library is a build that
+/// stages, a build that cannot find its runtime library is a build that
 /// cannot happen, and a *wrong* runtime would link a binary that dies on the
 /// box. The native candidate is out (it exists exactly when this host *is* the
 /// target, and `ort`'s own `download-binaries` covers that case without a
@@ -875,7 +864,7 @@ fn build_tts_binary(cand: &std::path::Path, layout: &Layout) -> anyhow::Result<(
 }
 
 /// `make runtime`, unless the shared library is already staged. Idempotent in
-/// the Makefile too — this only saves the round trip of spawning it.
+/// the Makefile too, this only saves the round trip of spawning it.
 fn stage_onnx_runtime(layout: &Layout, dir: &std::path::Path) -> anyhow::Result<()> {
     if dir.join("libonnxruntime.so").is_file() && dir.join("libonnxruntime.so.1").is_file() {
         return Ok(());
@@ -897,7 +886,7 @@ fn stage_onnx_runtime(layout: &Layout, dir: &std::path::Path) -> anyhow::Result<
 }
 
 /// Where `make runtime` staged the shared ONNX Runtime to push alongside the
-/// sidecar — `None` where the sidecar is self-contained (macOS links its
+/// sidecar, `None` where the sidecar is self-contained (macOS links its
 /// runtime statically, so no `.so` travels).
 fn tts_runtime_dir(os: &str, arch: &str, layout: &Layout) -> Option<std::path::PathBuf> {
     match (os, arch) {
@@ -915,10 +904,10 @@ fn agent_binary_for(os: &str, arch: &str, layout: &Layout) -> anyhow::Result<std
             // `bm-agent` links no C toolchain, so `zig cc` needs no runtime
             // staged), and a `:prov` clicked in the dashboard should heal the
             // gap itself rather than send the operator to a shell. Only the
-            // cross candidates are buildable — the native fallback exists
+            // cross candidates are buildable, the native fallback exists
             // exactly when this host is the target, so `cargo build` already
             // ran and a miss means something is wrong beyond a missing build.
-            // Cross targets only, and at most one per platform — the build
+            // Cross targets only, and at most one per platform, the build
             // either succeeds (returning the candidate) or its error is the
             // provision failure.
             if let Some(cand) = buildable_agent_candidates(os, arch, layout)
@@ -933,7 +922,7 @@ fn agent_binary_for(os: &str, arch: &str, layout: &Layout) -> anyhow::Result<std
     }
 }
 
-/// The pick among binaries already on disk. Platform-pure, no side effects —
+/// The pick among binaries already on disk. Platform-pure, no side effects
 // the piece tests can exercise without a toolchain. A missing cross build is
 // an error naming the platform; [`agent_binary_for`] may still build it.
 //
@@ -961,7 +950,7 @@ fn agent_binary_staged(
     )
 }
 
-/// Cross candidates only — the native build is never something we can conjure
+/// Cross candidates only, the native build is never something we can conjure
 /// here: it exists exactly when this host *is* the target, so a miss there is
 /// not a missing cross toolchain but a broken workspace.
 fn buildable_agent_candidates(os: &str, arch: &str, layout: &Layout) -> Vec<std::path::PathBuf> {
@@ -988,7 +977,7 @@ fn staged_is_fresh(bin: &std::path::Path, layout: &Layout) -> bool {
     )
 }
 
-/// The same question for a different set of sources — the sidecar is built
+/// The same question for a different set of sources, the sidecar is built
 /// from its own crate, not the agent's, and measuring it against the agent's
 /// dirs would call it stale on every unrelated edit.
 fn staged_is_fresh_against(bin: &std::path::Path, dirs: &[&str], layout: &Layout) -> bool {
@@ -1028,7 +1017,7 @@ fn sources_newer_than(dir: &std::path::Path, built: std::time::SystemTime) -> bo
 
 /// Build the agent binary into the exact path a candidate names, so the
 /// provision flow that asked for it can pick the file straight up. The target
-/// triple is the candidate's grandparent directory (`…/target/<triple>/debug`) —
+/// triple is the candidate's grandparent directory (`…/target/<triple>/debug`)
 /// one spelling, one source. Output is captured: the caller's log gets the tail
 /// on failure, and the dashboard never has cargo's progress spew landing
 /// mid-redraw.
@@ -1044,7 +1033,7 @@ fn build_agent_binary(cand: &std::path::Path) -> anyhow::Result<()> {
     }
     let mut cmd = std::process::Command::new(tool_on_path("cargo-zigbuild").expect("probed above"));
     // The rustup shim dir is missing from a non-login shell's PATH, and `zig cc`
-    // is looked up by name from there — so the dir goes on the PATH of the
+    // is looked up by name from there, so the dir goes on the PATH of the
     // build, not just into the existence check.
     let shim_dir = tool_on_path("cargo-zigbuild")
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
@@ -1085,7 +1074,7 @@ fn build_agent_binary(cand: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// This process's PATH with `dir` in front — the shape a build needs when the
+/// This process's PATH with `dir` in front, the shape a build needs when the
 /// linker lives in a rustup shim dir the environment forgot.
 fn path_with_shim(dir: std::path::PathBuf) -> std::ffi::OsString {
     let old = std::env::var_os("PATH").unwrap_or_default();
@@ -1095,8 +1084,8 @@ fn path_with_shim(dir: std::path::PathBuf) -> std::ffi::OsString {
 }
 
 /// Where a build tool actually is, looking in `~/.cargo/bin` as well as PATH:
-/// a rustup shim dir is missing from a non-login shell's PATH — the same trap
-/// the Makefile's CARGO fallback covers — and the dashboard is often launched
+/// a rustup shim dir is missing from a non-login shell's PATH, the same trap
+/// the Makefile's CARGO fallback covers, and the dashboard is often launched
 /// from somewhere that has no PATH at all. Returns the full path, because a
 /// check that accepts a tool the exec cannot find is a check that lies.
 fn tool_on_path(tool: &str) -> Option<std::path::PathBuf> {
@@ -1114,7 +1103,7 @@ fn tool_on_path(tool: &str) -> Option<std::path::PathBuf> {
 
 /// The cross target a candidate names: its grandparent directory under
 /// `target/` (`…/target/<triple>/debug/bm-agent`). A separate pure function so
-/// the inference is testable without running a toolchain — caught live: the
+/// the inference is testable without running a toolchain, caught live: the
 /// first version took the *parent* and handed zigbuild `debug`.
 fn cross_target_of(cand: &std::path::Path) -> anyhow::Result<String> {
     cand.parent()
@@ -1125,7 +1114,7 @@ fn cross_target_of(cand: &std::path::Path) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("cannot infer target from {}", cand.display()))
 }
 
-/// Walk up from a candidate binary to the workspace directory — the candidate
+/// Walk up from a candidate binary to the workspace directory, the candidate
 /// lives under `<repo>/rust/target/<triple>/debug`, so `target`'s parent is
 /// the dir holding `Cargo.toml`, wherever the layout root actually is.
 fn workspace_dir_above_target(cand: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
@@ -1171,7 +1160,7 @@ fn tts_candidates(os: &str, arch: &str, layout: &Layout) -> Vec<std::path::PathB
     cands
 }
 
-/// `workspace` — one directory per book. Creating switches to it; selecting
+/// `workspace`, one directory per book. Creating switches to it; selecting
 /// only moves the pointer, so data is never wiped and ledgers never mix
 /// (the serve gate still refuses a ledger bound to another profile).
 ///
@@ -1204,7 +1193,7 @@ pub(crate) fn workspace_cmd(
                 std::fs::create_dir_all(dir(&name).join(d))?;
             }
             // A workspace is born bound to the loaded profile, so its first
-            // run cannot mix genres. No profile loaded yet is not an error —
+            // run cannot mix genres. No profile loaded yet is not an error
             // the serve gate names it when it matters.
             let mut settings = Settings::default();
             match bm_core::profile::read_pointer(root) {
@@ -1257,7 +1246,7 @@ pub(crate) fn workspace_cmd(
 /// The AWS pool: the app's IAM user, the definition, and what the account
 /// holds.
 ///
-/// Returns the lines to show, like [`workspace_cmd`] — the CLI prints them and
+/// Returns the lines to show, like [`workspace_cmd`], the CLI prints them and
 /// the dashboard could log the same operation. `policy` and `show` read no
 /// network at all; `login` verifies against the account; `up`/`down` are the
 /// two that spend money and destroy things.
@@ -1316,7 +1305,7 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
             );
             out.push("  step by step: docs/AWS-IAM-USER.md".into());
             out.push(String::new());
-            // Console work, all of it — and named here rather than assumed,
+            // Console work, all of it, and named here rather than assumed,
             // because the console is where the account gets set up.
             out.push("In the console, alongside the user:".into());
             out.push("  the SSH keypair — EC2 → Key pairs → Create key pair, and keep".into());
@@ -1403,8 +1392,8 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
         AwsCmd::Show => {
             let cfg = AwsConfig::load_layered(root);
             // Which identity is in force, named before anything else: "why
-            // can't it launch" is usually the IAM user — missing, or not the
-            // one the operator thinks — and the answer should not require
+            // can't it launch" is usually the IAM user, missing, or not the
+            // one the operator thinks, and the answer should not require
             // running a command that spends money.
             out.push(bm_core::provision::aws_credentials::source(root).describe(root));
             if !path.exists() {
@@ -1415,7 +1404,7 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
             }
             out.push(cfg.summary());
             // The key file is named after the region, so there is nothing
-            // meaningful to print before one is set — a path ending in `.pem`
+            // meaningful to print before one is set, a path ending in `.pem`
             // with no name in it reads as a missing file rather than as a
             // missing region.
             if cfg.region.trim().is_empty() {
@@ -1441,7 +1430,7 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
             let missing = cfg.missing();
             if missing.is_empty() {
                 // "Ready" means ready to *launch*, which is what `missing()`
-                // knows about — and the firewall is deliberately not part of it,
+                // knows about, and the firewall is deliberately not part of it,
                 // because this command reads no network. Said out loud, because
                 // a box behind a closed port launches perfectly and then does
                 // nothing, and this is the line someone will read before
@@ -1564,8 +1553,8 @@ pub(crate) fn seed_pool(
     let template = root.join(bm_core::provision::DEFAULT_FILE);
     // Seed from the tracked template when it is there, so the file the operator
     // edits carries the `_note`s explaining each field rather than a bare
-    // struct dump. The notes are ignored on read — serde drops what the struct
-    // does not name — and the round trip proves a hand-edited template that has
+    // struct dump. The notes are ignored on read, serde drops what the struct
+    // does not name, and the round trip proves a hand-edited template that has
     // drifted from the shape cannot seed a broken config.
     if template.is_file() {
         let text = std::fs::read_to_string(&template)?;
@@ -1628,7 +1617,7 @@ pub(crate) fn set_json(doc: &mut serde_json::Value, path: &[&str], value: serde_
 
 /// One `aws` call whose answer is a single value, or nothing.
 ///
-/// `None` means "the call worked and there was nothing to find" — an account
+/// `None` means "the call worked and there was nothing to find", an account
 /// with no default subnet, a region with no keypairs. For `discover` that is an
 /// answer to report rather than a failure, which is why it is not
 /// [`aws_cli_text`], where an empty answer is a refusal.
@@ -1689,7 +1678,7 @@ fn ask(prompt: &str) -> anyhow::Result<String> {
 
 /// Ask for one line without echoing it when stdin is a terminal.
 ///
-/// `stty -echo` rather than an `rpassword` dependency — one call, Unix-only,
+/// `stty -echo` rather than an `rpassword` dependency, one call, Unix-only,
 /// the same reasoning the cluster token uses for `/dev/urandom`. Piped input
 /// is read plainly, which is what makes `printf '%s\n' "$SECRET" | …` work.
 ///
@@ -1723,8 +1712,8 @@ pub(crate) fn aws_cli_raw(root: &std::path::Path, args: &[String]) -> anyhow::Re
 
 /// Run one `aws` subcommand with credentials supplied for this call alone.
 ///
-/// Only `aws login` uses it, and it has to: the identity must be proven — and
-/// proven to be an IAM *user* — before there is a file to point the CLI at.
+/// Only `aws login` uses it, and it has to: the identity must be proven, and
+/// proven to be an IAM *user*, before there is a file to point the CLI at.
 ///
 /// The shadowing variables are stripped either way. Env-var keys outrank a
 /// shared credentials file, so a stray `AWS_ACCESS_KEY_ID` exported in the
@@ -1756,7 +1745,7 @@ pub(crate) fn aws_cli_with(
         let err = String::from_utf8_lossy(&out.stderr);
         // Three first-run states, three different fixes. The middle one is the
         // one that wastes an afternoon: the credentials *are* found, so nothing
-        // says "credentials" — the call is simply not allowed, and the account
+        // says "credentials", the call is simply not allowed, and the account
         // and user in the message are the only clue about which policy to edit.
         let hint = if err.contains("Unable to locate credentials") {
             " — the stored key was not accepted; re-run `bm-inductor aws login` (docs/AWS-IAM-USER.md)"
@@ -1836,7 +1825,7 @@ async fn cmd_provision(
         println!("[{addr}] provision INCOMPLETE — fix the errors above and run it again");
     }
     // Register the machine so the scheduler sees it: prefer the live API,
-    // fall back to merging the ledger file (safe only when no inductor runs —
+    // fall back to merging the ledger file (safe only when no inductor runs
     // the API attempt failing is exactly that signal).
     let api = format!("http://127.0.0.1:{api_port}/api/machines");
     let client = reqwest::Client::builder()
@@ -1846,7 +1835,7 @@ async fn cmd_provision(
         Ok(r) if r.status().is_success() => println!("[{}] registered with live inductor", addr),
         _ => {
             // No live inductor: merge into the ledger file (safe only when no
-            // inductor runs — the API attempt failing is exactly that signal).
+            // inductor runs, the API attempt failing is exactly that signal).
             // New shape is `machine_state` (runtime); a pre-migration file
             // still carrying the `machines` array gets both, so the boot
             // migration sees one coherent story.
@@ -1945,7 +1934,7 @@ async fn main() -> anyhow::Result<()> {
     // The dashboard and `workspace` are the management plane: they must open
     // on a root whose pointer is *stale*, because re-pointing is exactly how
     // that gets repaired. Everything else resolves first and refuses. The
-    // problem is carried, not swallowed — the dashboard prints it, and
+    // problem is carried, not swallowed, the dashboard prints it, and
     // `workspace list` shows which names are still there.
     let manages = matches!(&cli.cmd, Cmd::Workspace { .. } | Cmd::Tui { .. });
     let (layout, pointer_problem) = match cli.root {
@@ -2138,7 +2127,7 @@ async fn main() -> anyhow::Result<()> {
 /// **The crawl HTTP client cannot be built or dropped inside a tokio task**, and
 /// this is the same constraint the provider works under: `reqwest::blocking`
 /// owns a runtime of its own. `spawn_blocking` keeps it off the async worker and
-/// keeps that runtime out of the way — without it the command panics on drop
+/// keeps that runtime out of the way, without it the command panics on drop
 /// before it prints anything.
 async fn cmd_check(settings: Settings, url: String, timeout: u64) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || cmd_check_blocking(&settings, &url, timeout))
@@ -2149,7 +2138,7 @@ async fn cmd_check(settings: Settings, url: String, timeout: u64) -> anyhow::Res
 fn cmd_check_blocking(settings: &Settings, url: &str, timeout: u64) -> anyhow::Result<()> {
     let opts = bm_core::crawl::probe::Options {
         // The workspace's own agent and headers, so a check goes out exactly as
-        // a crawl would — including a session cookie that is part of the setup
+        // a crawl would, including a session cookie that is part of the setup
         // being validated.
         user_agent: settings.crawl.user_agent.clone(),
         headers: settings.crawl.headers.clone(),
@@ -2185,7 +2174,7 @@ fn cmd_check_blocking(settings: &Settings, url: &str, timeout: u64) -> anyhow::R
         print!("{}", bm_core::crawl::known::note(site));
     }
 
-    // A non-`Ok` verdict is a **failed check**, so a script can gate on it — but
+    // A non-`Ok` verdict is a **failed check**, so a script can gate on it, but
     // the reason is always printed first, because "exit 1" on its own helps
     // nobody choose between a cookie, a browser user agent, and a different site.
     if !check.verdict.crawlable() {
@@ -2211,13 +2200,13 @@ fn cmd_check_blocking(settings: &Settings, url: &str, timeout: u64) -> anyhow::R
     Ok(())
 }
 
-/// `digest` — the analyzer's answer for one chapter, and nothing else.
+/// `digest`, the analyzer's answer for one chapter, and nothing else.
 ///
 /// Deliberately not routed through the control API: a request to a running
 /// inductor is a request to the *pipeline*, and the whole point of this command
 /// is to ask the question without waking it. It reads the chapter text and the
-/// bible, calls [`bm_core::digest::analyze_chapter`] — the same function the
-/// digest worker calls — and prints the result.
+/// bible, calls [`bm_core::digest::analyze_chapter`], the same function the
+/// digest worker calls, and prints the result.
 async fn cmd_digest(
     layout: &Layout,
     settings: &Settings,
@@ -2283,7 +2272,7 @@ async fn cmd_digest(
     Ok(())
 }
 
-/// The backup runner's options — bundled so one call carries the whole request.
+/// The backup runner's options, bundled so one call carries the whole request.
 struct BackupOpts {
     start: Option<u32>,
     through: Option<u32>,
@@ -2298,11 +2287,11 @@ struct BackupOpts {
     dry_run: bool,
 }
 
-/// `backup` — be the digestor while the cluster's analyzer has no quota.
+/// `backup`, be the digestor while the cluster's analyzer has no quota.
 ///
 /// Chapters are digested **in order**, and the run stops at the first failure:
 /// each chapter's bible delta lands on top of its predecessor's, so skipping
-/// ahead would merge deltas out of order. Nothing is written here — the
+/// ahead would merge deltas out of order. Nothing is written here, the
 /// inductor is the single writer of the bible and the script, and it does that
 /// when the report lands.
 async fn cmd_backup(
@@ -2322,7 +2311,7 @@ async fn cmd_backup(
     } = opts;
     // **The two addresses are different things, and the difference is the whole
     // point of this command's arguments.** `model_api` is where the two digest
-    // calls go — a model service. The report goes to an *inductor*, which is
+    // calls go, a model service. The report goes to an *inductor*, which is
     // this machine's own control API: it is where the ledger and the bible
     // live, exactly as it is for `make tui`.
     let api = inductor.unwrap_or_else(|| format!("http://127.0.0.1:{}", settings.control_port));
@@ -2373,7 +2362,7 @@ async fn cmd_backup(
     };
     let last = match through {
         Some(t) => t,
-        // To the end of the **book the ledger knows about** — the highest
+        // To the end of the **book the ledger knows about**, the highest
         // chapter that has a digest row. Not "every chapter file on disk":
         // `data/chapters/` can hold text for a range this run never enqueued
         // (200 files against a 100-chapter ledger), and digesting those would
@@ -2482,7 +2471,7 @@ async fn cmd_backup(
             // A refused round is re-asked with the validator's own words, and
             // the complaint is the instruction: each retry is a different ask
             // because the previous one is named in it. Bounded, because a model
-            // that cannot satisfy the gate is a chapter to look at — but not
+            // that cannot satisfy the gate is a chapter to look at, but not
             // after a single refusal, which is what cost ch79.
             let mut accepted = None;
             let mut complaint = String::new();
@@ -2594,7 +2583,7 @@ mod tests {
     #[test]
     fn provisioning_localhost_syncs_nothing_and_reports_ready() {
         // The local worker runs in place from the repo, so there is no
-        // mirror to fill — and crucially no readiness gate to fail: a
+        // mirror to fill, and crucially no readiness gate to fail: a
         // missing (or stale) `~/bm-worker` must never park localhost in
         // Error during `:B` catch-up.
         let dir = std::env::temp_dir().join(format!("bm-local-prov{}", std::process::id()));
@@ -2618,7 +2607,7 @@ mod tests {
     #[test]
     fn reprovision_keeps_the_stored_work_policy() {
         // A fresh `Machine` carries `task_policy: None`, and both
-        // registration paths persist it — so without the carry, every
+        // registration paths persist it, so without the carry, every
         // re-provision silently reset the policy panel's order/toggles.
         let dir = std::env::temp_dir().join(format!("bm-policy{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2669,7 +2658,7 @@ mod tests {
     #[test]
     fn binary_routing_serves_each_platform_its_own_build() {
         // A fixture root holding one binary per platform: routing must pick
-        // the file matching the probe, and refuse — not guess — the rest.
+        // the file matching the probe, and refuse, not guess, the rest.
         let dir = std::env::temp_dir().join(format!("bm-routing{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let layout = bm_core::Layout::new(&dir);
@@ -2690,7 +2679,7 @@ mod tests {
         );
         // Nothing staged for linux/arm64: a build error naming the platform,
         // never another platform's binary. (The full `agent_binary_for` would
-        // go on to cross-build that target on demand — the staged lookup is
+        // go on to cross-build that target on demand, the staged lookup is
         // the pure, toolchain-free half that is testable here.)
         let err = agent_binary_staged("linux", "aarch64", &layout).unwrap_err();
         assert!(err.to_string().contains("linux/aarch64"), "{err}");
@@ -2712,7 +2701,7 @@ mod tests {
             !buildable_agent_candidates("linux", foreign_arch, &layout).is_empty(),
             "a foreign linux target must have cross candidates to build"
         );
-        // This host's own platform falls back to the native build — asserted
+        // This host's own platform falls back to the native build, asserted
         // on the candidate list (not the pick) so the test holds on any host:
         // on linux/x86_64 the cross file above would otherwise win first.
         let native = touch("rust/target/debug/bm-agent");
@@ -2785,7 +2774,7 @@ mod tests {
     fn an_old_sidecar_is_reported_but_never_silently_rebuilt() {
         // The agent rebuilds a stale staged binary because the version gate
         // would otherwise ship it forever. The sidecar has no such gate, and a
-        // release cross-build costs minutes — so a stale one warns instead,
+        // release cross-build costs minutes, so a stale one warns instead,
         // and only `make tts` spends the time.
         let dir = std::env::temp_dir().join(format!("bm-tts-stale{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2805,7 +2794,7 @@ mod tests {
         std::fs::write(&src, b"fn main() { /* newer */ }").unwrap();
         assert!(tts_is_stale(&bin, &layout), "older than the source: warn");
         // A source the sidecar does not build from is not a reason to call it
-        // stale — the agent's dirs would otherwise do it on every edit.
+        // stale, the agent's dirs would otherwise do it on every edit.
         let _ = std::fs::remove_dir_all(src.parent().unwrap());
         std::fs::create_dir_all(dir.join("rust/crates/bm-agent/src")).unwrap();
         std::fs::write(
@@ -2886,7 +2875,7 @@ mod tests {
         );
         assert!(agent_binary_staged("linux", "x86_64", &layout).is_err());
         // No sources at all (a bare fixture, like the routing test above)
-        // reads as fresh — only newer sources veto.
+        // reads as fresh, only newer sources veto.
         let _ = std::fs::remove_dir_all(dir.join("rust/crates"));
         assert!(staged_is_fresh(&bin, &layout));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2895,7 +2884,7 @@ mod tests {
     #[test]
     fn cross_build_infers_target_and_workspace_from_the_candidate_path() {
         // The target triple is the candidate's grandparent (`…/<triple>/debug`)
-        // and the workspace manifest sits a fixed number of levels above — both
+        // and the workspace manifest sits a fixed number of levels above, both
         // read from the path, so there is one spelling of each and no drift.
         // Caught live: the first version took the parent and handed zigbuild
         // `debug`, which it rightly refused.

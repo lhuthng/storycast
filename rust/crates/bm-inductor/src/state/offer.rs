@@ -9,13 +9,13 @@ use std::collections::HashMap;
 ///
 /// **A guardrail, not a capacity model.** One sidecar is ~36% of an 8 GiB box,
 /// so a healthy busy worker sits near half; a box over this line is one the OOM
-/// killer is already circling — a second sidecar, a leak, a co-resident ffmpeg —
+/// killer is already circling, a second sidecar, a leak, a co-resident ffmpeg
 /// and every task handed to it ends with a struck chapter and no artifact. The
 /// threshold only *withholds*: nothing is failed and nothing moves, and a box
 /// that settles (the idle reaper returns the model's pages) is offered work
 /// again on its next ask. Deliberately high, because the cost of a false
 /// positive is a box sitting idle while its peers absorb the queue, and one
-/// threshold because the stage with the biggest working set is the merge — and
+/// threshold because the stage with the biggest working set is the merge, and
 /// it reaps the model before ffmpeg (see `bm-agent`'s `Sidecar::reap_all`), so
 /// the reading it is judged on is already net of the 2.85 GB it frees.
 const MEM_PCT_CEILING: f32 = 90.0;
@@ -26,20 +26,16 @@ impl Inner {
     /// The box's own **policy** decides which stages it will run and in what
     /// order (most-preferred first): the scheduler walks the enabled stages and
     /// takes the oldest chapter of the first stage that has assignable work.
-    /// No row on any stage carries affinity: takes are independent, every
-    /// unit lands on the inductor before its completion is applied, and a
-    /// merge pulls the pieces it lacks from the inductor — so any capable
-    /// box runs anything whose inputs are done. A merge is one task like any
-    /// other; it is not tied to the boxes that spoke the chapter.
     /// A machine with no stored policy gets the default (all four, merge →
-    /// render → digest → crawl). Capability gates still apply within a stage —
-    /// render needs `render-segments`, merge needs `merge` (absent when the box
-    /// has no ffmpeg).
+    /// render → digest → crawl). Capability gates still apply within a stage:
+    /// render needs `render-segments`, merge needs `merge` (absent when the
+    /// box has no ffmpeg).
     ///
-    /// **Chapters split across boxes, and that is expected.** Any box takes
-    /// any take, so a chapter's audio routinely ends up on several stores —
-    /// and the merge fetches what it lacks instead of requiring them on its
-    /// own disk.
+    /// No row carries affinity: takes are independent, every unit lands on the
+    /// inductor before its completion is applied, and a merge pulls the pieces
+    /// it lacks from the inductor. So any capable box runs anything whose
+    /// inputs are done, and a chapter's audio routinely ends up on several
+    /// stores. That is expected, not a fault.
     ///
     /// A merge is additionally offered only when its segments are on this
     /// disk (`missing_wavs` empty): the ledger's `render:Done` is a claim
@@ -58,7 +54,7 @@ impl Inner {
         // `Unknown` passes, as "no opinion formed": a hand-written ledger, or
         // the legacy pull worker asking before its first beat. Both were
         // offered work before this gate existed, and a live worker asking for
-        // work is itself evidence the box is up — second-guessing that is not
+        // work is itself evidence the box is up, second-guessing that is not
         // this gate's job. Every *other* state is one the inductor chose.
         if let Some(m) = self.machines.get(&machine) {
             if !m.state.accepts_work() && m.state != bm_proto::MachineState::Unknown {
@@ -67,7 +63,7 @@ impl Inner {
             // The operator's pause, and it is second because the two answers are
             // different questions: the state above is *is this box able*, this is
             // *should it be working*. A relaxed box is deliberately idle, so it
-            // is withheld work **whatever its state** — including `Unknown`, and
+            // is withheld work **whatever its state**, including `Unknown`, and
             // including `Online`. That last one is the whole point: a parked box
             // keeps beating (it is alive), so the state gate alone would let the
             // scheduler hand it a task the operator just said not to run.
@@ -79,7 +75,7 @@ impl Inner {
         // first: handing work to a box that cannot hold it is a task that fails
         // slowly and strikes the chapter for the scheduler's mistake. It sits
         // here rather than in `build_offer` because a withheld offer must leave
-        // the task `Pending` and untouched — `build_offer` runs *after* the
+        // the task `Pending` and untouched, `build_offer` runs *after* the
         // task has been marked `Assigned`.
         //
         // `None` (an older agent, or a registration that has not measured yet)
@@ -98,21 +94,21 @@ impl Inner {
             .map(|m| m.effective_task_policy())
             .unwrap_or_else(bm_proto::TaskPref::default_list);
         let caps = self.caps.get(worker_id).cloned();
-        // Pick first, then mutate — the borrow checker wants the scan finished
+        // Pick first, then mutate, the borrow checker wants the scan finished
         // before the assignment begins. Walk the policy in order and take the
         // oldest chapter of the first enabled stage that has assignable work.
         //
         // `pick` is a **batch**: one row for every stage, and up to
         // `Settings::render_batch` of one chapter's takes for a render. The
-        // grouping is an assignment detail — each take keeps its own ledger row
-        // — and it is recorded on the row the offer names (`Task::batch`) so
+        // grouping is an assignment detail, each take keeps its own ledger row
+        //, and it is recorded on the row the offer names (`Task::batch`) so
         // the completion settles the whole group.
         let mut pick: Option<(Vec<String>, Stage)> = None;
         for pref in policy.iter().filter(|p| p.enabled) {
             let stage = pref.stage;
             // Capability gates. Render uploads units; merge shells out to
             // ffmpeg and a box without it advertises no `merge`. A worker with
-            // no recorded capabilities is allowed — failing closed here would
+            // no recorded capabilities is allowed, failing closed here would
             // strand anything that never registered.
             if let Some(caps) = &caps {
                 let can = |cap: &str| caps.iter().any(|c| c == cap);
@@ -135,11 +131,11 @@ impl Inner {
                     // offerable at a time), so an idle digest worker would
                     // otherwise sit out a 20-minute LLM call. An already
                     // assigned digest row is offerable to a box that does not
-                    // hold it yet — same snapshot, same prompt, first report
+                    // hold it yet, same snapshot, same prompt, first report
                     // wins and every later one is dropped as stale. Other
                     // stages stay single-assignee: their rows are cheap and
                     // parallel across chapters already.
-                    // ponytail: unbounded racers by design — the operator's
+                    // ponytail: unbounded racers by design, the operator's
                     // digest-worker count is the cap; each box holds one task.
                     stage == Stage::Digest
                         && matches!(t.state, TaskState::Assigned | TaskState::Running)
@@ -153,8 +149,8 @@ impl Inner {
                 // capable box. Pins only ever serialised the cluster.
                 .map(|(id, _)| id.clone())
                 .collect();
-            // Numeric chapter order — lexical sort would put ch100 before ch93
-            // — and take order within a chapter, so a render speaks front to
+            // Numeric chapter order, lexical sort would put ch100 before ch93
+            //, and take order within a chapter, so a render speaks front to
             // back instead of in whatever order the map iterates. The render
             // batch relies on this: "one chapter" is a prefix of this order.
             ids.sort_by_key(|id| {
@@ -167,7 +163,7 @@ impl Inner {
                 // The data check delivery was missing: offer the oldest merge
                 // whose segments are actually here, and heal the render of
                 // every starved one skipped along the way. A chapter this
-                // disk cannot plan (`None` — no script, uncast speaker) is
+                // disk cannot plan (`None`, no script, uncast speaker) is
                 // offered as before: there is nothing local to prove it
                 // starved, and its failure names the real cause.
                 let mut ready: Option<String> = None;
@@ -236,7 +232,7 @@ impl Inner {
                     t.assigned_to = Some(worker_id.into());
                     t.lease_until = Some(lease);
                     t.updated = now_secs();
-                    // The grouping is recorded on the row the offer names —
+                    // The grouping is recorded on the row the offer names
                     // and only there. Repeating it on every member would be the
                     // same fact stored N times, which is the shape that goes
                     // inconsistent.
@@ -251,7 +247,7 @@ impl Inner {
         let t = self.tasks.get(&primary)?;
         let offer = self.build_offer(t, &batch, &machine);
         // **A chapter may be spoken by several boxes at once, and that is the
-        // point.** No row is ever pinned — takes are independent, a merge
+        // point.** No row is ever pinned, takes are independent, a merge
         // pulls the pieces it lacks from the inductor, and the next worker
         // to ask deepens this chapter instead of opening another one.
         //
@@ -265,20 +261,19 @@ impl Inner {
     /// takes, up to [`bm_core::config::Settings::render_batch`], truncated at
     /// the first take this store cannot resolve.
     ///
-    /// **One chapter, never two.** The progress line and
-    /// the inductor's unit collection are all keyed by chapter, so an offer
-    /// spanning chapters would collect one chapter's wavs against another's
-    /// report. `ids` arrives sorted by `(chapter, take)`, so "one chapter" is a
-    /// prefix — and it is also what makes the batch *deepen*: the next worker to
-    /// ask sees this chapter first and gets the next slice of it, not a new
-    /// chapter. Takes are never pinned, so any box takes that next slice.
+    /// **One chapter, never two.** The progress line and the inductor's unit
+    /// collection are all keyed by chapter, so an offer spanning chapters
+    /// would collect one chapter's wavs against another's report. `ids`
+    /// arrives sorted by `(chapter, take)`, so "one chapter" is a prefix, and
+    /// it is also what makes the batch *deepen*: the next worker to ask gets
+    /// the next slice of this chapter, not a new one. Takes are never pinned.
     ///
     /// The truncation keeps the batch and its payload the same length: a take
-    /// with no plan entry has no unit to speak, and assigning it would make the
-    /// offer claim work it cannot name. The **first** row is taken whether or
-    /// not it resolves, so an unplannable take still reaches the completion gate
-    /// and fails there by name — which is what it did before batching existed,
-    /// and skipping it would strand the chapter silently instead.
+    /// with no plan entry has no unit to speak, and assigning it would make
+    /// the offer claim work it cannot name. The **first** row is taken whether
+    /// or not it resolves, so an unplannable take still reaches the
+    /// completion gate and fails there by name instead of stranding the
+    /// chapter silently.
     fn render_batch(&self, ids: &[String]) -> Vec<String> {
         let Some(chapter) = ids.first().and_then(|id| Task::chapter_of(id)) else {
             return Vec::new();
@@ -304,7 +299,7 @@ impl Inner {
     /// the rest of the batch that offer assigned.
     ///
     /// A batch is recorded on the row the offer named (see `Task::batch`), so a
-    /// report applies to the whole group or to nothing — a partially settled
+    /// report applies to the whole group or to nothing, a partially settled
     /// batch would leave rows `Assigned` to a worker that has already answered,
     /// and their leases would expire into a second render of takes that landed.
     /// `pub(crate)` because the ledger's strike-free release of a refused
@@ -330,7 +325,7 @@ impl Inner {
         } else {
             Value::Null
         };
-        // Merge needs the script — it plans the mix from it, and this is the
+        // Merge needs the script, it plans the mix from it, and this is the
         // one stage whose input is a *chapter* of segments. Digest needs the
         // text.
         //
@@ -344,7 +339,7 @@ impl Inner {
             .then(|| bm_core::read_json::<Value>(&self.layout.script(n)).ok())
             .flatten();
         // The cast decides segment *filenames*. A worker that had to recompute
-        // it would plan different names than the render wrote — and a
+        // it would plan different names than the render wrote, and a
         // provisioned worker cannot recompute it at all, because `data/` is
         // not part of what provisioning copies.
         let cast = (t.stage == Stage::Merge)
@@ -354,7 +349,7 @@ impl Inner {
             .then(|| std::fs::read_to_string(self.layout.chapter_txt(n)).ok())
             .flatten();
         // **One take per row, `render_batch` rows per offer.** The offer stays
-        // self-sufficient — voice, text, parameters — so the worker needs
+        // self-sufficient, voice, text, parameters, so the worker needs
         // neither the script nor the cast, and a local edit still costs one
         // segment instead of a chapter. What batching changes is only how many
         // of those self-sufficient takes travel together: a worker pays a round
@@ -376,7 +371,7 @@ impl Inner {
                 for id in batch {
                     // `batch` was built from `take_spec` succeeding for every
                     // row but the first, so this only fails on the degenerate
-                    // one-row case — which is exactly the `Some([])` below.
+                    // one-row case, which is exactly the `Some([])` below.
                     match self.take_spec(n, Task::take_of(id)) {
                         Some((unit, h, f)) => {
                             if hash.is_empty() {
@@ -393,7 +388,7 @@ impl Inner {
             _ => (None, String::new(), Vec::new()),
         };
         // A merge needs the whole chapter's files, in mix order, and the names
-        // are the plan's — the mixer cannot re-derive a content-addressed take
+        // are the plan's, the mixer cannot re-derive a content-addressed take
         // name from the script and the cast, and must not try.
         let merge_takes = if t.stage == Stage::Merge {
             RenderPlan::load(&self.layout.plan(n))
@@ -432,14 +427,14 @@ impl Inner {
             // backend runs travels here. Both are needed: a provisioned worker
             // has no `.bm/settings.json` to read (provisioning never copies
             // `.bm/`), so without this it digests with the compiled-in
-            // `Settings::default()` — which named a model the operator had
+            // `Settings::default()`, which named a model the operator had
             // stopped using.
             analyzer_settings: self.settings.analyzer_settings(),
             // The inductor is the only machine whose `.env` the operator
             // maintains: a provisioned worker has none, because `.env` is
             // personal and git-ignored and `install_sources` copies only
             // `prompts/`, `python/`, `assets/` and `refs/`. Shipping the key
-            // with the task is what makes a remote digest possible at all —
+            // with the task is what makes a remote digest possible at all
             // narrowed to what this stage actually reads, so a crawl offer
             // carries no secret.
             credentials: bm_proto::Credentials::from_env().for_stage(
@@ -459,7 +454,7 @@ impl Inner {
             music_volume: self.settings.music_volume,
             inject_volume: self.settings.inject_volume,
             // The inductor plans; the worker speaks. One fully specified unit
-            // per assigned take — see `take_spec` and `render_batch`.
+            // per assigned take, see `take_spec` and `render_batch`.
             // `render_force` carries only adopted takes this store lacks, the
             // one case where a same-named file on a warm box is not proof of
             // the right bytes.
@@ -476,8 +471,8 @@ impl Inner {
     /// Where a chapter lives: the frozen index's answer when there is one, and
     /// the URL template otherwise.
     ///
-    /// The index is read from disk rather than rebuilt here — an offer is not
-    /// the place for a network walk — so a mapping rebuilt since (by `:crawl`,
+    /// The index is read from disk rather than rebuilt here, an offer is not
+    /// the place for a network walk, so a mapping rebuilt since (by `:crawl`,
     /// by `:translate`, or by hand) takes effect on the next offer, and a
     /// workspace that never built one keeps working off its template.
     fn crawl_url(&self, n: u32) -> String {
@@ -488,7 +483,7 @@ impl Inner {
 
     /// Apply a worker report. Returns a human-readable line for the event log.
     pub fn complete(&mut self, c: &Complete) -> String {
-        // Snapshot what the transition needs, then mutate — the borrow checker
+        // Snapshot what the transition needs, then mutate, the borrow checker
         // wants facts first, decisions after.
         enum Outcome {
             Unknown,
@@ -503,7 +498,7 @@ impl Inner {
             },
             Failed,
             /// The site has no such chapter. Terminal, strike-free, and the
-            /// artifact does not exist by definition — so the digest closes at
+            /// artifact does not exist by definition, so the digest closes at
             /// the same time, or the chapter waits forever on a crawl that will
             /// never produce text.
             Absent {
@@ -521,7 +516,7 @@ impl Inner {
         }
         // **The operator is authoritative for the chapter they digested by hand.**
         //
-        // A worker's report is believed only while it still holds the row — that
+        // A worker's report is believed only while it still holds the row, that
         // is what stops a stale report from a box that lost its lease from
         // resurrecting work. The operator holds nothing: they are not a worker,
         // the row may well be assigned to a box that is grinding on it right now,
@@ -529,13 +524,13 @@ impl Inner {
         //
         // Accepting it here **is** the release. Marking the row Done clears
         // its holders, so every other box's eventual report finds a row it no
-        // longer owns and is dropped as stale — and the dispatcher's drive
+        // longer owns and is dropped as stale, and the dispatcher's drive
         // loop aborts a losing digest racer's POST on its next poll, so the
         // worker reads a dropped connection as a cancel instead of grinding
         // to a stale report. No new instruction on the wire either way.
         let manual = c.worker_id == bm_proto::MANUAL_WORKER;
         // A manual digest may name the next chapter before any worker task
-        // exists for it — the operator works ahead of the enqueue, not from
+        // exists for it, the operator works ahead of the enqueue, not from
         // it. Create the row so the report lands instead of bouncing as
         // unknown. Digest only: the manual path digests, nothing else.
         if manual && !self.tasks.contains_key(&c.task_id) {
@@ -548,7 +543,7 @@ impl Inner {
         let outcome = match self.tasks.get(&c.task_id) {
             None => Outcome::Unknown,
             // A digest racer holds the row as well as the primary: the first
-            // `ok` wins and every later report — racer or primary — finds a
+            // `ok` wins and every later report, racer or primary, finds a
             // row it no longer owns and is dropped here, strike-free.
             Some(t)
                 if !manual
@@ -569,7 +564,7 @@ impl Inner {
                         r.detail.clone()
                     },
                 },
-                // A refusal the crawler itself classified as terminal — a bot
+                // A refusal the crawler itself classified as terminal, a bot
                 // check it knows will not clear, a login wall, a gone page.
                 // Retrying is what the class says not to do.
                 (Some(r), false) if !r.retryable() => Outcome::Shelved {
@@ -631,7 +626,7 @@ impl Inner {
                     format!("ch{chapter} is not on the site ({reason}) — crawl and digest closed"),
                 );
                 self.save();
-                // Closing a chapter may have drained the queue — trip the
+                // Closing a chapter may have drained the queue, trip the
                 // armed latch, exactly as a completion does.
                 self.maybe_auto_shutdown();
                 return format!("ch{chapter} absent: {reason}");
@@ -648,7 +643,7 @@ impl Inner {
                 mp3_b64,
             } => {
                 // Completion gate (render only): the worker's word is not
-                // evidence — the take's file is. Read out of the **plan**, not
+                // evidence, the take's file is. Read out of the **plan**, not
                 // re-derived from the script and cast: the plan is what named
                 // the file and what the mixer will read, so the gate and the
                 // merge ask one question with one answer.
@@ -656,7 +651,7 @@ impl Inner {
                 // **Every row the offer assigned**, not just the one it named.
                 // A batch is one report covering N takes, and a gate that
                 // checked only the primary would pass a report whose other nine
-                // takes never landed — the failure would surface at the merge
+                // takes never landed, the failure would surface at the merge
                 // instead, as "N segments missing", with nothing pointing at
                 // the render.
                 if stage == Stage::Render {
@@ -789,7 +784,7 @@ impl Inner {
                 // The design this mp3 was mixed under, read *before* the borrow
                 // below: the stamp needs `self.settings` and the registries,
                 // and it has to be written under the same borrow as the state.
-                // A merge that failed never gets here, which is right — it left
+                // A merge that failed never gets here, which is right, it left
                 // no artifact to make a claim about.
                 let design = if stage == Stage::Merge {
                     let d = bm_core::design::MergeDesign::load(&self.layout);
@@ -800,7 +795,7 @@ impl Inner {
                 // **Every row the report covers**, not just the one it names: a
                 // batched offer is one report for N takes, and settling only
                 // the primary would leave its siblings `Assigned` to a worker
-                // that has already answered — their leases would then expire
+                // that has already answered, their leases would then expire
                 // into a second render of takes that landed. The grouping is
                 // cleared as it is consumed, so it can never settle a later,
                 // unrelated report.
@@ -860,7 +855,7 @@ impl Inner {
                 return self.fail_task(&c.task_id, &c.worker_id, c.detail.clone());
             }
         }
-        // A completion may have drained the queue — trip the armed latch.
+        // A completion may have drained the queue, trip the armed latch.
         self.maybe_auto_shutdown();
         format!(
             "{}: {} {} ({})",
@@ -879,20 +874,18 @@ impl Inner {
     /// same merge into shelved.
     ///
     /// Only `Done` moves: anything else is already queued, in flight, or
-    /// parked for an operator. A published mp3 vetoes the flip — then the
+    /// parked for an operator. A published mp3 vetoes the flip: then the
     /// segments are provenance (TTS does not reproduce), not cache. Nothing
-    /// is deleted: the next render fills gaps (`pending_units` skips what
-    /// the box holds) rather than starting over.
-    ///
-    /// A merge pulls the pieces it lacks from the inductor, so a worker-side
-    /// `segments missing` means the inductor itself is short — and this heal
-    /// is exactly what refills it.
+    /// is deleted: the next render fills gaps rather than starting over. A
+    /// merge pulls the pieces it lacks from the inductor, so a worker-side
+    /// `segments missing` means the inductor itself is short, and this heal
+    /// is what refills it.
     fn heal_render_for_merge(&mut self, chapter: u32) -> bool {
         if self.layout.final_mp3(chapter).is_file() {
             return false;
         }
         // The plan's diff *is* the heal: a take whose file this store lacks is
-        // work again, and one it holds stays `Done`. Nothing is deleted — the
+        // work again, and one it holds stays `Done`. Nothing is deleted, the
         // next render fills the gap rather than starting the chapter over.
         if self.materialize_render_takes(chapter).is_none() {
             // Unplannable here (no script, an uncast speaker): the
@@ -923,32 +916,26 @@ impl Inner {
     }
 
     /// Record a failed report: a strike, Pending again (Shelved at the
-    /// stage's threshold — 3 everywhere but digest, which gets 15), and an
+    /// stage's threshold, 3 everywhere but digest, which gets 15), and an
     /// event line. Shared by worker-reported failures and the completion
     /// gate, which fails reports whose files never landed.
     ///
     /// Digest racing changes one thing: a failing racer while other boxes
-    /// are still grinding the same row costs no strike — the row stays
-    /// `Assigned` under its remaining holders and only the last holder's
-    /// failure strikes. Otherwise N racers failing one bad prompt would
-    /// shelve the chapter in a single wave.
+    /// are still grinding the same row costs no strike. Otherwise N racers
+    /// failing one bad prompt would shelve the chapter in a single wave.
     ///
     /// **The whole batch takes the strike, not the row the report named.** One
     /// report is one answer about one offer, and the offer covered N takes: a
-    /// worker that died mid-batch, or whose units never landed, did not fail
-    /// only the first of them. Per-take strikes would also let a batch of sixty
-    /// shelter sixty rows from the three-strikes rule while never once
-    /// finishing — the chapter would be retried for ever instead of shelving
-    /// for an operator to look at.
-    ///
-    /// The cost is honest and small: a retry is cheap, because `pending_units`
-    /// skips the takes whose files did land, so a batch that got nine of ten
-    /// re-speaks one.
+    /// worker that died mid-batch did not fail only the first of them.
+    /// Per-take strikes would also let a batch of sixty shelter sixty rows
+    /// from the strikes rule while never once finishing. The cost is honest
+    /// and small: a retry is cheap, because `pending_units` skips the takes
+    /// whose files did land, so a batch that got nine of ten re-speaks one.
     /// Park a row immediately, without spending the three strikes a retry
     /// ladder exists to spend on *uncertain* failures.
     ///
-    /// Same end state as [`Inner::fail_task`] reaching its cap — `Shelved`,
-    /// holders cleared, the reason on the row — reached in one step because the
+    /// Same end state as [`Inner::fail_task`] reaching its cap, `Shelved`,
+    /// holders cleared, the reason on the row, reached in one step because the
     /// crawler already classified the refusal as terminal.
     fn shelve_now(&mut self, task_id: &str, detail: &str) -> String {
         let rows = self.covered_rows(task_id);
@@ -1020,7 +1007,7 @@ impl Inner {
             }
         }
         // **Which input is short?** A merge fails on `N segments missing`
-        // when the render never produced the audio or the inductor lost it —
+        // when the render never produced the audio or the inductor lost it
         // the merge itself pulls what it lacks, so its box is never the
         // problem. The render is requeued alongside the merge retry below.
         let rows = self.covered_rows(task_id);
@@ -1055,7 +1042,7 @@ impl Inner {
         // The other half of a `segments missing` merge failure: the render
         // really is the starved input. Requeue it alongside the merge retry,
         // or the same merge fails twice more into shelved and waits for a
-        // manual force. The merge keeps its strike — a render that cannot
+        // manual force. The merge keeps its strike, a render that cannot
         // close the gap still shelves.
         if let Some(rest) = task_id.strip_prefix("merge:") {
             if detail.contains("segments missing") {
@@ -1065,8 +1052,8 @@ impl Inner {
             }
             // The plan predates the script: a digest landed after the render
             // plan was built, so the recorded take list no longer matches the
-            // timeline. Rebuild the plan from the current script — the diff
-            // requeues exactly the changed takes — or the same merge fails
+            // timeline. Rebuild the plan from the current script, the diff
+            // requeues exactly the changed takes, or the same merge fails
             // twice more into shelved and waits for a manual force. The merge
             // keeps its strike, like the starved-input heal above.
             if detail.contains("turns for ") && detail.contains(" rendered segments") {
@@ -1093,10 +1080,10 @@ impl Inner {
             ),
         );
         self.save();
-        // A shelving may have drained the queue — trip the armed latch.
+        // A shelving may have drained the queue, trip the armed latch.
         self.maybe_auto_shutdown();
         // The log line carries the same distinction as the event. It used to say
-        // only "failed", so a shelving — the outcome that needs an operator —
+        // only "failed", so a shelving, the outcome that needs an operator
         // was indistinguishable from a failure that retries itself, in the one
         // place a person actually greps.
         let outcome = if shelved { "SHELVED" } else { "failed" };
@@ -1128,7 +1115,7 @@ impl Inner {
     /// Every speaker the inductor can name: the operator's cast, the cast file,
     /// the bible, and every script's roster and segments.
     ///
-    /// This is the voice picker's first step — without it the operator has to
+    /// This is the voice picker's first step, without it the operator has to
     /// recall exact Vietnamese character names from memory. The shipped
     /// catalogue carries no character names, so the seed is the operator's own
     /// roster; a malformed one seeds nothing, which is a missing convenience
