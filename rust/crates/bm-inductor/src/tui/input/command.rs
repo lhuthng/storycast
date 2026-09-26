@@ -17,7 +17,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 /// recursion presses them as if typed. Operator actions map to the variants
 /// below and run directly, because their single keys were removed: a stray
 /// keypress must never provision, reconcile or stop anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Command {
     Key(KeyCode),
     AddMachine,
@@ -44,6 +44,15 @@ pub(crate) enum Command {
     /// Requeue shelved work: everything, one chapter, or one task. `stage`
     /// and `chapter` together name one task; `chapter` alone narrows to that
     /// chapter; neither is the whole ledger.
+    /// Point one segment at another speaker: `:speaker 18 67 "Thanh Sơn lão tổ"
+    /// "Dịch Phong"`. `expect` is the check, not decoration, so a wrong segment
+    /// number refuses instead of editing the wrong line.
+    FixSpeaker {
+        chapter: u32,
+        segment: usize,
+        expect: String,
+        speaker: String,
+    },
     Retry {
         stage: Option<Stage>,
         chapter: Option<u32>,
@@ -123,6 +132,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: Some('S'), names: &["cast"], desc: Some("cast overview: every speaker × voice, read-only"), cmd: Command::Cast },
     Word { key: Some('e'), names: &["eta"], desc: Some("estimate the remaining wall-clock time"), cmd: Command::Eta },
     Word { key: Some('u'), names: &["retry"], desc: Some("requeue every shelved task — strikes reset; `:retry 24` narrows to one chapter, `:retry render 24` to one task"), cmd: Command::Retry { stage: None, chapter: None } },
+    Word { key: None, names: &["speaker"], desc: Some("re-attribute one segment: `:speaker 18 67 \"Thanh Sơn lão tổ\" \"Dịch Phong\"` — segment is 1-based, the two names are checked, quotes for spaces; re-speaks only the takes the edit reached"), cmd: Command::FixSpeaker { chapter: 0, segment: 0, expect: String::new(), speaker: String::new() } },
     Word { key: Some('m'), names: &["reconcile"], desc: Some("fold duplicates — asks first; certain folds apply, ambiguous only listed"), cmd: Command::Reconcile },
     Word { key: Some('B'), names: &["backend"], desc: Some("backend up now, machines provision in background and join as ready"), cmd: Command::Backend },
     Word { key: None, names: &["mix"], desc: Some("story speed and fx/music/inject volumes — requeues every merge"), cmd: Command::Mix },
@@ -171,7 +181,7 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
     if word.chars().count() == 1 {
         let c = word.chars().next().filter(|c| *c != ':')?;
         if let Some(w) = WORDS.iter().find(|w| w.key == Some(c)) {
-            return Some(w.cmd);
+            return Some(w.cmd.clone());
         }
         // Read-only keys keep their Normal-mode arms, so the command
         // presses the key and every context behaves like it was typed.
@@ -198,6 +208,26 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
                     .then_some(Command::AwsDown { force: true });
             }
             "retry" | "u" if !rest.is_empty() => return retry_scope(&rest),
+            // Its own splitter, because a speaker name is almost always two or
+            // three words and `:speaker 18 67 Dịch Phong` has no way to say
+            // where the name ends. Quoted, like a shell.
+            "speaker" if !rest.is_empty() => {
+                let args = split_args(&rest.join(" "));
+                let [chapter, segment, expect, speaker] = args.as_slice() else {
+                    return None;
+                };
+                let chapter = chapter.parse::<u32>().ok().filter(|c| *c > 0)?;
+                let segment = segment.parse::<usize>().ok().filter(|s| *s > 0)?;
+                if expect.is_empty() || speaker.is_empty() {
+                    return None;
+                }
+                return Some(Command::FixSpeaker {
+                    chapter,
+                    segment,
+                    expect: expect.clone(),
+                    speaker: speaker.clone(),
+                });
+            }
             _ => {}
         }
     }
@@ -205,7 +235,44 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
     WORDS
         .iter()
         .find(|w| w.names.iter().any(|n| *n == lower))
-        .map(|w| w.cmd)
+        .map(|w| w.cmd.clone())
+}
+
+/// Split a command's arguments on whitespace, except inside double quotes, so
+/// an argument can be a phrase: `:speaker 18 67 "Thanh Sơn lão tổ" "Dịch Phong"`
+/// is four arguments, not eight.
+///
+/// A quote inside a word opens there too (`a"b c"d` is `ab cd`), an unterminated
+/// quote takes the rest of the line rather than being an error, and a doubled
+/// quote inside a quoted run is one literal quote. Deliberately not a shell:
+/// no escapes, no expansion, nothing to explain.
+pub(crate) fn split_args(input: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for c in input.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    out.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        out.push(cur);
+    }
+    out
 }
 
 /// `:retry <chapter>` / `:retry <stage> <chapter>` → the command that names
@@ -634,6 +701,26 @@ pub(crate) fn do_command(
                 http,
                 OpRequest {
                     op: Op::Eta,
+                    ..Default::default()
+                },
+            );
+        }
+        Command::FixSpeaker {
+            chapter,
+            segment,
+            expect,
+            speaker,
+        } => {
+            dispatch_op(
+                app,
+                job_tx,
+                http,
+                OpRequest {
+                    op: Op::FixSpeaker,
+                    chapter: Some(chapter),
+                    segment: Some(segment),
+                    expect: Some(expect),
+                    speaker: Some(speaker),
                     ..Default::default()
                 },
             );

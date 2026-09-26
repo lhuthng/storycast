@@ -637,6 +637,32 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                 _ => Json(OpResult::fail("recast requires a chapter")),
             }
         }
+        bm_proto::Op::FixSpeaker => {
+            // All three names are required, and the third is the check rather
+            // than decoration: without an `expect` this is `recast` with worse
+            // ergonomics, and the point of the op is that a wrong segment
+            // number cannot edit the wrong line.
+            let (chapter, segment, expect, speaker) = (
+                req.chapter,
+                req.segment,
+                req.expect.clone(),
+                req.speaker.clone(),
+            );
+            match (chapter, segment, expect, speaker) {
+                (Some(chapter), Some(segment), Some(expect), Some(speaker))
+                    if chapter > 0 && segment > 0 =>
+                {
+                    let mut inner = st.lock().await;
+                    match inner.op_fix_speaker(chapter, segment, &expect, &speaker) {
+                        Ok(msg) => Json(OpResult::ok(msg)),
+                        Err(e) => Json(OpResult::fail(format!("fix-speaker failed: {e:#}"))),
+                    }
+                }
+                _ => Json(OpResult::fail(
+                    "fix-speaker requires chapter, segment, expect and speaker",
+                )),
+            }
+        }
         bm_proto::Op::Remix => {
             let mut inner = st.lock().await;
             match inner.op_remix(
