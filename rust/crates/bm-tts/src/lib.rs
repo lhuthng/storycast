@@ -14,6 +14,7 @@
 pub mod babble;
 pub mod codec;
 pub mod engine;
+pub mod f32le;
 pub mod framecap;
 pub mod npz;
 pub mod sample;

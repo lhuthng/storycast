@@ -27,11 +27,7 @@ fn main() -> Result<()> {
     // *before* the draw: the candidate set and its probabilities.
     if let Some(at) = args.iter().position(|a| a == "--logits") {
         let path = args.get(at + 1).context("--logits needs a path")?;
-        let logits: Vec<f32> = std::fs::read(path)
-            .with_context(|| format!("reading {path}"))?
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+        let logits: Vec<f32> = bm_tts::f32le::read(std::path::Path::new(path))?;
         let base = Sampling {
             temperature: 1.0,
             top_k: 25,
@@ -94,11 +90,7 @@ fn main() -> Result<()> {
     let models = models.context("usage: bm-tts-frames <models-dir> --speaker <f32-file> …")?;
     let speaker = speaker.context("--speaker is required: this model conditions on one")?;
 
-    let anchor_in: Vec<f32> = std::fs::read(&speaker)
-        .with_context(|| format!("reading {speaker}"))?
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
+    let anchor_in: Vec<f32> = bm_tts::f32le::read(&speaker)?;
     let ref_frames: Option<Vec<Vec<i64>>> = match &ref_codes {
         Some(p) => Some(
             serde_json::from_str(
@@ -138,11 +130,7 @@ fn main() -> Result<()> {
             let dir = std::path::Path::new(dir);
             std::fs::create_dir_all(dir)?;
             let anchor = match &anchor_file {
-                Some(p) => std::fs::read(p)
-                    .with_context(|| format!("reading {p}"))?
-                    .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect(),
+                Some(p) => bm_tts::f32le::read(p)?,
                 None => engine.speaker_anchor(Some(&anchor_in))?.unwrap_or_default(),
             };
             let (rows, t0) = engine.build_rows(&phonemes, ref_frames.as_deref())?;
@@ -159,13 +147,9 @@ fn main() -> Result<()> {
                 prompt.len()
             );
         }
-        let forced: Option<Vec<f32>> = anchor_file.as_ref().map(|p| {
-            std::fs::read(p)
-                .expect("--anchor file")
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect()
-        });
+        let forced: Option<Vec<f32>> = anchor_file
+            .as_ref()
+            .map(|p| bm_tts::f32le::read(p).expect("--anchor file"));
         let mut req = Request::new(&phonemes);
         req.sampling = Sampling {
             temperature: temp,
