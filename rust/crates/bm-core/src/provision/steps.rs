@@ -58,7 +58,14 @@ pub struct Probe {
     /// than it saves.
     #[serde(default)]
     pub ffmpeg_present: bool,
-    /// Enrolled clone-voice names parsed from the voice store (no model load).
+    /// The sidecar's roster, as `/voices` sends it: **labels, not names** —
+    /// `"<name> — <description>"` for a voice with a description (every preset)
+    /// and the bare name for one without (every enrolled clone).
+    ///
+    /// It was documented as "enrolled clone-voice names", which is a guarantee
+    /// the transport does not keep, and the one consumer that compared these
+    /// against a list of names read all 23 shipped presets as undeclared. Use
+    /// [`crate::voices::voice_name`] before comparing anything here with a name.
     #[serde(default)]
     pub voices: Vec<String>,
     pub tts_up: bool,
@@ -833,6 +840,14 @@ echo stopped"#,
 /// on that box and 500s everywhere else (the Suneo outage: hand-enrolled
 /// locally, offered by the picker, unknown to every other worker).
 ///
+/// **Each store entry is a roster *label*, not a name**, because that is what
+/// the sidecar's `/voices` sends: `"<name> — <description>"` for a voice that
+/// has a description (every preset — this is what the operator reads in the
+/// picker) and the bare name for one that does not (every enrolled clone). So
+/// the label is split through [`crate::voices::voice_name`] before any of the
+/// three comparisons, and the *name* is what comes back: "Thái Sơn" is the thing
+/// to add to a manifest, not a 40-character description of it.
+///
 /// Reported, never deleted: erasing a voice the cast uses would break renders.
 /// The fix is named in the warning — declare it in `voices.json` (with its
 /// `refs/` clip) or drop it from the store.
@@ -844,13 +859,13 @@ pub fn undeclared_voices(
 ) -> Vec<String> {
     let mut out: Vec<String> = store
         .iter()
-        .filter(|v| {
-            !v.starts_with('_')
-                && !manifest.contains_key(v.as_str())
-                && !pool.contains_key(v.as_str())
-                && !catalogue.iter().any(|c| c == *v)
+        .map(|label| crate::voices::voice_name(label))
+        .filter(|name| {
+            !name.starts_with('_')
+                && !manifest.contains_key(name.as_str())
+                && !pool.contains_key(name.as_str())
+                && !catalogue.iter().any(|c| c == name)
         })
-        .cloned()
         .collect();
     out.sort();
     out.dedup();
@@ -1470,8 +1485,12 @@ mod tests {
             },
         );
         let catalogue = vec!["Thái Sơn".to_string(), "Adam".to_string()];
+        // Exactly what the sidecar sends, and the difference is the whole test:
+        // a preset carries a description and so arrives as a *label*, while a
+        // clone has none and arrives bare.
         let store = vec![
-            "Thái Sơn".to_string(),
+            "Thái Sơn — Nam · Trung · Kể chuyện".to_string(),
+            "Adam — Nam · Nam · Giọng đọc tự nhiên".to_string(),
             "Học Trò".to_string(),
             "Pool Sample".to_string(),
             "Suneo".to_string(),
@@ -1480,9 +1499,54 @@ mod tests {
         ];
         assert_eq!(
             undeclared_voices(&store, &manifest, &pool, &catalogue),
-            vec!["Suneo"]
+            vec!["Suneo"],
+            "one hand-enrolled clone, named by its name and not by a label"
         );
         assert!(undeclared_voices(&[], &manifest, &pool, &catalogue).is_empty());
+    }
+
+    /// The false positive this shape caused, in the numbers it produced.
+    ///
+    /// It reported all 23 shipped presets on every single provision and told the
+    /// operator to add each one with a `refs/` clip — ~20 MB of audio to clone
+    /// voices already present, under names that already exist. Nothing about
+    /// those 23 is undeclared: they are the catalogue itself.
+    #[test]
+    fn a_shipped_preset_is_never_reported_as_undeclared() {
+        let catalogue: Vec<String> = crate::voices::offline_voices("vieneu")
+            .into_iter()
+            .map(|v| v.name)
+            .collect();
+        assert_eq!(catalogue.len(), 23, "the shipped ViNeu roster");
+        // Built the way the sidecar builds them: name + description, verbatim.
+        let store: Vec<String> = catalogue
+            .iter()
+            .map(|n| format!("{n} — Nam · Bắc · Kể chuyện"))
+            .chain(["Suneo".to_string()])
+            .collect();
+        assert_eq!(
+            undeclared_voices(
+                &store,
+                &std::collections::HashMap::new(),
+                &crate::pool::Pool::new(),
+                &catalogue,
+            ),
+            vec!["Suneo"],
+            "23 declared presets, 1 genuine stray"
+        );
+        // And the same answer whatever the description says, or whether the
+        // label uses an en dash or the ASCII fallback.
+        let spelled = vec![
+            "Thái Sơn – Nam · Trung".to_string(),
+            "Adam - Nam".to_string(),
+        ];
+        assert!(undeclared_voices(
+            &spelled,
+            &std::collections::HashMap::new(),
+            &crate::pool::Pool::new(),
+            &catalogue
+        )
+        .is_empty());
     }
 
     #[test]
