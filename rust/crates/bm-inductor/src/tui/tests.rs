@@ -73,7 +73,7 @@ async fn tracked_jobs_queue_only_behind_a_resource_they_need() {
         settings_key: None,
     };
     assert!(dispatch(&mut app, &job_tx, start));
-    // Both name `Res::Cluster`, so the stop still waits for the start — the
+    // Both name `Res::Cluster`, so the stop still waits for the start, the
     // pair is the one place "one cluster, one lifecycle" is literally true.
     assert!(dispatch(
         &mut app,
@@ -626,7 +626,7 @@ fn run_config_save_persists_everything_it_parsed() {
     assert_eq!(saved.analyzer, "gemini");
     assert_eq!(saved.analyze_models, vec!["3.8-flash", "3.7-flash"]);
 
-    // Omitted models keep the saved chain — a blank field must not wipe it.
+    // Omitted models keep the saved chain, a blank field must not wipe it.
     save_run_config(&app, "1 1 gemini").unwrap();
     let saved: bm_core::config::Settings =
         bm_core::read_json(&bm_core::Layout::new(&dir).settings()).unwrap();
@@ -796,7 +796,7 @@ async fn run_screen_enters_and_launches_with_previewed_values() {
     // catch-up; it is now the moment the catch-up *starts*, and the boxes it
     // handed out are still provisioning. Clearing the flag here would leave `X`
     // with nothing to set, and a provision mid-push would launch its worker
-    // anyway — a cluster that is not quiet after a stop.
+    // anyway, a cluster that is not quiet after a stop.
     assert!(
         app.start_cancel.is_some(),
         "the catch-up outlives the start job that made it"
@@ -812,7 +812,7 @@ async fn run_screen_enters_and_launches_with_previewed_values() {
 fn the_start_guard_outlives_the_start_job() {
     // `B` now ends in seconds and hands its boxes to the scheduler. If the guard
     // were released then, a second `B` a moment later would be allowed and would
-    // queue a duplicate push at every box — exactly the queueing this change
+    // queue a duplicate push at every box, exactly the queueing this change
     // exists to remove. So the flag follows the catch-up, not the start job.
     let mut app = App::new("http://unused");
     app.catchup_jobs = vec![7, 8];
@@ -846,7 +846,7 @@ fn the_start_guard_outlives_the_start_job() {
 fn cold_start_catches_up_every_box_despite_stale_online_states() {
     // `:X`, restart, `:B`: the machine list is the last live poll's, states
     // frozen `Online` (`state_failed` keeps the rows), inductor down. The
-    // old skip trusted those states and provisioned nothing — the backend
+    // old skip trusted those states and provisioned nothing, the backend
     // came up with no workers and only a second `:B` (fresh states, Offline)
     // brought the boxes.
     use super::jobs::split_catchup;
@@ -873,7 +873,7 @@ async fn machine_state_falls_back_to_the_workspace_ledger_while_down() {
     // the ledger patch carries the phase instead.
     //
     // With a workspace selected the *book's* ledger is the live one. Patching
-    // `<root>/.bm/ledger.json` — which is what a root-only layout did — wrote
+    // `<root>/.bm/ledger.json`, which is what a root-only layout did, wrote
     // a file no scheduler reads, so the phase silently never appeared.
     let d = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(d.path().join(".bm")).unwrap();
@@ -913,7 +913,7 @@ fn machine_targets_fall_back_to_the_workspace_ledger_file() {
     //
     // With a workspace selected that file is the *workspace's* ledger: reading
     // `<root>/.bm/ledger.json` found nothing, so the fallback quietly returned
-    // local-only and the remotes were dropped again — the same bug, one layer
+    // local-only and the remotes were dropped again, the same bug, one layer
     // down.
     let d = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(d.path().join(".bm")).unwrap();
@@ -1026,7 +1026,7 @@ fn a_cold_start_names_the_fix_instead_of_reqwest_prose() {
     //
     // Asserted on the **verdict** rather than through a socket. The socket
     // version bound an ephemeral port, dropped the listener, and then hoped no
-    // other test was handed that port in between — a race with a real window
+    // other test was handed that port in between, a race with a real window
     // that failed once in six full-suite runs and passed 3/3 in isolation. The
     // trade: reqwest's own classification (`ECONNREFUSED` ⇒ `is_connect`) is no
     // longer exercised here. That is reqwest's contract rather than this repo's
@@ -1148,7 +1148,7 @@ fn the_import_prompt_takes_a_number_and_a_path_but_never_guesses_the_number() {
         other => panic!("{other:?}"),
     }
     // A path alone: the number comes from the filename, later, by the importer
-    // (which is the one place that rule lives) — the prompt does not guess one.
+    // (which is the one place that rule lives), the prompt does not guess one.
     match submit_text(&mut app, &p("/tmp/ch217.txt")).unwrap() {
         Job::Op { req, .. } => {
             assert_eq!(req.chapter, None);
@@ -1194,7 +1194,7 @@ fn crawl_template_takes_a_placeholder_or_nothing_at_all() {
 ///
 /// The shape that motivates it: ReadNovelFull's chapter URLs carry a title
 /// slug, so the prompt's own rule ("must contain {n}") refuses every URL the
-/// operator could possibly paste, and the refusal — left generic — is a loop.
+/// operator could possibly paste, and the refusal, left generic, is a loop.
 /// Naming the crawler turns a dead end into a next step.
 #[test]
 fn a_known_site_url_names_its_crawler_instead_of_only_refusing() {
@@ -1265,14 +1265,14 @@ fn the_known_site_note_tracks_the_buffer_and_only_where_it_belongs() {
     // And a known one resolves from a bare host, scheme and all.
     let p = TextPrompt::new(TextKind::CrawlTemplate, "t", "h", "storya.click");
     assert_eq!(p.known_site().map(|s| s.host), Some("storya.click"));
-    // Templatable, so no "no {n}" instruction — that would be a lie here.
+    // Templatable, so no "no {n}" instruction, that would be a lie here.
     let note = p.known_note().unwrap();
     assert!(!note.contains("no {n}"), "{note}");
 }
 
 #[test]
 fn workspace_prompt_parses_list_use_and_new() {
-    // One prompt, three verbs — parsed at submit so a typo keeps the prompt
+    // One prompt, three verbs, parsed at submit so a typo keeps the prompt
     // open with the operator's own text still in it.
     let mut app = App::new("http://x");
     let prompt = |buf: &str| TextPrompt::new(TextKind::Workspace, "t", "h", buf);
@@ -1319,7 +1319,7 @@ fn profile_prompt_parses_list_load_and_pack() {
             ..
         })
     ));
-    // A bare name loads — the common case needs no verb.
+    // A bare name loads, the common case needs no verb.
     assert!(matches!(
         submit_text(&mut app, &prompt("xianxia")),
         Ok(Job::Profile {
@@ -1449,7 +1449,7 @@ async fn add_sample_success_reloads_the_roster() {
         "no stale Done: {dones:?}"
     );
 
-    // Failure refreshes nothing — the roster it would fetch is unchanged.
+    // Failure refreshes nothing, the roster it would fetch is unchanged.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
     run_job(
         Job::AddSample {
@@ -1513,7 +1513,7 @@ async fn text_prompt_closes_on_submit_or_esc_but_stays_open_on_error() {
 #[test]
 fn add_machine_rejects_whitespace_addresses() {
     // The bind prompt is a tuple now (`addr [user [port [key]]]`), so a
-    // second token is a user, not an error — only the address itself is
+    // second token is a user, not an error, only the address itself is
     // validated.
     let mut app = App::new("http://x");
     let p = TextPrompt::new(TextKind::AddMachine, "t", "h", "192.168.2.7 extra");
@@ -1584,8 +1584,8 @@ fn state_age_says_unknown_rather_than_a_fifty_year_boot() {
 #[test]
 fn a_booting_box_that_never_answered_ssh_is_not_called_broken() {
     // `:prov` seconds after `:up` is the likeliest way to meet a box whose
-    // sshd is not listening yet. The probe learned nothing — it cannot even
-    // tell a booting box from a dead one — so calling it `Error` is the exact
+    // sshd is not listening yet. The probe learned nothing, it cannot even
+    // tell a booting box from a dead one, so calling it `Error` is the exact
     // misreading `initializing` exists to prevent. Stay booting; the boot
     // deadline is what gives up.
     assert_eq!(
@@ -1597,7 +1597,7 @@ fn a_booting_box_that_never_answered_ssh_is_not_called_broken() {
 #[test]
 fn a_box_that_answered_but_failed_a_step_is_broken_even_while_booting() {
     // The boundary that makes the rule above safe rather than a blanket
-    // amnesty: ssh *answered*, so the failure is real — a missing python, a
+    // amnesty: ssh *answered*, so the failure is real, a missing python, a
     // full disk, a failed push. That is a fault whatever the clock says.
     assert_eq!(
         verdict_after_failed_provision(true, true),
@@ -1946,7 +1946,7 @@ fn every_live_worker_is_visible_on_a_terminal_that_can_hold_them() {
 /// Tasks and Stats are drawn in the compact tier too.
 ///
 /// They used to be carved out of the Workers pane *only on the full tier*, so
-/// on a 76x24 terminal — the default on most setups — both were simply not
+/// on a 76x24 terminal, the default on most setups, both were simply not
 /// drawn, and the footer carried a roll-up instead. A pane that cannot be seen
 /// is a pane that cannot answer the question you opened the dashboard to ask.
 #[test]
@@ -2093,7 +2093,7 @@ fn roster_fixture() -> Roster {
     let voice = |name: &str, gender: &str, accent: &str, allowed: bool, enrolled: bool| {
         VoiceInfo {
             // Keys come from the real catalogue, so the fixture cannot drift
-            // from what the picker actually receives — and a name the
+            // from what the picker actually receives, and a name the
             // catalogue does not declare keeps an empty key, as a clone does.
             key: bm_core::voices::key_for_name("vieneu", name).unwrap_or_default(),
             name: name.to_string(),
@@ -2248,7 +2248,7 @@ fn cast_rows_carry_the_voice_metadata_through() {
 /// Render one frame into an in-memory terminal and flatten it to text.
 ///
 /// The responsive tiers are pure layout, so they can be checked without a
-/// real terminal — which is also the only way to prove the size guard does
+/// real terminal, which is also the only way to prove the size guard does
 /// not panic on a degenerate area.
 fn render_text(app: &mut App, w: u16, h: u16) -> String {
     let backend = ratatui::backend::TestBackend::new(w, h);
@@ -2268,7 +2268,7 @@ fn render_text(app: &mut App, w: u16, h: u16) -> String {
 /// Whether `hint` is on the rendered screen, **as a reader would see it**.
 ///
 /// `render_text` returns the buffer row by row, so anything the overlay *wraps* is
-/// split across two of them — and a hint line longer than the overlay's width
+/// split across two of them, and a hint line longer than the overlay's width
 /// wraps by definition. A plain `contains` therefore misses phrases that are
 /// plainly visible on screen, which is a test failing for the wrong reason. This
 /// collapses the whitespace first, so the phrase is looked for as it reads.
@@ -2368,7 +2368,7 @@ fn a_new_line_holds_the_reading_position_instead_of_shoving_it() {
         "the view is still on the same line"
     );
 
-    // Pinned to newest, arrivals scroll by — the tail follows.
+    // Pinned to newest, arrivals scroll by, the tail follows.
     app.events_scroll = 0;
     app.log_at(Level::Info, "tail follows");
     assert_eq!(app.events_scroll, 0);
@@ -2377,7 +2377,7 @@ fn a_new_line_holds_the_reading_position_instead_of_shoving_it() {
 #[test]
 fn log_lines_use_reported_aliases_when_beats_carry_them() {
     // The mismatch: the Workers pane said `marmot` while the log line
-    // said `[hare] [thang-29486]` — the log hashed the raw id instead of
+    // said `[hare] [thang-29486]`, the log hashed the raw id instead of
     // asking the beats.
     let mut app = App::new("http://127.0.0.1:8901");
     app.beats = vec![beat("thang-29486", "192.168.2.2", 2, "marmot")];
@@ -2388,7 +2388,7 @@ fn log_lines_use_reported_aliases_when_beats_carry_them() {
         "the reported alias wins:\n{text}"
     );
     // ...but an id no beat knows stays itself. Hashing it once minted
-    // `[hawk]` for the address `192.168.2.2` — a worker that never
+    // `[hawk]` for the address `192.168.2.2`, a worker that never
     // existed, hunted across every pane.
     app.log_at(Level::Ok, "[ghost-1] render:24 done");
     let text = render_text(&mut app, 140, 44);
@@ -2580,7 +2580,7 @@ fn workers_pane_hides_ghosts_of_offline_boxes() {
     m.set_state(MachineState::Offline);
     let ghost = beat("thang-marmot", "192.168.2.2", 30, "marmot");
     assert!(!beat_backed(&[m.clone()], &ghost));
-    // A beat newer than the verdict still counts — one slow poll flickers
+    // A beat newer than the verdict still counts, one slow poll flickers
     // the dot without deleting the row.
     m.state_since = m.state_since.saturating_sub(100);
     let fresh = beat("thang-marmot", "192.168.2.2", 2, "marmot");
@@ -2900,7 +2900,7 @@ async fn k_opens_the_ledger_and_esc_closes_it() {
 async fn tab_opens_jobs_and_tab_closes_it_again() {
     // Regression guard for the key move: Jobs used to live only on `J`, and
     // the footer advertised a key nobody associated with "the other side of
-    // the dashboard". Tab opens; Tab closes — the same toggle shape the
+    // the dashboard". Tab opens; Tab closes, the same toggle shape the
     // sound editor's layer tabs already use.
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
@@ -3010,7 +3010,7 @@ async fn enter_opens_the_task_page_and_shows_the_whole_reason() {
     );
     assert!(text.contains("lease"), "the lease is on the page:\n{text}");
 
-    // Esc returns to the list — and to the same view of it.
+    // Esc returns to the list, and to the same view of it.
     handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
     assert!(matches!(app.screen, Screen::Tasks(_)), "{:?}", app.screen);
 }
@@ -3234,8 +3234,8 @@ async fn ctrl_u_clears_the_filter_and_never_requeues() {
 async fn the_task_page_explains_a_batched_render_from_the_row_that_owns_it() {
     // Ten rows flipping to `assigned` on one box with nothing on screen to say
     // why is the state batching created, and the TUI is the operator's only
-    // interface. The fact lives on the row the offer named — the one the
-    // worker reports progress against — so that is where it is shown, and a
+    // interface. The fact lives on the row the offer named, the one the
+    // worker reports progress against, so that is where it is shown, and a
     // member row says nothing because it knows nothing.
     let mut app = tasks_app();
     let head = app
@@ -3263,7 +3263,7 @@ async fn the_task_page_explains_a_batched_render_from_the_row_that_owns_it() {
         "naming the other rows, so they can be found in the ledger: {text}"
     );
 
-    // A row with no batch says nothing extra — the line is not decoration.
+    // A row with no batch says nothing extra, the line is not decoration.
     let head = app
         .tasks
         .iter_mut()
@@ -3575,7 +3575,7 @@ async fn current_word_tests_the_current_voice_on_the_shown_line() {
     let mut app = audition_app();
 
     // `:current`: the current voice on the shown line, from cache only. The
-    // cursor sits on Adam, but it never follows it — that is what `:try`
+    // cursor sits on Adam, but it never follows it, that is what `:try`
     // (render) and Enter (pick) are for.
     do_command(&mut app, Command::AuditionCurrent, &http, &job_tx);
     let req = last_op(&mut job_rx).expect(":current must dispatch a segment fetch");
@@ -3674,7 +3674,7 @@ async fn another_word_rerolls_the_pointed_voice_on_another_line() {
     assert_eq!(candidate.voice.as_deref(), Some("Adam"));
     finish_audition(&mut app, "Adam");
 
-    // `:another`: the pointed voice again, re-rolled — a render, never a
+    // `:another`: the pointed voice again, re-rolled, a render, never a
     // cache-only segment fetch.
     do_command(&mut app, Command::AuditionAnother, &http, &job_tx);
     let reroll = last_op(&mut job_rx).expect(":another must dispatch");
@@ -3693,7 +3693,7 @@ async fn another_word_rerolls_the_pointed_voice_on_another_line() {
 #[tokio::test]
 async fn audition_without_a_backend_synthesizes_locally() {
     // No inductor, no worker, no sidecar: `:try` still auditions, on this box.
-    // The synthesis itself is not run here (model weights, minutes) — the
+    // The synthesis itself is not run here (model weights, minutes), the
     // dispatch shape is the contract, and the job reports honestly alone.
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
@@ -3724,7 +3724,7 @@ async fn audition_without_a_backend_synthesizes_locally() {
 #[tokio::test]
 async fn controlled_letters_other_than_u_r_do_nothing() {
     // `^U` clears; every other controlled letter must leave the audio and
-    // the filter alone. (`^T` auditions and `^R` focuses — both dispatch
+    // the filter alone. (`^T` auditions and `^R` focuses, both dispatch
     // or mark, so they are covered by the focus tests, not here.)
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
@@ -3769,7 +3769,7 @@ async fn a_second_audition_while_one_renders_is_refused_by_name() {
 #[tokio::test]
 async fn a_refused_audition_does_not_leave_the_screen_wedged() {
     // The bug this guards: the marker used to be set *before* the dispatch, and
-    // a refused dispatch sends no `Done` — so the screen sat behind a render
+    // a refused dispatch sends no `Done`, so the screen sat behind a render
     // that never started, and every later key was refused for the same reason.
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
@@ -3794,7 +3794,7 @@ async fn a_refused_audition_does_not_leave_the_screen_wedged() {
 
 #[tokio::test]
 async fn plain_o_and_n_still_type_into_the_filter() {
-    // Bare letters outside t/T focus the filter and type — o and n stand
+    // Bare letters outside t/T focus the filter and type, o and n stand
     // in for all of them here (t/T audition in audition focus).
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
@@ -3886,7 +3886,7 @@ async fn filter_focus_types_t_and_esc_blurs_back_to_audition() {
         Screen::Pick(p) => assert!(p.filter_focus, "^R focuses"),
         other => panic!("must stay in the picker, got {other:?}"),
     }
-    // Focused, `t` types like every other letter — no audition.
+    // Focused, `t` types like every other letter, no audition.
     for c in ['t', 'T'] {
         handle_key(&mut app, key(KeyCode::Char(c)), &http, &job_tx).await;
     }
@@ -4074,8 +4074,8 @@ async fn a_failed_line_index_says_which_half_is_out() {
 async fn every_finished_audition_replaces_the_auditioning_line() {
     // The bug this guards: "auditioning…" is written when the op is
     // *dispatched*, and it used to be replaced only when the op returned
-    // *and* had audio. Against an inductor older than the TUI — which has no
-    // audio field at all — the bar kept claiming a render was in flight
+    // *and* had audio. Against an inductor older than the TUI, which has no
+    // audio field at all, the bar kept claiming a render was in flight
     // after it had finished, and nothing else ever clears that line.
     let key = op_key(&OpRequest {
         op: Op::PreviewVoice,
@@ -4125,7 +4125,7 @@ async fn every_finished_audition_replaces_the_auditioning_line() {
 async fn a_completed_audition_writes_the_sample_next_to_the_speaker() {
     // Why the wire carries bytes and not a path: the file has to land on the
     // machine with the speaker, so the inductor's disk stays untouched. The
-    // stand-in player is `true` — it spawns for real and makes no sound.
+    // stand-in player is `true`, it spawns for real and makes no sound.
     let scratch = std::env::temp_dir().join(format!("bmaud-test-{}-play.wav", std::process::id()));
     let _ = std::fs::remove_file(&scratch);
 
@@ -4163,7 +4163,7 @@ async fn a_completed_audition_writes_the_sample_next_to_the_speaker() {
 async fn the_line_index_releases_the_in_flight_count() {
     // The bug this guards: `job_load_lines` reported `Ev::Lines` and never
     // `Ev::Done`, so `App::pending` was +1 from the first screen that
-    // auditions until the process exited — a footer reading "1 job(s)
+    // auditions until the process exited, a footer reading "1 job(s)
     // running" over a dashboard with nothing running, permanently.
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
@@ -4382,8 +4382,8 @@ fn ssh_default_commands_save_validate_and_clear() {
 #[test]
 fn render_batch_parses_its_bounds_and_saves_to_this_workspaces_settings() {
     // The knob's own rules in one place. `0` is the value that would deadlock
-    // the scheduler — an offer of no takes assigns no row, so the chapter never
-    // leaves Pending and nothing anywhere says why — and 64 is where a batch
+    // the scheduler, an offer of no takes assigns no row, so the chapter never
+    // leaves Pending and nothing anywhere says why, and 64 is where a batch
     // stops being a batch and becomes a lease held on one box for hours. Both
     // are refused *while the operator's typing is still on screen*; the
     // scheduler's clamp is the last resort, not the first answer.
@@ -4418,7 +4418,7 @@ fn render_batch_parses_its_bounds_and_saves_to_this_workspaces_settings() {
         "the file is what the scheduler reads"
     );
 
-    // A refused value writes nothing — a typo must not clear what is in force.
+    // A refused value writes nothing, a typo must not clear what is in force.
     assert!(save_render_batch(&app, "0").is_err());
     assert_eq!(
         load().render_batch,
@@ -4545,7 +4545,7 @@ async fn roster_job_shows_disk_first_without_contacting_anyone() {
         .build()
         .unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
-    // Nothing listens on :9 — the inductor hop fails fast. The local roster
+    // Nothing listens on :9, the inductor hop fails fast. The local roster
     // must already be on the channel: picking never waits for the network.
     super::jobs::job_load_roster(tx, "http://127.0.0.1:9".into(), http, layout).await;
     let first = tokio::time::timeout(Duration::from_secs(10), rx.recv())
@@ -4574,7 +4574,7 @@ async fn roster_job_shows_disk_first_without_contacting_anyone() {
 
 #[tokio::test]
 async fn quit_word_quits_from_the_picker_command_line() {
-    // The filter owns every letter on picker/cast, so a bare `q` types —
+    // The filter owns every letter on picker/cast, so a bare `q` types
     // but `:quit` must still quit from there, not type another letter.
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
@@ -4679,7 +4679,7 @@ async fn enter_on_a_voice_locks_its_sentence_for_later() {
 ///
 /// The fixture mirrors production shapes, so the editor guards behave as they
 /// do live; the live tree itself is ignored and may be absent. The clips are
-/// placeholders — nothing in the editor reads their contents, only whether
+/// placeholders, nothing in the editor reads their contents, only whether
 /// they are there.
 fn sound_layout(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
@@ -4748,7 +4748,7 @@ fn the_sound_editor_marks_remove_unavailable_where_it_is() {
 }
 
 /// The bar that says `d` is dead is the screen's whole warning surface, so it
-/// has to survive every tier — including the 76-column one where the overlay
+/// has to survive every tier, including the 76-column one where the overlay
 /// has no margin to give. The compile-time guard in `layout.rs` predicts this;
 /// this is the render that proves it.
 #[test]
@@ -4768,7 +4768,7 @@ fn the_editor_renders_at_every_tier_with_the_warning_intact() {
         );
     }
     // The gain chain is context, not a warning, and only shows where there is
-    // room for it — at the minimum width the counts win.
+    // room for it, at the minimum width the counts win.
     assert!(!render_text(&mut app, 76, 24).contains("layers.effect.trim"));
     assert!(render_text(&mut app, 140, 44).contains("layers.effect.trim"));
 }
@@ -4812,7 +4812,7 @@ async fn the_command_line_opens_the_editor_and_loads_the_pools() {
             "{word} does not route"
         );
     }
-    // And it is a `:` command only — no single key reaches it.
+    // And it is a `:` command only, no single key reaches it.
     let text = render_text(&mut app, 120, 60);
     assert!(text.contains("loading the three pools"), "{text}");
     let _ = job_rx.try_recv();
@@ -5042,7 +5042,7 @@ async fn a_level_edit_touches_only_the_level() {
     ));
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
     // A retune is a sound-design change, and this is the one write the
-    // scheduler does not make — the pool registry is edited from the screen —
+    // scheduler does not make, the pool registry is edited from the screen
     // so the inductor has to be told to look. Without this op the level moves
     // and every published chapter keeps its old mix for ever.
     match job_rx.try_recv().map(Job::into_bare) {
@@ -5055,7 +5055,7 @@ async fn a_level_edit_touches_only_the_level() {
     );
     let after = after.iter().find(|r| r.name == "cooking").unwrap();
     assert_eq!(after.sound.level, Some(0.35));
-    // Every other field is where it was — a retune is not a rewrite.
+    // Every other field is where it was, a retune is not a rewrite.
     assert_eq!(after.sound.tags, before.tags);
     assert_eq!(after.sound.files, before.files);
     assert_eq!(after.sound.mode, before.mode);
@@ -5139,7 +5139,7 @@ fn the_editor_says_why_it_shows_nothing_rather_than_showing_an_empty_pool() {
 /// An entry whose clip has gone missing must stay editable: it is already
 /// flagged in red, and refusing a tag change because somebody moved a file is
 /// how an entry becomes unfixable from the screen. A *new* take still has to
-/// exist — that is the typo the check is for.
+/// exist, that is the typo the check is for.
 #[tokio::test]
 async fn an_entry_whose_clip_is_gone_can_still_be_retagged() {
     let http = reqwest::Client::new();
@@ -5220,7 +5220,7 @@ fn local_cache_layout() -> (tempfile::TempDir, bm_core::Layout) {
 #[tokio::test]
 async fn an_unrendered_held_line_falls_back_to_one_of_hers() {
     // Fresh swap, rendered chapter by chapter: the held line misses in her
-    // voice, but her voice exists in the cache — play one of hers, still
+    // voice, but her voice exists in the cache, play one of hers, still
     // zero synthesis, and hold it so T compares on the same sentence.
     let (_dir, layout) = local_cache_layout();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
@@ -5379,7 +5379,7 @@ async fn down_at_the_last_row_stays_put() {
 fn command_keys_are_unique_and_operators_stay_off_the_keyboard() {
     // There was no key-uniqueness test at all, so a new binding could quietly
     // shadow an existing one. Read-only navigations may share their Normal-mode
-    // key (that is the point of `Command::Key`); operator commands may not —
+    // key (that is the point of `Command::Key`); operator commands may not
     // they live on the `:` line, and a bare keypress must not launch or
     // terminate anything.
     let mut seen: Vec<char> = Vec::new();
@@ -5392,7 +5392,7 @@ fn command_keys_are_unique_and_operators_stay_off_the_keyboard() {
         seen.push(k);
     }
     // The three new cloud keys are gated, not live: a stray `w`/`o`/`l` must not
-    // launch or terminate EC2 instances. (A few older operators — `B`, `X` — do
+    // launch or terminate EC2 instances. (A few older operators, `B`, `X`, do
     // keep a normal-mode key on purpose; these do not.)
     for k in ['w', 'o', 'l'] {
         assert!(seen.contains(&k), "{k:?} lost its command binding");
@@ -5482,7 +5482,7 @@ fn the_login_prompt_takes_the_console_csv_and_never_a_typed_secret() {
     let prompt = |buf: &str| TextPrompt::new(TextKind::AwsLogin, "t", "h", buf);
 
     // A bare key id has no secret to go with it, and the secret must not be
-    // typed on a screen — refused with that reason, not half-handled.
+    // typed on a screen, refused with that reason, not half-handled.
     let err = submit_text(&mut app, &prompt("--access-key-id AKIAEXAMPLE")).unwrap_err();
     assert!(err.contains("secret cannot be typed here"), "{err}");
     let err = submit_text(&mut app, &prompt("~/nowhere.csv")).unwrap_err();
@@ -5535,7 +5535,7 @@ fn the_discover_prompt_expands_a_tilde_pem_and_refuses_a_missing_one() {
 #[tokio::test]
 async fn aws_pool_job_reports_an_unreadable_account_and_never_a_blank_one() {
     // A fresh root with no `.bm/aws.json`: the read fails on the missing region.
-    // The Cloud view must get the reason — an empty account is the one wrong
+    // The Cloud view must get the reason, an empty account is the one wrong
     // answer here, because it reads as "nothing is running".
     let dir = tempfile::tempdir().unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
@@ -5564,14 +5564,14 @@ async fn aws_pool_job_reports_an_unreadable_account_and_never_a_blank_one() {
 
 #[test]
 fn a_batch_is_visible_to_the_down_guard_and_bounded_in_its_dialog() {
-    // Two claims batching could have broken — one held, one did not.
+    // Two claims batching could have broken, one held, one did not.
     //
     // (a) The guard must still see the box as busy. It reads *rows*, not the
     //     beat's `task_id`, so every take of a batch counts: batching must not
     //     be able to hide in-flight work from the one guard that exists to stop
     //     an operator killing a render.
-    // (b) The dialog line did break. `Confirm`'s height is `body.len() + 5` —
-    //     one entry per body line — while the paragraph *wraps*, so a single
+    // (b) The dialog line did break. `Confirm`'s height is `body.len() + 5`
+    //     one entry per body line, while the paragraph *wraps*, so a single
     //     long entry costs visual lines the height never counted and pushes the
     //     `Enter / y confirm` hint out of the box. One task per box never did
     //     that; sixty-four takes on one box does.
@@ -5614,7 +5614,7 @@ fn a_batch_is_visible_to_the_down_guard_and_bounded_in_its_dialog() {
         line.len()
     );
     // The bound is by width, not by count, so a list of *long* ids is elided
-    // harder than a list of short ones — the property a fixed count gets wrong.
+    // harder than a list of short ones, the property a fixed count gets wrong.
     let long: Vec<String> = (0..12).map(|i| format!("render:1999:{i}")).collect();
     assert!(busy_summary(&long).len() <= 68, "{}", busy_summary(&long));
     let short: Vec<String> = (0..12).map(|i| format!("m:{i}")).collect();
@@ -5751,7 +5751,7 @@ async fn the_theme_cycle_lands_on_the_same_theme_every_time() {
 ///
 /// While mouse reporting is on the terminal routes every drag to the program
 /// instead of treating it as a selection, which is why an error message could
-/// not be highlighted and copied — the one thing anybody wants to do with an
+/// not be highlighted and copied, the one thing anybody wants to do with an
 /// error. `M` turns reporting off and back on again.
 #[tokio::test]
 async fn the_mouse_can_be_handed_back_to_the_terminal_to_copy_an_error() {
@@ -5893,7 +5893,7 @@ fn the_crawl_view_is_in_the_footer_and_the_help_screen() {
 /// The key that turns the mouse off has to be findable without being told.
 #[test]
 fn the_mouse_key_is_in_the_footer_and_the_help_screen() {
-    // One line a tier is enough — what must not happen is the key being
+    // One line a tier is enough, what must not happen is the key being
     // nowhere in the footer, which is how it is never found.
     for (tier, lines) in [("full", &KEYS_FULL), ("compact", &KEYS_COMPACT)] {
         assert!(
@@ -6002,7 +6002,7 @@ fn the_state_column_leads_with_a_glyph_and_the_word_stays() {
 fn machines_pane_shows_no_address_for_a_box_the_account_has_not_addressed_yet() {
     // The confusion this ends: a launched box keyed by an address nothing can
     // dial. `RunInstances` answers before the address exists, and the old
-    // fallback printed the *private* address there — a real-looking IP for a box
+    // fallback printed the *private* address there, a real-looking IP for a box
     // across the internet, which the scheduler then failed to reach every two
     // seconds.
     let mut app = App::new("http://127.0.0.1:8901");
@@ -6033,7 +6033,7 @@ fn machines_pane_shows_no_address_for_a_box_the_account_has_not_addressed_yet() 
         "but the row is named by the handle the account read repairs it by"
     );
     assert_eq!(super::model::machine_kind(&m), "aws");
-    // The private address is not lost — it is in the note, for the detail panel
+    // The private address is not lost, it is in the note, for the detail panel
     // and for an operator whose inductor sits in the same VPC.
     assert!(m.note.contains("172.31.21.86"));
 
@@ -6090,7 +6090,7 @@ fn a_box_whose_address_just_arrived_is_queued_for_onboarding_once() {
     app.apply_state(payload.clone());
     assert!(app.pending_onboard.is_empty(), "not queued twice");
 
-    // The provision job clears the marker by rewriting the note — which is why
+    // The provision job clears the marker by rewriting the note, which is why
     // the trigger is a note and not a field: nothing has to remember to clear it.
     let mut taken = newborn.clone();
     taken.set_state(MachineState::Provisioning);
@@ -6102,7 +6102,7 @@ fn a_box_whose_address_just_arrived_is_queued_for_onboarding_once() {
         "and the guard is released, so a future re-mark would be seen"
     );
 
-    // A box that was already working carries no marker and is never offered —
+    // A box that was already working carries no marker and is never offered
     // the expensive mistake a marker written on *rotation* would cause.
     let mut working = named_machine("52.2.2.3", "box-2");
     working.set_state(MachineState::Configured);
@@ -6149,7 +6149,7 @@ fn machines_pane_shows_every_state_word_whole() {
 #[test]
 fn a_parked_machine_reads_relaxed_but_a_fault_still_outranks_it() {
     // The state column is asked "why is nothing happening on this box", and for a
-    // parked box the honest answer is `relaxed` — its real state is `online`,
+    // parked box the honest answer is `relaxed`, its real state is `online`,
     // which says the opposite of what the operator did.
     let mut parked = named_machine("52.2.2.2", "box-1");
     parked.set_state(MachineState::Online);
@@ -6194,7 +6194,7 @@ async fn g_toggles_the_machines_pane_between_the_table_and_the_graph() {
     let mut app = App::new("http://127.0.0.1:8901");
     app.machines = vec![named_machine("52.2.2.2", "box-1")];
 
-    // The table is the default, and it says the key that leaves it — the pane
+    // The table is the default, and it says the key that leaves it, the pane
     // advertises the toggle rather than the help screen being the only way in.
     let table = render_text(&mut app, 140, 44);
     assert!(
@@ -6234,7 +6234,7 @@ async fn g_toggles_the_machines_pane_between_the_table_and_the_graph() {
         "the graph is not the table with a different shape:\n{pane}"
     );
 
-    // And back, with the state kept — a view preference, not a reset.
+    // And back, with the state kept, a view preference, not a reset.
     handle_key(&mut app, key(KeyCode::Char('g')), &http, &job_tx).await;
     assert!(!app.machines_graph);
     assert!(render_text(&mut app, 140, 44).contains("policy"));
@@ -6420,7 +6420,7 @@ async fn up_and_down_walk_a_whole_row_of_the_rack() {
 
 #[test]
 fn the_rack_replaces_the_workers_pane_rather_than_sitting_above_it() {
-    // Every box in the rack is drawn with the worker standing on it — the same
+    // Every box in the rack is drawn with the worker standing on it, the same
     // animal name, the same task, the same chapter. A second list of the same
     // facts underneath is the pane arguing with itself, and it costs the rows
     // the rack wanted most. So in rack mode the Workers pane is not drawn and
@@ -6436,7 +6436,7 @@ fn the_rack_replaces_the_workers_pane_rather_than_sitting_above_it() {
         "the Workers pane must be gone, not just its header:\n{rack}"
     );
     // And the focus cycle must not park the bright border on a pane that is not
-    // on screen — `f` would then have nowhere to go but back.
+    // on screen, `f` would then have nowhere to go but back.
     assert_eq!(
         crate::tui::app::Panel::Workers.next_visible(true),
         crate::tui::app::Panel::Machines,
@@ -6466,7 +6466,7 @@ async fn the_arrows_walk_the_rack_and_the_console_stays_put() {
     let first = render_text(&mut app, 100, 44);
     assert!(first.contains("box-0"), "{first}");
 
-    // Right twice: the window moves with the cursor, and the console does not —
+    // Right twice: the window moves with the cursor, and the console does not
     // it is anchored at the left, so a wide terminal cannot slide it into empty
     // space and leave the boxes to slide past it.
     for _ in 0..2 {
@@ -6502,7 +6502,7 @@ async fn the_arrows_walk_the_rack_and_the_console_stays_put() {
 
 #[test]
 fn machines_pane_names_the_kind_and_the_address() {
-    // A row reads `box-1 · rmt · 192.168.2.2` — whose box, where it came from,
+    // A row reads `box-1 · rmt · 192.168.2.2`, whose box, where it came from,
     // and how to reach it. The old `role` column said only "worker".
     let mut app = App::new("http://127.0.0.1:8901");
     let mut remote = named_machine("192.168.2.2", "box-1");
@@ -6614,7 +6614,7 @@ async fn the_digest_manager_lists_chapters_and_hides_the_digested() {
         );
     }
 
-    // `f` filters. It also has to keep the cursor *inside* the list it filters —
+    // `f` filters. It also has to keep the cursor *inside* the list it filters
     // the cursor indexes the rows, so a filter that shrinks them can leave it
     // pointing past the end at nothing.
     handle_key(&mut app, press(KeyCode::Down), &http, &job_tx).await;
@@ -6626,7 +6626,7 @@ async fn the_digest_manager_lists_chapters_and_hides_the_digested() {
             // Asserted through `Layout::digested`, which is the question the
             // handler and the painter both ask. An earlier version of this test
             // invented its own predicate (`n == 7`) and then complained that the
-            // cursor — correctly clamped against the *real* rows — was out of
+            // cursor, correctly clamped against the *real* rows, was out of
             // range for the invented ones. The lesson is the reason
             // `Layout::digested` exists: three sites spelling out one question is
             // three chances to disagree.
@@ -6655,7 +6655,7 @@ async fn the_digest_manager_lists_chapters_and_hides_the_digested() {
 fn the_digest_chapter_page_names_the_round_and_the_last_thing_that_happened() {
     // Built directly rather than by opening a chapter: opening one builds a real
     // prompt, which needs a chapter file and a bible. What this pins is the
-    // *page* — that the round, the validator's words and the prompt's identity
+    // *page*, that the round, the validator's words and the prompt's identity
     // are all on it, at every tier the layout supports.
     let mut app = App::new("http://127.0.0.1:8901");
     let mut v = super::screen::DigestView::new(vec![7, 9]);
@@ -6692,7 +6692,7 @@ fn the_digest_chapter_page_names_the_round_and_the_last_thing_that_happened() {
 #[test]
 fn a_long_validator_complaint_does_not_push_the_chapter_page_off_its_own_box() {
     // The other half of the bug the grid had. A validator's complaint is the
-    // *instruction* — the operator pastes it back into their model — so it is
+    // *instruction*, the operator pastes it back into their model, so it is
     // deliberately shown in full, and a real one is a paragraph, not a phrase.
     // This is the same trap as the confirm dialog and the grid footer: the height
     // counts lines, the paragraph wraps, and the line that falls off the bottom is
@@ -6716,7 +6716,7 @@ fn a_long_validator_complaint_does_not_push_the_chapter_page_off_its_own_box() {
     for (w, h) in [(76, 20), (76, 24), (100, 32), (160, 50)] {
         let text = render_text(&mut app, w, h);
         // The prompt's identity is the last thing drawn, so it is what falls off
-        // when the note overflows — and it is how the operator checks the right
+        // when the note overflows, and it is how the operator checks the right
         // prompt is on the clipboard before pasting anything.
         assert!(
             hint_visible(&text, "clipboard:"),
@@ -6809,7 +6809,7 @@ async fn the_digest_manager_arrows_follow_the_grid_and_esc_steps_back_from_a_cha
     app.screen = Screen::Digest(super::screen::DigestView::new((1..=30).collect()));
 
     // ←/→ step one chapter; ↑/↓ step a **row**, because that is what the picture
-    // shows — the numbers are drawn `DIGEST_COLS` to a line. Stepping one chapter
+    // shows, the numbers are drawn `DIGEST_COLS` to a line. Stepping one chapter
     // on ↑ would move the highlight sideways.
     handle_key(&mut app, press(KeyCode::Right), &http, &job_tx).await;
     assert_eq!(cursor(&app), 1, "→ is one chapter");
@@ -6832,7 +6832,7 @@ async fn the_digest_manager_arrows_follow_the_grid_and_esc_steps_back_from_a_cha
     // **The regression.** Esc inside a chapter returns to the list. It used to do
     // nothing: the handler works on a *clone* of the view and writes it back after
     // the match, so the Esc arm clearing `open` had that undone one line later.
-    // The list-level Esc was tested and passed — which is exactly why this went
+    // The list-level Esc was tested and passed, which is exactly why this went
     // unnoticed, since the bug only lived in the branch the test never entered.
     if let Screen::Digest(v) = &mut app.screen {
         v.open = Some(super::screen::DigestChapter {
@@ -6857,7 +6857,7 @@ async fn the_digest_manager_arrows_follow_the_grid_and_esc_steps_back_from_a_cha
         "Esc from the list closes it"
     );
 
-    // `x` and `s` are the cluster-wide switch, on the screen it belongs to — the
+    // `x` and `s` are the cluster-wide switch, on the screen it belongs to, the
     // same command the `:off`/`:on` words run, so there is one implementation and
     // two ways in.
     app.machines = vec![named_machine("192.168.2.2", "box-1")];
@@ -6868,7 +6868,7 @@ async fn the_digest_manager_arrows_follow_the_grid_and_esc_steps_back_from_a_cha
         other => panic!("{other:?}"),
     }
     // `s` restores, which needs a snapshot; whether this machine has one is the
-    // filesystem's business, not the test's — what the test holds is that the
+    // filesystem's business, not the test's, what the test holds is that the
     // screen survives the attempt, because the operator is still on it.
     handle_key(&mut app, press(KeyCode::Char('s')), &http, &job_tx).await;
     assert!(
@@ -6908,7 +6908,7 @@ async fn digest_off_snapshots_every_machine_and_on_refuses_without_a_snapshot() 
 
     // The refusal, tested against a path that certainly has no snapshot. It has
     // to refuse *before* posting anything: an empty policy reads as the default
-    // list, which is digest ON everywhere — the opposite of the ask.
+    // list, which is digest ON everywhere, the opposite of the ask.
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("digest-suspend.json");
     let err = super::jobs::digest_restore(&missing, "http://127.0.0.1:9", &http, &[])
@@ -7044,7 +7044,7 @@ fn the_cast_and_picker_empty_states_point_at_the_gated_commands() {
 
 #[test]
 fn the_cloud_error_names_the_real_command_words() {
-    // There are no `aws login` / `aws discover` words — the setup commands
+    // There are no `aws login` / `aws discover` words, the setup commands
     // are `:login` and `:discover`, and the hint must send the operator to
     // the command line that actually has them.
     let mut app = App::new("http://127.0.0.1:8901");
@@ -7105,7 +7105,7 @@ fn screens_without_a_reload_key_do_not_advertise_one() {
 
 #[test]
 fn the_task_ledger_hints_the_movement_it_actually_binds() {
-    // Letters type into the filter here, so `j`/`k` never moved anything —
+    // Letters type into the filter here, so `j`/`k` never moved anything
     // and the hint said they did.
     let mut app = tasks_app();
     app.screen = Screen::Tasks(TasksView::new());
