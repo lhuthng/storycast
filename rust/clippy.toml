@@ -2,6 +2,18 @@
 #
 # Without this, clippy lints against whatever API today's stable happens to
 # have and suggests rewrites the project cannot compile: it asked for
-# `as_chunks` over `chunks_exact` in the npy reader, and `slice::as_chunks`
-# needs 1.88. A lint that cannot be acted on is a release that cannot be cut.
-msrv = "1.75"
+# `slice::as_chunks` over `chunks_exact` in the npy reader, and `as_chunks`
+# needs 1.88.
+#
+# With it, the lint runs the other way and is the useful direction: it reports
+# code that needs a *newer* Rust than the floor claims. It found four uses of
+# `Option::is_none_or` (1.82) and one `u64::is_multiple_of` (1.87) against a
+# declared 1.75 that had been stale for some time. The floor is 1.88 because
+# `ort` needs it and bm-tts is in the workspace; every other crate needs 1.87.
+# That is the value earning its keep: a floor the build checks rather than a
+# number nobody has revisited.
+#
+# It must be the same string as `rust-version`, and every crate's must agree
+# with it or clippy warns that they differ. bm-tts used to declare 1.88
+# separately for exactly that reason; it inherits now.
+msrv = "1.88"

@@ -186,21 +186,23 @@ pub fn read_npy(bytes: &[u8]) -> Result<Array> {
             if body.len() < count * 4 {
                 bail!("truncated: wanted {} bytes, have {}", count * 4, body.len());
             }
-            body[..count * 4]
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect()
+            // `as_chunks` rather than `chunks_exact`: the length above already
+            // proved the slice is a whole number of floats, so the remainder is
+            // empty, and each chunk arrives as `[u8; 4]` with no bounds check
+            // per element. It is why the workspace floor is 1.88.
+            let (chunks, []) = body[..count * 4].as_chunks::<4>() else {
+                bail!("truncated: wanted {} bytes, have {}", count * 4, body.len());
+            };
+            chunks.iter().map(|c| f32::from_le_bytes(*c)).collect()
         }
         "<f8" => {
             if body.len() < count * 8 {
                 bail!("truncated: wanted {} bytes, have {}", count * 8, body.len());
             }
-            body[..count * 8]
-                .chunks_exact(8)
-                .map(|c| {
-                    f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
-                })
-                .collect()
+            let (chunks, []) = body[..count * 8].as_chunks::<8>() else {
+                bail!("truncated: wanted {} bytes, have {}", count * 8, body.len());
+            };
+            chunks.iter().map(|c| f64::from_le_bytes(*c) as f32).collect()
         }
         other => bail!("unsupported npy dtype {other}; expected <f4 or <f8"),
     };
@@ -288,6 +290,16 @@ mod tests {
     }
 
     fn npy_f32(shape: &[usize], data: &[f32]) -> Vec<u8> {
+        npy(shape, "<f4", data.iter().flat_map(|v| v.to_le_bytes()))
+    }
+
+    /// The same header, with a float64 body. The reader narrows to f32, so this
+    /// is the only thing covering the 8-byte branch.
+    fn npy_f64(shape: &[usize], data: &[f64]) -> Vec<u8> {
+        npy(shape, "<f8", data.iter().flat_map(|v| v.to_le_bytes()))
+    }
+
+    fn npy(shape: &[usize], descr: &str, body: impl Iterator<Item = u8>) -> Vec<u8> {
         let shape_s = if shape.len() == 1 {
             format!("({},)", shape[0])
         } else {
@@ -300,7 +312,7 @@ mod tests {
                     .join(", ")
             )
         };
-        let header = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': {shape_s}, }}");
+        let header = format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape_s}, }}");
         let padded = (64 - (10 + header.len() + 1) % 64) % 64;
         let mut h = header.into_bytes();
         h.extend(std::iter::repeat_n(b' ', padded));
@@ -309,9 +321,7 @@ mod tests {
         let mut out = b"\x93NUMPY\x01\x00".to_vec();
         out.extend_from_slice(&(h.len() as u16).to_le_bytes());
         out.extend_from_slice(&h);
-        for v in data {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
+        out.extend(body);
         out
     }
 
@@ -333,6 +343,26 @@ mod tests {
         let a = read_npy(&npy_f32(&[], &[1e-6])).unwrap();
         assert!(a.shape.is_empty());
         assert_eq!(a.scalar(), 1e-6);
+    }
+
+    /// Float64 weights are read and narrowed, not refused. The values are
+    /// chosen to be exact in f32 so a byte-order or width mistake cannot hide
+    /// behind a tolerance.
+    #[test]
+    fn a_float64_member_is_narrowed_to_f32() {
+        let a = read_npy(&npy_f64(&[3], &[1.0, -2.5, 0.5])).unwrap();
+        assert_eq!(a.shape, vec![3]);
+        assert_eq!(a.data, vec![1.0, -2.5, 0.5]);
+    }
+
+    /// A float64 header with a body that is not a whole number of doubles is
+    /// truncated, not read as noise.
+    #[test]
+    fn a_float64_member_short_of_its_count_is_refused() {
+        let mut bytes = npy_f64(&[2], &[1.0, 2.0]);
+        bytes.truncate(bytes.len() - 3);
+        let err = read_npy(&bytes).unwrap_err().to_string();
+        assert!(err.contains("truncated"), "got {err}");
     }
 
     /// The refusal that matters: a compressed member must not be silently read
