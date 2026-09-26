@@ -5,10 +5,7 @@ edition.workspace = true
 license.workspace = true
 description = "Local TTS server: VieNeu-TTS v3 Turbo on ONNX Runtime, no Python"
 
-# NOT `rust-version.workspace = true`: the workspace floor is 1.75 and `ort`
-# needs 1.88. Declaring 1.75 here would be a lie the toolchain only catches on
-# an old machine — say the real number instead.
-rust-version = "1.88"
+rust-version.workspace = true
 
 [[bin]]
 name = "bm-tts"
