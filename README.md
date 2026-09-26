@@ -123,6 +123,23 @@ The dotted edges matter: **the bible is both digest input and output**, and the
 cast is derived from the digest. Chapter 40 keeps chapter 1's voice for a
 character with no hand config.
 
+### The digest invents people: audit the bible early
+
+The cast and script come from one LLM call per chapter, and nothing about
+names survives contact with 260 chapters intact: genders guessed wrong (a
+heroine filed as `adult male`), one person split into two or three entries
+(title here, full name there, nickname elsewhere), and loose aliases
+(`Lý cô nương` for whoever wears the name this week) that later chapters
+attach to the wrong woman. None of this fails loudly. The gate checks JSON
+shape and quote attribution, not whether the person is real.
+
+The damage compounds because everything downstream is content-addressed and
+cached: a wrong voice bakes into hundreds of segments, ships in published
+mp3s, and a fix means re-speaking every line that character ever said. Check
+each digest's bible delta while the book is small. Merge duplicates, fix
+`voice_hint` gender, drop ambiguous aliases. The same audit at chapter
+200 costs a full re-speak instead of a five-minute edit.
+
 ### The crawler is the first three stages' input
 
 Worth understanding before you write one, because it explains most of the rules
