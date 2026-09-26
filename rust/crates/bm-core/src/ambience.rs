@@ -2,40 +2,29 @@
 //!
 //! Exactly three layers, and the split is the point:
 //!
-//! * **effect** — per-scene beds and one-shot stingers, deliberately *sparse*.
-//!   A window opens on a scene that names effect tags, lasts at most
-//!   `max_window_s`, waits `cooldown_s` of silence after the previous window,
-//!   and the chapter may not spend more than `max_coverage` of its runtime on
-//!   the layer. A bed running under 100% of a chapter is a wall, not a bed.
-//! * **music** — background tracks, continuous and far below the effects. A
+//! * **effect**, per-scene beds and one-shot stingers, deliberately *sparse*:
+//!   gated windows bounded by `max_window_s`, `cooldown_s` and `max_coverage`.
+//!   A bed running under 100% of a chapter is a wall, not a bed.
+//! * **music**, background tracks, continuous and far below the effects. A
 //!   scene with no music tags, or with `music_off`, or whose tags match nothing
-//!   in the pool, gets no music at all: silence is a valid answer here, not a
-//!   failure to be papered over.
-//! * **inject** — spot effects the script places itself, as their own items
-//!   between the lines: a blood spatter after the blow lands, a page turn after
-//!   the reading. The script splits the sentence it belongs to and puts the
-//!   sound between the halves, so the sound item carries no text and no
-//!   renderer can ever be handed it. A *hit* holds its whole clip as silence, an
-//!   *overlap* costs no time and runs under the following speech, a *trail*
-//!   holds a few seconds solo and tails under it; a *stop* fades a running tail
-//!   out, never a cut.
+//!   in the pool, gets no music at all: silence is a valid answer here.
+//! * **inject**, spot effects the script places itself, as items between the
+//!   lines. A *hit* holds its clip as silence, an *overlap* runs under the
+//!   following speech, a *trail* holds briefly and tails under it; a *stop*
+//!   fades a running tail out, never a cut.
 //!
-//! A third thing the scene map controls — room reverb — is *not* a layer. It is
-//! applied to the voice before the layers exist, and it is left alone here.
+//! Room reverb is not a layer: it is applied to the voice before the layers
+//! exist, and it is left alone here. All three layers are ducked by **one**
+//! sidechain compressor keyed on the voice track, applied as a single bus, so
+//! "every layer drops whenever anybody speaks" is a property of the signal
+//! path. The lift the music gets inside a planned pause is that same
+//! compressor releasing.
 //!
-//! All three layers are ducked by **one** sidechain compressor keyed on the
-//! voice track, applied to them as a single bus. That makes "every layer drops
-//! whenever anybody speaks" a property of the signal path rather than a rule
-//! each layer has to remember — and because the key is the whole voice track,
-//! the narrator ducks them exactly as a character does. The lift the music gets
-//! inside a planned pause is the same compressor releasing: nothing special is
-//! done for it beyond holding the beat long enough for the release to finish.
-//!
-//! Ported from `ambience.py`. Offline, deterministic, no API: the same script,
-//! scene map and pools always produce the same mix, and a missing clip degrades
-//! to silence for that span rather than failing a chapter.
+//! Offline, deterministic, no API: the same script, scene map and pools always
+//! produce the same mix, and a missing clip degrades to silence for that span
+//! rather than failing a chapter.
 
-use crate::assemble::{read_wav, Run};
+use crate::assemble::{wav_info, wav_seconds, Run};
 use crate::audio_pool::{self, ClipPool};
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -53,7 +42,7 @@ use std::process::Command;
 ///
 /// Deliberately no music field. A place is where we are; what it feels like is
 /// the script's `music` value, and the palette is the only thing that decides a
-/// track. One string doing both jobs is how `martial-shop-morning` — a place —
+/// track. One string doing both jobs is how `martial-shop-morning`, a place
 /// came out with a hearth under it, because the keyword `shop` matched a fire
 /// rule before the keyword `morning` reached the daylight rule.
 #[derive(Debug, Clone, Default, serde::Serialize, Deserialize)]
@@ -92,7 +81,7 @@ pub struct Rule {
 /// gloss the digest prompt shows the analyzer.
 #[derive(Debug, Clone, Default, serde::Serialize, Deserialize)]
 pub struct PaletteEntry {
-    /// Pool tags for assets/music-pool.json. Empty is the `none` value — no
+    /// Pool tags for assets/music-pool.json. Empty is the `none` value, no
     /// track at all, which is a choice, not a missing one.
     #[serde(default)]
     pub tags: Vec<String>,
@@ -105,7 +94,7 @@ pub struct PaletteEntry {
 /// not a key here is rejected at digest time.
 pub type MusicPalette = BTreeMap<String, PaletteEntry>;
 
-/// Read a palette object, skipping `_note`-style keys — the same convention the
+/// Read a palette object, skipping `_note`-style keys, the same convention the
 /// clip pools use, so a section can document itself in place without becoming
 /// an entry the analyzer could emit.
 fn de_palette<'de, D>(d: D) -> Result<MusicPalette, D::Error>
@@ -159,18 +148,13 @@ pub struct Duck {
     /// Gain the key is held at while the chapter's **headline** is spoken.
     ///
     /// The headline is the one stretch where the beds are *meant* to arrive:
-    /// the music starts at the top of the chapter and fades up under it (see
-    /// [`MusicLayer::fade_s`]), and a duck that pulls the beds to nothing there
-    /// is how that fade-in came out inaudible — the layer was doing exactly
-    /// what it was told, twenty-something dB down, under the line it was
-    /// written for. `0.0` mutes the key for those few seconds, so the beds sit
-    /// at their own level under the title; `1.0` is the key taken as-is, i.e.
-    /// ducking everywhere, which is what shipped before this field existed.
-    ///
-    /// It costs nothing elsewhere: an effect window cannot open on the headline
-    /// (it names no scene tags, so it has no rule to match), which leaves the
-    /// music as the only layer with anything to say there. The exemption is the
-    /// default because a fade-in nobody can hear is not a fade-in.
+    /// the music starts at the top of the chapter and fades up under it, and
+    /// a duck that pulls the beds to nothing there is how that fade-in came
+    /// out inaudible. `0.0` mutes the key for those few seconds, so the beds
+    /// sit at their own level under the title; `1.0` is ducking everywhere,
+    /// which is what shipped before this field existed. The exemption costs
+    /// nothing elsewhere: an effect window cannot open on the headline, so the
+    /// music is the only layer with anything to say there.
     #[serde(default = "default_head_key")]
     pub head_key: f64,
 }
@@ -222,7 +206,7 @@ pub struct EffectLayer {
     /// Fade at each window edge, against a click.
     #[serde(default = "d_fade")]
     pub fade_s: f64,
-    /// Fade at the end of a window that runs to the *end of the chapter* — the
+    /// Fade at the end of a window that runs to the *end of the chapter*, the
     /// last thing the layer has to say. A window that stops mid-chapter keeps
     /// `fade_s`: there is speech after it, and a three-second fade would only
     /// bleed the bed into the next scene. A chapter that closes on a bed used
@@ -231,8 +215,8 @@ pub struct EffectLayer {
     pub end_fade_s: f64,
     /// Master gain for the layer, multiplied into every rule's own `level`.
     ///
-    /// A rule's `level` is the *relative* balance between scenes — a storm
-    /// against a hearth — and is the wrong place to say "the layer as a whole
+    /// A rule's `level` is the *relative* balance between scenes, a storm
+    /// against a hearth, and is the wrong place to say "the layer as a whole
     /// is too hot": that is one opinion about the whole layer, and expressing
     /// it per rule means retuning the layer is thirteen edits that can drift
     /// apart. Defaults to 1.0, so every map written before this field existed
@@ -292,7 +276,7 @@ pub struct MusicLayer {
     /// Fade at the head and tail of the whole layer: the opening cue rises out
     /// of silence *under the headline* and the closing one falls away at the
     /// chapter's end. Three seconds, not the 0.3 s the short edges of the other
-    /// two layers use — a cue that arrives or leaves inside a third of a second
+    /// two layers use, a cue that arrives or leaves inside a third of a second
     /// reads as a cut, which is exactly what a chapter's first and last moments
     /// of music must not read as. Clamped to half a run by [`place`], so a
     /// chapter whose only cue is two seconds long still can't invert.
@@ -338,7 +322,7 @@ impl Default for MusicLayer {
 /// Where a beat fits, and how long it lasts.
 #[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct PausePlan {
-    /// Delivered seconds — the merge scales it by `speed` before writing it.
+    /// Delivered seconds, the merge scales it by `speed` before writing it.
     #[serde(default = "d_pause")]
     pub pause_s: f64,
     #[serde(default = "d_max_pauses")]
@@ -393,7 +377,7 @@ pub struct InjectLayer {
     #[serde(default = "d_fade")]
     pub fade_s: f64,
     /// Fade a `stop` takes to silence its sound. A stop is an ending, and
-    /// endings fade — never a cut. Three seconds, not one and a half: at 1.5 s
+    /// endings fade, never a cut. Three seconds, not one and a half: at 1.5 s
     /// a sizzle bed's end read as a cut, which is the one thing a stop exists
     /// to avoid.
     #[serde(default = "d_stop_fade")]
@@ -408,7 +392,7 @@ pub struct InjectLayer {
     /// [`Self::stop_fade_s`], which is the long one on purpose.
     #[serde(default = "d_tail_fade")]
     pub tail_fade_s: f64,
-    /// Crossfade at each seam of a looped bed. Short on purpose — it is there
+    /// Crossfade at each seam of a looped bed. Short on purpose, it is there
     /// to hide the join, not to be heard. Clamped to a quarter of the clip.
     #[serde(default = "d_loop_xfade")]
     pub loop_xfade_s: f64,
@@ -454,7 +438,7 @@ impl Default for InjectLayer {
 ///
 /// Injects ride with the effects switch: they are sound design, so an operator
 /// asking for a plain read gets neither beds nor spot effects. Their volume is
-/// independent — a third gain, not a third switch.
+/// independent, a third gain, not a third switch.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct LayerSwitch {
     pub effects: bool,
@@ -495,7 +479,7 @@ pub struct SceneMap {
     pub default: SceneRule,
     /// The closed music vocabulary the digest may emit, and the pool tags each
     /// value means. One table, read twice: [`palette_prompt`] renders it into
-    /// the analyzer prompt, and [`plan_music`] resolves a value to a track — so
+    /// the analyzer prompt, and [`plan_music`] resolves a value to a track, so
     /// the prompt and the pool cannot disagree about what `warm` sounds like.
     #[serde(default, deserialize_with = "de_palette")]
     pub music_palette: MusicPalette,
@@ -514,7 +498,7 @@ pub struct SceneMap {
     pub pause: PausePlan,
 }
 
-/// The palette's keys, sorted — what a script's `music` value is checked
+/// The palette's keys, sorted, what a script's `music` value is checked
 /// against, and what a rejection message lists back to the analyzer.
 pub fn palette_names(map: &SceneMap) -> Vec<String> {
     map.music_palette.keys().cloned().collect()
@@ -525,7 +509,7 @@ pub fn palette_names(map: &SceneMap) -> Vec<String> {
 /// Built from the map rather than written into the prompt text, so adding a
 /// value (and the clip that answers it) is one edit to one file. A prompt that
 /// listed its own vocabulary would drift the moment the pool changed. The tags
-/// ride along so the analyzer sees what each mood *means* in pool terms — the
+/// ride along so the analyzer sees what each mood *means* in pool terms, the
 /// merge scores those same tags, so a mood picked for its tags resolves to the
 /// track the analyzer had in mind.
 pub fn palette_prompt(map: &SceneMap) -> String {
@@ -578,7 +562,7 @@ pub struct UseOf {
 }
 
 impl UseOf {
-    /// `mountain rule [mountain, wind]` — what a screen shows beside the entry.
+    /// `mountain rule [mountain, wind]`, what a screen shows beside the entry.
     pub fn label(&self) -> String {
         if self.tags.is_empty() {
             self.by.clone()
@@ -594,8 +578,8 @@ impl UseOf {
 /// use" is a question about the tag sets the map names, not about the sound's
 /// own name: `wind` is in use because the mountain rule asks for `mountain`,
 /// and the map never says `wind` anywhere. Deleting it would make every
-/// mountain scene score zero and go quiet — the failure the effect pool's own
-/// note warns about — so the editor refuses, and this is what it refuses on.
+/// mountain scene score zero and go quiet, the failure the effect pool's own
+/// note warns about, so the editor refuses, and this is what it refuses on.
 ///
 /// The test is the weakest one `pick` applies before narrowing: at least one
 /// tag in common. A one-tag sound may lose the overlap contest on most
@@ -648,7 +632,7 @@ pub fn music_usage(map: &SceneMap, pool: &ClipPool) -> Usage {
 /// Sound -> the chapters whose script places it.
 ///
 /// Unlike the other two layers this one is a direct lookup, because the script
-/// names the *sound* — `{"sound": "coin"}` — rather than a tag. An item is a
+/// names the *sound*, `{"sound": "coin"}`, rather than a tag. An item is a
 /// sound when it carries `sound` or `stop` and no `text`
 /// ([`crate::util::is_sound_item`]); a `stop` counts, because it is placed for
 /// the same sound and would be left fading nothing.
@@ -697,7 +681,7 @@ pub fn load_map(path: &Path) -> Result<SceneMap> {
 ///
 /// Substring matching, not token matching, and on purpose: `market-stall-morning`
 /// has to reach the `market` rule. The cost is that a keyword can fire on a word
-/// that is only part of a compound label — which is why the rules are ordered
+/// that is only part of a compound label, which is why the rules are ordered
 /// most-specific-first and why the generic place nouns that used to sit in a
 /// catch-all (`shop`, `room`) are no longer keywords here.
 pub fn match_scene(scene: &str, cfg: &SceneMap) -> SceneRule {
@@ -758,7 +742,7 @@ pub fn run_scenes(segments: &[Value], runs: &[Run]) -> Vec<String> {
 ///
 /// A run that declares no value anywhere is a run from a script written before
 /// the field existed, so it is scored by `legacy_scene_music` off its scene
-/// label — the shim that keeps chapters already on disk mergeable. Mixed runs
+/// label, the shim that keeps chapters already on disk mergeable. Mixed runs
 /// resolve the same way per run, which is the graceful reading: a hand-edited
 /// old script still merges rather than losing its music entirely.
 pub fn run_music(segments: &[Value], runs: &[Run], cfg: &SceneMap) -> Vec<String> {
@@ -803,7 +787,7 @@ pub fn legacy_music(scene: &str, cfg: &SceneMap) -> String {
 /// know about it.
 ///
 /// `scene` is the place (effect + reverb) and `music` is the mood (which track
-/// plays). Two fields, two jobs — see this module's docs.
+/// plays). Two fields, two jobs, see this module's docs.
 #[derive(Debug, Clone)]
 pub struct Turn {
     pub wav: PathBuf,
@@ -819,8 +803,8 @@ pub struct Turn {
 /// One position in the mix: what plays, when it starts and ends, and how much
 /// air follows it.
 ///
-/// The timeline is built once and read twice — [`crate::assemble::concat_slots`]
-/// writes these gaps and the layers read these offsets — which is the whole
+/// The timeline is built once and read twice, [`crate::assemble::concat_slots`]
+/// writes these gaps and the layers read these offsets, which is the whole
 /// reason it exists. The gap arithmetic used to live in two places (the concat
 /// and the span builder) and stayed correct only because the gap was a
 /// constant; a variable-length pause would have let them drift apart silently,
@@ -838,10 +822,10 @@ pub struct Slot {
     /// Silence written after this turn: the uniform gap plus any beat.
     pub gap_ms: u32,
     /// How much of `gap_ms` is a planned beat, held between this turn and the
-    /// next. The layers need the beat on its own — it is where the music lifts.
+    /// next. The layers need the beat on its own, it is where the music lifts.
     pub pause_ms: u32,
     /// How much of `gap_ms` is the injects' own solo time, in pre-tempo
-    /// milliseconds — the room a hit or a trail's hold plays in.
+    /// milliseconds, the room a hit or a trail's hold plays in.
     ///
     /// Tracked separately because it is the one part of a gap that outlives the
     /// last slot: an inject anchored at the final line's end has nowhere else
@@ -854,7 +838,7 @@ pub struct Slot {
 /// Lay the turns out on the mix clock, inserting the planned pauses.
 ///
 /// `pauses` maps a turn index to the beat held *before* that turn, in pre-tempo
-/// milliseconds — the scene map authors it as `pause_before_s` on the scene
+/// milliseconds, the scene map authors it as `pause_before_s` on the scene
 /// being entered. The mix has no place to hold a beat before the first thing in
 /// the chapter, so a beat is written into the gap that *follows* turn `i-1`:
 /// the same silence, named from the other side. [`Slot::pause_ms`] therefore
@@ -865,8 +849,10 @@ pub fn timeline(turns: &[Turn], gap_ms: u32, pauses: &BTreeMap<usize, u32>) -> R
     let mut params: Option<(u16, u32, u16)> = None;
     let mut t = 0.0f64;
     for (i, turn) in turns.iter().enumerate() {
-        let w = read_wav(&turn.wav)?;
-        let p = (w.channels, w.sample_rate, w.bits);
+        // Header probe, not a full read: only the params and the duration are
+        // needed here, and the samples are read again by the concat anyway.
+        let info = wav_info(&turn.wav)?;
+        let p = (info.channels, info.sample_rate, info.bits);
         match params {
             None => params = Some(p),
             Some(prev) if prev != p => anyhow::bail!(
@@ -875,7 +861,7 @@ pub fn timeline(turns: &[Turn], gap_ms: u32, pauses: &BTreeMap<usize, u32>) -> R
             ),
             _ => {}
         }
-        let dur = w.seconds();
+        let dur = info.seconds();
         let pause_ms = pauses.get(&(i + 1)).copied().unwrap_or(0);
         out.push(Slot {
             wav: turn.wav.clone(),
@@ -899,7 +885,7 @@ pub fn timeline(turns: &[Turn], gap_ms: u32, pauses: &BTreeMap<usize, u32>) -> R
 /// [`timeline`] lays the slots out from the raw voice wavs, so every offset is
 /// on the *pre-tempo* clock. Once the speech has been through `atempo` the
 /// delivered clock is `pre / speed`, and a layer placed against the pre-tempo
-/// clock slides further behind the voice with every line — by the end of a
+/// clock slides further behind the voice with every line, by the end of a
 /// 7-minute chapter the music is a minute and a half out of place.
 ///
 /// Scaling the whole timeline by one factor is exact rather than approximate:
@@ -929,14 +915,14 @@ pub fn pause_intervals(slots: &[Slot]) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// Where the chapter's headline ends, in delivered seconds — the stretch where
+/// Where the chapter's headline ends, in delivered seconds, the stretch where
 /// the duck lets go (see [`Duck::head_key`]).
 ///
 /// The headline is the opening turn, and `plan_turns` builds it with neither a
 /// place nor a mood: that pairing is its signature, which makes this a property
 /// of the chapter rather than a number of seconds somebody has to guess at and
-/// keep in step with the writing. A chapter that opens on a scene — or on a
-/// line the analyzer gave a label but no mood — has no headline and no
+/// keep in step with the writing. A chapter that opens on a scene, or on a
+/// line the analyzer gave a label but no mood, has no headline and no
 /// exemption.
 fn headline_end(slots: &[Slot]) -> Option<f64> {
     let first = slots.first()?;
@@ -948,7 +934,7 @@ fn headline_end(slots: &[Slot]) -> Option<f64> {
 /// A beat belongs where a *scene changes and the change is narrated*: the
 /// incoming or the outgoing turn must be the Narrator, so the pause lands on
 /// narration handing over rather than in the middle of an exchange. Narration
-/// *resuming* is the stronger signal — a new scene establishing itself — so it
+/// *resuming* is the stronger signal, a new scene establishing itself, so it
 /// outranks narration handing off; the longest `pause_before_s` the scene map
 /// declares breaks the remaining ties, and the earliest boundary breaks those.
 ///
@@ -968,7 +954,7 @@ pub fn plan_pauses(turns: &[Turn], map: &SceneMap, speed: f64) -> BTreeMap<usize
         // A beat marks a *change of scene*, so both sides have to name one. An
         // untagged turn is not a scene: the chapter headline leads with none,
         // and a mid-chapter line the analyzer left blank must not manufacture a
-        // boundary — that would put a beat in the middle of a continuous scene.
+        // boundary, that would put a beat in the middle of a continuous scene.
         if prev.scene.is_empty() || cur.scene.is_empty() || cur.scene == prev.scene {
             continue;
         }
@@ -985,7 +971,7 @@ pub fn plan_pauses(turns: &[Turn], map: &SceneMap, speed: f64) -> BTreeMap<usize
         cands.push((rank, secs, i));
     }
     // Best first: strongest narration signal, then longest declared beat, then
-    // earliest — so the choice is a decision, not whichever rule happened to
+    // earliest, so the choice is a decision, not whichever rule happened to
     // come first in the file.
     cands.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
     for (_, secs, i) in cands.into_iter().take(cfg.max_per_chapter) {
@@ -1062,7 +1048,7 @@ pub struct Window {
 ///
 /// The span index is the whole point. `plan_windows` opens a window at
 /// `span.start.max(free_at)`, so a window can start later than the span it came
-/// from — the previous window's cooldown pushes it. The report used to match
+/// from, the previous window's cooldown pushes it. The report used to match
 /// windows to spans by start offset, through a formatted string
 /// (`l.starts_with("[110-")`), so any window the cooldown had pushed read as
 /// "no effect" on its own span. Chapter 13 measured 75 s of night under
@@ -1116,7 +1102,7 @@ pub fn plan_windows(spans: &[Span], cfg: &EffectLayer, total: f64) -> Vec<Window
             end: start + len,
             // The rule's relative balance, scaled by the layer's one master
             // gain. Read here rather than in `build_spans` so the span merge
-            // still compares raw rule levels — the trim is a property of the
+            // still compares raw rule levels, the trim is a property of the
             // layer, not of a scene, and folding it in earlier would make two
             // rules that differ only by trim merge as one.
             level: span.level * cfg.trim,
@@ -1137,7 +1123,7 @@ pub fn plan_windows(spans: &[Span], cfg: &EffectLayer, total: f64) -> Vec<Window
 /// where the music lifts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MusicRun {
-    /// The palette value that chose this track — what the log reports and what
+    /// The palette value that chose this track, what the log reports and what
     /// a re-merge is compared against.
     pub mood: String,
     /// The *sound* the palette resolved to (`soft-relax`). Consecutive slots
@@ -1146,7 +1132,7 @@ pub struct MusicRun {
     pub sound: String,
     /// The take that answers it. Which of `soft-relax-bg-1/2` plays is an
     /// implementation detail of the pick, so the mix reads it from here rather
-    /// than looking the sound up a second time — one lookup, one answer.
+    /// than looking the sound up a second time, one lookup, one answer.
     pub file: String,
     /// The sound's own trim (`Sound::level`), carried the same way and for the
     /// same reason as `file`: the mix multiplies it into the layer level, and
@@ -1164,30 +1150,21 @@ pub struct MusicRun {
 /// Which track plays when, and where it lifts.
 ///
 /// Read per *slot*, not per span: the mood is a property of the line being
-/// spoken, and a cue breaks exactly where the mood changes. A place change
-/// inside one mood therefore keeps one continuous track rather than crossfading
-/// into the same tune — and, the other way round, a change of mood mid-scene
-/// does change the track, which is the whole point of the field.
-///
-/// The pick is seeded from the palette *value* rather than its tags, so a change
-/// of value is a change of track by construction: two values that happened to
-/// share tags would otherwise crossfade into themselves. The chapter goes into
-/// the seed too, so two chapters in the same mood still differ.
+/// spoken, and a cue breaks exactly where the mood changes. The pick is seeded
+/// from the palette *value* rather than its tags, so a change of value is a
+/// change of track by construction; the chapter goes into the seed too, so two
+/// chapters in the same mood still differ.
 ///
 /// A slot with no value, with `none`, or whose palette entry names tags nothing
-/// in the pool answers contributes nothing — no run, no silent file, no
-/// gap-filling. `none` is a choice; a pool that has lost its last clip for a
-/// mood is a degraded mix, and both are reported once each.
+/// in the pool answers contributes nothing. `none` is a choice; a pool that
+/// has lost its last clip for a mood is a degraded mix, and both are reported
+/// once each.
 ///
-/// The chapter's *first* run is pulled back to the head of the timeline — the
-/// slot the headline is spoken in — so the music comes up underneath the title
-/// and fades in, rather than hitting at full level on whichever line first
-/// names a mood. It is only the first: every later cue keeps the offset its own
-/// slot gave it, so a gap between two runs stays the silence the script asked
-/// for.
-///
-/// The layer's own knobs (`level`, `xfade_s`, `ramp_s`) are not read here: they
-/// shape how a run is *rendered*, which is the caller's job.
+/// The chapter's *first* run is pulled back to the head of the timeline (the
+/// slot the headline is spoken in) so the music comes up under the title; every
+/// later cue keeps the offset its own slot gave it. The layer's own knobs
+/// (`level`, `xfade_s`, `ramp_s`) are not read here: they shape how a run is
+/// *rendered*, which is the caller's job.
 pub fn plan_music(
     slots: &[Slot],
     pauses: &[(f64, f64)],
@@ -1203,7 +1180,7 @@ pub fn plan_music(
             continue;
         }
         // A value outside the palette is a script that never went through the
-        // digest validator — say so rather than silently going quiet.
+        // digest validator, say so rather than silently going quiet.
         let Some(entry) = palette.get(mood) else {
             let msg = format!("{mood} (not a palette value)");
             if !unpooled.contains(&msg) {
@@ -1231,7 +1208,7 @@ pub fn plan_music(
         match out.last_mut() {
             // Merge on the *sound*, not the take: the seed is derived from the
             // mood, so a repeated mood resolves to the same sound and the same
-            // take anyway — merging on the sound is what keeps a scene change
+            // take anyway, merging on the sound is what keeps a scene change
             // inside one mood from cutting the music.
             Some(last) if last.sound == picked.sound => {
                 last.end = slot.end;
@@ -1283,7 +1260,7 @@ impl InjectMode {
     /// A `hit` owns the silence it was written into, so it plays at the level
     /// the pool gives it. An `overlap` and a `trail` own nothing: they run
     /// *under* the speech, and at full level they stop being a bed and start
-    /// competing with the voice. The library had already voted on this — every
+    /// competing with the voice. The library had already voted on this, every
     /// overlap or trail clip that sat right had been hand-trimmed to 0.05–0.2 in
     /// its own pool entry, which is a per-clip workaround for a property of the
     /// mode. So the mode carries the trim, and the pool's `level` goes back to
@@ -1297,11 +1274,11 @@ impl InjectMode {
 }
 
 /// The mode a pool entry's string names, or `None` for a string that names
-/// none — which the caller reads as *skip this directive*, never as a default.
+/// none, which the caller reads as *skip this directive*, never as a default.
 ///
 /// The one place the string is parsed. `injects_of` needs the mode to place the
 /// clip; the `:sound` editor needs it to say how loud the clip will be, and a
-/// second `match` there would be a second answer to the same question — the kind
+/// second `match` there would be a second answer to the same question, the kind
 /// that goes stale silently when a fourth mode is added.
 pub fn inject_mode(name: &str) -> Option<InjectMode> {
     match name {
@@ -1329,18 +1306,15 @@ pub enum Inject {
 
 /// The directives that fire at one place on the timeline, in listed order.
 ///
-/// A directive is the script's own **sound item** — `{"sound": "page-turn"}` —
-/// a sibling of the lines rather than a field on one, and one
-/// [`crate::assemble::Planned`] has already separated out of the speech. All it
-/// carries is the *name*; **how the sound behaves comes from the pool**, because
-/// that is a property of the clip and not of the chapter. A script that had to
-/// restate `mode` per use was a second source of truth, and the analyzer guessed
-/// at it: it once `overlap`ped a water spell under a kitchen sink because a
-/// per-chapter mode is not something a reader of prose can know.
+/// A directive is the script's own **sound item**, `{"sound": "page-turn"}`
+/// a sibling of the lines rather than a field on one. All it carries is the
+/// *name*; **how the sound behaves comes from the pool**, because that is a
+/// property of the clip and not of the chapter (a per-use mode is not
+/// something a reader of prose can know, and the analyzer guessed at it).
 ///
-/// Lenient on purpose: the digest validator is the strict gate (it can ask the
-/// analyzer for a repair), while a merge must survive a hand edit the way it
-/// survives a missing clip — malformed entries are skipped, and an unknown
+/// Lenient on purpose: the digest validator is the strict gate (it can ask
+/// the analyzer for a repair), while a merge must survive a hand edit the way
+/// it survives a missing clip, malformed entries are skipped, and an unknown
 /// sound resolves to no take at [`plan_inject_takes`] with one warning rather
 /// than a dead chapter.
 pub fn injects_of(directives: &[Value], pool: &ClipPool, default_hold: f64) -> Vec<Inject> {
@@ -1392,7 +1366,7 @@ pub fn injects_of(directives: &[Value], pool: &ClipPool, default_hold: f64) -> V
 /// decide: the *name* it writes, the mode so it knows whether the narration
 /// will pause for it (`hit`) or carry on over it (`overlap`/`trail`), the tags
 /// that say what it sounds like, and the length. The mode is rendered rather
-/// than left to the analyzer because it is a property of the clip — the script
+/// than left to the analyzer because it is a property of the clip, the script
 /// says *which* sound and *where*, never how it behaves.
 pub fn inject_prompt(pool: &ClipPool) -> String {
     pool.iter()
@@ -1432,7 +1406,7 @@ fn trim_num(v: f64) -> String {
 /// A direct registry lookup, not a tag pick: the analyzer names the *sound*,
 /// and sounds are disjoint by construction, so scoring tags could only answer
 /// a question nobody asked. The take rolls on the chapter, the slot and the
-/// sound — a re-merge reproduces it, and neighbouring chapters vary. `None`
+/// sound, a re-merge reproduces it, and neighbouring chapters vary. `None`
 /// is an unknown sound (a hand edit past the validator), warned once here so
 /// the chapter degrades to skipping it rather than dying on it.
 pub fn inject_take(
@@ -1489,7 +1463,7 @@ pub fn plan_inject_takes(
 /// Durations of the takes one chapter's injects picked, by pool path. One
 /// ffprobe per file; a file gone missing since the registry was written is
 /// absent from the map, and both planners read absence as zero with a warning
-/// — a renamed clip degrades to a skipped inject, not a dead merge.
+///, a renamed clip degrades to a skipped inject, not a dead merge.
 pub fn probe_inject_durs(
     takes: &[Vec<Option<audio_pool::Picked>>],
     assets: &Path,
@@ -1541,22 +1515,19 @@ pub fn probe_inject_durs(
 }
 
 /// Solo time each slot's injects need, written into the gap that follows the
-/// slot — the same place a planned pause goes, in the same pre-tempo
+/// slot, the same place a planned pause goes, in the same pre-tempo
 /// milliseconds, so [`retime`] keeps them honest for free. Hits cost their
 /// whole clip, trails their hold (never more than the clip), overlaps nothing.
 /// Multiple directives queue in listed order; the event planner replays the
 /// same queue, so the silence and the sounds agree.
 ///
-/// The gaps are *not* the whole story, and treating them as if they were is
-/// how this layer went inaudible once. Writing a hold makes the concat longer,
-/// so every slot after it starts later than the clock [`timeline`] laid out —
-/// and every layer, this one included, is placed by reading `Slot::start` and
-/// `Slot::end`. A 0.6 s hit early in a chapter therefore slid everything after
-/// it 0.6 s late while the layers stayed on the old clock: the last line's
-/// blood spatter was planned into silence the timeline believed in and played
-/// on top of the last six words instead. So the timeline is re-laid here, in
-/// the same call that moved it, and a caller cannot have the gaps without the
-/// clock that matches them.
+/// The gaps are not the whole story. Writing a hold makes the concat longer,
+/// so every slot after it starts later than the clock [`timeline`] laid out,
+/// and every layer is placed by reading `Slot::start` and `Slot::end`. A hold
+/// early in a chapter therefore slid everything after it late while the layers
+/// stayed on the old clock. So the timeline is re-laid here, in the same call
+/// that moved it: a caller cannot have the gaps without the clock that
+/// matches them.
 pub fn plan_inject_holds(
     slots: &mut [Slot],
     takes: &[Vec<Option<audio_pool::Picked>>],
@@ -1594,7 +1565,7 @@ pub fn plan_inject_holds(
 
 /// Re-accumulate `start`/`end` from each slot's own duration and gap.
 ///
-/// A slot's duration is `end - start` — the only copy of it the struct holds,
+/// A slot's duration is `end - start`, the only copy of it the struct holds,
 /// and the one thing a gap can never change. [`timeline`] lays the clock out
 /// once; this is what re-lays it after something moves the gaps, so the two
 /// cannot disagree about where a slot begins.
@@ -1609,8 +1580,8 @@ fn relayout(slots: &mut [Slot]) {
 }
 
 /// One placed inject: what plays, when, and how it ends. The level is the
-/// directive's own — the pool's trim with [`InjectMode::gain`] already folded
-/// in — and the layer and operator gains are applied at render.
+/// directive's own, the pool's trim with [`InjectMode::gain`] already folded
+/// in, and the layer and operator gains are applied at render.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InjectEvent {
     pub sound: String,
@@ -1623,7 +1594,7 @@ pub struct InjectEvent {
     pub fade_out: f64,
     /// The pool says this sound is a bed, so the window it was given is filled
     /// by repeating it rather than by playing once and leaving silence. False
-    /// for every one-shot, and false for a bed with no `stop` — see
+    /// for every one-shot, and false for a bed with no `stop`, see
     /// [`loop_copies`].
     pub looped: bool,
 }
@@ -1649,7 +1620,7 @@ struct InjectActive {
 /// covers the window: a one-shot is not a loop, and a clip that needs no repeat
 /// must not be handed a seam it never had.
 ///
-/// A window only exists when something ends the sound — the `stop` in the
+/// A window only exists when something ends the sound, the `stop` in the
 /// script. A bed with no `stop` gets the clip's own length and is therefore
 /// never looped, which is why the digest has to place one.
 pub fn loop_copies(window: f64, clip: f64, xfade: f64) -> Option<usize> {
@@ -1666,7 +1637,7 @@ pub fn loop_copies(window: f64, clip: f64, xfade: f64) -> Option<usize> {
 ///
 /// The seam is the whole point: a hard repeat of a sizzle clicks at every join,
 /// and a bed that clicks four times a minute is worse than no bed. `acrossfade`
-/// overlaps each pair into a short equal-power blend — `c1=tri:c2=tri` is
+/// overlaps each pair into a short equal-power blend, `c1=tri:c2=tri` is
 /// ffmpeg's default curve, which is what a short seam wants. The caller
 /// truncates with an output `-t`, so the loop is allowed to run past the window
 /// and no `atrim` is needed here.
@@ -1699,8 +1670,8 @@ fn stop_actives(actives: &mut [InjectActive], sound: &str, at: f64, fade: f64) {
 }
 /// Lay a chapter's injects on the delivered clock.
 ///
-/// Every directive anchors at its slot's end — it plays when the segment's
-/// speech ends — in listed order, hits queuing inside the silence
+/// Every directive anchors at its slot's end, it plays when the segment's
+/// speech ends, in listed order, hits queuing inside the silence
 /// [`plan_inject_holds`] already wrote. Overlap and trail tails keep sounding
 /// under the following speech until the clip ends or a `stop` names them: a
 /// stop fades from its anchor over `stop_fade_s`, and starting a sound
@@ -1735,7 +1706,7 @@ pub fn plan_injects(
                     // The queue is serial: every directive anchors at the
                     // cursor, and hits and trails advance it by their solo
                     // time. That is the only anchor that keeps the sounds
-                    // where the silence is — `plan_inject_holds` wrote the
+                    // where the silence is, `plan_inject_holds` wrote the
                     // *sum* of those solos into the gap, so a trail that
                     // started back at `slot.end` would play its hold under a
                     // queued hit and leave its own tail in dead air.
@@ -1745,7 +1716,7 @@ pub fn plan_injects(
                     stop_actives(&mut actives, sound, anchor, cfg.fade_s);
                     // A looped bed has no natural end: the clip is a length of
                     // texture, not a statement, and the script's `stop` is what
-                    // says when the scene moved on. So it opens *unbounded* —
+                    // says when the scene moved on. So it opens *unbounded*
                     // `stop_actives` can only shorten, and a stop that arrives
                     // past the clip's own end would otherwise be ignored, which
                     // is exactly how a 7 s bed ended in a 142 s kitchen.
@@ -1799,7 +1770,7 @@ pub fn plan_injects(
             }
         }
     }
-    // Anything still open never met its `stop`. Fall back to one play — the
+    // Anything still open never met its `stop`. Fall back to one play, the
     // behaviour a bed had before looping existed, so a chapter that forgets the
     // stop loses the loop, not the sound.
     for a in actives.iter_mut().filter(|a| a.end.is_infinite()) {
@@ -1889,7 +1860,7 @@ struct Slice {
 /// Slices may overlap: that is how the music layer crossfades between tracks.
 /// Two complementary linear fades summing to unity is not a true equal-power
 /// crossfade, but for uncorrelated beds the error is a fraction of a dB in the
-/// middle of a two-second overlap — cheaper than a filter chain that would have
+/// middle of a two-second overlap, cheaper than a filter chain that would have
 /// to know which slice comes next.
 fn place(slices: &[Slice], out: &Path, total: f64) -> Result<()> {
     if slices.is_empty() {
@@ -1946,8 +1917,8 @@ fn place(slices: &[Slice], out: &Path, total: f64) -> Result<()> {
 /// The music layer's gain over time, as an ffmpeg expression.
 ///
 /// A flat level, plus one lift per pause built from two complementary `clip`
-/// ramps. The alternative — slicing the track at each level change and
-/// concatenating — restarts the loop at every boundary, which is audible; and
+/// ramps. The alternative, slicing the track at each level change and
+/// concatenating, restarts the loop at every boundary, which is audible; and
 /// `t` is monotonic across `-stream_loop` boundaries, so an expression keyed on
 /// it is safe on a looped source.
 fn level_expr(base: f64, lift: f64, ramp: f64, run_start: f64, pauses: &[(f64, f64)]) -> String {
@@ -1967,7 +1938,7 @@ fn level_expr(base: f64, lift: f64, ramp: f64, run_start: f64, pauses: &[(f64, f
 }
 
 /// Resolve a clip path. Pool files are `assets/`-relative, which is the same
-/// directory the scene map came from — one root, so a pool and its clips cannot
+/// directory the scene map came from, one root, so a pool and its clips cannot
 /// be read from different places.
 fn clip_path(assets: &Path, file: &str) -> PathBuf {
     assets.join(file)
@@ -1976,7 +1947,7 @@ fn clip_path(assets: &Path, file: &str) -> PathBuf {
 /// Effective start offset per music run, so adjacent tracks crossfade.
 ///
 /// The planner covers only speech (`run.end` is the slot's end), while the
-/// renderer extends each run by `xfade_s` — leaving the two fades misaligned
+/// renderer extends each run by `xfade_s`, leaving the two fades misaligned
 /// by the inter-slot gap and dipping the mix mid-transition. Starting the
 /// next track where the previous one's audible coverage ended aligns them.
 /// Gaps wider than the crossfade plus a beat are intentional silence (`none`,
@@ -2007,7 +1978,7 @@ fn music_starts(runs: &[MusicRun], xfade: f64) -> Vec<f64> {
 ///
 /// The chapter's first slice rises and its last falls over `fade_s` (3 s). An
 /// opening and a closing are *heard*, and a third of a second of either reads
-/// as a cut — the one thing the layer's first and last moments must not read
+/// as a cut, the one thing the layer's first and last moments must not read
 /// as. Everywhere the track changes mid-chapter the edge is the short
 /// `xfade_s` instead, because that seam is covered by the next track arriving.
 fn music_fades(n: usize, last: bool, cfg: &MusicLayer) -> (f64, f64) {
@@ -2029,9 +2000,9 @@ fn music_fades(n: usize, last: bool, cfg: &MusicLayer) -> (f64, f64) {
 ///
 /// `work` is a directory the caller owns, used for the per-span slices this
 /// pass needs. It is created on demand and never cleaned up here, so pass a
-/// throwaway path — the merge passes its per-chapter scratch directory.
+/// throwaway path, the merge passes its per-chapter scratch directory.
 /// The reverb filter for one slot's piece of the voice track: its span's
-/// preset — unless the voice is the Narrator, who always reads dry.
+/// preset, unless the voice is the Narrator, who always reads dry.
 fn slot_reverb<'a>(
     slot: &Slot,
     spans: &[Span],
@@ -2069,7 +2040,7 @@ pub fn apply_layers(
 
     // 1. the voice track, with per-scene reverb. Not a layer: it is applied to
     //    the voice itself, before anything is mixed under it. It rides with the
-    //    effect switch because it is part of that layer's scene treatment — an
+    //    effect switch because it is part of that layer's scene treatment, an
     //    operator turning the effects off is asking for a plain read, not a
     //    plain read in a cave.
     //
@@ -2077,27 +2048,33 @@ pub fn apply_layers(
     //    plays around, not a voice inside it.
     let work = work.join("layers");
     std::fs::create_dir_all(&work)?;
-    let total = read_wav(voice_wav)?.seconds();
+    // Header probe: the mix WAV is the biggest file in the merge, and the
+    // layers need only its length.
+    let total = wav_seconds(voice_wav)?;
     let mut voice_fx = voice_wav.to_path_buf();
     if on.effects && spans.iter().any(|s| s.reverb.is_some()) {
         let mut parts = Vec::new();
         for (n, slot) in slots.iter().enumerate() {
             // Tile contiguously: each piece runs to the next slot's start, so
             // no gap is lost at a scene change (the old span cut dropped
-            // them). A tail is cut where the next line starts — masking does
+            // them). A tail is cut where the next line starts, masking does
             // the rest, as it did at span ends before.
             let end = slots.get(n + 1).map(|s| s.start).unwrap_or(slot.end);
             let p = work.join(format!("v{n}.wav"));
+            // Seek BEFORE the input: `-ss` as an input option seeks (PCM is
+            // sample-accurate for this), so each piece decodes only its own
+            // span. With the seek after `-i`, ffmpeg decoded the whole mix
+            // from byte 0 for every slot, quadratic in the chapter length.
             let mut args: Vec<String> = vec![
                 "-y".into(),
                 "-loglevel".into(),
                 "error".into(),
-                "-i".into(),
-                s(voice_wav.display()),
                 "-ss".into(),
                 format!("{:.3}", slot.start),
-                "-to".into(),
-                format!("{:.3}", end),
+                "-t".into(),
+                format!("{:.3}", (end - slot.start).max(0.0)),
+                "-i".into(),
+                s(voice_wav.display()),
             ];
             if let Some(fx) = slot_reverb(slot, &spans, &cfg.reverb_presets) {
                 args.push("-af".into());
@@ -2136,7 +2113,7 @@ pub fn apply_layers(
         // Three rungs, multiplied: the rule's balance against other scenes, the
         // layer's own trim, and this sound's trim. A sound with no `level` is
         // 1.0, so a registry that predates the field mixes byte for byte as it
-        // did — which `the_shipped_registries_are_all_at_unity_today` keeps
+        // did, which `the_shipped_registries_are_all_at_unity_today` keeps
         // honest.
         let vol = w.level * clip.level;
         let p = work.join(format!("fx{n}.wav"));
@@ -2313,7 +2290,7 @@ pub fn apply_layers(
                 let clip_s = inj_durs.get(&e.file).copied().unwrap_or(0.0);
                 // A bed the pool marks `looped` fills its window by repeating,
                 // with a short crossfade at each seam. The window is only longer
-                // than the clip when a `stop` ended it — with no stop there is
+                // than the clip when a `stop` ended it, with no stop there is
                 // nothing to fill and `loop_copies` returns None, so the sound
                 // plays once exactly as it did before.
                 let copies = if e.looped {
@@ -2383,13 +2360,13 @@ pub fn apply_layers(
         }
     };
 
-    // 5. one duck for the beds, keyed on the voice — and the inject layer
+    // 5. one duck for the beds, keyed on the voice, and the inject layer
     //    mixed in *after* it.
     //
     //    The inject registry's own contract is foreground: `-20 LUFS / -3 dBTP`,
     //    "voice territory, not the -26 bed contract". It was riding the beds'
     //    ducked bus anyway, and the duck keys on the voice while a spot effect
-    //    fires at the instant the voice stops — so the compressor was at full
+    //    fires at the instant the voice stops, so the compressor was at full
     //    reduction with a 400 ms release exactly when the sound began. Measured
     //    on ch9: a `cooking` bed the script asked for played at **-34.8 dB**,
     //    15 dB under the speech, and was inaudible. A bed has to get out of the
@@ -2439,27 +2416,23 @@ pub fn apply_layers(
 /// a true-peak limiter on the sum.
 ///
 /// Split out and pure because it is the one part of the signal path that is
-/// invisible in every artifact — a wrong bus assignment does not fail, it just
-/// makes a layer quiet — so it gets to be asserted on instead of eyeballed.
-/// `beds` is how many bed tracks are inputs 1..=beds; the inject track, if
-/// present, is the input right after them.
+/// invisible in every artifact: a wrong bus assignment does not fail, it just
+/// makes a layer quiet, so it is asserted on instead of eyeballed. `beds` is
+/// how many bed tracks are inputs 1..=beds; the inject track, if present, is
+/// the input right after them.
 ///
-/// `headline` is `(end, key gain)` — the seconds at the head of the chapter
-/// where the sidechain key is held down, so the beds arrive with the title
-/// instead of being ducked under it
-/// ([`Duck::head_key`]). It listens to a *copy* of the voice: the compressor's
-/// key is a split of input 0, never the voice that reaches the mix, because a
-/// key that also changed what the listener hears would be a level edit wearing
-/// a compressor's name.
+/// `headline` is `(end, key gain)`: the seconds at the head of the chapter
+/// where the sidechain key is held down ([`Duck::head_key`]) so the beds
+/// arrive with the title. The key listens to a *copy* of the voice, never the
+/// voice that reaches the mix: a key that also changed what the listener hears
+/// would be a level edit wearing a compressor's name.
 ///
-/// The limiter is not decoration. Every clip in every pool is normalized to a
-/// **-3 dBTP ceiling** and the layer gains multiply on top of that, but nothing
-/// downstream was enforcing the ceiling on the *sum*: ch9 measured **-0.11
-/// dBFS** with the inject layer switched off entirely, i.e. the mix was already
-/// over its own contract from the voice and beds alone, and there was no
-/// headroom left to raise a bed into. `alimiter` is a lookahead limiter, so it
-/// caps the peak without the distortion a clipper would add, and `level=0`
-/// keeps it from re-normalizing the output behind the operator's back.
+/// The limiter is not decoration. Clips are normalized to a -3 dBTP ceiling
+/// and the layer gains multiply on top, but nothing was enforcing the ceiling
+/// on the *sum*: ch9 measured -0.11 dBFS with the inject layer off entirely.
+/// `alimiter` is a lookahead limiter, so it caps the peak without a clipper's
+/// distortion, and `level=0` keeps it from re-normalizing behind the
+/// operator's back.
 fn layer_graph(beds: usize, inject: bool, sc: &str, headline: Option<(f64, f64)>) -> String {
     let inject_in = beds + 1;
     let lim = "alimiter=limit=0.589:attack=5:release=100:level=0";
@@ -2469,7 +2442,7 @@ fn layer_graph(beds: usize, inject: bool, sc: &str, headline: Option<(f64, f64)>
         return format!("[0:a][{inject_in}:a]{}", tail(2));
     }
     // The key, and the voice the mix keeps: the same stream twice, unless the
-    // headline holds the key down — then the voice is split and only the copy
+    // headline holds the key down, then the voice is split and only the copy
     // the compressor listens to is attenuated. A gain of 1.0 (or no headline)
     // is the key taken as-is, which is exactly the graph this used to emit.
     let (prologue, key, vox) = match headline {
@@ -2511,13 +2484,9 @@ fn layer_graph(beds: usize, inject: bool, sc: &str, headline: Option<(f64, f64)>
 /// is a place and carries the reverb; a *window* is an effect and may open
 /// later than its span (the cooldown can push it); a *run* is a mood, and
 /// `none` emits no run at all, so silence shows up as a gap between two runs'
-/// ranges rather than as a line.
-///
-/// This used to fold both the effect and the music into the span line, by
-/// taking the first entry that matched on start offset. That hid every effect
-/// the cooldown had pushed and every cue after the first in a span — i.e. it
-/// hid precisely the two behaviours the per-window and per-slot designs exist
-/// to express, in the only place a merged chapter is inspectable.
+/// ranges rather than as a line. Folding these into one span line is what hid
+/// exactly the behaviours the per-window and per-slot designs exist to
+/// express.
 fn plan_lines(
     spans: &[Span],
     pauses: &[(f64, f64)],
@@ -2568,8 +2537,8 @@ fn plan_lines(
         out.push("music none — no cue resolved for this chapter".into());
     }
     for r in runs {
-        // The level that was actually applied — the layer's, times this track's
-        // own trim — so the log reads the same way the effect line above it
+        // The level that was actually applied, the layer's, times this track's
+        // own trim, so the log reads the same way the effect line above it
         // does, and a per-sound trim is visible in the one place a human looks
         // to ask what the mix did.
         out.push(format!(
@@ -2671,7 +2640,7 @@ mod tests {
 
     /// The tracked fixture profile, installed to a scratch dir: same shapes as
     /// production, no clips. Tests must never read the live tree, which is
-    /// ignored and may be absent. Unique per call — tests run in parallel and
+    /// ignored and may be absent. Unique per call, tests run in parallel and
     /// a shared dir is a race.
     fn fixture_live(tag: &str) -> PathBuf {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2683,7 +2652,7 @@ mod tests {
     }
 
     /// The fixture map. The chapter-1 regression this file exists for lived in
-    /// a shipped file, not in the code — so this helper installs the tracked
+    /// a shipped file, not in the code, so this helper installs the tracked
     /// fixture profile (same shapes as production) rather than reading the
     /// live tree, which is ignored and may be absent. Live-tree drift is
     /// profile::verify's job, not the suite's.
@@ -2865,7 +2834,7 @@ mod tests {
         assert!(!usage.contains_key("unused"), "{usage:?}");
     }
 
-    /// A `stop` is placed *for* a sound — dropping the sound leaves the stop
+    /// A `stop` is placed *for* a sound, dropping the sound leaves the stop
     /// fading nothing, which is the same defect as a scene gone quiet.
     #[test]
     fn inject_usage_reads_the_scripts_and_counts_a_stop() {
@@ -2924,7 +2893,7 @@ mod tests {
     }
 
     /// The music layer's third rung: a track's own trim rides on the run, and
-    /// a track with none is 1.0 — so nothing already on disk changes.
+    /// a track with none is 1.0, so nothing already on disk changes.
     #[test]
     fn plan_music_carries_the_sounds_own_level() {
         let cfg = scene_map();
@@ -2952,7 +2921,7 @@ mod tests {
     /// The chapter's first cue opens the chapter: pulled back to the head of
     /// the timeline it comes up *under the headline* and fades in, instead of
     /// hitting at full level on the first line that happens to name a mood.
-    /// Later cues are not moved — a gap between two runs is silence the script
+    /// Later cues are not moved, a gap between two runs is silence the script
     /// asked for, not a gap to fill.
     #[test]
     fn the_chapters_first_cue_starts_at_the_head() {
@@ -3097,7 +3066,7 @@ mod tests {
 
     /// The merge tempoes the speech and then places the layers, so the timeline
     /// the layers read has to be the one the listener hears. Without this the
-    /// music drifts behind the voice by a line's worth per line — the whole
+    /// music drifts behind the voice by a line's worth per line, the whole
     /// reason the tempo pass moved ahead of `apply_layers`.
     #[test]
     fn retime_puts_the_timeline_on_the_delivered_clock() {
@@ -3106,7 +3075,7 @@ mod tests {
         silent_wav(&a, 4.0, 48_000).unwrap();
         let turns = vec![turn(&a, "s", "Narrator"), turn(&a, "s", "Narrator")];
         // A beat authored *before* turn 1 is written into the gap that follows
-        // turn 0 — the same silence, named from the other side.
+        // turn 0, the same silence, named from the other side.
         let mut pauses = BTreeMap::new();
         pauses.insert(1usize, 1875u32);
         let mut slots = timeline(&turns, 300, &pauses).unwrap();
@@ -3240,7 +3209,7 @@ mod tests {
             w[0].level
         );
 
-        // The trim must not resurrect a rule that declared silence — the hall
+        // The trim must not resurrect a rule that declared silence, the hall
         // rule's `level: 0.0` means "no bed here", not "quiet bed".
         let silent = vec![span(0.0, 100.0, &["night"], 0.0)];
         assert!(plan_windows(&silent, &quieter.layers.effect, 200.0).is_empty());
@@ -3322,7 +3291,7 @@ mod tests {
     }
 
     /// Sound-keyed, like the shipped registry: `soft` is one sound with two
-    /// takes, and `soft-alt` is a *second* sound answering the same tags — the
+    /// takes, and `soft-alt` is a *second* sound answering the same tags, the
     /// shape the real pool has (`soft-relax` and `generic-soft` both answer
     /// `[soft, calm]`), and the only way a mood change can resolve to a
     /// different track.
@@ -3379,7 +3348,7 @@ mod tests {
         assert!((runs[0].end - 200.0).abs() < 0.01);
         assert_eq!(runs[0].mood, "quiet");
 
-        // A change of mood is a change of sound — the whole point of the field.
+        // A change of mood is a change of sound, the whole point of the field.
         let runs = plan_music(
             &[slot("quiet", 0.0, 100.0), slot("busy", 100.0, 200.0)],
             &[],
@@ -3421,7 +3390,7 @@ mod tests {
         // Regression: the report used to fold music into the span line by
         // taking the first run that overlapped, so a span holding three cues
         // printed one. Since spans are places and runs are moods, that hid
-        // exactly the in-chapter change the design exists to express — and the
+        // exactly the in-chapter change the design exists to express, and the
         // log is the only place a merged chapter is inspectable.
         let cfg = scene_map();
         let pool = music_pool();
@@ -3459,7 +3428,7 @@ mod tests {
     fn the_log_attributes_a_window_the_cooldown_pushed_to_its_own_place() {
         // `plan_windows` opens at `span.start.max(free_at)`, so the second
         // window starts *after* its span does. Matching windows to spans by
-        // start offset — which the report did, through a formatted string —
+        // start offset, which the report did, through a formatted string
         // then reported "no effect" for a span that had 75 s of one. Chapter 13
         // was measured that way: `courtyard-evening` looked silent while
         // carrying a night bed from 120 s to 195 s.
@@ -3508,7 +3477,7 @@ mod tests {
             effects[1].ends_with("<- courtyard-evening"),
             "a pushed window still belongs to its own place: {effects:#?}"
         );
-        // And the span line carries no effect of its own — a span does not have
+        // And the span line carries no effect of its own, a span does not have
         // one, so it must not imply it does.
         let span_line = lines.iter().find(|l| l.starts_with("span ")).unwrap();
         assert!(!span_line.contains("effect"), "{span_line}");
@@ -3516,7 +3485,7 @@ mod tests {
 
     #[test]
     fn two_moods_that_name_the_same_tags_are_one_run_when_one_sound_answers() {
-        // The old premise here — "a mood change always changes the track" — was
+        // The old premise here, "a mood change always changes the track", was
         // false the moment picks became sound-based, and it is not a bug. The
         // seed decides *among the candidates*; with one candidate there is
         // nothing to decide, so both moods resolve to the same sound and the
@@ -3563,7 +3532,7 @@ mod tests {
         // What seeding from the palette *value* actually buys. Two values naming
         // one tag set are two independent draws from the candidate set, so a
         // pool with two sounds for those tags spreads them across moods instead
-        // of crossfading one into itself. The pool has to offer the choice —
+        // of crossfading one into itself. The pool has to offer the choice
         // this is not a guarantee plan_music can make on its own.
         let mut cfg = scene_map();
         cfg.music_palette.insert(
@@ -3611,7 +3580,7 @@ mod tests {
         assert!(plan_music(&[slot("", 0.0, 100.0)], &[], 1, &pool, pal).is_empty());
         // A palette value whose tags nothing in the pool answers.
         assert!(plan_music(&[slot("grand", 0.0, 100.0)], &[], 1, &pool, pal).is_empty());
-        // A value that is not in the palette at all — the validator's job to
+        // A value that is not in the palette at all, the validator's job to
         // catch, and the mix still refuses to guess.
         assert!(plan_music(&[slot("melancholy", 0.0, 100.0)], &[], 1, &pool, pal).is_empty());
     }
@@ -3686,7 +3655,7 @@ mod tests {
             "empty": {"tags": ["ghost"], "files": []},
         }))
         .unwrap();
-        // Sorted, deduped, and drawn from sounds — even one with no files,
+        // Sorted, deduped, and drawn from sounds, even one with no files,
         // because the vocabulary describes the pool, not one pick.
         assert_eq!(effect_tags(&pool), vec!["calm", "ghost", "night", "rain"]);
     }
@@ -3694,7 +3663,7 @@ mod tests {
     /// The defect that started this: chapter 1 opened with a hearth crackling
     /// under a martial-arts shop at dawn. The label `martial-shop-morning`
     /// matched the generic `shop` keyword of a catch-all fire rule, which sat
-    /// *before* the daylight rule — so `morning` never got a say. Against the
+    /// *before* the daylight rule, so `morning` never got a say. Against the
     /// map that actually ships, not a fixture.
     #[test]
     fn the_shipped_map_no_longer_puts_a_hearth_under_a_shop_at_dawn() {
@@ -3709,7 +3678,7 @@ mod tests {
         assert_eq!(match_scene("kitchen", &cfg).effect, vec!["fire"]);
         // ...but a courtyard does not. `courtyard` used to sit in a fire rule,
         // which put a hearth under `courtyard-battle-moment` and
-        // `courtyard-confrontation` — 20 labels and ~800 segments in the
+        // `courtyard-confrontation`, 20 labels and ~800 segments in the
         // corpus, the same absurdity as the shop at dawn, just louder. A
         // courtyard is not a place with a fire in it: the battle rule owns the
         // ones that say battle, the daylight rule owns the ones that name a
@@ -3769,7 +3738,7 @@ mod tests {
     /// Every shipped rule must actually resolve, or the rule is decoration.
     /// Every shipped effect rule resolves, and the daylight rule owns its scene.
     ///
-    /// A tie between interchangeable variants is the pool's designed behaviour —
+    /// A tie between interchangeable variants is the pool's designed behaviour
     /// `night-1..4` are four nights, and the seed spreads them across chapters.
     /// A tie between *different sounds* is not: `["day"]` alone sat on six clips
     /// spanning birdsong, a calm bed and a market crowd, one of them a one-shot
@@ -3795,7 +3764,7 @@ mod tests {
         }
 
         // The rule this change was about, pinned by name. A 75 s window needs a
-        // looped bed, and the *sound* is the decision — the take (`day-1/2/3`)
+        // looped bed, and the *sound* is the decision, the take (`day-1/2/3`)
         // is the pool's business and must not appear here.
         let day = match_scene("martial-shop-morning", &cfg);
         assert_eq!(day.effect, vec!["day", "calm"], "the daylight rule owns it");
@@ -3815,11 +3784,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Every file a fixture pool names must exist on disk here — placeholder
+    /// Every file a fixture pool names must exist on disk here, placeholder
     /// takes, written below, because the fixture ships shapes without clips.
     ///
     /// The merge resolves a pool `file` through `clip_path` and, when it is
-    /// missing, prints a warning and skips the run — so a registry pointing at a
+    /// missing, prints a warning and skips the run, so a registry pointing at a
     /// renamed or deleted clip is not an error, it is *silence*. The disk half
     /// of this runs at runtime too, where the tree actually lives: `check_files`
     /// at load and `profile::verify` on the pointer hash.
@@ -3941,7 +3910,7 @@ mod tests {
     }
 
     /// The script names the sound; **the pool says how it behaves**. A
-    /// directive that tries to restate `mode` is ignored, not honoured — that
+    /// directive that tries to restate `mode` is ignored, not honoured, that
     /// is the whole point of moving it out of the JSON, and it is asserted here
     /// because a silent "the script won" would reintroduce the second source of
     /// truth without anything failing.
@@ -3975,7 +3944,7 @@ mod tests {
                     level: 0.1
                 },
                 // `hold` and `level` come from the entry too, not the layer
-                // default — and the level then takes the mode's gain, so a
+                // default, and the level then takes the mode's gain, so a
                 // trail's 0.5 is rendered at 0.05.
                 Inject::Start {
                     sound: "rumble".into(),
@@ -4010,7 +3979,7 @@ mod tests {
                 level: 0.1
             }],
         );
-        // Absent, empty, malformed and unknown entries are silence, not errors —
+        // Absent, empty, malformed and unknown entries are silence, not errors
         // the digest validator is the strict gate, the merge survives hand edits.
         assert!(injects_of(&[], &pool, 2.0).is_empty());
         assert!(injects_of(
@@ -4041,7 +4010,7 @@ mod tests {
     /// silence it was written into and keeps its level.
     ///
     /// The gain belongs to the *mode*, so two clips of one mode keep their ratio
-    /// to each other — the pool's `level` stays the balance between them rather
+    /// to each other, the pool's `level` stays the balance between them rather
     /// than a second volume knob for the layer. And it is applied *after* the
     /// `None`/zero rule, so a bed with no level of its own is 0.1, not 0.0: the
     /// "a pool can never mute by arithmetic accident" promise survives it.
@@ -4081,7 +4050,7 @@ mod tests {
     /// An entry whose `mode` names nothing is silence, not a default. The pool
     /// said something the mixer does not understand, and guessing `hit` would
     /// play a length of clip nobody asked for. `inject_mode` returning `None` is
-    /// what makes that a skip — and it is now also the answer the `:sound`
+    /// what makes that a skip, and it is now also the answer the `:sound`
     /// editor's own validation reads, so the two cannot disagree about which
     /// strings are modes.
     #[test]
@@ -4113,7 +4082,7 @@ mod tests {
     fn inject_takes_name_the_sound_and_roll_with_the_slot() {
         let pool = inject_pool();
         // Direct registry lookup: the analyzer names the sound, the pool rolls
-        // the take — tag scoring could only answer a question nobody asked.
+        // the take, tag scoring could only answer a question nobody asked.
         for slot in 0..8 {
             let t = inject_take(&pool, 1, slot, "blood").unwrap();
             assert_eq!(t.sound, "blood");
@@ -4150,8 +4119,8 @@ mod tests {
     }
 
     /// Hits queue in the silence their holds wrote, an overlap costs no time,
-    /// a trail holds its solo and tails under the speech, and a stop fades —
-    /// never cuts — from its anchor. Every mode here comes from the pool entry,
+    /// a trail holds its solo and tails under the speech, and a stop fades
+    /// never cuts, from its anchor. Every mode here comes from the pool entry,
     /// because that is where a clip's behaviour lives.
     #[test]
     fn inject_events_hit_queue_overlap_tails_and_stops_fade() {
@@ -4200,13 +4169,13 @@ mod tests {
         assert!((ev[2].start - 20.0).abs() < 1e-9);
         assert!((ev[2].end - (20.0 + 51.0)).abs() < 1e-9, "{ev:?}");
         // The trail starts at 20.0 too, holds 3 s solo, then the stop fades it
-        // from 23.0 over `stop_fade_s` = 3 s — an ending, not a cut.
+        // from 23.0 over `stop_fade_s` = 3 s, an ending, not a cut.
         assert_eq!(ev[3].mode, InjectMode::Trail);
         assert!((ev[3].start - 20.0).abs() < 1e-9);
         assert!((ev[3].end - (23.0 + 3.0)).abs() < 1e-9, "{ev:?}");
         assert!((ev[3].fade_out - 3.0).abs() < 1e-9, "stop_fade_s");
         // The level the render multiplies by `layers.inject.level` is the pool's
-        // with the mode's gain already folded in — `boil` carries none (unity),
+        // with the mode's gain already folded in, `boil` carries none (unity),
         // `rumble` 0.5. Pinned here, at the far end of the pipeline from
         // `injects_of`, because a gain that stopped halfway would still leave
         // every test above passing.
@@ -4250,7 +4219,7 @@ mod tests {
         assert_eq!(held[0].gap_ms, 300 + 3750, "{held:?}");
     }
 
-    /// A wrong bus assignment does not fail — it makes a layer quiet, which is
+    /// A wrong bus assignment does not fail, it makes a layer quiet, which is
     /// how the inject layer went inaudible. So the graph is asserted on.
     #[test]
     fn the_inject_layer_is_mixed_after_the_duck_and_the_beds_are_not() {
@@ -4313,7 +4282,7 @@ mod tests {
     }
 
     /// The headline is the one place the beds are meant to arrive, so the key
-    /// is held down there — and it is held down on a *copy* of the voice: the
+    /// is held down there, and it is held down on a *copy* of the voice: the
     /// voice that reaches the mix must be the one that was rendered, not a key
     /// with a level edit on it.
     #[test]
@@ -4331,7 +4300,7 @@ mod tests {
             "the voice is the copy nothing attenuated: {g}"
         );
         // A key taken as-is is the graph every chapter used to get, byte for
-        // byte — no split, no volume filter, nothing to explain.
+        // byte, no split, no volume filter, nothing to explain.
         let plain = layer_graph(2, false, sc, Some((7.4, 1.0)));
         assert!(!plain.contains("asplit"), "{plain}");
         assert!(!plain.contains("volume"), "{plain}");
@@ -4380,7 +4349,7 @@ mod tests {
     fn loop_copies_solves_for_the_window_and_refuses_a_single_play() {
         // A 6.86 s bed in a 7 s window: one more copy covers it.
         assert_eq!(loop_copies(7.0, 6.86, 0.25), Some(2));
-        // A window no longer than the clip is not a loop at all — this is the
+        // A window no longer than the clip is not a loop at all, this is the
         // path a bed with no `stop` takes, and it must stay a single play.
         assert_eq!(loop_copies(6.86, 6.86, 0.25), None);
         assert_eq!(loop_copies(3.0, 6.86, 0.25), None);
@@ -4425,7 +4394,7 @@ mod tests {
     ///
     /// `Sound::looped` defaults to `true` because the *effect* pool is mostly
     /// beds and the default is what makes a hand-written rule work. The inject
-    /// pool is the opposite — mostly one-shots — so the same default silently
+    /// pool is the opposite, mostly one-shots, so the same default silently
     /// turns an entry that forgot the key into a looping bed. The shipped pool
     /// states it everywhere, and this is what keeps that true: read the raw JSON
     /// rather than the parsed pool, because the parsed one cannot tell "absent"
@@ -4490,8 +4459,8 @@ mod tests {
     }
 
     /// A hold is silence *inserted* into the chapter, and inserting it makes
-    /// every later slot start later. Every layer — the effects, the music and
-    /// the injects themselves — is placed by reading `Slot::start`/`end`, so a
+    /// every later slot start later. Every layer, the effects, the music and
+    /// the injects themselves, is placed by reading `Slot::start`/`end`, so a
     /// clock that did not move puts them all on top of speech that has shifted
     /// out from under them. That is not a near miss: it is the difference
     /// between a blood spatter in the silence reserved for it and the same
@@ -4517,7 +4486,7 @@ mod tests {
             slots[1].start
         );
         assert!((slots[1].end - 3.3).abs() < 1e-9, "{:?}", slots[1]);
-        // And the slot's own duration is untouched — a hold is silence *after*
+        // And the slot's own duration is untouched, a hold is silence *after*
         // a line, never a change to the line.
         assert!((slots[1].end - slots[1].start - 0.9).abs() < 1e-9);
         // An overlap costs no time, so nothing moves.
