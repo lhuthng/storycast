@@ -4,8 +4,8 @@
 //! "an address + ssh credentials + a mirror to fill", so a cloud box is that
 //! same thing whose address came from `RunInstances` instead of a static IP.
 //! What AWS adds is a place to get addresses from, and the reason this module
-//! exists is that a launch needs a dozen decisions — region, type, subnet,
-//! security group, keypair, instance profile, disk, lifetime — that nobody
+//! exists is that a launch needs a dozen decisions, region, type, subnet,
+//! security group, keypair, instance profile, disk, lifetime, that nobody
 //! should have to retype per call.
 //!
 //! So: **one file, written once**, `.bm/aws.json`. Machine-global and ignored,
@@ -16,7 +16,7 @@
 //! that was already here: `.bm/profile` holds `{name, hash}`, every worker
 //! verifies that hash of `assets/` + `prompts/` at startup, and
 //! `.provision_stamp.json` decides whether a given box needs anything pushed.
-//! Assets reach a box by rsync from this machine — one path, with no second
+//! Assets reach a box by rsync from this machine, one path, with no second
 //! copy to keep in step and no bucket to create. Publishing the 668 MB of
 //! models as a release artifact a box fetches and verifies itself is designed
 //! in `docs/ARTIFACTS.md`; it is not built.
@@ -62,17 +62,16 @@ pub struct AwsConfig {
     ///
     /// **RAM is what actually decides it, measured on the target platform**
     /// (`m7i-flex.large`, linux/x86_64, release build, 2026-09-20): the sidecar
-    /// is **~2.85 GB resident as soon as the weights are loaded** (VmHWM
-    /// 2,918,708 kB) and **~2.88 GB after a dozen renders** — the load dominates
-    /// and renders add ~30 MB. So 1–2 GiB cannot run it, **4 GiB does not fit**
-    /// (~2.9 GB of sidecar plus the agent and the OS in ~3.9 GB usable), and
-    /// **8 GiB is the size to use**.
+    /// is **~2.85 GB resident as soon as the weights are loaded** and ~2.88 GB
+    /// after a dozen renders; renders add ~30 MB. So 1–2 GiB cannot run it,
+    /// **4 GiB does not fit** (~2.9 GB of sidecar plus the agent and the OS in
+    /// ~3.9 GB usable), and **8 GiB is the size to use**.
     ///
     /// Two traps: a macOS/arm64 build of the same binary idles at ~1.0 GB, so
     /// measuring on the wrong platform understates this by ~2.8×; and `models/`
     /// is 668 MB on disk, so sizing from `du` understates it by ~4×.
     ///
-    /// The type must also be eligible for the account's plan — a Free-plan
+    /// The type must also be eligible for the account's plan, a Free-plan
     /// account is refused the default outright, with `m7i-flex.large` (2 vCPU /
     /// 8 GiB) the right pick off that list. Nothing this code can call can read
     /// a plan.
@@ -80,32 +79,32 @@ pub struct AwsConfig {
     /// Root volume, GB. Models 668 MB, the profile 57 MB, plus the segments a
     /// chapter accumulates; 30 is comfortable and cheap.
     pub disk_gb: u32,
-    /// The subnet the boxes land in — and it must be one **the inductor can
+    /// The subnet the boxes land in, and it must be one **the inductor can
     /// reach**.
     ///
     /// The transport is inverted: the inductor dials the box on its task port,
     /// and nothing ever dials the inductor. So a box in a genuinely private
     /// subnet, with no public address and no tunnel, is one that can never be
-    /// driven — it will sit at `Offline` for ever while looking perfectly
+    /// driven, it will sit at `Offline` for ever while looking perfectly
     /// healthy from the console. A default-VPC subnet maps a public address on
     /// launch, which is why the default works and why this is easy to get
     /// wrong.
     pub subnet_id: String,
-    /// Security group. **Ingress** is what matters, on two ports — 22 for
-    /// provisioning and the task port for the work (see [`REQUIRED_INGRESS`]) —
+    /// Security group. **Ingress** is what matters, on two ports, 22 for
+    /// provisioning and the task port for the work (see [`REQUIRED_INGRESS`])
     /// and both must come from wherever the inductor runs. Egress stays open,
     /// but not to reach the inductor: it is for chapter URLs and the Gemini
     /// API.
     pub security_group_id: String,
     /// IAM instance profile **name**. Required by [`AwsConfig::missing`], because
-    /// every launch names one — a box started with no profile cannot assume the
+    /// every launch names one, a box started with no profile cannot assume the
     /// role the rest of the account expects. It needs no permissions of its own:
     /// assets arrive by rsync, not by a fetch the box authenticates.
     pub iam_instance_profile: String,
     /// Login on the box. `ubuntu` on the stock Ubuntu AMIs, `ec2-user` on AL.
     pub ssh_user: String,
     /// EC2 keypair **name** per region. The private half never leaves this
-    /// machine — see [`AwsConfig::key_file`].
+    /// machine, see [`AwsConfig::key_file`].
     pub keypairs: BTreeMap<String, String>,
     /// AMI per region, because an image is one region's copy.
     ///
@@ -113,9 +112,9 @@ pub struct AwsConfig {
     /// decides what actually runs on the account, so it is a value you can read
     /// and change rather than one that moves under you. `bm-inductor aws
     /// discover` resolves the current Ubuntu LTS once and writes it here, so
-    /// nobody has to hunt the AMI catalogue — and a value already present is
+    /// nobody has to hunt the AMI catalogue, and a value already present is
     /// left alone, with `--ami` the only thing that moves it. It must match
-    /// `ssh_user` — `ubuntu` on Ubuntu, `ec2-user` on Amazon Linux — and the
+    /// `ssh_user`, `ubuntu` on Ubuntu, `ec2-user` on Amazon Linux, and the
     /// two are checked together.
     pub images: BTreeMap<String, String>,
     /// Ask for spot capacity. Render and merge are both idempotent and the
@@ -156,7 +155,7 @@ impl Default for AwsConfig {
 }
 
 impl AwsConfig {
-    /// Read the pool definition from one file. A missing file is not an error —
+    /// Read the pool definition from one file. A missing file is not an error
     /// it means the pool has never been set up, which is a state
     /// [`Self::missing`] describes.
     pub fn load(path: &Path) -> Self {
@@ -168,17 +167,14 @@ impl AwsConfig {
     /// The effective pool: the local values over the tracked template over the
     /// compiled defaults.
     ///
-    /// Layered rather than either/or, because the two halves answer different
-    /// questions. The template ships the *shape* — which fields exist, what a
-    /// sensible instance type is, why spot is a good fit — and travels with the
-    /// repo. The local file holds the account-specific values, which are
-    /// nobody else's business and which git ignores. A field the local file
-    /// omits keeps the template's value, so a config written before a field
-    /// existed still picks it up instead of silently reverting to a compiled
-    /// default that the template had deliberately changed.
-    ///
-    /// Objects merge key by key (a local `keypairs` entry adds to the
-    /// template's rather than replacing it); everything else replaces.
+    /// Layered because the two halves answer different questions. The template
+    /// ships the *shape* (which fields exist, what a sensible instance type is,
+    /// why spot is a good fit) and travels with the repo; the local file holds
+    /// the account-specific values, which are nobody else's business and which
+    /// git ignores. A field the local file omits keeps the template's value,
+    /// so a config written before a field existed still picks it up. Objects
+    /// merge key by key (a local `keypairs` entry adds to the template's
+    /// rather than replacing it); everything else replaces.
     pub fn load_layered(root: &Path) -> Self {
         let mut doc = read_doc(&root.join(DEFAULT_FILE)).unwrap_or(serde_json::Value::Null);
         if let Some(local) = read_doc(&root.join(".bm/aws.json")) {
@@ -246,21 +242,21 @@ impl AwsConfig {
         }
         if self.keypair().is_none() {
             out.push(format!(
-                "no keypair for region {:?} — add it to `keypairs` (an EC2 keypair belongs to one region)",
+                "no keypair for region {:?}, add it to `keypairs` (an EC2 keypair belongs to one region)",
                 self.region
             ));
         }
         if self.image().is_none() {
             out.push(format!(
-                "no AMI for region {:?} — run `bm-inductor aws discover` to fill it in, or set `images` by hand",
+                "no AMI for region {:?}, run `bm-inductor aws discover` to fill it in, or set `images` by hand",
                 self.region
             ));
         }
         if self.max_workers == 0 {
-            out.push("max_workers is 0 — no launch can ever be within the cap".into());
+            out.push("max_workers is 0, no launch can ever be within the cap".into());
         }
         if self.ttl_hours == 0 {
-            out.push("ttl_hours is 0 — boxes would outlive their work by design".into());
+            out.push("ttl_hours is 0, boxes would outlive their work by design".into());
         }
         out
     }
@@ -294,7 +290,7 @@ fn read_doc(path: &Path) -> Option<serde_json::Value> {
 
 /// `over` wins, key by key; nested objects merge rather than replace.
 ///
-/// The `_note` keys the template carries for the human are just keys here —
+/// The `_note` keys the template carries for the human are just keys here
 /// serde drops what the struct does not name, so the explanation survives in
 /// the file the operator edits without ever reaching the code.
 fn merge(base: &mut serde_json::Value, over: serde_json::Value) {
@@ -333,7 +329,7 @@ pub fn describe_image_args(cfg: &AwsConfig, image_id: &str) -> Vec<String> {
 ///
 /// A constant rather than a "latest" query because the *result* is what gets
 /// stored: `aws discover` writes the resolved `ami-…` into `.bm/aws.json`, so
-/// nothing downstream depends on this staying current — only the one command
+/// nothing downstream depends on this staying current, only the one command
 /// that has to look something up does. Bump it when Canonical ships the next
 /// LTS; the AWS parameter path carries the version.
 pub const UBUNTU_LTS: &str = "26.04";
@@ -342,7 +338,7 @@ pub const UBUNTU_LTS: &str = "26.04";
 ///
 /// This is the one pool field that cannot be read off a console page without
 /// hunting through the AMI catalogue, and it is a field whose absence is a
-/// refusal — so it is the one worth a lookup. Read-only, one value.
+/// refusal, so it is the one worth a lookup. Read-only, one value.
 pub fn ubuntu_ami_args(region: &str) -> Vec<String> {
     vec![
         "ssm".into(),
@@ -383,7 +379,7 @@ pub fn default_subnet_args(region: &str) -> Vec<String> {
 /// The default security group of the default VPC.
 ///
 /// **It has no inbound rules**, so a box launched with it is unreachable until
-/// SSH is allowed — which is why the caller must say so rather than presenting
+/// SSH is allowed, which is why the caller must say so rather than presenting
 /// the value as a working answer.
 pub fn default_security_group_args(region: &str) -> Vec<String> {
     vec![
@@ -417,7 +413,7 @@ pub fn keypair_names_args(region: &str) -> Vec<String> {
     ]
 }
 
-/// One security group, as JSON — for checking what it actually admits.
+/// One security group, as JSON, for checking what it actually admits.
 pub fn describe_security_group_args(region: &str, group_id: &str) -> Vec<String> {
     vec![
         "ec2".into(),
@@ -435,8 +431,8 @@ pub fn describe_security_group_args(region: &str, group_id: &str) -> Vec<String>
 ///
 /// Two, and both are load-bearing:
 ///
-/// - **22** — provisioning pushes the mirror over ssh + rsync.
-/// - **the task port** — the work itself. The transport is inverted, so the
+/// - **22**, provisioning pushes the mirror over ssh + rsync.
+/// - **the task port**, the work itself. The transport is inverted, so the
 ///   inductor dials the box: `GET /status`, `POST /task`, `GET /unit`,
 ///   `POST /shutdown`.
 ///
@@ -449,21 +445,18 @@ pub const REQUIRED_INGRESS: &[u16] = &[22, bm_proto::DEFAULT_TASK_PORT];
 /// Whether a security group admits **`port` from an address**.
 ///
 /// The check exists because the failure it predicts is invisible until you are
-/// staring at a hung `ssh`, or at a machine that has never once been `Online`: a
-/// closed port does not refuse a connection, it swallows it. So `discover` says
-/// so while the group is being chosen.
+/// staring at a hung `ssh`, or at a machine that has never once been `Online`:
+/// a closed port does not refuse a connection, it swallows it. So `discover`
+/// says so while the group is being chosen.
 ///
-/// Deliberately narrow about what counts as admitting you:
-///
-/// - `IpProtocol == "-1"` (all traffic) counts, and so does a `tcp` rule whose
-///   port range spans `port`.
-/// - A source must be an **`IpRanges` / `Ipv6Ranges` / `PrefixListIds`** entry.
-///   A rule that names only `UserIdGroupPairs` does **not** count — that is
-///   group-to-group traffic, which is exactly what the default group has and
-///   exactly why the default group does not let you in.
-///
-/// `None` when the payload is not the shape we expect, so the caller can stay
-/// quiet instead of warning on a guess.
+/// Deliberately narrow about what counts as admitting you: `IpProtocol ==
+/// "-1"` (all traffic) counts, and so does a `tcp` rule whose port range spans
+/// `port`; a source must be an **`IpRanges` / `Ipv6Ranges` / `PrefixListIds`**
+/// entry, and a rule naming only `UserIdGroupPairs` does **not** count (that
+/// is group-to-group traffic, which is exactly what the default group has and
+/// exactly why the default group does not let you in). `None` when the payload
+/// is not the shape we expect, so the caller can stay quiet instead of
+/// warning on a guess.
 pub fn admits_port(json: &str, port: u16) -> Option<bool> {
     let doc: serde_json::Value = serde_json::from_str(json).ok()?;
     let groups = doc.get("SecurityGroups")?.as_array()?;
@@ -498,7 +491,7 @@ pub fn admits_port(json: &str, port: u16) -> Option<bool> {
     Some(false)
 }
 
-/// The instance profile names in the account. IAM is global — no `--region`.
+/// The instance profile names in the account. IAM is global, no `--region`.
 pub fn instance_profile_names_args() -> Vec<String> {
     vec![
         "iam".into(),
@@ -538,7 +531,7 @@ pub fn sole_name(names: &[String]) -> Option<&str> {
 ///
 /// Pure, and the whole point of that: `aws up --dry-run` prints this exact argv,
 /// so what will run on the account is reviewable before it costs anything. Every
-/// value comes from the config — nothing is invented here.
+/// value comes from the config, nothing is invented here.
 ///
 /// `tag_value` is written to the marker tag and is what `ls`/`down` read back;
 /// the caller passes the profile hash, so a box always says which build it was
@@ -578,7 +571,7 @@ pub fn run_instances_args(
         ),
         // The marker is the safety mechanism, not decoration: `down` filters on
         // it, so an untagged box is one this tool can never terminate by
-        // accident — including a stranger's.
+        // accident, including a stranger's.
         "--tag-specifications".into(),
         format!(
             "ResourceType=instance,Tags=[{{Key={},Value={}}},{{Key=Name,Value={}}}]",
@@ -587,7 +580,7 @@ pub fn run_instances_args(
         // Ask for a public address explicitly instead of trusting the subnet's
         // `MapPublicIpOnLaunch` default. That default is per-subnet and set once,
         // so relying on it makes reachability depend on a checkbox nobody
-        // re-reads — and the failure is silent, not loud: the box launches, the
+        // re-reads, and the failure is silent, not loud: the box launches, the
         // account is happy, and it can never be dialed because the transport is
         // inverted (the inductor dials the box, nothing dials the inductor).
         // `subnet_id`'s own doc already says the subnet must be one this machine
@@ -617,7 +610,7 @@ pub fn run_instances_args(
 ///
 /// Takes ids rather than a filter on purpose. `down` resolves the ids from the
 /// marker tag first and shows them, so the destructive step is always over a
-/// list someone could read — never a pattern that might match something else.
+/// list someone could read, never a pattern that might match something else.
 pub fn terminate_args(region: &str, ids: &[String]) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "ec2".into(),
@@ -640,13 +633,13 @@ pub struct AwsInstance {
     /// `pending` | `running` | `stopping` | `stopped`.
     pub state: String,
     pub az: String,
-    /// `InstanceLifecycle == "spot"` — worth showing, because a reclaimed spot
+    /// `InstanceLifecycle == "spot"`, worth showing, because a reclaimed spot
     /// box is a requeued task, not a lost one, and the operator should be able
     /// to tell which kind they are paying for.
     pub spot: bool,
     /// Public address, when the box has one. Empty until the box is running.
     pub public_ip: String,
-    /// Private address. The fallback when there is no public one — but a box
+    /// Private address. The fallback when there is no public one, but a box
     /// with **neither** is one the inductor cannot reach at all, and therefore
     /// one nothing can drive: it is the inductor that dials, so the address has
     /// to be reachable *from it*. See [`AwsConfig::subnet_id`].
@@ -660,7 +653,7 @@ pub struct AwsInstance {
 ///
 /// Pure, and defensive on every field: this parses another program's JSON, so a
 /// missing key is a normal event rather than a panic. `Reservations` is a list
-/// of lists — the nesting is the API's shape, not a mistake here.
+/// of lists, the nesting is the API's shape, not a mistake here.
 ///
 /// Returns `None` when the payload is not the shape we expect, so the caller can
 /// say "the CLI answered something else" instead of reporting an empty account,
@@ -672,7 +665,7 @@ pub fn parse_instances(json: &str, tag_key: &str) -> Option<Vec<AwsInstance>> {
     // `Reservations`; `run-instances` answers with a single top-level `Instances`
     // array and no reservations at all. Reading only the first is why `aws up`
     // reported "the launch answered without any instances" while a box was in
-    // fact running — the information was in the reply and the parser could not
+    // fact running, the information was in the reply and the parser could not
     // see it.
     let instances: Vec<&serde_json::Value> = match doc.get("Reservations") {
         Some(res) => res
@@ -730,7 +723,7 @@ pub fn parse_instances(json: &str, tag_key: &str) -> Option<Vec<AwsInstance>> {
 /// The EC2 instance id a machine's note carries, if any.
 ///
 /// An EC2 **public** address changes on every stop/start and every spot
-/// relaunch, so a registry keyed by address drifts out of date — but the
+/// relaunch, so a registry keyed by address drifts out of date, but the
 /// instance id is stable for the box's whole life. `machine_from_instance`
 /// stamps it into `Machine::note` (`"EC2 i-… (running)"`) and TUI state
 /// updates may overwrite the note later, so this reads it back from wherever
@@ -757,7 +750,7 @@ pub fn ec2_id_from_note(note: &str) -> Option<String> {
 /// A new note for a machine, keeping any EC2 instance id the old note carried.
 ///
 /// State updates rewrite the note freely ("provisioning (p)", the stale-verdict
-/// refutation…), but the id is the box's one stable identity — lose it and a
+/// refutation…), but the id is the box's one stable identity, lose it and a
 /// relaunched box can never be re-found by [`ec2_id_from_note`]. Carried at the
 /// tail, where the parser looks regardless of position.
 pub fn preserve_ec2_id(old_note: &str, new_note: &str) -> String {
@@ -772,7 +765,7 @@ pub fn preserve_ec2_id(old_note: &str, new_note: &str) -> String {
 ///
 /// It is a note rather than a machine field on purpose. A note is written by
 /// whoever last had an opinion, so a marker in one is cleared by the very next
-/// thing that has one — which is exactly the lifetime wanted here. The
+/// thing that has one, which is exactly the lifetime wanted here. The
 /// provision job rewrites the note to `provisioning (p)` the moment it takes the
 /// box, so an onboard trigger reading this fires **once** with no bookkeeping to
 /// keep in sync, no queue to drain, and no latch that can get stuck. A field
@@ -791,18 +784,15 @@ pub fn awaiting_onboard(note: &str) -> bool {
 /// reply names it.
 ///
 /// This is the join the whole cloud path turns on: `RunInstances` returns
-/// addresses, and the same job that reads that reply registers the box, so there
-/// is no correlation problem later — no instance id on [`Machine`], no address
-/// matching, no "which box is which". Nothing here remembers the EC2 id past
-/// the note; the registry keys machines by address, exactly as `:add` does.
+/// addresses, and the same job that reads that reply registers the box, so
+/// there is no correlation problem later. Nothing here remembers the EC2 id
+/// past the note; the registry keys machines by address, exactly as `:add`
+/// does.
 ///
-/// Public address when the box has one (the default VPC maps one on launch),
-/// private otherwise — a genuinely private box is one the inductor cannot dial
-/// anyway, so the private fallback is a best effort, not a promise. The key is
-/// the `.pem` [`discover`] imported, which is the file nothing wired up before
-/// this: the pool already knew where it lived, and every launch was one
-/// forgotten `--key` from an unreachable afternoon.
-///
+/// Public address when the box has one, private otherwise: a genuinely
+/// private box is one the inductor cannot dial anyway, so the private
+/// fallback is a best effort, not a promise. The key is the `.pem`
+/// [`discover`] imported, which is the file nothing wired up before this.
 /// Pure, so it is testable without a terminal or an account.
 ///
 /// [`discover`]: AwsConfig::key_file
@@ -810,8 +800,8 @@ pub fn machine_from_instance(i: &AwsInstance, cfg: &AwsConfig) -> Machine {
     // Two states, and the address decides which. `RunInstances` answers before
     // the network interface is handed an address, so most launches land in the
     // first branch: no address to dial, and therefore nothing to *call* the box
-    // yet. It is still registered — keyed by its instance id, which is the same
-    // string `relink` matches on — so there is a record for the account read to
+    // yet. It is still registered, keyed by its instance id, which is the same
+    // string `relink` matches on, so there is a record for the account read to
     // repair rather than a box that was never tracked at all. Keying it by the
     // empty `private_ip` (what the address fallback used to do) produced a
     // registry entry at an address nothing could dial and a pane that printed a
@@ -826,13 +816,13 @@ pub fn machine_from_instance(i: &AwsInstance, cfg: &AwsConfig) -> Machine {
     let mut m = Machine::new(&addr, &cfg.ssh_user, 22, Some(key), "worker");
     // Born initializing, never `Unknown`: the account has just created this box
     // and nobody has spoken to it, so "we know it is booting" is the honest
-    // state — and the one that carries a deadline. `Unknown` would read as
+    // state, and the one that carries a deadline. `Unknown` would read as
     // "never contacted", which is also true but says nothing about *why*, and
     // would let a box that never comes up sit there for ever.
     //
     // Both `pending` and `running` land here on purpose. EC2 calls an instance
     // `running` before sshd is listening, so a freshly launched box that says
-    // `running` is still not reachable — reachability is proven by the probe,
+    // `running` is still not reachable, reachability is proven by the probe,
     // not by the launch reply.
     m.set_state(if dialable {
         MachineState::Initializing
@@ -844,8 +834,8 @@ pub fn machine_from_instance(i: &AwsInstance, cfg: &AwsConfig) -> Machine {
 }
 
 /// The note for a box the account just created: the instance id (which is how
-/// `relink` keeps hold of it), EC2's own state word, and — once there is no
-/// address to dial — the private address as *information* rather than as
+/// `relink` keeps hold of it), EC2's own state word, and, once there is no
+/// address to dial, the private address as *information* rather than as
 /// something to connect to.
 ///
 /// The private address is kept for the operator whose inductor sits inside the
@@ -911,7 +901,7 @@ mod note_id_tests {
 /// One line per box, in the shape the Machines pane uses.
 ///
 /// The address is in here because `aws up` ends by telling you to
-/// `provision --addr <ip>` — an instruction that is not actionable from the
+/// `provision --addr <ip>`, an instruction that is not actionable from the
 /// output that gave it to you. Public if there is one, else private, else `-`
 /// (a box that has not reached `running` yet has no address at all).
 pub fn instance_line(i: &AwsInstance) -> String {
@@ -958,7 +948,7 @@ mod tests {
     fn a_launched_box_becomes_a_machine_with_its_address_and_the_pool_key() {
         // The join made at birth: the same reply that names the box carries the
         // address the registry will key it by, and the key is the `.pem`
-        // `discover` imported — not something the operator retypes.
+        // `discover` imported, not something the operator retypes.
         let cfg = configured();
         let reply = r#"{"Groups":[],"Instances":[
             {"InstanceId":"i-09def58f197d3092c","InstanceType":"t3.micro",
@@ -981,7 +971,7 @@ mod tests {
         assert_eq!(m.role, "worker");
         // Born *initializing*, never `Unknown`. The account has just created
         // this box and nobody has spoken to it, so "we know it is booting" is
-        // the honest state — and the only one carrying a deadline. Note the
+        // the honest state, and the only one carrying a deadline. Note the
         // reply says `pending` here, but the assertion is about the state we
         // assign, which is the same for `running`: EC2 calls a box running
         // before sshd is listening, so reachability is proven by the probe.
@@ -1002,7 +992,7 @@ mod tests {
         );
     }
 
-    /// The reply that arrives with no address — which is most of them, because
+    /// The reply that arrives with no address, which is most of them, because
     /// EC2 assigns one asynchronously after `RunInstances` returns.
     ///
     /// This used to fall back to the private address, producing a registry entry
@@ -1025,7 +1015,7 @@ mod tests {
         let m = machine_from_instance(&no_address, &cfg);
         assert_eq!(
             m.addr, "i-09def58f197d3092c",
-            "the handle is the instance id — stable for the box's whole life"
+            "the handle is the instance id, stable for the box's whole life"
         );
         assert_eq!(m.id, m.addr, "id stays the key, exactly as for `:add`");
         assert_eq!(m.state, MachineState::AwaitingIp);
@@ -1064,7 +1054,7 @@ mod tests {
     #[test]
     fn the_onboard_marker_is_readable_out_of_a_rewritten_note() {
         // It is a note marker rather than a field because the provision job
-        // clears it by rewriting the note — the lifetime wanted, with no second
+        // clears it by rewriting the note, the lifetime wanted, with no second
         // thing that has to remember to clear a flag.
         let note = format!("EC2 i-09def58f197d3092c (running) · {}", AWAITING_ONBOARD);
         assert!(awaiting_onboard(&note));
@@ -1113,7 +1103,7 @@ mod tests {
     fn a_keypair_belongs_to_one_region() {
         // The trap this prevents: a name that exists in one region is not a
         // keypair in another, so a single `keypair: String` works until the day
-        // someone changes region — then `RunInstances` says the key does not
+        // someone changes region, then `RunInstances` says the key does not
         // exist while it plainly does.
         let mut c = configured();
         assert_eq!(c.keypair(), Some("storycast"));
@@ -1176,7 +1166,7 @@ mod tests {
             "spot is on by default: {joined}"
         );
         // On-demand drops the market option entirely rather than asking for
-        // on-demand explicitly — the two are not the same request.
+        // on-demand explicitly, the two are not the same request.
         c.spot = false;
         assert!(!run_instances_args(&c, 1, "/dev/xvda", "h")
             .join(" ")
@@ -1268,7 +1258,7 @@ mod tests {
 
     #[test]
     fn ingress_is_read_off_the_group_rather_than_assumed() {
-        // The real shape of the default group in a live account — a
+        // The real shape of the default group in a live account, a
         // self-referencing all-traffic rule and nothing else. It does **not**
         // let anyone in from outside, which is why a box launched into it hangs
         // on ssh and is never driven. The regression test for that afternoon.
@@ -1283,7 +1273,7 @@ mod tests {
             );
         }
 
-        // A rule that admits an address, on the port it names — and *not* on the
+        // A rule that admits an address, on the port it names, and *not* on the
         // task port, which is the mistake this check exists to catch: the box
         // would launch, accept ssh, and never be driven.
         let ssh_only = r#"{"SecurityGroups":[{"IpPermissions":[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,
@@ -1372,7 +1362,7 @@ mod tests {
     #[test]
     fn a_pool_without_an_image_cannot_launch() {
         // The image decides what runs on the account, so a missing one is a
-        // refusal naming the fix — not a launch against some default that
+        // refusal naming the fix, not a launch against some default that
         // nobody chose.
         let mut c = configured();
         c.images.clear();
@@ -1389,7 +1379,7 @@ mod tests {
     #[test]
     fn a_run_instances_reply_is_not_an_empty_account() {
         // `run-instances` answers with a top-level `Instances` array and **no**
-        // `Reservations` — unlike `describe-instances`. Reading only the latter
+        // `Reservations`, unlike `describe-instances`. Reading only the latter
         // made `aws up` print "the launch answered without any instances" while
         // the box was running, which is how this was found on a live account.
         let reply = r#"{"Groups":[],"Instances":[
@@ -1405,7 +1395,7 @@ mod tests {
         assert_eq!(got[0].public_ip, "3.76.103.21");
         assert_eq!(got[0].private_ip, "172.31.19.210");
         assert_eq!(got[0].profile, "b20f7789f510");
-        // Neither shape is still `None` — not an empty account.
+        // Neither shape is still `None`, not an empty account.
         assert_eq!(
             parse_instances(r#"{"Groups":[],"OwnerId":"1"}"#, DEFAULT_TAG),
             None
@@ -1423,7 +1413,7 @@ mod tests {
             parse_instances(r#"{"Reservations":null}"#, DEFAULT_TAG),
             None
         );
-        // A well-formed empty account *is* an empty list — the distinction is
+        // A well-formed empty account *is* an empty list, the distinction is
         // the whole point.
         assert_eq!(
             parse_instances(r#"{"Reservations":[]}"#, DEFAULT_TAG),
@@ -1491,7 +1481,7 @@ mod tests {
     fn the_local_values_layer_over_the_tracked_template() {
         // The split that makes this shareable: the template travels with the
         // repo so a clone knows what to fill in, and the values stay personal.
-        // A field the local file omits keeps the template's value — otherwise a
+        // A field the local file omits keeps the template's value, otherwise a
         // local file that predates a field would silently revert to a compiled
         // default the template had deliberately changed.
         let dir = std::env::temp_dir().join(format!("bm-aws-layer-{}", std::process::id()));

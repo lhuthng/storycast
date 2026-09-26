@@ -23,7 +23,7 @@ pub(crate) struct BackgroundJob {
 
 /// Something only one job at a time may hold.
 ///
-/// Ordered so a job that names several can take them in a stable order — two
+/// Ordered so a job that names several can take them in a stable order, two
 /// jobs with overlapping sets then queue rather than deadlock. See
 /// [`Job::resources`] for which job names what.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -39,7 +39,7 @@ pub(crate) enum Res {
 }
 
 impl Res {
-    /// How the jobs screen names this resource. Short — it sits on one row.
+    /// How the jobs screen names this resource. Short, it sits on one row.
     pub(crate) fn label(&self) -> String {
         match self {
             Res::Command => "the command lane".into(),
@@ -63,7 +63,7 @@ pub(crate) enum WorkspaceReq {
 #[derive(Debug)]
 pub(crate) enum ProfileReq {
     List,
-    /// `unpack` — replaces the live `assets/` + `prompts/` trees.
+    /// `unpack`, replaces the live `assets/` + `prompts/` trees.
     Load(String),
     /// Bundle the live tree into `profiles/<name>.tar.zst`.
     Pack(String),
@@ -82,7 +82,7 @@ pub(crate) enum Job {
     ///
     /// `cancel` is the `B` start's flag when the catch-up dispatched this, and
     /// `None` for a `:prov` the operator asked for by hand. It gates the *last*
-    /// step — the worker launch — so an `X` that lands while a push is in
+    /// step, the worker launch, so an `X` that lands while a push is in
     /// flight cannot be followed by a fresh worker on a box the operator just
     /// stopped. It does not abort the push: that is one blocking rsync, and
     /// killing it mid-file is how a box ends up half-configured.
@@ -103,17 +103,15 @@ pub(crate) enum Job {
     /// `enqueue` is false for bare `B` (backend only) and true for the run
     /// screen's Enter (backend + job). `machines` is the registry snapshot at
     /// submit. Degraded start: the backend goes up first (seconds), then the
-    /// boxes that still need work are handed out **as their own jobs** — a
+    /// boxes that still need work are handed out **as their own jobs**, a
     /// failing box lands in Error, never vetoes the rest. `cancel` lets `X`
     /// stop the catch-up between boxes.
     ///
-    /// The catch-up is *not* run here. This job used to loop over every box
-    /// itself, so a job called "start backend" — which should take seconds —
-    /// held the cluster for as long as provisioning every machine took, and
-    /// everything else queued behind it. It now finishes as soon as the
-    /// inductor answers and emits [`Ev::CatchUp`]; the dashboard turns that
-    /// into one `Provision` per box, each visible, each cancellable, and all
-    /// of them in parallel.
+    /// The catch-up is *not* run here: a job called "start backend" used to
+    /// hold the cluster for as long as provisioning every machine took. It now
+    /// finishes as soon as the inductor answers and emits [`Ev::CatchUp`]; the
+    /// dashboard turns that into one `Provision` per box, each visible, each
+    /// cancellable, all parallel.
     StartBackend {
         layout: bm_core::Layout,
         api: String,
@@ -127,7 +125,7 @@ pub(crate) enum Job {
     },
     /// Stop everything: the local backend by PID file, strays by sweep, and
     /// every registered remote worker over ssh. `X` means the cluster is
-    /// quiet afterwards — not just this box.
+    /// quiet afterwards, not just this box.
     StopBackend {
         layout: bm_core::Layout,
         machines: Vec<Machine>,
@@ -164,7 +162,7 @@ pub(crate) enum Job {
     ///
     /// A job rather than a keypress handler because it is a hundred file opens
     /// (26 ms warm here, but unbounded on a cold or networked path) and because
-    /// it runs once per session — the result is cached, so the audition itself is
+    /// it runs once per session, the result is cached, so the audition itself is
     /// instant.
     LoadLines {
         layout: bm_core::Layout,
@@ -172,7 +170,7 @@ pub(crate) enum Job {
     /// Read the three sound-design registries, the scene map and every script,
     /// and work out what each pooled sound is still used for.
     ///
-    /// A job for the same reason as `LoadLines` — it is a hundred file opens —
+    /// A job for the same reason as `LoadLines`, it is a hundred file opens
     /// and one more: the removal guard is read off this data, so it is also
     /// re-run after every save rather than cached for the session.
     LoadSounds {
@@ -190,7 +188,7 @@ pub(crate) enum Job {
     },
     /// Synthesize one line on this machine: the disconnected form of
     /// `Op::PreviewVoice`. Same engine call the sidecar makes, so a fresh
-    /// voice auditions with no worker on — at the cost of loading the
+    /// voice auditions with no worker on, at the cost of loading the
     /// model here, which is why the connected path stays first.
     PreviewLocal {
         layout: bm_core::Layout,
@@ -199,7 +197,7 @@ pub(crate) enum Job {
     },
     /// List, switch or create a workspace. Switching moves the pointer the
     /// ledger, settings and data hang off, so it is refused while anything
-    /// reads them — see `cluster_busy`.
+    /// reads them, see `cluster_busy`.
     Workspace {
         layout: bm_core::Layout,
         api: String,
@@ -222,7 +220,7 @@ pub(crate) enum Job {
         http: reqwest::Client,
     },
     /// Save one machine's work policy: which stages it may run and in what
-    /// order. Small and quiet — the editor sends one after every change so the
+    /// order. Small and quiet, the editor sends one after every change so the
     /// panel never holds an unsaved decision.
     SaveTaskPolicy {
         api: String,
@@ -234,8 +232,8 @@ pub(crate) enum Job {
     ///
     /// Idempotent, not a toggle, and that is deliberate. The *dashboard* is what
     /// toggles, from the state it is showing; the request carries the value it
-    /// wants. A toggle would make a retry after a failed `POST` — or a double
-    /// keypress — land back where it started, which is the one outcome nobody
+    /// wants. A toggle would make a retry after a failed `POST`, or a double
+    /// keypress, land back where it started, which is the one outcome nobody
     /// can see.
     SetAccepting {
         api: String,
@@ -253,7 +251,7 @@ pub(crate) enum Job {
     /// operator would be a second implementation of all of that.
     ///
     /// The body carries the whole `DigestOutcome` rather than a path, because the
-    /// inductor may not share a filesystem with the dashboard — and because the
+    /// inductor may not share a filesystem with the dashboard, and because the
     /// script it holds is what every downstream machine is handed.
     ManualDigest {
         api: String,
@@ -262,7 +260,7 @@ pub(crate) enum Job {
         script: serde_json::Value,
         delta: serde_json::Value,
     },
-    /// Turn digest work off — or back on — across every machine.
+    /// Turn digest work off, or back on, across every machine.
     ///
     /// **Off snapshots each machine's whole policy, not just the digest flag**,
     /// because "on" has to mean *what that box had*, not *digest enabled*: a box
@@ -271,7 +269,7 @@ pub(crate) enum Job {
     /// is the entire reason this is a snapshot rather than a toggle.
     ///
     /// The snapshot is a **file**, so an inductor restart in between cannot
-    /// silently turn digest work back on with no way to restore it — which is the
+    /// silently turn digest work back on with no way to restore it, which is the
     /// failure a purely in-memory latch would have.
     DigestPolicy {
         api: String,
@@ -284,22 +282,22 @@ pub(crate) enum Job {
         restore: bool,
     },
     /// Re-point a box whose EC2 public IP drifted (stop/start, spot relaunch)
-    /// at the address it carries *now*. The instance id — stable for the box's
-    /// whole life — comes from the machine's note; the account read supplies
+    /// at the address it carries *now*. The instance id, stable for the box's
+    /// whole life, comes from the machine's note; the account read supplies
     /// the current address and the registry swap happens in the API, which
     /// also keeps the live inductor's map consistent.
     RelinkMachine {
         layout: bm_core::Layout,
         api: String,
         http: reqwest::Client,
-        /// The registry record as the operator selected it — its note carries
+        /// The registry record as the operator selected it, its note carries
         /// the EC2 instance id to match on, its name the handle to keep.
         machine: Machine,
     },
     /// Store the app's IAM user from the console's CSV, off the UI thread.
     ///
     /// The secret is never typed in the dashboard, so the CSV is the only
-    /// route offered — it carries both halves and the verify-then-write order
+    /// route offered, it carries both halves and the verify-then-write order
     /// is `aws_ops::login`, the same one the CLI runs.
     AwsLogin {
         root: std::path::PathBuf,
@@ -312,7 +310,7 @@ pub(crate) enum Job {
         args: crate::aws_ops::DiscoverArgs,
     },
     /// Launch boxes, stream the lines, then **link what came back** into the
-    /// registry — the join is made in the same job that reads the launch reply,
+    /// registry, the join is made in the same job that reads the launch reply,
     /// so no instance id ever has to be correlated to a machine later.
     AwsUp {
         root: std::path::PathBuf,
@@ -401,7 +399,7 @@ impl Job {
     /// "lifecycle", and a provision of box A queued behind one of box B.
     ///
     /// Only name a resource where there is a real conflict. A job that names
-    /// nothing conflicting is `Command` — the old command lane, which stays
+    /// nothing conflicting is `Command`, the old command lane, which stays
     /// serial among its own members on purpose (two model-loading previews at
     /// once is not a thing anyone asked for).
     pub(crate) fn resources(&self) -> Vec<Res> {
@@ -420,7 +418,7 @@ impl Job {
             | Job::AwsDiscover { .. } => vec![Res::Aws],
             // Read-only indexes: a roster GET, a hundred file opens. They
             // hold nothing any other job needs, so they name nothing and
-            // start on the next scan — never queued behind a five-minute
+            // start on the next scan, never queued behind a five-minute
             // provision or a slow op. Callers already guard against
             // dispatching them twice (`lines_loading`, `roster_loading`).
             Job::LoadRoster { .. } | Job::LoadLines { .. } | Job::LoadSounds { .. } => vec![],
@@ -430,8 +428,8 @@ impl Job {
 
     /// The one thing worth naming on the jobs screen, or `None`.
     ///
-    /// `Res::Command` is the default lane — true of most jobs and worth
-    /// nothing on a row — so it is filtered out. A job that shows a resource
+    /// `Res::Command` is the default lane, true of most jobs and worth
+    /// nothing on a row, so it is filtered out. A job that shows a resource
     /// is a job that can be *blocked*, and the row says by what: "queued ·
     /// needs box 10.0.0.5" is the answer to "why is this not running".
     pub(crate) fn resource_label(&self) -> Option<String> {
@@ -518,12 +516,12 @@ pub(crate) enum Ev {
     Log(LogLine),
     Roster(Result<Roster, String>),
     Done(DoneKind),
-    /// The inductor's answer to a manual digest report — the line `complete`
+    /// The inductor's answer to a manual digest report, the line `complete`
     /// returned, or why it never arrived.
     ///
     /// Carried back rather than assumed: the report can be refused (`unknown
     /// task`, or the row moving under it), and the operator is looking at a
-    /// screen that said "reporting it" — so the screen has to be able to say what
+    /// screen that said "reporting it", so the screen has to be able to say what
     /// happened, including "no".
     ManualDigest(Result<String, String>),
     /// The answer to a cluster-wide digest-policy change: what happened, or why
@@ -540,7 +538,7 @@ pub(crate) enum Ev {
         count: u32,
     },
     /// The boxes a `B` start still has to catch up, and the flag that can stop
-    /// it. The job does not provision them itself — it hands them to the
+    /// it. The job does not provision them itself, it hands them to the
     /// dashboard, which dispatches one `Provision` per box so each gets its own
     /// row on the jobs screen and its own resource to hold. `cancel` is the
     /// same flag the `B` press created, so `X` still stops the catch-up.
@@ -558,8 +556,8 @@ pub(crate) enum Ev {
     Lines(Result<std::collections::HashMap<String, Vec<String>>, String>),
     /// The sound-design pools, the scene map and each entry's usage.
     ///
-    /// Boxed because this is the only large variant — `SoundData` is ~512 bytes
-    /// against a 144-byte runner-up — and the channel is *unbounded*, so every
+    /// Boxed because this is the only large variant, `SoundData` is ~512 bytes
+    /// against a 144-byte runner-up, and the channel is *unbounded*, so every
     /// message pays for the largest variant. `JobStarted(u64)` is eight bytes of
     /// payload allocating a 512-byte node. A reload is rare and one allocation
     /// is nothing; a progress tick is neither.
@@ -570,7 +568,7 @@ pub(crate) enum Ev {
 }
 
 /// Bounded wait for a freshly spawned inductor to answer `/api/state`.
-/// True the moment it answers, false after `secs` — the caller reports and
+/// True the moment it answers, false after `secs`, the caller reports and
 /// quits instead of blocking a job (and the dashboard) forever.
 pub(crate) async fn wait_api_live(api: &str, secs: u64) -> bool {
     for _ in 0..secs.max(1) {
@@ -603,7 +601,7 @@ pub(crate) async fn set_machine_state(
     // Always write the ledger file as well: when the inductor is up the
     // TUI refreshes from the API, but the ledger is the only source
     // before the API starts or if the POST fails. It is the *workspace's*
-    // ledger — a box's state belongs to the book being run.
+    // ledger, a box's state belongs to the book being run.
     let path = layout.ledger();
     let mut doc: serde_json::Value = std::fs::read_to_string(&path)
         .ok()
@@ -642,19 +640,14 @@ pub(crate) fn op_job(app: &App, http: &reqwest::Client, req: OpRequest) -> Job {
 /// The verdict for a fetch that never got an answer, from the two facts that
 /// decide it.
 ///
-/// **Pure on purpose.** The only input that matters is whether the failure was a
-/// *refusal* (`reqwest::Error::is_connect`), and this is the one place that
-/// decides. It used to be three lines inside `fetch_state`'s `match`, which meant
-/// the only way to test the wording was to bind an ephemeral port, drop the
-/// listener and hope nothing else was handed the same port before the request —
-/// a race that failed once in six full-suite runs. Everything the verdict needs
-/// can be handed to it.
-///
-/// `detail` is deliberately dropped on the refusal branch: a refused connection
-/// is the normal cold start, so reqwest's prose for it is noise exactly where the
-/// remedy (`:B`) belongs. On any other failure the detail is kept — a timeout or
-/// a reset may be a *sick* inductor rather than an absent one, and telling those
-/// apart is why there are two branches at all.
+/// **Pure on purpose.** The only input that matters is whether the failure was
+/// a *refusal* (`reqwest::Error::is_connect`), and this is the one place that
+/// decides; the alternative was testing the wording against an ephemeral port
+/// race. `detail` is deliberately dropped on the refusal branch: a refused
+/// connection is the normal cold start, so reqwest's prose for it is noise
+/// exactly where the remedy (`:B`) belongs. On any other failure the detail
+/// is kept, a timeout or a reset may be a *sick* inductor rather than an
+/// absent one, and telling those apart is why there are two branches.
 pub(crate) fn unreachable_verdict(api: &str, refused: bool, detail: &str) -> String {
     if refused {
         format!("inductor is down at {api} — :B to start it")
@@ -666,7 +659,7 @@ pub(crate) fn unreachable_verdict(api: &str, refused: bool, detail: &str) -> Str
 /// Fetch `/api/state` once.
 ///
 /// Free-standing so the background poller can use it without holding the UI
-/// state — the whole point of the poller is that the drawing loop never waits
+/// state, the whole point of the poller is that the drawing loop never waits
 /// on this call.
 pub(crate) async fn fetch_state(
     http: &reqwest::Client,
@@ -698,7 +691,7 @@ fn send(tx: &tokio::sync::mpsc::UnboundedSender<Ev>, level: Level, text: String)
 ///
 /// The exception is a box we already knew was **booting** that never answered
 /// ssh. The probe learned nothing it did not already know, so calling it broken
-/// is the same misreading the `initializing` state exists to prevent — and
+/// is the same misreading the `initializing` state exists to prevent, and
 /// `:prov` a few seconds after `:up` is the most likely way to hit it. It stays
 /// `initializing`, and the boot deadline is what gives up.
 ///
@@ -757,7 +750,7 @@ fn push_label(secs: u64) -> String {
 /// The run's own `stop` wins: the pre-flight steps that fail before a step can
 /// log (`no TTS sidecar binary for …`, `no local profile loaded`) have no
 /// shared vocabulary, and a scanner that only knows "missing"/"not found"/
-/// "failed" silently reduced them to "provision INCOMPLETE" — which names no
+/// "failed" silently reduced them to "provision INCOMPLETE", which names no
 /// cause and answers a question the operator never asked. The log scan stays
 /// as the fallback for failures inside the step flow, where the useful line
 /// really is in the log: prefer the inner root cause ("rsync: command not
@@ -766,7 +759,7 @@ fn provision_stop_reason(stop: Option<&str>, lines: &[String]) -> String {
     if let Some(why) = stop.filter(|s| !s.trim().is_empty()) {
         return bm_core::util::head_chars(why, 160);
     }
-    /// A log line without its `[addr] ` prefix — the pane already shows the
+    /// A log line without its `[addr] ` prefix, the pane already shows the
     /// machine, and the address is the widest part of the note.
     fn body(l: &str) -> &str {
         match l.strip_prefix('[') {
@@ -798,7 +791,7 @@ pub(crate) async fn job_provision(
     let addr = machine.addr.clone();
     // Anchor for the launch line below: the push ahead is blocking and slow
     // on some boxes, so the worker starts minutes after faster boxes are
-    // already beating — the elapsed on that line is what says so.
+    // already beating, the elapsed on that line is what says so.
     let t0 = Instant::now();
     send(&tx, Level::Info, format!("[{addr}] provisioning machine…"));
     // Read before the run: the job stamps `provisioning` below, so the state on
@@ -857,15 +850,15 @@ pub(crate) async fn job_provision(
     match out {
         Ok(out) => {
             let ready = out.ready;
-            // Lines already streamed live above — `lines` stays for the
+            // Lines already streamed live above, `lines` stays for the
             // reason scan only, never re-sent.
             let fail_reason = provision_stop_reason(out.stop.as_deref(), &out.lines);
             if ready {
                 // `X` landed while this box was being pushed: the box is
                 // provisioned, but giving it a worker now would leave the
                 // cluster running after the stop the operator asked for. The
-                // push itself is not aborted — it is one blocking rsync, and
-                // killing it mid-file is how a box ends up half-configured —
+                // push itself is not aborted, it is one blocking rsync, and
+                // killing it mid-file is how a box ends up half-configured
                 // so the stop is honoured at the last point that matters.
                 if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
                     let note = "start cancelled (X) — provisioned, worker not launched";
@@ -958,7 +951,7 @@ pub(crate) async fn job_provision(
             } else if verdict_after_failed_provision(was_initializing, out.reachable)
                 == MachineState::Initializing
             {
-                // It never answered ssh, and we already knew it was booting —
+                // It never answered ssh, and we already knew it was booting
                 // so this is a wait, not a fault. Reporting `Error` here would
                 // call a box twenty seconds into its first boot broken, which
                 // is precisely the misreading `initializing` exists to stop.
@@ -967,8 +960,8 @@ pub(crate) async fn job_provision(
                 set_machine_state(&api, &layout, &addr, MachineState::Initializing, note).await;
                 send(&tx, Level::Info, format!("[{addr}] {note}"));
             } else {
-                // The note carries the actual failing step — a missing local
-                // build, python missing, an ssh abort — because a bare
+                // The note carries the actual failing step, a missing local
+                // build, python missing, an ssh abort, because a bare
                 // "INCOMPLETE" made the machine pane lie about what the box
                 // needs, and ":prov again" is the wrong advice for a failure
                 // that only a build on this machine can fix.
@@ -1105,10 +1098,10 @@ pub(crate) async fn job_start_backend(
 ) {
     // Degraded start: the backend goes up first (seconds), then each
     // box provisions in the background and joins as it becomes ready.
-    // A failing box lands in Error with its reason — it never vetoes
+    // A failing box lands in Error with its reason, it never vetoes
     // the rest. The catch-up is handed to the dashboard rather than run
     // here (see the hand-off at the end of this function), so the boxes
-    // provision **concurrently** — each one holds its own `Res::Box`,
+    // provision **concurrently**, each one holds its own `Res::Box`,
     // and `X` reaches them all through the shared `cancel` flag.
     if start_cancelled(&tx, &cancel) {
         return;
@@ -1139,7 +1132,7 @@ pub(crate) async fn job_start_backend(
     if has_remotes {
         // A running inductor bound to loopback (old start, hand start)
         // is deaf to exactly these boxes: restart it LAN-wide first.
-        // Workers ride through — they re-register on their own and
+        // Workers ride through, they re-register on their own and
         // their in-flight reports still count afterwards.
         let dark =
             crate::backend::lan_blackout(&targets, port, advertised_host(&layout).as_deref()).await;
@@ -1167,7 +1160,7 @@ pub(crate) async fn job_start_backend(
         }
     }
     // The analyzer was already saved to the settings file at submit,
-    // so a fresh backend picks it up — but a live one never re-reads
+    // so a fresh backend picks it up, but a live one never re-reads
     // it, hence the warning.
     if api_up {
         send(
@@ -1179,7 +1172,7 @@ pub(crate) async fn job_start_backend(
     // Inductor only: workers start per-box after that box provisions,
     // so an unready box never takes tasks it would fail. Spawning is
     // instant (the server boots in the background); the enqueue waits
-    // for the first live refresh (see Ev::BackendLive) — and only
+    // for the first live refresh (see Ev::BackendLive), and only
     // when asked: bare `B` brings the backend, nothing more.
     if start_cancelled(&tx, &cancel) {
         return;
@@ -1225,15 +1218,15 @@ pub(crate) async fn job_start_backend(
     //
     // This is where the inline catch-up loop used to be, and the difference is
     // the whole point of the change: the loop made one job hold the cluster for
-    // as long as provisioning every box took, so `start backend` — a press that
-    // should be seconds — showed minutes and every later job sat queued behind
+    // as long as provisioning every box took, so `start backend`, a press that
+    // should be seconds, showed minutes and every later job sat queued behind
     // it. Each box now gets its own `provision machine` row, all of them
     // running at once because they hold different boxes.
     //
     // A box already beating needs nothing: `online` is the state this path
     // exists to reach, and it is *working*. Re-provisioning it anyway is why
     // `B` on a healthy cluster took minutes, so it is skipped and said out
-    // loud — `p` is the deliberate re-provision.
+    // loud, `p` is the deliberate re-provision.
     let (todo, online) = split_catchup(targets, api_up, &resolve);
     for addr in &online {
         send(
@@ -1262,8 +1255,8 @@ pub(crate) async fn job_start_backend(
 /// Split a `B` start's boxes into catch-ups and skips.
 ///
 /// A box is skipped as "already online" only when the inductor was up at
-/// submit (`api_up`): with it down, the states are the last live poll's —
-/// frozen by `state_failed`, which keeps the rows — and trusting them skips
+/// submit (`api_up`): with it down, the states are the last live poll's
+/// frozen by `state_failed`, which keeps the rows, and trusting them skips
 /// every catch-up, so the first `:B` starts the inductor and no worker and
 /// only the second `:B` brings the boxes. A box that truly is beating costs
 /// one cheap "already running" check inside its provision; a box wrongly
@@ -1302,7 +1295,7 @@ pub(crate) async fn job_stop_backend(
     // to the app-wide default, like every other ssh flow.
     //
     // Graceful first: the shutdown op latches the inductor, whose next
-    // heartbeat answer (2s) tells every worker to exit on its own — no
+    // heartbeat answer (2s) tells every worker to exit on its own, no
     // ssh needed for the living. The sweep below stays as the fallback
     // for what cannot hear it: dead boxes, old agents, and the detached
     // TTS sidecar, which is nobody's child.
@@ -1371,8 +1364,8 @@ pub(crate) async fn job_drop_machine(
 }
 
 /// Persist one machine's work policy through the API, so the live inductor and
-/// the on-disk `machines.json` agree. Success is silent — the panel is the
-/// feedback — but a rejection is named, because a policy that did not stick is
+/// the on-disk `machines.json` agree. Success is silent, the panel is the
+/// feedback, but a rejection is named, because a policy that did not stick is
 /// a scheduling surprise later.
 pub(crate) async fn job_save_task_policy(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
@@ -1401,7 +1394,7 @@ pub(crate) async fn job_save_task_policy(
 /// Park a machine or wake it up, through the API so the live inductor and the
 /// on-disk `machines.json` agree.
 ///
-/// Success is silent — the pane is the feedback, and the `relaxed` state word
+/// Success is silent, the pane is the feedback, and the `relaxed` state word
 /// only appears once a poll has come back with it. A rejection is named, because
 /// a park that silently did not stick is a box that keeps taking work the
 /// operator believes it has stopped, which is worse than one that refuses
@@ -1483,7 +1476,7 @@ pub(crate) async fn job_digest_policy(
 /// Save every machine's policy, then write back a copy with digest disabled.
 ///
 /// The write-back goes through the same `/api/machines/policy` the policy editor
-/// uses, so there is one place a machine's policy is set — and the live inductor
+/// uses, so there is one place a machine's policy is set, and the live inductor
 /// updates its own copy of the registry rather than only the file.
 async fn digest_suspend(
     path: &std::path::Path,
@@ -1601,7 +1594,7 @@ pub(crate) async fn job_relink_machine(
     let old_addr = machine.addr.clone();
     // The machine the operator selected carries its identity in the note:
     // the EC2 instance id `machine_from_instance` stamped at launch. Without
-    // it there is nothing to match a relaunched box by — say so instead of
+    // it there is nothing to match a relaunched box by, say so instead of
     // guessing across the account.
     let Some(id) = bm_core::provision::ec2_id_from_note(&machine.note) else {
         send(
@@ -1676,7 +1669,7 @@ pub(crate) async fn job_relink_machine(
     }
     // The machine, re-born at its new address: same login, same key (the
     // pool's own .pem), same handle. The API's POST replaces the entry only
-    // if the address were equal — it is not — so the old entry is dropped
+    // if the address were equal, it is not, so the old entry is dropped
     // first and this is an add.
     let mut m = bm_core::provision::machine_from_instance(i, &cfg);
     m.name = if machine.name.is_empty() {
@@ -1905,7 +1898,7 @@ pub(crate) async fn job_load_lines(
     let _ = tx.send(Ev::Lines(res));
     // `dispatch` counts every job and only `Done` decrements, so a job that
     // reports its payload without one leaves the footer claiming a job is
-    // running for the rest of the session — and nothing else ever clears it.
+    // running for the rest of the session, and nothing else ever clears it.
     // Every arm of `run_job` owes exactly one of these.
     let _ = tx.send(Ev::Done(DoneKind::Other));
 }
@@ -1927,8 +1920,8 @@ pub(crate) async fn job_load_sounds(
 
 /// Serve one already-rendered segment without an inductor: the same lookup
 /// `Op::Segment` runs server-side, against this checkout's files. Reports
-/// through `DoneKind::Op` with the same shape, so the Done handler — line
-/// holding, playback, marker release — cannot tell the two paths apart.
+/// through `DoneKind::Op` with the same shape, so the Done handler, line
+/// holding, playback, marker release, cannot tell the two paths apart.
 pub(crate) async fn job_segment(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     layout: bm_core::Layout,
@@ -1949,7 +1942,7 @@ pub(crate) async fn job_segment(
             msg.push_str("; connect (:B) to synthesize instead");
             return Err(msg);
         }
-        // An exact line plays that sentence or misses honestly, like the op —
+        // An exact line plays that sentence or misses honestly, like the op
         // with the same fallback to one of hers that did render, so a
         // fresh swap (rendered chapter by chapter) still auditions.
         let want = text.trim();
@@ -2123,13 +2116,13 @@ pub(crate) async fn run_jobs_with<F, Fut>(
     // A job is queued only behind another job that holds something it needs.
     //
     // `pending` is scanned in arrival order, so the queue is still FIFO among
-    // jobs that *do* contend — the change is only that a job with nothing in
+    // jobs that *do* contend, the change is only that a job with nothing in
     // common with what is running never waits at all. `busy` is the set of
     // resources held right now; `done_rx` is how a running job gives them back.
     let mut pending: VecDeque<(Job, Vec<Res>)> = VecDeque::new();
     let mut busy: BTreeSet<Res> = BTreeSet::new();
     // Held by the scheduler as well, so a `recv` here never returns `None`
-    // while jobs are still running — the `None` case is unreachable, and the
+    // while jobs are still running, the `None` case is unreachable, and the
     // loop below never has to distinguish "no completions" from "all done".
     let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Res>>();
     let mut accepting = true;
@@ -2248,7 +2241,7 @@ where
 /// Two locks, the same two the offline voice swap takes: a running inductor
 /// owns the ledger and settings the switch would move out from under it, and a
 /// live local worker is mid-render against the `assets/` + `prompts/` a profile
-/// load would replace. Remote strays are the operator's responsibility — the
+/// load would replace. Remote strays are the operator's responsibility, the
 /// supported flow is `X` (which sweeps them) and then the switch.
 async fn cluster_busy(api: &str) -> Option<String> {
     if crate::backend::inductor_up(api).await {
@@ -2268,7 +2261,7 @@ async fn cluster_busy(api: &str) -> Option<String> {
 /// launcher runs in a blocking task with no access to them. Unset is the normal
 /// case: the launcher then asks the routing table which address reaches each
 /// box, which is right on a LAN. Set it when the workers are somewhere the
-/// routing table cannot describe — anything behind NAT, including a cloud box.
+/// routing table cannot describe, anything behind NAT, including a cloud box.
 fn advertised_host(layout: &bm_core::Layout) -> Option<String> {
     bm_core::config::Settings::load(&layout.settings())
         .advertised_host()
@@ -2278,7 +2271,7 @@ fn advertised_host(layout: &bm_core::Layout) -> Option<String> {
 /// List, switch or create a workspace.
 ///
 /// The work itself is [`crate::workspace_cmd`], the same function the CLI
-/// runs — one implementation, two presentations. Listing needs no lock (it
+/// runs, one implementation, two presentations. Listing needs no lock (it
 /// reads a pointer and a directory); switching and creating take both.
 pub(crate) async fn job_workspace(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
@@ -2319,7 +2312,7 @@ pub(crate) async fn job_workspace(
     }
     // Every arm owes exactly one Done; see `job_load_lines`. A successful
     // switch reports `Relayout` so the dashboard re-resolves before its next
-    // frame — a listing changed nothing.
+    // frame, a listing changed nothing.
     let _ = tx.send(Ev::Done(if switched {
         DoneKind::Relayout
     } else {
@@ -2331,7 +2324,7 @@ pub(crate) async fn job_workspace(
 ///
 /// Shell rather than Rust for the same reason ssh and ffmpeg are: tar + zstd +
 /// GitHub releases are the tools, and the script is the one place the bundle
-/// format lives. Its own output is the report — this streams it line by line
+/// format lives. Its own output is the report, this streams it line by line
 /// instead of re-deriving it.
 pub(crate) async fn job_profile(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
@@ -2418,7 +2411,7 @@ pub(crate) async fn job_profile(
 }
 
 /// One account listing, off the UI thread. Errors are returned as strings so
-/// the Cloud view can render the reason instead of an empty account — which is
+/// the Cloud view can render the reason instead of an empty account, which is
 /// the one wrong answer that costs money.
 async fn cloud_snapshot(
     root: &std::path::Path,
@@ -2454,7 +2447,7 @@ pub(crate) async fn job_aws_pool(
     let readable = res.is_ok();
     let _ = tx.send(Ev::Cloud(res));
     // Auto-relink: after a fresh account read, ask the inductor to reconcile
-    // the registry with the addresses the account carries now. Best-effort —
+    // the registry with the addresses the account carries now. Best-effort
     // a down inductor (or an offline TUI) simply skips it, and the repair lines
     // land in the events pane so the drift is never silent.
     if readable {
@@ -2516,7 +2509,7 @@ pub(crate) async fn job_aws_discover(
                 send(&tx, Level::Info, l);
             }
             // The pool definition just changed, so the Cloud view's header is
-            // stale — refresh it in the same job that wrote the file.
+            // stale, refresh it in the same job that wrote the file.
             let _ = tx.send(Ev::Cloud(cloud_snapshot(&root_for_pool).await));
         }
         Ok(Err(e)) => send(&tx, Level::Error, format!("aws discover: {e:#}")),
@@ -2554,7 +2547,7 @@ pub(crate) async fn job_aws_up(
     };
     // The join, made at birth: every returned instance becomes a registry entry,
     // carrying the pool's own key and login. A box the reply gave no address for
-    // is registered too, keyed by its instance id — see `machine_from_instance`.
+    // is registered too, keyed by its instance id, see `machine_from_instance`.
     // It used to be skipped with "has no address yet, :add it later", which is
     // the *normal* case (an address is assigned asynchronously) and left the
     // dashboard with nothing to show, nothing to repair, and no record that the
@@ -2776,7 +2769,7 @@ mod tests {
             format!("[10.0.0.1] {why}"),
         ];
         assert_eq!(provision_stop_reason(Some(why), &lines), why);
-        // The scan alone still cannot see it — the honest reason the field
+        // The scan alone still cannot see it, the honest reason the field
         // exists, pinned so nobody deletes the field and calls it a cleanup.
         assert_eq!(provision_stop_reason(None, &lines), "provision INCOMPLETE");
     }
