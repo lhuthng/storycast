@@ -91,14 +91,7 @@ struct TextOut {
 
 /// Raw little-endian f32, which is what the Python side writes with `.tofile()`.
 fn read_wav(path: &str) -> Result<Vec<f32>> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {path}"))?;
-    if bytes.len() % 4 != 0 {
-        bail!("{path} is {} bytes, not a whole number of f32", bytes.len());
-    }
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect())
+    bm_tts::f32le::read(std::path::Path::new(path))
 }
 
 fn main() -> Result<()> {
