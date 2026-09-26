@@ -17,9 +17,11 @@ pub use self::plan::{
 pub use self::renderplan::{
     reconcile, reconcile_with, take_file, take_key, PlanUpdate, RenderPlan, Take, PLAN_VERSION,
 };
-pub use self::wav::{read_wav, sample_rate_for, silent_wav, GEMINI_RATE, VIENEU_RATE};
+pub use self::wav::{
+    read_wav, sample_rate_for, silent_wav, wav_info, wav_seconds, GEMINI_RATE, VIENEU_RATE,
+};
 use self::wav::{write_wav, Wav};
-use crate::util::{atomic_write, head_chars};
+use crate::util::head_chars;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -443,12 +445,26 @@ pub fn publish(assembled: &Path, layout: &crate::Layout, n: u32) -> Result<PathB
 }
 
 /// Record a manifest line (JSONL) so every render is auditable, as before.
+///
+/// Appends instead of rewriting the file: a render loop calls this once per
+/// take, and a rewrite made the whole book's rendering quadratic in the number
+/// of takes. The one thing given up is atomicity of the last line: a crash
+/// mid-append can leave a torn line where a rewrite would have left the old
+/// file whole. Every consumer of this log reads it line by line, so a torn
+/// tail costs one record on a machine that just died, not a format change.
 pub fn manifest_append(path: &Path, record: &Value) -> Result<()> {
-    let mut line = serde_json::to_string(record)?;
-    line.push('\n');
-    let mut existing = std::fs::read_to_string(path).unwrap_or_default();
-    existing.push_str(&line);
-    atomic_write(path, &existing)
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let line = serde_json::to_string(record)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    writeln!(f, "{line}").with_context(|| format!("appending {}", path.display()))
 }
 
 #[cfg(test)]
