@@ -548,8 +548,14 @@ fn parse_progress_line(seg: &str) -> Option<(u64, u8, String)> {
     Some((bytes, pct, speed))
 }
 
-fn output_file() -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
+/// A temp file to hold one child's stdout or stderr, with the path to clean up.
+///
+/// On unix the file is created 0600 and unlinked immediately, so nothing is
+/// left on disk for anything else to read. Windows refuses to unlink a file
+/// with an open handle, so there the path survives until the caller is done
+/// with it; [`run_bounded_live`] removes it, and a push that dies first leaves
+/// one temp file behind rather than a handle nobody holds.
+fn output_file() -> std::io::Result<(std::fs::File, PathBuf)> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     for _ in 0..128 {
         let path = std::env::temp_dir().join(format!(
@@ -557,16 +563,18 @@ fn output_file() -> std::io::Result<std::fs::File> {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true).append(true).create_new(true);
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&path) {
             Ok(file) => {
+                #[cfg(unix)]
                 std::fs::remove_file(&path)?;
-                return Ok(file);
+                return Ok((file, path));
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
@@ -599,9 +607,11 @@ fn run_bounded_live(
     transport: &str,
     mut watch: OutputWatch<'_>,
 ) -> Result<(i32, String, String)> {
-    use std::os::unix::fs::FileExt;
-    let stdout = output_file().with_context(|| format!("creating stdout for {transport}"))?;
-    let stderr = output_file().with_context(|| format!("creating stderr for {transport}"))?;
+    use std::io::{Read, Seek};
+    let (stdout, stdout_path) =
+        output_file().with_context(|| format!("creating stdout for {transport}"))?;
+    let (stderr, stderr_path) =
+        output_file().with_context(|| format!("creating stderr for {transport}"))?;
     let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(
@@ -617,16 +627,22 @@ fn run_bounded_live(
         .spawn()
         .with_context(|| format!("spawning {transport}"))?;
     // The read closure is defined before the loop so the watcher can reuse
-    // it: output files only grow, and a 50 ms `read_exact_at` over megabytes
+    // it: output files only grow, and a 50 ms positional read over megabytes
     // every poll would cost more than the rsync it watches.
+    //
+    // It reads through a clone rather than the file itself, because the
+    // child's handle owns the write cursor and a shared one would drag it
+    // around; the clone has a cursor of its own to seek back to 0.
     let read = |file: &std::fs::File| -> std::io::Result<String> {
+        let mut handle = file.try_clone()?;
         let mut bytes = vec![
             0;
-            file.metadata()?.len().try_into().map_err(|_| {
+            handle.metadata()?.len().try_into().map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "output too large")
             })?
         ];
-        file.read_exact_at(&mut bytes, 0)?;
+        handle.seek(std::io::SeekFrom::Start(0))?;
+        handle.read_exact(&mut bytes)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
@@ -660,11 +676,16 @@ fn run_bounded_live(
             }
         }
     };
-    Ok((
+    let out = (
         status.code().unwrap_or(255),
         read(&stdout).with_context(|| format!("reading stdout from {transport}"))?,
         read(&stderr).with_context(|| format!("reading stderr from {transport}"))?,
-    ))
+    );
+    // A no-op on unix, where `output_file` already unlinked both. Best effort:
+    // a leftover temp file must not fail a push that otherwise worked.
+    let _ = std::fs::remove_file(&stdout_path);
+    let _ = std::fs::remove_file(&stderr_path);
+    Ok(out)
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {

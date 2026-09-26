@@ -58,6 +58,10 @@ __pycache__/
 rust/target/
 **/target/
 
+# Release staging: what the `Stage the binaries` step of .github/workflows
+# collects before it archives. Only ever produced by running those steps.
+rust/dist/
+
 # The sea-g2p phoneme dictionary: 60 MB, and byte-identical to upstream at the
 # pinned commit (hash in rust/vendor/sea-g2p/VENDORED.md). It is a runtime
 # artifact the bake step fetches, not source — committing it would put 60 MB of
