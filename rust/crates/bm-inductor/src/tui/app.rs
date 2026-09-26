@@ -33,15 +33,32 @@ pub(crate) enum Panel {
 }
 
 impl Panel {
-    pub(crate) fn next(self) -> Self {
-        const PANELS: [Panel; 4] = [
+    /// The next pane in the focus cycle, skipping the Workers pane when the
+    /// Machines pane is showing the rack.
+    ///
+    /// The rack *is* the Workers pane in that mode — every box is drawn with the
+    /// worker that is on it — so focusing a pane that is not on screen would put
+    /// the bright border somewhere invisible and leave the operator pressing `f`
+    /// to escape from nowhere.
+    pub(crate) fn next_visible(self, rack: bool) -> Self {
+        const ALL: [Panel; 4] = [
             Panel::Machines,
             Panel::Workers,
             Panel::Events,
             Panel::Footer,
         ];
-        let i = PANELS.iter().position(|p| *p == self).unwrap_or(0);
-        PANELS[(i + 1) % PANELS.len()]
+        let panels: &[Panel] = if rack {
+            &[Panel::Machines, Panel::Events, Panel::Footer]
+        } else {
+            &ALL
+        };
+        let i = panels.iter().position(|p| *p == self).unwrap_or(0);
+        // Starting from an unknown panel (Workers, when the rack took it away)
+        // lands on the first, which is the rack itself.
+        if i == 0 && self != panels[0] {
+            return panels[0];
+        }
+        panels[(i + 1) % panels.len()]
     }
 
     pub(crate) fn label(self) -> &'static str {
@@ -122,6 +139,22 @@ pub(crate) struct App {
     /// Shared HTTP client for the inductor API.
     pub(crate) http: reqwest::Client,
     pub(crate) machines: Vec<Machine>,
+    /// Draw the Machines pane as a hub-and-spoke picture instead of the table.
+    ///
+    /// A view preference, not state: it changes nothing about the cluster and is
+    /// deliberately not persisted, so a session that opened the graph does not
+    /// hand the next one a pane nobody asked for. `g` toggles it, and the table
+    /// stays the complete list — the graph is the glance.
+    pub(crate) machines_graph: bool,
+    /// The Machines rack's window: which band of servers it starts at, and how
+    /// many columns wide a band is.
+    ///
+    /// Both are published by the drawer, not set by the keys — the keys only
+    /// move the cursor. The width is read back by `↑`/`↓`, which have to move a
+    /// whole *row of the rack* and cannot know its width from where they run;
+    /// the same bargain the log's PageUp makes with `events_rows`.
+    pub(crate) graph_band: usize,
+    pub(crate) graph_cols: usize,
     pub(crate) beats: Vec<Heartbeat>,
     pub(crate) tasks: Vec<Task>,
     pub(crate) counts: serde_json::Value,
@@ -311,6 +344,9 @@ impl App {
             pending_enqueue: None,
             backend_start_outstanding: false,
             start_cancel: None,
+            machines_graph: false,
+            graph_band: 0,
+            graph_cols: 1,
             pending_catchup: None,
             pending_onboard: Vec::new(),
             onboarded: std::collections::HashSet::new(),

@@ -4715,7 +4715,7 @@ fn sound_app(root: &std::path::Path) -> App {
 fn the_sound_editor_marks_remove_unavailable_where_it_is() {
     let (_d, root) = sound_layout("render");
     let mut app = sound_app(&root);
-    let text = render_text(&mut app, 120, 40);
+    let text = render_text(&mut app, 120, 60);
     // The three tabs, with their sizes.
     assert!(text.contains("effects 11"), "tabs missing:\n{text}");
     assert!(text.contains("music 9"), "{text}");
@@ -4790,7 +4790,7 @@ fn a_missing_clip_is_called_out_before_the_chapter_is_run() {
         cursor: at,
         scroll: 0,
     });
-    let text = render_text(&mut app, 120, 40);
+    let text = render_text(&mut app, 120, 60);
     assert!(text.contains("1 clip(s) missing"), "{text}");
     assert!(text.contains("MISSING CLIP: effects/rain-1.mp3"), "{text}");
 }
@@ -4813,7 +4813,7 @@ async fn the_command_line_opens_the_editor_and_loads_the_pools() {
         );
     }
     // And it is a `:` command only — no single key reaches it.
-    let text = render_text(&mut app, 120, 40);
+    let text = render_text(&mut app, 120, 60);
     assert!(text.contains("loading the three pools"), "{text}");
     let _ = job_rx.try_recv();
 }
@@ -5119,7 +5119,7 @@ fn the_editor_says_why_it_shows_nothing_rather_than_showing_an_empty_pool() {
     let mut app = App::new("http://unused");
     app.sound_error = Some("no assets/ — the clip pools live beside the scene map".into());
     app.screen = Screen::Sound(SoundView::new());
-    let text = render_text(&mut app, 120, 40);
+    let text = render_text(&mut app, 120, 60);
     assert!(text.contains("could not be read"), "{text}");
     assert!(text.contains("no assets/"), "{text}");
     assert!(
@@ -6185,6 +6185,319 @@ fn a_parked_machine_reads_relaxed_but_a_fault_still_outranks_it() {
         text.contains("○ relaxed"),
         "parked reads at a glance, hollow dot and all:\n{text}"
     );
+}
+
+#[tokio::test]
+async fn g_toggles_the_machines_pane_between_the_table_and_the_graph() {
+    let http = reqwest::Client::new();
+    let (job_tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.machines = vec![named_machine("52.2.2.2", "box-1")];
+
+    // The table is the default, and it says the key that leaves it — the pane
+    // advertises the toggle rather than the help screen being the only way in.
+    let table = render_text(&mut app, 140, 44);
+    assert!(
+        table.contains("Machines · g graph"),
+        "the pane must name its own toggle:\n{table}"
+    );
+    assert!(
+        table.contains("policy") && table.contains("seen"),
+        "the table's columns are what the default shows:\n{table}"
+    );
+
+    handle_key(&mut app, key(KeyCode::Char('g')), &http, &job_tx).await;
+    assert!(app.machines_graph, "g turns the picture on");
+    let graph = render_text(&mut app, 140, 44);
+    assert!(
+        graph.contains("inductor"),
+        "the hub is the inductor, named:\n{graph}"
+    );
+    assert!(graph.contains("box-1"), "the box is a node:\n{graph}");
+    // The picture is drawn, not tabulated: a bus out of the console to every box,
+    // and the box itself as art. Neither glyph appears in the table.
+    for glyph in ["└", "┬", "|[_]|"] {
+        assert!(
+            graph.contains(glyph),
+            "`{glyph}` is missing — the rack is not drawn:\n{graph}"
+        );
+    }
+    // Lean by design: the state word and the policy column are one `g` away. The
+    // footer names them too, so the check is scoped to the Machines pane itself.
+    let pane = graph
+        .split_once('╭')
+        .and_then(|(_, r)| r.split_once('╮'))
+        .map(|(body, _)| body.to_string())
+        .unwrap_or_default();
+    assert!(
+        !pane.contains("workers") && !pane.contains("policy"),
+        "the graph is not the table with a different shape:\n{pane}"
+    );
+
+    // And back, with the state kept — a view preference, not a reset.
+    handle_key(&mut app, key(KeyCode::Char('g')), &http, &job_tx).await;
+    assert!(!app.machines_graph);
+    assert!(render_text(&mut app, 140, 44).contains("policy"));
+}
+
+#[test]
+fn the_graph_marks_are_distinct_and_group_the_coming_up_states() {
+    use super::model::graph_mark;
+    use bm_proto::MachineState;
+    // The graph spends one character on the verdict, so the characters have to
+    // carry it. Colour is the fast path, not the only one: a mono palette and a
+    // colour-blind read still tell the five families apart, which is the same
+    // promise the table's `state` column keeps by spelling the word out.
+    let mark = |state: MachineState, relaxed: bool| {
+        let mut m = named_machine("52.2.2.2", "box-1");
+        m.set_state(state);
+        m.accepting_work = !relaxed;
+        graph_mark(&m)
+    };
+    let families = [
+        mark(MachineState::Online, false),
+        mark(MachineState::Initializing, false),
+        mark(MachineState::Online, true),
+        mark(MachineState::Error, false),
+        mark(MachineState::Unknown, false),
+    ];
+    let distinct: std::collections::BTreeSet<_> = families.iter().collect();
+    assert_eq!(distinct.len(), 5, "a family shares a glyph: {families:?}");
+    // The three states that mean `on its way up` share one mark on purpose: the
+    // graph says *coming up*, and which of the three it is is the table's job.
+    for s in [
+        MachineState::AwaitingIp,
+        MachineState::Initializing,
+        MachineState::Probing,
+    ] {
+        assert_eq!(mark(s, false), families[1], "{s:?} is not its own family");
+    }
+    // A fault outranks a park here as in the table, and a never-contacted box is
+    // not a parked one.
+    assert_eq!(mark(MachineState::Error, true), families[3]);
+    assert_eq!(mark(MachineState::Offline, true), families[3]);
+    assert_eq!(mark(MachineState::Unknown, true), families[2]);
+}
+
+#[test]
+fn the_graph_draws_a_parked_box_hollow_and_says_what_it_is_doing() {
+    let mut app = App::new("http://127.0.0.1:8901");
+    let mut parked = named_machine("52.2.2.2", "box-1");
+    parked.set_state(MachineState::Online);
+    parked.accepting_work = false;
+    app.machines = vec![parked];
+    app.machines_graph = true;
+    let text = render_text(&mut app, 140, 44);
+    assert!(
+        text.contains("○ box-1"),
+        "a parked node is the hollow mark beside its name:\n{text}"
+    );
+    assert!(
+        text.contains('—'),
+        "no live worker reads as a dash, not as idle:\n{text}"
+    );
+}
+
+#[test]
+fn the_graph_says_how_many_boxes_it_did_not_fit() {
+    // A truncated picture with no notice is the failure mode that matters: the
+    // operator counts the nodes on screen and nothing tells them the cluster is
+    // bigger. The window ends in a count, and the arrows that move it.
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.machines = (0..30)
+        .map(|i| named_machine(&format!("52.2.2.{i}"), &format!("box-{i}")))
+        .collect();
+    app.machines_graph = true;
+    let text = render_text(&mut app, 100, 44);
+    assert!(
+        text.contains("more —"),
+        "what did not fit must be counted, not dropped:\n{text}"
+    );
+    assert!(text.contains('←'), "and the keys that reach it:\n{text}");
+    // And the picture still draws its window rather than panicking on the boxes
+    // it cannot reach. How many that is depends on the pane's width, so the
+    // exact boundary is held by the plan's own tests; what matters here is that
+    // the rack is drawn and the first box is in it.
+    assert!(text.contains("box-0"), "{text}");
+    assert!(!text.contains("box-29"), "the window stops short:\n{text}");
+}
+
+#[test]
+fn a_rack_node_says_who_is_working_on_what_and_takes_the_stage_colour() {
+    // The rack absorbs the Workers pane: the animal the box's worker reports,
+    // and the task with its chapter. One `machine_alias` and one `node_stage`
+    // feed both, so the rack and the Workers pane cannot call the same box two
+    // things or colour it two ways.
+    use super::model::{machine_alias, node_stage};
+    use super::style::machine_tint;
+    let machines = vec![named_machine("52.2.2.2", "box-1")];
+    let now = bm_proto::now_secs();
+    let mut b = beat("thang-w", "52.2.2.2", 2, "marmot");
+    b.stage = Some(Stage::Digest);
+    b.task_id = Some("t1".into());
+    b.chapter = Some(12);
+    b.progress = 0.5;
+    let beats = vec![b];
+
+    assert_eq!(
+        node_stage(&machines, &beats, "52.2.2.2", now),
+        Some("digest")
+    );
+    assert_eq!(machine_alias(&machines, &beats, "52.2.2.2", now), "marmot");
+    assert_eq!(
+        machine_tint("online", Some("digest")),
+        stage_color("digest"),
+        "the art wears the stage's colour, not a second palette"
+    );
+    // Idle and never-contacted are different answers and different greys: a box
+    // up with nothing to do is the cluster working; one nobody has reached is
+    // the thing being hunted.
+    assert_ne!(machine_tint("online", None), machine_tint("unknown", None));
+    // A fault outranks the stage, exactly as it does the table's state column.
+    assert_eq!(machine_tint("error", Some("render")), Color::Red);
+    assert_eq!(machine_tint("offline", None), Color::Red);
+
+    // And it all reaches the pane.
+    let mut app = App::new("http://127.0.0.1:8901");
+    let mut m = named_machine("52.2.2.2", "box-1");
+    m.set_state(MachineState::Online);
+    app.machines = vec![m];
+    app.beats = beats;
+    app.machines_graph = true;
+    let text = render_text(&mut app, 120, 44);
+    assert!(
+        text.contains("● marmot"),
+        "the animal, not the handle:\n{text}"
+    );
+    assert!(
+        text.contains("digest 12 50%"),
+        "the task and its chapter, with the progress:\n{text}"
+    );
+}
+
+#[tokio::test]
+async fn up_and_down_walk_a_whole_row_of_the_rack() {
+    let http = reqwest::Client::new();
+    let (job_tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    // More boxes than the pane has rows for, so the window has somewhere to go.
+    app.machines = (0..40)
+        .map(|i| named_machine(&format!("52.2.2.{i}"), &format!("box-{i}")))
+        .collect();
+    app.machines_graph = true;
+    // The drawer publishes the band's width; a key handler cannot know it.
+    let _ = render_text(&mut app, 120, 44);
+    let cols = app.graph_cols;
+    assert!(
+        cols > 1,
+        "a rack this wide has a row of boxes in it: {cols}"
+    );
+
+    handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
+    assert_eq!(app.selected, cols, "one row of the rack, not one box");
+    handle_key(&mut app, key(KeyCode::Right), &http, &job_tx).await;
+    assert_eq!(app.selected, cols + 1, "and one box across");
+    handle_key(&mut app, key(KeyCode::Up), &http, &job_tx).await;
+    assert_eq!(app.selected, 1);
+    let back = render_text(&mut app, 120, 44);
+    assert!(back.contains("box-1"), "{back}");
+
+    // The window is the drawer's: it follows the cursor down a band when the
+    // cursor would otherwise be off screen, and stays put when it would not.
+    // Three rows down out of a two-row page is the first press that must move it.
+    let bands = app.graph_band;
+    assert_eq!(bands, 0, "the first page");
+    for _ in 0..8 {
+        handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
+    }
+    let scrolled = render_text(&mut app, 120, 44);
+    assert!(app.graph_band > 0, "the rack scrolled: {}", app.graph_band);
+    assert!(
+        scrolled.contains(&format!("box-{}", app.selected)),
+        "the box the cursor is on is on screen:\n{scrolled}"
+    );
+}
+
+#[test]
+fn the_rack_replaces_the_workers_pane_rather_than_sitting_above_it() {
+    // Every box in the rack is drawn with the worker standing on it — the same
+    // animal name, the same task, the same chapter. A second list of the same
+    // facts underneath is the pane arguing with itself, and it costs the rows
+    // the rack wanted most. So in rack mode the Workers pane is not drawn and
+    // its rows go to the rack and the log.
+    let mut app = stats_app();
+    let table = render_text(&mut app, 140, 44);
+    assert!(table.contains("Workers"), "the table mode keeps the list");
+
+    app.machines_graph = true;
+    let rack = render_text(&mut app, 140, 44);
+    assert!(
+        !rack.contains("╭Workers"),
+        "the Workers pane must be gone, not just its header:\n{rack}"
+    );
+    // And the focus cycle must not park the bright border on a pane that is not
+    // on screen — `f` would then have nowhere to go but back.
+    assert_eq!(
+        crate::tui::app::Panel::Workers.next_visible(true),
+        crate::tui::app::Panel::Machines,
+        "an unfocusable pane is skipped"
+    );
+    assert_eq!(
+        crate::tui::app::Panel::Machines.next_visible(true),
+        crate::tui::app::Panel::Events,
+        "and the cycle carries on to the next one that is there"
+    );
+    assert_eq!(
+        crate::tui::app::Panel::Machines.next_visible(false),
+        crate::tui::app::Panel::Workers,
+        "in table mode every pane is still in the cycle"
+    );
+}
+
+#[tokio::test]
+async fn the_arrows_walk_the_rack_and_the_console_stays_put() {
+    let http = reqwest::Client::new();
+    let (job_tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.machines = (0..12)
+        .map(|i| named_machine(&format!("52.2.2.{i}"), &format!("box-{i}")))
+        .collect();
+    app.machines_graph = true;
+    let first = render_text(&mut app, 100, 44);
+    assert!(first.contains("box-0"), "{first}");
+
+    // Right twice: the window moves with the cursor, and the console does not —
+    // it is anchored at the left, so a wide terminal cannot slide it into empty
+    // space and leave the boxes to slide past it.
+    for _ in 0..2 {
+        handle_key(&mut app, key(KeyCode::Right), &http, &job_tx).await;
+    }
+    assert_eq!(app.selected, 2, "the arrows move the cursor along the rack");
+    let scrolled = render_text(&mut app, 100, 44);
+    assert!(
+        scrolled.contains("inductor"),
+        "the console is still there:\n{scrolled}"
+    );
+
+    // And on: the last box is reachable, and the window cannot walk past it.
+    for _ in 0..40 {
+        handle_key(&mut app, key(KeyCode::Right), &http, &job_tx).await;
+    }
+    assert_eq!(app.selected, 11, "the cursor stops at the last box");
+    let far = render_text(&mut app, 100, 44);
+    assert!(far.contains("box-11"), "the last box is on screen:\n{far}");
+    // And back off the left end.
+    for _ in 0..40 {
+        handle_key(&mut app, key(KeyCode::Left), &http, &job_tx).await;
+    }
+    assert_eq!(app.selected, 0);
+    assert!(render_text(&mut app, 100, 44).contains("box-0"));
+
+    // The arrows are the graph's: with the table up they do nothing, rather
+    // than walking a list sideways that has no sideways.
+    handle_key(&mut app, key(KeyCode::Char('g')), &http, &job_tx).await;
+    handle_key(&mut app, key(KeyCode::Right), &http, &job_tx).await;
+    assert_eq!(app.selected, 0, "the table's cursor moves down, not across");
 }
 
 #[test]

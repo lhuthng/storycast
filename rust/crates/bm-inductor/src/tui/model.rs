@@ -1,5 +1,8 @@
 //! Pure selection: filters, cast rows, task queries. No widgets, no keys.
-use crate::tui::{app::App, style::style_of};
+use crate::tui::{
+    app::App,
+    style::{style_of, worker_alias},
+};
 use bm_proto::{Heartbeat, Machine, MachineState, Roster, Stage, Task, TaskState, VoiceInfo};
 use ratatui::{
     style::{Color, Style},
@@ -467,6 +470,143 @@ pub(crate) fn work_label(m: &Machine) -> String {
         MachineState::Offline | MachineState::Error => m.state.as_str().to_string(),
         _ if m.relaxed() => "relaxed".to_string(),
         _ => m.state.as_str().to_string(),
+    }
+}
+
+/// The one-character state mark the Machines **graph** puts on a box.
+///
+/// The graph is lean by design — a word per node costs the row the node needs to
+/// say what it is doing — so the state travels as a mark and a colour. That is
+/// only honest because the marks are distinct without the colour: `●` working,
+/// `◐` on its way up, `○` parked, `✗` broken, `?` never contacted. Mono mode and
+/// a colour-blind read still tell those five apart, which is the rule the table's
+/// `state` column keeps by spelling the word out.
+///
+/// A fault outranks a park, exactly as in [`work_label`]: the box broke, and that
+/// is the fact worth seeing.
+pub(crate) fn graph_mark(m: &Machine) -> &'static str {
+    match m.state {
+        MachineState::Offline | MachineState::Error => "✗",
+        MachineState::Unknown if m.relaxed() => "○",
+        MachineState::Unknown => "?",
+        _ if m.relaxed() => "○",
+        MachineState::Online => "●",
+        _ => "◐",
+    }
+}
+
+/// What one box is doing right now, for a graph node's second line.
+///
+/// The busiest live worker wins, not the first: a box with two workers and one
+/// render at 60% is a box that is rendering. Nothing live reads `—` rather than
+/// `idle`, because "no worker" and "a worker with nothing to do" are different
+/// answers and the graph has room for only one of them.
+///
+/// `×N` is prefixed only when more than one worker is live on the box — the
+/// cluster is one worker per box today, so the prefix stays out of the way until
+/// it is not.
+/// The busiest live worker on `addr` that is actually working on a task.
+///
+/// The one place "what is this box busy with" is decided, so the rack's label
+/// and the rack's *colour* cannot answer differently about the same box.
+fn busiest_task<'a>(
+    machines: &[Machine],
+    beats: &'a [Heartbeat],
+    addr: &str,
+    now: u64,
+) -> Option<&'a Heartbeat> {
+    live_beats(beats, now)
+        .into_iter()
+        .filter(|b| b.addr == addr && beat_backed(machines, b) && b.task_id.is_some())
+        .max_by(|a, b| a.progress.total_cmp(&b.progress))
+}
+
+/// The stage a box is working on, for the hue of its art in the rack.
+///
+/// `None` is a real answer and not a gap: the box is up and has nothing to do,
+/// or has never been contacted. The caller tells those two apart by state.
+pub(crate) fn node_stage(
+    machines: &[Machine],
+    beats: &[Heartbeat],
+    addr: &str,
+    now: u64,
+) -> Option<&'static str> {
+    busiest_task(machines, beats, addr, now).and_then(|b| b.stage.map(|s| s.as_str()))
+}
+
+/// The name a box is known by on the Machines **rack**.
+///
+/// The animal its worker reports — the same word the Workers pane, the event
+/// log and Stats already use, so one box has one name on every screen — falling
+/// back to the registry handle when nothing is beating on it, because a box with
+/// no worker is still a box and needs a name.
+pub(crate) fn machine_alias(
+    machines: &[Machine],
+    beats: &[Heartbeat],
+    addr: &str,
+    now: u64,
+) -> String {
+    if let Some(b) = live_beats(beats, now)
+        .into_iter()
+        .find(|b| b.addr == addr && beat_backed(machines, b))
+    {
+        return reported_alias(beats, &b.worker_id)
+            .unwrap_or_else(|| worker_alias(&b.worker_id).0)
+            .to_string();
+    }
+    machines
+        .iter()
+        .find(|m| m.addr == addr)
+        .map(machine_label)
+        .unwrap_or_else(|| addr.to_string())
+}
+
+/// The inductor's own name, for the rack's console.
+///
+/// **Never an address.** `127.0.0.1:8901` is where this dashboard happens to be
+/// pointed — a fact about the session, not about the machine — and a picture
+/// that labels the coordinator by its socket teaches the reader nothing they can
+/// use. The local box's registry handle when there is one, else the word.
+pub(crate) fn inductor_label(machines: &[Machine]) -> String {
+    machines
+        .iter()
+        .find(|m| bm_core::is_local_node(&m.addr))
+        .map(machine_label)
+        .filter(|l| l != "local")
+        .unwrap_or_else(|| "inductor".into())
+}
+
+pub(crate) fn current_work(
+    machines: &[Machine],
+    beats: &[Heartbeat],
+    addr: &str,
+    now: u64,
+) -> String {
+    let live: Vec<&Heartbeat> = live_beats(beats, now)
+        .into_iter()
+        .filter(|b| b.addr == addr && beat_backed(machines, b))
+        .collect();
+    let Some(first) = live.first() else {
+        return "—".into();
+    };
+    let busy = live
+        .iter()
+        .filter(|b| b.task_id.is_some())
+        .max_by(|a, b| a.progress.total_cmp(&b.progress));
+    let line = match busy {
+        Some(b) => format!(
+            "{} {} {:.0}%",
+            b.stage.map(|s| s.as_str()).unwrap_or("task"),
+            b.chapter.unwrap_or_default(),
+            b.progress * 100.0
+        ),
+        None if !first.activity.is_empty() => first.activity.clone(),
+        None => "idle".into(),
+    };
+    if live.len() > 1 {
+        format!("×{} {line}", live.len())
+    } else {
+        line
     }
 }
 

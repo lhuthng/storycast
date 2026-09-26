@@ -225,7 +225,15 @@ fn scroll(app: &mut App, target: HitTarget, direction: i8) {
         HitTarget::Panel { panel, .. } => match panel {
             Panel::Machines => {
                 if !app.machines.is_empty() {
-                    let next = app.selected as isize + step * 3;
+                    // Three rows in the table; a whole band of the rack, because
+                    // that is the unit the eye moves in there. The drawer
+                    // publishes the band's width.
+                    let stride = if app.machines_graph {
+                        app.graph_cols as isize
+                    } else {
+                        3
+                    };
+                    let next = app.selected as isize + step * stride;
                     app.selected = next.clamp(0, app.machines.len() as isize - 1) as usize;
                 }
             }

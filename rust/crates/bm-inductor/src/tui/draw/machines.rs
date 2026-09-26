@@ -22,10 +22,24 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
     let disconnected = matches!(app.conn, Conn::Down(_));
     let colour = app.colour();
     let selected = app.selected;
-    let title = if disconnected {
-        "Machines — DISCONNECTED"
+    // Which form of the picture this pane's height can hold, decided from the
+    // area it is actually being given — the same question `machines_height`
+    // asked to size it, so the two cannot disagree about what is being drawn.
+    let form = if app.machines_graph && !app.machines.is_empty() {
+        super::graph::form_for(area.height.saturating_sub(2))
     } else {
-        "Machines"
+        None
+    };
+    // The title carries the mode *and* the key, so `g` is discoverable from the
+    // pane it acts on rather than only from the help screen — and so a
+    // screenshot of either view says which one it is. A terminal too short for
+    // even the lean picture says why the table is on screen instead.
+    let title = match (disconnected, form) {
+        (true, _) => "Machines — DISCONNECTED · g toggles",
+        (false, None) if app.machines_graph => "Machines — g graph (too short to draw)",
+        (false, Some(true)) => "Machines · console — ↑↓←→ walk · g table",
+        (false, Some(false)) => "Machines · console (short) — g table",
+        (false, None) => "Machines · g graph",
     };
     let border = if disconnected {
         style_of(colour, Color::Red)
@@ -37,6 +51,14 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
     let block = super::pane_block_for(app, Some(Panel::Machines), title)
         .border_style(border)
         .title_bottom(Line::from(format!("{} up", app.machines.len())).right_aligned());
+
+    // The picture needs boxes to draw a cluster out of, and rows to draw them in.
+    // With neither, the table is the more useful answer — and the title above
+    // has already said which of the two is on screen and why.
+    if let Some(hub_art) = form {
+        super::graph::draw_graph(f, app, area, block, hub_art);
+        return;
+    }
 
     if app.machines.is_empty() {
         let mut body = vec!["no machines in the cluster".to_string()];

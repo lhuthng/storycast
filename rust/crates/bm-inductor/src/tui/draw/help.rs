@@ -61,6 +61,18 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
              box. Press again to put it back to work",
         ),
         (
+            "g",
+            "draw the Machines pane as a rack — the inductor's console, the boxes it drives, \
+             and the bus between them — instead of the table. The Workers pane goes away \
+             while it is up; `g` again brings both back",
+        ),
+        (
+            "↑ ↓ ← →",
+            "in the rack, move on it: ↑↓ a whole row of boxes, ←→ one box. The console stays \
+             put at the left and the boxes move past it. With the table up the arrows move \
+             the cursor down a list, as they always did",
+        ),
+        (
             "Tab / J",
             "background jobs: running against queued, elapsed time, activity",
         ),
@@ -229,6 +241,22 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         "duration scaled by the beat's unworked fraction, a dash with no",
         "history yet. Both panes are full-tier only; the compact tier keeps",
         "Logs readable instead.",
+        "`g` draws the Machines pane as a rack instead of a table: the",
+        "inductor's console at the top left, a bus running down from it, and",
+        "each box drawn as a server in a frame, hanging off that bus. As many",
+        "rows of servers as the terminal has room for. **The Workers pane is not",
+        "shown while the rack is up** — a box already carries the animal its",
+        "worker reports, the task and the chapter, so the list underneath would",
+        "be the same facts twice. Its rows go to the rack.",
+        "A box's art takes the stage's colour, the one the Workers pane used:",
+        "cyan for render, magenta for digest, blue for crawl, green for merge.",
+        "Idle is grey, a box that has never answered is a darker grey, and a",
+        "fault is red whatever it was doing when it broke.",
+        "↑↓ walk a row of the rack and ←→ walk one box; the console is anchored",
+        "at the left, so it is the boxes that move past it. The rack says how",
+        "many boxes it did not fit rather than dropping them silently.",
+        "The bus is not decoration: the inductor dials every box and nothing",
+        "dials back, so there is no box-to-box edge in the picture to have.",
     ] {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }

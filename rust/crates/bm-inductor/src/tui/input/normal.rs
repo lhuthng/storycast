@@ -60,7 +60,7 @@ pub(crate) async fn normal_key(
             );
         }
         KeyCode::Char('f') => {
-            app.focused_panel = app.focused_panel.next();
+            app.focused_panel = app.focused_panel.next_visible(app.machines_graph);
             app.set_status(
                 Level::Info,
                 format!(
@@ -106,11 +106,55 @@ pub(crate) async fn normal_key(
             app.refresh(http).await;
             app.set_status(Level::Ok, "refreshed");
         }
+        // Draw the Machines pane as the hub-and-spoke picture, or back to the
+        // table. A view preference only — it touches nothing about the cluster,
+        // and it is not persisted, so a dashboard opened later is the table it
+        // expects. The table stays the complete list: the graph is the glance,
+        // and it says how many boxes it did not fit rather than dropping them.
+        KeyCode::Char('g') => {
+            app.machines_graph = !app.machines_graph;
+            // The rack draws every box with the worker on it, so the Workers
+            // pane is not shown at all in that mode — and focus must not be
+            // left on a pane that has just left the screen.
+            if app.machines_graph && app.focused_panel == crate::tui::app::Panel::Workers {
+                app.focused_panel = crate::tui::app::Panel::Machines;
+            }
+            let (level, msg) = if app.machines_graph {
+                (
+                    Level::Info,
+                    "machines as a rack — ↑↓ across it, ←→ along · g for the table",
+                )
+            } else {
+                (Level::Info, "machines as a table — g for the rack")
+            };
+            app.set_status(level, msg);
+        }
+        // Walk the rack sideways. The console is anchored at the left, so the
+        // boxes are what moves — and the arrows are the graph's only, because
+        // in the table the cursor moves down a list and there is nothing here
+        // for a sideways press to mean.
+        KeyCode::Left if app.machines_graph => app.selected = app.selected.saturating_sub(1),
+        KeyCode::Right if app.machines_graph => {
+            app.selected = (app.selected + 1).min(app.machines.len().saturating_sub(1))
+        }
+        // Up and down walk a *row* of the rack — a whole band of servers — and
+        // a single machine in the table. The step is the pane's own width, which
+        // the drawer publishes; a key handler cannot know it.
         KeyCode::Up | KeyCode::Char('k') => {
-            app.selected = app.selected.saturating_sub(1);
+            let step = if app.machines_graph {
+                app.graph_cols
+            } else {
+                1
+            };
+            app.selected = app.selected.saturating_sub(step);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            app.selected = (app.selected + 1).min(app.machines.len().saturating_sub(1));
+            let step = if app.machines_graph {
+                app.graph_cols
+            } else {
+                1
+            };
+            app.selected = (app.selected + step).min(app.machines.len().saturating_sub(1));
         }
         KeyCode::Home => app.selected = 0,
         KeyCode::End => app.selected = app.machines.len().saturating_sub(1),
