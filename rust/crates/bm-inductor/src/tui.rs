@@ -101,6 +101,13 @@ async fn run_loop(
     let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     tokio::spawn(run_jobs(job_rx, tx.clone()));
 
+    // Redraw gate: an idle dashboard has nothing new to draw. Redraw on
+    // delivered events, on key or mouse input, and on a one-second heartbeat
+    // so ages and other time-relative labels stay honest. Everything between
+    // (a silent loop with an empty channel) just waits on the input poll
+    // instead of repainting the same frame at the poll rate.
+    let mut last_draw = std::time::Instant::now();
+
     // State poller: `/api/state` is fetched off the UI task and delivered over
     // the same channel as everything else. Polling inline used to freeze the
     // whole interface for as long as the request took — up to the client's 15s
@@ -128,8 +135,9 @@ async fn run_loop(
     // cluster rather than an empty shell. Failures are already tolerated.
     app.refresh(&http).await;
     loop {
-        terminal.draw(|f| draw(f, &mut app))?;
+        let mut dirty = last_draw.elapsed() >= Duration::from_secs(1);
         while let Ok(ev) = rx.try_recv() {
+            dirty = true;
             // A finished add-sample refreshes a showing roster, so the new
             // voice is in the picker without a manual R. Read before `apply`
             // moves the event.
@@ -147,6 +155,7 @@ async fn run_loop(
             }
         }
         if event::poll(Duration::from_millis(200))? {
+            dirty = true;
             match event::read()? {
                 Event::Mouse(mouse) => {
                     if handle_mouse(&mut app, mouse, &http, &job_tx).await {
@@ -269,7 +278,12 @@ async fn run_loop(
                         ..Default::default()
                     },
                 );
+                dirty = true;
             }
+        }
+        if dirty {
+            terminal.draw(|f| draw(f, &mut app))?;
+            last_draw = std::time::Instant::now();
         }
     }
     Ok(())
