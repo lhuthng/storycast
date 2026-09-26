@@ -442,7 +442,7 @@ make tui
 
 | Key | Does |
 | --- | --- |
-| `:` | **Command line**: every operator action by word: `:add`, `:prov`, `:drop`/`:remove`, `:translate`, `:voices`, `:swap`, `:eta`, `:retry`, `:reconcile`, `:backend`, `:up [n]`/`:pool`/`:down` (§3D), `:drain`, `:quit`/`:exit`, `:X` stop. Singles still work (`:m` = `:reconcile`); aliases in `:help`. Input opens after `Enter`. No single key is destructive. |
+| `:` | **Command line**: every operator action by word: `:add`, `:prov`, `:drop`/`:remove`, `:translate`, `:voices`, `:swap`, `:speaker`, `:eta`, `:retry`, `:reconcile`, `:backend`, `:up [n]`/`:pool`/`:down` (§3D), `:drain`, `:quit`/`:exit`, `:X` stop. Singles still work (`:m` = `:reconcile`); aliases in `:help`. Input opens after `Enter`. No single key is destructive. |
 | **R** / **K** / **S** | Read-only: overview (`Enter` launches) / **task ledger** / cast |
 | **i** | Inspect selected machine |
 | **arrows / k j**, **PgUp PgDn**, **G** | Move, scroll log, pin newest |
@@ -639,7 +639,31 @@ completion, failure, expiry and action in one stream, the same stream
 Things you change by hand, and what has to be told afterwards. Each one is a
 recipe: what you changed, what to press, and why the press is needed.
 
-### You edited `data/script-NN.json`
+### A segment is attributed to the wrong character
+
+```
+:speaker 18 67 "Thanh Sơn lão tổ" "Dịch Phong"
+```
+
+Chapter, then segment (numbered from 1), then who is speaking there now, then
+who should be. It changes that one segment, re-speaks only the takes the edit
+reached, and requeues the merge for that chapter, because the mp3 on disk was
+mixed from the old audio.
+
+The two names are the point. The third argument is a check: if segment 67 is
+not spoken by "Thanh Sơn lão tổ", nothing is written and the refusal tells you
+who is actually there and which segments *are* spoken by the name you expected,
+which is the answer to a miscounted line. The last argument is checked against
+the cast before the script is touched, because a speaker holding no voice is a
+planning error and a chapter that requeues into an unplannable row is worse than
+a refusal. Quote any name with a space in it.
+
+One take, usually. The local engine groups consecutive same-speaker segments
+into a single take, so re-pointing the middle of a run splits that run and
+re-speaks both halves. The ledger says how many takes it queued; `e` estimates
+the rest.
+
+### You edited `data/script-NN.json` by hand
 
 Changing a segment's `speaker`, or its text, changes that segment and nothing
 else. A take's filename is a hash of engine, voice and text, so the edit gives
@@ -665,12 +689,11 @@ ledger pane does the same thing: select the `merge:12` row, press `u`.
 Leave `F` alone for this. Force deletes the cached takes, so the chapter is
 spoken again from the first line.
 
-### There is no command that edits a script for you
+### There is no command that edits a whole cast
 
 Worth saying so you stop looking. `:cast` is a read-only overview of every
-speaker and the voice it has, and the one command that rewrites a cast and
-invalidates the render for you is not on a key. Changing who speaks a line is a
-file edit, followed by the two commands above.
+speaker and the voice it has. `:speaker` above is the one segment; a chapter
+full of misattribution is a `:cast`-shaped job with no key bound to it.
 
 ### You changed which voice a character speaks as
 

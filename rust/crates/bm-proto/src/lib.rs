@@ -1348,6 +1348,19 @@ pub enum Op {
     /// re-mixes. A new speaker must already hold a voice, or the chapter
     /// would requeue into an unplannable row.
     Recast,
+    /// Change one segment's speaker on one chapter, checking who is speaking
+    /// there first, then invalidating exactly what the edit reached.
+    ///
+    /// `Recast` is the blunt version: it re-attributes whatever sits at the
+    /// indexes it is given. This one names the speaker it expects to find, so a
+    /// mistyped segment number refuses instead of re-attributing the wrong
+    /// line, which is the failure a hand edit cannot see and a re-render makes
+    /// permanent.
+    ///
+    /// The invalidation is the plan's diff, so it is the takes whose voice or
+    /// text moved and nothing else — and the merge, because the mp3 on disk was
+    /// mixed from the old ones.
+    FixSpeaker,
     /// Save a new mix (story speed + layer volumes) and requeue every merge:
     /// the finished mp3s were mixed with the old one. Render cache is kept
     /// tempo and layers apply at merge time, so no segment needs re-speaking.
@@ -1396,6 +1409,7 @@ impl Op {
             Op::Reconcile => "reconcile",
             Op::Retag => "retag",
             Op::Recast => "recast",
+            Op::FixSpeaker => "fix-speaker",
             Op::Remix => "remix",
             Op::SoundChanged => "sound-changed",
             Op::Rerender => "rerender",
@@ -1421,6 +1435,7 @@ impl Op {
             Op::Reconcile,
             Op::Retag,
             Op::Recast,
+            Op::FixSpeaker,
             Op::Remix,
             Op::SoundChanged,
             Op::Rerender,
@@ -1475,6 +1490,18 @@ pub struct OpRequest {
     pub stage: Option<Stage>,
     #[serde(default)]
     pub chapter: Option<u32>,
+    /// The segment to re-attribute, for `fix-speaker`. 1-based, because it is
+    /// typed by a person counting lines; the op converts and says so on any
+    /// refusal.
+    #[serde(default)]
+    pub segment: Option<usize>,
+    /// The speaker `fix-speaker` expects the segment to have now. The check
+    /// that makes a wrong segment number a refusal instead of a wrong edit.
+    #[serde(default)]
+    pub expect: Option<String>,
+    /// The speaker to put there, for `fix-speaker`.
+    #[serde(default)]
+    pub speaker: Option<String>,
     #[serde(default)]
     pub force: Option<bool>,
     /// Literal text to speak, for the ops that render speech. `None` means "the
@@ -1760,6 +1787,8 @@ mod tests {
             Op::RetryTask,
             Op::Reconcile,
             Op::Retag,
+            Op::Recast,
+            Op::FixSpeaker,
             Op::Remix,
             Op::SoundChanged,
             Op::Rerender,
