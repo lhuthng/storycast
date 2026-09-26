@@ -124,9 +124,19 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          # A dispatch from a branch has no tag, and `github.ref_name` would be
+          # the branch name, so a release would be cut called "main". Fall back
+          # to the workspace version, which is what the archives are named for.
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           set -euo pipefail
-          tag="${{ github.ref_name }}"
+          if [ "$REF_TYPE" = "tag" ]; then
+            tag="$REF_NAME"
+          else
+            version=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
+            tag="v$version"
+          fi
           files=$(ls rust/dist/*.tar.gz rust/dist/*.zip)
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" $files --clobber
