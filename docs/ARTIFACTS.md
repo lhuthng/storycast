@@ -1,11 +1,11 @@
-# Artifacts — the weights, the voice store, and who fetches what
+# Artifacts: the weights, the voice store, and who fetches what
 
 ## In plain words
 
 *You can stop reading after this section.*
 
 Provisioning a new worker means sending it about 886 MB. Three quarters of that
-is one directory of TTS weights — the same 667 MB for every box, forever, because
+is one directory of TTS weights, the same 667 MB for every box, forever, because
 the weights only change when you deliberately re-bake them.
 
 That is the wrong shape. The files are immutable, they are large, and they are
@@ -18,7 +18,7 @@ often: the prompts, the crawlers, the cast files, the small JSON manifests, and
 one 492 KB voice store that is rewritten every time a voice is enrolled.
 
 The result is that provisioning a new box sends roughly **24 MB from your
-machine** instead of 886 MB. The box still downloads the weights — from a CDN,
+machine** instead of 886 MB. The box still downloads the weights, from a CDN,
 in parallel with every other box, instead of serially through your home uplink.
 
 The rule the whole design turns on: **a file belongs in the artifact if and only
@@ -32,13 +32,13 @@ publishing, and the reasons differ for each.
 
 | Push | Size | Verdict |
 |---|---|---|
-| `models/` | 668 MB | **publish** — 16 immutable weight files |
-| `refs/` | 125 MB | candidate — changes only when a clip is added |
-| `assets/` media | 55 MB | candidate — same |
+| `models/` | 668 MB | **publish**, 16 immutable weight files |
+| `refs/` | 125 MB | candidate, changes only when a clip is added |
+| `assets/` media | 55 MB | candidate, same |
 | binaries + runtime | 52 MB | ship, but small enough not to matter |
 
-Everything else — prompts (24 KB), the crawlers (72 KB), cast files, the scene
-map, the three pool registries, `voices.json` (492 KB) — is under 1 MB combined
+Everything else, prompts (24 KB), the crawlers (72 KB), cast files, the scene
+map, the three pool registries, `voices.json` (492 KB), is under 1 MB combined
 and is never worth optimizing.
 
 ## The split: weights out, voice store stays
@@ -76,18 +76,18 @@ That has since been fixed at the source: **`voices.json` is no longer in
 load, but it is listed under `DERIVED` in `bake-models.py` and skipped when the
 record is written. Three things fall out:
 
-* `--check` is now a real gate — it reads `16/16 files match` and exits 0,
+* `--check` is now a real gate, it reads `16/16 files match` and exits 0,
   where before it could never pass on a cluster that had ever enrolled a voice.
 * No consumer needs a special case. The publish gate below is literally the
   `--check` result, and the `sha256sum -c` list provisioning writes needs no
-  exclusion rule — it is built from `files`, which no longer contains the store.
+  exclusion rule, it is built from `files`, which no longer contains the store.
 * `total_bytes` equals the sum of `files`, which is the property a receipt
   should have. It was previously inflated by a file it could not vouch for.
 
 The deeper reason is provenance, not mutability. Of the seventeen sources, only
 `backbone_rev` and `codec_rev` cover pinned HuggingFace revisions; `sea_g2p.bin`
 is pinned by being vendored in-tree. **`voices.json` was copied from a
-pip-installed package** — nothing pinned it, in-tree or by revision — and it was
+pip-installed package**, nothing pinned it, in-tree or by revision, and it was
 the one entry that had drifted. A receipt that cannot stand behind a hash is
 worse than a receipt that omits the field.
 
@@ -103,7 +103,7 @@ rsync     models/voices.json             1 file, 492 KB
 ```
 
 492 KB is 0.07% of the old payload. Leaving it on the rsync costs nothing and
-keeps every existing voice behavior — the delta is what actually moves, and the
+keeps every existing voice behavior, the delta is what actually moves, and the
 stamp's `models_need_push` / `voice_store_covers` pair already handles it. **This
 split is a correctness requirement, not an optimization.**
 
@@ -112,16 +112,15 @@ split is a correctness requirement, not an optimization.**
 The artifact is named by the hash of the bytes it contains, and that hash is
 computed from the manifest the box already holds.
 
-This is the pattern `profile_object()` already used for the profile plane
-(`s3://<bucket>/profiles/<hash>.tar.zst`), and it is worth keeping the reasoning
-rather than just the shape: because the object key is derived from a hash the box
+The reasoning behind content naming is worth keeping rather than just the shape:
+because the artifact key is derived from a hash the box
 already verifies against, **there is no mapping to keep in sync, and a box cannot
 be handed a bundle that disagrees with the pointer it checks.** A box either asks
 for the artifact matching what it wants, or it asks for nothing.
 
 Publishing is therefore idempotent. Re-packing identical content at a different
 compression level overwrites the same key with the same tree, which is the
-correct outcome — and the manifest inside is what gets checked, file by file,
+correct outcome, and the manifest inside is what gets checked, file by file,
 before anything moves.
 
 With GitHub Releases the key becomes the release tag:
@@ -135,7 +134,7 @@ and the mechanism is one this repo already runs: `tools/profile.sh fetch` querie
 the asset ending in `.tar.zst`, and curls its `browser_download_url`, with
 `GH_TOKEN` used only when set. Public repo means no token on the box.
 
-## Publishing — **done**
+## Publishing, **done**
 
 `tools/models.sh`, a sibling of `tools/profile.sh` with the same four verbs:
 
@@ -148,19 +147,19 @@ tools/models.sh list                          the local bundle, its hash and siz
 
 `pack` runs `python3 tools/bake-models.py --check` first and **refuses on
 anything but `16/16 files match`**. That gate is the whole safety story, and it
-could not be used as a gate until the roster left the record — before that, it
+could not be used as a gate until the roster left the record, before that, it
 reported a `CHANGED` that no re-bake could clear. It also selects members from
 the manifest rather than globbing `models/`, which is the same content-addressing
 rule as everywhere else: `voices.json` exists in the directory and is absent from
 the record, so "everything the manifest lists" and "everything in `models/`" are
 different questions and only one of them is the bundle. `verify` asserts both
-directions — nothing missing, and **nothing unlisted** — so a stray file in the
+directions, nothing missing, and **nothing unlisted**, so a stray file in the
 archive is a failure rather than a surprise on a box.
 
 **The name is the manifest hash**: sha256 over sorted `name + NUL +
 content-sha256 + NUL` lines, the rule `profile.sh` already uses, read one level
 deeper because the models manifest stores `bytes` beside each hash. Two machines
-with the same bake produce the same tag, and — the point — a tag can never name
+with the same bake produce the same tag, and, the point, a tag can never name
 bytes it does not hold. The tag is the first 12 hex of it, with the full hash in
 the release notes. `gh release create` refuses an existing tag, so immutability
 is enforced by the host rather than promised by a comment.
@@ -174,11 +173,11 @@ models-vdda4efee13df   models.tar.zst   380,099,956 bytes (363 MiB, level 3)
 and the round trip was checked by downloading it back: the asset's sha256 is
 byte-identical to the local bundle, and `verify` passes on it.
 
-## Fetching, on the box — not built
+## Fetching, on the box, not built
 
 This is the half that remains. What it needs is *less* than this document first
 assumed: **the box already links `reqwest`** (with `blocking`), so there is no
-`curl` to require and no shell-out to write. What is missing is extraction —
+`curl` to require and no shell-out to write. What is missing is extraction
 `bm-agent` links no `tar` and no `zstd`, so the artifact cannot be opened yet.
 
 `bm-agent` gains a subcommand:
@@ -195,7 +194,7 @@ Two decisions inside that:
 
 **The agent does the decompression, not a shipped `zstd` binary.** The `tar`
 crate is pure Rust; for the compressor, `ruzstd` is the pure-Rust decoder while
-the `zstd` crate binds the C library. Either fits — this repo already builds C
+the `zstd` crate binds the C library. Either fits, this repo already builds C
 where it earns its keep (`sea-g2p`, and the ONNX Runtime it links), so a C build
 dependency would not be new. A shipped per-target `zstd` *binary* is the option to
 reject: that is a second cross-built artifact to version-gate, reproducing exactly
@@ -217,10 +216,10 @@ specific about the level:
 668 MiB => 363 MiB   (54.31%)   zstd -3, 1.25s on an M-series laptop
 ```
 
-fp32 ONNX weights compress nearly 2:1 — they are not the incompressible blob that
+fp32 ONNX weights compress nearly 2:1, they are not the incompressible blob that
 plain `.onnx` suggests. Note what this does and does not save: `rsync -z` is
 *already* achieving this on the wire today. The artifact does not compress better
-than the rsync. **What it changes is whose uplink pays for it** — 363 MB that
+than the rsync. **What it changes is whose uplink pays for it**, 363 MB that
 currently leaves your house once per box, serially, now comes off a CDN with
 every box fetching at once.
 
@@ -228,7 +227,7 @@ every box fetching at once.
 
 ffmpeg is not part of this plane and needs no work.
 
-It is not a library call — `bm-core/src/ambience.rs` spawns
+It is not a library call, `bm-core/src/ambience.rs` spawns
 `Command::new("ffmpeg")` by name, so linking libav\* into the agent would not
 change the code path at all. And linking it is not a real option: libavcodec,
 libavformat, libavfilter, libswscale and libswresample are tens of megabytes with
@@ -238,10 +237,10 @@ More to the point, **the box-without-ffmpeg case is already the designed-for
 case.** `bm-agent` advertises the `merge` capability *only when ffmpeg is on
 PATH*; `ensure_ffmpeg` tries `apt-get`/`dnf`/`yum` under `sudo -n`; a refusal is
 a warning, never fatal, and the machine summary says
-`· NO FFMPEG — merges will fail here`. Merge goes off that box, crawl, digest and
+`· NO FFMPEG, merges will fail here`. Merge goes off that box, crawl, digest and
 render keep working.
 
-And ffmpeg is **0 bytes in the payload** — it is a package-manager install on the
+And ffmpeg is **0 bytes in the payload**, it is a package-manager install on the
 box, never a push. It was never part of the 886 MB.
 
 ## Fallback order
@@ -257,14 +256,16 @@ stays reachable. The order is deliberate:
    because GitHub had an incident is not.
 
 A verification failure is never a fallback trigger: if the bytes are *wrong*, the
-answer is to stop and say which file mismatched, not to try harder.## What the stamp changes — **done**
+answer is to stop and say which file mismatched, not to try harder.
+
+## What the stamp changes, **done**
 
 This section and the two sections after it describe work that has landed. What
 remains is the artifact itself (publish, fetch, verify on the box); everything
 below is in the tree.
 
 `tts_hash` was `models/manifest.json` content plus a directory signature of
-`models/` — which is one fact where there are two, because the directory holds
+`models/`, which is one fact where there are two, because the directory holds
 an immutable bake and one mutable file. It is now four digests, each gating a
 different push:
 
@@ -275,20 +276,20 @@ different push:
 | `voices_hash` | `models/voices.json` by content | the weights push, alongside `tts_hash` |
 | `tts_bin_hash` | the `bm-tts` bytes | the sidecar push |
 
-Three of those used to be wrong or absent, all in the same direction — a gate
+Three of those used to be wrong or absent, all in the same direction, a gate
 that was not where the push was:
 
 - **`refs/` was gated by nothing.** It is pushed by `install_sources`, but it
   was only folded into `voices_hash`, which provisioning computed, carried, and
   never read. So adding or editing a 125 MB reference clip drifted no gate that
   any push consulted. It is now in `sources_hash`, which is the digest the push
-  that carries it actually reads. (The test that asserted the old behaviour —
-  "refs/ is not part of the sources hash" — is now its inverse.)
+  that carries it actually reads. (The test that asserted the old behaviour
+  "refs/ is not part of the sources hash", is now its inverse.)
 - **The sidecar never redeployed.** `install_tts_runtime` was only called in the
   `else` of `if already`, and `tts_hash` covers `models/`, not the binary. A
   rebuilt `bm-tts` stayed on the inductor for ever while the box served the old
   one. `tts_bin_hash` is `agent_hash`'s pattern applied to the second binary,
-  and the push now also recycles the sidecar — a replaced binary on disk does
+  and the push now also recycles the sidecar, a replaced binary on disk does
   nothing while the old process is still running it.
 - **A newly enrolled voice could be invisible.** With `voices.json` excluded
   from `tts_hash`, nothing would have covered the roster at all. `voices_hash`
@@ -299,7 +300,7 @@ that was not where the push was:
 Two smaller things landed with them:
 
 - **The weights are verified, not assumed.** rsync exiting 0 says the transfer
-  worked, not that the bytes are intact — a box that dies mid-push, a source
+  worked, not that the bytes are intact, a box that dies mid-push, a source
   file already corrupt, or a `--delete` racing a writer all produce a directory
   rsync is happy with and the sidecar is not. `install_models` now writes the
   bake's own `sha256` entries out as a `sha256sum -c` list and checks them on
@@ -309,8 +310,8 @@ Two smaller things landed with them:
   entry is stale by design, because enrollment rewrites the file after the bake.
 - **The probe no longer needs Python.** It read the voice roster by shelling out
   to `python3 -c "import json…"` against `models/voices.json`. It now asks the
-  sidecar's `/voices` endpoint instead — `curl` was already required for
-  `/health` — which is also the better answer: the roster a render will actually
+  sidecar's `/voices` endpoint instead, `curl` was already required for
+  `/health`, which is also the better answer: the roster a render will actually
   find, rather than what a file claims. An **unknown** roster is no longer read
   as a missing one, which matters because reading it that way answered a down
   sidecar with a 668 MB push.
@@ -319,8 +320,8 @@ Two smaller things landed with them:
 
 | | today | after |
 |---|---|---|
-| `models/` | 363 MB (`-z`) | **0** — box fetches |
-| `libonnxruntime.so*` | 28 MB | 0 — rides in the same artifact |
+| `models/` | 363 MB (`-z`) | **0**, box fetches |
+| `libonnxruntime.so*` | 28 MB | 0, rides in the same artifact |
 | `refs/` | 125 MB | 125 MB |
 | `assets/` media | 55 MB | 55 MB |
 | `bm-agent` | 15 MB | 15 MB |
@@ -332,8 +333,8 @@ Two smaller things landed with them:
 be on the box first. Chasing that last 15 MB means a bootstrap that cannot verify
 what it downloaded, which is the trade this design exists to avoid.
 
-Publishing `refs/` and the `assets/` media as well — they qualify under the same
-rule, changing only when a clip is added — takes the final figure to **~24 MB**.
+Publishing `refs/` and the `assets/` media as well, they qualify under the same
+rule, changing only when a clip is added, takes the final figure to **~24 MB**.
 `refs/` needs its own hash gate first (see above); that gate is the prerequisite,
 not an optional extra.
 
@@ -343,7 +344,7 @@ not an optional extra.
 |---|---|
 | Release missing for the wanted hash | falls back to rsync, names the URL it tried |
 | Download truncated | per-file sha256 mismatch, the file named, the box left untouched |
-| Weights swapped under an unchanged name | impossible — the name is the hash |
+| Weights swapped under an unchanged name | impossible, the name is the hash |
 | Artifact published with `voices.json` inside | the box rejects it; `bake --check` is the gate meant to prevent it |
 | `bm-agent` too old to have `fetch-artifact` | falls back to rsync |
 | GitHub unreachable | falls back to rsync, slowly, and says so |
@@ -352,16 +353,16 @@ Every one of these is *slower* or *louder* than today's behavior. None is silent
 and that is the requirement: a box that is quietly holding the wrong weights is
 the failure mode worth engineering against.
 
-## Removing the S3 bucket — **done**
+## Removing the S3 bucket, **done**
 
-The bucket was sketched for this and never used — an empty `bucket` had always
+The bucket was sketched for this and never used, an empty `bucket` had always
 meant "rsync from here", which is a working configuration. With models and
 profiles both headed for Releases it had no consumer left, so the whole concept
 is gone rather than left as a second, unbuilt path:
 
 - `AwsConfig::bucket`, its initializer, and `publishes_assets()` (`aws.rs`);
 - the `summary()` branch that printed `s3://…` vs `assets: rsync from here`;
-- `profile_object()` and its `aws up` call site in `main.rs` — plus the
+- `profile_object()` and its `aws up` call site in `main.rs`, plus the
   `provision.rs` re-export;
 - the setup wizard text that asked for a bucket;
 - `bucket` and `_note_bucket` in `aws.default.json` and `.bm/aws.json`, along
@@ -373,7 +374,7 @@ is gone rather than left as a second, unbuilt path:
 
 The asset plane is now: one path (rsync from this machine), one host for the
 artifact when it lands (a GitHub Release). The IAM story simplified as a side
-effect — **the worker role needs no permissions at all**, which is three fewer
+effect, **the worker role needs no permissions at all**, which is three fewer
 paragraphs to keep true across three documents. The role is still required,
 because every launch names an instance profile.
 
@@ -388,10 +389,10 @@ because every launch names an instance profile.
 2. **Pruning.** Content-addressed names never overwrite, so every re-bake leaves
    363 MB behind forever. `tools/profile.sh` has no prune either.
 3. **Public repo.** A Release asset on a public repo is world-readable. The
-   weights are fine — they are baked from public models and contain nothing
-   secret — but this is a decision to make deliberately, and the answer changes
+   weights are fine, they are baked from public models and contain nothing
+   secret, but this is a decision to make deliberately, and the answer changes
    if anyone ever bakes private material into `models/`.
-4. **`refs/` and `assets/` media.** Worth publishing for the same reason —
+4. **`refs/` and `assets/` media.** Worth publishing for the same reason
    they change only when a clip is added, not per-provision. `refs/` now has the
    gate it needed (`sources_hash`, above), so it is unblocked; `assets/effects`,
    `assets/music` and `assets/injects` were already gated by signature there.
@@ -407,4 +408,4 @@ because every launch names an instance profile.
    (`16/16 files match`) catches it before a release; a box that is already in
    sync is taken on trust. Making the verify unconditional would cost a hash of
    668 MB on every provision of a healthy cluster, which is the cost the stamp
-   exists to avoid — so it wants to be deliberate, not folded in.
+   exists to avoid, so it wants to be deliberate, not folded in.
