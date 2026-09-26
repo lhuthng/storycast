@@ -99,7 +99,11 @@ endif
 	OPENROUTER_API_KEY='$(KEY)' GEMINI_API_KEY='$(KEY)' $(BIN)/bm-inductor backup \
 		--api "$$model_api" --model '$(MODEL)'
 
-provision: build tts
+# No `tts` prerequisite on purpose. `bm-inductor provision` cross-builds the
+# sidecar itself when the target is linux/x86_64, and errors with the exact
+# manual command when it is not, so gating this target on `make tts` only
+# blocked provisioning on hosts without zig.
+provision: build
 ifdef ADDR
 	$(BIN)/bm-inductor provision --addr $(ADDR) --user thang
 else
