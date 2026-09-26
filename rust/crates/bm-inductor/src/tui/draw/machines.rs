@@ -3,7 +3,7 @@ use crate::tui::style::Conn;
 use crate::tui::{
     app::{App, Panel},
     layout::COMPACT_MACHINE_COLS,
-    model::{clamp_scroll, live_workers, machine_kind, machine_label, policy_summary},
+    model::{addr_label, clamp_scroll, live_workers, machine_kind, machine_label, policy_summary},
     style::{
         cell, empty_body, seen_label, selection_bg, state_glyph_cell, style_bold_of, style_of,
     },
@@ -68,7 +68,7 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
             let mut cells = vec![
                 cell(format!("{cursor}{}", machine_label(m))),
                 cell(machine_kind(m).to_string()),
-                cell(m.addr.clone()),
+                cell(addr_label(m)),
                 cell(live_workers(&app.beats, &m.addr, bm_proto::now_secs()).to_string()),
                 cell(policy_summary(m)),
                 state_glyph_cell(colour, m.state.as_str()),
@@ -103,13 +103,20 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
         // The 100-column floor leaves 98 inside the border, and this set sums
         // to exactly that. The old set summed to 102: at the floor, `seen` and
         // the tail of `state` were pushed off the pane entirely.
+        //
+        // `policy` gave up two of its eleven columns to `state`, because policy
+        // is fixed-width by construction — `policy_summary` is always the four
+        // stage letters and three `>` (seven) — while `state` is a word of up to
+        // twelve. At thirteen it clipped `initializing` to `initializin` and a
+        // two-word state would have hidden its own noun. A column that truncates
+        // the verdict it exists to show is worse than a column with slack.
         vec![
             Constraint::Length(14),
             Constraint::Length(6),
             Constraint::Length(17),
             Constraint::Length(8),
-            Constraint::Length(11),
-            Constraint::Length(13),
+            Constraint::Length(9),
+            Constraint::Length(15),
         ]
     };
     if !compact {

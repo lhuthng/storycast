@@ -584,6 +584,15 @@ pub fn run_instances_args(
             "ResourceType=instance,Tags=[{{Key={},Value={}}},{{Key=Name,Value={}}}]",
             cfg.tag_key, tag_value, cfg.tag_key
         ),
+        // Ask for a public address explicitly instead of trusting the subnet's
+        // `MapPublicIpOnLaunch` default. That default is per-subnet and set once,
+        // so relying on it makes reachability depend on a checkbox nobody
+        // re-reads — and the failure is silent, not loud: the box launches, the
+        // account is happy, and it can never be dialed because the transport is
+        // inverted (the inductor dials the box, nothing dials the inductor).
+        // `subnet_id`'s own doc already says the subnet must be one this machine
+        // can reach; this is what makes that true rather than hoped for.
+        "--associate-public-ip-address".into(),
         "--output".into(),
         "json".into(),
     ];
@@ -758,6 +767,26 @@ pub fn preserve_ec2_id(old_note: &str, new_note: &str) -> String {
     }
 }
 
+/// The note marker for a launched box that has just become dialable and has
+/// never been onboarded: *"this one is new, and it is waiting to be set up"*.
+///
+/// It is a note rather than a machine field on purpose. A note is written by
+/// whoever last had an opinion, so a marker in one is cleared by the very next
+/// thing that has one — which is exactly the lifetime wanted here. The
+/// provision job rewrites the note to `provisioning (p)` the moment it takes the
+/// box, so an onboard trigger reading this fires **once** with no bookkeeping to
+/// keep in sync, no queue to drain, and no latch that can get stuck. A field
+/// would need a second thing to clear it, and the failure of that second thing
+/// is a box provisioned on every poll for ever.
+///
+/// The inductor's `relink` is the only writer.
+pub const AWAITING_ONBOARD: &str = "address assigned · not yet onboarded";
+
+/// Is this note waiting to be onboarded? See [`AWAITING_ONBOARD`].
+pub fn awaiting_onboard(note: &str) -> bool {
+    note.contains(AWAITING_ONBOARD)
+}
+
 /// The machine a freshly launched instance *is*, made the moment the launch
 /// reply names it.
 ///
@@ -778,10 +807,20 @@ pub fn preserve_ec2_id(old_note: &str, new_note: &str) -> String {
 ///
 /// [`discover`]: AwsConfig::key_file
 pub fn machine_from_instance(i: &AwsInstance, cfg: &AwsConfig) -> Machine {
-    let addr = if !i.public_ip.is_empty() {
+    // Two states, and the address decides which. `RunInstances` answers before
+    // the network interface is handed an address, so most launches land in the
+    // first branch: no address to dial, and therefore nothing to *call* the box
+    // yet. It is still registered — keyed by its instance id, which is the same
+    // string `relink` matches on — so there is a record for the account read to
+    // repair rather than a box that was never tracked at all. Keying it by the
+    // empty `private_ip` (what the address fallback used to do) produced a
+    // registry entry at an address nothing could dial and a pane that printed a
+    // plausible-looking private IP for a box on the other side of the internet.
+    let dialable = !i.public_ip.is_empty();
+    let addr = if dialable {
         i.public_ip.clone()
     } else {
-        i.private_ip.clone()
+        i.id.clone()
     };
     let key = cfg.key_file().to_string_lossy().into_owned();
     let mut m = Machine::new(&addr, &cfg.ssh_user, 22, Some(key), "worker");
@@ -795,9 +834,33 @@ pub fn machine_from_instance(i: &AwsInstance, cfg: &AwsConfig) -> Machine {
     // `running` before sshd is listening, so a freshly launched box that says
     // `running` is still not reachable — reachability is proven by the probe,
     // not by the launch reply.
-    m.set_state(MachineState::Initializing);
-    m.note = format!("EC2 {} ({})", i.id, i.state);
+    m.set_state(if dialable {
+        MachineState::Initializing
+    } else {
+        MachineState::AwaitingIp
+    });
+    m.note = instance_note(i, dialable);
     m
+}
+
+/// The note for a box the account just created: the instance id (which is how
+/// `relink` keeps hold of it), EC2's own state word, and — once there is no
+/// address to dial — the private address as *information* rather than as
+/// something to connect to.
+///
+/// The private address is kept for the operator whose inductor sits inside the
+/// same VPC, because for them it is genuinely the way in. It stays in the note
+/// instead of the address column so a box nothing can reach never presents a
+/// dialable-looking address.
+pub fn instance_note(i: &AwsInstance, dialable: bool) -> String {
+    let mut note = format!("EC2 {} ({})", i.id, i.state);
+    if !dialable {
+        note.push_str(" · no public address yet");
+        if !i.private_ip.is_empty() {
+            note.push_str(&format!(" · private {}", i.private_ip));
+        }
+    }
+    note
 }
 
 #[cfg(test)]
@@ -937,13 +1000,78 @@ mod tests {
             "the EC2 id survives as a note, never as a field: {}",
             m.note
         );
-        // A private-subnet box falls back to the private address — best
-        // effort, because the public one is simply absent.
-        let private = AwsInstance {
-            public_ip: String::new(),
-            ..instances[0].clone()
-        };
-        assert_eq!(machine_from_instance(&private, &cfg).addr, "172.31.19.210");
+    }
+
+    /// The reply that arrives with no address — which is most of them, because
+    /// EC2 assigns one asynchronously after `RunInstances` returns.
+    ///
+    /// This used to fall back to the private address, producing a registry entry
+    /// at an address the inductor could not dial and a pane that printed a real-
+    /// looking IP for a box it had no way to reach. It is now keyed by the
+    /// instance id instead: a handle the account read matches on, so the entry is
+    /// repaired in place when the address lands, rather than being wrong for ever.
+    #[test]
+    fn a_box_with_no_address_yet_is_tracked_by_its_instance_id() {
+        let cfg = configured();
+        let reply = r#"{"Groups":[],"Instances":[
+            {"InstanceId":"i-09def58f197d3092c","InstanceType":"t3.micro",
+             "State":{"Name":"pending"},"Placement":{"AvailabilityZone":"eu-central-1a"},
+             "PrivateIpAddress":"172.31.19.210",
+             "LaunchTime":"2026-09-20T18:38:56+00:00",
+             "Tags":[{"Key":"storycast-worker","Value":"b20f7789f510"}]}],
+            "OwnerId":"790139457078","ReservationId":"r-0abc"}"#;
+        let instances = parse_instances(reply, DEFAULT_TAG).unwrap();
+        let no_address = instances[0].clone();
+        let m = machine_from_instance(&no_address, &cfg);
+        assert_eq!(
+            m.addr, "i-09def58f197d3092c",
+            "the handle is the instance id — stable for the box's whole life"
+        );
+        assert_eq!(m.id, m.addr, "id stays the key, exactly as for `:add`");
+        assert_eq!(m.state, MachineState::AwaitingIp);
+        assert!(!m.state.dialable(), "and there is nothing to poll");
+        assert!(m.state.coming_up(), "but it is on its way, not gone");
+        // The private address is kept, as information: an operator whose
+        // inductor sits in the same VPC uses it, and it no longer masquerades as
+        // something the scheduler can dial.
+        assert!(m.note.contains("private 172.31.19.210"), "{}", m.note);
+        assert!(m.note.contains("i-09def58f197d3092c"), "{}", m.note);
+        assert!(!m.note.contains("172.31.19.210 ("));
+        // The one property relink depends on: the id is readable out of the note
+        // whatever else has been written there since.
+        assert_eq!(
+            ec2_id_from_note(&m.note).as_deref(),
+            Some("i-09def58f197d3092c")
+        );
+    }
+
+    #[test]
+    fn a_launch_asks_for_a_public_address_rather_than_trusting_the_subnet() {
+        // Reachability must not rest on a per-subnet checkbox nobody re-reads:
+        // the transport is inverted, so a box with no public address can never be
+        // driven, and it fails silently rather than loudly.
+        let args = run_instances_args(&configured(), 3, "/dev/sda1", "profilehash");
+        assert!(
+            args.iter().any(|a| a == "--associate-public-ip-address"),
+            "a launch must ask: {args:?}"
+        );
+        // Still one flag, not a value: nothing here invents an address.
+        assert!(!args
+            .iter()
+            .any(|a| a.starts_with("--associate-public-ip-address=")));
+    }
+
+    #[test]
+    fn the_onboard_marker_is_readable_out_of_a_rewritten_note() {
+        // It is a note marker rather than a field because the provision job
+        // clears it by rewriting the note — the lifetime wanted, with no second
+        // thing that has to remember to clear a flag.
+        let note = format!("EC2 i-09def58f197d3092c (running) · {}", AWAITING_ONBOARD);
+        assert!(awaiting_onboard(&note));
+        assert!(!awaiting_onboard("provisioning (p)"));
+        assert!(!awaiting_onboard(""));
+        // And it survives a rewrite the way the id does.
+        assert!(awaiting_onboard(&preserve_ec2_id(&note, AWAITING_ONBOARD)));
     }
 
     #[test]

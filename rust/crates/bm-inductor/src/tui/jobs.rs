@@ -2494,28 +2494,35 @@ pub(crate) async fn job_aws_up(
             return;
         }
     };
-    // The join, made at birth: each returned instance becomes a registry entry
-    // with the address the reply carried and the pool's own key and login. No
-    // instance id is stored — the machine is keyed by address, exactly as `:add`.
+    // The join, made at birth: every returned instance becomes a registry entry,
+    // carrying the pool's own key and login. A box the reply gave no address for
+    // is registered too, keyed by its instance id — see `machine_from_instance`.
+    // It used to be skipped with "has no address yet, :add it later", which is
+    // the *normal* case (an address is assigned asynchronously) and left the
+    // dashboard with nothing to show, nothing to repair, and no record that the
+    // box existed at all.
     let mut linked = 0usize;
+    let mut waiting = 0usize;
     for i in &launched {
         let m = bm_core::provision::machine_from_instance(i, &cfg);
-        if m.addr.is_empty() {
-            send(
-                &tx,
-                Level::Warn,
-                format!(
-                    "launched {} has no address yet — :pool in a moment, then :add it",
-                    i.id
-                ),
-            );
-            continue;
-        }
+        let newborn = m.state == MachineState::AwaitingIp;
         let url = format!("{}/api/machines", api.trim_end_matches('/'));
         match http.post(&url).json(&m).send().await {
             Ok(r) if r.status().is_success() => {
                 linked += 1;
-                send(&tx, Level::Ok, format!("linked {} → {}", i.id, m.addr));
+                if newborn {
+                    waiting += 1;
+                    send(
+                        &tx,
+                        Level::Info,
+                        format!(
+                            "tracking {} — no address yet; it will be relinked and onboarded by itself",
+                            i.id
+                        ),
+                    );
+                } else {
+                    send(&tx, Level::Ok, format!("linked {} → {}", i.id, m.addr));
+                }
             }
             Ok(r) => send(
                 &tx,
@@ -2538,11 +2545,18 @@ pub(crate) async fn job_aws_up(
         }
     }
     if linked > 0 {
-        send(
-            &tx,
-            Level::Ok,
-            format!("{linked} box(es) linked — :prov each one to onboard it"),
-        );
+        // The advice is not "provision them" any more. A box that was tracked
+        // without an address gets its address from the account watch, is relinked
+        // to it, and is provisioned on arrival; saying `:prov each one` would
+        // describe a chore the inductor now does. Only a box the reply *did*
+        // address needs the operator, and only because nothing is going to
+        // onboard it behind their back.
+        let msg = if waiting > 0 && waiting == linked {
+            format!("{linked} box(es) tracked — addresses arrive in a moment, then they onboard themselves")
+        } else {
+            format!("{linked} box(es) linked — the ones without an address onboard themselves; :prov the rest")
+        };
+        send(&tx, Level::Ok, msg);
     }
     // The launch changed the account, so the Cloud view is now stale.
     let _ = tx.send(Ev::Cloud(cloud_snapshot(&root).await));

@@ -21,8 +21,10 @@ flowchart TB
     P --> DRY["aws up --dry-run<br/>the one review step, CLI-only"]
     DRY --> B1[":B<br/>backend up"]
     B1 --> UP[":up 3<br/>launch, and link what it launched"]
+    UP --> WATCH["the account watch<br/>address arrives → relink → onboard"]
     UP --> B2[":B again<br/>catch-up: one job per box"]
     B2 --> RUN["chapters render"]
+    WATCH --> RUN
     RUN --> DOWN[":down<br/>terminate by explicit id"]
     DOWN --> DROP[":drop<br/>clear the registry entries"]
 ```
@@ -103,7 +105,8 @@ no `aws ls` → `:add` copy-paste step:
 | | |
 |---|---|
 | `:B` | backend up. `:up` and `:prov` `POST` to the API, so nothing works without this |
-| `:up 3` | launch three tagged boxes; each is registered with the pool's `.pem` (`AwsConfig::key_file()`) and `ssh_user` |
+| `:up 3` | launch three tagged boxes; each is registered **immediately** — with the pool's `.pem` (`AwsConfig::key_file()`) and `ssh_user`, and keyed by its instance id while EC2 has not yet assigned an address |
+| *wait a moment* | nothing to press. The address arrives in seconds; the inductor relinks the box to it and onboards it, and it appears as `initializing` → `provisioning` → `online` on its own |
 | `:pool` (`l`) | the Cloud view: what the account holds, and what is `not linked` |
 | `:B` again | the catch-up: every linked box that is **not already working** gets its own provision-and-start job, all at once. A box already `online` is skipped and says so — re-provisioning a working box is what used to make this slow. `p` is the deliberate re-provision |
 | `↓` then `:prov` (`p`) | provision one box and start its worker, if you prefer per-box control |

@@ -637,9 +637,10 @@ transport only would fix the probe and leave every push failing identically.
 ### Machine states, and the gates that read them
 
 A machine's state is a *decision*, not a label: `unknown` (never contacted),
+`awaiting-ip` (the account has the box and has not given it an address yet),
 `initializing` (created, not yet answering), `probing`, `provisioning`,
 `configured` (has everything it needs, no worker beating yet), `online` (a
-worker is answering), `offline` (was answering, now silent), `error`. Two gates
+worker is answering), `offline` (was answering, now silent), `error`. Three gates
 read it:
 
 * **`accepts_work`** — only `online` is handed tasks. Every other state is a
@@ -647,17 +648,56 @@ read it:
   that cannot run it. `unknown` passes separately, as "no opinion formed": a
   hand-written ledger or the legacy pull worker asking before its first beat,
   neither of which may be stranded.
-* **`coming_up`** — `initializing`/`probing`/`provisioning`/`configured`. The
-  dispatcher stamps `offline` on any box that fails to answer `/status`, and
-  must not do that while the box is still on its way up: a box twenty seconds
-  into its first boot is not gone, and calling it gone is how a freshly launched
-  pool looks broken.
+* **`coming_up`** — `awaiting-ip`/`initializing`/`probing`/`provisioning`/
+  `configured`. The dispatcher stamps `offline` on any box that fails to answer
+  `/status`, and must not do that while the box is still on its way up: a box
+  twenty seconds into its first boot is not gone, and calling it gone is how a
+  freshly launched pool looks broken.
+* **`dialable`** — everything except `awaiting-ip`. This is the gate on *asking*:
+  `RunInstances` returns before EC2 has assigned the instance a public address,
+  so a launched box is registered by its instance id — the handle the account
+  read repairs it by — and there is no `http://i-0abc…:8917/status` to poll.
+  `unknown` passes deliberately: a hand-added machine has never been probed, and
+  probing it is the only way to find out.
 
-`initializing` is the only state with a deadline (`BOOT_DEADLINE_SECS`, five
-minutes). A state with no exit condition is a lie — a box terminated before it
-booted, or launched into a subnet this machine cannot dial, would sit there for
-ever — so it becomes `error`, with the reason in the note. `state_since` is what
-makes both the deadline and the overlay's `state age` line possible.
+`awaiting-ip` and `initializing` are the two states with a deadline
+(`BOOT_DEADLINE_SECS`, five minutes). A state with no exit condition is a lie —
+a box terminated before it booted, a box the account never addressed, or one
+launched into a subnet with no route out, would sit there for ever — so it
+becomes `error`, with the reason in the note. `state_since` is what makes both
+the deadline and the overlay's `state age` line possible.
+
+### Launch, watch, onboard
+
+A launch that ends with boxes the dashboard cannot dial is the failure this pair
+exists to remove, and it has three parts:
+
+* **The launch asks for a public address** (`--associate-public-ip-address`)
+instead of trusting the subnet's `MapPublicIpOnLaunch` default. The transport is
+inverted — the inductor dials the box, nothing dials the inductor — so
+reachability resting on a per-subnet checkbox nobody re-reads fails *silently*:
+ssh may answer and the box is never driven. Asking is the only version of this
+that cannot be wrong quietly.
+* **Every instance is registered at birth, keyed by whatever it has.** With an
+address, that is the address. Without one, it is the instance id, so the record
+exists from the first second and the account read has something to repair. The
+private address is kept in the note — information for an operator whose inductor
+sits in the same VPC — and never in the address column, where it used to sit as
+a plausible-looking address for a box on the other side of the internet.
+* **An address arriving is a state transition, not an event nobody hears.**
+`relink` re-keys the entry to the public address, moves only that box from
+`awaiting-ip` to `initializing` (restarting its deadline from the moment it could
+actually be dialed), and marks its note as waiting to be onboarded. The
+dashboard reads that marker and hands the box to the same provision job `:prov`
+runs.
+
+The watch that drives this is gated on `has_pending_launch` — some machine is
+`awaiting-ip` or `initializing` *and* carries an EC2 id — so the account is read
+while a launch is in flight and never otherwise. A settled cluster spends no API
+calls and the watch stops itself. The marker is a note rather than a field
+because the provision job clears it by rewriting the note: exactly the lifetime
+wanted, with nothing that has to remember to clear a flag, and no latch that can
+get stuck and re-provision a box on every poll.
 
 The third reader is the *failed provision*. `verdict_after_failed_provision`
 (`tui/jobs.rs`) decides what a failed run leaves behind, and it separates two
@@ -1055,8 +1095,10 @@ flowchart TB
     LOGIN[":login<br/>the IAM user's key"] --> DISC[":discover<br/>read the account into .bm/aws.json"]
     DISC --> PROF[":profile load<br/>REQUIRED — the tag records this hash"]
     PROF --> UP[":up 3<br/>launch + link, the one command that spends money"]
+    UP --> WATCH["the account watch<br/>relink → onboard, no keys pressed"]
     UP --> B[":B<br/>catch-up: provision + start, one job per box"]
     B --> WORK["boxes render chapters"]
+    WATCH --> WORK
     WORK --> DOWN[":down<br/>terminate by explicit instance id"]
     DOWN -->|"or idle_mins elapses"| OFF["stopped"]
 ```
@@ -1083,6 +1125,15 @@ flowchart TB
   the same instance is folded into the real entry. Every repair is returned as a
   log line, so the events pane explains what changed and why. **No operator
   selection is involved** — that is the point.
+* **A launch ends before the address exists, which is why `:up` used to end
+  with boxes nobody could dial.** `RunInstances` returns before EC2 assigns a
+  public address, so "linked" at that moment cannot mean "reachable". Such a box
+  is registered under its instance id and stays `awaiting-ip` — with no address
+  in the address column, because there is none — and the inductor reads the
+  account every 15 s until one arrives, gated on `has_pending_launch` so a
+  settled cluster polls nothing. The box is then re-keyed to its address, moved
+  to `initializing` and onboarded by the same job `:prov` runs. `:B` remains the
+  manual version of the same thing; it is no longer the *only* version.
 * **The instance type is chosen for RAM, not CPU.** The TTS path is a
   hand-written SIMD matvec with no GPU code, so 2 vCPU is the floor — but the
   sidecar is **~2.85 GB resident the moment the weights load**, so a 4 GiB box

@@ -11,20 +11,49 @@ use bm_proto::{now_secs, Stage, Task, TaskState};
 pub const BOOT_DEADLINE_SECS: u64 = 300;
 
 impl Inner {
+    /// Is a launched box still waiting on the account?
+    ///
+    /// True while some machine sits in `AwaitingIp` or `Initializing` *and*
+    /// carries an EC2 instance id — that is, while a launch is in flight and an
+    /// account read could move something forward. It gates the periodic relink,
+    /// which is the whole point of asking: the account is read while boxes are
+    /// coming up and never otherwise, so a settled cluster costs no API calls at
+    /// all and the watch stops itself when the last box answers.
+    ///
+    /// The EC2 requirement matters: a hand-added machine is `Unknown`, never
+    /// `Initializing`, but a stuck `Initializing` row from a ledger written by
+    /// hand would otherwise keep the account being read for ever.
+    pub fn has_pending_launch(&self) -> bool {
+        self.machines.values().any(|m| {
+            matches!(
+                m.state,
+                bm_proto::MachineState::AwaitingIp | bm_proto::MachineState::Initializing
+            ) && bm_core::provision::ec2_id_from_note(&m.note).is_some()
+        })
+    }
+
     /// Retire boxes that never came up.
     ///
-    /// `Initializing` is the one machine state with a deadline, because it is
-    /// the only one where the inductor is *waiting* rather than acting. A state
-    /// with no exit condition is a lie: a box terminated before it booted, or
-    /// launched into a subnet this machine cannot dial, would sit in
-    /// "initializing" for ever with the pane implying it is about to work.
+    /// `Initializing` and `AwaitingIp` are the two machine states with a
+    /// deadline, because they are the only ones where the inductor is *waiting*
+    /// rather than acting. A state with no exit condition is a lie: a box
+    /// terminated before it booted, or launched into a subnet this machine
+    /// cannot dial, would sit in "initializing" for ever with the pane implying
+    /// it is about to work.
+    ///
+    /// `AwaitingIp` needs it for a sharper reason: the account assigns a
+    /// public address within seconds of a launch, so one that has not arrived in
+    /// five minutes is never arriving — a terminated instance, or a subnet with
+    /// no route to an internet gateway. Without a deadline that box is a
+    /// permanent row in the pane that no account read will ever repair.
     ///
     /// Returns one line per box retired, for the caller to log.
     pub fn expire_initializing(&mut self) -> Vec<String> {
         let now = now_secs();
         let mut out = Vec::new();
         for m in self.machines.values_mut() {
-            if m.state != bm_proto::MachineState::Initializing {
+            let addressless = m.state == bm_proto::MachineState::AwaitingIp;
+            if m.state != bm_proto::MachineState::Initializing && !addressless {
                 continue;
             }
             // `0` is "never stamped" — a record written before this field
@@ -37,10 +66,17 @@ impl Inner {
             if now.saturating_sub(m.state_since) < BOOT_DEADLINE_SECS {
                 continue;
             }
-            let note = format!(
-                "never answered ssh within {} min of launch — terminated, or unreachable from here",
-                BOOT_DEADLINE_SECS / 60
-            );
+            let note = if addressless {
+                format!(
+                    "no public address within {} min of launch — terminated, or a subnet with no route out",
+                    BOOT_DEADLINE_SECS / 60
+                )
+            } else {
+                format!(
+                    "never answered ssh within {} min of launch — terminated, or unreachable from here",
+                    BOOT_DEADLINE_SECS / 60
+                )
+            };
             m.set_state(bm_proto::MachineState::Error);
             m.note = bm_core::provision::preserve_ec2_id(&m.note, &note);
             out.push(format!("[{}] {note}", m.addr));

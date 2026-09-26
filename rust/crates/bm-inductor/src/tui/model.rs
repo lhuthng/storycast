@@ -436,6 +436,22 @@ pub(crate) fn machine_name<'a>(machines: &'a [Machine], beat: &'a Heartbeat) -> 
         })
 }
 
+/// The `ip` column, which is not always an address.
+///
+/// A launched box whose public address the account has not assigned yet is keyed
+/// by its instance id — that is the registry key and the handle the account read
+/// repairs it by, not something ssh can answer on. Printing it under `ip` put a
+/// plausible-looking non-address where an operator looks for one, which is the
+/// confusion the `awaiting-ip` state exists to end. The id is not lost: it is
+/// the row's name (see [`machine_label`]) and it is in the note.
+pub(crate) fn addr_label(m: &Machine) -> String {
+    if m.state.dialable() {
+        m.addr.clone()
+    } else {
+        "—".into()
+    }
+}
+
 /// What kind of box this is, for the Machines pane's `kind` column.
 ///
 /// `local` is the inductor's own node; `aws` is an EC2-launched box, told apart

@@ -32,11 +32,12 @@ mod stamp;
 mod steps;
 
 pub use aws::{
-    admits_port, default_security_group_args, default_subnet_args, describe_image_args,
-    describe_security_group_args, ec2_id_from_note, instance_line, instance_profile_names_args,
-    keypair_names_args, machine_from_instance, parse_instances, parse_name_list, preserve_ec2_id,
-    run_instances_args, sole_name, terminate_args, ubuntu_ami_args, AwsConfig, AwsInstance,
-    DEFAULT_FILE, DEFAULT_TAG, REQUIRED_INGRESS, UBUNTU_LTS,
+    admits_port, awaiting_onboard, default_security_group_args, default_subnet_args,
+    describe_image_args, describe_security_group_args, ec2_id_from_note, instance_line,
+    instance_note, instance_profile_names_args, keypair_names_args, machine_from_instance,
+    parse_instances, parse_name_list, preserve_ec2_id, run_instances_args, sole_name,
+    terminate_args, ubuntu_ami_args, AwsConfig, AwsInstance, AWAITING_ONBOARD, DEFAULT_FILE,
+    DEFAULT_TAG, REQUIRED_INGRESS, UBUNTU_LTS,
 };
 pub use ssh::{resolve_key, KeySource, RsyncProgress, Ssh};
 pub use stamp::{compute_provision_stamp, ProvisionStamp};

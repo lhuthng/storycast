@@ -192,6 +192,23 @@ pub(crate) struct App {
     /// the jobs screen, and a job spawning jobs behind its back would produce
     /// rows nothing could match an id to.
     pub(crate) pending_catchup: Option<(Vec<bm_proto::Machine>, Arc<AtomicBool>)>,
+    /// Boxes a launch orphaned that the account has just given an address to,
+    /// and that nobody has onboarded yet.
+    ///
+    /// Filled by every state poll from the marker `relink` writes, and drained
+    /// by the dashboard loop into one provision job each — the same shape as
+    /// `pending_catchup`, and for the same reason: only the dashboard can
+    /// allocate a job id.
+    pub(crate) pending_onboard: Vec<bm_proto::Machine>,
+    /// Addresses an onboard job has already been handed out for.
+    ///
+    /// The one piece of bookkeeping here, and it covers a single gap: the poll
+    /// runs every ~800 ms while a queued provision takes longer than that to
+    /// reach the box, so without this the marker would still be in the note on
+    /// the next two polls and the same box would be queued several times. An
+    /// entry is dropped as soon as the marker goes away — which is the moment
+    /// the job takes the box and rewrites its note.
+    pub(crate) onboarded: std::collections::HashSet<String>,
     /// Ids of the catch-up provisions a `B` handed out that are still running.
     ///
     /// `backend_start_outstanding` spans these, not just the backend boot. The
@@ -295,6 +312,8 @@ impl App {
             backend_start_outstanding: false,
             start_cancel: None,
             pending_catchup: None,
+            pending_onboard: Vec::new(),
+            onboarded: std::collections::HashSet::new(),
             catchup_jobs: Vec::new(),
             command_return: None,
             theme: Theme::default(),
@@ -717,6 +736,25 @@ impl App {
         machines.sort_by(|a, b| a.addr.cmp(&b.addr));
         beats.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
         tasks.sort_by_key(|t| (t.chapter, t.stage));
+        // Which launched boxes are waiting to be onboarded, read off the note
+        // marker `relink` writes when an address arrives. The job clears it by
+        // rewriting the note, so a box appears here exactly once.
+        //
+        // The set is pruned **before** the candidate list is built, so a box
+        // whose marker has gone is immediately eligible again rather than
+        // guarded for the session by a stale entry.
+        self.onboarded.retain(|addr| {
+            machines
+                .iter()
+                .any(|m| &m.addr == addr && bm_core::provision::awaiting_onboard(&m.note))
+        });
+        self.pending_onboard = machines
+            .iter()
+            .filter(|m| {
+                bm_core::provision::awaiting_onboard(&m.note) && !self.onboarded.contains(&m.addr)
+            })
+            .cloned()
+            .collect();
         self.machines = machines;
         self.beats = beats;
         self.tasks = tasks;

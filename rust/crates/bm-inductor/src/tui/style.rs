@@ -202,7 +202,9 @@ pub(crate) fn state_color(s: &str) -> Color {
         // `initializing` is a wait, not a fault: a launched box that is still
         // booting. Red here would make a fresh pool look broken, which is the
         // misreading the state exists to prevent.
-        "running" | "assigned" | "probing" | "provisioning" | "initializing" => Color::Yellow,
+        "running" | "assigned" | "probing" | "provisioning" | "initializing" | "awaiting-ip" => {
+            Color::Yellow
+        }
         "offline" | "failed" | "shelved" | "error" => Color::Red,
         "pending" => Color::Gray,
         _ => Color::Gray,
@@ -387,7 +389,9 @@ pub(crate) fn state_glyph_cell(colour: bool, text: &str) -> Line<'static> {
         "online" | "done" | "configured" | "ok" => "● ",
         // `initializing` joins the in-progress family: a box booting is on its
         // way, not missing. The hollow circle stays for "nothing known".
-        "running" | "assigned" | "probing" | "provisioning" | "initializing" => "◐ ",
+        "running" | "assigned" | "probing" | "provisioning" | "initializing" | "awaiting-ip" => {
+            "◐ "
+        }
         "offline" | "failed" | "shelved" | "error" => "✗ ",
         _ => "○ ",
     };
