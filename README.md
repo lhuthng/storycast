@@ -62,12 +62,12 @@ long it takes, not what it costs.
 
 ### What it will not do
 
-It will not get past a site that blocks it. No browser engine, no challenge
+**It will not get past a site that blocks it.** No browser engine, no challenge
 solver, no intention of adding either. Roughly one novel site in three refuses
-a program, and no amount of retrying changes that. It also will not do voices
-well for a language it was not built around: the built-in voices are
-Vietnamese. Cloning your own voice from a short clip works in any language and
-is the way around that.
+a program, and no amount of retrying changes that. **It will not do voices well
+for a language it was not built around**: the built-in voices are Vietnamese.
+Cloning your own voice from a short clip works in any language and is the way
+around that.
 
 **Before you spend a day on it:** the single most common way this fails is
 pointing it at a site that serves a bot check instead of a chapter. Run
@@ -77,11 +77,14 @@ pointing it at a site that serves a bot check instead of a chapter. Run
 
 The repo holds the program. The book itself is not in it.
 
+**First-time setup touches only these 3-4 rows.** Everything else is either
+already working or optional until you need it.
+
 | In the repo | What it is |
 | --- | --- |
-| `rust/` (five crates) | Pipeline: scheduler, workers, TUI, provisioning, plus `bm-tts`, the local Vieneu TTS sidecar |
-| `python/` | Voice enrollment only (the old sidecar is retired; serving never needs Python) |
-| `prompts/script.txt` | The staging contract the automatic digest renders after speakers are fixed: text, TTS, music, effects, sounds. Your main edit for another language or genre. Ships with the profile; the tracked copy is `rust/fixtures/profile/prompts/` |
+| **`rust/`** (five crates) | Pipeline: scheduler, workers, TUI, provisioning, plus `bm-tts`, the local Vieneu TTS sidecar |
+| **`python/`** | Voice enrollment only (the old sidecar is retired; serving never needs Python) |
+| **`prompts/script.txt`** | The staging contract the automatic digest renders after speakers are fixed: text, TTS, music, effects, sounds. Your main edit for another language or genre. Ships with the profile; the tracked copy is `rust/fixtures/profile/prompts/` |
 | `prompts/analyze.txt` | Chapter-attribution template used by the automatic first pass; its legacy raw-chapter rendering remains the manual digest manager (`D`) path |
 | `voices.default.json` | Built-in catalogue voices |
 | `assets/`, `Makefile`, `.env.example` | Scene maps, ambience, one-command ops, config template |
@@ -90,9 +93,9 @@ Everything book-specific is runtime-created and git-ignored:
 
 | Created by you / at runtime | What it is |
 | --- | --- |
-| `url_template` + `crawl` in `workspaces/<name>/settings.json` | Where chapters come from: `{n}` is the number, plus the [crawl script](docs/CRAWLING.md) that fetches them. The only novel-specific settings you must change. New workspaces default to `crawl.mode: "manual"`, nothing fetches until you name a crawler and set `"mode": "script"` |
-| `workspaces/<name>/crawl/*.lua` \| `*.js` | Your crawler, per book. `assets/crawl/templates/` has five to start from, four written against a page captured from the live site they are for: `storya.lua` (the site this was built for), `truyencom.lua` (the easy shape), `madara.lua` (a paginated listing), `readnovelfull.lua` (slug URLs and a book index that stops at 30 chapters), `webnovel.lua` (the hard shape, a site behind a bot check). Synced to every worker with the next provision. See [docs/CRAWLING.md](docs/CRAWLING.md) |
-| `prompts/script.txt` | Your style and language, if the example does not fit |
+| **`url_template` + `crawl` in `workspaces/<name>/settings.json`** | **Required.** Where chapters come from: `{n}` is the number, plus the [crawl script](docs/CRAWLING.md) that fetches them. The only novel-specific settings you must change. New workspaces default to `crawl.mode: "manual"`, nothing fetches until you name a crawler and set `"mode": "script"` |
+| **`workspaces/<name>/crawl/*.lua` \| `*.js`** | **Required if crawling.** Your crawler, per book. `assets/crawl/templates/` has five to start from, four written against a page captured from the live site they are for: `storya.lua` (the site this was built for), `truyencom.lua` (the easy shape), `madara.lua` (a paginated listing), `readnovelfull.lua` (slug URLs and a book index that stops at 30 chapters), `webnovel.lua` (the hard shape, a site behind a bot check). Synced to every worker with the next provision. See [docs/CRAWLING.md](docs/CRAWLING.md) |
+| **`prompts/script.txt`** | Your style and language, if the example does not fit |
 | `voices.json`, `voice-pool.json`, `refs/` | Cloned voices and clips (skip to use catalogue voices) |
 | `data/`, `output/` | Scripts, bible, cached audio, finished MP3s |
 | `.bm/` | Ledger, settings, machines, logs |
@@ -119,9 +122,8 @@ flowchart TB
     SEGS -->|merge| OUT["Ch.N - Title.mp3<br/>in output/"]
 ```
 
-The dotted edges matter: **the bible is both digest input and output**, and the
-cast is derived from the digest. Chapter 40 keeps chapter 1's voice for a
-character with no hand config.
+**The bible is both digest input and output**; the cast is derived from the
+digest. Chapter 40 keeps chapter 1's voice for a character with no hand config.
 
 ### The digest invents people: audit the bible early
 
@@ -428,13 +430,10 @@ ever use A: **one coordinator, any number of workers, and the coordinator is
 the one that reaches out.** The machines doing the work never try to phone
 home.
 
-**Why it is built that way**, because it is not an arbitrary choice. Each
-worker is a small web server that answers questions, and it is never told where
-the coordinator is. The alternative (workers calling in) does not work at all
-for a rented machine, which cannot reach a laptop sitting behind a home router,
-and the version that tried it had to fork the code in three separate places.
-Turning it around removes the problem entirely: the coordinator already knows
-how to reach them, because it is the one that started them.
+**Why it is built that way.** Each worker is a small web server that answers
+questions; it is never told where the coordinator is. Workers calling in does
+not work for a rented machine behind a home router, so the coordinator reaches
+out instead: it already knows how, because it started them.
 
 One practical consequence, because it fails quietly: on a machine you add
 yourself you must open **two** ports. Port 22 (ssh) gets you in to set it up;
@@ -668,12 +667,18 @@ reached, and requeues the merge for that chapter, because the mp3 on disk was
 mixed from the old audio.
 
 The two names are the point. The third argument is a check: if segment 67 is
-not spoken by "Thanh Sơn lão tổ", nothing is written and the refusal tells you
-who is actually there and which segments *are* spoken by the name you expected,
-which is the answer to a miscounted line. The last argument is checked against
-the cast before the script is touched, because a speaker holding no voice is a
-planning error and a chapter that requeues into an unplannable row is worse than
-a refusal. Quote any name with a space in it.
+not spoken by "Thanh Sơn lão tổ", nothing is written. The refusal names who is
+actually there and which segments *are* spoken by the name you expected:
+
+```
+speaker 18: segment 67 is "Dịch Phong", not "Thanh Sơn lão tổ";
+              "Thanh Sơn lão tổ" speaks segments 12, 14, 15
+```
+
+The last argument is checked against the cast before the script is touched,
+because a speaker holding no voice is a planning error and a chapter that
+requeues into an unplannable row is worse than a refusal. Quote any name with a
+space in it.
 
 One take, usually. The local engine groups consecutive same-speaker segments
 into a single take, so re-pointing the middle of a run splits that run and

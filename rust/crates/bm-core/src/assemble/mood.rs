@@ -56,6 +56,22 @@ pub fn mood_cluster(mood: &str) -> String {
     }
 }
 
+/// The acting-mood vocabulary rendered for the digest prompt: the canonical
+/// names of [`MOOD_TAKE`], comma separated.
+///
+/// Rendered from the table rather than written into the prompt text, so the
+/// prompt and [`mood_cluster`] cannot drift: every offered token resolves to a
+/// take. The prompt used to carry this list inside a section the Rust override
+/// deleted, so the analyzer saw no list and any coined word silently floored to
+/// `neutral` here.
+pub fn mood_palette() -> String {
+    MOOD_TAKE
+        .iter()
+        .map(|(m, _, _)| *m)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub fn take_for_mood(cluster: &str) -> (f64, f64) {
     MOOD_TAKE
         .iter()

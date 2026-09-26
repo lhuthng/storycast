@@ -9,6 +9,7 @@ mod plan;
 mod renderplan;
 mod wav;
 
+pub use self::mood::mood_palette;
 pub use self::plan::{
     character_has_lines, drop_headline, expected_wavs, is_headline, pick_exact, pick_rendered,
     plan_render, rendered_segments, segment_miss, segments_complete, title_speech,

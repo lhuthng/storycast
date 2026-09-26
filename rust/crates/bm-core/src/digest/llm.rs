@@ -224,7 +224,9 @@ async fn generate_ollama(prompt: &str, settings: &Settings) -> Result<(String, B
         "model": settings.local_model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": false,
-        "format": "json",
+        // A schema where the pass has one, else JSON mode. Ollama enforces a
+        // schema in `format`, so a malformed answer is not emitted to repair.
+        "format": digest_schema(prompt).unwrap_or_else(|| json!("json")),
         "options": {"temperature": 0, "num_ctx": 16384},
     });
     // NOTE: `ollama_url` is a loopback endpoint by default and this client
@@ -381,9 +383,19 @@ async fn try_gemini_model(prompt: &str, key: &str, model: &str) -> ModelNext {
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
     );
+    // `responseSchema` where the pass has one, so Gemini constrains decoding to
+    // the staging shape instead of merely promising JSON. The schema is built to
+    // Gemini's OpenAPI subset (no `additionalProperties`, no unions).
+    let mut config = json!({
+        "responseMimeType": "application/json",
+        "maxOutputTokens": 16384,
+    });
+    if let Some(schema) = digest_schema(prompt) {
+        config["responseSchema"] = schema;
+    }
     let body = json!({
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 16384},
+        "generationConfig": config,
     });
     // The default client has **no deadline at all** — the same class of bug as
     // the opencode child below, and just as invisible when it fires.
@@ -474,6 +486,71 @@ async fn try_gemini_model(prompt: &str, key: &str, model: &str) -> ModelNext {
     ModelNext::Skip(last)
 }
 
+/// A decoder-enforced JSON Schema for the staging pass, or `None` for any
+/// prompt that is not one.
+///
+/// Only the staging pass is offered a schema. Its answer is the one with the
+/// repeated per-line keys, and its shape is a plain array of objects with no maps,
+/// so it fits the OpenAPI subset both Ollama and Gemini accept. The attribution
+/// pass carries `mentions`/`speakers` maps, which that subset does not express
+/// portably, so it keeps plain JSON mode.
+///
+/// Selected from the prompt text rather than threaded through every call site:
+/// the automatic and manual paths share [`generate`], and a pass identity it
+/// does not otherwise use would touch all of them to say one bit.
+///
+/// Backends that advertise schema enforcement get it; the free OpenRouter model
+/// documents JSON mode *without* schema enforcement, so a schema sent there
+/// would be ignored at best, and the `opencode` CLI is plain stdout with no
+/// request body to constrain. Both keep the parse-and-repair path.
+pub fn digest_schema(prompt: &str) -> Option<Value> {
+    prompt
+        .contains("---STAGING OUTPUT CONTRACT---")
+        .then(staging_schema)
+}
+
+/// The staging answer's strict schema: `segments` plus `fixes`, the fields the
+/// contract names and nothing else a decoder might invent.
+///
+/// `text`, `mood`, `scene` and `music` are optional on purpose: the contract
+/// asks for them only where they change and the carry-forward pass fills the
+/// rest, so requiring them here would undo the very saving the shape exists for.
+fn staging_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "segments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "source_id": {"type": "string"},
+                        "text": {"type": "string"},
+                        "mood": {"type": "string"},
+                        "scene": {"type": "string"},
+                        "music": {"type": "string"},
+                        "sound_after": {"type": "string"},
+                        "stop_after": {"type": "string"}
+                    },
+                    "required": ["source_id", "sound_after", "stop_after"]
+                }
+            },
+            "fixes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "before": {"type": "string"},
+                        "after": {"type": "string"}
+                    },
+                    "required": ["before", "after"]
+                }
+            }
+        },
+        "required": ["segments"]
+    })
+}
+
 fn analyze_chain(settings: &Settings) -> Vec<String> {
     settings
         .analyze_models
@@ -533,6 +610,30 @@ mod tests {
             analyze_chain(&chained),
             vec!["gemini-3.8-flash", "gemini-3.5-flash"]
         );
+    }
+
+    #[test]
+    fn only_the_staging_prompt_gets_a_decoder_schema() {
+        let schema = digest_schema("text\n---STAGING OUTPUT CONTRACT---\n{}")
+            .expect("the staging pass has a schema");
+        assert_eq!(schema["type"], json!("object"));
+        assert_eq!(schema["properties"]["segments"]["type"], json!("array"));
+        // The per-line fields the carry-forward pass fills must stay optional,
+        // or the decoder forces the model to restate them and the saving is
+        // undone at the source.
+        let required = schema["properties"]["segments"]["items"]["required"]
+            .as_array()
+            .expect("items have a required list");
+        assert!(required.contains(&json!("source_id")));
+        assert!(required.contains(&json!("sound_after")));
+        assert!(!required.contains(&json!("text")));
+        assert!(!required.contains(&json!("mood")));
+
+        // The attribution answer carries `mentions`/`speakers` maps the OpenAPI
+        // subset cannot express portably, so it keeps plain JSON mode. So does
+        // an old profile with no contract at all.
+        assert!(digest_schema("---ATTRIBUTION OUTPUT CONTRACT---").is_none());
+        assert!(digest_schema("an old profile with no contract").is_none());
     }
 
     #[test]
