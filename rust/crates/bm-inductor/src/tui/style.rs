@@ -229,6 +229,28 @@ pub(crate) fn stage_color(s: &str) -> Color {
     }
 }
 
+/// The hue a box's art takes in the Machines rack.
+///
+/// The stage it is working on, so a cluster mid-render is a wall of cyan and a
+/// digest is a wall of magenta — the Workers pane's reading carried over, not a
+/// second one invented. A fault outranks it, exactly as in the table's `state`
+/// column: a broken box is red whatever it was doing when it broke.
+///
+/// Idle and never-contacted are **not** the same grey. A box that is up and has
+/// nothing to do is the cluster working; one that has never answered is the
+/// thing an operator is looking for, and wearing the same colour would make it
+/// the thing they stop looking for.
+pub(crate) fn machine_tint(work: &str, stage: Option<&str>) -> Color {
+    if matches!(work, "offline" | "error") {
+        return Color::Red;
+    }
+    match stage {
+        Some(s) => stage_color(s),
+        None if work == "unknown" => Color::DarkGray,
+        None => Color::Gray,
+    }
+}
+
 /// Display alias for a worker: a stable animal name + colour derived from the
 /// worker id. Raw ids (`host-pid`) are meaningless to an operator and change
 /// on every restart; the alias is arbitrary but stable for the same id, so a

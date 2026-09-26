@@ -6,6 +6,7 @@ mod crawl;
 mod digest;
 mod events;
 mod footer;
+mod graph;
 mod help;
 mod jobs;
 mod machine;
@@ -258,12 +259,44 @@ fn soft_ceiling(base: u16, share: u16, frame_h: u16) -> u16 {
 }
 
 /// Rows the Machines pane wants: one per machine, plus its chrome, clamped to
-/// the tier's floor and the scaled ceiling.
+/// the tier's floor and the scaled ceiling — or, in the graph, a chassis plus
+/// whole rows of servers it can afford.
 ///
 /// The ceiling is the point of the ceiling. A cluster with thirty machines
 /// should scroll, not push Logs and the footer off the screen — and the pane
 /// already clamps its scroll to the rows it can show.
-fn machines_height(app: &App, compact: bool, frame_h: u16) -> u16 {
+fn machines_height(app: &App, compact: bool, frame_h: u16, frame_w: u16, others: u16) -> u16 {
+    // The graph is the one pane that cannot be sized from its content alone: the
+    // picture is a fixed chassis plus whole rows of servers, however many boxes
+    // there are, and what it must fit *inside* is the width. So it is budgeted
+    // against the frame instead — everything else, minus this — and a frame too
+    // short even for the lean form falls back to the table, which says so in its
+    // title rather than drawing a rack with the legs cut off.
+    //
+    // `others` is what the other panes will *actually* take, not their floors.
+    // A cluster with eight live workers wants a nine-row Workers pane, and
+    // budgeting against the floor instead over-promised by six rows: the solver
+    // then gave every pane less than it was told, and the rack came out clipped
+    // on its last row with blank space under it — a picture that lies about how
+    // much it showed.
+    if !app.machines.is_empty() && app.machines_graph {
+        let budget = frame_h.saturating_sub(others);
+        if let Some(hub_art) = graph::form_for(budget.saturating_sub(PANE_CHROME)) {
+            let w = frame_w.saturating_sub(2);
+            // The plan's own arithmetic, at the window's first page, so the pane
+            // is exactly the rows the drawer will fill.
+            let rows = graph::plan(
+                budget.saturating_sub(PANE_CHROME),
+                w,
+                app.machines.len(),
+                0,
+                hub_art,
+            )
+            .rows
+            .len() as u16;
+            return PANE_CHROME + rows;
+        }
+    }
     let (min, base) = if compact {
         (COMPACT_MACHINES_MIN_H, COMPACT_MACHINES_MAX_H)
     } else {
@@ -340,9 +373,33 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
     // saying so, Tasks and Stats were dropped outright in the compact tier,
     // and terminal height beyond the fixed set was spent on empty borders
     // rather than on the log — the one pane where a message is the point.
-    let machines_h = machines_height(app, compact, area.height);
-    let workers_h = workers_height(app, compact, area.height);
+    // The Machines pane is sized last, and from what the others *will* take
+    // rather than from their floors — see `machines_height`.
+    //
+    // **The Workers pane does not exist in rack mode.** The rack draws every box
+    // with the worker standing on it — the same animal name, the same task, the
+    // same chapter — so a second list of the same facts underneath is the pane
+    // arguing with itself, and it costs the rows the rack wanted most. Its rows
+    // go to the rack and the log, not to a gap.
+    let rack = app.machines_graph;
+    let workers_h = if rack {
+        0
+    } else {
+        workers_height(app, compact, area.height)
+    };
     let tasks_h = tasks_height(app, compact, area.height);
+    let (header_h, events_min, footer_h) = if compact {
+        (0, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H)
+    } else {
+        (FULL_HEADER_H, FULL_EVENTS_MIN_H, FULL_FOOTER_H)
+    };
+    let machines_h = machines_height(
+        app,
+        compact,
+        area.height,
+        area.width,
+        header_h + workers_h + tasks_h + events_min + footer_h,
+    );
     let constraints: Vec<Constraint> = if compact {
         vec![
             Constraint::Length(machines_h),
@@ -382,17 +439,25 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     if compact {
         machines::draw_machines(f, app, root[0], compact);
-        workers::draw_workers(f, app, root[1], true);
+        if !rack {
+            workers::draw_workers(f, app, root[1], true);
+        }
         events::draw_events(f, app, root[3]);
         footer::draw_footer(f, app, root[4], true);
-        app.add_hit_region(
-            root[0],
-            HitTarget::Panel {
-                panel: Panel::Machines,
-                row_start: app.machine_scroll,
-                row_y: root[0].y + 2,
-            },
-        );
+        // A rack is a picture, not a list: there is no row index to map a click
+        // onto, and mapping one anyway would select whichever box happened to be
+        // that many rows down. So the pane takes no hit region in that mode and a
+        // click on it does nothing — which is the truth about a picture.
+        if !app.machines_graph {
+            app.add_hit_region(
+                root[0],
+                HitTarget::Panel {
+                    panel: Panel::Machines,
+                    row_start: app.machine_scroll,
+                    row_y: root[0].y + 2,
+                },
+            );
+        }
         app.add_hit_region(
             root[3],
             HitTarget::Panel {
@@ -412,17 +477,21 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
     } else {
         draw_header(f, app, root[0]);
         machines::draw_machines(f, app, root[1], compact);
-        workers::draw_workers(f, app, root[2], compact);
+        if !rack {
+            workers::draw_workers(f, app, root[2], compact);
+        }
         events::draw_events(f, app, root[4]);
         footer::draw_footer(f, app, root[5], false);
-        app.add_hit_region(
-            root[1],
-            HitTarget::Panel {
-                panel: Panel::Machines,
-                row_start: app.machine_scroll,
-                row_y: root[1].y + 2,
-            },
-        );
+        if !app.machines_graph {
+            app.add_hit_region(
+                root[1],
+                HitTarget::Panel {
+                    panel: Panel::Machines,
+                    row_start: app.machine_scroll,
+                    row_y: root[1].y + 2,
+                },
+            );
+        }
         app.add_hit_region(
             root[4],
             HitTarget::Panel {

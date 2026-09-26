@@ -881,6 +881,78 @@ provision/aws_credentials.rs  the credential store and the verify-then-write ord
 To follow a key press: `input.rs` → `input/<screen>.rs` → `jobs.rs` →
 `app.rs` → `draw.rs` → `draw/<pane>.rs`.
 
+### The Machines pane has two views
+
+The table is the default and the complete list — `machine · kind · ip ·
+workers · policy · state · tts · seen`. `g` swaps it for a rack
+(`tui/draw/graph.rs`): the inductor's console at the top left, a bus running
+down from it, and every box drawn as a server hanging off that bus, in as many
+rows of servers as the terminal has room for. It is a **view preference**, not
+state — it changes nothing about the cluster, and it is deliberately not
+persisted, so a later session opens on the table it expects.
+
+**It absorbs the Workers pane rather than repeating it — and the Workers pane
+is not drawn at all while the rack is up.** A node carries the animal its worker
+reports — the same word the Workers pane, the event log and Stats already call
+it, resolved by one `model::machine_alias` so the four screens cannot disagree —
+and the task it is on with the chapter. Two lists of the same facts, one above
+the other, is the dashboard arguing with itself, and it costs the rows the rack
+wanted most: `workers_height` is zero in rack mode, so those rows go to the rack
+and the log. `Panel::next_visible` drops Workers from the `f` cycle for the same
+reason — a focus border on a pane that is not on screen has nowhere to go.
+Its **art takes the stage's colour**: the Workers pane's `stage_color`, carried
+over rather than a second palette invented, so a cluster mid-render is a wall of
+cyan and a digest is a wall of magenta. A fault outranks it; idle (`Gray`) and
+never-contacted (`DarkGray`) are deliberately not the same grey, because a box
+that is up and idle is the cluster working and one that has never answered is
+the thing an operator is hunting.
+
+**The console is anchored at the left** and the boxes move past it, which is
+why the layout is a grid and why all four arrows are bound: a wide terminal
+must not slide the hub into the middle of an empty pane. `←`/`→` move the
+cursor one box and `↑`/`↓` move it a whole *row of the rack* — the band width,
+which the key handler cannot know from where it runs, so `draw_graph` publishes
+it on `App::graph_cols` exactly as the log publishes `events_rows` for PageUp.
+The window itself (`App::graph_band`) is the painter's alone: the keys move the
+cursor, and the drawer pulls the window along only when the cursor would be off
+screen. An earlier version remembered the scroll in `App` and the keys owned it
+too — two owners of one offset, and every press dragged the window back.
+
+**The bus is not decoration.** The inductor dials every box (`ssh` to push,
+`http` for `/status` and `/task`) and nothing dials the inductor, so there is
+no box-to-box edge in the picture to have. A mesh of arrows would look more
+like a cluster diagram and would say the wrong thing. The spine is what carries
+that fact: it runs down the left, `├` where a band leaves it and `└` where the
+last one closes, so the direction of every connection is on screen.
+
+**Every box is drawn in a frame, and that is load-bearing.** The first version
+hung bare art off a `│` and the complaint was that the lines were disconnected
+and confusing — which was true. A drop that ends in empty space above a glyph
+is a stroke, not a connection: the eye has to guess whether the rail belongs to
+the box below it. A frame ends the drop on a `┴` in a drawn edge, which is the
+one thing that makes "this is plugged into that" unambiguous, and the frame's
+side bars fill the two art rows that had nothing beside them. The frame also
+gives the selection a rectangle: the cell is written whole on every row, so the
+highlight is a box rather than a patch around two lines of text.
+
+**It cannot be sized from its content.** The picture is a fixed chassis plus
+whole bands of servers, and what it must fit *inside* is the width. So
+`machines_height` budgets it against the frame — every other pane's floor, minus
+this — and `graph::form_for` picks the richest form that fits: the drawn console
+with one band, or its name alone. A frame too short even for that draws the
+**table**, and the pane title says why, rather than showing a rack with the
+servers' legs cut off. The height and the rows come from one description,
+`graph::plan`, walked twice; a separate arithmetic block for the height is how a
+pane clips its own last row. The window is always full when there are enough
+boxes to fill it, so the count of what is off screen — and therefore the pane's
+height — is the same on every page.
+
+A rack is a picture, not a list, so the Machines pane takes **no mouse hit
+region** in this mode: there is no row index to map a click onto, and mapping
+one anyway would select whichever box happened to be that many rows down. The
+wheel steps a whole band instead of three rows, because a band is the unit the
+eye moves in there.
+
 ### The job scheduler: queue on a resource, not on a lane
 
 **What it replaced.** `Job::lifecycle() -> bool` classified a job as
