@@ -1009,6 +1009,157 @@ impl Inner {
     /// decides the blast radius for free: a re-voiced run has a new
     /// content-addressed name, so its old file is superseded and its take is
     /// work again, while untouched runs keep their audio.
+    /// Point one segment at another speaker, having first checked that the
+    /// segment says who the caller thought it said.
+    ///
+    /// `segment` is 1-based, the way a person counts lines in the file, and
+    /// `expect` is the guard: a mistyped number lands on a line that is not
+    /// the one meant, and re-attributing it would be a silent, permanent edit
+    /// to a chapter already rendered. So the mismatch refuses, and the refusal
+    /// names what is actually there and where the expected speaker *is*, which
+    /// is the answer to "I miscounted".
+    ///
+    /// The invalidation is [`invalidate_render`]'s, which is the plan's diff:
+    /// only the takes whose voice or text moved become work, and the rest of
+    /// the chapter keeps the audio it has. One caveat worth knowing, because it
+    /// is the difference between one take and several: the local engine groups
+    /// consecutive same-speaker segments into a single take, so re-pointing the
+    /// middle of a run splits that run and re-speaks the two halves.
+    pub fn op_fix_speaker(
+        &mut self,
+        chapter: u32,
+        segment: usize,
+        expect: &str,
+        speaker: &str,
+    ) -> anyhow::Result<String> {
+        let index = segment.saturating_sub(1);
+        let to = speaker.trim();
+        if to.is_empty() {
+            anyhow::bail!("segment {segment}: empty speaker");
+        }
+        if to == expect.trim() {
+            anyhow::bail!(
+                "segment {segment} already speaks as {to:?} — nothing to change"
+            );
+        }
+        for t in self.tasks.values() {
+            if t.chapter == chapter && matches!(t.state, TaskState::Assigned | TaskState::Running) {
+                anyhow::bail!(
+                    "ch{chapter} has {} in flight — wait for it to settle, then fix the speaker",
+                    t.id()
+                );
+            }
+        }
+        let now = now_secs();
+        for b in self.beats.values() {
+            if now.saturating_sub(b.ts) < 30 && b.chapter == Some(chapter) {
+                anyhow::bail!(
+                    "a worker is on ch{chapter} right now ({} at {}) — wait a beat, then fix the speaker",
+                    b.worker_id, b.activity,
+                );
+            }
+        }
+        let engine = self.settings.engine.clone();
+        let cast = bm_core::cast::read_cast(&engine, &self.layout.cast(&engine));
+        // Checked before the edit, not after: a speaker with no voice is a hard
+        // planning error, so writing the script first would leave the chapter
+        // unplannable and the requeue with nowhere to go.
+        if to != "Narrator" && cast.get(to).is_none() {
+            anyhow::bail!(
+                "{to:?} holds no voice in the {engine} cast — enrol it (:voices, or roster add-sample) and :prov, or this chapter requeues into a row no box can speak"
+            );
+        }
+        let path = self.layout.script(chapter);
+        let mut data: serde_json::Value = bm_core::read_json(&path)
+            .map_err(|_| anyhow::anyhow!("ch{chapter} has no script yet — digest it first"))?;
+        let segments = data
+            .get_mut("segments")
+            .and_then(|s| s.as_array_mut())
+            .ok_or_else(|| anyhow::anyhow!("ch{chapter} script has no segments array"))?;
+        let len = segments.len();
+        if index >= len {
+            anyhow::bail!(
+                "segment {segment} is past the end — ch{chapter} has {len} segment(s), numbered 1..{len}"
+            );
+        }
+        let item = &mut segments[index];
+        let here = item
+            .get("speaker")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "segment {segment} is a sound, not a line — it has no speaker to change"
+                )
+            })?
+            .to_string();
+        if here != expect.trim() {
+            // Name the neighbours, because "wrong number" is the likeliest
+            // cause and the fix is one of the numbers printed here.
+            let mut where_: Vec<String> = segments
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| {
+                    s.get("speaker").and_then(|v| v.as_str()) == Some(expect.trim())
+                })
+                .map(|(i, _)| (i + 1).to_string())
+                .collect();
+            where_.truncate(8);
+            let near: Vec<String> = (index.saturating_sub(1)..(index + 2).min(len))
+                .map(|i| {
+                    let s = segments[i].get("speaker").and_then(|v| v.as_str()).unwrap_or("?");
+                    let text: String = segments[i]
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .chars()
+                        .take(40)
+                        .collect();
+                    format!("{}: {s:?} “{text}”", i + 1)
+                })
+                .collect();
+            anyhow::bail!(
+                "segment {segment} is spoken by {here:?}, not {expect:?} — nothing changed.\n  \
+                 nearby: {}\n  \
+                 {expect:?} is at: {}",
+                near.join(" | "),
+                if where_.is_empty() {
+                    "nowhere in this chapter".to_string()
+                } else {
+                    where_.join(", ")
+                }
+            );
+        }
+        item["speaker"] = serde_json::Value::String(to.to_string());
+        let _ = bm_core::atomic_write(
+            &path,
+            &serde_json::to_string_pretty(&data).unwrap_or_default(),
+        );
+        // The count is the plan's diff, taken around the invalidation, because
+        // that is the number the operator watches drain. The chapter's take
+        // count is not it: a three-take chapter with one segment re-pointed has
+        // one take to speak, and reporting three would be a promise the
+        // scheduler does not keep.
+        let before = self.take_keys(chapter);
+        self.invalidate_render(chapter);
+        let after = self.take_keys(chapter);
+        let fresh = after.iter().filter(|k| !before.contains(k)).count();
+        self.save();
+        let msg = format!(
+            "ch{chapter} segment {segment}: {here} -> {to}; {fresh} take(s) to re-speak, merge requeued"
+        );
+        self.push_event("ok", msg.clone());
+        Ok(msg)
+    }
+
+    /// The chapter's take keys, which is what a re-plan diffs. Empty when the
+    /// chapter has no plan yet, which makes every take after an edit look new,
+    /// and is the honest answer: nothing was recorded to compare against.
+    fn take_keys(&self, chapter: u32) -> Vec<String> {
+        bm_core::assemble::RenderPlan::load(&self.layout.plan(chapter))
+            .map(|p| p.takes.into_iter().map(|t| t.take_key).collect())
+            .unwrap_or_default()
+    }
+
     pub fn op_recast(
         &mut self,
         chapter: u32,

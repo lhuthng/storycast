@@ -3,7 +3,7 @@ use super::app::App;
 use super::audio::Player;
 use super::audition::AuditionLine;
 use super::draw::draw;
-use super::input::command::{busy_summary, command_key, do_command, Command, WORDS};
+use super::input::command::{busy_summary, command_key, do_command, split_args, Command, WORDS};
 use super::input::runconfig::{
     parse_mix_config, parse_render_batch, parse_run_config, run_preview, save_app_setting,
     save_render_batch, save_run_config,
@@ -1729,6 +1729,37 @@ fn command_line_maps_keys_and_words() {
     );
     assert_eq!(command_key("r"), Some(Command::Key(KeyCode::Char('r'))));
     assert_eq!(command_key("reconcile"), Some(Command::Reconcile));
+    // The operator's case, verbatim: a character name is three words, so the
+    // quotes are load-bearing and the segment number is 1-based.
+    assert_eq!(
+        command_key("speaker 18 67 \"Thanh Sơn lão tổ\" \"Dịch Phong\""),
+        Some(Command::FixSpeaker {
+            chapter: 18,
+            segment: 67,
+            expect: "Thanh Sơn lão tổ".into(),
+            speaker: "Dịch Phong".into(),
+        })
+    );
+    // Single-word names need no quotes, and an unquoted multi-word one is
+    // refused rather than guessed at: four arguments or none.
+    assert_eq!(
+        command_key("speaker 3 1 A Narrator"),
+        Some(Command::FixSpeaker {
+            chapter: 3,
+            segment: 1,
+            expect: "A".into(),
+            speaker: "Narrator".into(),
+        })
+    );
+    for bad in [
+        "speaker 18 67 \"Thanh Sơn lão tổ\" Dịch Phong", // five arguments
+        "speaker 18 67",                                 // nothing to change
+        "speaker 0 67 A B",                              // chapter 0 is not a chapter
+        "speaker 18 0 A B",                              // segments are 1-based
+        "speaker eighteen 67 A B",
+    ] {
+        assert_eq!(command_key(bad), None, "{bad} must not parse");
+    }
     assert_eq!(command_key("rerender"), Some(Command::Rerender));
     assert_eq!(command_key("remerge"), Some(Command::Remerge));
     assert_eq!(command_key("backend"), Some(Command::Backend));
@@ -7118,4 +7149,23 @@ fn the_task_ledger_hints_the_movement_it_actually_binds() {
         !text.contains("j/k"),
         "the keys that type into the filter are not advertised:\n{text}"
     );
+}
+
+#[test]
+fn split_args_honours_quotes_so_a_speaker_name_is_one_argument() {
+    // Everything `:speaker` needs, and the cases a shell would have opinions
+    // about. Deliberately not a shell: no escapes, no expansion.
+    assert_eq!(
+        split_args("18 67 \"Thanh Sơn lão tổ\" \"Dịch Phong\""),
+        vec!["18", "67", "Thanh Sơn lão tổ", "Dịch Phong"]
+    );
+    assert_eq!(split_args("a b  c"), vec!["a", "b", "c"], "runs collapse");
+    assert_eq!(split_args("\"\""), vec![""], "an empty quoted arg is an arg");
+    assert_eq!(split_args("a\"b c\"d"), vec!["ab cd"], "a quote mid-word opens");
+    assert_eq!(
+        split_args("\"unterminated tail"),
+        vec!["unterminated tail"],
+        "an unterminated quote takes the rest rather than erroring"
+    );
+    assert!(split_args("   ").is_empty(), "whitespace is not an argument");
 }

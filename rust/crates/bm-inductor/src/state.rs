@@ -3353,6 +3353,215 @@ mod tests {
         );
     }
 
+    /// A chapter with a stored plan, every take rendered, and a finished mix:
+    /// the state a hand edit lands in.
+    fn rendered_chapter(inner: &mut Inner, chapter: u32, script: &str, cast: &str) -> Vec<String> {
+        let layout = inner.layout.clone();
+        std::fs::write(layout.script(chapter), script).unwrap();
+        std::fs::write(layout.cast("vieneu"), cast).unwrap();
+        // First materialisation records the plan; writing what it names is what
+        // makes the takes real, so the second pass finds them and marks them
+        // done. Without the stored plan there is no diff to be surgical about.
+        inner.materialize_render_takes(chapter).expect("plans");
+        let seg = layout.seg_dir("vieneu", chapter);
+        std::fs::create_dir_all(&seg).unwrap();
+        let files: Vec<String> = bm_core::assemble::RenderPlan::load(&layout.plan(chapter))
+            .unwrap()
+            .takes
+            .iter()
+            .map(|t| t.file.clone())
+            .collect();
+        for f in &files {
+            std::fs::write(seg.join(f), vec![0u8; 2000]).unwrap();
+        }
+        inner.materialize_render_takes(chapter).expect("plans again");
+        std::fs::write(layout.final_mp3(chapter), vec![0u8; 2000]).unwrap();
+        let mut t = Task::new(chapter, Stage::Merge);
+        t.state = TaskState::Done;
+        inner.tasks.insert(format!("merge:{chapter}"), t);
+        files
+    }
+
+    #[test]
+    fn fix_speaker_respeaks_one_take_and_requeues_the_mix() {
+        // The operator's case: one segment attributed to the wrong character.
+        // The promise is the size of the work — one take, not the chapter.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        let files = rendered_chapter(
+            &mut inner,
+            18,
+            r#"{"segments":[
+                {"speaker":"Narrator","text":"Nàng nhíu mày, rồi lắc đầu."},
+                {"speaker":"Thanh Sơn lão tổ","text":"Đi thôi, hãy theo ta."},
+                {"speaker":"Narrator","text":"Cả hai rời đi."}]}"#,
+            r#"{"Narrator":"Đức Trí","Thanh Sơn lão tổ":"Âm Cung","Dịch Phong":"Thiếu Nữ"}"#,
+        );
+        assert_eq!(files.len(), 3, "three distinct speakers, three takes");
+
+        let msg = inner
+            .op_fix_speaker(18, 2, "Thanh Sơn lão tổ", "Dịch Phong")
+            .expect("the check matches, so the edit applies");
+        assert!(msg.contains("Thanh Sơn lão tổ -> Dịch Phong"), "{msg}");
+        // The count is what the scheduler will do, not the chapter's size: one
+        // segment moved, so one take, out of three.
+        assert!(msg.contains("1 take(s) to re-speak"), "{msg}");
+
+        let back: Value = bm_core::read_json(&layout.script(18)).unwrap();
+        assert_eq!(back["segments"][1]["speaker"], serde_json::json!("Dịch Phong"));
+        assert_eq!(
+            back["segments"][0]["speaker"],
+            serde_json::json!("Narrator"),
+            "nothing else in the script moved"
+        );
+
+        // One take re-spoken. The other two keep their files, so they are not
+        // work: this is the whole point of the take key being a hash of voice
+        // and text rather than of the segment number.
+        let pending: Vec<&String> = inner
+            .tasks
+            .keys()
+            .filter(|k| k.starts_with("render:18:") && inner.tasks[*k].state == TaskState::Pending)
+            .collect();
+        assert_eq!(pending.len(), 1, "exactly one take is work again: {pending:?}");
+        assert_eq!(
+            inner.tasks["merge:18"].state,
+            TaskState::Pending,
+            "the mp3 on disk was mixed from the old segment: {msg}"
+        );
+        assert!(!layout.final_mp3(18).exists(), "stale product goes");
+
+        let seg = layout.seg_dir("vieneu", 18);
+        let plan = bm_core::assemble::RenderPlan::load(&layout.plan(18)).unwrap();
+        assert_eq!(plan.takes[1].speaker, "Dịch Phong");
+        assert_eq!(plan.takes[1].voice, "Thiếu Nữ", "the voice follows the cast");
+        // The two untouched takes are still on disk under the same names, and
+        // the old bytes of the moved one are gone rather than left beside them.
+        assert!(seg.join(&plan.takes[0].file).exists(), "untouched take kept");
+        assert!(seg.join(&plan.takes[2].file).exists(), "untouched take kept");
+        assert!(
+            !seg.join(&files[1]).exists(),
+            "the superseded voice's audio is swept, not left to be mixed by accident"
+        );
+    }
+
+    #[test]
+    fn fix_speaker_refuses_a_segment_speaking_by_someone_else() {
+        // The guard the op exists for: a miscounted segment number must not
+        // edit the wrong line, and the refusal has to say what is actually
+        // there and where the expected speaker is.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        let before = r#"{"segments":[
+            {"speaker":"Narrator","text":"Một."},
+            {"speaker":"Dịch Phong","text":"Hai."}]}"#;
+        rendered_chapter(&mut inner, 18, before, r#"{"Narrator":"Đức Trí","Dịch Phong":"Thiếu Nữ"}"#);
+
+        let err = inner
+            .op_fix_speaker(18, 1, "Thanh Sơn lão tổ", "Dịch Phong")
+            .expect_err("segment 1 is the Narrator, not the character named")
+            .to_string();
+        assert!(err.contains("\"Narrator\""), "names who is really there: {err}");
+        assert!(
+            err.contains("nowhere in this chapter"),
+            "and that the expected speaker is not: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(layout.script(18)).unwrap(),
+            before,
+            "the script is byte-identical: the refusal wrote nothing"
+        );
+        assert_eq!(inner.tasks["merge:18"].state, TaskState::Done, "no churn");
+        assert!(layout.final_mp3(18).exists(), "the finished mp3 is untouched");
+    }
+
+    #[test]
+    fn fix_speaker_names_where_the_expected_speaker_is_when_the_number_is_wrong() {
+        let (_d, mut inner) = fixture();
+        rendered_chapter(
+            &mut inner,
+            18,
+            r#"{"segments":[
+                {"speaker":"Narrator","text":"Một."},
+                {"speaker":"Dịch Phong","text":"Hai."}]}"#,
+            r#"{"Narrator":"Đức Trí","Dịch Phong":"Thiếu Nữ"}"#,
+        );
+        let err = inner
+            .op_fix_speaker(18, 2, "Narrator", "Dịch Phong")
+            .expect_err("segment 2 is not the Narrator")
+            .to_string();
+        assert!(err.contains("nearby:"), "the neighbours are named: {err}");
+        assert!(err.contains("1: \"Narrator\""), "{err}");
+        // The point of the whole message: a miscount is answered by a number.
+        assert!(err.contains("\"Narrator\" is at: 1"), "{err}");
+    }
+
+    #[test]
+    fn fix_speaker_refuses_a_target_who_holds_no_voice_before_writing_anything() {
+        // A speaker with no voice is a hard planning error, so the check has to
+        // come first: writing the script and requeueing would leave the chapter
+        // unplannable with a row no box can speak.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        rendered_chapter(
+            &mut inner,
+            18,
+            r#"{"segments":[{"speaker":"Thanh Sơn lão tổ","text":"Đi thôi."}]}"#,
+            r#"{"Thanh Sơn lão tổ":"Âm Cung"}"#,
+        );
+        let err = inner
+            .op_fix_speaker(18, 1, "Thanh Sơn lão tổ", "Người Lạ")
+            .expect_err("Người Lạ is in no cast")
+            .to_string();
+        assert!(err.contains("holds no voice"), "{err}");
+        assert!(
+            std::fs::read_to_string(layout.script(18))
+                .unwrap()
+                .contains("Thanh Sơn lão tổ"),
+            "the segment still speaks as it did: {err}"
+        );
+        assert_eq!(inner.tasks["merge:18"].state, TaskState::Done, "no churn");
+    }
+
+    #[test]
+    fn fix_speaker_treats_the_narrator_as_always_speakable() {
+        // The Narrator is not in the cast, so the voice check has to exempt it
+        // the way recast does, or reassigning narration is impossible.
+        let (_d, mut inner) = fixture();
+        rendered_chapter(
+            &mut inner,
+            18,
+            r#"{"segments":[{"speaker":"Dịch Phong","text":"Ta đi đây."}]}"#,
+            r#"{"Dịch Phong":"Thiếu Nữ"}"#,
+        );
+        let msg = inner
+            .op_fix_speaker(18, 1, "Dịch Phong", "Narrator")
+            .expect("Narrator needs no enrolment");
+        assert!(msg.contains("Dịch Phong -> Narrator"), "{msg}");
+    }
+
+    #[test]
+    fn fix_speaker_refuses_zero_and_out_of_range_segments_clearly() {
+        let (_d, mut inner) = fixture();
+        rendered_chapter(
+            &mut inner,
+            18,
+            r#"{"segments":[{"speaker":"A","text":"Một."}]}"#,
+            r#"{"A":"Adam"}"#,
+        );
+        let err = inner
+            .op_fix_speaker(18, 9, "A", "Narrator")
+            .expect_err("past the end")
+            .to_string();
+        assert!(err.contains("numbered 1..1"), "{err}");
+        assert!(
+            inner
+                .op_fix_speaker(18, 0, "A", "Narrator")
+                .is_ok(),
+            "segment 0 saturates to the first segment rather than panicking"
+        );
+    }
+
     fn racing_digest(inner: &mut Inner, chapter: u32) {
         let mut c = Task::new(chapter, Stage::Crawl);
         c.state = TaskState::Done;
