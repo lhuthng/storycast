@@ -135,32 +135,51 @@ and the mechanism is one this repo already runs: `tools/profile.sh fetch` querie
 the asset ending in `.tar.zst`, and curls its `browser_download_url`, with
 `GH_TOKEN` used only when set. Public repo means no token on the box.
 
-## Publishing
+## Publishing — **done**
 
-A `make models-publish` (or `tools/models.sh pack`) that:
+`tools/models.sh`, a sibling of `tools/profile.sh` with the same four verbs:
 
-1. runs `python3 tools/bake-models.py --check` and **refuses to publish on
-   anything but `16/16 files match`** — the `--check` gate is the whole safety
-   story, and it already exists;
-2. tars the 17 files, excluding `voices.json` by name, at the level
-   `tools/profile.sh` already uses;
-3. writes the bundle, records its sha256, and creates the release asset.
+```
+tools/models.sh pack [--level N]              verify the bake -> models/models.tar.zst
+tools/models.sh verify                        bundle manifest vs. bundle contents
+tools/models.sh publish [--notes "…"]         gh release create models-v<hash>
+tools/models.sh list                          the local bundle, its hash and size
+```
 
-The gate is `python3 tools/bake-models.py --check` reporting `16/16 files match`
-and exiting 0. It did not used to be usable as a gate, because the roster sat in
-the record and drifted on every enrollment; now that it is out, the gate and the
-bundle are the same set and neither needs an exclusion rule of its own.
+`pack` runs `python3 tools/bake-models.py --check` first and **refuses on
+anything but `16/16 files match`**. That gate is the whole safety story, and it
+could not be used as a gate until the roster left the record — before that, it
+reported a `CHANGED` that no re-bake could clear. It also selects members from
+the manifest rather than globbing `models/`, which is the same content-addressing
+rule as everywhere else: `voices.json` exists in the directory and is absent from
+the record, so "everything the manifest lists" and "everything in `models/`" are
+different questions and only one of them is the bundle. `verify` asserts both
+directions — nothing missing, and **nothing unlisted** — so a stray file in the
+archive is a failure rather than a surprise on a box.
 
-The pack must still select by **name, not by manifest membership**, for the
-reason every content-addressed system needs that rule: `voices.json` exists in
-the directory and is absent from the record, so "everything the manifest lists"
-and "everything in `models/`" are different questions and only one of them is
-the bundle.
+**The name is the manifest hash**: sha256 over sorted `name + NUL +
+content-sha256 + NUL` lines, the rule `profile.sh` already uses, read one level
+deeper because the models manifest stores `bytes` beside each hash. Two machines
+with the same bake produce the same tag, and — the point — a tag can never name
+bytes it does not hold. The tag is the first 12 hex of it, with the full hash in
+the release notes. `gh release create` refuses an existing tag, so immutability
+is enforced by the host rather than promised by a comment.
 
-## Fetching, on the box
+The first one is cut:
 
-The box needs **nothing preinstalled except `curl`**, which the probe already
-checks (`provision/steps.rs:291`).
+```
+models-vdda4efee13df   models.tar.zst   380,099,956 bytes (363 MiB, level 3)
+```
+
+and the round trip was checked by downloading it back: the asset's sha256 is
+byte-identical to the local bundle, and `verify` passes on it.
+
+## Fetching, on the box — not built
+
+This is the half that remains. What it needs is *less* than this document first
+assumed: **the box already links `reqwest`** (with `blocking`), so there is no
+`curl` to require and no shell-out to write. What is missing is extraction —
+`bm-agent` links no `tar` and no `zstd`, so the artifact cannot be opened yet.
 
 `bm-agent` gains a subcommand:
 
@@ -174,12 +193,15 @@ directory into place.
 
 Two decisions inside that:
 
-**The agent does the decompression, not a shipped `zstd` binary.** The `zstd`
-crate is a pure-Rust decoder, and this repo already vendors C where it earns its
-keep (`sea-g2p`). A shipped per-target `zstd` binary would be a second
-cross-built binary to version-gate — reproducing exactly the `bm-tts` staleness
-bug that was just fixed, to save a megabyte. `apt-get install zstd` on the box
-would be a second `sudo -n` gamble alongside the ffmpeg one.
+**The agent does the decompression, not a shipped `zstd` binary.** The `tar`
+crate is pure Rust; for the compressor, `ruzstd` is the pure-Rust decoder while
+the `zstd` crate binds the C library. Either fits — this repo already builds C
+where it earns its keep (`sea-g2p`, and the ONNX Runtime it links), so a C build
+dependency would not be new. A shipped per-target `zstd` *binary* is the option to
+reject: that is a second cross-built artifact to version-gate, reproducing exactly
+the `bm-tts` staleness bug that was just fixed, to save a megabyte. And
+`apt-get install zstd` on the box would be a second `sudo -n` gamble alongside the
+ffmpeg one.
 
 **The box does not fetch a tarball over a directory it is using.** A failed
 download that leaves a partial `models/` in place is the failure mode this design
@@ -357,10 +379,12 @@ because every launch names an instance profile.
 
 ## Open questions
 
-1. **Tag or release per hash?** A `models-v<hash>` tag per bake is immutable and
-   obvious but pollutes the tag list. One rolling `models-latest` release
-   overwrites in place and relies on the per-file verify for correctness. The
-   first is safer; the second is tidier.
+1. ~~**Tag or release per hash?**~~ **Decided: tag per hash.** A `models-v<hash>`
+   tag per bake is immutable and unambiguous, and the immutability is enforced by
+   `gh release create` refusing a tag that exists rather than by convention. The
+   rolling `models-latest` alternative is tidier but a box fetching mid-overwrite
+   can receive a bundle that disagrees with what it asked for, and the tag would
+   say nothing about which bytes it holds. The cost accepted is tag-list clutter.
 2. **Pruning.** Content-addressed names never overwrite, so every re-bake leaves
    363 MB behind forever. `tools/profile.sh` has no prune either.
 3. **Public repo.** A Release asset on a public repo is world-readable. The
