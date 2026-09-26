@@ -173,10 +173,20 @@ The **inductor** owns this state (the task ledger) and hands chapters to
 
 ## 2. Install
 
-You need three things: **Rust** 1.88 or newer, **Python 3** (used once, to
-prepare the voices and to record your own), and a way to reach an AI model: a
-Gemini key, an [opencode](https://opencode.ai) login, an OpenRouter key, or
-Ollama running on your own machine.
+You need these before anything runs:
+
+| Dependency | Why | How to check |
+| --- | --- | --- |
+| **Rust** 1.88 or newer | every program in `rust/` | `cargo --version` |
+| **Python 3** | once, to prepare the voices and to record your own | `python3 --version` |
+| **ffmpeg** | merge: joins the segments and writes the mp3 | `ffmpeg -version` |
+| **sh**, **ssh**, **rsync** | provisioning, and the tunnel back from a box | `command -v sh ssh rsync` |
+| **A model**: a Gemini key, an [opencode](https://opencode.ai) login, an OpenRouter key, or Ollama on your own machine | the two LLM calls per chapter | see `.env` below |
+| **zig** and `cargo-zigbuild` | only if you want the speech program built up front | `zig version` |
+
+Rust, Python 3 and `sh`/`ssh`/`rsync` are already there on both. ffmpeg is
+either installed or one `brew install ffmpeg` away. The model is yours to
+choose, and zig only if you run `make tts`.
 
 ```bash
 git clone lhuthng/storycast.git
@@ -186,39 +196,50 @@ make build               # builds the Rust programs
 cp .env.example .env     # add your key(s)
 #   GEMINI_API_KEY=...      (or OPENROUTER_API_KEY, or nothing for opencode)
 #   TTS_ENGINE=vieneu       (default; `gemini` for the API engine)
+
+make tui                 # the dashboard, on http://127.0.0.1:8901
 ```
 
-`bm-tts`, the speech program, is not part of that step. It is a release build
-for Linux that links a C++ runtime, so it is not built with the rest of the
-workspace, and you only need it when you have somewhere to run it. On a Linux
-x86_64 machine there is nothing to do: provisioning cross-builds it and stages
-its runtime the first time you add a box, which takes a few minutes and prints
-what it is doing. `make tts` builds it up front instead, and it needs **zig**
-and `cargo-zigbuild`. A Mac or an ARM Linux box is a different target, which
-`make tts` does not cover; provisioning stops and prints the command for it
-rather than pushing the wrong binary.
+Everything is driven from `make`. The ones worth knowing:
+
+| Command | What it does |
+| --- | --- |
+| `make build` | compile the workspace |
+| `make tui` | the dashboard: every operator action, on :8901 |
+| `make serve START=1 COUNT=100` | the coordinator, no dashboard |
+| `make agent` | a worker on this machine |
+| `make provision ADDR=<ip>` | onboard a box by address |
+| `make link NAME=box-1 ADDR=<ip>` | remember a box in `.bm/machines.json`, then `make provision BOX=box-1` |
+| `make tts` | build the speech program and its runtime, up front |
+| `make test` | the test suite and clippy |
+
+`bm-tts`, the speech program, is not part of `make build`. It is a release
+build for Linux that links a C++ runtime, so it is not built with the rest of
+the workspace, and you only need it when you have somewhere to run it. On a
+Linux x86_64 machine there is nothing to do: provisioning cross-builds it and
+stages its runtime the first time you add a box, which takes a few minutes and
+prints what it is doing. `make tts` builds it up front instead, and it is what
+needs zig. A Mac or an ARM Linux box is a different target, which `make tts`
+does not cover; provisioning stops and prints the command for it rather than
+pushing the wrong binary.
 
 ### What platforms this runs on
 
 **Linux and macOS.** That is the whole list, for the machine holding the
 dashboard and for the workers.
 
-Both need `sh`, `ssh` and `rsync` on the machine you run them from, and macOS
-and Linux have all three. Provisioning also detects the remote box with
-`uname` and installs with `apt-get`, so the boxes are Linux or a Mac as well.
+Provisioning also detects the remote box with `uname` and installs with
+`apt-get`, so the boxes are Linux or a Mac as well.
 
-**Windows is not supported.** There is no port and no plan for one. The code
-does compile for Windows, and a tagged release carries a `.zip` for it, but that
-binary cannot do the parts that matter: provisioning shells out to `rsync` and
-POSIX `sh`, and `bm-tts` is a Linux build, so a Windows machine has no local
-speech engine and no way to onboard a box. If you are on Windows, use WSL and
-run the Linux build there.
+**Windows is not supported**, and nothing is published for it. There is no port
+and no plan for one: provisioning shells out to `rsync` and POSIX `sh`, and
+`bm-tts` is a Linux build, so a Windows machine has no way to onboard a box and
+no local speech engine. If you are on Windows, use WSL and run it there.
 
-Prebuilt binaries for Linux and macOS, x86_64 and arm64, are attached to each
-[tagged release](https://github.com/lhuthng/storycast/releases). The archive is
-the two programs and this README; the repository is still where the prompts,
-crawlers, scene maps and voice catalogue live, so a release saves you a build,
-not a clone.
+There are no prebuilt binaries. You build from source with `make build`, and
+the [releases page](https://github.com/lhuthng/storycast/releases) holds profile
+bundles only: the baked speech weights, and the genre bundles you fetch with
+`tools/profile.sh fetch <name>`.
 
 ### A note on security
 
@@ -631,10 +652,10 @@ Local-only design notes (`.docs/` is git-ignored): `TUI_UX_AUDIT.md`,
 
 The things that will cost you time, in the order they are likely to.
 
-- **Windows is not a platform this runs on.** Linux and macOS are. The
-  workspace compiles for Windows and a release ships a binary, but provisioning
-  needs `rsync` and `sh` and the speech sidecar is a Linux build, so on Windows
-  the interesting parts do not work. WSL is the answer today.
+- **Windows is not a platform this runs on.** Linux and macOS are, and nothing
+  is built or published for Windows: provisioning needs `rsync` and `sh` and the
+  speech sidecar is a Linux build, so there is no version of this that runs
+  there. WSL is the answer today.
 
 - **The built-in voices are Vietnamese.** Vieneu is local and free, but it is
   built for Vietnamese and it is what this project grew up on. In another

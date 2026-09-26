@@ -1,0 +1,67 @@
+name: ci
+
+# Tests and clippy on every push. No artifacts and no release: the binaries are
+# not distributed from here, so the only thing this needs to be is the check
+# that a push is green.
+#
+# It earns its place because the runner's toolchain is not the one this is
+# written on. Two real problems got past a clean local clippy and a green
+# `cargo test` and were caught only here: a lint that wanted an API the
+# declared MSRV could not compile, and five copies of a reader that disagreed
+# about whether a truncated file is an error.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One platform failing must not hide the others.
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os: linux x86_64
+          - runner: macos-13
+            os: macos x86_64
+          - runner: macos-latest
+            os: macos arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ matrix.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-
+
+      - name: Build
+        run: cargo build --workspace --locked
+        working-directory: rust
+
+      # The suite runs everywhere rather than on one platform, because these
+      # are the two supported ones and a Unix-only assumption that holds on the
+      # author's Mac is still an assumption.
+      - name: Test
+        run: cargo test --workspace --locked
+        working-directory: rust
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        working-directory: rust
