@@ -440,7 +440,7 @@ of a pipeline where it is expensive to notice.
 
 One HTTP service, running on the coordinator, on port 8901 by default. The
 machines call it; it never calls them (see section 7). The whole surface is
-thirteen routes, and there is nothing else:
+fifteen endpoints, one per method, and there is nothing else:
 
 | Endpoint | What it is for |
 | --- | --- |
@@ -453,9 +453,11 @@ thirteen routes, and there is nothing else:
 | `GET /api/state` | The dashboard asking for everything it displays |
 | `GET /api/roster` | The voice roster as resolved: catalogue, pool, and the policy's verdicts |
 | `POST /api/op` | Operator actions: start a range, retry, switch profile, and so on |
-| `POST`/`DELETE /api/machines` | Adding and removing a machine |
+| `POST /api/machines` | Adding a machine |
+| `DELETE /api/machines` | Removing one |
 | `POST /api/machines/state` | Setting whether a machine is allowed to work |
 | `POST /api/machines/policy` | Setting which stages a machine will run |
+| `POST /api/machines/accepting` | Parking a box: it stays up and answers, and is offered no work until this is set back |
 | `POST /api/relink` | Re-pointing a cloud box whose address has changed |
 
 Every change the scheduler makes also writes an **event** into a ring buffer
