@@ -102,7 +102,7 @@ def _genai_call(model: str, direction: str, voice: str) -> bytes:
 
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
-        raise SystemExit("GEMINI_API_KEY missing — copy .env.example to .env")
+        raise SystemExit("GEMINI_API_KEY missing — the inductor sends it with the render offer (add it with L in the TUI)")
     client = genai.Client(api_key=key, http_options={"retry_options": {"attempts": 1}})
     try:  # keep a ref: inline temporary gets GC'd mid-request (SDK 2.x)
         resp = client.models.generate_content(

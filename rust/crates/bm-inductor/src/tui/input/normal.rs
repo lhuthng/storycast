@@ -311,6 +311,11 @@ pub(crate) async fn normal_key(
         KeyCode::Char('K') => {
             app.screen = Screen::Tasks(TasksView::new());
         }
+        // LLM providers: keys, endpoints, models, and which one digests.
+        // A bare key (not behind `:`) because this is setup an operator
+        // reaches for constantly — new key, model switch, quota hop — and
+        // read-only until an edit key is pressed on purpose.
+        KeyCode::Char('L') => crate::tui::input::llm::open_llm(app),
         // The background jobs (what the footer's "N job(s) running" actually
         // is). Tab is the spelling the footer advertises — it is the one
         // free top-row key and "flip to the other side of the dashboard" is

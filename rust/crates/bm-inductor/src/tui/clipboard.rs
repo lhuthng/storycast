@@ -76,8 +76,7 @@ mod tests {
 
     /// Whether this machine has the pair at all. A box without them is not a
     /// failure of this code, so the tests below report a skip rather than
-    /// failing for the environment's sake — the same rule the `opencode` deadline
-    /// test follows.
+    /// failing for the environment's sake.
     fn available() -> bool {
         Command::new("pbpaste").arg("--help").output().is_ok()
     }

@@ -1,15 +1,17 @@
-//! Runtime settings and a tiny `.env` loader.
+//! Runtime settings and LLM provider config.
 //!
-//! Settings live in `.bm/settings.json` so the inductor can be reconfigured
-//! from the TUI and survive restarts. API keys stay in `.env` — never here.
-//! The SSH key is a *path*, which is config, not a secret: it lives here
-//! (per-machine in `machines.json`, app-wide default below) and never in
-//! `.env`.
+//! Settings live in the workspace's `settings.json` so the inductor can be
+//! reconfigured from the TUI and survive restarts. LLM providers live in
+//! `.bm/llm.json` (see [`LlmConfig`]) — machine-global like `machines.json`,
+//! because a key is this machine's access, not a book's. The SSH key is a
+//! *path*, which is config, not a secret: it lives here (per-machine in
+//! `machines.json`, app-wide default below) and never with the keys.
 
 use crate::util::{atomic_write, read_json};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// How many render takes one offer carries when the workspace does not say.
 ///
@@ -91,8 +93,8 @@ pub struct CrawlSettings {
     pub params: serde_json::Map<String, serde_json::Value>,
     /// Extra headers on every fetch: a `Referer` some sites require, or a
     /// session cookie the operator pasted in. Secrets here live in the
-    /// workspace's `settings.json`, not in `.env` — a deliberate trade, since a
-    /// crawl header is per-book configuration and not a provider key.
+    /// workspace's `settings.json`, not with the provider keys — a deliberate
+    /// trade, since a crawl header is per-book configuration.
     pub headers: std::collections::BTreeMap<String, String>,
     /// Empty means the built-in browser-ish default.
     pub user_agent: String,
@@ -203,9 +205,17 @@ pub struct Settings {
     pub effect_volume: f64,
     pub music_volume: f64,
     pub inject_volume: f64,
-    /// `opencode` | `openrouter` | `local` | `gemini`.
+    /// Digest backend, mirrored from [`LlmConfig::active`] by the TUI so the
+    /// run screen and the API preview stay truthful: the provider id
+    /// (`tokenharbor`) or a legacy backend name (`gemini` | `openrouter` |
+    /// `local`). Empty means no provider is active — the digest refuses with
+    /// "press L" rather than calling anything.
     pub analyzer: String,
-    pub opencode_model: String,
+    /// The backend slot the active provider speaks (`gemini` | `openai` |
+    /// `ollama`), mirrored with [`Settings::analyzer`]. Routing reads this,
+    /// labels read the id — so renaming a provider never reroutes it.
+    #[serde(default)]
+    pub analyzer_backend: String,
     pub openrouter_model: String,
     /// The model service's base URL. Settings, not a constant, because the
     /// endpoint a key talks to is a deployment fact: the public one by default,
@@ -313,8 +323,8 @@ impl Default for Settings {
             effect_volume: 1.0,
             music_volume: 1.0,
             inject_volume: 1.0,
-            analyzer: "opencode".into(),
-            opencode_model: "opencode/muse-spark-1.3-contributor-free".into(),
+            analyzer: String::new(),
+            analyzer_backend: String::new(),
             openrouter_model: "google/gemma-4-31b-it:free".into(),
             openrouter_url: "https://openrouter.ai/api/v1".into(),
             local_model: "gemma-4-12b".into(),
@@ -360,11 +370,11 @@ impl Settings {
     pub fn analyzer_settings(&self) -> bm_proto::AnalyzerSettings {
         bm_proto::AnalyzerSettings {
             analyze_models: Some(self.analyze_models.clone()),
-            opencode_model: self.opencode_model.clone(),
             openrouter_model: self.openrouter_model.clone(),
             openrouter_url: self.openrouter_url.clone(),
             local_model: self.local_model.clone(),
             ollama_url: self.ollama_url.clone(),
+            backend: self.analyzer_backend.clone(),
         }
     }
 
@@ -391,9 +401,6 @@ impl Settings {
         if let Some(models) = &a.analyze_models {
             s.analyze_models = models.clone();
         }
-        if !a.opencode_model.is_empty() {
-            s.opencode_model = a.opencode_model.clone();
-        }
         if !a.openrouter_model.is_empty() {
             s.openrouter_model = a.openrouter_model.clone();
         }
@@ -405,6 +412,9 @@ impl Settings {
         }
         if !a.ollama_url.is_empty() {
             s.ollama_url = a.ollama_url.clone();
+        }
+        if !a.backend.is_empty() {
+            s.analyzer_backend = a.backend.clone();
         }
         s
     }
@@ -439,15 +449,430 @@ impl Settings {
     }
 }
 
-/// Minimal `.env` reader: `KEY=value`, `#` comments, optional quotes.
+/// One LLM provider: which protocol it speaks, where it lives, the key that
+/// activates it, and the model to run. An empty `api_key` means the provider
+/// is off — that is the default for all of them, so a fresh machine calls
+/// nothing until the operator adds a key (TUI: `L`, or `:llm`).
 ///
-/// Deliberately not a dependency — the format is trivial and we only ever read
-/// a handful of keys. Existing process env always wins, so `FOO=bar cargo run`
-/// still overrides the file.
-pub fn load_dotenv(path: &Path) {
+/// Providers are data, not code: the ids and their `kind`s come from
+/// `llm.default.json` (copied to `.bm/llm.json` on first run), and a
+/// hand-added entry with just a `base_url` rides the OpenAI-compatible path.
+/// Nothing outside this file names a provider.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ProviderEntry {
+    /// `gemini` (native REST) | `openai` (`POST {base}/chat/completions`) |
+    /// `ollama` (`POST {base}/api/chat`). Anything else means `openai`.
+    #[serde(default)]
+    pub kind: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl ProviderEntry {
+    /// Set when the operator gave it a key (Ollama needs none — see
+    /// [`LlmConfig::resolve`]).
+    pub fn has_key(&self) -> bool {
+        !self.api_key.trim().is_empty()
+    }
+}
+
+/// Every LLM provider this machine knows, in one machine-global file.
+///
+/// `.bm/llm.json`, next to `machines.json`: a key is this machine's access,
+/// not a book's, so it does not live in the workspace's `settings.json` and
+/// there is no `.env` to keep in sync — the inductor sends the active
+/// provider's key with each task offer (see `Credentials::for_stage`), which
+/// is the whole sync: switching the model takes effect on the next offer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LlmConfig {
+    /// Active provider id (`google` | `openrouter` | `tokenharbor` |
+    /// `ollama` | any custom id). Empty means none — the digest refuses
+    /// rather than calling a provider the operator never chose.
+    pub active: String,
+    /// By id. Unknown ids are OpenAI-compatible (`POST {base}/chat/completions`).
+    pub providers: BTreeMap<String, ProviderEntry>,
+}
+
+/// The wire protocol one provider speaks. Parsed from the entry's `kind`,
+/// never from its id: ids are the operator's (`llm.default.json` plus
+/// anything added by hand), protocols are the three this program implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmKind {
+    /// Native Gemini REST (`:generateContent`).
+    Gemini,
+    /// OpenAI-compatible (`POST {base}/chat/completions`).
+    Openai,
+    /// Ollama (`POST {base}/api/chat`).
+    Ollama,
+}
+
+impl LlmKind {
+    /// Anything unrecognised (including absent) is OpenAI-compatible, so a
+    /// hand-added gateway needs only a `base_url` to work.
+    pub fn parse(kind: &str) -> LlmKind {
+        match kind.trim() {
+            "gemini" => LlmKind::Gemini,
+            "ollama" => LlmKind::Ollama,
+            _ => LlmKind::Openai,
+        }
+    }
+
+    /// The backend slot: the vocabulary the wire (`AnalyzerSettings::backend`,
+    /// `Credentials::for_stage`, `generate`) routes on.
+    pub fn as_backend(self) -> &'static str {
+        match self {
+            LlmKind::Gemini => "gemini",
+            LlmKind::Openai => "openai",
+            LlmKind::Ollama => "ollama",
+        }
+    }
+}
+
+/// A provider ready to call: what the offer carries to the worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLlm {
+    pub provider: String,
+    pub kind: LlmKind,
+    /// The provider id itself (`tokenharbor`, not the backend slot) — this
+    /// is the `analyzer` wire value, so every progress line and screen names
+    /// what the operator picked. Routing reads the entry's `kind`, never
+    /// this label.
+    pub analyzer: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: String,
+    /// The env var the worker installs it as (`GEMINI_API_KEY` |
+    /// `OPENROUTER_API_KEY`), so the wire stays one narrowed key per stage.
+    pub key_var: &'static str,
+}
+
+impl LlmConfig {
+    /// Machine-global path: `.bm/llm.json` at the root.
+    pub fn path(root: &Path) -> PathBuf {
+        root.join(".bm").join("llm.json")
+    }
+
+    pub fn load(root: &Path) -> LlmConfig {
+        // `.bm/llm.json` wins; the shipped `llm.default.json` is the fallback
+        // (tracked, like `voices.default.json`); otherwise empty. What the
+        // file names is what exists — no compiled-in providers to merge.
+        let root_layout = crate::Layout::new(root);
+        let mut cfg: LlmConfig = read_json(&Self::path(root))
+            .or_else(|_| read_json(&root_layout.llm_default()))
+            .unwrap_or_default();
+        // Kinds arrived after keys did: a file written before them names no
+        // `kind`, so backfill from the shipped file — same id first, same
+        // endpoint when the operator renamed it. Anything still blank rides
+        // the OpenAI-compatible path (`LlmKind::parse`), so a hand-added
+        // gateway needs only a `base_url` to work.
+        let shipped: LlmConfig = read_json(&root_layout.llm_default()).unwrap_or_default();
+        fn norm(u: &str) -> String {
+            u.trim().trim_end_matches('/').to_string()
+        }
+        for (id, e) in cfg.providers.iter_mut() {
+            if !e.kind.trim().is_empty() {
+                continue;
+            }
+            e.kind = shipped
+                .providers
+                .get(id)
+                .map(|s| s.kind.clone())
+                .filter(|k| !k.trim().is_empty())
+                .or_else(|| {
+                    shipped
+                        .providers
+                        .values()
+                        .find(|s| !s.base_url.trim().is_empty() && norm(&s.base_url) == norm(&e.base_url))
+                        .map(|s| s.kind.clone())
+                })
+                .unwrap_or_default();
+        }
+        cfg
+    }
+
+    pub fn save(&self, root: &Path) -> Result<()> {
+        let p = Self::path(root);
+        if let Some(dir) = p.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        atomic_write(&p, &serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
+    /// Load, seeding once from the legacy `settings.json` + environment so an
+    /// upgraded machine keeps digesting with what it already used. `opencode`
+    /// maps to nothing — that backend is gone, and an operator who relied on
+    /// it picks a keyed provider instead.
+    ///
+    /// The legacy `.env` file is read here, once, for the same reason: it is
+    /// retired (nothing loads it at startup anymore), but its keys are still
+    /// the operator's, so the seed carries them over rather than stranding
+    /// them. Existing process env wins over the file.
+    pub fn load_or_seed(root: &Path, settings: &Settings) -> LlmConfig {
+        let p = Self::path(root);
+        if p.is_file() {
+            return Self::load(root);
+        }
+        // Missing: copy the shipped `llm.default.json` (via `load`'s own
+        // fallback), then overlay what the upgraded machine already used.
+        let mut cfg = Self::load(root);
+        let legacy = read_legacy_env(&root.join(".env"));
+        let legacy_var = |name: &str| {
+            std::env::var(name).ok().filter(|v| !v.is_empty()).or_else(|| {
+                legacy
+                    .iter()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v.clone())
+                    .filter(|v| !v.is_empty())
+            })
+        };
+        let gemini_key = legacy_var("GEMINI_API_KEY").unwrap_or_default();
+        let or_key = legacy_var("OPENROUTER_API_KEY").unwrap_or_default();
+        if !gemini_key.is_empty() {
+            let e = cfg.entry_for_kind(LlmKind::Gemini);
+            e.api_key = gemini_key;
+            if let Some(m) = settings.analyze_models.first() {
+                if !m.trim().is_empty() {
+                    e.model = m.trim().to_string();
+                }
+            }
+        }
+        if !or_key.is_empty() {
+            let e = cfg.entry_for_kind(LlmKind::Openai);
+            e.api_key = or_key;
+            if !settings.openrouter_model.trim().is_empty() {
+                e.model = settings.openrouter_model.clone();
+            }
+            if !settings.openrouter_url.trim().is_empty() {
+                e.base_url = settings.openrouter_url.clone();
+            }
+        }
+        if !settings.local_model.trim().is_empty() {
+            let e = cfg.entry_for_kind(LlmKind::Ollama);
+            e.model = settings.local_model.clone();
+            if !settings.ollama_url.trim().is_empty() {
+                e.base_url = settings.ollama_url.clone();
+            }
+        }
+        // The legacy backend name follows the first entry that speaks its
+        // kind; an id already names its own entry. Anything else stays
+        // unactivated — an explicit `a` in the `L` screen, not a guess.
+        cfg.active = match settings.analyzer.as_str() {
+            id if cfg.providers.contains_key(id) => id.into(),
+            "gemini" => cfg.first_of_kind(LlmKind::Gemini),
+            "openrouter" => cfg.first_of_kind(LlmKind::Openai),
+            "local" => cfg.first_of_kind(LlmKind::Ollama),
+            _ => String::new(),
+        };
+        // …but only when the entry is usable: a keyless non-Ollama entry (or
+        // a modelless one) resolves to nothing, and an active value that
+        // resolves to nothing is a lie about the state.
+        if cfg.resolve().is_none() {
+            cfg.active.clear();
+        }
+        // ponytail: best-effort seed; a failed write surfaces on the next save.
+        let _ = cfg.save(root);
+        cfg
+    }
+
+    /// The protocol one provider id speaks, read from its entry's `kind`.
+    /// Missing ids are OpenAI-compatible, so a hand-added gateway needs only
+    /// a `base_url` to work.
+    pub fn kind_of(&self, id: &str) -> LlmKind {
+        self.providers
+            .get(id)
+            .map(|e| LlmKind::parse(&e.kind))
+            .unwrap_or(LlmKind::Openai)
+    }
+
+    /// The backend slot for an id or a legacy backend name, or `None` when it
+    /// names nothing usable (empty, or a name no provider and no legacy slot
+    /// owns). `gemini | local | openrouter` are the retired wire values the
+    /// previous release sent — mapped here so old offers still route, not
+    /// because any provider is called that.
+    pub fn backend_for(&self, analyzer: &str) -> Option<String> {
+        if let Some(e) = self.providers.get(analyzer) {
+            return Some(LlmKind::parse(&e.kind).as_backend().to_string());
+        }
+        match analyzer {
+            "gemini" => Some("gemini".into()),
+            "local" => Some("ollama".into()),
+            "openrouter" => Some("openai".into()),
+            _ => None,
+        }
+    }
+
+    /// First provider id speaking a kind, or empty. File order would be
+    /// nicest, but the map is sorted — deterministic beats curated here.
+    fn first_of_kind(&self, kind: LlmKind) -> String {
+        self.providers
+            .iter()
+            .find(|(_, e)| LlmKind::parse(&e.kind) == kind)
+            .map(|(id, _)| id.clone())
+            .unwrap_or_default()
+    }
+
+    /// The entry to seed a legacy key/model into: the first of its kind, or
+    /// a new kind-named slot when the file names none. The id is a protocol
+    /// tag, not a provider — routing reads `kind`, never this label.
+    fn entry_for_kind(&mut self, kind: LlmKind) -> &mut ProviderEntry {
+        let id = self
+            .providers
+            .iter()
+            .find(|(_, e)| LlmKind::parse(&e.kind) == kind)
+            .map(|(id, _)| id.clone())
+            .unwrap_or_else(|| kind.as_backend().to_string());
+        self.providers.entry(id).or_insert_with(|| ProviderEntry {
+            kind: kind.as_backend().to_string(),
+            ..Default::default()
+        })
+    }
+
+    /// The active provider, or `None` when none is usable. Ollama needs no
+    /// key (local URL); every other provider needs a key *and* a model.
+    pub fn resolve(&self) -> Option<ResolvedLlm> {
+        let id = self.active.trim();
+        if id.is_empty() {
+            return None;
+        }
+        let e = self.providers.get(id)?;
+        let kind = self.kind_of(id);
+        let key_var = match kind {
+            LlmKind::Gemini => "GEMINI_API_KEY",
+            // Ollama takes no key; every other service shares the one
+            // OpenAI-compatible wire slot, with the endpoint riding alongside.
+            _ => "OPENROUTER_API_KEY",
+        };
+        if e.model.trim().is_empty() {
+            return None;
+        }
+        if !matches!(kind, LlmKind::Ollama) && !e.has_key() {
+            return None;
+        }
+        Some(ResolvedLlm {
+            provider: id.to_string(),
+            kind,
+            analyzer: id.to_string(),
+            base_url: e.base_url.trim().to_string(),
+            model: e.model.trim().to_string(),
+            api_key: e.api_key.clone(),
+            key_var,
+        })
+    }
+
+    /// What a digest offer carries: the provider id plus the model/URL block.
+    /// The worker has no `llm.json` (provisioning never copies `.bm/`), so
+    /// without this it would digest with the compiled-in default.
+    pub fn offer_analyzer(&self, fallback: &Settings) -> (String, bm_proto::AnalyzerSettings) {
+        match self.resolve() {
+            Some(r) => {
+                let mut a = bm_proto::AnalyzerSettings {
+                    backend: r.kind.as_backend().to_string(),
+                    ..Default::default()
+                };
+                match r.kind {
+                    LlmKind::Gemini => a.analyze_models = Some(vec![r.model.clone()]),
+                    LlmKind::Ollama => {
+                        a.local_model = r.model.clone();
+                        a.ollama_url = r.base_url.clone();
+                    }
+                    LlmKind::Openai => {
+                        a.openrouter_model = r.model.clone();
+                        a.openrouter_url = r.base_url.clone();
+                    }
+                }
+                (r.analyzer, a)
+            }
+            None => {
+                // No usable provider: the workspace settings stand in, with
+                // the backend resolved the same way — an id the file knows, a
+                // retired wire value, or nothing (the worker then refuses).
+                let mut a = fallback.analyzer_settings();
+                a.backend = self.backend_for(&fallback.analyzer).unwrap_or_default();
+                (fallback.analyzer.clone(), a)
+            }
+        }
+    }
+
+    /// Both provider keys this machine holds, so `for_stage` can narrow to
+    /// the one the offered stage reads — a digest carries the analyzer's key,
+    /// a gemini render the TTS key, a crawl nothing at all. Slots are filled
+    /// by kind, never by id.
+    pub fn credentials(&self) -> bm_proto::Credentials {
+        let mut c = bm_proto::Credentials::default();
+        let key_of_kind = |kind: LlmKind| {
+            self.providers
+                .iter()
+                .find(|(_, e)| LlmKind::parse(&e.kind) == kind && e.has_key())
+                .map(|(_, e)| e.api_key.clone())
+                .unwrap_or_default()
+        };
+        // The ACTIVE provider's key travels under its kind's slot — never a
+        // same-kind neighbour's. Sending the alphabetically-first OpenAI key
+        // while TokenHarbor is active is exactly a 401 from the wrong issuer.
+        if let Some(e) = self.providers.get(self.active.trim()) {
+            match LlmKind::parse(&e.kind) {
+                LlmKind::Gemini => c.gemini_api_key = e.api_key.clone(),
+                LlmKind::Ollama => {}
+                LlmKind::Openai => c.openrouter_api_key = e.api_key.clone(),
+            }
+        }
+        // Legacy-fallback offers (no usable active provider) and the gemini
+        // TTS sidecar still need a key: first of the slot. Configured keys
+        // above win; nothing overwrites them.
+        if c.gemini_api_key.is_empty() {
+            c.gemini_api_key = key_of_kind(LlmKind::Gemini);
+        }
+        if c.openrouter_api_key.is_empty() {
+            c.openrouter_api_key = key_of_kind(LlmKind::Openai);
+        }
+        // Legacy env still counts when llm.json has no key (TTS sidecar and
+        // old setups): env never overrides a configured key.
+        if c.gemini_api_key.is_empty() {
+            c.gemini_api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
+        }
+        if c.openrouter_api_key.is_empty() {
+            c.openrouter_api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+        }
+        c
+    }
+
+    /// Mirror the active provider back into the workspace settings so the run
+    /// screen, the API preview and the headless CLI commands read the same
+    /// model the offers carry. One direction only: `llm.json` wins.
+    pub fn sync_settings(&self, s: &mut Settings) {
+        let Some(r) = self.resolve() else { return };
+        s.analyzer = r.analyzer.clone();
+        s.analyzer_backend = r.kind.as_backend().to_string();
+        match r.kind {
+            LlmKind::Gemini => s.analyze_models = vec![r.model.clone()],
+            LlmKind::Ollama => {
+                s.local_model = r.model.clone();
+                if !r.base_url.is_empty() {
+                    s.ollama_url = r.base_url.clone();
+                }
+            }
+            LlmKind::Openai => {
+                s.openrouter_model = r.model.clone();
+                if !r.base_url.is_empty() {
+                    s.openrouter_url = r.base_url.clone();
+                }
+            }
+        }
+    }
+}
+
+/// Read `KEY=value` lines from a legacy `.env` file: `#` comments and
+/// optional quotes. Used once, by [`LlmConfig::load_or_seed`], to carry keys
+/// over from the retired file — process env wins, and nothing else reads it.
+fn read_legacy_env(path: &Path) -> Vec<(String, String)> {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return;
+        return Vec::new();
     };
+    let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -457,17 +882,13 @@ pub fn load_dotenv(path: &Path) {
             continue;
         };
         let key = key.trim();
-        if key.is_empty() || std::env::var_os(key).is_some() {
+        if key.is_empty() {
             continue;
         }
         let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
-        std::env::set_var(key, value);
+        out.push((key.to_string(), value.to_string()));
     }
-}
-
-/// Read an env var, falling back to a default.
-pub fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
+    out
 }
 
 #[cfg(test)]
@@ -605,25 +1026,291 @@ mod tests {
     }
 
     #[test]
-    fn dotenv_does_not_clobber_existing_env() {
-        let dir = std::env::temp_dir().join("bm-dotenv-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join(".env");
-        std::fs::write(
-            &p,
-            "# comment\nBM_TEST_KEY=\"from-file\"\nBM_TEST_QUOTED='quoted'\n",
-        )
-        .unwrap();
-        std::env::set_var("BM_TEST_KEY", "from-env");
-        load_dotenv(&p);
-        assert_eq!(std::env::var("BM_TEST_KEY").unwrap(), "from-env");
-        assert_eq!(std::env::var("BM_TEST_QUOTED").unwrap(), "quoted");
+    fn llm_config_defaults_to_nothing_at_all() {
+        // Default is none twice over: no active provider AND no providers —
+        // slots come from `llm.default.json` (or `.bm/llm.json`), never code.
+        let cfg = LlmConfig::default();
+        assert!(cfg.active.is_empty());
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.resolve().is_none());
+    }
+
+    /// One test provider: `kind` is what routes, the id is just a label.
+    fn entry(kind: &str, key: &str, model: &str) -> ProviderEntry {
+        ProviderEntry {
+            kind: kind.into(),
+            base_url: "https://example/v1".into(),
+            api_key: key.into(),
+            model: model.into(),
+        }
+    }
+
+    fn llm_cfg(active: &str, providers: &[(&str, &str, &str, &str)]) -> LlmConfig {
+        LlmConfig {
+            active: active.into(),
+            providers: providers
+                .iter()
+                .map(|(id, kind, key, model)| (id.to_string(), entry(kind, key, model)))
+                .collect(),
+        }
     }
 
     #[test]
-    fn missing_dotenv_is_not_an_error() {
-        load_dotenv(Path::new("/nonexistent/.env"));
+    fn llm_resolve_needs_a_key_and_a_model() {
+        let mut cfg = llm_cfg("openrouter", &[("openrouter", "openai", "", "")]);
+        assert!(cfg.resolve().is_none(), "no key, no model: not usable");
+        cfg.providers.get_mut("openrouter").unwrap().api_key = "sk-or-x".into();
+        assert!(cfg.resolve().is_none(), "key but no model: not usable");
+        cfg.providers.get_mut("openrouter").unwrap().model = "x/y".into();
+        let r = cfg.resolve().expect("key + model resolves");
+        assert_eq!(r.analyzer, "openrouter");
+        assert_eq!(r.key_var, "OPENROUTER_API_KEY");
+        // An id the file invented still routes by its kind, not its name.
+        cfg.providers
+            .insert("my-gateway".into(), entry("openai", "k", "m"));
+        cfg.providers.get_mut("my-gateway").unwrap().base_url =
+            "https://gw.example/v1".into();
+        cfg.active = "my-gateway".into();
+        let r = cfg.resolve().expect("custom provider resolves");
+        assert_eq!(r.analyzer, "my-gateway");
+        assert_eq!(r.base_url, "https://gw.example/v1");
+        // The ollama kind needs a model but no key.
+        cfg.providers.insert("ollama".into(), entry("ollama", "", ""));
+        cfg.active = "ollama".into();
+        assert!(cfg.resolve().is_none(), "ollama still model-less");
+        cfg.providers.get_mut("ollama").unwrap().model = "gemma-4-12b".into();
+        let r = cfg.resolve().expect("ollama resolves keyless");
+        assert_eq!(r.analyzer, "ollama");
+    }
+
+    #[test]
+    fn backend_slots_come_from_kinds_and_legacy_names() {
+        // Labels travel, slots decide. Routing reads the entry's `kind`;
+        // the retired wire values still map, so old offers keep working.
+        let cfg = llm_cfg(
+            "",
+            &[
+                ("google", "gemini", "", ""),
+                ("tokenharbor", "openai", "", ""),
+                ("my-gateway", "weird-kind", "", ""),
+                ("ollama", "ollama", "", ""),
+            ],
+        );
+        for (id, slot) in [
+            ("google", "gemini"),
+            ("tokenharbor", "openai"),
+            ("my-gateway", "openai"),
+            ("ollama", "ollama"),
+            ("gemini", "gemini"),
+            ("local", "ollama"),
+            ("openrouter", "openai"),
+        ] {
+            assert_eq!(cfg.backend_for(id).as_deref(), Some(slot), "{id}");
+        }
+        for id in ["", "watson", "opencode"] {
+            assert_eq!(cfg.backend_for(id), None, "{id} names nothing usable");
+        }
+    }
+
+    #[test]
+    fn the_active_key_travels_never_a_neighbour() {
+        // The outage: active TokenHarbor plus a stocked OpenRouter entry sent
+        // OpenRouter's key to tokenharbor.ai — a 401 from the wrong issuer
+        // that reads exactly like a revoked key.
+        let cfg = llm_cfg(
+            "tokenharbor",
+            &[
+                ("google", "gemini", "g-key", "gem"),
+                ("openrouter", "openai", "o-key", "o-model"),
+                ("tokenharbor", "openai", "t-key", "th-model"),
+            ],
+        );
+        let creds = cfg.credentials().for_stage(
+            bm_proto::Stage::Digest,
+            &cfg.offer_analyzer(&Settings::default()).1.backend,
+            "vieneu",
+        );
+        assert_eq!(creds.pairs(), vec![("OPENROUTER_API_KEY", "t-key")]);
+        // …and the Gemini slot still finds its own key for a gemini render.
+        let render = cfg.credentials().for_stage(
+            bm_proto::Stage::Render,
+            "gemini",
+            "gemini",
+        );
+        assert_eq!(render.pairs(), vec![("GEMINI_API_KEY", "g-key")]);
+    }
+
+    #[test]
+    fn llm_offer_carries_only_the_active_provider() {
+        let mut cfg = llm_cfg(
+            "google",
+            &[
+                ("google", "gemini", "g-key", "gemini-3.5-flash"),
+                ("tokenharbor", "openai", "", ""),
+            ],
+        );
+        let (analyzer, a) = cfg.offer_analyzer(&Settings::default());
+        assert_eq!(analyzer, "google");
+        assert_eq!(a.analyze_models, Some(vec!["gemini-3.5-flash".into()]));
+        assert_eq!(a.backend, "gemini");
+        let creds = cfg
+            .credentials()
+            .for_stage(bm_proto::Stage::Digest, &a.backend, "vieneu");
+        assert_eq!(
+            creds.pairs(),
+            vec![("GEMINI_API_KEY", "g-key")],
+            "the digest offer carries its key and nothing else"
+        );
+        // Switching provider switches the next offer — that is the whole
+        // sync: the id, key, model and slot travel per task.
+        cfg.active = "tokenharbor".into();
+        cfg.providers.get_mut("tokenharbor").unwrap().api_key = "t-key".into();
+        cfg.providers.get_mut("tokenharbor").unwrap().model = "th-model".into();
+        cfg.providers.get_mut("tokenharbor").unwrap().base_url =
+            "https://th.example/v1".into();
+        let (analyzer, a) = cfg.offer_analyzer(&Settings::default());
+        assert_eq!(analyzer, "tokenharbor");
+        assert_eq!(a.backend, "openai");
+        assert_eq!(a.openrouter_model, "th-model");
+        assert_eq!(a.openrouter_url, "https://th.example/v1");
+        let creds = cfg
+            .credentials()
+            .for_stage(bm_proto::Stage::Digest, &a.backend, "vieneu");
+        assert_eq!(creds.pairs(), vec![("OPENROUTER_API_KEY", "t-key")]);
+    }
+
+    #[test]
+    fn llm_seed_migrates_legacy_settings_once() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("bm-llm-seed{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".bm")).unwrap();
+        let settings = Settings {
+            analyzer: "gemini".into(),
+            analyze_models: vec!["gemini-3.5-flash-lite".into()],
+            ..Settings::default()
+        };
+        std::env::set_var("BM_LLM_SEED_TEST_G", "seed-key");
+        let saved_g = std::env::var("GEMINI_API_KEY").ok();
+        std::env::set_var("GEMINI_API_KEY", "seed-key");
+        let cfg = LlmConfig::load_or_seed(&dir, &settings);
+        assert_eq!(cfg.active, "gemini");
+        assert_eq!(cfg.providers["gemini"].model, "gemini-3.5-flash-lite");
+        assert!(LlmConfig::path(&dir).is_file(), "the seed is persisted");
+        std::env::remove_var("BM_LLM_SEED_TEST_G");
+        if let Some(k) = saved_g {
+            std::env::set_var("GEMINI_API_KEY", k);
+        } else {
+            std::env::remove_var("GEMINI_API_KEY");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn llm_seed_reads_the_retired_env_file_once() {
+        // The file is retired — nothing loads it at startup — but its keys
+        // are still the operator's, so the one-time seed carries them over.
+        // Process env wins over the file.
+        let dir = std::env::temp_dir().join(format!("bm-llm-env{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".bm")).unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "# legacy\nGEMINI_API_KEY=\"file-key\"\nOPENROUTER_API_KEY=file-or-key\n",
+        )
+        .unwrap();
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved_g = std::env::var("GEMINI_API_KEY").ok();
+        let saved_or = std::env::var("OPENROUTER_API_KEY").ok();
+        std::env::remove_var("GEMINI_API_KEY");
+        std::env::remove_var("OPENROUTER_API_KEY");
+        let cfg = LlmConfig::load_or_seed(&dir, &Settings::default());
+        assert_eq!(cfg.providers["gemini"].api_key, "file-key");
+        assert_eq!(cfg.providers["openai"].api_key, "file-or-key");
+        // Second load reads the seeded file, not the legacy one.
+        std::fs::remove_file(dir.join(".env")).unwrap();
+        let again = LlmConfig::load_or_seed(&dir, &Settings::default());
+        assert_eq!(again.providers["gemini"].api_key, "file-key");
+        if let Some(k) = saved_g {
+            std::env::set_var("GEMINI_API_KEY", k);
+        }
+        if let Some(k) = saved_or {
+            std::env::set_var("OPENROUTER_API_KEY", k);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_shipped_default_names_no_key_and_no_model() {
+        // The template a fresh clone copies: endpoints only. A default key
+        // would be a leaked secret and a default model a choice the operator
+        // never made — both are set with `L`, never shipped.
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../llm.default.json");
+        let cfg: LlmConfig =
+            read_json(&root).expect("llm.default.json parses — if you moved it, move this test");
+        assert!(cfg.active.is_empty());
+        for (id, e) in &cfg.providers {
+            assert!(e.api_key.is_empty(), "{id} ships a key");
+            assert!(e.model.is_empty(), "{id} ships a model");
+            assert!(!e.base_url.trim().is_empty(), "{id} has no endpoint");
+            assert!(
+                ["gemini", "openai", "ollama"].contains(&e.kind.as_str()),
+                "{id} ships kind {:?}, which routes nowhere",
+                e.kind
+            );
+        }
+        assert_eq!(
+            cfg.providers["tokenharbor"].base_url,
+            "https://tokenharbor.ai/v1",
+            "the OpenAI-compatible base, not the full /chat/completions path"
+        );
+    }
+
+    #[test]
+    fn llm_load_backfills_kinds_from_the_shipped_file() {
+        // Files written before `kind` existed carry keys and models but no
+        // routing info. Loading restores it from the shipped data — same id,
+        // else same endpoint — instead of stranding them on the default path.
+        let dir = std::env::temp_dir().join(format!("bm-llm-kind{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".bm")).unwrap();
+        std::fs::write(
+            dir.join("llm.default.json"),
+            r#"{"active":"","providers":{"google":{"kind":"gemini","base_url":"https://g.example","api_key":"","model":""}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".bm/llm.json"),
+            r#"{"active":"google","providers":{"google":{"base_url":"https://g.example","api_key":"k","model":"m"}}}"#,
+        )
+        .unwrap();
+        let cfg = LlmConfig::load(&dir);
+        assert_eq!(cfg.kind_of("google"), LlmKind::Gemini);
+        assert_eq!(cfg.backend_for("google").as_deref(), Some("gemini"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn llm_load_falls_back_to_the_shipped_default() {
+        // No `.bm/llm.json` and no tracked file in this temp root: empty.
+        // With a `llm.default.json` beside it: that file's content, and
+        // nothing else — the file is the whole roster.
+        let dir = std::env::temp_dir().join(format!("bm-llm-fallback{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bare = LlmConfig::load(&dir);
+        assert!(bare.active.is_empty());
+        assert!(bare.providers.is_empty());
+        std::fs::write(
+            dir.join("llm.default.json"),
+            r#"{"active":"","providers":{"mybox":{"kind":"ollama","base_url":"http://x:11434","api_key":"","model":""}}}"#,
+        )
+        .unwrap();
+        let cfg = LlmConfig::load(&dir);
+        assert_eq!(cfg.providers["mybox"].base_url, "http://x:11434");
+        assert_eq!(cfg.providers.len(), 1, "no compiled-in ids are merged in");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -634,12 +1321,12 @@ mod tests {
         let remote_box = Settings::default();
         let inductor = Settings {
             analyze_models: vec!["gemini-3.5-flash-lite".into()],
-            opencode_model: "opencode/other".into(),
+            openrouter_model: "someone/else".into(),
             ..Settings::default()
         };
         let effective = remote_box.with_analyzer_settings(&inductor.analyzer_settings());
         assert_eq!(effective.analyze_models, vec!["gemini-3.5-flash-lite"]);
-        assert_eq!(effective.opencode_model, "opencode/other");
+        assert_eq!(effective.openrouter_model, "someone/else");
     }
 
     #[test]

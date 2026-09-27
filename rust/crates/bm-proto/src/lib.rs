@@ -634,7 +634,7 @@ pub struct Heartbeat {
     pub chapter: Option<u32>,
     /// 0.0..=1.0 within the current task.
     pub progress: f32,
-    /// What the worker is doing right now, e.g. "digest ch42 via opencode".
+    /// What the worker is doing right now, e.g. "digest ch42 via gemini".
     pub activity: String,
     #[serde(default)]
     pub eta_secs: Option<u64>,
@@ -787,14 +787,14 @@ pub struct Complete {
 pub const MANUAL_WORKER: &str = "operator";
 
 /// Provider credentials the offered stage will read, sourced from the
-/// inductor's own environment.
+/// inductor's `.bm/llm.json` (the TUI's `L` screen).
 ///
 /// Workers are provisioned by *copying files*, `prompts/`, `python/`,
-/// `assets/`, `refs/`, and `.env` is deliberately not among them: it is
-/// personal and git-ignored, so a remote box has no key of its own. Before
-/// this, a digest offered to such a box died on `GEMINI_API_KEY missing` no
-/// matter how carefully the operator had set the inductor up, because the
-/// key never left the machine that held it.
+/// `assets/`, `refs/`, and `.bm/` is deliberately not among them: it is the
+/// inductor's state, so a remote box has no key of its own. The key travels
+/// with the task instead — narrowed by [`Credentials::for_stage`] to what
+/// the offered stage actually reads, so switching the model on the inductor
+/// takes effect on the next offer with no other sync.
 ///
 /// The field names are the environment variables the generation backends
 /// already read (`bm-core/src/digest/llm.rs`, and `python/tts_router.py` for
@@ -803,9 +803,8 @@ pub const MANUAL_WORKER: &str = "operator";
 /// the code that consumes them.
 ///
 /// An empty string means "not configured on the inductor" and is never
-/// installed, so a worker with its own `.env` keeps working; an offer from an
-/// inductor that predates this field carries nothing at all and behaves
-/// exactly as before.
+/// installed; an offer from an inductor that predates this field carries
+/// nothing at all and behaves exactly as before.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credentials {
     #[serde(default)]
@@ -849,14 +848,17 @@ impl Credentials {
     /// every worker every credential on the cluster for no reason, the point
     /// of narrowing is that the wire only ever carries what the receiving
     /// stage is about to need.
-    pub fn for_stage(self, stage: Stage, analyzer: &str, engine: &str) -> Credentials {
-        // The digest backend picks its key from `analyzer`; the backends that
-        // need none (`opencode` authenticates itself, `local` is Ollama) get an
-        // empty block rather than a gratuitous secret.
+    pub fn for_stage(self, stage: Stage, backend: &str, engine: &str) -> Credentials {
+        // `backend` is the slot (`gemini` | `openai` | `ollama`), resolved by
+        // the inductor from the provider entry's `kind` — never a provider
+        // id, so narrowing cannot learn provider names. The digest takes its
+        // slot's key and nothing else; the keyless slot (`ollama`, or an
+        // empty backend from an inductor with nothing active) gets an empty
+        // block rather than a gratuitous secret.
         let wanted = match stage {
-            Stage::Digest => match analyzer {
+            Stage::Digest => match backend {
                 "gemini" => Some("GEMINI_API_KEY"),
-                "openrouter" => Some("OPENROUTER_API_KEY"),
+                "openai" => Some("OPENROUTER_API_KEY"),
                 _ => None,
             },
             // The TTS sidecar reads `GEMINI_API_KEY` from its own environment
@@ -927,8 +929,6 @@ pub struct AnalyzerSettings {
     #[serde(default)]
     pub analyze_models: Option<Vec<String>>,
     #[serde(default)]
-    pub opencode_model: String,
-    #[serde(default)]
     pub openrouter_model: String,
     /// The model service's base URL, so a box behind a proxy or a gateway
     /// talks to the same endpoint the inductor does. Empty means "the inductor
@@ -939,6 +939,12 @@ pub struct AnalyzerSettings {
     pub local_model: String,
     #[serde(default)]
     pub ollama_url: String,
+    /// The backend slot the model runs as (`gemini` | `openai` | `ollama`),
+    /// resolved by the inductor from the provider entry's `kind`. Empty from
+    /// an older inductor, which the worker then derives from the legacy
+    /// `analyzer` name instead.
+    #[serde(default)]
+    pub backend: String,
 }
 
 /// Everything one crawl needs that the worker cannot derive locally.
@@ -1097,8 +1103,10 @@ pub struct TaskOffer {
     /// day the Gemini TTS path is finished.
     #[serde(default)]
     pub model_order: Vec<String>,
-    /// Digest backend: `opencode` | `openrouter` | `local` | `gemini`.
-    /// Defaults to `opencode` so old inductors' offers still parse.
+    /// Digest backend: the provider id (`tokenharbor`, not the slot), or a
+    /// legacy backend name (`gemini` | `openrouter` | `local`). Empty means
+    /// the inductor has no provider active — the worker refuses with "press
+    /// L" rather than calling anything.
     #[serde(default = "default_analyzer")]
     pub analyzer: String,
     /// What that backend runs, the model chain and the per-backend model
@@ -1107,12 +1115,15 @@ pub struct TaskOffer {
     /// the operator's choice. Empty means "the inductor said nothing".
     #[serde(default)]
     pub analyzer_settings: AnalyzerSettings,
-    /// The provider keys this stage will read, from the inductor's `.env`.
+    /// The provider keys this stage will read, from the inductor's
+    /// `.bm/llm.json` (the TUI's `L` screen), narrowed to what this stage
+    /// actually needs — so switching the model takes effect on the next
+    /// offer with no other sync.
     ///
-    /// Empty when the inductor has nothing configured, the worker then uses
-    /// whatever its own environment holds, exactly as before this field
-    /// existed. An old inductor sends nothing and an old worker ignores it, so
-    /// either side may be upgraded first.
+    /// Empty when the inductor has nothing configured, the worker then refuses
+    /// with "press L" instead of failing on a missing key. An old inductor
+    /// sends nothing and an old worker ignores it, so either side may be
+    /// upgraded first.
     #[serde(default)]
     pub credentials: Credentials,
     /// Current bible snapshot. The worker uses it to build the prompt and
@@ -1238,7 +1249,7 @@ fn default_volume() -> f64 {
 }
 
 fn default_analyzer() -> String {
-    "opencode".into()
+    String::new()
 }
 
 /// One selectable voice plus the metadata an operator needs to choose it.
@@ -1839,14 +1850,15 @@ mod tests {
     }
 
     #[test]
-    fn offer_without_analyzer_means_opencode() {
-        // An old inductor never sent `analyzer`; its offers still digest.
+    fn offer_without_analyzer_means_no_active_provider() {
+        // An old inductor never sent `analyzer`; its offers still parse, and
+        // the worker refuses them with "press L" instead of calling anything.
         let o: TaskOffer = serde_json::from_str(
             r#"{"task_id":"digest:1","chapter":1,"stage":"digest","root":"/r",
                 "engine":"vieneu","gap_ms":300,"speed":1.25,"ambience":true}"#,
         )
         .unwrap();
-        assert_eq!(o.analyzer, "opencode");
+        assert!(o.analyzer.is_empty());
     }
 
     #[test]
@@ -1953,7 +1965,9 @@ mod tests {
 
     #[test]
     fn credentials_travel_only_to_the_stage_that_reads_them() {
-        // The digest lane takes the analyzer's key, and only that one.
+        // The digest lane takes its slot's key, and only that one. The slot
+        // (`gemini` | `openai`) is resolved by the inductor from the entry's
+        // `kind` — no provider id reaches this function.
         assert_eq!(
             both_keys().for_stage(Stage::Digest, "gemini", "vieneu"),
             Credentials {
@@ -1962,20 +1976,20 @@ mod tests {
             }
         );
         assert_eq!(
-            both_keys().for_stage(Stage::Digest, "openrouter", "vieneu"),
+            both_keys().for_stage(Stage::Digest, "openai", "vieneu"),
             Credentials {
                 gemini_api_key: String::new(),
                 openrouter_api_key: "o-key".into(),
             }
         );
-        // opencode authenticates itself and Ollama is a local URL: neither
-        // reads a key, so neither gets one.
-        for analyzer in ["opencode", "local"] {
+        // The ollama slot reads no key, so it gets none — like an empty
+        // backend from an inductor with nothing active.
+        for backend in ["", "ollama"] {
             assert!(
                 both_keys()
-                    .for_stage(Stage::Digest, analyzer, "vieneu")
+                    .for_stage(Stage::Digest, backend, "vieneu")
                     .is_empty(),
-                "{analyzer} reads no key"
+                "{backend} reads no key"
             );
         }
         // A gemini TTS render hands the key to the sidecar the worker spawns.
@@ -2012,7 +2026,7 @@ mod tests {
             vec!["GEMINI_API_KEY", "OPENROUTER_API_KEY"]
         );
         // An unset key is absent, never an empty assignment: the worker must
-        // be able to leave a box's own `.env` alone.
+        // leave a box's own environment alone.
         let half = Credentials {
             gemini_api_key: String::new(),
             openrouter_api_key: "o-key".into(),

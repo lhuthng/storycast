@@ -78,6 +78,12 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         ),
         ("D / :digest", "digest manager: every chapter, manual digest by clipboard"),
         (
+            "L / :llm",
+            "LLM providers: add a key, set the endpoint and model, switch the \
+             active one. The next offer carries the active key+model, so this \
+             is the whole sync — no restart, no second file",
+        ),
+        (
             "c",
             "crawl view: the settings in force, this book's chapter links, the crawlers \
              on this machine, and the sites we know",

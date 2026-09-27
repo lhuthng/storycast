@@ -1175,10 +1175,10 @@ mod tests {
 
     #[test]
     fn a_digest_offer_carries_the_key_its_analyzer_needs() {
-        // The outage: `192.168.2.2` (alias `marmot`) has no `.env`, it is
-        // personal and git-ignored, so provisioning never copies it, and every
-        // digest offered there died on `GEMINI_API_KEY missing` however
-        // carefully this inductor was set up. The key now rides the offer.
+        // The outage: `192.168.2.2` (alias `marmot`) holds no key file —
+        // provisioning never copies `.bm/` — so every digest offered there
+        // died on `GEMINI_API_KEY missing` however carefully this inductor
+        // was set up. The key now rides the offer.
         let _g = env_lock();
         let (_d, mut inner) = fixture();
         let layout = inner.layout.clone();

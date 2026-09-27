@@ -187,6 +187,13 @@ pub(crate) struct App {
     pub(crate) roster: Option<Roster>,
     pub(crate) roster_loading: bool,
     pub(crate) roster_error: Option<String>,
+    /// Models the last `f` fetch listed, and which provider they are for.
+    /// Read by the `L` screen's picker; a fetch for another provider is
+    /// shown as its note instead of offered as a pick.
+    pub(crate) llm_models: Vec<String>,
+    pub(crate) llm_models_for: String,
+    /// Cursor to restore on the `L` screen after a `k`/`u`/`m` prompt closes.
+    pub(crate) llm_cursor: usize,
     /// Jobs in flight, for the "working…" indicator and duplicate suppression.
     /// One key per op *instance* (see `op_key`), so retrying chapter 3 does not
     /// block retrying chapter 4 — but pressing the same key twice does.
@@ -336,6 +343,9 @@ impl App {
             roster: None,
             roster_loading: false,
             roster_error: None,
+            llm_models: Vec::new(),
+            llm_models_for: String::new(),
+            llm_cursor: 0,
             pending: 0,
             next_job_id: 0,
             background_jobs: Vec::new(),
@@ -922,6 +932,35 @@ impl App {
             }
             Ev::DigestPolicy(Ok(msg)) => self.log_at(Level::Ok, msg),
             Ev::DigestPolicy(Err(e)) => self.log_at(Level::Error, format!("digest policy: {e}")),
+            // One provider's model list, for the `L` screen's picker. Stored
+            // with which provider it is for, so the screen offers it as a
+            // pick only on that provider's row — a stale answer is a note,
+            // not a wrong model.
+            Ev::LlmModels { provider, result } => match result {
+                Ok(models) => {
+                    self.llm_models = models;
+                    self.llm_models_for = provider.clone();
+                    if let Screen::Llm(v) = &mut self.screen {
+                        v.note = format!(
+                            "{} model(s) for {provider} — ↑↓ move · Enter saves",
+                            self.llm_models.len()
+                        );
+                    }
+                    self.set_status(
+                        Level::Ok,
+                        format!(
+                            "{provider}: {} model(s) — Enter picks, Esc leaves",
+                            self.llm_models.len()
+                        ),
+                    );
+                }
+                Err(e) => {
+                    if let Screen::Llm(v) = &mut self.screen {
+                        v.note = e.clone();
+                    }
+                    self.set_status(Level::Error, e);
+                }
+            },
             // The `B` job started a backend: run this range on the first live
             // refresh. Stored, not sent, because the inductor is still booting.
             Ev::BackendLive { start, count } => {

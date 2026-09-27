@@ -411,6 +411,20 @@ impl Inner {
         } else {
             (None, None)
         };
+        // The LLM source of truth is `.bm/llm.json`, not the workspace
+        // settings: keys are machine-global, and the offer below carries the
+        // active key+model per task. Unconfigured (or legacy) falls back to
+        // the workspace settings, which the `L` screen keeps mirrored.
+        let llm =
+            bm_core::config::LlmConfig::load_or_seed(&self.layout.root, &self.settings);
+        let (analyzer, analyzer_settings) = llm.offer_analyzer(&self.settings);
+        // Narrowed to what this stage reads, so a crawl offer carries no
+        // secret and a digest carries only the analyzer's key. The slot (not
+        // the provider id) decides the narrowing.
+        let backend = analyzer_settings.backend.clone();
+        let credentials =
+            llm.credentials()
+                .for_stage(t.stage, &backend, &self.settings.engine);
         TaskOffer {
             task_id: t.id(),
             chapter: n,
@@ -422,26 +436,22 @@ impl Inner {
             tts_url: t.stage.needs_tts().then_some(tts_url),
             engine: self.settings.engine.clone(),
             model_order: self.settings.model_order.clone(),
-            analyzer: self.settings.analyzer.clone(),
+            analyzer,
             // The analyzer's *backend* travels in `analyzer` above; what that
             // backend runs travels here. Both are needed: a provisioned worker
-            // has no `.bm/settings.json` to read (provisioning never copies
+            // has no `.bm/llm.json` to read (provisioning never copies
             // `.bm/`), so without this it digests with the compiled-in
-            // `Settings::default()`, which named a model the operator had
-            // stopped using.
-            analyzer_settings: self.settings.analyzer_settings(),
-            // The inductor is the only machine whose `.env` the operator
-            // maintains: a provisioned worker has none, because `.env` is
-            // personal and git-ignored and `install_sources` copies only
-            // `prompts/`, `python/`, `assets/` and `refs/`. Shipping the key
-            // with the task is what makes a remote digest possible at all
+            // default instead of the operator's choice. The key and the model
+            // travel per task, so switching with `L` takes effect on the
+            // next offer with no other sync.
+            analyzer_settings,
+            // The inductor is the only machine whose `.bm/llm.json` the
+            // operator maintains: a provisioned worker has none, because
+            // `.bm/` is never copied by `install_sources`. Shipping the key
+            // with the task is what makes a remote digest possible at all —
             // narrowed to what this stage actually reads, so a crawl offer
             // carries no secret.
-            credentials: bm_proto::Credentials::from_env().for_stage(
-                t.stage,
-                &self.settings.analyzer,
-                &self.settings.engine,
-            ),
+            credentials,
             bible: if bible.is_null() { None } else { Some(bible) },
             script,
             cast,

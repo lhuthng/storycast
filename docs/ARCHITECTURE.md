@@ -184,8 +184,8 @@ For the ssh key, three places are tried in order and the first hit wins: the
 machine's own entry, then the app-wide default, then letting ssh decide for
 itself (an agent, or `~/.ssh/config`; having no key at all is a valid choice,
 not a gap). The machine screen prints the winner and *where it came from*, so a
-key pointing at the wrong place tells you which line set it. `.env` holds API
-keys only. An ssh key is a *path* to a file, which is configuration, not a
+key pointing at the wrong place tells you which line set it. `.bm/llm.json`
+holds provider keys only. An ssh key is a *path* to a file, which is configuration, not a
 secret.
 
 ### Two scopes: the book, and the machine
@@ -376,8 +376,9 @@ of a pipeline where it is expensive to notice.
   that lands a *changed* script invalidates the chapter's render and merge
   (segments and mp3 go, both tasks requeue fresh); otherwise the kept render
   would speak the old dramatization under the new one. The "analyzer" (which AI
-  service to use) is swappable (`opencode | openrouter | gemini | local`) with
-  a fallback chain over models.
+  service to use) is any provider id from `llm.default.json` (picked with `L`),
+  routed by its `kind` (`gemini` | `openai` | `ollama`) with a fallback chain
+  over models.
   **You can also run this stage by hand** (press `D`), which is the way out
   when every AI service is unavailable, rate-limited, returning errors, or
   simply when you would rather use a model you already have open in a browser.
@@ -1217,8 +1218,8 @@ flowchart TB
 * **One identity, and it is not yours.** The app runs as an IAM user created
   for it, with the key in the ignored `.bm/aws/credentials` (0600, AWS's own
   INI format). There is **no fallback to the ambient AWS identity**: no stored
-  user, no AWS call. `aws show` names the user it will act as. `.env` and the
-  shell cannot override it. See [AWS-CREDENTIALS.md](AWS-CREDENTIALS.md).
+  user, no AWS call. `aws show` names the user it will act as. Process env
+  cannot override it. See [AWS-CREDENTIALS.md](AWS-CREDENTIALS.md).
 * **The tag is the safety boundary, in two places at once.** Every box carries
   `storycast-worker` = the profile hash it was launched for.
   `aws-policy.json` scopes `ec2:TerminateInstances` to

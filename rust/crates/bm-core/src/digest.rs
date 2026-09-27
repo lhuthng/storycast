@@ -28,7 +28,7 @@ pub use canon::{
     apply_merges, canon_key, canonicalize_script, merge_bible, resolve_speaker,
     scrub_ambiguous_aliases, BibleMerge,
 };
-pub use llm::{generate, parse_retry_delay, GenError};
+pub use llm::{fetch_models, generate, parse_retry_delay, GenError};
 pub use reconcile::{cast_only_folds, parse_reconcile_merges, reconcile_plan, ReconcilePlan};
 pub use tags::{
     apply_tag_aliases, discard_unknown_effect_tags, retag_text, tags_of, validate_context,

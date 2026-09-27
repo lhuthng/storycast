@@ -8,6 +8,7 @@ mod crawl;
 mod digest;
 mod help;
 mod jobs;
+pub(crate) mod llm;
 mod machine;
 pub(crate) mod mouse;
 mod normal;
@@ -180,6 +181,9 @@ pub(crate) async fn handle_key(
     }
     if let Screen::Digest(view) = app.screen.clone() {
         return digest::key_digest(app, view, key, http, job_tx).await;
+    }
+    if let Screen::Llm(view) = app.screen.clone() {
+        return llm::key_llm(app, view, key, http, job_tx).await;
     }
     normal::normal_key(app, key, http, job_tx).await
 }

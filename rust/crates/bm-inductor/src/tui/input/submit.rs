@@ -34,6 +34,11 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
         TextKind::SoundAdd(_) | TextKind::SoundEdit(..) | TextKind::SoundLevel(..) => {
             Err("sound pools save from the prompt, not submit".into())
         }
+        // The LLM prompts write `.bm/llm.json` and launch nothing, so
+        // reaching dispatch means a bug — same as the sound pools above.
+        TextKind::LlmKey(_) | TextKind::LlmUrl(_) | TextKind::LlmModel(_) => {
+            Err("LLM fields save from the prompt, not submit".into())
+        }
         TextKind::AddMachine => {
             // Bind tuple: `addr [user [port [key...]]]` — the key is the
             // remainder of the line so paths with spaces survive. Missing
