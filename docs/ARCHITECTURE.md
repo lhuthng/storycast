@@ -529,9 +529,11 @@ machine and change only when you re-bake them. The publish half is now built:
 `tools/models.sh` packs the 16 immutable weight files plus their manifest into
 `models.tar.zst` and cuts a GitHub release named by the manifest hash (pack,
 verify, publish, list; `pack` refuses unless `bake-models.py --check` reports
-16/16). The fetch half, where a box downloads and verifies the bundle itself
-instead of receiving it through your uplink, is the part still not built; the
-design is in [ARTIFACTS.md](ARTIFACTS.md).
+16/16). The fetch half is built too: `bm-agent fetch-artifact` downloads the
+tagged bundle, verifies all 17 files against the manifest that travelled with
+them, and swaps the tree into place, so a box takes 363 MB off a CDN instead of
+668 MB off this house's uplink. Absent release falls back to the push; bytes that
+disagree stop the provision. See [ARTIFACTS.md](ARTIFACTS.md).
 
 **On a box that is already configured, the installers are not run at all.**
 `may_install(configured, force)` gates `ensure_opencode` and `ensure_ffmpeg`:

@@ -49,6 +49,12 @@ mlua = { version = "0.12", features = ["lua54", "vendored", "serde"] }
 rquickjs = "0.14"
 scraper = "0.27"
 crossterm = "0.28"
+# The model artifact, opened on the box: `tar` walks the bundle and `ruzstd`
+# decodes it, both pure Rust. A shipped `zstd` binary would be a second
+# cross-built artifact to version-gate, and `apt install zstd` a second sudo
+# gamble, for the sake of one megabyte.
+tar = "0.4"
+ruzstd = "0.9"
 chrono = "0.4"
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 
