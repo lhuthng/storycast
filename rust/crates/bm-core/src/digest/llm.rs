@@ -174,7 +174,10 @@ async fn generate_openrouter(
     // for a TokenHarbor outage sends the operator to the wrong dashboard.
     let who = settings.analyzer.trim();
     let who = if who.is_empty() { "OpenRouter" } else { who };
-    let url = format!("{}/chat/completions", normalize_base(&settings.openrouter_url));
+    let url = format!(
+        "{}/chat/completions",
+        normalize_base(&settings.openrouter_url)
+    );
     let resp = client
         .post(url)
         .header("Authorization", format!("Bearer {key}"))
@@ -484,7 +487,12 @@ pub async fn generate(
 /// (`{"models":[{"name":"models/…"}]}`); Ollama answers `GET
 /// {base}/api/tags`; everything else answers the OpenAI-compatible `GET
 /// {base}/models` (`{"data":[{"id":…}]}`).
-pub async fn fetch_models(provider: &str, kind: &str, base_url: &str, key: &str) -> Result<Vec<String>> {
+pub async fn fetch_models(
+    provider: &str,
+    kind: &str,
+    base_url: &str,
+    key: &str,
+) -> Result<Vec<String>> {
     let base = normalize_base(base_url);
     let base = base.as_str();
     if base.is_empty() {
@@ -502,7 +510,10 @@ pub async fn fetch_models(provider: &str, kind: &str, base_url: &str, key: &str)
         };
         (format!("{base}/v1beta/models"), req)
     } else if kind == "ollama" {
-        (format!("{base}/api/tags"), client.get(format!("{base}/api/tags")))
+        (
+            format!("{base}/api/tags"),
+            client.get(format!("{base}/api/tags")),
+        )
     } else {
         let req = client.get(format!("{base}/models"));
         let req = if key.trim().is_empty() {
@@ -512,11 +523,17 @@ pub async fn fetch_models(provider: &str, kind: &str, base_url: &str, key: &str)
         };
         (format!("{base}/models"), req)
     };
-    let resp = req.send().await.map_err(|e| anyhow!("cannot reach {url} ({e})"))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| anyhow!("cannot reach {url} ({e})"))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("{provider} returned {status}: {}", head_chars(text.trim(), 160));
+        anyhow::bail!(
+            "{provider} returned {status}: {}",
+            head_chars(text.trim(), 160)
+        );
     }
     let v: Value = serde_json::from_str(&text)?;
     let mut out: Vec<String> = if kind == "gemini" {

@@ -31,9 +31,8 @@ fn layout() -> Layout {
 #[ignore = "live: costs an LLM call, run by hand"]
 async fn a_real_model_uses_the_retraction() -> anyhow::Result<()> {
     let layout = layout();
-    let settings: Settings = serde_json::from_str(&std::fs::read_to_string(
-        layout.work.join("settings.json"),
-    )?)?;
+    let settings: Settings =
+        serde_json::from_str(&std::fs::read_to_string(layout.work.join("settings.json"))?)?;
     let bible: Value =
         serde_json::from_str(&std::fs::read_to_string(layout.data().join("bible.json"))?)?;
     let n: u32 = std::env::var("BM_CH")
@@ -43,7 +42,10 @@ async fn a_real_model_uses_the_retraction() -> anyhow::Result<()> {
 
     // What the preparer decided, and what the model is about to be shown.
     let raw = std::fs::read_to_string(layout.chapter_txt(n))?;
-    println!("--- split report ---\n{}\n", bm_core::digest::preview_split(&raw));
+    println!(
+        "--- split report ---\n{}\n",
+        bm_core::digest::preview_split(&raw)
+    );
 
     let mut progress = |f: f32, s: String| println!("  [{:.0}%] {s}", f * 100.0);
     let outcome = bm_core::digest::analyze_chapter(
@@ -62,7 +64,10 @@ async fn a_real_model_uses_the_retraction() -> anyhow::Result<()> {
         .get("speakers")
         .cloned()
         .unwrap_or(Value::Null);
-    println!("--- speakers ---\n{}\n", serde_json::to_string_pretty(&speakers)?);
+    println!(
+        "--- speakers ---\n{}\n",
+        serde_json::to_string_pretty(&speakers)?
+    );
 
     let segs = outcome
         .script

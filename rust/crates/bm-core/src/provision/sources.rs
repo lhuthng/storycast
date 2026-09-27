@@ -73,7 +73,9 @@ pub const OWNED: [&str; 3] = ["prompts", "assets", "crawl"];
 /// under these names is the bundle's to replace, and anything else on a box is
 /// the box's own state.
 pub fn is_owned(rel: &str) -> bool {
-    OWNED.iter().any(|o| rel == *o || rel.starts_with(&format!("{o}/")))
+    OWNED
+        .iter()
+        .any(|o| rel == *o || rel.starts_with(&format!("{o}/")))
 }
 
 /// The registry files each stage reads, relative to `assets/`.
@@ -352,8 +354,8 @@ impl Sources {
     pub fn manifest(&self) -> Result<SourcesManifest> {
         let mut files = BTreeMap::new();
         for m in &self.members {
-            let bytes = std::fs::read(&m.from)
-                .with_context(|| format!("reading {}", m.from.display()))?;
+            let bytes =
+                std::fs::read(&m.from).with_context(|| format!("reading {}", m.from.display()))?;
             files.insert(m.to.clone(), hex(Sha256::digest(&bytes)));
         }
         Ok(SourcesManifest {
@@ -391,7 +393,11 @@ impl Sources {
         let clips = self
             .members
             .iter()
-            .filter(|m| m.to.starts_with("assets/effects/") || m.to.starts_with("assets/music/") || m.to.starts_with("assets/injects/"))
+            .filter(|m| {
+                m.to.starts_with("assets/effects/")
+                    || m.to.starts_with("assets/music/")
+                    || m.to.starts_with("assets/injects/")
+            })
             .count();
         format!(
             "{} file(s), {:.1} MB, for {} ({} clip(s))",
@@ -450,8 +456,7 @@ impl Sources {
             for m in &self.members {
                 let at = scratch.join(&m.to);
                 if let Some(parent) = at.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("staging {}", m.to))?;
+                    std::fs::create_dir_all(parent).with_context(|| format!("staging {}", m.to))?;
                 }
                 // Canonicalised, because a symlink is resolved from where it
                 // sits: a relative source path would point into the stage.
@@ -545,10 +550,7 @@ pub struct SourcesManifest {
 /// box needs anyway, and a box without it is told so in one line rather than
 /// failing with a shell error naming nothing.
 pub fn extract_script() -> String {
-    let owned: Vec<String> = OWNED
-        .iter()
-        .map(|o| format!("\"$D/{o}\""))
-        .collect();
+    let owned: Vec<String> = OWNED.iter().map(|o| format!("\"$D/{o}\"")).collect();
     format!(
         r#"set -e
 D="$HOME/{d}"
@@ -605,7 +607,11 @@ mod tests {
         }
         std::fs::create_dir_all(l.work.join("data")).unwrap();
         std::fs::write(l.work.join("data/cast.json"), "{}").unwrap();
-        std::fs::write(l.root.join("voices.json"), r#"{"Narrator":"refs/narrator.mp3"}"#).unwrap();
+        std::fs::write(
+            l.root.join("voices.json"),
+            r#"{"Narrator":"refs/narrator.mp3"}"#,
+        )
+        .unwrap();
         std::fs::create_dir_all(l.work.join("crawl")).unwrap();
         std::fs::write(l.work.join("crawl/site.lua"), "-- crawl").unwrap();
         // Finder noise must never enter the manifest.
@@ -643,7 +649,10 @@ mod tests {
             assert!(got.contains(&reg.to_string()), "{reg} missing: {got:?}");
         }
         // The digest never opens the music pool, and no stage reads a clip.
-        assert!(!got.contains(&"assets/music-pool.json".to_string()), "{got:?}");
+        assert!(
+            !got.contains(&"assets/music-pool.json".to_string()),
+            "{got:?}"
+        );
         assert!(
             !got.iter().any(|p| p.ends_with(".mp3")),
             "a digest box was sent audio: {got:?}"
@@ -663,14 +672,20 @@ mod tests {
         ] {
             assert!(got.contains(&reg.to_string()), "{reg} missing: {got:?}");
         }
-        assert!(got.contains(&"assets/music/market-bg-1.mp3".to_string()), "{got:?}");
+        assert!(
+            got.contains(&"assets/music/market-bg-1.mp3".to_string()),
+            "{got:?}"
+        );
         // A file nothing registers never travels: the registry is the pool.
         assert!(
             !got.iter().any(|p| p.contains("leftover")),
             "an unregistered clip was shipped: {got:?}"
         );
         // Nothing on the merge path opens the aliases.
-        assert!(!got.contains(&"assets/tag-aliases.json".to_string()), "{got:?}");
+        assert!(
+            !got.contains(&"assets/tag-aliases.json".to_string()),
+            "{got:?}"
+        );
     }
 
     #[test]
@@ -770,9 +785,19 @@ mod tests {
     #[test]
     fn the_manifest_is_stable_and_moves_with_content() {
         let l = fixture("manifest");
-        let a = Sources::plan(&l, &[Stage::Merge]).unwrap().manifest().unwrap();
-        let b = Sources::plan(&l, &[Stage::Merge]).unwrap().manifest().unwrap();
-        assert_eq!(Sources::hash(&a), Sources::hash(&b), "same set, same digest");
+        let a = Sources::plan(&l, &[Stage::Merge])
+            .unwrap()
+            .manifest()
+            .unwrap();
+        let b = Sources::plan(&l, &[Stage::Merge])
+            .unwrap()
+            .manifest()
+            .unwrap();
+        assert_eq!(
+            Sources::hash(&a),
+            Sources::hash(&b),
+            "same set, same digest"
+        );
         assert!(
             !a.files.keys().any(|k| k.contains(".DS_Store")),
             "OS noise entered the manifest: {:?}",
@@ -780,8 +805,14 @@ mod tests {
         );
 
         std::fs::write(l.assets().join("music/market-bg-1.mp3"), b"different").unwrap();
-        let c = Sources::plan(&l, &[Stage::Merge]).unwrap().manifest().unwrap();
-        assert_ne!(a.files["assets/music/market-bg-1.mp3"], c.files["assets/music/market-bg-1.mp3"]);
+        let c = Sources::plan(&l, &[Stage::Merge])
+            .unwrap()
+            .manifest()
+            .unwrap();
+        assert_ne!(
+            a.files["assets/music/market-bg-1.mp3"],
+            c.files["assets/music/market-bg-1.mp3"]
+        );
         assert_ne!(Sources::hash(&a), Sources::hash(&c));
     }
 
@@ -803,7 +834,10 @@ mod tests {
         assert_eq!(s.missing, vec!["market: music/ghost-bg-1.mp3".to_string()]);
         assert!(!s.members.iter().any(|m| m.to.contains("ghost")));
         // …and the take that *is* here goes, under the path the merge resolves.
-        assert!(s.members.iter().any(|m| m.to == "assets/music/market-bg-1.mp3"));
+        assert!(s
+            .members
+            .iter()
+            .any(|m| m.to == "assets/music/market-bg-1.mp3"));
     }
 
     /// A base outside `assets/` is a registry line that would have escaped the
@@ -826,8 +860,14 @@ mod tests {
     #[test]
     fn the_extract_script_prunes_the_trees_it_owns_and_removes_refs() {
         let s = extract_script();
-        assert!(s.contains(r#"rm -rf "$D/prompts" "$D/assets" "$D/crawl""#), "{s}");
-        assert!(s.contains(r#""$D/refs""#), "the inductor's own material must leave: {s}");
+        assert!(
+            s.contains(r#"rm -rf "$D/prompts" "$D/assets" "$D/crawl""#),
+            "{s}"
+        );
+        assert!(
+            s.contains(r#""$D/refs""#),
+            "the inductor's own material must leave: {s}"
+        );
         assert!(s.contains("zstd -dc"), "{s}");
         assert!(s.contains("SOURCES-OK"), "{s}");
     }
@@ -855,7 +895,11 @@ mod tests {
             bundle = shq(&out.display().to_string()),
             dst = shq(&dst.display().to_string())
         );
-        let status = std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap();
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&sh)
+            .status()
+            .unwrap();
         assert!(status.success(), "extract failed: {sh}");
         for rel in [
             "assets/music/market-bg-1.mp3",

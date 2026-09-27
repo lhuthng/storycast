@@ -293,14 +293,9 @@ impl Inner {
                         || bm_core::digest::resolve_speaker(bible, &run.speaker) == *name
                 })
             });
-            let in_plan =
-                bm_core::assemble::RenderPlan::load(&self.layout.plan(n))
-                    .map(|p| {
-                        p.takes
-                            .iter()
-                            .any(|t| names.contains(&t.speaker))
-                    })
-                    .unwrap_or(false);
+            let in_plan = bm_core::assemble::RenderPlan::load(&self.layout.plan(n))
+                .map(|p| p.takes.iter().any(|t| names.contains(&t.speaker)))
+                .unwrap_or(false);
             if (heard || in_plan) && !out.contains(&n) {
                 out.push(n);
             }
@@ -319,11 +314,7 @@ impl Inner {
     /// ones. Pending digests are harmless — their prompts are built from the
     /// post-merge bible — but a just-assigned one has no beat yet, so recent
     /// assignment counts as live for them.
-    fn ensure_mergeable(
-        &self,
-        absorbs: &[String],
-        affected: &[u32],
-    ) -> anyhow::Result<()> {
+    fn ensure_mergeable(&self, absorbs: &[String], affected: &[u32]) -> anyhow::Result<()> {
         let now = now_secs();
         let fresh = |ts: u64| now.saturating_sub(ts) < 30;
         let live_holders = |t: &Task| -> Vec<String> {
@@ -356,18 +347,19 @@ impl Inner {
                 continue;
             }
             let holders: Vec<&str> = t.holders().into_iter().collect();
-            let live = holders.iter().any(|w| {
-                self.beats.get(*w).map(|b| fresh(b.ts)).unwrap_or(false)
-            });
+            let live = holders
+                .iter()
+                .any(|w| self.beats.get(*w).map(|b| fresh(b.ts)).unwrap_or(false));
             if !live && now.saturating_sub(t.updated) >= 120 {
                 continue;
             }
-            let folds: Vec<String> =
-                absorbs.iter().map(|a| bm_core::util::fold(a)).collect();
+            let folds: Vec<String> = absorbs.iter().map(|a| bm_core::util::fold(a)).collect();
             let risky = std::fs::read_to_string(self.layout.chapter_txt(t.chapter))
                 .map(|text| {
                     let f = bm_core::util::fold(&text);
-                    folds.iter().any(|a| !a.is_empty() && f.contains(a.as_str()))
+                    folds
+                        .iter()
+                        .any(|a| !a.is_empty() && f.contains(a.as_str()))
                 })
                 .unwrap_or(false);
             if risky {
@@ -387,9 +379,7 @@ impl Inner {
             }
             if let Some(tid) = &b.task_id {
                 if let Some(ch) = Task::chapter_of(tid) {
-                    if affected.contains(&ch)
-                        && !busy.iter().any(|s| s.starts_with(tid.as_str()))
-                    {
+                    if affected.contains(&ch) && !busy.iter().any(|s| s.starts_with(tid.as_str())) {
                         busy.push(format!("{tid} on {w}"));
                     }
                 }
@@ -429,12 +419,8 @@ impl Inner {
         // digests naming the absorbed) must be still. The rest of the book
         // keeps rendering.
         {
-            let scan: Value =
-                bm_core::read_json(&path).unwrap_or(json!({"characters": []}));
-            let absorbs: Vec<String> = merges
-                .iter()
-                .flat_map(|(_, a)| a.iter().cloned())
-                .collect();
+            let scan: Value = bm_core::read_json(&path).unwrap_or(json!({"characters": []}));
+            let absorbs: Vec<String> = merges.iter().flat_map(|(_, a)| a.iter().cloned()).collect();
             let affected = self.chapters_hearing(&scan, &absorbs);
             self.ensure_mergeable(&absorbs, &affected)?;
         }
@@ -443,8 +429,7 @@ impl Inner {
             // "nothing to fold" after rewriting nothing is how a typo becomes
             // a mystery. The survivor needs a bible home for the aliases; the
             // absorbed need to exist somewhere with a voice to take.
-            let bible: Value =
-                bm_core::read_json(&path).unwrap_or(json!({"characters": []}));
+            let bible: Value = bm_core::read_json(&path).unwrap_or(json!({"characters": []}));
             let names: Vec<&str> = bible
                 .get("characters")
                 .and_then(|c| c.as_array())
@@ -457,23 +442,17 @@ impl Inner {
             let cast = bm_core::cast::read_cast(&engine, &self.layout.cast(&engine));
             for (canonical, absorbs) in merges {
                 if canonical == "Narrator" || absorbs.iter().any(|a| a == "Narrator") {
-                    anyhow::bail!(
-                        "merge refuses the Narrator — it is a voice, not a character"
-                    );
+                    anyhow::bail!("merge refuses the Narrator — it is a voice, not a character");
                 }
                 if absorbs.is_empty() {
                     anyhow::bail!("merge names nobody to absorb into {canonical:?}");
                 }
                 if !names.contains(&canonical.as_str()) {
-                    anyhow::bail!(
-                        "merge refuses: survivor {canonical:?} is not in the bible"
-                    );
+                    anyhow::bail!("merge refuses: survivor {canonical:?} is not in the bible");
                 }
                 for name in absorbs {
                     if name == canonical {
-                        anyhow::bail!(
-                            "merge refuses: {name:?} cannot absorb itself"
-                        );
+                        anyhow::bail!("merge refuses: {name:?} cannot absorb itself");
                     }
                     if !names.contains(&name.as_str()) && !cast.contains_key(name) {
                         anyhow::bail!(

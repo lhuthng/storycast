@@ -724,7 +724,12 @@ fn build_attribution_prompt(
         "`roster` is the cast list the next pass consumes: canonical names and the\n   reserved `Anonymous` speaker, plus \"Narrator\" when the chapter has narration.",
         &mut missed,
     );
-    replace_or_miss(&mut body, "{bible_json}", &bible_context(bible), &mut missed);
+    replace_or_miss(
+        &mut body,
+        "{bible_json}",
+        &bible_context(bible),
+        &mut missed,
+    );
     replace_or_miss(
         &mut body,
         "{chapter_text}",
@@ -885,8 +890,18 @@ fn build_staging_prompt(
         "INPUT 3 — the same prepared source events shown to the attribution pass. `kind` is authoritative; speakers are already fixed.",
         &mut missed,
     );
-    replace_or_miss(&mut body, "{bible_json}", &bible_context(bible), &mut missed);
-    replace_or_miss(&mut body, "{cast_json}", &cast_context(context), &mut missed);
+    replace_or_miss(
+        &mut body,
+        "{bible_json}",
+        &bible_context(bible),
+        &mut missed,
+    );
+    replace_or_miss(
+        &mut body,
+        "{cast_json}",
+        &cast_context(context),
+        &mut missed,
+    );
     replace_or_miss(&mut body, "{music_palette}", &palette, &mut missed);
     // `{mood_palette}` is new: profiles written before it lack the placeholder
     // and that is not a miss worth warning about, so it is replaced outright.
@@ -1068,9 +1083,13 @@ pub async fn analyze_chapter(
                 soft_released = Some(msg);
                 break;
             }
-            let again =
-                repair_once(&staging_prompt, &anyhow::anyhow!(gap.clone()), analyzer, settings)
-                    .await?;
+            let again = repair_once(
+                &staging_prompt,
+                &anyhow::anyhow!(gap.clone()),
+                analyzer,
+                settings,
+            )
+            .await?;
             dump_raw(layout, "digest-staging-retry", &again);
             script = parse_staging(&again)?;
             attempt += 1;
@@ -1360,7 +1379,7 @@ pub fn manual_accept(
             // The worker asks the model again at this point; the operator is
             // simply told, so they can paste an answer that places the sounds it
             // staged. Same rule, different remedy.
-    if let Some(gap) = sound_design_gap(&script, &text, &vocab.injects) {
+            if let Some(gap) = sound_design_gap(&script, &text, &vocab.injects) {
                 anyhow::bail!("{gap}");
             }
             Ok(ManualAnswer {
@@ -1538,8 +1557,7 @@ fn carry_forward_fields(data: &mut Value, prepared: &PreparedChapter) {
     let Some(segments) = data.get_mut("segments").and_then(Value::as_array_mut) else {
         return;
     };
-    let mut last: std::collections::HashMap<&'static str, Value> =
-        std::collections::HashMap::new();
+    let mut last: std::collections::HashMap<&'static str, Value> = std::collections::HashMap::new();
     for segment in segments.iter_mut() {
         if crate::util::is_sound_item(segment) {
             continue;
@@ -1805,14 +1823,14 @@ fn not_speech_ids(data: &Value) -> Result<HashSet<String>> {
     if list.is_null() {
         return Ok(HashSet::new());
     }
-    let list = list
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("attribution `not_speech` must be an array of source ids"))?;
+    let list = list.as_array().ok_or_else(|| {
+        anyhow::anyhow!("attribution `not_speech` must be an array of source ids")
+    })?;
     list.iter()
         .map(|id| {
-            id.as_str()
-                .map(str::to_string)
-                .ok_or_else(|| anyhow::anyhow!("attribution `not_speech` holds a non-string: {id:?}"))
+            id.as_str().map(str::to_string).ok_or_else(|| {
+                anyhow::anyhow!("attribution `not_speech` holds a non-string: {id:?}")
+            })
         })
         .collect()
 }
@@ -2926,7 +2944,10 @@ mod tests {
         ]});
         carry_forward_fields(&mut legacy, &prepared);
         for seg in legacy["segments"].as_array().unwrap() {
-            assert!(seg.get("music").is_none(), "nothing to say about a legacy script");
+            assert!(
+                seg.get("music").is_none(),
+                "nothing to say about a legacy script"
+            );
         }
     }
 
@@ -3463,8 +3484,7 @@ mod tests {
     /// ignore the line on every chapter that is fine.
     #[test]
     fn a_balanced_chapter_says_nothing_about_quotes() {
-        let prepared =
-            prepare_chapter("Hắn lật trang sách.\n\n\"Ngươi đọc xong chưa?\" hắn hỏi.");
+        let prepared = prepare_chapter("Hắn lật trang sách.\n\n\"Ngươi đọc xong chưa?\" hắn hỏi.");
         assert!(!prepared.unbalanced);
         let summary = prepared.split_summary();
         assert!(!summary.contains("still open"), "{summary}");
@@ -3479,7 +3499,11 @@ mod tests {
         let prepared = prepare_chapter("\"Ký chủ: Dịch Phong.\"\n\n\"Tuổi tác: 20.\"");
         assert!(!prepared.unbalanced);
         assert_eq!(
-            prepared.events.iter().filter(|e| e.kind == "narration").count(),
+            prepared
+                .events
+                .iter()
+                .filter(|e| e.kind == "narration")
+                .count(),
             0
         );
         assert!(prepared.split_summary().contains("no narration at all"));
@@ -3513,8 +3537,7 @@ mod tests {
             "not_speech": ["e0002"],
             "speakers": {"e0002": "Narrator"}
         });
-        let speakers =
-            validate_attributions(&data, &bible_with_phong(), &prepared).unwrap();
+        let speakers = validate_attributions(&data, &bible_with_phong(), &prepared).unwrap();
         assert_eq!(speakers["e0002"], "Narrator");
 
         let script = json!({"segments": [
@@ -3523,12 +3546,7 @@ mod tests {
             {"source_id": "e0003", "speaker": "Narrator", "text": "bất ngờ với nội dung bên trong."},
             {"source_id": "e0004", "speaker": "Narrator", "text": "Dịch Phong ngẩng đầu."}
         ], "fixes": []});
-        validate_source_alignment(
-            &script,
-            &prepared,
-            &not_speech_ids(&data).unwrap(),
-        )
-        .unwrap();
+        validate_source_alignment(&script, &prepared, &not_speech_ids(&data).unwrap()).unwrap();
     }
 
     /// The case a keyword list would get wrong, and the reason this is a
@@ -3565,9 +3583,11 @@ mod tests {
             }
         });
         let not_speech = not_speech_ids(&data).unwrap();
-        assert!(!not_speech.contains(&spoken.id), "the spoken title is not retracted");
-        let speakers =
-            validate_attributions(&data, &bible_with_phong(), &prepared).unwrap();
+        assert!(
+            !not_speech.contains(&spoken.id),
+            "the spoken title is not retracted"
+        );
+        let speakers = validate_attributions(&data, &bible_with_phong(), &prepared).unwrap();
         assert_eq!(speakers[&spoken.id], "Dịch Phong");
 
         // And retracting *this* one is not a free pass: it would narrate a
@@ -3581,8 +3601,7 @@ mod tests {
                 spoken.id.clone(): "Narrator"
             }
         });
-        let speakers =
-            validate_attributions(&retracted, &bible_with_phong(), &prepared).unwrap();
+        let speakers = validate_attributions(&retracted, &bible_with_phong(), &prepared).unwrap();
         assert_eq!(speakers[&spoken.id], "Narrator");
     }
 
@@ -3756,8 +3775,12 @@ mod tests {
     #[test]
     fn an_absent_retraction_field_means_no_retraction() {
         assert!(not_speech_ids(&json!({})).unwrap().is_empty());
-        assert!(not_speech_ids(&json!({"not_speech": null})).unwrap().is_empty());
-        assert!(not_speech_ids(&json!({"not_speech": []})).unwrap().is_empty());
+        assert!(not_speech_ids(&json!({"not_speech": null}))
+            .unwrap()
+            .is_empty());
+        assert!(not_speech_ids(&json!({"not_speech": []}))
+            .unwrap()
+            .is_empty());
     }
 
     /// **This is the test that would have caught the field not working.**
@@ -3800,7 +3823,10 @@ mod tests {
         // disagree — the first live run did exactly that.
         let view: Value = serde_json::from_str(&attribution_view(&prepared)).unwrap();
         let note = view["note"].as_str().unwrap();
-        assert!(!note.contains("NEVER"), "rules live in the contract: {note}");
+        assert!(
+            !note.contains("NEVER"),
+            "rules live in the contract: {note}"
+        );
     }
 
     /// The prompt has to offer the field, or the model cannot use it. The

@@ -84,18 +84,11 @@ pub(crate) fn parse_run_config(buf: &str, current_analyzer: &str) -> Result<RunC
         None => current_analyzer.to_string(),
         // Slots, new vocabulary first (`openai`), retired aliases after
         // (`openrouter`): both mean the OpenAI-compatible path.
-        Some(a)
-            if [
-                "openai", "openrouter", "ollama", "local", "gemini",
-            ]
-            .contains(a) =>
-        {
-            match *a {
-                "openrouter" => "openai".to_string(),
-                "local" => "ollama".to_string(),
-                _ => a.to_string(),
-            }
-        }
+        Some(a) if ["openai", "openrouter", "ollama", "local", "gemini"].contains(a) => match *a {
+            "openrouter" => "openai".to_string(),
+            "local" => "ollama".to_string(),
+            _ => a.to_string(),
+        },
         Some(a) => {
             return Err(format!(
                 "analyzer “{a}” unknown — gemini|openai|ollama (or press L for providers)"
@@ -175,8 +168,7 @@ pub(crate) fn save_render_batch(app: &App, buf: &str) -> Result<String, String> 
 /// must land there too, or the save would read back a model the digests never
 /// run. `llm.json` wins ties — this only records the intent.
 pub(crate) fn save_run_config(app: &App, buf: &str) -> Result<String, String> {
-    let (start, count, analyzer, models) =
-        parse_run_config(buf, &app.setting_str("analyzer", ""))?;
+    let (start, count, analyzer, models) = parse_run_config(buf, &app.setting_str("analyzer", ""))?;
     if app.layout.root.as_os_str().is_empty() {
         return Err("no repo root — restart the TUI from a checkout".into());
     }
@@ -259,7 +251,11 @@ fn mirror_analyzer_to_llm(app: &App, settings: &bm_core::config::Settings) {
     if entry.kind.trim().is_empty() {
         entry.kind = kind.as_backend().to_string();
     }
-    if let Some(m) = settings.analyze_models.first().filter(|m| !m.trim().is_empty()) {
+    if let Some(m) = settings
+        .analyze_models
+        .first()
+        .filter(|m| !m.trim().is_empty())
+    {
         if kind == LlmKind::Gemini {
             entry.model = m.trim().to_string();
         }

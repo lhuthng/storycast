@@ -1841,18 +1841,7 @@ async fn cmd_provision(
     carry_task_policy(&mut m, &layout);
     let out = tokio::task::spawn_blocking({
         let (layout, addr, user) = (layout.clone(), addr.clone(), user.clone());
-        move || {
-            provision_machine(
-                &layout,
-                &addr,
-                &user,
-                port,
-                key,
-                force,
-                None,
-                release_repo,
-            )
-        }
+        move || provision_machine(&layout, &addr, &user, port, key, force, None, release_repo)
     })
     .await?;
     for line in &out.lines {
@@ -2046,17 +2035,7 @@ async fn main() -> anyhow::Result<()> {
             let key = key
                 .or_else(|| linked.as_ref().and_then(|b| b.key.clone()))
                 .or_else(|| settings.ssh.key.clone());
-            cmd_provision(
-                layout,
-                addr,
-                user,
-                port,
-                key,
-                api_port,
-                force,
-                release_repo,
-            )
-            .await
+            cmd_provision(layout, addr, user, port, key, api_port, force, release_repo).await
         }
         Cmd::Segments {
             from,

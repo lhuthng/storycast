@@ -96,7 +96,10 @@ pub(crate) async fn key_text(
                 }
             } else if matches!(
                 p.kind,
-                TextKind::SshKey | TextKind::SshUser | TextKind::SshPort | TextKind::Advertise
+                TextKind::SshKey
+                    | TextKind::SshUser
+                    | TextKind::SshPort
+                    | TextKind::Advertise
                     | TextKind::ModelsRelease
             ) {
                 match save_app_setting(app, p.kind.clone(), &p.buf) {
