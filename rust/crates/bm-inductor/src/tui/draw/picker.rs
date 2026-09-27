@@ -6,7 +6,7 @@ use crate::tui::{
         VoiceKind, VoiceRow,
     },
     screen::{PickStage, Picker},
-    style::{centered, dash_if_empty, empty_body, style_bold_of, style_of},
+    style::{centered, empty_body, style_bold_of, style_of},
 };
 use bm_proto::VoiceInfo;
 use ratatui::{
@@ -260,13 +260,13 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                                 spans.push(Span::styled(
                                     // The same `gender_of` as step 2: a pooled
                                     // sample's roster gender is `unknown`, and
-                                    // its tag already says what it is.
-                                    format!(
-                                        "{} · {} · {}",
-                                        gender_of(v),
-                                        dash_if_empty(&v.accent),
-                                        v.language
-                                    ),
+                                    // its tag already says what it is. Accent
+                                    // and language are gone with it: on an
+                                    // offline roster they read `unknown` and
+                                    // `vi-VN` on every single row, and a column
+                                    // that says one thing on every line is not
+                                    // a column.
+                                    gender_of(v).to_string(),
                                     Style::default().fg(Color::DarkGray),
                                 ));
                             }

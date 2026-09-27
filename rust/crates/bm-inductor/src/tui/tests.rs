@@ -7536,6 +7536,60 @@ fn the_picker_step_two_keeps_its_columns_aligned_however_long_a_voice_is() {
     }
 }
 
+#[test]
+fn step_one_shows_the_incumbent_voice_and_its_gender_and_no_column_that_repeats_itself() {
+    // The character list answers "who do I swap?", so the only thing worth
+    // saying about the voice a character already has is what tells it apart.
+    // Accent and language were the two columns that never could: on the
+    // offline roster they read `unknown` and `vi-VN` on every single row.
+    let mut roster = roster_fixture();
+    roster.voices.push(VoiceInfo {
+        key: String::new(),
+        name: "young-female-9".into(),
+        gender: "unknown".into(),
+        accent: "unknown".into(),
+        language: "vi-VN".into(),
+        style: "pool: young, female".into(),
+        pool_tags: vec!["young".into(), "female".into()],
+        enrolled: true,
+        allowed: true,
+    });
+    roster.cast.insert("Bé Mắt".into(), "young-female-9".into());
+    // Step 1 lists the *speakers*, so the name has to be one of those.
+    roster.characters.push("Bé Mắt".into());
+    let mut app = voice_app(roster);
+    if let Screen::Pick(p) = &mut app.screen {
+        p.stage = PickStage::Character;
+        p.filter.clear();
+    }
+    let text = render_text(&mut app, 140, 44);
+    let row = |voice: &str| {
+        text.lines()
+            .find(|l| l.contains(voice))
+            .unwrap_or_else(|| panic!("{voice} must be on screen:\n{text}"))
+            // `render_text` returns the whole row: the overlay's own border
+            // and the padding out to the terminal's edge come after the last
+            // cell, and neither is part of it.
+            .trim_end_matches([' ', '│'])
+            .to_string()
+    };
+    assert!(
+        row("Đức Trí").ends_with("male"),
+        "the row ends at the incumbent's gender:\n{}",
+        row("Đức Trí")
+    );
+    // A pooled sample carries no roster gender — its tag is what it plainly
+    // says, read exactly as step 2 reads it.
+    assert!(
+        row("young-female-9").ends_with("female"),
+        "a pooled sample's gender comes from its tag:\n{}",
+        row("young-female-9")
+    );
+    for gone in ["unknown", "vi-VN"] {
+        assert!(!text.contains(gone), "no row says {gone} any more:\n{text}");
+    }
+}
+
 #[tokio::test]
 async fn a_group_heading_is_a_label_and_never_the_thing_a_key_acts_on() {
     let http = reqwest::Client::new();
