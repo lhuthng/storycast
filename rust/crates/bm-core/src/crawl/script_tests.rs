@@ -1045,6 +1045,53 @@ fn the_bundled_crawlers_reproduce_the_rust_extractors_goldens() {
     }
 }
 
+/// Storya leaves a one-letter stub at the end of some paragraphs, and it must
+/// never reach the digest.
+///
+/// The stub is in the page, not in our extraction: `…cảnh tượng đó. m.` is what
+/// storya.click serves for ch386. The digest's source gate demands every word be
+/// spoken exactly once, a model drops a meaningless fragment on sight, and the
+/// chapter is then refused on every racer for ever — ch386 burned 15 attempts
+/// and was shelved over this one fragment. So the templates strip it, both of
+/// them: the two engines are one behaviour, and a rule in only one of them is a
+/// chapter that crawls clean or not depending on `crawl.engine`.
+///
+/// The page below is the shape the site serves, cut to the parts the extractor
+/// reads. The prose is the real ch386 paragraph, verbatim, so the assertion
+/// about what survives is about the corpus and not about this fixture.
+#[test]
+fn the_storya_engines_drop_the_translators_letter_stub() {
+    const PAGE: &str = r#"<html><body><article>
+<h1>Chương 386: Liền như vậy một đống lạt kê?</h1>
+<p>Gần như chỉ trong chớp mắt, phi thuyền đã bị đánh nát thành từng mảnh.</p>
+<p>Những vị Võ Đế theo sau này, đa số là công nhân mà Hám Thiên Khuyết và những người khác đã tuyển dụng sau này, cũng đều kinh hãi khi chứng kiến cảnh tượng đó. m.</p>
+<p>Trong lòng hắn lại thở dài một tiếng.</p>
+<p>Chương sau</p>
+</article></body></html>"#;
+    let base = fixture::start(vec![("/stub".into(), 200, PAGE.to_string())]);
+
+    for (engine, file) in [("lua", "storya.lua"), ("js", "storya.js")] {
+        let s = spec(engine, file, &template(file));
+        let got = Provider::new(&s)
+            .crawl(1, Some(&format!("{base}/stub")), 1)
+            .expect("crawl");
+        let text = text_of(got.outcome);
+        assert!(
+            !text.contains("m."),
+            "{file} handed the stub to the digest: {text:?}"
+        );
+        assert!(
+            text.contains("kinh hãi khi chứng kiến cảnh tượng đó."),
+            "{file} lost the sentence with the stub: {text:?}"
+        );
+        // A paragraph that ends in a real one-letter Vietnamese word keeps it.
+        assert!(
+            text.contains("thở dài một tiếng."),
+            "{file} is not the file being changed here: {text:?}"
+        );
+    }
+}
+
 /// A workspace's own crawler shadows the profile's: `crawl/` in the active
 /// workspace is searched before the root and before `assets/`, so a book whose
 /// site needs a different script wins without touching anything shared — and

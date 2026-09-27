@@ -164,6 +164,32 @@ function isArtifact(line) {
 }
 
 // The old Rust extractor, as a script: one page of HTML in, one chapter out.
+// The translator's one-letter stub, which Storya leaves at the end of some
+// paragraphs: `…cũng đều kinh hãi khi chứng kiến cảnh tượng đó. m.` (ch386) and
+// `"Không, ngươi không xứng." m.` (ch362), both confirmed on the live page.
+//
+// It is not a word and not part of the sentence, but the digest's source gate
+// requires every word of the chapter to be spoken exactly once, and a model
+// drops the stub on sight — so the chapter is refused for ever: ch386 burned 15
+// attempts on this one fragment and was shelved. Cheaper and more honest to
+// never hand it to the model. Same rule as the Lua twin beside this file.
+//
+// Only the letters the site actually stubs with are listed. A paragraph ending
+// `y.`, `a.` or `u.` is the pronoun, the sentence particle and `âm u` — real
+// words, five of them in this corpus — so "drop a dangling letter" would delete
+// prose to clean up two paragraphs.
+const STUB_LETTERS = ["m"];
+
+function stripStub(line) {
+  for (const letter of STUB_LETTERS) {
+    const stub = " " + letter + ".";
+    if (line.length > stub.length && line.endsWith(stub)) {
+      return line.slice(0, -stub.length).replace(/\s+$/, "");
+    }
+  }
+  return line;
+}
+
 function extract(html) {
   // `<script>` and `<style>` bodies are not prose, and neither are the site's
   // own wrappers.
@@ -237,7 +263,9 @@ function extract(html) {
   // What is left is prose, and the host's `sanitize` is then only tidying —
   // entities, whitespace, paragraph shape — the same boundary a manual import
   // and the digest preparer run.
-  const out = all.filter((line) => !isArtifact(line) && !isNumberedHeading(line));
+  const out = all
+    .filter((line) => !isArtifact(line) && !isNumberedHeading(line))
+    .map(stripStub);
   return sanitize(out.join("\n\n"));
 }
 
