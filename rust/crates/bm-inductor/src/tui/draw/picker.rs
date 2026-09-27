@@ -1,9 +1,12 @@
 //! Voice picker overlay.
 use crate::tui::{
     app::{App, HitTarget, ListTarget},
-    model::{clamp_scroll, filtered_characters, filtered_voices, users_of},
+    model::{
+        clamp_scroll, filtered_characters, filtered_voices, gender_of, settle_cursor, used_by,
+        VoiceKind, VoiceRow,
+    },
     screen::{PickStage, Picker},
-    style::{centered, dash_if_empty, empty_body, gender_label, style_bold_of, style_of},
+    style::{centered, dash_if_empty, empty_body, style_bold_of, style_of},
 };
 use bm_proto::VoiceInfo;
 use ratatui::{
@@ -13,6 +16,59 @@ use ratatui::{
     widgets::{Clear, Paragraph, Wrap},
 };
 use std::collections::BTreeMap;
+
+/// Step 2's column widths, in characters. Named because the used-by cell is
+/// computed from what is left: these four are the whole of the fixed part, and
+/// a column added here has to be paid for there or the last cell silently
+/// loses its padding.
+const MARKER_W: usize = 2;
+/// A voice name and its tag suffix, `young-male-10`, with room for the
+/// catalogue's accented presets.
+const NAME_W: usize = 20;
+const GENDER_W: usize = 8;
+/// `auditioning…` / `auditioned`, the only two states a row can carry that
+/// the voice itself does not.
+const AUDITION_W: usize = 12;
+
+/// One cell, exactly `width` wide: truncated, then padded.
+///
+/// A cut cell says so with an `…` rather than stopping mid-word, because a
+/// name that runs into the next column reads as one longer name — which is
+/// exactly the bug the fixed widths exist to prevent.
+///
+/// `head_chars` counts characters, and every string in this table is
+/// precomposed single-width text, so the pad lands where the terminal ends it.
+fn pad(text: &str, width: usize) -> String {
+    let body = match text.chars().count() {
+        0 => String::new(),
+        n if n <= width => text.to_string(),
+        _ => format!(
+            "{}…",
+            bm_core::util::head_chars(text, width.saturating_sub(1))
+        ),
+    };
+    format!("{:<width$}", body, width = width)
+}
+
+/// `1 voice` / `2 voices`, for the group headings.
+fn plural(n: usize, one: &str) -> String {
+    if n == 1 {
+        format!("{n} {one}")
+    } else {
+        format!("{n} {one}s")
+    }
+}
+
+/// What a group heading says it is holding.
+fn group_label(kind: VoiceKind, tags: &str) -> String {
+    match kind {
+        // A pooled sample with no tags at all is still auto-assignable — it
+        // was vetted when it was added — it just has nothing to group by.
+        VoiceKind::AutoAssign if tags.is_empty() => "Auto Assign · untagged".to_string(),
+        VoiceKind::AutoAssign => format!("Auto Assign · {tags}"),
+        VoiceKind::Unique => "Unique".to_string(),
+    }
+}
 
 pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker) {
     let area = centered(f.area(), 96, 24);
@@ -202,9 +258,12 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                             ));
                             if let Some(v) = meta.get(&current) {
                                 spans.push(Span::styled(
+                                    // The same `gender_of` as step 2: a pooled
+                                    // sample's roster gender is `unknown`, and
+                                    // its tag already says what it is.
                                     format!(
                                         "{} · {} · {}",
-                                        gender_label(&v.gender),
+                                        gender_of(v),
                                         dash_if_empty(&v.accent),
                                         v.language
                                     ),
@@ -232,66 +291,78 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
             } else {
                 let mut scroll = picker.scroll;
                 clamp_scroll(picker.cursor, &mut scroll, list.len(), height);
+                // The cursor is a row index and a heading is a row, so it can
+                // be sitting on one; the marker follows the voice it means.
+                let cursor = settle_cursor(&list, picker.cursor);
+                // Every column is a fixed width and the used-by cell is
+                // whatever is left over. A voice name, an accent or a list of
+                // eleven characters must not push the cells after it — that
+                // is what made the columns unreadable and the alignment a
+                // guess.
+                let used_w = (rows[3].width as usize)
+                    .saturating_sub(MARKER_W + NAME_W + GENDER_W + AUDITION_W);
                 let items: Vec<Line> = list
                     .iter()
                     .enumerate()
                     .skip(scroll)
                     .take(height)
-                    .map(|(i, v)| {
-                        let selected = i == picker.cursor;
-                        let marker = if selected { "▸ " } else { "  " };
-                        let users = users_of(&cast, &v.name);
-                        let (status, colour_of_status) = if users.contains(&picker.character) {
-                            ("current".to_string(), Color::Green)
-                        } else if !users.is_empty() {
-                            (format!("in use: {}", users.join(", ")), Color::Yellow)
-                        } else if !v.allowed {
-                            ("accent policy concern".to_string(), Color::Yellow)
-                        } else {
-                            ("available".to_string(), Color::DarkGray)
-                        };
-                        let mut spans = vec![
-                            Span::styled(marker.to_string(), style_of(colour, Color::Cyan)),
-                            Span::styled(
-                                format!("{:<14}", v.name),
-                                if selected {
-                                    style_bold_of(colour, Color::White)
-                                } else if v.allowed {
-                                    Style::default()
+                    .map(|(i, row)| match row {
+                        VoiceRow::Group { kind, tags, count } => Line::from(Span::styled(
+                            format!(
+                                "── {} · {}",
+                                group_label(*kind, tags),
+                                plural(*count, "voice")
+                            ),
+                            style_of(colour, Color::Cyan),
+                        )),
+                        VoiceRow::Voice { voice: v, users } => {
+                            let selected = i == cursor;
+                            let marker = if selected { "\u{25b8} " } else { "  " };
+                            let used = used_by(users, &picker.character);
+                            // Green is the incumbent: this is the voice the
+                            // character already speaks with.
+                            let (used_text, used_colour) =
+                                if users.iter().any(|u| u == &picker.character) {
+                                    (used, Color::Green)
+                                } else if users.is_empty() {
+                                    (used, Color::DarkGray)
                                 } else {
-                                    Style::default().fg(Color::DarkGray)
-                                },
-                            ),
-                            Span::styled(
-                                format!("{:<8}", gender_label(&v.gender)),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                            Span::styled(
-                                format!("{:<14}", dash_if_empty(&v.accent)),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                            Span::styled(
-                                format!("{:<7}", v.language),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                            Span::styled(
-                                format!("{:<16}", dash_if_empty(&v.style)),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                        ];
-                        if v.enrolled {
-                            spans.push(Span::styled("clone ", style_of(colour, Color::Magenta)));
+                                    (used, Color::Yellow)
+                                };
+                            let badge = if auditioning.as_deref() == Some(v.name.as_str()) {
+                                ("auditioning\u{2026}", Color::Yellow)
+                            } else if picker.previewed.iter().any(|p| p == &v.name) {
+                                ("auditioned", Color::Green)
+                            } else {
+                                ("", Color::DarkGray)
+                            };
+                            Line::from(vec![
+                                Span::styled(marker.to_string(), style_of(colour, Color::Cyan)),
+                                Span::styled(
+                                    pad(&v.name, NAME_W),
+                                    if selected {
+                                        style_bold_of(colour, Color::White)
+                                    } else if v.allowed {
+                                        Style::default()
+                                    } else {
+                                        // An accent-policy voice is not hidden —
+                                        // it is dimmed, because refusing to
+                                        // assign it is the policy's job and
+                                        // refusing to show it is not.
+                                        Style::default().fg(Color::DarkGray)
+                                    },
+                                ),
+                                Span::styled(
+                                    pad(gender_of(v), GENDER_W),
+                                    Style::default().fg(Color::DarkGray),
+                                ),
+                                Span::styled(
+                                    pad(&used_text, used_w),
+                                    style_of(colour, used_colour),
+                                ),
+                                Span::styled(pad(badge.0, AUDITION_W), style_of(colour, badge.1)),
+                            ])
                         }
-                        if auditioning.as_deref() == Some(v.name.as_str()) {
-                            spans.push(Span::styled(
-                                "auditioning… ",
-                                style_of(colour, Color::Yellow),
-                            ));
-                        } else if picker.previewed.iter().any(|p| p == &v.name) {
-                            spans.push(Span::styled("auditioned ", style_of(colour, Color::Green)));
-                        }
-                        spans.push(Span::styled(status, style_of(colour, colour_of_status)));
-                        Line::from(spans)
                     })
                     .collect();
                 f.render_widget(Paragraph::new(items), rows[3]);

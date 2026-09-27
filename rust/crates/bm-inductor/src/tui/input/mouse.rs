@@ -201,8 +201,20 @@ fn list_len(app: &App, kind: ListTarget) -> usize {
 
 fn set_list_cursor(app: &mut App, kind: ListTarget, requested: usize) {
     let len = list_len(app, kind);
-    if let Some(cursor) = list_cursor_mut(app, kind) {
-        *cursor = if len == 0 { 0 } else { requested.min(len - 1) };
+    let mut cursor = if len == 0 { 0 } else { requested.min(len - 1) };
+    // A click lands on a row, and in the picker's voice list a group heading
+    // is one. Clicking a heading selects the first voice under it rather than
+    // nothing at all.
+    if let (Screen::Pick(p), ListTarget::Picker) = (&app.screen, kind) {
+        if p.stage == PickStage::Voice {
+            cursor = crate::tui::model::settle_cursor(
+                &crate::tui::model::filtered_voices(app, &p.filter),
+                cursor,
+            );
+        }
+    }
+    if let Some(slot) = list_cursor_mut(app, kind) {
+        *slot = cursor;
     }
 }
 

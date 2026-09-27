@@ -11,13 +11,16 @@ use crate::tui::{
     app::App,
     input::audition::{pick_current, pick_pointed},
     jobs::Job,
-    model::{filtered_characters, filtered_voices},
+    model::{filtered_characters, filtered_voices, settle_cursor, settle_cursor_back},
     screen::{Confirm, ConfirmAction, PickStage, Picker, Screen, TextKind, TextPrompt},
     style::Level,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Last valid cursor for the rows on screen right now, per stage.
+///
+/// Counts group headings too, because the cursor is a row index and the
+/// draw hit-tests rows; `settle_cursor` is what keeps it off a heading.
 fn list_len(app: &App, p: &Picker) -> usize {
     let n = match p.stage {
         PickStage::Character => filtered_characters(app, &p.filter).len(),
@@ -93,7 +96,9 @@ pub(crate) async fn key_picker(
                         p.character = chosen;
                         p.stage = PickStage::Voice;
                         p.filter.clear();
-                        p.cursor = 0;
+                        // Row 0 is the first group heading, so opening on 0
+                        // would open on a label with nothing to audition.
+                        p.cursor = settle_cursor(&filtered_voices(app, &p.filter), 0);
                         p.scroll = 0;
                         // Step 2 opens in audition focus: t/T/^T play first,
                         // the filter takes over on the first other letter.
@@ -109,7 +114,10 @@ pub(crate) async fn key_picker(
                 }
                 PickStage::Voice => {
                     let list = filtered_voices(app, &p.filter);
-                    match list.get(p.cursor) {
+                    match list
+                        .get(settle_cursor(&list, p.cursor))
+                        .and_then(|r| r.voice())
+                    {
                         None => app.set_status(Level::Error, "no voice selected"),
                         Some(v) => {
                             if !v.allowed {
@@ -168,7 +176,10 @@ pub(crate) async fn key_picker(
         // filter for a speaker called "Kiên" silently moved the cursor
         // instead of typing — and nothing on screen said why.
         KeyCode::Up => {
+            // Backwards over a heading, not forwards onto it: from the first
+            // voice of a group the forward settle would land right back on it.
             p.cursor = p.cursor.saturating_sub(1);
+            p.cursor = settle_cursor_back(&filtered_voices(app, &p.filter), p.cursor);
             app.screen = Screen::Pick(p);
         }
         KeyCode::Down => {
@@ -176,15 +187,18 @@ pub(crate) async fn key_picker(
             // past the end silently selects nothing.
             let last = list_len(app, &p);
             p.cursor = (p.cursor + 1).min(last);
+            p.cursor = settle_cursor(&filtered_voices(app, &p.filter), p.cursor);
             app.screen = Screen::Pick(p);
         }
         KeyCode::PageUp => {
             p.cursor = p.cursor.saturating_sub(8);
+            p.cursor = settle_cursor_back(&filtered_voices(app, &p.filter), p.cursor);
             app.screen = Screen::Pick(p);
         }
         KeyCode::PageDown => {
             let last = list_len(app, &p);
             p.cursor = (p.cursor + 8).min(last);
+            p.cursor = settle_cursor(&filtered_voices(app, &p.filter), p.cursor);
             app.screen = Screen::Pick(p);
         }
         KeyCode::Backspace => {
@@ -194,7 +208,7 @@ pub(crate) async fn key_picker(
                 p.filter_focus = true;
             }
             p.filter.pop();
-            p.cursor = 0;
+            p.cursor = settle_cursor(&filtered_voices(app, &p.filter), 0);
             p.scroll = 0;
             app.screen = Screen::Pick(p);
         }
@@ -202,7 +216,7 @@ pub(crate) async fn key_picker(
             match c {
                 'u' => {
                     p.filter.clear();
-                    p.cursor = 0;
+                    p.cursor = settle_cursor(&filtered_voices(app, &p.filter), 0);
                     p.scroll = 0;
                     if p.stage == PickStage::Voice {
                         p.filter_focus = true;
@@ -240,7 +254,7 @@ pub(crate) async fn key_picker(
                 p.filter_focus = true;
             }
             p.filter.push(c);
-            p.cursor = 0;
+            p.cursor = settle_cursor(&filtered_voices(app, &p.filter), 0);
             p.scroll = 0;
             app.screen = Screen::Pick(p);
         }

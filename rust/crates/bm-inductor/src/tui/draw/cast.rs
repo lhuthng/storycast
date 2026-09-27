@@ -1,12 +1,11 @@
 //! Cast overview overlay.
 use crate::tui::{
     app::{App, HitTarget, ListTarget},
-    layout::{cols, size_class, Size, CAST_COLS_NARROW, CAST_COLS_WIDE},
+    layout::{cols, size_class, Size, CAST_COLS_NARROW, CAST_COLS_WIDE, CAST_OVERLAY_W},
     model::{clamp_scroll, filtered_cast_rows, Verdict},
     screen::CastView,
     style::{
-        cell, centered_padded, dash_if_empty, empty_body, gender_label, selection_bg,
-        style_bold_of, style_of,
+        cell, centered_padded, dash_if_empty, empty_body, selection_bg, style_bold_of, style_of,
     },
 };
 use ratatui::{
@@ -27,7 +26,7 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
     let area = if compact {
         f.area()
     } else {
-        centered_padded(f.area(), 108, 30, 2)
+        centered_padded(f.area(), CAST_OVERLAY_W, 30, 2)
     };
     f.render_widget(Clear, area);
 
@@ -93,8 +92,11 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
         ));
     }
     if unassigned > 0 {
+        // The fix travels with the count, in the one line that is about every
+        // row at once. It used to be repeated on each unassigned row, which is
+        // what a column of identical advice is.
         summary.push(Span::styled(
-            format!("  ·  {unassigned} unassigned"),
+            format!("  ·  {unassigned} unassigned — :v fills gaps"),
             app.style(Color::Yellow),
         ));
     }
@@ -176,12 +178,13 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
         } else {
             CAST_COLS_NARROW[1]
         } as usize;
-        let accent_w = if wide {
-            CAST_COLS_WIDE[3]
+        // The count is padded to the column's own width, not the slack the
+        // table gives it, so it sits against the voice it counts for.
+        let shared_w = if wide {
+            CAST_COLS_WIDE[2]
         } else {
             CAST_COLS_NARROW[2]
         } as usize;
-
         let mut scroll = view.scroll;
         clamp_scroll(view.cursor, &mut scroll, list.len(), body);
         let rows: Vec<Row> = list
@@ -207,39 +210,31 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
                 if r.enrolled {
                     voice_cells.push(Span::styled(" clone", style_of(colour, Color::Magenta)));
                 }
-                let (status, status_colour) = match r.verdict() {
-                    Verdict::Unassigned => {
-                        ("unassigned — :v fills gaps".to_string(), Color::DarkGray)
-                    }
-                    Verdict::Blocked => ("accent policy concern".to_string(), Color::Yellow),
-                    Verdict::Unknown => ("unknown voice — stale cast?".to_string(), Color::Red),
-                    Verdict::Ok if r.shared() => (
-                        format!(
-                            "shared with {} other{}",
-                            r.shared_with.len(),
-                            if r.shared_with.len() == 1 { "" } else { "s" }
-                        ),
-                        Color::Yellow,
-                    ),
-                    Verdict::Ok => ("ok".to_string(), Color::DarkGray),
-                };
                 let mut cells = vec![cell(format!(
                     "{marker}{:<width$}",
                     bm_core::util::head_chars(&r.character, speaker_w - 2),
                     width = speaker_w - 2
                 ))];
                 cells.push(Line::from(voice_cells));
-                if wide {
-                    cells.push(cell(format!("{:<7}", gender_label(&r.gender))));
-                }
-                cells.push(cell(format!(
-                    "{:<width$}",
-                    dash_if_empty(&r.accent),
-                    width = accent_w
-                )));
+                // The last column is a number and nothing else: how many
+                // *other* speakers are on this voice. It was a status column
+                // once, and a fourth of its width was spent on `unknown` and
+                // `vi-VN` — the two values every row had.
                 cells.push(Line::from(Span::styled(
-                    status,
-                    style_of(colour, status_colour),
+                    format!("{:<width$}", r.shared_with.len(), width = shared_w),
+                    style_of(
+                        colour,
+                        match r.verdict() {
+                            // A blocked or unknown voice stays red or yellow
+                            // in the one place the table still has room for it;
+                            // the prose for it was the same three words on
+                            // every row that had it.
+                            Verdict::Blocked => Color::Yellow,
+                            Verdict::Unknown => Color::Red,
+                            _ if r.shared() => Color::Yellow,
+                            _ => Color::DarkGray,
+                        },
+                    ),
                 )));
                 let mut row = Row::new(cells);
                 if selected {
@@ -254,30 +249,23 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
         } else {
             "Cast".to_string()
         };
-        // The status column is the flexible one: it is the only column whose
-        // text length varies with the verdict.
+        // The count is the flexible one, so the table fills whatever the
+        // overlay got instead of stranding three short columns in the middle
+        // of it.
         let mut header = vec!["speaker", "voice"];
         let mut widths: Vec<Constraint> = vec![
             Constraint::Length(CAST_COLS_NARROW[0]),
             Constraint::Length(CAST_COLS_NARROW[1]),
         ];
         if wide {
-            header.push("gender");
             widths[0] = Constraint::Length(CAST_COLS_WIDE[0]);
             widths[1] = Constraint::Length(CAST_COLS_WIDE[1]);
-            widths.push(Constraint::Length(CAST_COLS_WIDE[2]));
         }
-        header.push("accent");
-        widths.push(Constraint::Length(if wide {
-            CAST_COLS_WIDE[3]
+        header.push("shared");
+        widths.push(Constraint::Min(if wide {
+            CAST_COLS_WIDE[2]
         } else {
             CAST_COLS_NARROW[2]
-        }));
-        header.push("status");
-        widths.push(Constraint::Min(if wide {
-            CAST_COLS_WIDE[4]
-        } else {
-            CAST_COLS_NARROW[3]
         }));
 
         let table = Table::new(rows, widths)
