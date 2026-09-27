@@ -1849,9 +1849,21 @@ fn validate_attributions(
     }
 
     for event in &prepared.events {
-        let speaker = speakers
-            .get(&event.id)
-            .ok_or_else(|| anyhow::anyhow!("attribution dropped source event {:?}", event.id))?;
+        let speaker = speakers.get(&event.id).ok_or_else(|| {
+            // The text goes in the complaint, not just the id. This string is
+            // the whole of what the one repair pass is told, and a bare
+            // `e0076` asks the model to act on a label it can no longer look
+            // up — the prepared view is thousands of characters back in the
+            // prompt by now. ch347 failed on exactly this: the model dropped
+            // `e0076` ("A!"), was told only the id, dropped it again, and the
+            // chapter burned every racer. Naming the words lets one repair
+            // actually repair.
+            anyhow::anyhow!(
+                "attribution dropped source event {:?} — it is dialogue and reads {:?}; give it a speaker",
+                event.id,
+                crate::util::head_chars(&event.text, 80)
+            )
+        })?;
         // A dialogue event the model retracted is narration now, and is held
         // to the narration rule instead. The check below cannot read as
         // "dialogue assigned Narrator" for an id that was retracted, or every
@@ -1875,9 +1887,14 @@ fn validate_attributions(
                     event.id
                 );
             }
+            // The same reasoning as the dropped-event complaint: a repair only
+            // works if it can see the line it is being asked to fix. ch347 hit
+            // this too, on a different id, in the same failing chapter.
             anyhow::bail!(
-                "source {:?} assigns {speaker:?}, but that speaker is not in the chapter roster",
-                event.id
+                "source {:?} assigns {speaker:?}, but that speaker is not in the chapter roster — \
+                 add {speaker:?} to `roster` or give the line another speaker. The line reads {:?}",
+                event.id,
+                crate::util::head_chars(&event.text, 80)
             );
         }
     }
@@ -3554,6 +3571,69 @@ mod tests {
         let err =
             validate_attributions(&ignored, &json!({"characters": []}), &prepared).unwrap_err();
         assert!(err.to_string().contains("dropped source event"), "{err}");
+    }
+
+    /// The complaint is the entire input to the one repair pass, so it has to
+    /// carry the line it is complaining about. ch347 failed on this: the model
+    /// dropped `e0076`, was told only the bare id, dropped it again, and the
+    /// chapter burned every racer in a loop. A label the model cannot look up
+    /// is not a repairable instruction.
+    #[test]
+    fn a_dropped_event_complaint_quotes_the_line_it_names() {
+        let prepared = prepare_chapter(
+            "Gấu đen rụt đầu vào trong khe.\n\n\"Các ngươi không thấy ta đâu.\"\n\n\"A!\"",
+        );
+        // One event answered, one dropped, so the complaint is about a known id
+        // rather than whichever happens to come first.
+        let short = prepared
+            .events
+            .iter()
+            .find(|e| e.text == "A!")
+            .expect("the exclamation is a prepared dialogue event");
+        let other = prepared
+            .events
+            .iter()
+            .find(|e| e.kind == "dialogue" && e.id != short.id)
+            .expect("there is a second dialogue event");
+        let err = validate_attributions(
+            &json!({
+                "roster": ["Narrator", "anonymous:anon-1"],
+                "speakers": {other.id.clone(): "anonymous:anon-1"}
+            }),
+            &json!({"characters": []}),
+            &prepared,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(&short.id), "{msg}");
+        assert!(
+            msg.contains("A!"),
+            "the complaint must quote the dropped line so one repair can fix it: {msg}"
+        );
+    }
+
+    /// Same for the not-in-roster complaint, which ch347 hit on a second id in
+    /// the same chapter. Naming the speaker is not enough; the model has to be
+    /// able to see which line it is being asked to re-attribute.
+    #[test]
+    fn a_roster_complaint_quotes_the_line_too() {
+        let prepared = prepare_chapter("Hắn ngồi xuống.\n\n\"Ngươi đi đâu đấy?\" hắn hỏi.");
+        let speech = prepared
+            .events
+            .iter()
+            .find(|e| e.kind == "dialogue")
+            .expect("there is dialogue");
+        let err = validate_attributions(
+            &json!({"roster": ["Narrator"], "speakers": {speech.id.clone(): "Ghost"}}),
+            &json!({"characters": [{"name": "Ghost", "personality": "x",
+                                    "voice_hint": "adult male", "tags": ["male"]}]}),
+            &prepared,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("Ngươi đi đâu đấy?"),
+            "the complaint must quote the line: {err}"
+        );
     }
 
     /// A malformed retraction is refused, not skipped. Silently ignoring a
