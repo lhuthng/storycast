@@ -409,6 +409,13 @@ struct PreparedChapter {
     /// The machine-readable form placed in the attribution and staging prompts.
     /// It contains the chapter text exactly once, split into ordered events.
     prompt_json: String,
+    /// A quote delimiter was still open when the text ran out.
+    ///
+    /// Not cosmetic. An unclosed quote makes the scanner treat *every*
+    /// remaining span as one dialogue event, so a chapter that lost its final
+    /// `"` upstream is read start-to-finish in a single voice — the mirror of
+    /// the no-quotes case below, and just as silent.
+    unbalanced: bool,
 }
 
 impl PreparedChapter {
@@ -432,6 +439,13 @@ impl PreparedChapter {
     /// accusation. A genuinely single-voice chapter is a real thing, and
     /// blaming the crawler on every one of them would train the operator to
     /// ignore the line exactly when it matters.
+    ///
+    /// The mirror case gets the same treatment. Too few quote marks reads as
+    /// one voice, and so do *too many*: an unbalanced chapter leaves a
+    /// delimiter open and every span after it becomes one dialogue event, so
+    /// the count looks healthy while the chapter is one long speech. Neither
+    /// shape is visible to the validators, which can only catch a model
+    /// disagreeing with the text it was given.
     fn split_summary(&self) -> String {
         let dialogue = self.dialogue_count();
         let narration = self.events.len() - dialogue;
@@ -447,6 +461,22 @@ impl PreparedChapter {
                  if the chapter really is narration. If people are talking in it, the quote \
                  marks are not in the text: check the crawler's container selector, and \
                  whether this site marks speech with something other than \" or “",
+            );
+        } else if self.unbalanced {
+            s.push_str(
+                " — a quote is still open at the end of the chapter, so everything after the \
+                 last matched pair was read as one speech. Check the crawler's container \
+                 selector: the chapter is probably cut short or lost a closing quote",
+            );
+        } else if narration == 0 {
+            // Every event landed inside quotes. Legal, and true of a chapter
+            // that is nothing but a system panel — so this asks rather than
+            // claims, and stays a line the operator learns to read.
+            s.push_str(
+                " — no narration at all, so the whole chapter will be read as speech. That is \
+                 correct for a chapter that is all dialogue or a system panel. If the prose is \
+                 there, the site is marking speech with something this scanner reads as a quote \
+                 delimiter",
             );
         }
         s
@@ -540,6 +570,10 @@ fn prepare_chapter(text: &str) -> PreparedChapter {
     PreparedChapter {
         prompt_json: serde_json::to_string_pretty(&value).unwrap_or_else(|_| "[]".into()),
         events,
+        // Decided before the headline filter, because it is a fact about the
+        // text and not about which events survived it. A headline dropped
+        // after a dangling quote does not rebalance anything.
+        unbalanced: quote.is_some(),
     }
 }
 
@@ -580,7 +614,7 @@ fn attribution_view(prepared: &PreparedChapter) -> String {
     let view = json!({
         "narration_ids": narration_ids,
         "dialogue_events": dialogue_events,
-        "note": "Return `speakers` for every `dialogue_events` id only. Context events are evidence for resolving that id; all context and every id in `narration_ids` are spoken by Narrator and are not yours to answer. An explicit named speech tag in `following_context` is the strongest speaker evidence.",
+        "note": "Return `speakers` for every `dialogue_events` id only, except any you list in `not_speech`. Context events are evidence for resolving that id; all context and every id in `narration_ids` are spoken by Narrator and are not yours to answer. An explicit named speech tag in `following_context` is the strongest speaker evidence. `not_speech` is for a quoted span that is not somebody talking — a title, a technique, a term, a panel label — judged from the context around it, never from the words alone. Put such an id in `not_speech` AND in `speakers` as \"Narrator\", because the rule below only accepts it when both agree.",
     });
     serde_json::to_string_pretty(&view).unwrap_or_else(|_| "[]".into())
 }
@@ -1685,14 +1719,68 @@ fn fixed_speakers(data: &Value) -> Result<BTreeMap<String, String>> {
         .collect()
 }
 
+/// What an event is, once the attribution pass's retraction is applied.
+///
+/// One definition for both gates. A retracted id reads as narration everywhere,
+/// so the speaker rule, the delimiter rule and the prompt's own wording cannot
+/// disagree about whether a span is still dialogue.
+fn effective_kind<'a>(event: &'a PreparedEvent, not_speech: &HashSet<String>) -> &'a str {
+    if not_speech.contains(&event.id) {
+        "narration"
+    } else {
+        &event.kind
+    }
+}
+
+/// The ids the attribution answer claims are quoted non-speech.
+///
+/// Optional: an answer without the field is an answer that agrees with the
+/// preparer, which is what every stored script before this field existed means.
+/// A non-string entry is refused rather than skipped, so a model that meant to
+/// retract a line cannot have it silently ignored.
+fn not_speech_ids(data: &Value) -> Result<HashSet<String>> {
+    let Some(list) = data.get("not_speech") else {
+        return Ok(HashSet::new());
+    };
+    if list.is_null() {
+        return Ok(HashSet::new());
+    }
+    let list = list
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("attribution `not_speech` must be an array of source ids"))?;
+    list.iter()
+        .map(|id| {
+            id.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("attribution `not_speech` holds a non-string: {id:?}"))
+        })
+        .collect()
+}
+
 /// Validate the complete source-id to speaker map against the preparer's
 /// mechanical narration/dialogue classification.
+///
+/// **The one thing the model may overrule is "this quote is speech",** and only
+/// downwards. `prepare_chapter` calls a quoted span dialogue because a
+/// delimiter opened it, with no notion of a title or a term — so
+/// `"sánh ngang với thần"`, a skill name, has to be spoken by somebody. The
+/// attribution pass already holds the span with the narration on both sides,
+/// which is the evidence a title needs and a keyword list cannot supply: a
+/// title is bracketed by prose that continues the sentence, a speech is
+/// followed by a tag. So `not_speech` lets the model say so.
+///
+/// **The direction is what makes this safe.** Narration is still written here
+/// in code, never read from the answer, and the reverse — prose promoted to
+/// dialogue — is not expressible. The model can retract the preparer's guess;
+/// it cannot invent a speaker for prose, nor talk a real character out of a
+/// line it is given.
 fn validate_attributions(
     data: &Value,
     bible: &Value,
     prepared: &PreparedChapter,
 ) -> Result<BTreeMap<String, String>> {
     let mut speakers = fixed_speakers(data)?;
+    let not_speech = not_speech_ids(data)?;
     // Narration is mechanical, so it is written here rather than read from the
     // answer: the prompt never asks about these ids, and a model that answers
     // anyway cannot change who speaks prose.
@@ -1710,18 +1798,38 @@ fn validate_attributions(
             anyhow::bail!("attribution names unknown source id {id:?}");
         }
     }
+    // Both halves must agree before an id counts as quoted non-speech: listed
+    // in `not_speech`, *and* assigned Narrator. A model that lists an id and
+    // still gives it a character has contradicted itself, and the
+    // contradiction is refused rather than resolved in either direction —
+    // guessing which half it meant is how a real speech ends up narrated.
+    for id in &not_speech {
+        match speakers.get(id) {
+            None => anyhow::bail!("attribution lists {id:?} as not_speech but assigns no speaker"),
+            Some(s) if s != "Narrator" => anyhow::bail!(
+                "attribution lists {id:?} as not_speech but assigns it {s:?}; a quoted span that \
+                 is not speech must be assigned Narrator"
+            ),
+            Some(_) => {}
+        }
+    }
 
     for event in &prepared.events {
         let speaker = speakers
             .get(&event.id)
             .ok_or_else(|| anyhow::anyhow!("attribution dropped source event {:?}", event.id))?;
-        match event.kind.as_str() {
+        // A dialogue event the model retracted is narration now, and is held
+        // to the narration rule instead. The check below cannot read as
+        // "dialogue assigned Narrator" for an id that was retracted, or every
+        // legitimate retraction would be refused.
+        let kind = effective_kind(event, &not_speech);
+        match kind {
             "narration" if speaker != "Narrator" => anyhow::bail!(
                 "source {:?} is narration but attribution assigns {speaker:?}; narration must be Narrator",
                 event.id
             ),
             "dialogue" if speaker == "Narrator" => anyhow::bail!(
-                "source {:?} is dialogue but attribution assigns Narrator; use a canonical character or the reserved `Anonymous` — a hail nobody on cast is tagged saying belongs to the crowd, not to Narrator",
+                "source {:?} is dialogue but attribution assigns Narrator; use a canonical character or the reserved `Anonymous` — a hail nobody on cast is tagged saying belongs to the crowd, not to Narrator. Only a quoted span that is not somebody talking (a title, a term, a panel label) may be Narrator, and it must also be listed in `not_speech`",
                 event.id
             ),
             _ => {}
@@ -2036,7 +2144,7 @@ fn parse_staged_script(
     validate_script(&data, bible, context, &vocab.palette)?;
     validate_effect_tags(&data, &vocab.effects)?;
     validate_injects(&data, &vocab.injects)?;
-    validate_source_alignment(&data, prepared)?;
+    validate_source_alignment(&data, prepared, &not_speech_ids(context)?)?;
     Ok(data)
 }
 
@@ -2313,7 +2421,11 @@ fn written_sound_hint(expected: &str, actual: &str) -> Option<String> {
 /// `source_id` is deliberately mandatory here, unlike the legacy script
 /// validator. It is the join key that makes a dropped paragraph, a duplicated
 /// quote, or a reordered chapter visible before the script is persisted.
-fn validate_source_alignment(data: &Value, prepared: &PreparedChapter) -> Result<()> {
+fn validate_source_alignment(
+    data: &Value,
+    prepared: &PreparedChapter,
+    not_speech: &HashSet<String>,
+) -> Result<()> {
     let segments = data
         .get("segments")
         .and_then(Value::as_array)
@@ -2371,7 +2483,7 @@ fn validate_source_alignment(data: &Value, prepared: &PreparedChapter) -> Result
                 );
             }
         }
-        match event.kind.as_str() {
+        match effective_kind(event, not_speech) {
             "narration" if speaker != "Narrator" => anyhow::bail!(
                 "source {id:?} is narration but segment {i} is assigned to {speaker:?}; narration must be Narrator"
             ),
@@ -2380,7 +2492,10 @@ fn validate_source_alignment(data: &Value, prepared: &PreparedChapter) -> Result
             ),
             _ => {}
         }
-        if event.kind == "dialogue"
+        // A retracted span is narration now, so it is a narration segment and
+        // must not carry a delimiter — same rule, reached through the same
+        // effective kind the speaker check above used.
+        if effective_kind(event, not_speech) == "dialogue"
             && (text.contains('"') || text.contains('“') || text.contains('”'))
         {
             anyhow::bail!("source {id:?}: quote delimiters must not be merged into segment {i}");
@@ -2411,6 +2526,26 @@ fn validate_source_alignment(data: &Value, prepared: &PreparedChapter) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bible that knows one character, for the tests that need a named
+    /// speaker on the roster: `validate_digest_identity` refuses a roster name
+    /// that is neither in the bible nor declared in `new_characters`.
+    fn bible_with_phong() -> Value {
+        json!({"characters": [
+            {"name": "Dịch Phong", "personality": "wry", "voice_hint": "young male",
+             "tags": ["male"]}
+        ]})
+    }
+
+    /// The source gate with nothing retracted, which is what every test that
+    /// is not *about* the retraction field means. Named rather than spelled
+    /// inline so a future test that does retract something has to say so.
+    fn validate_source_alignment_no_retractions(
+        data: &Value,
+        prepared: &PreparedChapter,
+    ) -> Result<()> {
+        validate_source_alignment(data, prepared, &HashSet::new())
+    }
 
     /// The chain the whole program rests on, as one test: **a crawler's output
     /// decides whether the model is asked a question at all.**
@@ -3026,12 +3161,12 @@ mod tests {
             line("e0002", "Vũ Kiệt", "Anh nhi, xong chưa?"),
             line("e0003", "Narrator", "Vũ Kiệt hỏi."),
         ], "fixes": []});
-        validate_source_alignment(&good, &prepared).unwrap();
+        validate_source_alignment_no_retractions(&good, &prepared).unwrap();
 
         let dropped = json!({"segments": [
             line("e0001", "Narrator", "Dịch Phong nói với Bành Anh."),
         ], "fixes": []});
-        let err = validate_source_alignment(&dropped, &prepared).unwrap_err();
+        let err = validate_source_alignment_no_retractions(&dropped, &prepared).unwrap_err();
         assert!(err.to_string().contains("dropped"), "{err}");
 
         let wrong_owner = json!({"segments": [
@@ -3039,14 +3174,14 @@ mod tests {
             line("e0002", "Vũ Kiệt", "Anh nhi, xong chưa?"),
             line("e0003", "Narrator", "Vũ Kiệt hỏi."),
         ], "fixes": []});
-        let err = validate_source_alignment(&wrong_owner, &prepared).unwrap_err();
+        let err = validate_source_alignment_no_retractions(&wrong_owner, &prepared).unwrap_err();
         assert!(err.to_string().contains("narration"), "{err}");
 
         let merged = json!({"segments": [
             line("e0001", "Narrator", "Dịch Phong nói với Bành Anh."),
             line("e0002", "Vũ Kiệt", "Anh nhi, xong chưa? Vũ Kiệt hỏi."),
         ], "fixes": []});
-        let err = validate_source_alignment(&merged, &prepared).unwrap_err();
+        let err = validate_source_alignment_no_retractions(&merged, &prepared).unwrap_err();
         assert!(err.to_string().contains("changed"), "{err}");
     }
 
@@ -3069,7 +3204,7 @@ mod tests {
             {"source_id": "e0002", "speaker": "Anonymous", "text": "Một câu."},
             {"source_id": "e0003", "speaker": "Anonymous", "text": "Câu tiếp theo."}
         ], "fixes": []});
-        validate_source_alignment(&aligned, &prepared).unwrap();
+        validate_source_alignment_no_retractions(&aligned, &prepared).unwrap();
 
         let mut corrected_separator = prepare_chapter("\"Một câu.\", \"Câu tiếp theo.\"");
         corrected_separator.events[0].text.push(',');
@@ -3077,7 +3212,7 @@ mod tests {
             {"source_id": "e0001", "speaker": "Anonymous", "text": "Một câu.,"},
             {"source_id": "e0002", "speaker": "Anonymous", "text": "Câu tiếp theo."}
         ], "fixes": []});
-        validate_source_alignment(&aligned, &corrected_separator).unwrap();
+        validate_source_alignment_no_retractions(&aligned, &corrected_separator).unwrap();
     }
 
     #[test]
@@ -3099,7 +3234,7 @@ mod tests {
         let data = json!({"segments": [
             {"source_id": "e0001", "speaker": "Narrator", "text": "Quả nhiên, cánh cửa nhỏ 'két' một tiếng, nhẹ nhàng khẽ mở."}
         ], "fixes": []});
-        validate_source_alignment(&data, &prepared).unwrap();
+        validate_source_alignment_no_retractions(&data, &prepared).unwrap();
     }
 
     #[test]
@@ -3148,7 +3283,290 @@ mod tests {
             {"source_id": "e0002", "speaker": "Narrator", "text": "hắn đáp,"},
             {"source_id": "e0003", "speaker": "Vũ Kiệt", "text": "xong rồi."}
         ], "fixes": []});
-        validate_source_alignment(&data, &prepared).unwrap();
+        validate_source_alignment_no_retractions(&data, &prepared).unwrap();
+    }
+
+    /// ch248's real tail, verbatim. The crawler cut the line mid-speech and
+    /// left a dangling backslash, so the closing `"` never arrived — and
+    /// every span after the last matched pair became one dialogue event. The
+    /// chapter read as a single voice with a green ledger row, which is the
+    /// mirror of the no-quotes case and the reason this is a warning.
+    #[test]
+    fn an_unclosed_quote_is_reported_rather_than_read_as_one_voice() {
+        let text = concat!(
+            "\"Tiền bối, không thể nói như thế chứ, hắn đi tới Nam Sa chúng ta, ",
+            "dù sao cũng phải có chút thể hiện chứ!\"\n\n",
+            "Hắn lắc đầu, thở dài một tiếng.\n\n",
+            "\"Đúng vậy đúng vậy, cũng không thể phụ lòng nhiệt tình của chúng ta chứ!\\\n",
+        );
+        let prepared = prepare_chapter(text);
+        assert!(
+            prepared.unbalanced,
+            "the trailing quote is never closed, so the chapter is unbalanced"
+        );
+        // Everything after the last matched pair became dialogue, which is the
+        // damage: prose the scanner can no longer see as prose.
+        assert!(prepared
+            .events
+            .iter()
+            .any(|e| e.kind == "dialogue" && e.text.starts_with("Đúng vậy")));
+        let summary = prepared.split_summary();
+        assert!(
+            summary.contains("still open"),
+            "the summary must name the open quote: {summary}"
+        );
+    }
+
+    /// A balanced chapter must not be warned about, or the operator learns to
+    /// ignore the line on every chapter that is fine.
+    #[test]
+    fn a_balanced_chapter_says_nothing_about_quotes() {
+        let prepared =
+            prepare_chapter("Hắn lật trang sách.\n\n\"Ngươi đọc xong chưa?\" hắn hỏi.");
+        assert!(!prepared.unbalanced);
+        let summary = prepared.split_summary();
+        assert!(!summary.contains("still open"), "{summary}");
+        assert!(!summary.contains("no narration at all"), "{summary}");
+    }
+
+    /// The other end of the same blind spot: a chapter that is one quoted
+    /// system panel has no narration at all. Legal and real, so it is asked
+    /// about rather than refused.
+    #[test]
+    fn an_all_dialogue_chapter_is_asked_about_not_refused() {
+        let prepared = prepare_chapter("\"Ký chủ: Dịch Phong.\"\n\n\"Tuổi tác: 20.\"");
+        assert!(!prepared.unbalanced);
+        assert_eq!(
+            prepared.events.iter().filter(|e| e.kind == "narration").count(),
+            0
+        );
+        assert!(prepared.split_summary().contains("no narration at all"));
+    }
+
+    /// The defect this field exists for. A title inside narration is a quoted
+    /// span with nobody talking, and the preparer cannot tell it from a hail —
+    /// so it became a dialogue event, which `validate_attributions` then
+    /// *forbade* from being Narrator. The only legal answer was a character or
+    /// `Anonymous`, and 101 spans in this corpus were read that way: skill
+    /// names, a panel label, a guqin piece title, each in a stranger's voice.
+    #[test]
+    fn a_quoted_title_in_narration_can_be_retracted_to_the_narrator() {
+        let prepared = prepare_chapter(
+            "Hắn lật ra cuốn sách \"Khải hoàn\" bất ngờ với nội dung bên trong.\n\nDịch Phong ngẩng đầu.",
+        );
+        // The preparer calls it dialogue, and that is the whole problem: the
+        // evidence is in the context, not in the two words.
+        let title = prepared
+            .events
+            .iter()
+            .find(|e| e.text == "Khải hoàn")
+            .expect("the title is a prepared event");
+        assert_eq!(title.kind, "dialogue");
+        assert_eq!(title.id, "e0002");
+
+        // The model retracts it and assigns Narrator: both halves agree, so it
+        // is accepted and the segment is read by the narrator.
+        let data = json!({
+            "roster": ["Narrator"],
+            "not_speech": ["e0002"],
+            "speakers": {"e0002": "Narrator"}
+        });
+        let speakers =
+            validate_attributions(&data, &bible_with_phong(), &prepared).unwrap();
+        assert_eq!(speakers["e0002"], "Narrator");
+
+        let script = json!({"segments": [
+            {"source_id": "e0001", "speaker": "Narrator", "text": "Hắn lật ra cuốn sách"},
+            {"source_id": "e0002", "speaker": "Narrator", "text": "Khải hoàn"},
+            {"source_id": "e0003", "speaker": "Narrator", "text": "bất ngờ với nội dung bên trong."},
+            {"source_id": "e0004", "speaker": "Narrator", "text": "Dịch Phong ngẩng đầu."}
+        ], "fixes": []});
+        validate_source_alignment(
+            &script,
+            &prepared,
+            &not_speech_ids(&data).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The case a keyword list would get wrong, and the reason this is a
+    /// model call rather than a list: the *same* words, quoted aloud, really
+    /// are dialogue. A technique name inside narration is a title; a technique
+    /// name inside a question is speech. Only the surrounding context tells
+    /// them apart, so nothing about "Yêu Đại Giới" itself may decide it.
+    #[test]
+    fn the_same_words_spoken_aloud_stay_dialogue() {
+        let prepared = prepare_chapter(
+            "Hắn lật ra cuốn sách \"Khải hoàn\" bất ngờ với nội dung bên trong.\n\n\"Ngươi đọc 'Yêu Đại Giới' chưa?\" hắn hỏi.",
+        );
+        let spoken = prepared
+            .events
+            .iter()
+            .find(|e| e.text.contains("Yêu Đại Giới"))
+            .expect("the spoken title is a prepared event");
+        let quoted_title = prepared
+            .events
+            .iter()
+            .find(|e| e.text == "Khải hoàn")
+            .expect("the quoted title is a prepared event");
+        assert_ne!(spoken.id, quoted_title.id, "two distinct events");
+
+        // Absent from `not_speech`, the spoken one is ordinary dialogue and is
+        // held to the ordinary rule: somebody on cast has to be speaking it.
+        // The title beside it is retracted, exactly as in the previous test.
+        let data = json!({
+            "roster": ["Narrator", "Dịch Phong"],
+            "not_speech": [quoted_title.id.clone()],
+            "speakers": {
+                quoted_title.id.clone(): "Narrator",
+                spoken.id.clone(): "Dịch Phong"
+            }
+        });
+        let not_speech = not_speech_ids(&data).unwrap();
+        assert!(!not_speech.contains(&spoken.id), "the spoken title is not retracted");
+        let speakers =
+            validate_attributions(&data, &bible_with_phong(), &prepared).unwrap();
+        assert_eq!(speakers[&spoken.id], "Dịch Phong");
+
+        // And retracting *this* one is not a free pass: it would narrate a
+        // real speech, so it has to be claimed as non-speech, which the
+        // context above does not support — the model has to actually say so.
+        let retracted = json!({
+            "roster": ["Narrator", "Dịch Phong"],
+            "not_speech": [quoted_title.id.clone(), spoken.id.clone()],
+            "speakers": {
+                quoted_title.id.clone(): "Narrator",
+                spoken.id.clone(): "Narrator"
+            }
+        });
+        let speakers =
+            validate_attributions(&retracted, &bible_with_phong(), &prepared).unwrap();
+        assert_eq!(speakers[&spoken.id], "Narrator");
+    }
+
+    /// Both halves must agree. A model that lists an id as non-speech and
+    /// still hands it a character has contradicted itself, and the code must
+    /// not guess which half it meant: guessing wrong either narrates a real
+    /// speech or leaves a title in a stranger's voice, silently.
+    #[test]
+    fn a_retraction_and_a_speaker_must_agree() {
+        let prepared = prepare_chapter("Hắn lật ra cuốn sách \"Khải hoàn\" bên trong.");
+        let contradiction = json!({
+            "roster": ["Narrator", "Dịch Phong"],
+            "not_speech": ["e0002"],
+            "speakers": {"e0002": "Dịch Phong"}
+        });
+        let err = validate_attributions(
+            &contradiction,
+            &json!({"characters": []}),
+            &prepared,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not_speech"), "{err}");
+
+        // Listed with no speaker at all is the same contradiction, caught
+        // before the coverage check below can blame a dropped event.
+        let orphan = json!({
+            "roster": ["Narrator"],
+            "not_speech": ["e0002"],
+            "speakers": {}
+        });
+        let err =
+            validate_attributions(&orphan, &json!({"characters": []}), &prepared).unwrap_err();
+        assert!(err.to_string().contains("no speaker"), "{err}");
+    }
+
+    /// Narration still cannot be promoted to dialogue, and an unlisted
+    /// dialogue event still cannot be narrated. The retraction moves one way
+    /// only, which is what makes it safe to hand the model at all.
+    #[test]
+    fn the_retraction_is_one_way_only() {
+        let prepared = prepare_chapter("Hắn bước ra cửa.\n\n\"Ngươi đi đâu?\" hắn hỏi.");
+        let narration = prepared
+            .events
+            .iter()
+            .find(|e| e.kind == "narration")
+            .expect("there is narration");
+        let speech = prepared
+            .events
+            .iter()
+            .find(|e| e.kind == "dialogue")
+            .expect("there is dialogue");
+
+        // Listing a narration id does not make it answerable as speech. The
+        // speaker it claims is overwritten rather than trusted, exactly as
+        // before this field existed — a model cannot promote prose into a
+        // line somebody has to deliver, however it asks.
+        let hoisted = json!({
+            "roster": ["Narrator", "Dịch Phong"],
+            "not_speech": [narration.id.clone()],
+            "speakers": {
+                narration.id.clone(): "Dịch Phong",
+                speech.id.clone(): "Dịch Phong"
+            }
+        });
+        let speakers =
+            validate_attributions(&hoisted, &bible_with_phong(), &prepared).unwrap();
+        assert_eq!(
+            speakers[&narration.id], "Narrator",
+            "a claimed speaker for prose must be rewritten, not honoured"
+        );
+        assert_eq!(speakers[&speech.id], "Dịch Phong");
+
+        // And a dialogue id with no retraction and no speaker is still the
+        // old refusal, so an answer that ignores the field entirely behaves
+        // exactly as it did before the field existed.
+        let ignored = json!({"roster": ["Narrator"], "speakers": {}});
+        let err =
+            validate_attributions(&ignored, &json!({"characters": []}), &prepared).unwrap_err();
+        assert!(err.to_string().contains("dropped source event"), "{err}");
+    }
+
+    /// A malformed retraction is refused, not skipped. Silently ignoring a
+    /// non-string entry would let a model believe it retracted a line when the
+    /// code did not.
+    #[test]
+    fn a_malformed_retraction_is_refused_rather_than_ignored() {
+        let prepared = prepare_chapter("Hắn lật ra cuốn sách \"Khải hoàn\" bên trong.");
+        let err = validate_attributions(
+            &json!({"roster": ["Narrator"], "not_speech": "e0002", "speakers": {}}),
+            &json!({"characters": []}),
+            &prepared,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must be an array"), "{err}");
+
+        let err = validate_attributions(
+            &json!({"roster": ["Narrator"], "not_speech": [7], "speakers": {}}),
+            &json!({"characters": []}),
+            &prepared,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("non-string"), "{err}");
+    }
+
+    /// An absent field means the answer agrees with the preparer, which is
+    /// what every script digested before this field existed means. The 345
+    /// stored scripts stay valid and nothing re-digests.
+    #[test]
+    fn an_absent_retraction_field_means_no_retraction() {
+        assert!(not_speech_ids(&json!({})).unwrap().is_empty());
+        assert!(not_speech_ids(&json!({"not_speech": null})).unwrap().is_empty());
+        assert!(not_speech_ids(&json!({"not_speech": []})).unwrap().is_empty());
+    }
+
+    /// The prompt has to offer the field, or the model cannot use it. The
+    /// `note` is the only place that describes the answer, so this is what
+    /// makes the retraction reachable.
+    #[test]
+    fn the_attribution_view_offers_the_retraction() {
+        let prepared = prepare_chapter("Hắn lật ra cuốn sách \"Khải hoàn\" bên trong.");
+        let view: Value = serde_json::from_str(&attribution_view(&prepared)).unwrap();
+        let note = view["note"].as_str().unwrap();
+        assert!(note.contains("not_speech"), "{note}");
+        // And it must keep saying the rest, or the field reads as a licence
+        // to answer nothing at all.
+        assert!(note.contains("every `dialogue_events` id"), "{note}");
     }
 
     #[test]
@@ -3252,19 +3670,19 @@ mod tests {
         // refused, and the error names the sound instead of saying only that
         // the event "was changed".
         let hoisted = answer("[hắng giọng] Khụ khụ khụ, ban đầu ta cầm bảo đao.");
-        let err = validate_source_alignment(&hoisted, &prepared).unwrap_err();
+        let err = validate_source_alignment_no_retractions(&hoisted, &prepared).unwrap_err();
         assert!(err.to_string().contains("written sound"), "{err}");
 
         // The same answer passes once it comes through `retag_text`, which is
         // what `parse_staged_script` does before it validates and persists.
         let mut collapsed = hoisted.clone();
         collapse_redundant_sounds(&mut collapsed);
-        validate_source_alignment(&collapsed, &prepared).unwrap();
+        validate_source_alignment_no_retractions(&collapsed, &prepared).unwrap();
 
         // A genuine change keeps the honest generic message: the hint fires
         // only when written sound is the whole disagreement.
         let rewritten = answer("Đêm ấy trời trở gió.");
-        let err = validate_source_alignment(&rewritten, &prepared).unwrap_err();
+        let err = validate_source_alignment_no_retractions(&rewritten, &prepared).unwrap_err();
         assert!(err.to_string().contains("changed"), "{err}");
         assert!(!err.to_string().contains("written sound"), "{err}");
     }
@@ -3327,7 +3745,7 @@ mod tests {
             {"source_id": "e0001", "speaker": "Narrator", "text": "Hắn lật"},
             {"source_id": "e0001", "speaker": "Narrator", "text": "trang sách."},
         ], "fixes": []});
-        validate_source_alignment(&data, &prepared).unwrap();
+        validate_source_alignment_no_retractions(&data, &prepared).unwrap();
     }
 
     #[test]
@@ -3337,7 +3755,7 @@ mod tests {
             {"source_id": "e0001", "speaker": "Vũ Kiệt", "text": "Anh nhi,"},
             {"source_id": "e0001", "speaker": "Bành Anh", "text": "xong chưa?"},
         ], "fixes": []});
-        let err = validate_source_alignment(&data, &prepared).unwrap_err();
+        let err = validate_source_alignment_no_retractions(&data, &prepared).unwrap_err();
         assert!(err.to_string().contains("split across speakers"), "{err}");
     }
 
