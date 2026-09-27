@@ -44,13 +44,14 @@ Common causes per stage:
   model is picked, not typed.
   * **the event names a model you stopped using** (e.g. a `503` for
     `gemini-3.5-flash` when the `L` screen holds only
-    `gemini-3.5-flash-lite`), a provisioned worker has **no key file    at all**: provisioning copies the sources bundle its work policy selects —
-    the registries for a digest box, the scene map, the pools and the clips they
+    `gemini-3.5-flash-lite`), a provisioned worker has **no key file at all**:
+    provisioning copies the sources bundle its work policy selects — the
+    registries for a digest box, the scene map, the pools and the clips they
     register for a merge box, the crawlers for a crawl box (the `prompts/`
-    themselves ride every bundle) — and
-    never the inductor's own state. Not `.bm/`, and no longer `refs/`. It therefore used
-    to run on `Settings::default()`, the *compiled-in* chain, and
-    ignore the operator's chain completely. The inductor now sends its analyzer
+    themselves ride every bundle) — and never the inductor's own state. Not
+    `.bm/`, and no longer `refs/`. It therefore used to run on
+    `Settings::default()`, the *compiled-in* chain, and ignore the operator's
+    chain completely. The inductor now sends its analyzer
     block (the active key, the model, the endpoint) with every digest offer
     and the worker overlays it, so the model named in the event is the model
     in the inductor's own `.bm/llm.json` (mirrored into

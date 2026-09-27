@@ -687,8 +687,9 @@ and shelves, and the event log names the chapters waiting for `:import`.
 * **Trust.** Scripts run in-process with the worker's privileges: this is a
   *boundary* that makes the documented ABI the true one, not a sandbox for
   hostile code. A crawler is profile content the operator authors, like
-  `prompts/`, it ships in the profile, is pushed to every worker whose policy runs
-  crawl, and drifts the provision stamp when it changes. Loading a stranger's crawler without asking is
+  `prompts/`: it ships in the profile, is pushed to every worker whose policy
+  runs crawl (the prompts themselves are the one thing every bundle carries),
+  and drifts the provision stamp when it changes. Loading a stranger's crawler without asking is
   what WASM would be for, later.
 
 ---

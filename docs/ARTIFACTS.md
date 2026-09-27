@@ -54,7 +54,7 @@ fails, on every retry, until somebody re-provisions. The rest of the selection
 still follows the stage list, which is what the manifest records and what the
 scheduler reads back from the box before offering it a stage.
 
-Everything else, prompts (24 KB), the crawlers (72 KB), cast files, the scene
+Everything else, prompts (21 KB), the crawlers (72 KB), cast files, the scene
 map, the three pool registries, `voices.json` (492 KB), is under 1 MB combined
 and is never worth optimizing — which is why they ride in that same bundle
 rather than getting a plane of their own.
