@@ -74,3 +74,5 @@ rust/dist/
 # never tracked.
 .workbuddy-ai/
 session-*.md
+
+/tmp
