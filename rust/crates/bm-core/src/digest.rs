@@ -455,7 +455,7 @@ impl PreparedChapter {
 
 fn prepared_event(id: usize, kind: &str, text: &str) -> Option<PreparedEvent> {
     let text = text.trim();
-    if text.is_empty() {
+    if text.is_empty() || !crate::util::has_speakable_content(text) {
         return None;
     }
     Some(PreparedEvent {
@@ -466,8 +466,8 @@ fn prepared_event(id: usize, kind: &str, text: &str) -> Option<PreparedEvent> {
 }
 
 /// Split source paragraphs into dialogue and narration spans without changing
-/// their text. A quote delimiter is punctuation, not part of the speakable
-/// span, so the model is not asked to reproduce it in a segment.
+/// their speakable text. Quote delimiters and standalone punctuation separators
+/// are not speech, so the model is not asked to reproduce them in a segment.
 fn prepare_chapter(text: &str) -> PreparedChapter {
     // Older workspaces can contain raw HTML entities and Storya's promo/footer
     // metadata. Sanitize at the same boundary the crawler and local reader use,
@@ -3048,6 +3048,36 @@ mod tests {
         ], "fixes": []});
         let err = validate_source_alignment(&merged, &prepared).unwrap_err();
         assert!(err.to_string().contains("changed"), "{err}");
+    }
+
+    #[test]
+    fn quote_separators_that_are_only_punctuation_are_not_prepared_as_speech() {
+        let prepared = prepare_chapter("Những câu như:\n\n\"Một câu.\", \"Câu tiếp theo.\"");
+
+        assert_eq!(prepared.events.len(), 3, "{:?}", prepared.events);
+        assert_eq!(prepared.events[0].text, "Những câu như:");
+        assert_eq!(prepared.events[1].text, "Một câu.");
+        assert_eq!(prepared.events[2].text, "Câu tiếp theo.");
+        assert_eq!(prepared.events[2].id, "e0003");
+        assert!(prepared
+            .events
+            .iter()
+            .all(|event| crate::util::has_speakable_content(&event.text)));
+
+        let aligned = json!({"segments": [
+            {"source_id": "e0001", "speaker": "Narrator", "text": "Những câu như:"},
+            {"source_id": "e0002", "speaker": "Anonymous", "text": "Một câu."},
+            {"source_id": "e0003", "speaker": "Anonymous", "text": "Câu tiếp theo."}
+        ], "fixes": []});
+        validate_source_alignment(&aligned, &prepared).unwrap();
+
+        let mut corrected_separator = prepare_chapter("\"Một câu.\", \"Câu tiếp theo.\"");
+        corrected_separator.events[0].text.push(',');
+        let aligned = json!({"segments": [
+            {"source_id": "e0001", "speaker": "Anonymous", "text": "Một câu.,"},
+            {"source_id": "e0002", "speaker": "Anonymous", "text": "Câu tiếp theo."}
+        ], "fixes": []});
+        validate_source_alignment(&aligned, &corrected_separator).unwrap();
     }
 
     #[test]

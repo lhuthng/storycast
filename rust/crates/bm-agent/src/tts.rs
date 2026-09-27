@@ -127,6 +127,7 @@ impl Tts {
         silence_p: f64,
         engine: &str,
     ) -> Result<Vec<u8>> {
+        validate_request_text(text)?;
         let body = json!({
             "text": text,
             "voice": voice,
@@ -157,5 +158,30 @@ impl Tts {
             );
         }
         Ok(bytes.to_vec())
+    }
+}
+
+fn validate_request_text(text: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        anyhow::bail!("TTS request text is empty");
+    }
+    if !bm_core::util::has_speakable_content(text) {
+        anyhow::bail!("TTS request has no speakable content (punctuation-only text)");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_validation_rejects_empty_and_punctuation_only_text() {
+        let empty_error = validate_request_text(" ").unwrap_err().to_string();
+        assert!(empty_error.contains("empty"));
+        let punctuation_error = validate_request_text(",").unwrap_err().to_string();
+        assert!(punctuation_error.contains("punctuation-only"));
+        validate_request_text("Ừm!").unwrap();
+        validate_request_text("[cười]").unwrap();
     }
 }

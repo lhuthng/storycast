@@ -108,6 +108,15 @@ pub fn squeeze_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Whether a string has content the speech pipeline can pronounce.
+///
+/// This distinguishes alphanumeric text (including valid short utterances and
+/// inline emotion cues) from punctuation and whitespace. It is a guard against
+/// punctuation-only render units, not a full phonemizer validation.
+pub fn has_speakable_content(s: &str) -> bool {
+    s.chars().any(|c| c.is_alphanumeric())
+}
+
 /// First `n` characters, for log lines. Slicing a `&str` by bytes would panic
 /// on Vietnamese text.
 pub fn head_chars(s: &str, n: usize) -> String {
@@ -193,6 +202,16 @@ mod tests {
         assert_eq!(char_len(s), 10);
         assert_eq!(head_chars(s, 6), "Chương");
         assert_eq!(squeeze_ws("  a\n\t b  "), "a b");
+    }
+
+    #[test]
+    fn speakable_content_distinguishes_words_and_cues_from_punctuation() {
+        for text in [",", "...", "！？", "  "] {
+            assert!(!has_speakable_content(text), "{text:?} is not speakable");
+        }
+        for text in ["Ừm!", "123", "[cười]"] {
+            assert!(has_speakable_content(text), "{text:?} is speakable");
+        }
     }
 
     #[test]
