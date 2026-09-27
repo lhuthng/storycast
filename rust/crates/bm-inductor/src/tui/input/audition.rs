@@ -367,7 +367,11 @@ pub(crate) fn pick_pointed(
     reroll: bool,
 ) {
     let list = crate::tui::model::filtered_voices(app, &p.filter);
-    match list.get(p.cursor) {
+    // Settled, because a group heading is a row and this is the one read of
+    // "the pointed voice" that a stale cursor could still reach.
+    let pointed = crate::tui::model::settle_cursor(&list, p.cursor);
+    p.cursor = pointed;
+    match list.get(pointed).and_then(|r| r.voice()) {
         None => app.set_status(Level::Warn, "nothing to audition"),
         Some(v) => {
             let (character, voice) = (p.character.clone(), v.name.clone());

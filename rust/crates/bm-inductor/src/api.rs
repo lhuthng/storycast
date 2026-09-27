@@ -671,9 +671,7 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             // anything is rewritten.
             let (survivor, absorbed) = (req.survivor.clone(), req.absorbed.clone());
             match survivor {
-                Some(survivor)
-                    if !survivor.trim().is_empty() && !absorbed.is_empty() =>
-                {
+                Some(survivor) if !survivor.trim().is_empty() && !absorbed.is_empty() => {
                     let mut inner = st.lock().await;
                     match inner.apply_reconcile(&[(survivor, absorbed)], true) {
                         Ok(msg) => Json(OpResult::ok(msg)),
@@ -1140,7 +1138,9 @@ fn disk_voices(
     // The sample pool rides the same list: a pooled sample shows its tags where
     // the style was, so the picker filter (`young`) finds it, and a sample the
     // registry names but nothing enrolled yet still shows, as vetted-at-adding
-    // like any clone (the render fails loudly if it never gets enrolled).
+    // like any clone (the render fails loudly if it never gets enrolled). The
+    // tags also ride along as `pool_tags`, which is what makes the picker able
+    // to tell an auto-assignable voice from a unique one.
     for (name, entry) in bm_core::pool::load_pool(&layout.root.join("voice-pool.json")) {
         let style = if entry.tags.is_empty() {
             "named voice".to_string()
@@ -1148,7 +1148,10 @@ fn disk_voices(
             format!("pool: {}", entry.tags.join(", "))
         };
         match voices.iter_mut().find(|v| v.name == name) {
-            Some(v) => v.style = style,
+            Some(v) => {
+                v.style = style;
+                v.pool_tags = entry.tags.clone();
+            }
             None => voices.push(VoiceInfo {
                 key: String::new(),
                 name,
@@ -1156,6 +1159,7 @@ fn disk_voices(
                 accent: "unknown".into(),
                 language: "vi-VN".into(),
                 style,
+                pool_tags: entry.tags.clone(),
                 enrolled: true,
                 allowed: true,
             }),
@@ -1253,7 +1257,9 @@ async fn build_roster(
     // The sample pool rides the same list: a pooled sample shows its tags where
     // the style was, so the picker filter (`young`) finds it, and a sample the
     // registry names but nothing enrolled yet still shows, as vetted-at-adding
-    // like any clone (the render fails loudly if it never gets enrolled).
+    // like any clone (the render fails loudly if it never gets enrolled). The
+    // tags also ride along as `pool_tags`, which is what makes the picker able
+    // to tell an auto-assignable voice from a unique one.
     for (name, entry) in bm_core::pool::load_pool(&layout.root.join("voice-pool.json")) {
         let style = if entry.tags.is_empty() {
             "named voice".to_string()
@@ -1261,7 +1267,10 @@ async fn build_roster(
             format!("pool: {}", entry.tags.join(", "))
         };
         match voices.iter_mut().find(|v| v.name == name) {
-            Some(v) => v.style = style,
+            Some(v) => {
+                v.style = style;
+                v.pool_tags = entry.tags.clone();
+            }
             None => voices.push(VoiceInfo {
                 key: String::new(),
                 name,
@@ -1269,6 +1278,7 @@ async fn build_roster(
                 accent: "unknown".into(),
                 language: "vi-VN".into(),
                 style,
+                pool_tags: entry.tags.clone(),
                 enrolled: true,
                 allowed: true,
             }),

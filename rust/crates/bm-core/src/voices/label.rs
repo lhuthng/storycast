@@ -123,6 +123,9 @@ fn voice_from_label(label: &str, id: &str, allowed: &[String], engine: &str) -> 
         accent: accent.to_string(),
         language: CONTENT_LANGUAGE.to_string(),
         style,
+        // Labels come from the SDK, which knows nothing about the sample
+        // pool; the roster builder fills this in from the registry.
+        pool_tags: Vec::new(),
     }
 }
 
@@ -170,6 +173,7 @@ pub fn offline_voices(engine: &str) -> Vec<VoiceInfo> {
                 accent: accent.to_string(),
                 language: CONTENT_LANGUAGE.to_string(),
                 style: style.to_string(),
+                pool_tags: Vec::new(),
                 enrolled: false,
                 allowed: policy.allowed.is_empty() || policy.allowed.iter().any(|a| a == name),
             });
@@ -237,6 +241,9 @@ pub fn enrolled_voices(path: &std::path::Path) -> Vec<VoiceInfo> {
             accent: "unknown".into(),
             language: CONTENT_LANGUAGE.into(),
             style: "enrolled clone".into(),
+            // Enrolled, but not necessarily pooled: `voices.json` does not say
+            // which samples the cast may roll.
+            pool_tags: Vec::new(),
             enrolled: true,
             allowed: true, // vetted when it was enrolled
         })

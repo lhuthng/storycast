@@ -247,6 +247,8 @@ impl EngineRoster {
                     accent,
                     language: CONTENT_LANGUAGE.to_string(),
                     style,
+                    // A catalogue preset is never auto-assigned: the pool is.
+                    pool_tags: Vec::new(),
                     enrolled: false,
                     allowed: policy.allowed.is_empty() || policy.allowed.iter().any(|a| a == name),
                 });

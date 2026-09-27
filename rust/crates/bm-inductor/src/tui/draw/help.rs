@@ -158,9 +158,13 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         "Step 2 and the overview open in audition focus (see below); step 1",
         "types every letter. Accents are ignored, so \"thai son\" finds",
         "\"Thái Sơn\".",
-        "Every voice is listed with gender, accent, language and style, plus whether",
-        "it is already in use and whether the accent policy permits it.",
-        "Pooled samples show their tags (pool: young, female) — type one to filter.",
+        "Step 2 groups the voices. Auto Assign comes first — one group per set",
+        "of sample-pool tags, in alphabetical order, emptiest voice at the top of",
+        "each group. Unique voices follow, by name.",
+        "A row shows its gender and who already speaks with it: one name, then a",
+        "count of the rest. A pool tag still filters (\"young\"), as do accent,",
+        "language and style.",
+        "The overview is speaker, voice, and how many other speakers share it.",
         "Enter advances or applies; Esc goes back one step.",
     ] {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));

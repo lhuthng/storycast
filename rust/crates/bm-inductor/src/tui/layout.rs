@@ -137,18 +137,29 @@ pub(crate) const COMPACT_WORKER_COLS: [u16; 5] = [14, 8, 5, 17, 16];
 
 /// Column widths for the cast table, in two sets.
 ///
-/// The dashboard floor is 76 columns, but the wide cast table needs 92 — so on
-/// the terminal sizes where the dashboard is *most* useful the table would be
-/// squeezed and every column clipped together. The narrow set drops `gender`
-/// (the picker shows it in full) so the speaker, the voice and the verdict stay
-/// readable. `lang` is absent from both: it is the constant `vi-VN` and so
-/// carries no information, and it lives in the overlay title instead.
+/// The dashboard floor is 76 columns, so the cast table carries two sets and
+/// picks one against the width the overlay actually got.
 ///
-/// `speaker, voice, gender, accent, status`
-pub(crate) const CAST_COLS_WIDE: [u16; 5] = [24, 20, 7, 14, 27];
+/// `gender` and `accent` are gone from both, and `lang` never was: `accent`
+/// read `unknown` on most rows and the language is the constant `vi-VN` in
+/// every one, so together they were a third of the table repeating itself.
+/// What is left is who speaks, with what, and how many *other* speakers share
+/// it — a count, not a sentence, because the sentence was the same four words
+/// on every row that had anything to say. The verdict survives in the voice
+/// cell's colour and in the summary line's `N to fix`, which is where a
+/// screen-wide number belongs.
+///
+/// `speaker, voice, shared`
+pub(crate) const CAST_COLS_WIDE: [u16; 3] = [30, 24, 9];
 
-/// `speaker, voice, accent, status`
-pub(crate) const CAST_COLS_NARROW: [u16; 4] = [18, 16, 13, 23];
+/// `speaker, voice, shared`
+pub(crate) const CAST_COLS_NARROW: [u16; 3] = [20, 18, 7];
+
+/// The cast overlay's own width, when the terminal can hold it. Named for the
+/// same reason `SOUND_OVERLAY_W` is: a wide set wider than the overlay it is
+/// only chosen on can never be selected, which is how a layout quietly
+/// becomes dead code.
+pub(crate) const CAST_OVERLAY_W: u16 = 108;
 
 /// The sound-design overlay's own size, when the terminal can hold it. Named
 /// because the column sets below are chosen against it: a table wider than
@@ -265,6 +276,11 @@ const _: () = assert!(
 const _: () = assert!(
     cols(&CAST_COLS_NARROW) + 4 <= MIN_W,
     "the narrow cast table plus two sets of borders must fit the smallest terminal"
+);
+const _: () = assert!(
+    cols(&CAST_COLS_WIDE) + 2 <= CAST_OVERLAY_W - 2,
+    "the wide cast table must fit the overlay it is only chosen on — \
+     otherwise the wide set is unreachable and the table is always narrow"
 );
 const _: () = assert!(
     cols(&SOUND_COLS_NARROW) + 2 <= MIN_W - 4,

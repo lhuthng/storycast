@@ -1277,6 +1277,15 @@ pub struct VoiceInfo {
     pub language: String,
     /// Free text from the roster label, e.g. `kể chuyện`.
     pub style: String,
+    /// Sample-pool tags (`young`, `female`) when this voice is a pooled
+    /// sample the cast rolls from; empty for a unique voice.
+    ///
+    /// The pool registry is the truth about what is *auto-assignable*, and
+    /// the picker groups on it. It travels here rather than being re-read
+    /// from `voice-pool.json` per frame, so the live roster and the offline
+    /// one group identically.
+    #[serde(default)]
+    pub pool_tags: Vec<String>,
     /// An operator-enrolled clone rather than a shipped preset.
     #[serde(default)]
     pub enrolled: bool,
