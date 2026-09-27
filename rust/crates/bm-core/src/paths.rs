@@ -415,6 +415,24 @@ impl Layout {
         self.bm_state().join("machines.json")
     }
 
+    /// LLM providers (keys, endpoints, active model): machine-global like
+    /// `machines()`, for the same reason — a key is this machine's access,
+    /// not a book's. The single file the `L` screen edits; the inductor sends
+    /// the active key with each task offer, so workers never read this.
+    pub fn llm_config(&self) -> PathBuf {
+        self.bm_state().join("llm.json")
+    }
+
+    /// The shipped provider template: four keyless, modelless slots and the
+    /// default endpoints, for `.bm/llm.json` to be copied from.
+    ///
+    /// Tracked, like [`Layout::roster_default`]: a fresh clone has to show
+    /// the same `L` screen with no local config, so this one is committed at
+    /// the root.
+    pub fn llm_default(&self) -> PathBuf {
+        self.root.join("llm.default.json")
+    }
+
     /// The AWS worker pool definition: region, type, subnet, security group,
     /// instance profile, keypair names, caps.
     ///

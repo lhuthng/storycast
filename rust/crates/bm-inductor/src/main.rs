@@ -127,7 +127,7 @@ enum Cmd {
     Digest {
         /// Chapter number (needs `data/chapters/chNN.txt`).
         chapter: u32,
-        /// Analyzer to use. Default: the `analyzer` value in `.bm/settings.json`.
+        /// Analyzer to use. Default: the active provider in `.bm/llm.json` (TUI: `L`).
         #[arg(long)]
         analyzer: Option<String>,
         /// Also write `data/script-NN.json`. Nothing else happens: caches are
@@ -160,9 +160,9 @@ enum Cmd {
         /// about, so a bare `backup` carries on to the end of the book.
         #[arg(long)]
         through: Option<u32>,
-        /// Which service to call. Default: read off `--api` (a URL containing
-        /// `openrouter` or `googleapis`), then the API key in the environment
-        /// (`sk-or-` → openrouter, `AIza` → gemini), then settings.
+        /// Which service to call. Default: the active provider in
+        /// `.bm/llm.json` (TUI: `L`), else read off `--api` (a URL containing
+        /// `openrouter` or `googleapis`), else settings.
         #[arg(long)]
         analyzer: Option<String>,
         /// The model service's base URL, where the two digest calls go. This is
@@ -1943,8 +1943,10 @@ async fn main() -> anyhow::Result<()> {
         None if manages => Layout::resolve_or_root(Layout::find_root()?),
         None => (Layout::discover()?, None),
     };
-    bm_core::config::load_dotenv(&layout.root.join(".env"));
     let settings = Settings::load(&layout.settings());
+    // One-time migration: first run after the upgrade seeds `.bm/llm.json`
+    // from the legacy workspace settings + environment, then saves it.
+    bm_core::config::LlmConfig::load_or_seed(&layout.root, &settings);
     // `roster` and `workspace` are local file work: requiring ssh/rsync/ffmpeg
     // to rewrite JSON would make them unusable on exactly the machine that
     // needs them. Same for `digest`, which is one HTTP call to an analyzer
@@ -2215,7 +2217,6 @@ async fn cmd_digest(
     write: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    let analyzer = analyzer.unwrap_or(settings.analyzer.as_str()).to_string();
     let txt = layout.chapter_txt(chapter);
     if !txt.is_file() {
         anyhow::bail!(
@@ -2223,13 +2224,31 @@ async fn cmd_digest(
             txt.display()
         );
     }
+    // The flag wins; otherwise the active provider in `.bm/llm.json` (TUI:
+    // `L`) decides, not the workspace settings mirror. A named flag must be
+    // a provider the file knows or a legacy backend name — anything else
+    // would route OpenAI-compatible by construction and fail confusingly.
+    let llm = bm_core::config::LlmConfig::load_or_seed(&layout.root, settings);
+    if let Some(flag) = analyzer {
+        if llm.backend_for(flag).is_none() {
+            anyhow::bail!("unknown analyzer {flag:?} — pick one with `tui` (L)");
+        }
+    }
+    let (active, asettings) = llm.offer_analyzer(settings);
+    let analyzer = analyzer.unwrap_or(active.as_str()).to_string();
+    if analyzer.is_empty() {
+        anyhow::bail!("no LLM provider is active — add a key with `tui` (L), then retry");
+    }
+    // The overlay carries the active model, endpoint AND backend slot, so
+    // `generate` routes by slot while progress lines name the provider id.
+    let settings = settings.with_analyzer_settings(&asettings);
     let bible = bm_core::digest::load_bible(&layout.bible());
     let mut progress = |_f: f32, s: String| eprintln!("{s}");
     let out = bm_core::digest::analyze_chapter(
         layout,
         chapter,
         &bible,
-        settings,
+        &settings,
         &analyzer,
         &mut progress,
     )
@@ -2316,33 +2335,45 @@ async fn cmd_backup(
     // live, exactly as it is for `make tui`.
     let api = inductor.unwrap_or_else(|| format!("http://127.0.0.1:{}", settings.control_port));
     let model_api = model_api.trim_end_matches('/').to_string();
+    // The flag wins; otherwise the active provider in `.bm/llm.json`. The
+    // address only decides when neither says (a gateway at a name of its
+    // own): the operator passes an API, a key and a model, never a transport.
+    let llm = bm_core::config::LlmConfig::load_or_seed(&layout.root, &settings);
+    let (active, _) = llm.offer_analyzer(&settings);
     let analyzer = match analyzer {
         Some(a) => a.to_string(),
-        // The address says which service it is; the key says so when the
-        // address does not say (a gateway at a name of its own). So the
-        // operator passes an API, a key and a model, and never a transport.
+        None if !active.is_empty() => active,
         None if model_api.contains("openrouter") => "openrouter".to_string(),
         None if model_api.contains("googleapis") => "gemini".to_string(),
-        None if std::env::var("OPENROUTER_API_KEY").is_ok_and(|k| k.starts_with("sk-or-")) => {
-            "openrouter".to_string()
-        }
-        None if std::env::var("GEMINI_API_KEY").is_ok_and(|k| k.starts_with("AIza")) => {
-            "gemini".to_string()
-        }
         None => settings.analyzer.clone(),
     };
-    // The model and the endpoint land on whichever fields the chosen service
-    // reads, so one `--model` and one `--api` cover every backend.
-    if let Some(model) = model.filter(|m| !m.trim().is_empty()) {
-        match analyzer.as_str() {
-            "openrouter" => settings.openrouter_model = model,
-            "gemini" => settings.analyze_models = vec![model],
-            "opencode" => settings.opencode_model = model,
-            "local" => settings.local_model = model,
-            other => anyhow::bail!("unknown analyzer {other:?}"),
+    {
+        if llm.backend_for(&analyzer).is_none() {
+            anyhow::bail!("unknown analyzer {analyzer:?} — pick one with `tui` (L)");
         }
     }
-    if analyzer == "openrouter" {
+    if analyzer.is_empty() {
+        anyhow::bail!("no LLM provider is active — add a key with `tui` (L), then retry");
+    }
+    // The model and the endpoint land on whichever fields the chosen service
+    // reads, so one `--model` and one `--api` cover every backend. `analyzer`
+    // is the provider id; the slot decides the fields.
+    let backend = llm
+        .backend_for(&analyzer)
+        .expect("validated above: the analyzer names a provider or legacy slot");
+    // The overlay carries the active model, endpoint AND backend slot, so
+    // `generate` routes by slot while progress lines name the provider id.
+    // Flag overrides land after it, so `--model`/`--api` win.
+    settings = settings.with_analyzer_settings(&llm.offer_analyzer(&settings).1);
+    settings.analyzer_backend = backend.clone();
+    if let Some(model) = model.filter(|m| !m.trim().is_empty()) {
+        match backend.as_str() {
+            "openai" => settings.openrouter_model = model,
+            "gemini" => settings.analyze_models = vec![model],
+            _ => settings.local_model = model,
+        }
+    }
+    if backend == "openai" {
         settings.openrouter_url = model_api;
     }
     // Where a digest may begin is not a free choice: the deltas have to land in
@@ -2406,10 +2437,9 @@ async fn cmd_backup(
             layout.chapter_txt(start).display()
         );
     }
-    let endpoint = match analyzer.as_str() {
-        "openrouter" => settings.openrouter_url.clone(),
-        "local" => settings.ollama_url.clone(),
-        "opencode" => format!("the {analyzer} CLI"),
+    let endpoint = match backend.as_str() {
+        "openai" => settings.openrouter_url.clone(),
+        "ollama" => settings.ollama_url.clone(),
         _ => "https://generativelanguage.googleapis.com".to_string(),
     };
     eprintln!(

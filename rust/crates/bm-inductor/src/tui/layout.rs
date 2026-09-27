@@ -110,12 +110,12 @@ pub(crate) const COMPACT_FOOTER_H: u16 = 4;
 // the first thing anyone tries) while `z` is a new verb nobody would guess. Both
 // remain in full on the help screen, which is what `?` opens.
 pub(crate) const KEYS_FULL: [&str; 2] = [
-    "Tab jobs · K tasks · i inspect · P policy · z park · D digest · c crawl · R run · S cast · M mouse",
-    ":add :prov :drop :translate :crawl :retry :reconcile :backend :stop :swap :voices · r · ? · q",
+    "Tab jobs · K tasks · i inspect · P policy · z park · D digest · c crawl · R run · S cast · L llm",
+    ":add :prov :drop :translate :crawl :retry :m :backend :stop :swap :voices · M mouse · r · ? · q",
 ];
 
 pub(crate) const KEYS_COMPACT: [&str; 2] = [
-    "Tab jobs · K tasks · i inspect · P policy · z park · R run · S cast",
+    "Tab jobs · K tasks · i inspect · P policy · z park · R run · S cast · L llm",
     ":add :prov :drop :translate :crawl :stop :retry :swap :voices · M copy · ? q",
 ];
 

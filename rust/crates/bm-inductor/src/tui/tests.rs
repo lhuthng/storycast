@@ -741,7 +741,9 @@ async fn run_screen_enters_and_launches_with_previewed_values() {
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
-    // `e` opens the config editor prefilled from the preview.
+    // `e` opens the config editor prefilled from the preview. The retired
+    // `opencode` value maps to no slot, so the line spells the range only —
+    // and saving it keeps the current analyzer rather than writing a dead one.
     let mut app = App::new("http://x");
     app.settings = Some(serde_json::json!({
         "start": 1, "count": 1, "analyzer": "opencode", "engine": "vieneu",
@@ -749,7 +751,7 @@ async fn run_screen_enters_and_launches_with_previewed_values() {
     app.screen = Screen::Run;
     handle_key(&mut app, key(KeyCode::Char('e')), &http, &job_tx).await;
     match &app.screen {
-        Screen::Text(p) => assert_eq!(p.buf, "1 1 opencode"),
+        Screen::Text(p) => assert_eq!(p.buf, "1 1 "),
         other => panic!("expected the config editor, got {other:?}"),
     }
 

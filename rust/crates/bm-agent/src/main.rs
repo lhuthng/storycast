@@ -1332,17 +1332,16 @@ fn clear_task(shared: &Shared) {
 ///
 /// Two consumers read them straight out of the environment: the generation
 /// backends in `bm-core::digest::llm` (which is why a provisioned box used to
-/// die on `GEMINI_API_KEY missing`, `.env` is personal and git-ignored, so it
-/// is never one of the files provisioning copies), and the TTS sidecar, a
+/// die on `GEMINI_API_KEY missing` — provisioning never copies `.bm/`, so a
+/// remote box holds no key file of its own), and the TTS sidecar, a
 /// child process the worker spawns for a render and which inherits this
 /// environment at `spawn()`.
 ///
-/// **The inductor wins.** It holds the only copy the operator maintains, so a
-/// value it sends replaces whatever this box had, a stale key on one machine
-/// is precisely the failure this replaces. An *empty* value is skipped rather
-/// than blanked, so a worker whose own `.env` is the only place a key exists
-/// keeps working, and an offer from an inductor that has nothing configured
-/// changes nothing at all.
+/// **The inductor wins.** It holds the only copy the operator maintains (the
+/// `L` screen, `.bm/llm.json`), so a value it sends replaces whatever this
+/// box had — a stale key on one machine is precisely the failure this
+/// replaces. An *empty* value is skipped rather than blanked, so an offer
+/// from an inductor that has nothing configured changes nothing at all.
 ///
 /// `set_var` is process-global; it runs here, before the stage is dispatched
 /// and before any child is spawned, which is the only point at which no other
@@ -1454,15 +1453,11 @@ async fn run_offer(
         }
         Digest => {
             let bible = offer.bible.clone().unwrap_or(json!({"characters": []}));
-            // The inductor's pick wins; an empty offer (old inductor) falls
-            // back to this worker's own settings, then to opencode.
+            // The inductor's pick wins; an empty offer (no active provider)
+            // falls back to this worker's own settings, which refuses with
+            // "press L" when it names nothing either.
             let analyzer = if offer.analyzer.is_empty() {
-                let a = settings.analyzer.clone();
-                if a.is_empty() {
-                    "opencode".into()
-                } else {
-                    a
-                }
+                settings.analyzer.clone()
             } else {
                 offer.analyzer.clone()
             };
@@ -1474,7 +1469,11 @@ async fn run_offer(
             // returns `Settings::default()` and the compiled-in model runs
             // instead of the operator's. That is the bug that made a box
             // configured for `gemini-3.5-flash-lite` call `gemini-3.5-flash`.
-            let digest_settings = settings.with_analyzer_settings(&offer.analyzer_settings);
+            let mut digest_settings = settings.with_analyzer_settings(&offer.analyzer_settings);
+            // The id rides the offer; the overlay carries model, endpoint and
+            // slot. Both land here so error lines name the provider (`who`)
+            // while routing reads the slot.
+            digest_settings.analyzer = analyzer.clone();
             let (delta, script) = run_digest(
                 layout,
                 n,
@@ -2047,7 +2046,6 @@ async fn main() -> Result<()> {
         Some(r) => Layout::resolve(r)?,
         None => Layout::discover()?,
     };
-    bm_core::config::load_dotenv(&layout.root.join(".env"));
     let settings = Settings::load(&layout.settings());
     match cli.cmd {
         Cmd::Run {
@@ -2088,13 +2086,14 @@ async fn main() -> Result<()> {
                         &std::fs::read_to_string(layout.bible())
                             .unwrap_or_else(|_| "{\"characters\":[]}".into()),
                     )?;
-                    let analyzer = if settings.analyzer.is_empty() {
-                        "opencode".into()
-                    } else {
-                        settings.analyzer.clone()
-                    };
                     run_digest(
-                        &layout, chapter, &bible, &settings, &analyzer, &shared, true,
+                        &layout,
+                        chapter,
+                        &bible,
+                        &settings,
+                        &settings.analyzer,
+                        &shared,
+                        true,
                     )
                     .await?;
                 }
@@ -2859,10 +2858,9 @@ mod tests {
 
     #[test]
     fn offered_credentials_replace_the_workers_own_and_empty_ones_do_not() {
-        // The outage this closes: `.env` is personal and git-ignored, so it is
-        // never among the files provisioning copies. A remote box therefore had
-        // no key of its own and every digest died on `GEMINI_API_KEY missing`
-        // however carefully the inductor was set up.
+        // The outage this closes: provisioning never copies `.bm/`, so a
+        // remote box holds no key of its own and every digest died on
+        // `GEMINI_API_KEY missing` however carefully the inductor was set up.
         std::env::remove_var("GEMINI_API_KEY");
         let names = install_credentials(&bm_proto::Credentials {
             gemini_api_key: "from-inductor".into(),
@@ -2884,9 +2882,8 @@ mod tests {
         });
         assert_eq!(std::env::var("GEMINI_API_KEY").unwrap(), "from-inductor");
 
-        // An unset key is skipped, never blanked: a worker whose own `.env` is
-        // the only place a key exists keeps working, and an old inductor's
-        // empty block changes nothing.
+        // An unset key is skipped, never blanked: an old inductor's empty
+        // block changes nothing.
         install_credentials(&bm_proto::Credentials::default());
         assert_eq!(
             std::env::var("GEMINI_API_KEY").unwrap(),

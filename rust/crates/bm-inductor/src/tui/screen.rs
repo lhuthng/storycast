@@ -64,6 +64,13 @@ pub(crate) enum TextKind {
     /// (`reconcile`) and Enter presses it for you. Never dispatched —
     /// handled inline so one keypress can open another prompt.
     Command,
+    /// One LLM provider's secret key (`L` → `k`): typed, never displayed.
+    LlmKey(String),
+    /// One provider's base URL (`L` → `u`).
+    LlmUrl(String),
+    /// One provider's model name (`L` → `m`): typed, or picked from the
+    /// fetched list with `f` then `Enter`.
+    LlmModel(String),
 }
 
 /// A single-line editor with a real cursor. The old prompt could only append
@@ -479,6 +486,10 @@ pub(crate) enum Screen {
     Crawl {
         scroll: usize,
     },
+    /// LLM providers: keys, endpoints, models, and which one digests.
+    /// `L` opens it; every edit saves `.bm/llm.json` at once and the next
+    /// task offer carries the active key+model, so there is no second sync.
+    Llm(LlmView),
 }
 
 /// Chapter numbers per row in the digest manager's grid.
@@ -588,5 +599,41 @@ impl PolicyView {
             grabbed: None,
             prefs,
         }
+    }
+}
+
+/// The LLM setup screen: one row per provider, all empty until the operator
+/// adds a key.
+///
+/// The rows are the provider ids in `.bm/llm.json` (the four known ones
+/// first, then any custom gateway the operator added by hand). `cursor`
+/// walks them; `f` lists the highlighted provider's models from its own API
+/// and `picking` turns the cursor onto that list, where `Enter` saves the
+/// model. `note` is the last thing the fetch said, drawn under the table.
+#[derive(Debug, Clone)]
+pub(crate) struct LlmView {
+    pub(crate) cursor: usize,
+    pub(crate) picking: bool,
+    pub(crate) model_cursor: usize,
+    pub(crate) note: String,
+}
+
+impl LlmView {
+    pub(crate) fn new() -> Self {
+        LlmView {
+            cursor: 0,
+            picking: false,
+            model_cursor: 0,
+            note: String::new(),
+        }
+    }
+
+    /// Provider ids in display order: whatever `.bm/llm.json` (or the
+    /// shipped `llm.default.json`) names, sorted. No compiled-in list — the
+    /// file is the whole roster.
+    pub(crate) fn ids(cfg: &bm_core::config::LlmConfig) -> Vec<String> {
+        let mut ids: Vec<String> = cfg.providers.keys().cloned().collect();
+        ids.sort();
+        ids
     }
 }

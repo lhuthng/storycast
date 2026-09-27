@@ -87,7 +87,7 @@ already working or optional until you need it.
 | **`prompts/script.txt`** | The staging contract the automatic digest renders after speakers are fixed: text, TTS, music, effects, sounds. Your main edit for another language or genre. Ships with the profile; the tracked copy is `rust/fixtures/profile/prompts/` |
 | `prompts/analyze.txt` | Chapter-attribution template used by the automatic first pass; its legacy raw-chapter rendering remains the manual digest manager (`D`) path |
 | `voices.default.json` | Built-in catalogue voices |
-| `assets/`, `Makefile`, `.env.example` | Scene maps, ambience, one-command ops, config template |
+| `assets/`, `Makefile` | Scene maps, ambience, one-command ops |
 
 Everything book-specific is runtime-created and git-ignored:
 
@@ -99,7 +99,7 @@ Everything book-specific is runtime-created and git-ignored:
 | `voices.json`, `voice-pool.json`, `refs/` | Cloned voices and clips (skip to use catalogue voices) |
 | `data/`, `output/` | Scripts, bible, cached audio, finished MP3s |
 | `.bm/` | Ledger, settings, machines, logs |
-| `.env` | API keys, inductor only. Workers receive keys with the task that needs them |
+| `.bm/llm.json` | LLM providers (keys, endpoints, active model), inductor only. Workers receive the active key with the task that needs it |
 
 Any novel runs on the same program. Language, cast and voices come from your
 prompt, your URL template and your voice files. The code itself only knows four
@@ -200,7 +200,7 @@ You need these before anything runs:
 | **Python 3** | once, to prepare the voices and to record your own | `python3 --version` |
 | **ffmpeg** | merge: joins the segments and writes the mp3 | `ffmpeg -version` |
 | **sh**, **ssh**, **rsync** | provisioning, and the tunnel back from a box | `command -v sh ssh rsync` |
-| **A model**: a Gemini key, an [opencode](https://opencode.ai) login, an OpenRouter key, or Ollama on your own machine | the two LLM calls per chapter | see `.env` below |
+| **A model**: a Gemini key, an OpenRouter key, a TokenHarbor key, or Ollama on your own machine | the two LLM calls per chapter | press `L` in the dashboard (or `:llm`) |
 | **zig** and `cargo-zigbuild` | only if you want the speech program built up front | `zig version` |
 
 Rust, Python 3 and `sh`/`ssh`/`rsync` are already there on both. ffmpeg is
@@ -211,13 +211,15 @@ choose, and zig only if you run `make tts`.
 git clone lhuthng/storycast.git
 cd storycast
 make build               # builds the Rust programs
-
-cp .env.example .env     # add your key(s)
-#   GEMINI_API_KEY=...      (or OPENROUTER_API_KEY, or nothing for opencode)
-#   TTS_ENGINE=vieneu       (default; `gemini` for the API engine)
-
 make tui                 # the dashboard, on http://127.0.0.1:8901
 ```
+
+Then press **`L`** in the dashboard (or `:llm`): pick a provider (Google,
+OpenRouter, TokenHarbor, Ollama, or your own gateway), paste its key, set the
+endpoint and model — `f` lists what the API serves so the name is picked, not
+typed. No provider is active by default. The next task offer carries the
+active key + model to whichever worker digests, so switching takes effect
+immediately with nothing else to sync.
 
 Everything is driven from `make`. The ones worth knowing:
 
@@ -262,7 +264,7 @@ bundles only: the baked speech weights, and the genre bundles you fetch with
 
 ### A note on security
 
-First: **`.env` never leaves the machine you created it on.** When you add more
+First: **`.bm/llm.json` never leaves the machine you created it on.** When you add more
 machines later, they are not given this file. Instead, each machine is sent just
 the one key that the work it has been handed actually needs. A remote machine
 can do the work without ever holding your keys as a whole. The catch is that

@@ -74,6 +74,9 @@ pub(crate) enum Command {
     ShutdownWhenIdle,
     Workspace,
     Profile,
+    /// LLM providers: keys, endpoints, models, and which one digests.
+    /// Same screen as the `L` key.
+    Llm,
     AuditionCurrent,
     AuditionTry,
     AuditionAnother,
@@ -145,6 +148,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["login"], desc: Some("store the IAM user's key from the console's accessKeys.csv — setup, once"), cmd: Command::AwsLogin },
     Word { key: None, names: &["discover"], desc: Some("read the account into `.bm/aws.json`: AMI, subnet, group, keypair, instance profile"), cmd: Command::AwsDiscover },
     Word { key: Some('l'), names: &["pool", "aws", "cloud"], desc: Some("what the EC2 account holds — launches nothing"), cmd: Command::AwsPool },
+    Word { key: Some('L'), names: &["llm", "model", "models"], desc: Some("LLM providers: add a key, set the endpoint and model, switch the active one — same as L"), cmd: Command::Llm },
     Word { key: Some('w'), names: &["up", "launch"], desc: Some("launch EC2 boxes and link them into the cluster — spends money"), cmd: Command::AwsUp { count: 1 } },
     Word { key: Some('o'), names: &["down", "terminate"], desc: Some("terminate the live EC2 boxes — destructive; asks first, refuses while a render is in flight"), cmd: Command::AwsDown { force: false } },
     Word { key: Some('X'), names: &["stop"], desc: Some("stop everything everywhere: local backend plus workers on all machines"), cmd: Command::Stop },
@@ -633,6 +637,9 @@ pub(crate) fn do_command(
             // background load rather than something to do between keystrokes.
             app.screen = Screen::Sound(crate::tui::sound::SoundView::new());
             app.load_sound(job_tx);
+        }
+        Command::Llm => {
+            super::llm::open_llm(app);
         }
         Command::Workspace => {
             // Prefilled with what is in force, like every other prompt: the

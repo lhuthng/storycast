@@ -25,15 +25,11 @@ impl std::fmt::Display for GenError {
 /// Which backend actually answered.
 ///
 /// Returned alongside the text because the *configured* analyzer and the one
-/// that ran are not the same thing: `gemini` falls back to `opencode` when its
-/// chain is exhausted, so a caller that labelled its progress with the
-/// configured name would say "via gemini" while opencode was the thing running
-/// — and, on 2026-09-22, the thing hanging for twenty-six minutes. This is what
-/// lets the caller say which one it actually got.
+/// that ran are not the same thing only while a chain walks: the caller must
+/// label its progress with the backend that actually produced the answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     Gemini,
-    Opencode,
     Openrouter,
     Ollama,
 }
@@ -42,7 +38,6 @@ impl Backend {
     pub fn as_str(self) -> &'static str {
         match self {
             Backend::Gemini => "gemini",
-            Backend::Opencode => "opencode",
             Backend::Openrouter => "openrouter",
             Backend::Ollama => "ollama",
         }
@@ -57,26 +52,6 @@ impl Backend {
 /// expiry is strike-free, so the task is silently requeued while the request is
 /// still in flight. 180 s keeps a whole chain inside the lease.
 const GEMINI_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(180);
-
-/// How long the `opencode` child may run before it is killed.
-///
-/// **This is the one that was missing, and it took a cluster's worth of work with
-/// it.** `Command::output()` has no deadline of its own, so a CLI that stalls
-/// blocks the worker for ever: the stage sits at whatever percentage it had
-/// reached, prints nothing, and the only thing that ever happens is the lease
-/// expiring — silently, without a strike — and the task being handed to another
-/// box, which stalls the same way. The whole loop is invisible from the TUI.
-///
-/// **Two minutes, not ten.** This is a *fallback*: if it cannot answer a 32 KB
-/// prompt in two minutes it is not coming back, and every second past that is a
-/// box held hostage. The cost is that a legitimately slow run now fails instead
-/// of finishing — which is the right trade for a path whose failure mode is a
-/// silent infinite hang, and it is one constant if that proves too tight.
-///
-/// Still **under** the 1200 s digest lease, for the reason that matters: the
-/// deadline that fires must be the child's, not the lease's, or the task is
-/// requeued while the request is still in flight.
-const OPENCODE_TIMEOUT: Duration = Duration::from_secs(120);
 
 // ---------------------------------------------------------------------------
 // generation backends
@@ -108,115 +83,16 @@ pub fn parse_retry_delay(s: &str) -> Option<f64> {
     None
 }
 
-fn extract_json_object(text: &str) -> Result<String> {
-    let start = text
-        .find('{')
-        .ok_or_else(|| anyhow!("no JSON object in output: {:?}", head_chars(text, 200)))?;
-    let end = text
-        .rfind('}')
-        .ok_or_else(|| anyhow!("no closing brace in output: {:?}", head_chars(text, 200)))?;
-    if end <= start {
-        anyhow::bail!("malformed JSON span in output: {:?}", head_chars(text, 200));
-    }
-    Ok(text[start..=end].to_string())
-}
-
 /// The error for a provider key this process does not hold.
 ///
-/// Naming both routes is the point. On the inductor `.env` is the file to
-/// edit, but a provisioned worker has **no `.env` at all** — it is personal and
-/// git-ignored, so provisioning copies `prompts/`, `python/`, `assets/` and
-/// `refs/` and never that. "copy .env.example to .env" sent the operator
-/// looking for a file that does not exist on the box that was failing. The key
-/// normally arrives with the task (`bm_proto::Credentials`), so the fix is to
-/// set it where it travels from.
+/// The key arrives with the task (`bm_proto::Credentials`): the inductor is
+/// the single machine whose `.bm/llm.json` the operator maintains (TUI: `L`),
+/// and each offer carries the active provider's key to the box that runs it.
+/// A worker has no key file of its own, so "set it where it travels from".
 fn missing_key(var: &str) -> GenError {
     GenError::Fatal(anyhow!(
-        "{var} missing — the task carried no key and this machine has none in .env; \
-         set it in the inductor's .env (the copy that travels) and retry"
+        "{var} missing — the task carried no key; add one on the inductor with L (:llm) and retry"
     ))
-}
-
-async fn generate_opencode(
-    prompt: &str,
-    settings: &Settings,
-) -> Result<(String, Backend), GenError> {
-    generate_opencode_within(prompt, settings, OPENCODE_TIMEOUT).await
-}
-
-/// The same call with the deadline supplied.
-///
-/// Split out so the deadline is **testable**: a test that has to wait ten minutes
-/// is a test nobody runs, and a deadline nobody tests is exactly the one that was
-/// missing here. The caller above is the only production path.
-async fn generate_opencode_within(
-    prompt: &str,
-    settings: &Settings,
-    deadline: Duration,
-) -> Result<(String, Backend), GenError> {
-    let full = format!(
-        "Do not use any tools. Answer with the requested output and nothing else.\n\n{prompt}"
-    );
-    let model = settings.opencode_model.clone();
-    // `kill_on_drop` is what makes the deadline below real: without it the future
-    // is dropped at the timeout and the child keeps running, orphaned, holding
-    // the prompt and whatever it was waiting on.
-    let child = tokio::process::Command::new("opencode")
-        .args(["run", "-m", &model, &full])
-        .kill_on_drop(true)
-        .output();
-    println!(
-        "opencode run -m {model} — started ({} bytes of prompt, deadline {}s)",
-        full.len(),
-        // `as_secs_f64`, not `as_secs`: truncating printed "deadline 0s" for the
-        // sub-second deadline a test passes, and a log line that misreports the
-        // deadline it applied is the one thing this fix exists to stop.
-        deadline.as_secs_f64()
-    );
-    let started = std::time::Instant::now();
-    let out = match tokio::time::timeout(deadline, child).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(GenError::Fatal(anyhow!(
-                "opencode CLI not found — install it first"
-            )))
-        }
-        Ok(Err(e)) => return Err(GenError::Fatal(anyhow!(e).context("running opencode"))),
-        // The deadline. Named out loud, because "the digest is stuck" is exactly
-        // what this looked like from the outside and the message has to say
-        // otherwise — and it has to say what to do next.
-        Err(_) => {
-            eprintln!(
-                "opencode run -m {model} — KILLED after {}s with no answer",
-                deadline.as_secs_f64()
-            );
-            return Err(GenError::Fatal(anyhow!(
-                "opencode run -m {model} produced nothing in {}s and was killed. The digest is \
-                 not at fault: run `opencode run -m {model} hello` by hand to see what the CLI \
-                 does on its own",
-                deadline.as_secs_f64()
-            )));
-        }
-    };
-    let took = started.elapsed().as_secs_f64();
-    if !out.status.success() {
-        eprintln!(
-            "opencode run -m {model} — failed after {took:.1}s ({})",
-            out.status
-        );
-        return Err(GenError::Fatal(anyhow!(
-            "opencode run failed after {took:.1}s: {}",
-            head_chars(&String::from_utf8_lossy(&out.stderr), 500)
-        )));
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    println!(
-        "opencode run -m {model} — ok in {took:.1}s ({} bytes out)",
-        stdout.len()
-    );
-    extract_json_object(&stdout)
-        .map(|t| (t, Backend::Opencode))
-        .map_err(GenError::Fatal)
 }
 
 async fn generate_ollama(prompt: &str, settings: &Settings) -> Result<(String, Backend), GenError> {
@@ -265,6 +141,14 @@ async fn generate_ollama(prompt: &str, settings: &Settings) -> Result<(String, B
         .ok_or_else(|| GenError::Fatal(anyhow!("ollama response had no message.content")))
 }
 
+/// The base a path is appended to: trailing slashes go, and so does a
+/// pasted full endpoint (`…/v1/chat/completions` from a provider's docs) —
+/// the code appends the path itself, so keeping it would double it.
+fn normalize_base(url: &str) -> String {
+    let u = url.trim_end_matches('/');
+    u.strip_suffix("/chat/completions").unwrap_or(u).to_string()
+}
+
 async fn generate_openrouter(
     prompt: &str,
     settings: &Settings,
@@ -284,10 +168,13 @@ async fn generate_openrouter(
     // The endpoint is settings, not a constant: the public API by default, a
     // gateway or a proxy where the key actually lives. The path is appended, so
     // `API=https://openrouter.ai/api/v1` is the whole address.
-    let url = format!(
-        "{}/chat/completions",
-        settings.openrouter_url.trim_end_matches('/')
-    );
+    //
+    // `who` names the provider id for every message below: this one function
+    // serves OpenRouter and every custom gateway, and "OpenRouter error 502"
+    // for a TokenHarbor outage sends the operator to the wrong dashboard.
+    let who = settings.analyzer.trim();
+    let who = if who.is_empty() { "OpenRouter" } else { who };
+    let url = format!("{}/chat/completions", normalize_base(&settings.openrouter_url));
     let resp = client
         .post(url)
         .header("Authorization", format!("Bearer {key}"))
@@ -296,7 +183,7 @@ async fn generate_openrouter(
         .json(&body)
         .send()
         .await
-        .map_err(|e| GenError::Fatal(anyhow!("cannot reach OpenRouter ({e})")))?;
+        .map_err(|e| GenError::Fatal(anyhow!("cannot reach {who} ({e})")))?;
     let status = resp.status();
     let retry_after = resp
         .headers()
@@ -304,7 +191,12 @@ async fn generate_openrouter(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<f64>().ok());
     let text = resp.text().await.unwrap_or_default();
-    if status.as_u16() == 429 {
+    // 429 is quota; 502/503/529 is the provider at peak demand — both are
+    // "try again shortly", and the digest sleeps out the provider's own
+    // delay (or a minute) and retries. Anything else is fatal for the round:
+    // a 401 is a dead key, a 400/404 a dead request, and retrying those
+    // strikes the chapter for nothing.
+    if matches!(status.as_u16(), 429 | 502 | 503 | 529) {
         let delay = retry_after.map(|d| d + 2.0).unwrap_or(60.0);
         return Err(GenError::RateLimited(format!(
             "retry in {delay}s: {}",
@@ -313,7 +205,7 @@ async fn generate_openrouter(
     }
     if !status.is_success() {
         return Err(GenError::Fatal(anyhow!(
-            "OpenRouter error {status}: {}",
+            "{who} error {status}: {}",
             head_chars(&text, 200)
         )));
     }
@@ -321,16 +213,16 @@ async fn generate_openrouter(
     v.pointer("/choices/0/message/content")
         .and_then(|c| c.as_str())
         .map(|c| (c.to_string(), Backend::Openrouter))
-        .ok_or_else(|| GenError::Fatal(anyhow!("OpenRouter response had no content")))
+        .ok_or_else(|| GenError::Fatal(anyhow!("{who} response had no content")))
 }
 
-/// Gemini model chain over REST, ending in opencode as the last resort.
+/// Gemini model chain over REST.
 ///
 /// Skipped fast, never retried: 401/403 (the key is wrong for every model)
 /// and 400 (the request itself is bad) — retrying those anywhere is burning
 /// quota for nothing. Everything else walks on: 429s (after sleeping the
 /// provider's own delay), 5xx, transport errors, unknown-model 404s and spent
-/// day-quotas.
+/// day-quotas. An exhausted chain is fatal: there is no fallback backend.
 async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<(String, Backend), GenError> {
     let key = std::env::var("GEMINI_API_KEY").map_err(|_| missing_key("GEMINI_API_KEY"))?;
     let mut last = String::from("no models configured");
@@ -338,9 +230,9 @@ async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<(String, B
     if chain.is_empty() {
         // Say so rather than falling through with a reason that reads like a
         // provider fault: an empty chain is a settings mistake.
-        eprintln!(
-            "gemini: no models configured (analyze_models is empty) — falling back to opencode"
-        );
+        return Err(GenError::Fatal(anyhow!(
+            "gemini: no models configured — pick one with L (:llm) on the inductor"
+        )));
     }
     for model in &chain {
         match try_gemini_model(prompt, &key, model).await {
@@ -352,23 +244,7 @@ async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<(String, B
             }
         }
     }
-    // **The line that names the real backend.** Whatever the caller's progress
-    // label says, this is what is about to run, and it is the only record of the
-    // fallback that survives into the log. It also states the deadline, because
-    // "opencode is running" and "opencode is running and will be killed in ten
-    // minutes" are very different things to read at 2 a.m.
-    eprintln!(
-        "gemini chain exhausted ({last}) — running opencode -m {} instead (deadline {}s)",
-        settings.opencode_model,
-        OPENCODE_TIMEOUT.as_secs()
-    );
-    match generate_opencode(prompt, settings).await {
-        Ok(t) => Ok(t),
-        Err(GenError::RateLimited(m)) => Err(GenError::RateLimited(m)),
-        Err(GenError::Fatal(e)) => Err(GenError::Fatal(anyhow!(
-            "gemini chain exhausted ({last}); opencode fallback failed: {e:#}"
-        ))),
-    }
+    Err(GenError::Fatal(anyhow!("gemini chain exhausted ({last})")))
 }
 
 /// What one model attempt resolved to: text, the next model, or give up now.
@@ -397,8 +273,8 @@ async fn try_gemini_model(prompt: &str, key: &str, model: &str) -> ModelNext {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": config,
     });
-    // The default client has **no deadline at all** — the same class of bug as
-    // the opencode child below, and just as invisible when it fires.
+    // The default client has **no deadline at all** — without the timeout
+    // below a stalled request blocks the worker until the digest lease fires.
     let client = match reqwest::Client::builder()
         .timeout(GEMINI_ATTEMPT_TIMEOUT)
         .build()
@@ -501,8 +377,7 @@ async fn try_gemini_model(prompt: &str, key: &str, model: &str) -> ModelNext {
 ///
 /// Backends that advertise schema enforcement get it; the free OpenRouter model
 /// documents JSON mode *without* schema enforcement, so a schema sent there
-/// would be ignored at best, and the `opencode` CLI is plain stdout with no
-/// request body to constrain. Both keep the parse-and-repair path.
+/// would be ignored at best. Both keep the parse-and-repair path.
 pub fn digest_schema(prompt: &str) -> Option<Value> {
     prompt
         .contains("---STAGING OUTPUT CONTRACT---")
@@ -562,24 +437,122 @@ fn analyze_chain(settings: &Settings) -> Vec<String> {
 
 /// One generation attempt against the configured backend.
 ///
-/// Returns the text **and the backend that produced it**: the configured name is
-/// not the one that ran whenever `gemini` falls back, and a caller that labelled
-/// its progress with the configured name would be describing a backend that had
-/// already given up.
+/// `analyzer` is the provider id and names the progress lines only. Routing
+/// reads `settings.analyzer_backend` — the slot the inductor resolved from
+/// the entry's `kind` and sent with the offer. An empty slot means an older
+/// inductor, which is routed off its retired `analyzer` value instead (`gemini`
+/// | `local` | `openrouter`; anything else, including nothing, refuses).
+/// No provider id is matched here, so renaming one never reroutes it.
 pub async fn generate(
     prompt: &str,
     analyzer: &str,
     settings: &Settings,
 ) -> Result<(String, Backend), GenError> {
-    match analyzer {
-        "local" => generate_ollama(prompt, settings).await,
-        "openrouter" => generate_openrouter(prompt, settings).await,
-        "opencode" => generate_opencode(prompt, settings).await,
+    let backend = if !settings.analyzer_backend.trim().is_empty() {
+        settings.analyzer_backend.clone()
+    } else {
+        match analyzer.trim() {
+            "gemini" => "gemini".into(),
+            "local" => "ollama".into(),
+            "openrouter" => "openai".into(),
+            "" => {
+                return Err(GenError::Fatal(anyhow!(
+                    "no LLM provider is active — add a key with L (:llm) on the inductor"
+                )))
+            }
+            other => {
+                return Err(GenError::Fatal(anyhow!(
+                    "unknown analyzer {other:?} — pick one with L (:llm) on the inductor"
+                )))
+            }
+        }
+    };
+    match backend.as_str() {
         "gemini" => generate_gemini(prompt, settings).await,
+        "ollama" => generate_ollama(prompt, settings).await,
+        "openai" => generate_openrouter(prompt, settings).await,
         other => Err(GenError::Fatal(anyhow!(
-            "unknown analyzer {other:?} (expected opencode | openrouter | local | gemini)"
+            "unknown backend {other:?} — pick a provider with L (:llm) on the inductor"
         ))),
     }
+}
+
+/// List the models a provider serves, for the `L` screen's picker.
+///
+/// `kind` is the backend slot (`gemini` | `openai` | `ollama`): Google
+/// answers `GET {base}/v1beta/models?key=…`
+/// (`{"models":[{"name":"models/…"}]}`); Ollama answers `GET
+/// {base}/api/tags`; everything else answers the OpenAI-compatible `GET
+/// {base}/models` (`{"data":[{"id":…}]}`).
+pub async fn fetch_models(provider: &str, kind: &str, base_url: &str, key: &str) -> Result<Vec<String>> {
+    let base = normalize_base(base_url);
+    let base = base.as_str();
+    if base.is_empty() {
+        anyhow::bail!("{provider} has no base URL set");
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let (url, req): (String, reqwest::RequestBuilder) = if kind == "gemini" {
+        let req = client.get(format!("{base}/v1beta/models"));
+        let req = if key.trim().is_empty() {
+            req
+        } else {
+            req.query(&[("key", key)])
+        };
+        (format!("{base}/v1beta/models"), req)
+    } else if kind == "ollama" {
+        (format!("{base}/api/tags"), client.get(format!("{base}/api/tags")))
+    } else {
+        let req = client.get(format!("{base}/models"));
+        let req = if key.trim().is_empty() {
+            req
+        } else {
+            req.header("Authorization", format!("Bearer {key}"))
+        };
+        (format!("{base}/models"), req)
+    };
+    let resp = req.send().await.map_err(|e| anyhow!("cannot reach {url} ({e})"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("{provider} returned {status}: {}", head_chars(text.trim(), 160));
+    }
+    let v: Value = serde_json::from_str(&text)?;
+    let mut out: Vec<String> = if kind == "gemini" {
+        v.pointer("/models")
+            .and_then(|m| m.as_array())
+            .map(|ms| {
+                ms.iter()
+                    .filter_map(|m| m.pointer("/name").and_then(|n| n.as_str()))
+                    .map(|n| n.strip_prefix("models/").unwrap_or(n).to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else if kind == "ollama" {
+        v.pointer("/models")
+            .and_then(|m| m.as_array())
+            .map(|ms| {
+                ms.iter()
+                    .filter_map(|m| m.pointer("/name").and_then(|n| n.as_str()))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        v.pointer("/data")
+            .and_then(|m| m.as_array())
+            .map(|ms| {
+                ms.iter()
+                    .filter_map(|m| m.pointer("/id").and_then(|n| n.as_str()))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -638,6 +611,7 @@ mod tests {
 
     #[test]
     fn gemini_without_a_key_fails_before_touching_the_network() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("GEMINI_API_KEY").ok();
         std::env::remove_var("GEMINI_API_KEY");
         let err = tokio::runtime::Builder::new_current_thread()
@@ -647,14 +621,10 @@ mod tests {
             .block_on(generate_gemini("{}", &Settings::default()))
             .unwrap_err();
         assert!(err.to_string().contains("GEMINI_API_KEY missing"), "{err}");
-        // The wording is load-bearing: the old one told a provisioned worker
-        // (which has no `.env` at all) to copy a `.env.example` that is not
-        // there. Both routes have to be named — the key travels with the task.
-        assert!(err.to_string().contains("inductor"), "{err}");
-        assert!(
-            !err.to_string().contains("copy .env.example"),
-            "the instruction that sent the operator to a missing file: {err}"
-        );
+        // The wording is load-bearing: a provisioned worker holds no key file
+        // at all, so the message must name where the key travels from — the
+        // inductor's `L` screen — not a file on the failing box.
+        assert!(err.to_string().contains(":llm"), "{err}");
         if let Some(k) = saved {
             std::env::set_var("GEMINI_API_KEY", k);
         }
@@ -668,9 +638,63 @@ mod tests {
         for var in ["GEMINI_API_KEY", "OPENROUTER_API_KEY"] {
             let msg = missing_key(var).to_string();
             assert!(msg.starts_with(var), "{msg}");
-            assert!(msg.contains("inductor"), "{msg}");
+            assert!(msg.contains(":llm"), "{msg}");
             assert!(msg.len() < 200, "{} chars: {msg}", msg.len());
         }
+    }
+
+    #[test]
+    fn routing_reads_the_slot_never_the_label() {
+        // The slot arrives in `analyzer_backend` (the offer's block); the id
+        // only names progress lines. Keyless, each slot fails on its own key
+        // before any I/O — and a mismatched label does not reroute.
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved_g = std::env::var("GEMINI_API_KEY").ok();
+        let saved_or = std::env::var("OPENROUTER_API_KEY").ok();
+        std::env::remove_var("GEMINI_API_KEY");
+        std::env::remove_var("OPENROUTER_API_KEY");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let slot = |backend: &str| Settings {
+            analyzer_backend: backend.into(),
+            ..Settings::default()
+        };
+        let err = rt
+            .block_on(generate("{}", "tokenharbor", &slot("openai")))
+            .unwrap_err();
+        assert!(err.to_string().contains("OPENROUTER_API_KEY"), "{err}");
+        let err = rt
+            .block_on(generate("{}", "tokenharbor", &slot("gemini")))
+            .unwrap_err();
+        assert!(err.to_string().contains("GEMINI_API_KEY"), "{err}");
+        // No slot: the retired wire values still route, anything else refuses.
+        let err = rt
+            .block_on(generate("{}", "gemini", &Settings::default()))
+            .unwrap_err();
+        assert!(err.to_string().contains("GEMINI_API_KEY"), "{err}");
+        let err = rt
+            .block_on(generate("{}", "watson", &Settings::default()))
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown analyzer"), "{err}");
+        if let Some(k) = saved_g {
+            std::env::set_var("GEMINI_API_KEY", k);
+        }
+        if let Some(k) = saved_or {
+            std::env::set_var("OPENROUTER_API_KEY", k);
+        }
+    }
+
+    #[test]
+    fn no_active_provider_refuses_rather_than_calling_anything() {
+        let err = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(generate("{}", "", &Settings::default()))
+            .unwrap_err();
+        assert!(err.to_string().contains("no LLM provider"), "{err}");
     }
 
     #[test]
@@ -701,48 +725,19 @@ mod tests {
         assert_eq!(analyze_chain(&silent), analyze_chain(&remote_box));
     }
 
-    #[tokio::test]
-    async fn the_opencode_child_is_killed_at_its_deadline() {
-        // The bug that cost ~80 minutes of silent looping on 2026-09-22:
-        // `Command::output()` has no deadline of its own, so a CLI that stalls
-        // blocks the worker for ever. The stage sits at whatever percentage it
-        // had reached, prints nothing, and the only thing that ever happens is
-        // the lease expiring — silently, without a strike — and the task being
-        // handed to another box, which stalls the same way.
-        //
-        // A 500 ms deadline against the **real** CLI, because a fake one would
-        // only prove the fake hangs. Measured: `opencode run -m <model> "say hi"`
-        // prints its banner and then produces nothing at all, so this exercises
-        // the deadline branch rather than pretending to.
-        //
-        // **Guarded, and loudly.** `opencode` is installed by provisioning rather
-        // than by cargo, so on a machine without it this prints what it did *not*
-        // check instead of failing for the environment's sake.
-        if std::process::Command::new("opencode")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            println!("SKIP: no `opencode` on PATH — the deadline branch was NOT checked here");
-            return;
-        }
-        let err =
-            generate_opencode_within("say hi", &Settings::default(), Duration::from_millis(500))
-                .await
-                .expect_err("half a second is not enough for the CLI to answer");
-        let msg = err.to_string();
-        assert!(msg.contains("produced nothing"), "{msg}");
-        assert!(msg.contains("was killed"), "{msg}");
-        assert!(
-            msg.contains("by hand"),
-            "and names the next step, because the operator's instinct is to blame the \
-             digest rather than the CLI: {msg}"
+    #[test]
+    fn a_pasted_full_endpoint_is_trimmed_to_its_base() {
+        // Providers document the full `…/v1/chat/completions` path; the code
+        // appends it, so keeping it would double it.
+        assert_eq!(
+            normalize_base("https://tokenharbor.ai/v1/chat/completions"),
+            "https://tokenharbor.ai/v1"
         );
-        assert!(
-            matches!(err, GenError::Fatal(_)),
-            "a deadline is fatal for this round — retrying a hung CLI is what made it \
-             invisible in the first place"
+        assert_eq!(
+            normalize_base("https://openrouter.ai/api/v1/"),
+            "https://openrouter.ai/api/v1"
         );
+        assert_eq!(normalize_base(""), "");
     }
 
     #[test]
@@ -753,12 +748,5 @@ mod tests {
         );
         assert_eq!(parse_retry_delay(r#"{"retryDelay": "53s"}"#), Some(53.0));
         assert_eq!(parse_retry_delay("no hint here"), None);
-    }
-
-    #[test]
-    fn json_object_is_extracted_from_surrounding_prose() {
-        let t = "Sure! Here you go:\n{\"a\": 1}\nHope that helps.";
-        assert_eq!(extract_json_object(t).unwrap(), "{\"a\": 1}");
-        assert!(extract_json_object("no braces").is_err());
     }
 }

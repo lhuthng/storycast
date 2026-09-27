@@ -9,6 +9,7 @@ mod footer;
 mod graph;
 mod help;
 mod jobs;
+mod llm;
 mod machine;
 mod machines;
 mod picker;
@@ -528,6 +529,7 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Screen::Sound(v) => sound::draw_sound(f, app, &v),
         Screen::Cloud(v) => cloud::draw_cloud(f, app, &v),
         Screen::Crawl { scroll } => crawl::draw_crawl(f, app, scroll),
+        Screen::Llm(v) => llm::draw_llm(f, app, &v),
         _ => {}
     }
 }

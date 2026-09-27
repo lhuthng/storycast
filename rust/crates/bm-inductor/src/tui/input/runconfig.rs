@@ -44,7 +44,7 @@ pub(crate) fn run_preview(app: &App) -> RunPreview {
         analyzer: s
             .get("analyzer")
             .and_then(|v| v.as_str())
-            .unwrap_or("opencode")
+            .unwrap_or("")
             .to_string(),
         models: s
             .get("analyze_models")
@@ -82,10 +82,23 @@ pub(crate) fn parse_run_config(buf: &str, current_analyzer: &str) -> Result<RunC
     let tokens: Vec<&str> = buf.split_whitespace().collect();
     let analyzer = match tokens.get(2) {
         None => current_analyzer.to_string(),
-        Some(a) if ["opencode", "openrouter", "local", "gemini"].contains(a) => a.to_string(),
+        // Slots, new vocabulary first (`openai`), retired aliases after
+        // (`openrouter`): both mean the OpenAI-compatible path.
+        Some(a)
+            if [
+                "openai", "openrouter", "ollama", "local", "gemini",
+            ]
+            .contains(a) =>
+        {
+            match *a {
+                "openrouter" => "openai".to_string(),
+                "local" => "ollama".to_string(),
+                _ => a.to_string(),
+            }
+        }
         Some(a) => {
             return Err(format!(
-                "analyzer “{a}” unknown — opencode|openrouter|local|gemini"
+                "analyzer “{a}” unknown — gemini|openai|ollama (or press L for providers)"
             ))
         }
     };
@@ -156,9 +169,14 @@ pub(crate) fn save_render_batch(app: &App, buf: &str) -> Result<String, String> 
 }
 
 /// Persist run configuration to the settings file. Returns a status line.
+///
+/// The analyzer half is mirrored into `.bm/llm.json` (the `L` screen's file):
+/// that file is what the next offer actually carries, so a model named here
+/// must land there too, or the save would read back a model the digests never
+/// run. `llm.json` wins ties — this only records the intent.
 pub(crate) fn save_run_config(app: &App, buf: &str) -> Result<String, String> {
     let (start, count, analyzer, models) =
-        parse_run_config(buf, &app.setting_str("analyzer", "opencode"))?;
+        parse_run_config(buf, &app.setting_str("analyzer", ""))?;
     if app.layout.root.as_os_str().is_empty() {
         return Err("no repo root — restart the TUI from a checkout".into());
     }
@@ -168,16 +186,100 @@ pub(crate) fn save_run_config(app: &App, buf: &str) -> Result<String, String> {
     // screen previews, the footer shows and the next backend boots with.
     settings.start = start;
     settings.count = count;
-    settings.analyzer = analyzer.clone();
     if let Some(m) = models {
         settings.analyze_models = m;
+    }
+    // Record the resolved provider id, not the typed slot: settings mirror
+    // the pick (`tokenharbor`, never `openrouter`-for-tokenharbor), so the
+    // run screen and the footer name what the offers carry.
+    if !analyzer.is_empty() {
+        settings.analyzer = resolve_llm_provider(app, &analyzer);
     }
     settings
         .save(&settings_path)
         .map_err(|e| format!("saving settings: {e:#}"))?;
+    mirror_analyzer_to_llm(app, &settings);
     Ok(format!(
-        "run config saved: ch{start}×{count}, digest {analyzer}"
+        "run config saved: ch{start}×{count}, digest {}",
+        settings.analyzer
     ))
+}
+
+/// The provider a run line's analyzer names: an id spells itself, a slot
+/// prefers the active provider when it still rides that slot — so re-saving
+/// the prefilled line never hops a custom gateway back to stock.
+fn resolve_llm_provider(app: &App, typed: &str) -> String {
+    use bm_core::config::{LlmConfig, LlmKind};
+    let cfg = LlmConfig::load(&app.layout.root);
+    if cfg.providers.contains_key(typed) {
+        return typed.to_string();
+    }
+    let want = match typed {
+        "gemini" => LlmKind::Gemini,
+        "ollama" => LlmKind::Ollama,
+        _ => LlmKind::Openai,
+    };
+    if !cfg.active.is_empty() && cfg.kind_of(&cfg.active) == want {
+        return cfg.active.clone();
+    }
+    cfg.providers
+        .iter()
+        .find(|(_, e)| LlmKind::parse(&e.kind) == want)
+        .map(|(id, _)| id.clone())
+        .unwrap_or_else(|| typed.to_string())
+}
+
+/// Record the run line's analyzer+models in `.bm/llm.json`, so the file the
+/// offers read agrees with the file the run screen previews. The active
+/// provider follows the analyzer name; the first model becomes its model. A
+/// key is never invented here — without one the provider stays inactive and
+/// the digest says so, which is the truth about that state.
+fn mirror_analyzer_to_llm(app: &App, settings: &bm_core::config::Settings) {
+    use bm_core::config::{LlmConfig, LlmKind};
+    let id = settings.analyzer.trim();
+    if id.is_empty() {
+        return;
+    }
+    let mut cfg = LlmConfig::load(&app.layout.root);
+    // An id saved straight into settings (the synced mirror) addresses its
+    // own entry; a slot name resolves like the run line did. The kind prefers
+    // the slot's legacy meaning — a bare `gemini` with no such entry yet is
+    // Gemini, not "whatever the missing id defaults to".
+    let provider = if cfg.providers.contains_key(id) {
+        id.to_string()
+    } else {
+        resolve_llm_provider(app, id)
+    };
+    let kind = match id {
+        "gemini" => LlmKind::Gemini,
+        "ollama" | "local" => LlmKind::Ollama,
+        _ => cfg.kind_of(&provider),
+    };
+    let entry = cfg.providers.entry(provider.clone()).or_default();
+    if entry.kind.trim().is_empty() {
+        entry.kind = kind.as_backend().to_string();
+    }
+    if let Some(m) = settings.analyze_models.first().filter(|m| !m.trim().is_empty()) {
+        if kind == LlmKind::Gemini {
+            entry.model = m.trim().to_string();
+        }
+    }
+    if kind == LlmKind::Openai && !settings.openrouter_model.trim().is_empty() {
+        entry.model = settings.openrouter_model.clone();
+        if !settings.openrouter_url.trim().is_empty() {
+            entry.base_url = settings.openrouter_url.clone();
+        }
+    }
+    if kind == LlmKind::Ollama {
+        if !settings.local_model.trim().is_empty() {
+            entry.model = settings.local_model.clone();
+        }
+        if !settings.ollama_url.trim().is_empty() {
+            entry.base_url = settings.ollama_url.clone();
+        }
+    }
+    cfg.active = provider;
+    let _ = cfg.save(&app.layout.root);
 }
 
 /// Parse `<speed> <effect-volume> <music-volume> <inject-volume>` — the mix

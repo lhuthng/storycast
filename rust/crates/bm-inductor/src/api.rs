@@ -947,9 +947,9 @@ async fn state(State(st): State<Shared>) -> impl IntoResponse {
         // the Stats pane's matrix and its TUI-side ETA.
         "stats": inner.stats.summary(),
         // Settings ride along so the TUI can prefill prompts with the values
-        // that are actually in force instead of hardcoded guesses. API keys
-        // stay in .env; the SSH key is a path (config, in machines.json and
-        // settings.json), not a secret.
+        // that are actually in force instead of hardcoded guesses. Provider
+        // keys stay in `.bm/llm.json` (never on this wire); the SSH key is a
+        // path (config, in machines.json and settings.json), not a secret.
         "settings": inner.settings,
         // Scheduler events (task done/fail, retry, orphan reap, …) surfaced in
         // the TUI's event pane. The TUI deduplicates by event id.

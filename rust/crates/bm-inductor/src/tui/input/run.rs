@@ -55,10 +55,15 @@ pub(crate) async fn key_run(
         KeyCode::Char('e') | KeyCode::Char('E') => {
             let cfg = run_preview(app);
             let models = cfg.models.join(",");
+            // The line spells slots (`openai`), not ids (`tokenharbor`):
+            // the parser only knows slots, and the save maps back to the id.
+            let analyzer = bm_core::config::LlmConfig::load(&app.layout.root)
+                .backend_for(&cfg.analyzer)
+                .unwrap_or_default();
             let prefill = if models.is_empty() {
-                format!("{} {} {}", cfg.start, cfg.count, cfg.analyzer)
+                format!("{} {} {}", cfg.start, cfg.count, analyzer)
             } else {
-                format!("{} {} {} {}", cfg.start, cfg.count, cfg.analyzer, models)
+                format!("{} {} {} {}", cfg.start, cfg.count, analyzer, models)
             };
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::RunConfig,

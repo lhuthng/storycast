@@ -323,6 +323,17 @@ pub(crate) enum Job {
         root: std::path::PathBuf,
         ids: Vec<String>,
     },
+    /// List what one LLM provider serves (`GET {base}/models`), off the UI
+    /// task. Read-only: the answer lands in `Ev::LlmModels` and the `L`
+    /// screen offers it as a pick, so a model name is never typed blind.
+    /// `kind` is the backend slot, so the request shape never depends on
+    /// the provider's name.
+    LlmModels {
+        provider: String,
+        kind: String,
+        base_url: String,
+        key: String,
+    },
 }
 
 impl Job {
@@ -385,6 +396,7 @@ impl Job {
             Job::AwsDown { .. } => "aws down",
             Job::AwsLogin { .. } => "aws login",
             Job::AwsDiscover { .. } => "aws discover",
+            Job::LlmModels { provider, .. } => return format!("fetch {provider} models"),
             Job::Tracked { .. } => unreachable!(),
         }
         .to_string()
@@ -422,6 +434,8 @@ impl Job {
             // provision or a slow op. Callers already guard against
             // dispatching them twice (`lines_loading`, `roster_loading`).
             Job::LoadRoster { .. } | Job::LoadLines { .. } | Job::LoadSounds { .. } => vec![],
+            // Read-only provider read: never queued behind anything.
+            Job::LlmModels { .. } => vec![],
             _ => vec![Res::Command],
         }
     }
@@ -528,6 +542,13 @@ pub(crate) enum Ev {
     /// not. Shown either way, because "digest is off" is a claim the operator
     /// will act on.
     DigestPolicy(Result<String, String>),
+    /// The models one provider serves, or why the list never arrived. The
+    /// `L` screen offers the list as a pick when it is for the highlighted
+    /// provider; a stale answer (cursor moved on) is dropped there, not here.
+    LlmModels {
+        provider: String,
+        result: Result<Vec<String>, String>,
+    },
     /// A `/api/state` snapshot from the background poller. Carrying the payload
     /// (not the parsed structs) keeps the parse on the UI task, where the
     /// ordering/sort fixes already live.
@@ -1159,14 +1180,14 @@ pub(crate) async fn job_start_backend(
             api_up = false;
         }
     }
-    // The analyzer was already saved to the settings file at submit,
-    // so a fresh backend picks it up, but a live one never re-reads
-    // it, hence the warning.
+    // The LLM choice lives in `.bm/llm.json`, which every offer reads when
+    // it is built — so a model switch takes effect on the next offer even
+    // with a live inductor, and this stays a note rather than a warning.
     if api_up {
         send(
             &tx,
-            Level::Warn,
-            "inductor already up: analyzer saved, takes effect on next restart (X, then B)".into(),
+            Level::Info,
+            "inductor already up: the next offer carries the saved LLM key + model".into(),
         );
     }
     // Inductor only: workers start per-box after that box provisions,
@@ -2749,7 +2770,28 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
         } => job_preview_local(tx, layout, voice, text).await,
         Job::Workspace { layout, api, req } => job_workspace(tx, layout, api, req).await,
         Job::Profile { layout, api, req } => job_profile(tx, layout, api, req).await,
+        Job::LlmModels {
+            provider,
+            kind,
+            base_url,
+            key,
+        } => job_llm_models(tx, provider, kind, base_url, key).await,
     }
+}
+
+/// List what one provider serves, for the `L` screen's picker. One request,
+/// no retry: a wrong key or URL is the finding, and the error is the message.
+pub(crate) async fn job_llm_models(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    provider: String,
+    kind: String,
+    base_url: String,
+    key: String,
+) {
+    let result = bm_core::digest::fetch_models(&provider, &kind, &base_url, &key)
+        .await
+        .map_err(|e| format!("{provider}: {e:#}"));
+    let _ = tx.send(Ev::LlmModels { provider, result });
 }
 
 #[cfg(test)]

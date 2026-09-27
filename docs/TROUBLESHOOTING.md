@@ -37,23 +37,22 @@ Common causes per stage:
   `c` in the TUI re-saves the template and probe-crawls one chapter; check the
   response in the events pane. Some sites rate-limit: lower `START`/`COUNT` and
   add pauses.
-* **digest fails**, almost always the analyzer: a missing key, quota
-  exhausted (free tier: 3 RPM / 10 RPD), or the model name changed. The
-  analyzer chain falls through `analyze_models` in order; check which model the
-  event names. `ANALYZER=opencode|openrouter|local` in `.env` swaps the backend.
+* **digest fails**, almost always the analyzer: no provider active, a missing
+  key, quota exhausted (free tier: 3 RPM / 10 RPD), or the model name changed.
+  Press `L` (or `:llm`): it shows every provider, which one is active, and
+  whether its key and model are set. `f` lists what the API serves so the
+  model is picked, not typed.
   * **the event names a model you stopped using** (e.g. a `503` for
-    `gemini-3.5-flash` when `analyze_models` holds only
-    `gemini-3.5-flash-lite`), a provisioned worker has **no settings file at
+    `gemini-3.5-flash` when the `L` screen holds only
+    `gemini-3.5-flash-lite`), a provisioned worker has **no key file at
     all**: provisioning copies `prompts/`, `python/`, `assets/`, `refs/` and the
     cast, and never the inductor's own state. It therefore used
     to run on `Settings::default()`, the *compiled-in* chain, and
     ignore the operator's chain completely. The inductor now sends its analyzer
-    block (`analyze_models`, the per-backend model names,
-    `ollama_url`) with every digest offer and the worker overlays it, so the
-    model named in the event is the model in the inductor's own settings
-    (`workspaces/<name>/settings.json`). With Gemini credentials configured, an
-    empty
-    `analyze_models` list skips Gemini and falls back to `opencode`. If a
+    block (the active key, the model, the endpoint) with every digest offer
+    and the worker overlays it, so the model named in the event is the model
+    in the inductor's own `.bm/llm.json` (mirrored into
+    `workspaces/<name>/settings.json`). If a
     stale name still shows up, that box is running an agent from before the fix:
     re-run `make provision BOX=…`. The agent is re-pushed **only when the
     workspace version in `rust/Cargo.toml` changed**, an unchanged version
@@ -64,21 +63,13 @@ Common causes per stage:
     (`:drain`, workers exit once the queue empties) or `X`, then `B` to relaunch
     them onto the new binary. The local node is never provisioned at all, so there
     the relaunch is the whole job.
-  * **`…; opencode fallback failed: opencode CLI not found`**, the gemini chain
-    ran out *and* the fallback behind it is not installed on the box that took
-    the task. `opencode` is a **binary**, not a pip package, and provisioning
-    does not install it, so a remote worker can have gemini configured and no
-    fallback at all. Two ways out: put `opencode` on `PATH` for the worker's
-    user on that box, or accept that an exhausted gemini chain is terminal
-    there. Worth checking *before* blaming the model, a 503/429 that shelves a
-    task is often this pair, not one failure.
-  * **`GEMINI_API_KEY missing` (or `OPENROUTER_API_KEY`)**, the key is set in
-    the **inductor's** `.env`, and only there. It rides the task offer to
-    whichever worker runs the digest, so a box with no `.env` of its own is
-    normal and expected; there is nothing to copy onto it. If this fires, the
-    inductor itself has no key for the analyzer it is configured with: fix
-    `.env` next to the inductor, **restart the inductor** (it reads `.env` at
-    boot), then `u` to retry. To check which side is short, the worker logs
+  * **`GEMINI_API_KEY missing` (or `OPENROUTER_API_KEY`)**, the key is set on
+    the **inductor** with `L` (`:llm`, stored in `.bm/llm.json`), and only
+    there. It rides the task offer to whichever worker runs the digest, so a
+    box with no key file of its own is normal and expected; there is nothing
+    to copy onto it. If this fires, the inductor has no key for the active
+    provider: add it with `L`, then `u` to retry — no restart needed, the next
+    offer carries the new key. To check which side is short, the worker logs
     `credentials from inductor: GEMINI_API_KEY` for every task that received
     one, no such line means the offer carried nothing.
 * **render fails / voice missing**, the TTS sidecar is down (`tts=down` in the

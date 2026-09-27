@@ -138,6 +138,28 @@ pub(crate) async fn key_text(
                     }
                     Err(msg) => app.set_status(Level::Error, msg),
                 }
+            } else if matches!(
+                p.kind,
+                TextKind::LlmKey(_) | TextKind::LlmUrl(_) | TextKind::LlmModel(_)
+            ) {
+                // One provider field: validated in one place so a typo keeps
+                // the prompt open with the typing still in it. The provider
+                // id rides on the kind; the cursor to restore rides on the app.
+                let provider = match &p.kind {
+                    TextKind::LlmKey(id) | TextKind::LlmUrl(id) | TextKind::LlmModel(id) => {
+                        id.clone()
+                    }
+                    _ => unreachable!(),
+                };
+                match super::llm::save_llm_field(app, &provider, &p.kind, &p.buf) {
+                    Ok(msg) => {
+                        let mut v = super::super::screen::LlmView::new();
+                        v.cursor = app.llm_cursor;
+                        app.screen = Screen::Llm(v);
+                        app.set_status(Level::Ok, msg);
+                    }
+                    Err(msg) => app.set_status(Level::Error, msg),
+                }
             } else if p.kind == TextKind::Mix {
                 // Validated here so a typo keeps the prompt open; the op
                 // itself saves the mix and requeues every merge — live via
