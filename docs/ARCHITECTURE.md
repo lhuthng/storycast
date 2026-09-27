@@ -129,7 +129,13 @@ The jargon, defined once here:
 * **offer**: a worker asks the inductor "what should I do?" The inductor only
   offers a stage when the stages before it are finished (crawl, digest, render,
   merge), so the order things happen in is guaranteed by the data rather than
-  by luck.
+  by luck. Two more things gate the answer, and they are different questions:
+  the box's **work policy** says which stages the operator wants it to run and
+  in what order, and the **sources bundle it reports** (`sources-manifest.json`,
+  carried on every beat) says which of those it was actually sent the files for.
+  A stage the policy names and the bundle does not cover is withheld rather than
+  attempted — a digest with no `prompts/analyze.txt` fails on every retry and
+  wears the chapter's strikes — and the log says so once per change.
 * **lease**: a time limit on one running task (crawl 10 min, digest 20 min,
   render 90 min, merge 30 min). If the time runs out, the task goes back on the
   pile **without a mark against it**, because silence is not failure. A
@@ -168,7 +174,12 @@ restarted worker has to get itself back onto (section 7).
 | `ledger.json` | Only ever the task list, plus which machines are alive |
 
 The API joins these together and shows one "machine" shape to the TUI, so the
-dashboard never has to know they were separate.
+dashboard never has to know they were separate. A machine the ledger remembers
+and `machines.json` does not — a box dropped from the list while its liveness row
+stayed — is still shown, because hiding it would say a beating box is gone. It is
+shown **working on nothing**: its synthesized policy enables no stage, since
+nothing has ever provisioned it (provisioning walks `machines.json`) and a box
+with no files for a stage used to be offered it anyway, failing on every retry.
 
 **Where the first two live is the one thing to get right**, because the answer
 is "it depends" and getting the wrong half fails silently. `settings.json` and
@@ -488,10 +499,12 @@ visible in the TUI log (the machine overlay shows which key won:
    `~/.bm-worker/.provision_stamp.json` during its last provision.
    * `sources_hash`: the **manifest of the bundle** the push would send: one
      sha256 per file, keyed by the path it lands on the worker, over the set the
-     box's own work policy selects — the prompts and the registry files a digest
-     box reads, the scene map, the pools and the clips they register for a merge
-     box, the crawlers for a crawl box — plus the stage list itself and the
-     agent version. The selection lives in `provision/sources.rs`. Nothing
+     box's own work policy selects — the registry files a digest box reads, the
+     scene map, the pools and the clips they register for a merge box, the
+     crawlers for a crawl box — plus the stage list itself and the agent
+     version. The `prompts/` are the one exception: 21 KB that rides every
+     bundle, so a box that gains `digest` by a keypress is not left without the
+     one file the stage cannot start without. The selection lives in `provision/sources.rs`. Nothing
      travels because it happened to be in a directory, so a clip copied into
      `assets/music/` and left unregistered stops travelling, and widening a
      policy is drift by construction: the new stage is in the list, so the
