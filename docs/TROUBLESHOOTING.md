@@ -45,8 +45,10 @@ Common causes per stage:
   * **the event names a model you stopped using** (e.g. a `503` for
     `gemini-3.5-flash` when the `L` screen holds only
     `gemini-3.5-flash-lite`), a provisioned worker has **no key file at
-    all**: provisioning copies `prompts/`, `python/`, `assets/`, `refs/` and the
-    cast, and never the inductor's own state. It therefore used
+    all**: provisioning copies the sources bundle its work policy selects —
+    `prompts/` and the registries for a digest box, the scene map, the pools and
+    the clips they register for a merge box, the crawlers for a crawl box — and
+    never the inductor's own state. Not `.bm/`, and no longer `refs/`. It therefore used
     to run on `Settings::default()`, the *compiled-in* chain, and
     ignore the operator's chain completely. The inductor now sends its analyzer
     block (the active key, the model, the endpoint) with every digest offer
@@ -145,7 +147,9 @@ that hole. What each symptom means:
 | provision uses the wrong key | the machine overlay's `ssh key` line names the winning source (`machines.json` / `settings.json` / ssh default), fix it where it wins: re-bind with `:a`, `:sshkey` for the default, or `make link KEY=..` |
 | `bm-tts would not run, missing libonnxruntime.so.1 beside it?` | the sidecar is pushed together with its shared ONNX Runtime; if the library did not travel the loader fails by SONAME. `make runtime` stages it locally, then re-provision with `P` |
 | `voice enrollment failed for: <names>` | a clip in `voices.json` is missing or unreadable on this machine; fix `refs/`, then provision again |
-| Provisioning runs the slow path every time | the stamp changed, check *what* changed: any edit under `prompts/`, `python/requirements.txt`, the cast files, or the agent version resets the sources stamp; any change to `voices.json` or `refs/` resets the voices stamp. `P` forces the slow path deliberately |
+| Provisioning runs the slow path every time | the stamp changed, check *what* changed: any file in the sources bundle (a prompt, a pool registry, a clip a registry actually names — an unregistered clip no longer travels and no longer drifts anything), the box's work policy, or the agent version resets the sources stamp; `models/voices.json` resets the voices stamp. `P` forces the slow path deliberately |
+| `zstd-missing on this box` | the sources bundle is compressed, and the box has no `zstd`. Provisioning installs it before it needs it, so seeing this means the install was skipped (a box that is not allowed to `apt install`) — put it there by hand: `apt install -y zstd` (or `dnf`), then `P` |
+| `the box did not confirm the bundle` / `unpacking the sources bundle failed` | the push arrived but the extract did not finish. The message names tar's own error; the usual cause is a full disk or an interrupted ssh, and re-provisioning is the fix. The trees the bundle owns (`prompts/`, `assets/`, `crawl/`) are **pruned then extracted**, so a box left mid-way holds a partial tree until the next push — nothing else on the box is touched |
 | Re-provisioning a **healthy** box is slow | it should not be. On a box that already passed a full provision, `ensure_opencode`/`ensure_ffmpeg` are gated off and only run a `command -v` check, so no `npm i` (600 s bound) and no `apt install -y`. If it is still slow, the stamp changed: see the row above |
 | `OPENCODE-SKIP (already configured, not reinstalling; force a re-provision to try again)` | not an error, the gate above declining to reinstall on a box it has already configured. It only appears if the tool is genuinely missing, and then the message names the remedy: `P` |
 | `FFMPEG-SKIP (…)` / `ffmpeg is not on PATH` | same gate. Merge is disabled on that box until ffmpeg is present; crawl/digest/render still work. `apt install ffmpeg` (or `dnf`), then `P` |

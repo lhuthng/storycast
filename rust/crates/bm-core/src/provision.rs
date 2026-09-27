@@ -27,6 +27,10 @@ mod aws;
 /// `aws login` and `aws show`, and `bm_core::provision::aws_credentials::write`
 /// says which file it writes where a bare `write` would not.
 pub mod aws_credentials;
+/// What a worker is handed, selected by its work policy. Public because the
+/// dashboard and the CLI both want to say what a box is *about to* receive
+/// without provisioning it.
+pub mod sources;
 mod ssh;
 mod stamp;
 mod steps;

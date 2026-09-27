@@ -50,6 +50,18 @@ pub struct ProvisionStamp {
     /// records the real hash.
     #[serde(default)]
     pub tts_bin_hash: String,
+    /// The stages the bundle on this box covers, from the plan it was built
+    /// for.
+    ///
+    /// Not a gate — a policy change drifts `sources_hash`, because the stage
+    /// list is part of the manifest — but the one thing that lets a report say
+    /// *which* stages a box holds, and so answer the question a widened policy
+    /// raises: this box is being offered merge work and was handed no clips.
+    ///
+    /// `#[serde(default)]`: a stamp written before the field existed reads as
+    /// an empty list, which is "unknown", not "nothing shipped".
+    #[serde(default)]
+    pub sources_stages: Vec<String>,
 }
 
 impl ProvisionStamp {
@@ -61,10 +73,11 @@ impl ProvisionStamp {
     ///
     /// It was once computed over the clone manifest and `refs/` and then never
     /// read — which is how an edited reference clip shipped nowhere while every
-    /// gate reported "in sync". Both of those are pushed by `install_sources`,
-    /// so they now live in `sources_hash`, where the push they gate actually
-    /// reads them. This field covers the one file that push does not carry: the
-    /// store the sidecar loads at startup.
+    /// gate reported "in sync". Both of those are now *inputs to a bake* rather
+    /// than files a box needs: the clone manifest travels in the bundle
+    /// (`sources_hash`) and a reference clip reaches a box encoded, in the store
+    /// this method gates. This field covers the one file the bundle does not
+    /// carry: the store the sidecar loads at startup.
     pub fn voices_in_sync(&self, want: &ProvisionStamp) -> bool {
         self.voices_hash == want.voices_hash
     }
@@ -110,14 +123,18 @@ impl ProvisionStamp {
 /// Each one gates a *different push*, and the split is what keeps one kind of
 /// change from paying for another:
 ///
-/// * `sources_hash` — `prompts/` by signature, plus the *content* of the small
-///   manifests the worker must match exactly (`requirements.txt`, the cast
-///   files, the clone manifest `voices.json`, the scene map and the three
-///   clip-pool registries), plus the effect, music, inject **and `refs/`** clip
-///   directories by signature, plus the crawl scripts by content, plus the
-///   agent version so a release bump redeploys. (A rebuild under the *same*
-///   version is `agent_hash`'s job.) **Everything `install_sources` pushes is
-///   in here**, and `refs/` was the one that was not.
+/// * `sources_hash` — the **manifest of the bundle** the push would send: one
+///   sha256 per file, keyed by where it lands on the worker, plus the stage
+///   list it was selected for, plus the agent version so a release bump
+///   redeploys. (A rebuild under the *same* version is `agent_hash`'s job.)
+///   This replaced a walk of `prompts/`, `refs/`, the clip directories and the
+///   crawl scripts: 202 MB of directory signatures on every probe, for a
+///   question that is now answered by the digest of the artifact itself. The
+///   stage list is in there deliberately — widening a box's policy changes
+///   what it must hold, and that has to be drift or the narrowing is silent.
+///   `refs/` is no longer in any digest: no worker reads it (enrollment runs on
+///   the inductor and ships encoded, inside `models/voices.json`), so a new
+///   reference clip reaches a box as a *bake*, through `voices_hash`.
 /// * `tts_hash` — the baked `models/` directory **minus `models/voices.json`**,
 ///   by signature, plus `manifest.json` by content. Excluding the store is what
 ///   lets a newly enrolled voice ship without re-sending 668 MB of weights, and
@@ -128,133 +145,22 @@ impl ProvisionStamp {
 /// * `tts_bin_hash` — the `bm-tts` bytes, by content, so a rebuild reaches a box
 ///   that already has the right models.
 pub fn compute_provision_stamp(
-    repo_root: &Path,
+    layout: &crate::Layout,
+    stages: &[bm_proto::Stage],
     agent_version: &str,
     agent_binary: &Path,
-) -> ProvisionStamp {
+) -> anyhow::Result<ProvisionStamp> {
+    let repo_root = layout.root.as_path();
+    // What the push would send, hashed as a set. The plan is the same call the
+    // push makes, so the digest and the artifact cannot describe different
+    // files — which is the one property this gate exists to have.
+    let plan = super::sources::Sources::plan(layout, stages)?;
+    let sources_manifest = plan.manifest()?;
     let mut sources = Sha256::new();
     sources.update(agent_version.as_bytes());
     sources.update([0]);
-    sources.update(signature_of_dir(&repo_root.join("prompts")).as_bytes());
-    for rel in [
-        "python/requirements.txt",
-        "data/cast-vieneu.json",
-        "data/cast.json",
-        "voices.json",
-        "assets/scene-map.json",
-        // The pools are manifests, not media: the registry decides which clip
-        // answers a scene, so a worker left holding a stale one would mix a
-        // different chapter than the inductor previewed — same script, same
-        // seed, different audio, and nothing on either side to say why.
-        "assets/effect-pool.json",
-        "assets/music-pool.json",
-        "assets/inject-pool.json",
-    ] {
-        let p = repo_root.join(rel);
-        if let Ok(bytes) = std::fs::read(&p) {
-            sources.update(rel.as_bytes());
-            sources.update([0]);
-            sources.update(&bytes);
-            sources.update([0]);
-        }
-    }
-    // The active workspace's cast files: voice assignments travel to workers
-    // via install_sources, so a swap must drift the stamp — otherwise the
-    // next :prov reports "in sync (cache match)" and the new voices never
-    // reach any box while renders naming them are already queued.
-    if let Ok(ws) = std::fs::read_to_string(repo_root.join(".bm").join("active-workspace")) {
-        let ws = ws.trim();
-        if !ws.is_empty() {
-            for name in ["cast-vieneu.json", "cast.json"] {
-                let p = repo_root
-                    .join("workspaces")
-                    .join(ws)
-                    .join("data")
-                    .join(name);
-                if let Ok(bytes) = std::fs::read(&p) {
-                    sources.update(name.as_bytes());
-                    sources.update([0]);
-                    sources.update(&bytes);
-                    sources.update([0]);
-                }
-            }
-        }
-    }
-    // …and the clips themselves by signature, exactly like `refs/`: a pool
-    // registry is only as good as the files it names, so adding a clip has to
-    // resync even though no manifest changed.
-    for rel in ["assets/effects", "assets/music", "assets/injects"] {
-        sources.update(rel.as_bytes());
-        sources.update([0]);
-        sources.update(signature_of_dir(&repo_root.join(rel)).as_bytes());
-        sources.update([0]);
-    }
-
-    // …and the reference clips, because `install_sources` pushes `refs/`
-    // whether or not any digest here mentions it.
-    //
-    // This is a fix, not a nicety. `refs/` used to be folded into `voices_hash`
-    // — a digest provisioning computed, carried, and never read — so adding or
-    // editing a clip drifted no gate at all. A worker kept the stale clip while
-    // every box and every log said "in sync", and a render naming the new voice
-    // failed only on the boxes that never received it. A signature rather than
-    // content, for the reason `refs/` is 125 MB of audio and mtime+size is the
-    // test rsync itself uses.
-    sources.update(b"refs");
+    sources.update(super::sources::Sources::hash(&sources_manifest).as_bytes());
     sources.update([0]);
-    sources.update(signature_of_dir(&repo_root.join("refs")).as_bytes());
-    sources.update([0]);
-
-    // The crawl scripts, by **content**: they are small, and they decide which
-    // bytes become a chapter. A worker left holding a stale crawler would fetch
-    // something different from what the inductor's own probe read, and the
-    // directory signature would only catch that if the mtime moved — which
-    // `cp -p`, a checkout and rsync all decline to guarantee. Both sources are
-    // hashed: the profile's shared `assets/crawl/` and the active workspace's
-    // own `crawl/` (which `resolve_script` searches first), so an edit to
-    // either drifts the stamp and reaches every box with the next `:prov`.
-    {
-        // The workspace's dir, by `Layout::resolve_or_root`'s semantics: a
-        // missing or stale pointer means the root *is* the workspace, whose
-        // crawlers live at `<root>/crawl`. The same dir `install_sources`
-        // pushes, so the stamp and the sync can never disagree about what
-        // "the workspace's crawler" is.
-        let ws = std::fs::read_to_string(repo_root.join(".bm/active-workspace"))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        let ws_dir = repo_root.join("workspaces").join(&ws);
-        let ws_crawl = if !ws.is_empty() && ws_dir.is_dir() {
-            ws_dir.join("crawl")
-        } else {
-            repo_root.join("crawl")
-        };
-        let mut files = Vec::new();
-        let mut stack = vec![repo_root.join("assets/crawl"), ws_crawl];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for e in entries.filter_map(|e| e.ok()) {
-                let p = e.path();
-                if p.is_dir() {
-                    stack.push(p);
-                } else {
-                    files.push(p);
-                }
-            }
-        }
-        files.sort();
-        for p in files {
-            let (Ok(rel), Ok(bytes)) = (p.strip_prefix(repo_root), std::fs::read(&p)) else {
-                continue;
-            };
-            sources.update(rel.display().to_string().as_bytes());
-            sources.update([0]);
-            sources.update(&bytes);
-            sources.update([0]);
-        }
-    }
-
     // The Rust sidecar's *weights*, by directory signature rather than content:
     // `models/` is 668 MB and reading it would cost more than the provisioning
     // this digest exists to skip. `manifest.json` is read by content because it
@@ -316,8 +222,9 @@ pub fn compute_provision_stamp(
         voices.update([0]);
     }
 
-    ProvisionStamp {
+    Ok(ProvisionStamp {
         agent_version: agent_version.to_string(),
+        sources_stages: sources_manifest.stages.clone(),
         sources_hash: hex_digest(sources.finalize()),
         voices_hash: hex_digest(voices.finalize()),
         tts_hash: hex_digest(tts.finalize()),
@@ -337,7 +244,7 @@ pub fn compute_provision_stamp(
         agent_hash: std::fs::read(agent_binary)
             .map(|bytes| hex_digest(Sha256::digest(&bytes)))
             .unwrap_or_default(),
-    }
+    })
 }
 
 /// The one mutable file inside the otherwise immutable `models/` bake: the
@@ -379,14 +286,16 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
 }
 
 /// A cheap, deterministic signature for a directory tree: sorted names plus
-/// each file's length and mtime, recursively. Contents are never read — this
-/// runs over `refs/`, where a single clip is megabytes and mtime+size is
-/// exactly the test `copy_dir` and rsync already use to decide "unchanged".
-fn signature_of_dir(dir: &Path) -> String {
-    signature_of_dir_skipping(dir, &[])
-}
-
-/// [`signature_of_dir`], ignoring any entry whose file name is in `extra`.
+/// each file's length and mtime, recursively. Contents are never read — the one
+/// caller left is `models/`, where 668 MB of weights would cost more to hash
+/// than the provisioning the digest exists to skip, and mtime+size is exactly
+/// the test `copy_dir` and rsync already use to decide "unchanged".
+///
+/// It was also how `prompts/`, the clip directories, the crawl scripts and
+/// `refs/` were covered, before they became a bundle whose manifest hashes each
+/// file by content. This is now the exception, not the rule.
+///
+/// Any entry whose file name is in `extra` is ignored.
 ///
 /// `models/` needs it: that directory is a 668 MB immutable bake with exactly
 /// one mutable file inside it, and the two have opposite requirements. Skipping
@@ -466,11 +375,50 @@ mod tests {
         p
     }
 
+    /// The stage list the fixture is stamped for: the two whose files it holds.
+    const STAGES: [bm_proto::Stage; 2] = [bm_proto::Stage::Digest, bm_proto::Stage::Merge];
+
+    /// The stamp for a plain root. The plan is built through the same call the
+    /// push makes, so a fixture that cannot be planned is a test failure rather
+    /// than a silently empty digest.
+    fn stamp(root: &std::path::Path) -> ProvisionStamp {
+        compute_provision_stamp(&crate::Layout::new(root), &STAGES, "0.2.0", &agent_bin(root))
+            .expect("the fixture plan must build")
+    }
+
+    fn stamp_v(root: &std::path::Path, version: &str) -> ProvisionStamp {
+        compute_provision_stamp(&crate::Layout::new(root), &STAGES, version, &agent_bin(root))
+            .expect("the fixture plan must build")
+    }
+
+    /// The stamp with an explicit agent binary, for the rebuild cases that swap
+    /// the bytes under it.
+    fn stamp_bin(root: &std::path::Path, bin: &std::path::Path) -> ProvisionStamp {
+        compute_provision_stamp(&crate::Layout::new(root), &STAGES, "0.2.0", bin)
+            .expect("the fixture plan must build")
+    }
+
+    fn stamp_for(root: &std::path::Path, stages: &[bm_proto::Stage]) -> ProvisionStamp {
+        compute_provision_stamp(&crate::Layout::new(root), stages, "0.2.0", &agent_bin(root))
+            .expect("the fixture plan must build")
+    }
+
+    /// The layout a real provision uses on a machine with a workspace selected:
+    /// the root carries the profile, the workspace carries the book. The stamp
+    /// has to follow *that* split, because the cast files it ships are the
+    /// book's.
+    fn workspace_layout(root: &std::path::Path, name: &str) -> crate::Layout {
+        crate::Layout {
+            root: root.to_path_buf(),
+            work: root.join("workspaces").join(name),
+        }
+    }
+
     #[test]
     fn a_stamp_is_stable_and_content_addressed() {
         let root = stamp_fixture("stable");
-        let a = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
-        let b = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let a = stamp(&root);
+        let b = stamp(&root);
         assert_eq!(a, b, "nothing changed, so the stamp must not either");
         assert_eq!(a.sources_hash.len(), 64, "sha-256 hex is 64 chars");
         assert_eq!(a.voices_hash.len(), 64);
@@ -478,7 +426,7 @@ mod tests {
 
         // A cast edit is a source change and nothing else.
         std::fs::write(root.join("data/cast.json"), r#"{"Narrator":"Adam"}"#).unwrap();
-        let c = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let c = stamp(&root);
         assert_ne!(
             a.sources_hash, c.sources_hash,
             "a cast edit must resync sources"
@@ -489,7 +437,7 @@ mod tests {
         );
 
         // A version bump redeploys the agent even when every file is identical.
-        let d = compute_provision_stamp(&root, "0.3.0", &agent_bin(&root));
+        let d = stamp_v(&root, "0.3.0");
         assert!(!a.sources_in_sync(&d), "a new agent build must redeploy");
         assert!(
             a.voices_in_sync(&d),
@@ -511,13 +459,25 @@ mod tests {
             r#"{"A":"Đức Trí"}"#,
         )
         .unwrap();
-        let a = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let a = compute_provision_stamp(
+            &workspace_layout(&root, "book"),
+            &STAGES,
+            "0.2.0",
+            &agent_bin(&root),
+        )
+        .unwrap();
         std::fs::write(
             root.join("workspaces/book/data/cast-vieneu.json"),
             r#"{"A":"Quang Sơn"}"#,
         )
         .unwrap();
-        let b = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let b = compute_provision_stamp(
+            &workspace_layout(&root, "book"),
+            &STAGES,
+            "0.2.0",
+            &agent_bin(&root),
+        )
+        .unwrap();
         assert_ne!(
             a.sources_hash, b.sources_hash,
             "a workspace voice swap must force a resync"
@@ -526,25 +486,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The clone manifest and `refs/` are **sources**, because that is the push
-    /// that carries them.
+    /// The clone manifest travels in the bundle; a reference clip does not
+    /// travel at all.
     ///
-    /// This test replaces one that asserted the opposite for `refs/` ("a new
-    /// clip must re-enroll" / "refs/ is not part of the sources hash"). Both
-    /// halves were describing a bug rather than a design: `voices_hash` was
-    /// never read, so a new reference clip drifted no gate that any push
-    /// consulted, and the clip shipped nowhere. The gate is now the one the
-    /// push reads.
+    /// This test replaces one that asserted `refs/` was part of the sources
+    /// hash. That was true of the *push* — `install_sources` rsynced the whole
+    /// directory, 144 MB of it — and it was the bug rather than the design: no
+    /// worker reads a reference clip, because enrollment runs on the inductor
+    /// (it needs the encoder, which a worker does not have) and what crosses is
+    /// the encoded store in `models/voices.json`. A new or edited clip is an
+    /// input to the next *bake*, so it drifts `voices_hash` when an enrollment
+    /// rewrites the store, and drifts nothing until then. The one file that
+    /// still has to reach a box is the declaration itself, which is why
+    /// `voices.json` is in the bundle.
     #[test]
-    fn the_clone_manifest_and_the_reference_clips_are_sources() {
+    fn the_clone_manifest_is_a_source_and_a_reference_clip_is_not() {
         let root = stamp_fixture("voices");
-        let base = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let base = stamp(&root);
 
         // A rename in voices.json has to reach the worker's copy, so it is a
-        // source change — and because `install_sources` is what ships the
-        // manifest, it must NOT be a reason to re-push the model store.
+        // source change — and because the bundle is what ships the manifest, it
+        // must NOT be a reason to re-push the model store.
         std::fs::write(root.join("voices.json"), r#"{"Storyteller":"refs/n.wav"}"#).unwrap();
-        let renamed = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let renamed = stamp(&root);
         assert!(
             !base.sources_in_sync(&renamed),
             "a rename must resync the manifest"
@@ -555,18 +519,51 @@ mod tests {
         );
         assert!(base.tts_in_sync(&renamed), "…nor re-send 668 MB of weights");
 
-        // A new clip changes the refs signature without touching the manifest —
-        // and `install_sources` pushes `refs/`, so this must drift sources.
+        // A new reference clip changes nothing a box holds: it is this machine's
+        // input to the next bake, and nothing in the manifest names it.
         std::fs::write(root.join("refs/m.wav"), vec![2u8; 64]).unwrap();
-        let added = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let added = stamp(&root);
         assert!(
-            !renamed.sources_in_sync(&added),
-            "a new clip must resync the directory that is pushed for it"
+            renamed.sources_in_sync(&added),
+            "a clip no cell of the manifest names must not resync anything"
         );
+        assert!(renamed.tts_in_sync(&added) && renamed.voices_in_sync(&added));
+    }
+
+    /// Widening a box's policy is drift, because the stage list is part of the
+    /// manifest.
+    ///
+    /// This is the guard the narrowed set rests on. A render-only box is sent
+    /// no clips at all; without this assertion it could be handed merge work
+    /// later and merge *silently silent* — the merge degrades a missing clip to
+    /// one warning — while every log said the sources were in sync.
+    #[test]
+    fn a_wider_policy_is_sources_drift() {
+        let root = stamp_fixture("policy");
+        std::fs::create_dir_all(root.join("assets/effects")).unwrap();
+        std::fs::write(
+            root.join("assets/effect-pool.json"),
+            r#"{"wind":{"tags":["wind"],"files":["effects/wind-1.mp3"]}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("assets/effects/wind-1.mp3"), vec![1u8; 32]).unwrap();
+
+        let render_only = stamp_for(&root, &[bm_proto::Stage::Render]);
+        let with_merge = stamp_for(&root, &[bm_proto::Stage::Render, bm_proto::Stage::Merge]);
         assert!(
-            renamed.tts_in_sync(&added),
-            "…without re-sending the weights"
+            !render_only.sources_in_sync(&with_merge),
+            "a box given merge must be re-provisioned for the clips it now needs"
         );
+        assert_eq!(render_only.sources_stages, vec!["render".to_string()]);
+        assert_eq!(
+            with_merge.sources_stages,
+            vec!["render".to_string(), "merge".to_string()],
+            "the stages travel in canonical order, not the policy's own"
+        );
+        // The order the operator happens to list them in is not content.
+        let reordered = stamp_for(&root, &[bm_proto::Stage::Merge, bm_proto::Stage::Render]);
+        assert_eq!(with_merge.sources_hash, reordered.sources_hash);
+        assert_eq!(with_merge.sources_stages, reordered.sources_stages);
     }
 
     /// The store the sidecar loads is its own gate: a newly enrolled voice must
@@ -583,7 +580,7 @@ mod tests {
         std::fs::write(root.join("models/manifest.json"), r#"{"files":{}}"#).unwrap();
         std::fs::write(root.join("models/sea_g2p.bin"), vec![1u8; 64]).unwrap();
         std::fs::write(root.join("models/voices.json"), r#"{"presets":{"A":{}}}"#).unwrap();
-        let base = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let base = stamp(&root);
 
         // Enrolling a voice rewrites the store and nothing else.
         std::fs::write(
@@ -591,7 +588,7 @@ mod tests {
             r#"{"presets":{"A":{},"B":{}}}"#,
         )
         .unwrap();
-        let enrolled = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let enrolled = stamp(&root);
         assert!(
             !base.voices_in_sync(&enrolled),
             "an enrollment must reach the box"
@@ -608,7 +605,7 @@ mod tests {
         // to it — the limit `manifest.json`-by-content and the publish gate
         // (`bake-models.py --check`, `16/16 files match`) exist to cover.
         std::fs::write(root.join("models/sea_g2p.bin"), vec![2u8; 128]).unwrap();
-        let swapped = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let swapped = stamp(&root);
         assert!(
             !enrolled.tts_in_sync(&swapped),
             "a swapped weight must still resync the store"
@@ -632,12 +629,12 @@ mod tests {
         let bin = root.join("rust/target/x86_64-unknown-linux-gnu/release/bm-tts");
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
         std::fs::write(&bin, b"sidecar-bytes-v1").unwrap();
-        let base = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let base = stamp(&root);
         assert!(!base.tts_bin_hash.is_empty());
-        assert!(base.tts_bin_in_sync(&compute_provision_stamp(&root, "0.2.0", &agent_bin(&root))));
+        assert!(base.tts_bin_in_sync(&stamp(&root)));
 
         std::fs::write(&bin, b"sidecar-bytes-v2").unwrap();
-        let rebuilt = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let rebuilt = stamp(&root);
         assert!(
             !base.tts_bin_in_sync(&rebuilt),
             "a rebuilt sidecar must redeploy"
@@ -657,87 +654,111 @@ mod tests {
         );
 
         // No sidecar on this host means no opinion, never a push of nothing.
-        let none = compute_provision_stamp(&root.join("elsewhere"), "0.2.0", &root.join("a"));
+        let none = compute_provision_stamp(
+            &crate::Layout::new(root.join("elsewhere")),
+            &STAGES,
+            "0.2.0",
+            &root.join("a"),
+        )
+        .unwrap();
         assert!(base.tts_bin_in_sync(&none));
     }
 
+    /// A registered clip is a source; a clip nobody registers is not.
+    ///
+    /// The registry is the pool, so the selection is closed by construction:
+    /// the old stamp hashed the clip *directories* by signature, which meant a
+    /// file copied in and never registered drifted every box — and travelled to
+    /// it, 25 MB at a time — while being unreachable by the merge forever.
     #[test]
-    fn the_clip_pools_are_sources_and_resync_when_a_clip_is_added() {
+    fn the_clip_pools_are_sources_and_an_unregistered_clip_is_not() {
         let root = stamp_fixture("pools");
-        std::fs::create_dir_all(root.join("assets/effects")).unwrap();
         std::fs::create_dir_all(root.join("assets/music")).unwrap();
-        std::fs::write(root.join("assets/effects/rain-1.mp3"), vec![1u8; 32]).unwrap();
+        std::fs::write(root.join("assets/music/soft-1.mp3"), vec![1u8; 32]).unwrap();
         std::fs::write(
             root.join("assets/music-pool.json"),
-            r#"{"soft-1":{"file":"assets/music/soft-1.mp3","tags":["soft"]}}"#,
+            r#"{"soft-1":{"tags":["soft"],"files":["music/soft-1.mp3"]}}"#,
         )
         .unwrap();
-        let base = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let base = stamp(&root);
 
         // Re-running with nothing touched must not resync — otherwise every
-        // provision would push the clip directories for no reason.
-        assert!(base.sources_in_sync(&compute_provision_stamp(&root, "0.2.0", &agent_bin(&root))));
+        // provision would push the clips for no reason.
+        assert!(base.sources_in_sync(&stamp(&root)));
 
         // The registry is a manifest: editing it changes what a scene means,
         // so the worker has to receive it.
         std::fs::write(
             root.join("assets/music-pool.json"),
-            r#"{"soft-1":{"file":"assets/music/soft-1.mp3","tags":["calm"]}}"#,
+            r#"{"soft-1":{"tags":["calm"],"files":["music/soft-1.mp3"]}}"#,
         )
         .unwrap();
-        let edited = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let edited = stamp(&root);
         assert!(
             !base.sources_in_sync(&edited),
             "a pool edit must resync sources"
         );
 
-        // A new clip resyncs too, even though no manifest moved.
+        // Replacing the bytes of a clip a registry names resyncs too: the
+        // manifest hashes content, where the old directory signature only
+        // caught a change the mtime moved for.
         std::fs::write(root.join("assets/music/soft-1.mp3"), vec![2u8; 32]).unwrap();
+        let swapped = stamp(&root);
         assert!(
-            !edited.sources_in_sync(&compute_provision_stamp(&root, "0.2.0", &agent_bin(&root))),
-            "a new clip must resync sources"
+            !edited.sources_in_sync(&swapped),
+            "a replaced clip must resync sources"
         );
+
+        // …and a clip nothing registers neither travels nor drifts a box.
+        std::fs::write(root.join("assets/music/leftover.mp3"), vec![3u8; 32]).unwrap();
+        assert!(swapped.sources_in_sync(&stamp(&root)));
     }
 
-    /// The active workspace's own crawlers are sources too: an edit there must
+    /// The crawlers a crawl box is given are sources too: an edit there must
     /// drift the stamp, or `:prov` reports "in sync" and every box keeps the
     /// old crawler while the inductor probes through the new one.
+    ///
+    /// The set is the *workspace's* `crawl/` plus the profile's templates, read
+    /// through the same `Layout` the push uses — which is why switching books
+    /// drifts the stamp: the crawlers travel with the book.
     #[test]
     fn a_workspace_crawler_edit_drifts_the_stamp() {
         let root = stamp_fixture("wscrawl");
-        std::fs::create_dir_all(root.join(".bm")).unwrap();
-        std::fs::write(root.join(".bm/active-workspace"), "book\n").unwrap();
+        let crawl = [bm_proto::Stage::Crawl];
+        let at = |ws: &str| {
+            compute_provision_stamp(
+                &workspace_layout(&root, ws),
+                &crawl,
+                "0.2.0",
+                &agent_bin(&root),
+            )
+            .unwrap()
+        };
+
         std::fs::create_dir_all(root.join("workspaces/book/crawl")).unwrap();
         std::fs::write(root.join("workspaces/book/crawl/site.lua"), "v1").unwrap();
-        let a = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let a = at("book");
 
         // Editing the workspace crawler is a source change.
         std::fs::write(root.join("workspaces/book/crawl/site.lua"), "v2").unwrap();
-        let b = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let b = at("book");
         assert_ne!(
             a.sources_hash, b.sources_hash,
             "a workspace crawler edit must resync sources"
         );
 
-        // A different workspace's dir is a different input: switching the
-        // pointer to a book with another crawler drifts the stamp as well.
+        // A different book is a different set: the crawler that is pushed is
+        // the workspace's own, so switching workspaces drifts the stamp too.
         std::fs::create_dir_all(root.join("workspaces/other/crawl")).unwrap();
         std::fs::write(root.join("workspaces/other/crawl/site.lua"), "other").unwrap();
-        std::fs::write(root.join(".bm/active-workspace"), "other\n").unwrap();
-        let c = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let c = at("other");
         assert_ne!(
             b.sources_hash, c.sources_hash,
             "switching workspaces must resync sources"
         );
-
-        // A stale pointer falls back to the root's own `crawl/` — the same
-        // directory `install_sources` pushes in that case, never the missing
-        // workspace's.
-        std::fs::write(root.join(".bm/active-workspace"), "gone\n").unwrap();
-        std::fs::create_dir_all(root.join("crawl")).unwrap();
-        std::fs::write(root.join("crawl/site.lua"), "legacy").unwrap();
-        let d = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
-        assert_ne!(c.sources_hash, d.sources_hash);
+        // …and a crawl box holds the profile's templates either way: they are
+        // what a crawler named by a registry resolves against.
+        assert_eq!(c.sources_stages, vec!["crawl".to_string()]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -749,12 +770,12 @@ mod tests {
     fn a_rebuild_under_the_same_version_redeploys_the_agent_only() {
         let root = stamp_fixture("agent-drift");
         let bin = agent_bin(&root);
-        let base = compute_provision_stamp(&root, "0.2.0", &bin);
-        assert!(base.agent_in_sync(&compute_provision_stamp(&root, "0.2.0", &bin)));
+        let base = stamp_bin(&root, &bin);
+        assert!(base.agent_in_sync(&stamp_bin(&root, &bin)));
 
         // Same version string, different bytes: drift.
         std::fs::write(&bin, b"agent-bytes-v2").unwrap();
-        let rebuilt = compute_provision_stamp(&root, "0.2.0", &bin);
+        let rebuilt = stamp_bin(&root, &bin);
         assert!(
             !base.agent_in_sync(&rebuilt),
             "a rebuild must redeploy the agent"
@@ -766,7 +787,7 @@ mod tests {
         assert!(base.tts_in_sync(&rebuilt), "…or touch the sidecar");
 
         // No local binary to hash means no opinion, never a reinstall loop.
-        let nobin = compute_provision_stamp(&root, "0.2.0", &root.join("no-such-binary"));
+        let nobin = stamp_bin(&root, &root.join("no-such-binary"));
         assert!(nobin.agent_hash.is_empty());
         assert!(base.agent_in_sync(&nobin));
     }
@@ -794,7 +815,7 @@ mod tests {
     #[test]
     fn the_tts_artifacts_are_tracked_separately_from_the_sources() {
         let root = stamp_fixture("tts");
-        let without = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let without = stamp(&root);
         assert_eq!(without.tts_hash.len(), 64);
         assert!(
             without.sources_in_sync(&without),
@@ -804,7 +825,7 @@ mod tests {
         // Baking the models moves only the TTS hash.
         std::fs::create_dir_all(root.join("models")).unwrap();
         std::fs::write(root.join("models/manifest.json"), r#"{"files":{}}"#).unwrap();
-        let baked = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let baked = stamp(&root);
         assert!(
             without.sources_in_sync(&baked),
             "baking models must not resync the Python path's sources"
@@ -816,7 +837,7 @@ mod tests {
 
         // …and swapping a model file under an unchanged manifest is drift too.
         std::fs::write(root.join("models/vieneu_prefill.onnx"), vec![1u8; 64]).unwrap();
-        let swapped = compute_provision_stamp(&root, "0.2.0", &agent_bin(&root));
+        let swapped = stamp(&root);
         assert!(!baked.tts_in_sync(&swapped), "a swapped model must resync");
         assert!(
             baked.sources_in_sync(&swapped),
@@ -833,6 +854,7 @@ mod tests {
             tts_hash: "c".repeat(64),
             agent_hash: "d".repeat(64),
             tts_bin_hash: "e".repeat(64),
+            sources_stages: vec!["digest".into(), "merge".into()],
         };
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(parse_stamp(&text).unwrap(), s, "a real payload round-trips");

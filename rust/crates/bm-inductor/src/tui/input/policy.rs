@@ -4,6 +4,13 @@
 //! up or down the priority list, Space drops it. Enter toggles a stage on or
 //! off. Every change is saved at once through the API, so the panel holds no
 //! unsaved decision to lose.
+//!
+//! **Enabling a stage is also a statement about files.** What a box is given is
+//! selected from this policy (`provision::sources`), and the files only move at
+//! the next provision — so a box told it may merge, provisioned when it could
+//! not, will be offered merge work with no clips on it. That does not fail:
+//! the merge degrades a missing clip to one warning and mixes silence. So the
+//! key that widens a policy says so, in the panel, at the moment it happens.
 use crate::tui::{
     app::App,
     input::dispatch,
@@ -85,7 +92,32 @@ pub(crate) async fn key_policy(
         _ => {}
     }
     if save {
+        // Computed while the view is borrowed, reported after it: `log_at` takes
+        // `&mut app` and the dispatch below still needs the view it was handed.
+        let mut widened: Option<String> = None;
         if let Screen::Policy(v) = &app.screen {
+            // What the box's files now have to cover, against what it was
+            // provisioned for. The machine in `app.machines` still holds the
+            // *old* policy — the save is a round trip — so this compares the
+            // edit against the truth rather than against itself.
+            let old: Vec<bm_proto::Stage> = app
+                .machines
+                .iter()
+                .find(|m| m.addr == v.addr)
+                .map(|m| bm_core::provision::sources::stages_of(&m.effective_task_policy()))
+                .unwrap_or_default();
+            let new = bm_core::provision::sources::stages_of(&v.prefs);
+            let gained: Vec<&str> = new
+                .iter()
+                .filter(|s| !old.contains(s))
+                .map(|s| s.as_str())
+                .collect();
+            if !gained.is_empty() {
+                widened = Some(format!(
+                    "policy now covers {} — re-provision this box (p) or it is offered that work with no files for it",
+                    gained.join("+")
+                ));
+            }
             dispatch(
                 app,
                 job_tx,
@@ -96,6 +128,10 @@ pub(crate) async fn key_policy(
                     task_policy: v.prefs.clone(),
                 },
             );
+        }
+        if let Some(msg) = widened {
+            app.log_at(Level::Warn, msg.clone());
+            app.set_status(Level::Warn, msg);
         }
     }
     false

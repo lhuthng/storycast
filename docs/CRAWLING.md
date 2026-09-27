@@ -577,12 +577,14 @@ can retarget `crawl/site.lua` for its own site while the rest of the cluster
 keeps the shipped crawler, and switching workspaces switches crawlers with no
 edit at all, because each workspace's directory is searched first.
 
-**It reaches the machines.** Provisioning rsyncs `workspaces/<active>/crawl/`
-to `~/bm-worker/crawl` on every worker with the rest of the sources, the
-provision stamp hashes its contents, and a removed directory is cleared from
-the boxes it had reached. Edit the script, run `:prov` (or wait for the next
-one), and the cluster crawls through the new bytes, the same guarantee the
-profile's `assets/crawl/` has always had.
+**It reaches the machines.** A box whose work policy runs **crawl** is sent
+`workspaces/<active>/crawl/` and the profile's `assets/crawl/` inside the
+sources bundle, and the bundle's manifest hashes every file in them, so an edit
+is drift and a removed crawler is cleared by the prune-then-extract that takes
+delivery. Edit the script, run `:prov` (or wait for the next one), and the
+cluster crawls through the new bytes — the same guarantee the profile's
+`assets/crawl/` has always had. A box with crawl turned off gets neither of
+them, and no other stage opens the directory.
 
 Without an active workspace (legacy mode) the root *is* the workspace, so its
 directory is `<root>/crawl/`, the same path on both sides.
@@ -685,8 +687,8 @@ and shelves, and the event log names the chapters waiting for `:import`.
 * **Trust.** Scripts run in-process with the worker's privileges: this is a
   *boundary* that makes the documented ABI the true one, not a sandbox for
   hostile code. A crawler is profile content the operator authors, like
-  `prompts/`, it ships in the profile, is rsynced to every worker, and drifts the
-  provision stamp when it changes. Loading a stranger's crawler without asking is
+  `prompts/`, it ships in the profile, is pushed to every worker whose policy runs
+  crawl, and drifts the provision stamp when it changes. Loading a stranger's crawler without asking is
   what WASM would be for, later.
 
 ---

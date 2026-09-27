@@ -338,12 +338,41 @@ impl Ssh {
         delete: bool,
         progress: Option<RsyncProgress<'_>>,
     ) -> Result<()> {
+        self.rsync_push_with(src, remote_rel, delete, progress, true)
+    }
+
+    /// The same push with rsync's own `-z` left off.
+    ///
+    /// For an artifact that is *already* compressed. `-z` on a `.tar.zst` spends
+    /// CPU deflating incompressible bytes at both ends for nothing; the
+    /// transfer's integrity does not depend on it either way, because rsync
+    /// checksums the bytes it reconstructs whatever the transport does.
+    pub fn rsync_push_plain(
+        &self,
+        src: &Path,
+        remote_rel: &str,
+        progress: Option<RsyncProgress<'_>>,
+    ) -> Result<()> {
+        self.rsync_push_with(src, remote_rel, false, progress, false)
+    }
+
+    fn rsync_push_with(
+        &self,
+        src: &Path,
+        remote_rel: &str,
+        delete: bool,
+        progress: Option<RsyncProgress<'_>>,
+        compress: bool,
+    ) -> Result<()> {
         if self.local {
             return self.rsync_push_local(src, remote_rel);
         }
         let dst = format!("{}:{}/{remote_rel}", self.target, REMOTE_DIR);
-        let mut args: Vec<String> =
-            vec!["-az".into(), "--no-perms".into(), RSYNC_IO_TIMEOUT.into()];
+        let mut args: Vec<String> = vec![
+            if compress { "-az" } else { "-a" }.into(),
+            "--no-perms".into(),
+            RSYNC_IO_TIMEOUT.into(),
+        ];
         if delete {
             args.push("--delete".into());
         }

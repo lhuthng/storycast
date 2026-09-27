@@ -494,6 +494,16 @@ pub fn provision_machine(
     log.push(format!("[{addr}] tts sidecar: {}", tts.display()));
     let mut m = Machine::new(addr, user, port, key, "worker");
     m.tts_url = Some("http://127.0.0.1:8818".into());
+    // The policy decides *what this box is handed* (`provision` plans the
+    // sources from it), so it has to be this box's and not the four-stage
+    // default a bare `Machine::new` carries. Without this every push sent the
+    // full set and the narrowing was inert — the box got prompts it has no
+    // digest to read and clips it never plays. `machines.json` is where the
+    // policy panel persists one (the API writes it on every save), and it is
+    // the only source that outlives this process: the live copy belongs to the
+    // scheduler, which may not be running. A box with no stored policy keeps
+    // the default, which is the safe direction.
+    carry_task_policy(&mut m, layout);
     let (after, mut flow) = provision(
         &m,
         layout,

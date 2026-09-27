@@ -1464,7 +1464,7 @@ async fn run_offer(
             // The backend name travels in `offer.analyzer`; what it runs
             // travels in `offer.analyzer_settings`. Both are needed here: this
             // box may have no `.bm/settings.json` at all (provisioning copies
-            // `prompts/`, `python/`, `assets/` and `refs/`, never `.bm/`, that
+            // the sources bundle, never `.bm/`, that
             // is the inductor's state), in which case `Settings::load` silently
             // returns `Settings::default()` and the compiled-in model runs
             // instead of the operator's. That is the bug that made a box

@@ -731,8 +731,8 @@ pub struct Complete {
     /// The cast that decided this chapter's segment **filenames**.
     ///
     /// Shipped for the same reason as the script, and it has to be: a
-    /// provisioned worker has no `data/cast-*.json` (provisioning copies
-    /// `prompts/`, `assets/` and `refs/`, never `data/`), so a merge that
+    /// provisioned worker has no `data/cast-*.json` (provisioning copies the
+    /// sources bundle, never `data/`), so a merge that
     /// recomputed the plan locally would name every segment differently from
     /// the render that produced them and report all of them missing.
     /// Digest stage: the full script, so the inductor holds the artifact and
@@ -742,8 +742,8 @@ pub struct Complete {
     /// The cast that decided this chapter's segment **filenames**.
     ///
     /// Shipped for the same reason as the script, and it has to be: a
-    /// provisioned worker has no `data/cast-*.json`, provisioning copies
-    /// `prompts/`, `assets/` and `refs/`, never `data/`, so a merge that
+    /// provisioned worker has no `data/cast-*.json`, provisioning copies the
+    /// sources bundle, never `data/`, so a merge that
     /// recomputed the plan locally would name every segment differently
     /// from the render that produced them and report all of them missing.
     /// Crawl stage: the cleaned chapter text, for the same reason.
@@ -789,8 +789,9 @@ pub const MANUAL_WORKER: &str = "operator";
 /// Provider credentials the offered stage will read, sourced from the
 /// inductor's `.bm/llm.json` (the TUI's `L` screen).
 ///
-/// Workers are provisioned by *copying files*, `prompts/`, `python/`,
-/// `assets/`, `refs/`, and `.bm/` is deliberately not among them: it is the
+/// Workers are provisioned by *copying files* — the sources bundle: prompts,
+/// the registries, the crawlers, the clips a merge box plays — and `.bm/` is
+/// deliberately not among them: it is the
 /// inductor's state, so a remote box has no key of its own. The key travels
 /// with the task instead — narrowed by [`Credentials::for_stage`] to what
 /// the offered stage actually reads, so switching the model on the inductor
@@ -907,8 +908,8 @@ impl Credentials {
 ///
 /// [`TaskOffer::analyzer`] names the *backend*; this names what that backend
 /// runs. Both have to travel, because the worker's copy of `Settings` is not
-/// the operator's: provisioning copies `prompts/`, `python/`, `assets/` and
-/// `refs/` and never `.bm/` (that is the inductor's state), so a remote box has
+/// the operator's: provisioning copies the sources bundle and never `.bm/`
+/// (that is the inductor's state), so a remote box has
 /// **no `.bm/settings.json` at all** and `Settings::load` silently returns
 /// `Settings::default()`.
 ///
@@ -1138,8 +1139,8 @@ pub struct TaskOffer {
     /// The cast that decided this chapter's segment **filenames**.
     ///
     /// Shipped for the same reason as the script, and it has to be: a
-    /// provisioned worker has no `data/cast-*.json`, provisioning copies
-    /// `prompts/`, `assets/` and `refs/`, never `data/`, so a merge that
+    /// provisioned worker has no `data/cast-*.json`, provisioning copies the
+    /// sources bundle, never `data/`, so a merge that
     /// recomputed the plan locally would name every segment differently
     /// from the render that produced them and report all of them missing.
     #[serde(default)]

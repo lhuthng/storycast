@@ -383,8 +383,8 @@ impl Settings {
     ///
     /// The inductor is the single source of truth for what the analyzer runs,
     /// because the alternative is what actually happened: a provisioned worker
-    /// has **no `.bm/settings.json`** — provisioning copies `prompts/`,
-    /// `python/`, `assets/` and `refs/` and never `.bm/`, which is the
+    /// has **no `.bm/settings.json`** — provisioning copies the sources bundle
+    /// and never `.bm/`, which is the
     /// inductor's state — so `Settings::load` falls back to
     /// `Settings::default()` and the *compiled-in* `analyze_models` ran instead
     /// of the operator's. That showed up as a 503 naming a model the operator
@@ -1316,8 +1316,8 @@ mod tests {
     #[test]
     fn the_inductors_analyzer_settings_win_over_the_boxes_own() {
         // The outage: a provisioned worker has no `.bm/settings.json` —
-        // provisioning copies `prompts/`, `python/`, `assets/` and `refs/` and
-        // never `.bm/` — so `Settings::load` hands back the compiled default.
+        // provisioning copies the sources bundle and never `.bm/` — so
+        // `Settings::load` hands back the compiled default.
         let remote_box = Settings::default();
         let inductor = Settings {
             analyze_models: vec!["gemini-3.5-flash-lite".into()],
