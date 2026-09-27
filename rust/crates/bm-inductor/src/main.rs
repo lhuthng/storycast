@@ -68,6 +68,12 @@ enum Cmd {
         /// Rebuild even when already configured.
         #[arg(long)]
         force: bool,
+        /// GitHub `owner/name` whose releases host the model artifact, so the
+        /// box fetches the weights from a CDN instead of receiving them over
+        /// this machine's uplink. Overrides the workspace's `models_release`
+        /// for this run; unset reads that setting, and an unset setting pushes.
+        #[arg(long)]
+        release_repo: Option<String>,
     },
     /// Live cluster dashboard (talks to a running inductor API).
     Tui {
@@ -417,6 +423,9 @@ fn stopped(
 /// `live` streams each log line to the TUI event pane as it happens (slow
 /// steps read as progress, not a stall); `None` keeps collect-only for the
 /// CLI, which prints everything at the end.
+// Each parameter is a distinct fact about one box, and bundling them into an
+// options struct would be a redesign of a funnel three front ends call.
+#[allow(clippy::too_many_arguments)]
 pub fn provision_machine(
     layout: &Layout,
     addr: &str,
@@ -425,6 +434,10 @@ pub fn provision_machine(
     key: Option<String>,
     force: bool,
     live: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    // `owner/name` of the releases hosting the model artifact, for a one-shot
+    // that overrides the workspace setting. `None` means "read the settings",
+    // which is what both the TUI and a plain `provision` want.
+    release_repo: Option<String>,
 ) -> ProvisionOutcome {
     if bm_core::is_local_node(addr) {
         // No mirror to fill: the local worker runs in place from this repo
@@ -514,6 +527,7 @@ pub fn provision_machine(
         force,
         Some(pre),
         live,
+        release_repo.as_deref(),
     );
     // Already streamed live inside `provision`, collect silently here.
     log.lines.append(&mut flow);
@@ -1809,6 +1823,7 @@ async fn cmd_retag(api: &str, dry_run: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_provision(
     layout: Layout,
     addr: String,
@@ -1817,6 +1832,7 @@ async fn cmd_provision(
     key: Option<String>,
     api_port: u16,
     force: bool,
+    release_repo: Option<String>,
 ) -> anyhow::Result<()> {
     // The blocking SSH/rsync flow runs off the async runtime; registration
     // afterwards needs the live API client.
@@ -1825,7 +1841,18 @@ async fn cmd_provision(
     carry_task_policy(&mut m, &layout);
     let out = tokio::task::spawn_blocking({
         let (layout, addr, user) = (layout.clone(), addr.clone(), user.clone());
-        move || provision_machine(&layout, &addr, &user, port, key, force, None)
+        move || {
+            provision_machine(
+                &layout,
+                &addr,
+                &user,
+                port,
+                key,
+                force,
+                None,
+                release_repo,
+            )
+        }
     })
     .await?;
     for line in &out.lines {
@@ -1986,6 +2013,7 @@ async fn main() -> anyhow::Result<()> {
             key,
             api_port,
             force,
+            release_repo,
         } => {
             // A linked box fills every flag it stored; explicit flags win for
             // the rest. Neither is an error until both are missing an address.
@@ -2018,7 +2046,17 @@ async fn main() -> anyhow::Result<()> {
             let key = key
                 .or_else(|| linked.as_ref().and_then(|b| b.key.clone()))
                 .or_else(|| settings.ssh.key.clone());
-            cmd_provision(layout, addr, user, port, key, api_port, force).await
+            cmd_provision(
+                layout,
+                addr,
+                user,
+                port,
+                key,
+                api_port,
+                force,
+                release_repo,
+            )
+            .await
         }
         Cmd::Segments {
             from,
@@ -2631,7 +2669,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let layout = bm_core::Layout::new(&dir);
         for addr in ["127.0.0.1", "localhost", "::1"] {
-            let out = provision_machine(&layout, addr, "thang", 22, None, false, None);
+            let out = provision_machine(&layout, addr, "thang", 22, None, false, None, None);
             assert!(out.ready, "{addr} must always be ready");
             assert!(out.reachable, "{addr} is local — ssh is never involved");
             assert_eq!(out.lines.len(), 1, "{:?}", out.lines);

@@ -73,6 +73,9 @@ pub(crate) enum Command {
     SshUser,
     SshPort,
     Advertise,
+    /// GitHub `owner/name` hosting the baked model artifact: save-only, like
+    /// the ssh defaults. Empty restores the push.
+    ModelsRelease,
     /// How many of one chapter's takes a single render offer carries. Saved to
     /// this workspace's settings; applies to offers made from then on.
     RenderBatch,
@@ -166,6 +169,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["sshuser"], desc: None, cmd: Command::SshUser },
     Word { key: None, names: &["sshport"], desc: None, cmd: Command::SshPort },
     Word { key: None, names: &["advertise", "adv"], desc: Some("the address workers dial back on — set it when they are off the LAN"), cmd: Command::Advertise },
+    Word { key: None, names: &["release", "modelsrelease"], desc: Some("GitHub owner/name whose releases hold the model artifact, so a box fetches the weights from a CDN instead of your uplink (empty = push)"), cmd: Command::ModelsRelease },
     Word { key: None, names: &["batch", "renderbatch"], desc: Some("how many of one chapter's takes one render offer carries (default 5)"), cmd: Command::RenderBatch },
     Word { key: Some('q'), names: &["quit", "exit", "q"], desc: None, cmd: Command::Key(KeyCode::Char('q')) },
     Word { key: None, names: &["inspect"], desc: None, cmd: Command::Key(KeyCode::Char('i')) },
@@ -629,6 +633,18 @@ pub(crate) fn do_command(
                 "Advertised address for workers",
                 "host or host:port as the *workers* see this machine — needed when they are \
                  off the LAN (a cloud box cannot reach a NAT'd 192.168.x.x). Empty restores the guess.",
+                &cur,
+            ));
+        }
+        Command::ModelsRelease => {
+            let cur = app.setting_str("models_release", "");
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::ModelsRelease,
+                "Model artifact release",
+                "GitHub owner/name holding the baked weights as a release (tools/models.sh \
+                 publish). A provisioned box then fetches that 363 MB bundle and verifies it \
+                 itself, instead of receiving 668 MB over this machine's uplink. Empty restores \
+                 the push.",
                 &cur,
             ));
         }

@@ -338,7 +338,26 @@ impl Ssh {
         delete: bool,
         progress: Option<RsyncProgress<'_>>,
     ) -> Result<()> {
-        self.rsync_push_with(src, remote_rel, delete, progress, true)
+        self.rsync_push_with(src, remote_rel, delete, progress, true, &[])
+    }
+
+    /// A push that leaves named members behind.
+    ///
+    /// For the models tree, whose `models.tar.zst` is a *transfer* artifact that
+    /// happens to sit inside the directory: pushing it costs 380 MB per box for
+    /// a file no box reads, on top of the same weights already going over as
+    /// themselves. Patterns are rsync's own and anchored to the transfer root,
+    /// so `/models.tar.zst` means that file and not a same-named file in a
+    /// subdirectory.
+    pub fn rsync_push_excluding(
+        &self,
+        src: &Path,
+        remote_rel: &str,
+        delete: bool,
+        progress: Option<RsyncProgress<'_>>,
+        excludes: &[&str],
+    ) -> Result<()> {
+        self.rsync_push_with(src, remote_rel, delete, progress, true, excludes)
     }
 
     /// The same push with rsync's own `-z` left off.
@@ -353,7 +372,7 @@ impl Ssh {
         remote_rel: &str,
         progress: Option<RsyncProgress<'_>>,
     ) -> Result<()> {
-        self.rsync_push_with(src, remote_rel, false, progress, false)
+        self.rsync_push_with(src, remote_rel, false, progress, false, &[])
     }
 
     fn rsync_push_with(
@@ -363,6 +382,7 @@ impl Ssh {
         delete: bool,
         progress: Option<RsyncProgress<'_>>,
         compress: bool,
+        excludes: &[&str],
     ) -> Result<()> {
         if self.local {
             return self.rsync_push_local(src, remote_rel);
@@ -375,6 +395,10 @@ impl Ssh {
         ];
         if delete {
             args.push("--delete".into());
+        }
+        for pattern in excludes {
+            args.push("--exclude".into());
+            args.push((*pattern).to_string());
         }
         if progress.is_some() {
             // Per-file `%` (openrsync knows no `progress2`): the tracker

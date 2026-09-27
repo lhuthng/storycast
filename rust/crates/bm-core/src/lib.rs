@@ -21,6 +21,7 @@
 //! pipeline now runs across a cluster instead of on one box.
 
 pub mod ambience;
+pub mod artifact;
 pub mod assemble;
 pub mod audio_pool;
 pub mod cast;

@@ -7,6 +7,95 @@ use super::ssh::{RsyncProgress, Ssh};
 use super::stamp::{compute_provision_stamp, parse_stamp, ProvisionStamp};
 use super::{REMOTE_DIR, TTS_PORT};
 
+/// The line the box is asked to run, and the exit codes it answers with.
+///
+/// Split out of the ssh call so both halves are testable without one: the
+/// script says *what* is asked for, [`classify_fetch`] says what an answer
+/// means, and neither needs a box, a network or a `$HOME` to point somewhere
+/// temporary.
+///
+/// The codes are **20 and 21, not 2 and 3**, because `clap` exits 2 on a usage
+/// error — and the subcommand it does not recognise is exactly what an agent
+/// predating `fetch-artifact` answers. That has to read as *absence* (fall back
+/// to the push), never as *corrupt bytes* (stop), so the codes sit above
+/// everything the toolchain emits on its own and anything unrecognised is
+/// treated as absence.
+const EXIT_LANDED: i32 = 0;
+const EXIT_CORRUPT: i32 = 20;
+const EXIT_UNREACHABLE: i32 = 21;
+
+fn fetch_script(release: &crate::artifact::ModelsRelease) -> String {
+    format!(
+        "~/bm-worker/bm-agent fetch-artifact {url} ~/bm-worker/models --expect {hash}",
+        url = shell_quote(&release.url),
+        hash = release.hash,
+    )
+}
+
+/// Read a fetch's exit code as the contract it is.
+///
+/// `0` landed, `20` is corruption and `21` is absence, and the difference is the
+/// whole design: `21` falls back to the push, `20` never does. Anything else — a
+/// box too old to have the subcommand, an ssh that died mid-run — is treated as
+/// absence, because the push is a real answer to "I could not fetch it" and
+/// only *wrong bytes* are a reason to stop.
+fn classify_fetch(
+    code: i32,
+    stdout: &str,
+    stderr: &str,
+    tag: &str,
+) -> std::result::Result<String, FetchOutcome> {
+    let said = |fallback: &str| {
+        let t = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        crate::util::head_chars(if t.is_empty() { fallback } else { &t }, 200)
+    };
+    match code {
+        EXIT_LANDED => Ok(format!(
+            "models from the release {tag} ({})",
+            crate::util::head_chars(stdout.trim(), 120)
+        )),
+        EXIT_CORRUPT => Err(FetchOutcome::Corrupt(said("no detail"))),
+        EXIT_UNREACHABLE => Err(FetchOutcome::Unreachable(said("no detail"))),
+        other => Err(FetchOutcome::Unreachable(format!(
+            "bm-agent fetch-artifact exited {other} ({})",
+            said("no detail")
+        ))),
+    }
+}
+
+/// The one member of `models/` a push must leave behind.
+///
+/// `models.tar.zst` is the *transfer* artifact: 380 MB that stands for the
+/// 668 MB of weights next to it. A box that is being pushed the directory has
+/// no use for a second copy of the same tree, and a box that fetched a bundle
+/// has the extracted one — so the push skips it in both directions, which is
+/// also what keeps `--delete` from putting one back.
+const MODELS_PUSH_EXCLUDES: &[&str] = &["/models.tar.zst"];
+
+/// How a release fetch ended, in the two shapes the caller must treat
+/// differently.
+#[derive(Debug)]
+enum FetchOutcome {
+    /// The artifact was not there. The push is the answer.
+    Unreachable(String),
+    /// Bytes arrived and are not the ones asked for. Stop.
+    Corrupt(String),
+}
+
+/// Single-quote a value for the remote `sh -c`.
+///
+/// The release URL is built from a configured `owner/name` and a hash, so it is
+/// already restricted to characters no shell would read as syntax — but the
+/// command is assembled as a string and handed to `sh`, and a helper that only
+/// works for the input it happens to get today is not a helper.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 /// One labelled rsync progress stream off the shared live sender: `None`
 /// keeps the push silent.
 fn progress<'a>(
@@ -645,10 +734,52 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
         Ok(stdout.trim().to_string())
     }
 
-    /// Push the baked `models/` directory, the weights the sidecar reads.
+    /// Ask the box to take the artifact itself, and read the exit code as the
+    /// contract `bm-agent fetch-artifact` documents: `0` landed, `2` wrong
+    /// bytes, `3` not there.
+    ///
+    /// The agent is what fetches, not a `curl | zstd | tar` line in a heredoc,
+    /// for the reason the artifact exists at all: a shell pipeline cannot verify
+    /// seventeen files and then swap a directory in two renames, and a
+    /// half-extracted `models/` is the failure this was built to remove. The
+    /// agent also carries the decompressor, so the box needs no `zstd` package
+    /// and there is no second cross-built binary to version-gate.
+    fn fetch_models(
+        &self,
+        release: &crate::artifact::ModelsRelease,
+        live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> std::result::Result<String, FetchOutcome> {
+        if let Some(l) = live {
+            let _ = l.send(format!(
+                "[{}] models: fetching {} from the release (a CDN, not this machine's uplink)",
+                self.target, release.tag
+            ));
+        }
+        // Bounded well past the transfer: 363 MB on a 200 KB/s link is half an
+        // hour, and the timeout is here to catch a wedged ssh rather than to
+        // second-guess a slow box.
+        let (code, stdout, stderr) = self
+            .run(&fetch_script(release), 3600)
+            .map_err(|e| FetchOutcome::Unreachable(e.to_string()))?;
+        classify_fetch(code, &stdout, &stderr, &release.tag)
+    }
+
+    /// Put the baked `models/` directory on the box: from the release when one
+    /// is configured and reachable, over the push otherwise.
     ///
     /// 668 MB, content-addressed by the stamp's `tts_hash`, so a re-provision
-    /// with nothing changed costs one rsync delta rather than a transfer.
+    /// with nothing changed costs nothing either way.
+    ///
+    /// **A release, when there is one.** The weights are the one payload that
+    /// is identical on every machine and changes only when the operator
+    /// re-bakes them, so they are the one payload worth naming: the box
+    /// downloads `models.tar.zst` from a GitHub release tagged by the manifest
+    /// hash and verifies it itself, and 363 MB comes off a CDN instead of this
+    /// house's uplink, once per box instead of once per operator. The split of
+    /// failures is what makes the fallback safe — *unreachable* (no such
+    /// release, no route, a 5xx) falls back to the push below, and says so;
+    /// *wrong bytes* stops, because pushing the same wrong bytes again would
+    /// only hide the disagreement.
     ///
     /// **What arrives is verified, not assumed.** rsync exiting 0 says the
     /// *transfer* worked, which is weaker than "the weights are intact": a box
@@ -661,6 +792,7 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
     pub fn install_models(
         &self,
         root: &Path,
+        release: Option<&crate::artifact::ModelsRelease>,
         live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<String> {
         let src = root.join("models");
@@ -670,7 +802,51 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
                 src.display()
             );
         }
-        self.rsync_push(&src, "models", true, progress(live, "models"))?;
+        if let Some(r) = release {
+            match self.fetch_models(r, live) {
+                Ok(line) => {
+                    // The checksum list is the box's own statement about its
+                    // install, and the fetch has already verified every file
+                    // against the same manifest, so it is written either way:
+                    // a later push of a *different* bake then has a list to
+                    // check against.
+                    let sums = model_checksums(&src);
+                    if !sums.is_empty() {
+                        self.write_model_checksums(&sums)?;
+                    }
+                    return Ok(line);
+                }
+                Err(FetchOutcome::Corrupt(e)) => {
+                    // Not a fallback trigger. The bytes disagreed with the
+                    // manifest the operator's own bake declares, and pushing
+                    // them would be the same bytes with a worse provenance.
+                    anyhow::bail!(
+                        "the release artifact does not verify and was not put in place: {e} \
+                         (nothing was changed on this box; re-pack with tools/models.sh pack \
+                         and re-publish, or clear `models_release` to push the directory)"
+                    );
+                }
+                Err(FetchOutcome::Unreachable(e)) => {
+                    if let Some(l) = live {
+                        let _ = l.send(format!(
+                            "[{}] release {} unreachable ({}), pushing models/ instead",
+                            self.target, r.tag, e
+                        ));
+                    }
+                }
+            }
+        }
+        // `models.tar.zst` stays behind: it is the transfer artifact, and a box
+        // that is being pushed the directory has no use for a second copy of
+        // the same 668 MB. Excluding it also keeps `--delete` from putting one
+        // back on a box that fetched a bundle.
+        self.rsync_push_excluding(
+            &src,
+            "models",
+            true,
+            progress(live, "models"),
+            MODELS_PUSH_EXCLUDES,
+        )?;
         let sums = model_checksums(&src);
         if !sums.is_empty() {
             self.write_model_checksums(&sums)?;
@@ -988,6 +1164,10 @@ pub fn provision(
     force: bool,
     initial_probe: Option<Probe>,
     live: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    // `owner/name` of the releases that host the model artifact. `None` reads
+    // it from this workspace's `settings.json`, which is where the operator
+    // sets it; a one-shot provision passes it to override.
+    release_repo: Option<&str>,
 ) -> (Probe, Vec<String>) {
     let ssh = Ssh::for_machine(m);
     // Cloned, not moved: the install steps below borrow the original for
@@ -1009,6 +1189,21 @@ pub fn provision(
     if !probe.reachable {
         log.push(format!("[{}] unreachable, aborting provision", m.id));
         return (probe, log.lines);
+    }
+
+    // Where the weights come from, resolved once: the release named by the
+    // operator, or nothing. A workspace with no `models_release` and no
+    // `--release-repo` keeps the push, which is the safe direction — a box
+    // that cannot reach a release is still a box that can be provisioned.
+    let repo = release_repo
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::config::Settings::load(&layout.settings()).models_release);
+    let release = crate::artifact::ModelsRelease::resolve(&layout.root, &repo);
+    if repo.trim().is_empty() {
+        log.push(format!(
+            "[{}] no models release configured, the weights travel over the push",
+            m.id
+        ));
     }
 
     // Before anything is pushed: the sources bundle is `tar` + `zstd`, so the
@@ -1157,7 +1352,7 @@ pub fn provision(
             log.push(format!("[{}] models in sync (cache match)", m.id));
         } else {
             log.push(format!("[{}] pushing models/voice store", m.id));
-            match ssh.install_models(&layout.root, live.as_ref()) {
+            match ssh.install_models(&layout.root, release.as_ref(), live.as_ref()) {
                 Ok(v) => {
                     models_pushed = true;
                     log.push(format!("[{}] {v}", m.id));
@@ -1224,7 +1419,7 @@ pub fn provision(
             log.push(format!("[{}] models in sync (cache match)", m.id));
         } else {
             log.push(format!("[{}] pushing models (~668 MB)", m.id));
-            match ssh.install_models(&layout.root, live.as_ref()) {
+            match ssh.install_models(&layout.root, release.as_ref(), live.as_ref()) {
                 Ok(v) => {
                     models_pushed = true;
                     log.push(format!("[{}] {v}", m.id));
@@ -1588,6 +1783,76 @@ mod tests {
         for script in [opencode_script(true), opencode_script(false)] {
             assert!(script.contains(r#"command -v opencode >/dev/null 2>&1 && { echo "OPENCODE-OK (present)"; exit 0; }"#));
         }
+    }
+
+    /// The exit code is the whole contract between the box and this function,
+    /// so it is pinned here rather than left to a comment in two crates: `3`
+    /// falls back to the push, `2` does not, and nothing else is mistaken for
+    /// corruption.
+    #[test]
+    fn a_fetch_exit_code_says_whether_the_push_may_try_again() {
+        let tag = "models-vdda4efee13df";
+        let ok = classify_fetch(EXIT_LANDED, "FETCH-OK (16 files, 667 MiB)", "", tag);
+        assert!(ok.unwrap().contains("models-vdda4efee13df"));
+
+        // Absence: the artifact is not published, the network is down, the URL
+        // 404s. The push is a real answer to any of those.
+        let absent = classify_fetch(EXIT_UNREACHABLE, "", "FETCH-UNREACHABLE (HTTP 404)", tag);
+        assert!(matches!(absent, Err(FetchOutcome::Unreachable(_))));
+
+        // Wrong bytes: the one answer that must stop, because pushing the same
+        // bytes again would only hide the disagreement.
+        let wrong = classify_fetch(EXIT_CORRUPT, "", "FETCH-CORRUPT (tts.onnx: sha256 …)", tag);
+        match wrong {
+            Err(FetchOutcome::Corrupt(m)) => assert!(m.contains("tts.onnx"), "{m}"),
+            other => panic!("corruption must not be a fallback: {other:?}"),
+        }
+
+        // Anything else is absence, not corruption: a box too old to have the
+        // subcommand has not said anything about the bytes. `2` is in this list
+        // deliberately — that is what `clap` exits with on an unrecognised
+        // subcommand, so it is the exact shape of "the agent predates this".
+        for code in [1_i32, 2, 126, 127, 255] {
+            match classify_fetch(code, "", "", tag) {
+                Err(FetchOutcome::Unreachable(m)) => assert!(m.contains(&code.to_string()), "{m}"),
+                other => panic!("exit {code} must be absence: {other:?}"),
+            }
+        }
+    }
+
+    /// The line the box runs, and the one thing that could make it do something
+    /// other than fetch: it is a string handed to `sh -c`.
+    #[test]
+    fn the_fetch_line_asks_for_the_tagged_bundle_and_quotes_the_url() {
+        let hash = "dda4efee13df0eb2b30ef45eb548741b5af633f6d55712e30f4da574b357c552";
+        let r = crate::artifact::ModelsRelease::for_repo("lhuthng/storycast", hash).unwrap();
+        let script = fetch_script(&r);
+        assert!(script.contains("~/bm-worker/bm-agent fetch-artifact"), "{script}");
+        assert!(script.contains(&format!("--expect {hash}")), "{script}");
+        assert!(
+            script.contains("~/bm-worker/models"),
+            "the destination is the models dir itself: {script}"
+        );
+        // Quoted, because the URL is a string in a `sh -c`. A repo the parser
+        // accepts cannot produce a quote today; a helper that only works for
+        // today's input is not a helper.
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        assert_eq!(shell_quote("plain"), "'plain'");
+    }
+
+    /// The push must not carry the bundle it is standing in for.
+    #[test]
+    fn the_models_push_leaves_the_transfer_artifact_behind() {
+        assert_eq!(
+            MODELS_PUSH_EXCLUDES,
+            &["/models.tar.zst"],
+            "the bundle is 380 MB of the same 668 MB, and no box reads it"
+        );
+        assert_eq!(
+            MODELS_PUSH_EXCLUDES[0].trim_start_matches('/'),
+            crate::artifact::BUNDLE_NAME,
+            "and it is the one file `tools/models.sh pack` writes"
+        );
     }
 
     #[test]

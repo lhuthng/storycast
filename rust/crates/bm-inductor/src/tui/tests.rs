@@ -4441,6 +4441,38 @@ fn ssh_default_commands_save_validate_and_clear() {
 }
 
 #[test]
+fn the_models_release_setting_saves_a_repo_and_refuses_one_that_is_not() {
+    // The setting decides whether a box fetches 363 MB from a CDN or receives
+    // 668 MB over the operator's uplink, and a typo in it is silent in exactly
+    // the way that matters: the URL 404s, the fetch reports "unreachable", and
+    // the push quietly happens instead. So the shape is checked *here*, by the
+    // same parser the URL is built from, while the operator's typing is still
+    // on screen.
+    let dir = std::env::temp_dir().join("bm-models-release-save");
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut app = App::new("http://x");
+    app.layout = bm_core::Layout::new(&dir);
+    let load = || bm_core::config::Settings::load(&bm_core::Layout::new(&dir).settings());
+
+    let msg = save_app_setting(&app, TextKind::ModelsRelease, "lhuthng/storycast").unwrap();
+    assert!(msg.contains("lhuthng/storycast"), "{msg}");
+    assert_eq!(load().models_release, "lhuthng/storycast");
+
+    for bad in ["storycast", "a/b/c", "own er/name"] {
+        let err = save_app_setting(&app, TextKind::ModelsRelease, bad).unwrap_err();
+        assert!(err.contains("owner/name"), "`{bad}`: {err}");
+    }
+    // A refused value never lands, so the good one above is still in force.
+    assert_eq!(load().models_release, "lhuthng/storycast");
+
+    // Empty is the push, and it has to be reachable without a text editor:
+    // that is the setting every workspace had before this existed.
+    let msg = save_app_setting(&app, TextKind::ModelsRelease, "  ").unwrap();
+    assert!(msg.contains("push"), "{msg}");
+    assert_eq!(load().models_release, "");
+}
+
+#[test]
 fn render_batch_parses_its_bounds_and_saves_to_this_workspaces_settings() {
     // The knob's own rules in one place. `0` is the value that would deadlock
     // the scheduler, an offer of no takes assigns no row, so the chapter never

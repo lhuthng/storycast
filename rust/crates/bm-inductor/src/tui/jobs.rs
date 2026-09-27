@@ -865,6 +865,11 @@ pub(crate) async fn job_provision(
             key,
             force,
             Some(live),
+            // `None` reads `models_release` out of the workspace settings, which
+            // is where the run screen writes it — one source of truth for both
+            // front ends rather than a value copied through the TUI and stale
+            // the moment somebody edits the file.
+            None,
         )
     })
     .await;

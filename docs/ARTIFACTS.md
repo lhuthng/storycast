@@ -105,7 +105,7 @@ worse than a receipt that omits the field.
 **The split, concretely:**
 
 ```
-artifact  models/<hash>.tar.zst          17 files, 667.5 MB → 363 MB compressed
+artifact  models.tar.zst                 17 files, 667.5 MB → 363 MB compressed
          manifest.json + the 16 weight files
          pinned by a version, verified per file, never rewritten in place
 
@@ -182,43 +182,109 @@ models-vdda4efee13df   models.tar.zst   380,099,956 bytes (363 MiB, level 3)
 ```
 
 and the round trip was checked by downloading it back: the asset's sha256 is
-byte-identical to the local bundle, and `verify` passes on it.
+byte-identical to the local bundle.
 
-## Fetching, on the box, not built
+**That first asset also carried 17 AppleDouble sidecars** — see
+[Fetching](#fetching-on-the-box-done) — so it has been re-uploaded over the same
+tag, and the round trip was checked again the hard way: `bm-agent fetch-artifact`
+against the live public URL, which landed `FETCH-OK (16 files, 667 MiB,
+models-vdda4efee13df)` at 18 MiB/s off the CDN. If a bundle ever needs
+re-cutting, the same tag is the right one to clobber and not a new one:
 
-This is the half that remains. What it needs is *less* than this document first
-assumed: **the box already links `reqwest`** (with `blocking`), so there is no
-`curl` to require and no shell-out to write. What is missing is extraction
-`bm-agent` links no `tar` and no `zstd`, so the artifact cannot be opened yet.
+```bash
+tools/models.sh pack && tools/models.sh verify
+gh release upload models-v<hash> models/models.tar.zst --clobber
+```
 
-`bm-agent` gains a subcommand:
+The tag names the *contents* by the manifest hash, and the contents have not
+changed — only the archive around them, which is not byte-addressed and never
+was.
+
+## Fetching, on the box, **done**
+
+`bm-core::artifact` names the artifact, and `bm-agent` takes delivery of it:
 
 ```
-bm-agent fetch-artifact <url> <dest-dir>
+bm-agent fetch-artifact <url> <models-dir> [--expect <manifest-hash>]
 ```
 
-which streams to a temp file beside the destination, decompresses, verifies every
-file against the manifest's per-file sha256, and only then `rename()`s the
+It streams to a file beside the destination, decompresses, verifies every file
+against the manifest that travelled in the same archive — in **both**
+directions, so a member nobody listed is a failure too — and only then swaps the
 directory into place.
 
-Two decisions inside that:
+What is set, and where:
+
+| thing | value |
+|---|---|
+| release repo | `settings.json`'s `models_release` (`owner/name`), the TUI's `:release`, or `--release-repo` on a one-shot `bm-inductor provision` |
+| the tag | `models-v<first 12 of the manifest hash>`, computed on the inductor from its own `models/manifest.json` |
+| the URL | `https://github.com/<owner>/<name>/releases/download/<tag>/models.tar.zst` |
+| the hash check | `--expect <full manifest hash>`, the one the inductor read — *not* the one that arrived |
+| exit `0` | landed and verified; the push is skipped |
+| exit `20` | bytes arrived and disagree — **no fallback**, the provision stops and names the file |
+| exit `21` | the artifact was not there — the log says so and the rsync push runs instead |
+
+The codes are 20 and 21 rather than 2 and 3 because `clap` exits **2** on a usage
+error, and an unrecognised subcommand is exactly what an agent predating this
+one answers. Read as corruption that would stop a provision which should have
+fallen back to the push, and say the one thing that is not true.
+
+Three decisions inside that, and they are still the right ones:
 
 **The agent does the decompression, not a shipped `zstd` binary.** The `tar`
-crate is pure Rust; for the compressor, `ruzstd` is the pure-Rust decoder while
-the `zstd` crate binds the C library. Either fits, this repo already builds C
-where it earns its keep (`sea-g2p`, and the ONNX Runtime it links), so a C build
-dependency would not be new. A shipped per-target `zstd` *binary* is the option to
-reject: that is a second cross-built artifact to version-gate, reproducing exactly
-the `bm-tts` staleness bug that was just fixed, to save a megabyte. And
-`apt-get install zstd` on the box would be a second `sudo -n` gamble alongside the
-ffmpeg one.
+crate is pure Rust, and so is `ruzstd`, the decoder — so the cross-built agent
+gains no C dependency and the box needs no `zstd` package. A shipped per-target
+`zstd` *binary* is the option rejected: that is a second cross-built artifact to
+version-gate, reproducing exactly the `bm-tts` staleness bug that was just fixed,
+to save a megabyte. And `apt-get install zstd` on the box would be a second
+`sudo -n` gamble alongside the ffmpeg one.
 
 **The box does not fetch a tarball over a directory it is using.** A failed
 download that leaves a partial `models/` in place is the failure mode this design
-exists to remove, and the current code cannot even detect it: `MODELS-OK` tests
-only that `manifest.json` **exists**. So today a box that dies mid-rsync passes
-its own readiness check. Fetch-to-temp, verify all 17 hashes, rename is what
-makes a half-fetched box unrepresentable rather than merely unlikely.
+exists to remove, and the old code could not even detect it: `MODELS-OK` tested
+only that `manifest.json` **exists**. So a box that died mid-rsync passed its own
+readiness check. Extract beside, verify all 17 hashes, two `rename`s: a
+half-fetched tree is unrepresentable rather than merely unlikely, and a crash
+between the renames leaves the old tree beside the new one, never a mixed one.
+
+**Absence falls back, corruption does not.** A GitHub incident, a 404 from a tag
+nobody cut, a box behind a firewall — the push is a real answer to all of them,
+and a box that cannot reach a release is still a box that can be provisioned.
+Bytes that disagree with the manifest are a different thing: retrying harder, or
+pushing the same bytes again, is how a corrupt tree becomes a permanent one. So
+exit `20` stops, and the only way out is a re-pack or a cleared setting.
+
+Two things this found, both of which were true before it existed:
+
+- **The first published bundle carries 17 AppleDouble sidecars.**
+  `models-vdda4efee13df` was packed by macOS `tar` (libarchive), which writes a
+  `._name` sidecar for every member carrying an extended attribute and *hides
+  them from its own `tar -t`*. A Linux box unpacked them as 17 real files, and
+  the "nothing unlisted" check refuses that bundle by name — which is how a
+  packer nobody audited gets caught. `tools/models.sh pack` now sets
+  `COPYFILE_DISABLE=1` (the env var, not `--no-mac-metadata`, which GNU tar
+  rejects as unknown). The same bug shipped 115 sidecars per push in the sources
+  bundle before that was fixed.
+- **The push no longer carries the bundle.** `models.tar.zst` sits inside
+  `models/`, so the rsync was shipping 380 MB that stands for the 668 MB
+  travelling next to it — to a box that has no use for a second copy of the same
+  tree. It is now excluded in both directions, which also stops `--delete` from
+  putting one back on a box that fetched a bundle.
+
+Verified on the real artifact over a local HTTP server: the published bundle is
+refused with the 17 names, the re-packed one lands — `FETCH-OK (16 files, 667
+MiB, models-vdda4efee13df)` — and a bundle for another bake leaves the existing
+`models/` untouched.
+
+Compression is worth doing here, and the measurement is the reason to be
+specific about the level:
+
+```
+668 MiB => 363 MiB   (54.31%)   zstd -3, 1.25s on an M-series laptop
+```
+
+fp32 ONNX weights compress nearly 2:1, they are not the incompressible blob that
 
 Compression is worth doing here, and the measurement is the reason to be
 specific about the level:

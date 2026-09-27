@@ -18,3 +18,9 @@ encoding_rs = { workspace = true }
 mlua = { workspace = true }
 rquickjs = { workspace = true }
 scraper = { workspace = true }
+# The model artifact: a box opens the bundle itself instead of receiving the
+# weights through the operator's uplink. Both halves are pure Rust, so the
+# cross-built agent gains no C dependency and no shipped `zstd` binary to
+# version-gate — the failure mode bm-tts already taught us about.
+tar = { workspace = true }
+ruzstd = { workspace = true }

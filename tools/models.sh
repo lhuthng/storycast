@@ -8,11 +8,12 @@
 #                                     gh release create models-v<hash> with the bundle
 #   tools/models.sh list              the local bundle, its hash and size
 #
-# The bundle is transfer and archive only: provisioning still rsyncs the
-# directory, and the unpacked tree is what the sidecar reads. This exists so a
-# new box can fetch 363 MB from a CDN instead of receiving 668 MB from your
+# The bundle is transfer and archive only: provisioning falls back to rsyncing
+# the directory, and the unpacked tree is what the sidecar reads. This exists so
+# a new box can fetch 363 MB from a CDN instead of receiving 668 MB from your
 # connection, and verify what arrived against a manifest that travelled in the
-# same archive. The design is docs/ARTIFACTS.md; the fetch half is not built.
+# same archive. The design is docs/ARTIFACTS.md; `bm-agent fetch-artifact` is
+# the half that takes delivery.
 #
 # What goes in, and what deliberately does not: the files `models/manifest.json`
 # lists — the 16 immutable weights — plus that manifest. `models/voices.json`
@@ -114,8 +115,17 @@ case "$cmd" in
     # -T reads names relative to -C, so the archive holds `manifest.json` and the
     # weights at the top level — no `models/` prefix to strip on the way out,
     # which is what lets the fetch side untar straight into the worker root.
+    #
+    # COPYFILE_DISABLE=1 because macOS `tar` is libarchive, and for every member
+    # carrying an extended attribute it writes a `._name` AppleDouble sidecar
+    # into the archive. Its own `tar -t` *hides* them, so the packing machine
+    # sees a clean 17-member bundle; a Linux box does not, and unpacked them as
+    # 17 junk files. The first published bundle (models-vdda4efee13df) carries
+    # exactly that, and the fetch side refuses it by name — which is the check
+    # working, on a packer that was never audited. The env var, not
+    # `--no-mac-metadata`, which GNU tar would reject as unknown.
     tmp="$bundle.tmp"
-    tar -cf - -C "$models" -T "$members" | zstd -"$LEVEL" -o "$tmp"
+    COPYFILE_DISABLE=1 tar -cf - -C "$models" -T "$members" | zstd -"$LEVEL" -o "$tmp"
     mv "$tmp" "$bundle"
     hash=$(manifest_hash "$manifest")
     printf 'packed %s  (%s at level %s)\n' "$bundle" "$(du -h "$bundle" | cut -f1)" "$LEVEL"

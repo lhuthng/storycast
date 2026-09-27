@@ -22,6 +22,10 @@ pub(crate) enum TextKind {
     /// The address workers should dial (`:advertise`): save-only, like the ssh
     /// defaults. Empty clears it back to the routing-table guess.
     Advertise,
+    /// GitHub `owner/name` hosting the model artifact (`:release`): save-only.
+    /// Empty means the weights are pushed to each box instead of fetched from
+    /// a release, which is what every box did before the setting existed.
+    ModelsRelease,
     /// Render batch size (`:batch`): how many of one chapter's takes a single
     /// offer carries. Save-only, like the ssh defaults — it is read by the
     /// scheduler when it builds the next offer, so nothing is dispatched.

@@ -383,6 +383,25 @@ pub(crate) fn save_app_setting(
             settings.ssh.port = port;
             format!("ssh port default saved: {port}")
         }
+        TextKind::ModelsRelease => {
+            // Validated by the same parser the URL builder uses, so a value
+            // that saves is a value that produces a release URL — rather than a
+            // setting that quietly sends every box down the push because the
+            // repo name was wrong.
+            let repo = buf.trim();
+            if repo.is_empty() {
+                settings.models_release = String::new();
+                "models release cleared — the weights travel over the push again".to_string()
+            } else {
+                bm_core::artifact::ModelsRelease::for_repo(
+                    repo,
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                )
+                .map_err(|e| e.to_string())?;
+                settings.models_release = repo.to_string();
+                format!("boxes will fetch the weights from {repo} releases")
+            }
+        }
         TextKind::Advertise => {
             // Empty clears it back to the sentinel, which is the only way to
             // undo a wrong address without hand-editing settings.json.

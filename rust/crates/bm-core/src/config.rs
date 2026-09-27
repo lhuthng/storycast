@@ -238,6 +238,19 @@ pub struct Settings {
     /// addresses reaches each box — right on a LAN, and useless from a cloud
     /// worker, which is what this field is for.
     pub advertise: String,
+    /// `owner/name` of the GitHub Releases that host the baked model artifact.
+    ///
+    /// The weights are identical on every box and change only when the
+    /// operator re-bakes them, so they are the one payload worth naming:
+    /// `tools/models.sh publish` cuts a release tagged by the manifest hash and
+    /// a provisioned box downloads that bundle and verifies it itself, instead
+    /// of 668 MB arriving over this machine's uplink once per box.
+    ///
+    /// Empty means the push, which is what every workspace had before this
+    /// field existed and what a box behind a firewall that blocks GitHub
+    /// still gets. Not a secret and not per-box: it names a public release.
+    #[serde(default)]
+    pub models_release: String,
     /// Minutes with nothing left to do before the cluster shuts itself down.
     ///
     /// The inductor arms it once the queue has been empty this long, and then
@@ -330,6 +343,7 @@ impl Default for Settings {
             local_model: "gemma-4-12b".into(),
             ollama_url: "http://localhost:11434".into(),
             analyze_models: vec!["gemini-3.5-flash".into()],
+            models_release: String::new(),
             model_order: vec![
                 "gemini-3.1-flash-tts-preview".into(),
                 "gemini-2.5-pro-preview-tts".into(),

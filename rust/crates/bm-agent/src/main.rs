@@ -22,7 +22,7 @@ use bm_core::{config::Settings, Layout};
 use bm_proto::{Complete, Heartbeat, Register, TaskOffer};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -98,6 +98,31 @@ enum Cmd {
         #[arg(long, default_value_t = true)]
         json: bool,
     },
+    /// Take delivery of the model artifact from a release, on the box.
+    ///
+    /// The delivery half of `tools/models.sh publish`: download beside the
+    /// destination, verify every file against the manifest that travelled in
+    /// the same archive, and swap the tree into place. The exit code is the
+    /// contract the provisioner reads, and the split is the point:
+    ///
+    /// - `0` landed and verified
+    /// - `20` bytes arrived and are **not** the ones asked for — stop, never
+    ///   fall back to pushing over them
+    /// - `21` the artifact was not there — the caller falls back to the rsync
+    ///
+    /// So a GitHub incident cannot stop a cluster from provisioning, and a
+    /// corrupt artifact cannot be papered over by pushing it again.
+    FetchArtifact {
+        /// Release download URL of a `models.tar.zst`.
+        url: String,
+        /// The models directory itself, e.g. `~/bm-worker/models`.
+        dest: PathBuf,
+        /// The manifest hash the inductor read, which this must agree with.
+        /// Optional: without it the bundle is accepted on its own manifest,
+        /// which proves the archive is self-consistent and nothing more.
+        #[arg(long)]
+        expect: Option<String>,
+    },
 }
 
 /// One entry of the segment inventory: which chapter, which engine, which
@@ -139,6 +164,81 @@ fn set_progress(shared: &Shared, frac: f32, activity: String) {
 // Spawn paths live on `Layout` (`sidecar_binary`, `sidecar_command`) so the
 // inductor's preview path resolves the same tree without a second copy to
 // drift.
+
+/// Exit codes [`Cmd::FetchArtifact`] means by them, named once so the
+/// provisioner's `match` and this function cannot drift apart.
+///
+/// **Not 2 and 3**, and that is not an aesthetic choice: `clap` exits **2** on
+/// a usage error, and the subcommand it does not recognise is exactly what an
+/// agent predating this one answers. Reading that as "the bytes are corrupt"
+/// would stop a provision that should have fallen back to the push, and say the
+/// one thing that is not true. So the codes sit above every exit the toolchain
+/// produces on its own, and anything unrecognised is treated as absence.
+mod fetch_exit {
+    pub const LANDED: i32 = 0;
+    pub const CORRUPT: i32 = 20;
+    pub const UNREACHABLE: i32 = 21;
+}
+
+/// Take delivery of the model artifact, and say what happened on one line.
+///
+/// Progress goes to stderr, throttled, because a 363 MB body on a box with a
+/// 200 KB/s link is minutes of silence otherwise — and the provisioner streams
+/// it, so the operator watching `:prov` sees the download instead of a stall.
+/// `Content-Length` is used when the host sends one and nothing is invented
+/// when it does not: a progress line that guesses its denominator is worse than
+/// one that admits it has none.
+fn fetch_artifact(url: &str, dest: &Path, expect: Option<&str>) -> i32 {
+    use std::time::Instant;
+    let started = Instant::now();
+    let mut last = Instant::now();
+    let tag = expect.map(bm_core::artifact::tag_for);
+    let mut say = |done: u64, total: Option<u64>| {
+        if last.elapsed() < std::time::Duration::from_secs(2) {
+            return;
+        }
+        last = Instant::now();
+        let mb = done as f64 / (1024.0 * 1024.0);
+        let speed = mb / started.elapsed().as_secs_f64().max(0.001);
+        match total {
+            Some(t) => eprintln!(
+                "[fetch] {} {mb:.1}/{:.1} MiB ({:.0}%) at {speed:.1} MiB/s",
+                tag.as_deref().unwrap_or("artifact"),
+                t as f64 / (1024.0 * 1024.0),
+                done as f64 / t as f64 * 100.0
+            ),
+            None => eprintln!(
+                "[fetch] {} {mb:.1} MiB at {speed:.1} MiB/s",
+                tag.as_deref().unwrap_or("artifact")
+            ),
+        }
+    };
+    let r = match expect {
+        Some(hash) => bm_core::artifact::fetch(url, dest, hash, &mut say),
+        // No expectation from the caller: land it, then report the tag the
+        // bundle's own manifest names, which is the only claim available.
+        None => bm_core::artifact::fetch_unpinned(url, dest, &mut say),
+    };
+    match r {
+        Ok(landed) => {
+            println!(
+                "FETCH-OK ({} files, {:.0} MiB, {})",
+                landed.files,
+                landed.bytes as f64 / (1024.0 * 1024.0),
+                landed.tag
+            );
+            fetch_exit::LANDED
+        }
+        Err(bm_core::artifact::FetchError::Unreachable(m)) => {
+            eprintln!("FETCH-UNREACHABLE ({m})");
+            fetch_exit::UNREACHABLE
+        }
+        Err(bm_core::artifact::FetchError::Corrupt(m)) => {
+            eprintln!("FETCH-CORRUPT ({m})");
+            fetch_exit::CORRUPT
+        }
+    }
+}
 
 /// The share of this box's RAM the TTS sidecar may hold before it is recycled.
 /// The loaded model is ~2.85 GB (about 36% of an 8 GiB box), so this is a
@@ -2035,9 +2135,25 @@ fn default_worker_id(root: &std::path::Path) -> String {
     format!("{}-{}", hostname_simple(), worker_alias_for(root))
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Split from `main` so the artifact fetch can run with no tokio runtime at
+/// all.
+///
+/// Two reasons, both of them panics if ignored: `reqwest::blocking` refuses to
+/// run inside an async context, and `process::exit` from inside one drops the
+/// runtime on the way out. The fetch is a synchronous, self-contained
+/// download, so it does not belong on that side of the boundary.
+fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Handled before the layout is resolved, too: the box this runs on has
+    // `~/bm-worker` and no book, and a fetch refused for want of a workspace
+    // would fail for a reason that has nothing to do with the fetch.
+    if let Cmd::FetchArtifact { url, dest, expect } = &cli.cmd {
+        std::process::exit(fetch_artifact(url, dest, expect.as_deref()));
+    }
+    tokio::runtime::Runtime::new()?.block_on(run(cli))
+}
+
+async fn run(cli: Cli) -> Result<()> {
     let layout = match cli.root {
         // Same resolution the inductor does: `--root` names the *repo*, and
         // the workspace pointer inside it decides where this book's settings,
@@ -2166,6 +2282,10 @@ async fn main() -> Result<()> {
             let manifest = segment_manifest(&layout.audio());
             println!("{}", serde_json::to_string(&manifest)?);
         }
+        // Already handled above, before a layout was resolved — this arm is
+        // here for exhaustiveness, and the `unreachable!` is the compiler
+        // being told so rather than left to discover it.
+        Cmd::FetchArtifact { .. } => unreachable!("handled before the layout is resolved"),
     }
     Ok(())
 }
