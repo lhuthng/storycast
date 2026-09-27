@@ -342,6 +342,7 @@ pub fn validate_script(
         .ok_or_else(|| anyhow!("no segments"))?;
     let known = known_names(bible, context);
 
+    let mut has_speakable_segment = false;
     for (i, s) in segments.iter().enumerate() {
         // A sound item is not a line and has nothing to validate here — but it
         // is also the one item that must never be spoken, so it is skipped
@@ -361,6 +362,7 @@ pub fn validate_script(
         if text.is_empty() {
             anyhow::bail!("segment {i}: empty text");
         }
+        has_speakable_segment |= crate::util::has_speakable_content(text);
         // Only the engine's three emotion cues may stand in brackets —
         // anything else is spoken aloud literally downstream.
         for tag in inline_tags(text) {
@@ -370,6 +372,9 @@ pub fn validate_script(
                 );
             }
         }
+    }
+    if !has_speakable_segment {
+        anyhow::bail!("script has no speakable content to render");
     }
 
     // The music field is the *only* thing that decides a track, so it is a
@@ -1158,6 +1163,43 @@ mod tests {
         // Invented tags are read aloud downstream — that is why they fail here.
         let err = ok("Hắn [khóc].").unwrap_err();
         assert!(err.to_string().contains("voice tag"), "{err}");
+    }
+
+    #[test]
+    fn validate_allows_a_punctuation_line_when_the_script_has_speech() {
+        let script = json!({
+            "segments": [
+                {"speaker": "Narrator", "text": ","},
+                {"speaker": "Narrator", "text": "A spoken line."}
+            ],
+            "roster": ["Narrator"]
+        });
+        validate_script(
+            &script,
+            &json!({"characters": []}),
+            &ctx_of(&script),
+            &pal(),
+        )
+        .unwrap();
+
+        let only_punctuation = json!({
+            "segments": [{"speaker": "Narrator", "text": ","}],
+            "roster": ["Narrator"]
+        });
+        let err = validate_script(
+            &only_punctuation,
+            &json!({"characters": []}),
+            &ctx_of(&only_punctuation),
+            &pal(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no speakable content"), "{err}");
+
+        let cue = json!({
+            "segments": [{"speaker": "Narrator", "text": "[cười]"}],
+            "roster": ["Narrator"]
+        });
+        validate_script(&cue, &json!({"characters": []}), &ctx_of(&cue), &pal()).unwrap();
     }
 
     #[test]

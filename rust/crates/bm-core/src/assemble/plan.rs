@@ -24,7 +24,9 @@ pub struct Run {
 /// - the embedded chapter headline is dropped (the synthetic title run speaks
 ///   it instead), and
 /// - the script's **sound items are lifted out of the speech**, leaving
-///   `speech` as lines and only lines.
+///   `speech` as lines and only lines, and
+/// - detached punctuation-only lines are folded into the previous speech line,
+///   so punctuation stays in the text without getting a TTS take of its own.
 ///
 /// A `segments` array is a sequence of *items*, and an item is one of two
 /// kinds. A line carries a `speaker` and a `text`. A **sound** carries neither
@@ -52,11 +54,14 @@ pub struct Planned {
 }
 
 impl Planned {
-    /// Drop the headline, then separate lines from sounds.
+    /// Drop the headline, lift sounds out, and fold detached punctuation into
+    /// the previous speech line.
     ///
     /// Lenient by construction, like the rest of the merge: a sound with no
     /// line before it has no seam to fire at and is warned and dropped rather
-    /// than invented into one.
+    /// than invented into one. A punctuation-only line has no audio of its own;
+    /// its mark is appended to the previous line, and a leading mark with no
+    /// line to attach to is dropped rather than sent to TTS alone.
     pub fn plan(segments: &[Value]) -> Planned {
         let mut out = Planned::default();
         for (i, seg) in drop_headline(segments).iter().enumerate() {
@@ -66,6 +71,35 @@ impl Planned {
                     None => eprintln!(
                         "inject: a sound leads the chapter with no line to fire after -> skipped"
                     ),
+                }
+                continue;
+            }
+            let text = seg_text(seg).trim();
+            if !text.is_empty() && !crate::util::has_speakable_content(text) {
+                if let Some(previous) = out.speech.last_mut() {
+                    let previous_text = seg_text(previous).trim_end();
+                    if crate::util::has_speakable_content(previous_text)
+                        && !previous_text.chars().next_back().is_some_and(|c| {
+                            matches!(
+                                c,
+                                ',' | '.'
+                                    | '!'
+                                    | '?'
+                                    | ';'
+                                    | ':'
+                                    | '…'
+                                    | '。'
+                                    | '、'
+                                    | '，'
+                                    | '！'
+                                    | '？'
+                                    | '；'
+                                    | '：'
+                            )
+                        })
+                    {
+                        previous["text"] = Value::String(format!("{previous_text}{text}"));
+                    }
                 }
                 continue;
             }
@@ -264,6 +298,13 @@ pub fn plan_render(
     title: Option<&TitleSpeech>,
 ) -> Result<Vec<RenderUnit>> {
     let segments = &planned.speech;
+    for (i, segment) in segments.iter().enumerate() {
+        if !crate::util::has_speakable_content(seg_text(segment)) {
+            anyhow::bail!(
+                "segment {i}: cannot plan TTS render for punctuation-only text (no speakable content)"
+            );
+        }
+    }
     let mut units = Vec::new();
     if let Some(t) = title {
         units.push(title_unit(seg_dir, t));
@@ -395,6 +436,47 @@ mod tests {
         assert_eq!(r[0].idx, vec![0, 1]);
         assert_eq!(r[1].idx, vec![2]);
         assert_eq!(r[2].idx, vec![3]);
+    }
+
+    #[test]
+    fn punctuation_only_segments_are_folded_into_the_previous_line() {
+        let segs = vec![
+            json!({"speaker": "Anonymous", "text": "First line"}),
+            json!({"speaker": "Narrator", "text": ","}),
+            json!({"speaker": "Anonymous", "text": "Second line."}),
+        ];
+        let p = planned(&segs);
+        assert_eq!(p.speech.len(), 2, "no punctuation-only TTS take");
+        assert_eq!(p.speech[0]["text"], "First line,");
+        assert_eq!(p.speech[1]["text"], "Second line.");
+        assert_eq!(p.origin, vec![0, 2], "origins still point into the script");
+        assert!(p
+            .speech
+            .iter()
+            .all(|segment| crate::util::has_speakable_content(seg_text(segment))));
+
+        let cast = crate::cast::Cast::from_iter([("Anonymous".into(), "Adam".into())]);
+        let local = plan_render(&p, &cast, Path::new("s"), true, None).unwrap();
+        assert_eq!(local.len(), 1, "same-speaker lines remain one render run");
+        assert_eq!(local[0].text, "First line, Second line.");
+
+        let cloud = plan_render(&p, &cast, Path::new("s"), false, None).unwrap();
+        assert_eq!(cloud.len(), 2);
+        assert_eq!(cloud[0].text, "First line,");
+        assert_eq!(cloud[1].text, "Second line.");
+
+        let leading = planned(&[
+            json!({"speaker": "Narrator", "text": ","}),
+            json!({"speaker": "Anonymous", "text": "First line."}),
+        ]);
+        assert_eq!(leading.speech.len(), 1, "a leading comma is not a TTS take");
+        assert_eq!(leading.speech[0]["text"], "First line.");
+
+        let already_terminated = planned(&[
+            json!({"speaker": "Anonymous", "text": "First line."}),
+            json!({"speaker": "Narrator", "text": ","}),
+        ]);
+        assert_eq!(already_terminated.speech[0]["text"], "First line.");
     }
 
     #[test]

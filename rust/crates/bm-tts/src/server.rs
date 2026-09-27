@@ -165,12 +165,31 @@ pub struct PreviewBody {
 }
 
 fn wav(pcm: &[f32]) -> Response {
+    if pcm.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "TTS produced no audio samples (input may contain only punctuation)"
+            })),
+        )
+            .into_response();
+    }
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "audio/wav")],
         to_wav_bytes(pcm, SAMPLE_RATE as u32),
     )
         .into_response()
+}
+
+fn validate_infer_text(text: &str) -> std::result::Result<(), &'static str> {
+    if text.trim().is_empty() {
+        Err("text is required")
+    } else if !bm_core::util::has_speakable_content(text) {
+        Err("text contains no speakable content (punctuation-only)")
+    } else {
+        Ok(())
+    }
 }
 
 fn failed(e: anyhow::Error) -> Response {
@@ -292,10 +311,10 @@ async fn infer(State(s): State<Arc<Server>>, Json(body): Json<InferBody>) -> Res
     let Some(inner) = s.inner() else {
         return loading();
     };
-    if body.text.trim().is_empty() {
+    if let Err(error) = validate_infer_text(&body.text) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "text is required"})),
+            Json(serde_json::json!({"error": error})),
         )
             .into_response();
     }
@@ -415,10 +434,27 @@ mod tests {
     }
 
     #[test]
+    fn infer_rejects_empty_or_punctuation_only_text_before_synthesis() {
+        assert_eq!(validate_infer_text("  "), Err("text is required"));
+        assert_eq!(
+            validate_infer_text(","),
+            Err("text contains no speakable content (punctuation-only)")
+        );
+        assert_eq!(validate_infer_text("Ừm!"), Ok(()));
+        assert_eq!(validate_infer_text("[cười]"), Ok(()));
+    }
+
+    #[test]
     fn a_wav_response_is_audio_not_json() {
         let r = wav(&[0.0, 0.5]);
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(r.headers()[header::CONTENT_TYPE], "audio/wav");
+    }
+
+    #[test]
+    fn empty_audio_is_not_wrapped_as_a_valid_44_byte_wav() {
+        let r = wav(&[]);
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[test]
