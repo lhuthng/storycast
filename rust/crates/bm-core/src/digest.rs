@@ -498,6 +498,16 @@ fn prepared_event(id: usize, kind: &str, text: &str) -> Option<PreparedEvent> {
 /// Split source paragraphs into dialogue and narration spans without changing
 /// their speakable text. Quote delimiters and standalone punctuation separators
 /// are not speech, so the model is not asked to reproduce them in a segment.
+/// The split report for a chapter, without digesting it.
+///
+/// Exists so the shape of a chapter can be inspected before spending an LLM
+/// call on it: `analyze_chapter` prints this as its first log line, and this
+/// is the same line, on demand. The live retraction check uses it to see what
+/// the preparer decided before asking a model to agree or disagree.
+pub fn preview_split(text: &str) -> String {
+    prepare_chapter(text).split_summary()
+}
+
 fn prepare_chapter(text: &str) -> PreparedChapter {
     // Older workspaces can contain raw HTML entities and Storya's promo/footer
     // metadata. Sanitize at the same boundary the crawler and local reader use,
@@ -614,7 +624,11 @@ fn attribution_view(prepared: &PreparedChapter) -> String {
     let view = json!({
         "narration_ids": narration_ids,
         "dialogue_events": dialogue_events,
-        "note": "Return `speakers` for every `dialogue_events` id only, except any you list in `not_speech`. Context events are evidence for resolving that id; all context and every id in `narration_ids` are spoken by Narrator and are not yours to answer. An explicit named speech tag in `following_context` is the strongest speaker evidence. `not_speech` is for a quoted span that is not somebody talking — a title, a technique, a term, a panel label — judged from the context around it, never from the words alone. Put such an id in `not_speech` AND in `speakers` as \"Narrator\", because the rule below only accepts it when both agree.",
+        // The rules themselves live in the prompt template, where the rest of
+        // the output contract is. This says only what the JSON is, so a model
+        // reading the view and a model reading the contract are never told two
+        // different things about the same field.
+        "note": "Return `speakers` for every `dialogue_events` id, except any you also list in `not_speech` — a quoted span that is not somebody talking, judged from the context around it. Context events are evidence for resolving an id; all context and every id in `narration_ids` are spoken by Narrator and are not yours to answer. An explicit named speech tag in `following_context` is the strongest speaker evidence.",
     });
     serde_json::to_string_pretty(&view).unwrap_or_else(|_| "[]".into())
 }
@@ -764,19 +778,37 @@ Return ONE strict JSON object, never markdown or commentary:
     "proper_aliases": []
   }],
   "new_aliases": {},
+  "not_speech": ["e0012"],
   "speakers": {
     "e0002": "canonical character name",
-    "e0003": "Anonymous"
+    "e0003": "Anonymous",
+    "e0012": "Narrator"
   }
 }
 
-The prepare step's split is authoritative: `narration_ids` are already spoken by
-`Narrator` and are attached by code, so return exactly one `speakers` entry for
-every `dialogue_events` id, in source order, and nothing else — no narration ids,
+The prepare step's split is authoritative for WHERE the quote marks are, not for
+WHAT they contain: `narration_ids` are already spoken by `Narrator` and are
+attached by code, so return exactly one `speakers` entry for every
+`dialogue_events` id, in source order, and nothing else — no narration ids,
 no invented ids, no dropped line.
 - Every `dialogue_events` id maps to a canonical character name or the reserved
   name `Anonymous`. Dialogue must NEVER map to Narrator, even when the speaker is
   uncertain, even for a greeting, and even when nobody in the line is named.
+- The ONE exception: a quoted span that is not somebody talking. A title, a
+  technique, a term, a panel label, a song name — `cuốn sách "Khải hoàn"`, a
+  quoted skill in a system panel, `Tràng "cuồng phong bạo vũ"`. The preparer
+  called it dialogue only because a quote mark opened it; it has to be given to
+  somebody, and that somebody would be invented. Judge these from the context
+  beside the span, never from the words alone: a title sits inside prose that
+  continues the sentence on both sides, while a real speech is followed by a
+  tag (`hắn hỏi`) or stands alone as a person's line. When a span is one, list
+  its id in `not_speech`; the code then reads it as narration and ignores
+  whatever `speakers` says about it, so list an id only when you mean it.
+  Retracting the last line a speaker had makes that speaker unused, so drop it
+  from `roster` in the same answer — a roster entry nobody speaks is refused.
+  Quote marks alone decide nothing here: the same words spoken aloud
+  (`"Ngươi đọc 'Yêu Đại Giới' chưa?"`) are real dialogue and stay with a
+  character.
 - A quoted hail that names only the person it is addressed to — `\"Dịch sư
   phụ.\"`, `\"Sư tôn.\"`, `\"Đồ nhi!\"` — is spoken BY someone else TO that
   person, so it is a person and never Narrator. If no cast member is tagged
@@ -1798,20 +1830,22 @@ fn validate_attributions(
             anyhow::bail!("attribution names unknown source id {id:?}");
         }
     }
-    // Both halves must agree before an id counts as quoted non-speech: listed
-    // in `not_speech`, *and* assigned Narrator. A model that lists an id and
-    // still gives it a character has contradicted itself, and the
-    // contradiction is refused rather than resolved in either direction —
-    // guessing which half it meant is how a real speech ends up narrated.
+    // `not_speech` wins over `speakers` for the ids it lists, rather than the
+    // two having to agree.
+    //
+    // A live run is why. The model listed four ids, agreed with itself on
+    // three, and gave the fourth a character. Requiring agreement refused the
+    // whole chapter, and the one repair pass made it worse — it dropped an
+    // unrelated event — so the chapter failed outright over one ambiguous id.
+    // A gate that can deadlock is worse than the mistake it prevents, which is
+    // the same lesson `sound_design_gap` encodes.
+    //
+    // So the listing is taken as the decision and the speaker is written here,
+    // exactly as narration's is. Which half the model actually meant is unknow-
+    // able, and this way the cost of guessing wrong is one narrated span
+    // rather than a refused chapter.
     for id in &not_speech {
-        match speakers.get(id) {
-            None => anyhow::bail!("attribution lists {id:?} as not_speech but assigns no speaker"),
-            Some(s) if s != "Narrator" => anyhow::bail!(
-                "attribution lists {id:?} as not_speech but assigns it {s:?}; a quoted span that \
-                 is not speech must be assigned Narrator"
-            ),
-            Some(_) => {}
-        }
+        speakers.insert(id.clone(), "Narrator".to_string());
     }
 
     for event in &prepared.events {
@@ -3444,36 +3478,37 @@ mod tests {
         assert_eq!(speakers[&spoken.id], "Narrator");
     }
 
-    /// Both halves must agree. A model that lists an id as non-speech and
-    /// still hands it a character has contradicted itself, and the code must
-    /// not guess which half it meant: guessing wrong either narrates a real
-    /// speech or leaves a title in a stranger's voice, silently.
+    /// A disagreement resolves in favour of the listing, and does not fail the
+    /// chapter. This is the live ch161 shape: the model listed four ids, agreed
+    /// with itself on three and gave the fourth a character. Requiring
+    /// agreement refused the chapter, and the single repair pass made it worse
+    /// by dropping an unrelated event — one ambiguous id cost a whole chapter.
+    /// The listing wins instead, so the worst case is one narrated span.
     #[test]
-    fn a_retraction_and_a_speaker_must_agree() {
+    fn a_retraction_wins_over_a_disagreeing_speaker() {
         let prepared = prepare_chapter("Hắn lật ra cuốn sách \"Khải hoàn\" bên trong.");
         let contradiction = json!({
             "roster": ["Narrator", "Dịch Phong"],
             "not_speech": ["e0002"],
             "speakers": {"e0002": "Dịch Phong"}
         });
-        let err = validate_attributions(
-            &contradiction,
-            &json!({"characters": []}),
-            &prepared,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("not_speech"), "{err}");
+        let speakers =
+            validate_attributions(&contradiction, &bible_with_phong(), &prepared).unwrap();
+        assert_eq!(
+            speakers["e0002"], "Narrator",
+            "the listing is the decision; the speaker it contradicts is overwritten"
+        );
 
-        // Listed with no speaker at all is the same contradiction, caught
-        // before the coverage check below can blame a dropped event.
+        // Listed with no speaker at all is the same case, and used to be
+        // blamed as a dropped event.
         let orphan = json!({
             "roster": ["Narrator"],
             "not_speech": ["e0002"],
             "speakers": {}
         });
-        let err =
-            validate_attributions(&orphan, &json!({"characters": []}), &prepared).unwrap_err();
-        assert!(err.to_string().contains("no speaker"), "{err}");
+        let speakers =
+            validate_attributions(&orphan, &json!({"characters": []}), &prepared).unwrap();
+        assert_eq!(speakers["e0002"], "Narrator");
     }
 
     /// Narration still cannot be promoted to dialogue, and an unlisted
@@ -3505,8 +3540,7 @@ mod tests {
                 speech.id.clone(): "Dịch Phong"
             }
         });
-        let speakers =
-            validate_attributions(&hoisted, &bible_with_phong(), &prepared).unwrap();
+        let speakers = validate_attributions(&hoisted, &bible_with_phong(), &prepared).unwrap();
         assert_eq!(
             speakers[&narration.id], "Narrator",
             "a claimed speaker for prose must be rewritten, not honoured"
@@ -3553,6 +3587,49 @@ mod tests {
         assert!(not_speech_ids(&json!({})).unwrap().is_empty());
         assert!(not_speech_ids(&json!({"not_speech": null})).unwrap().is_empty());
         assert!(not_speech_ids(&json!({"not_speech": []})).unwrap().is_empty());
+    }
+
+    /// **This is the test that would have caught the field not working.**
+    ///
+    /// The first live run put `not_speech` in the view's `note` and the model
+    /// never emitted it. The cause was not the note: the template's own output
+    /// contract listed the allowed keys and said "Dialogue must NEVER map to
+    /// Narrator" with no exception, and a model reads the contract, not the
+    /// footnote. The field was unreachable however the note was worded.
+    ///
+    /// So the retraction is pinned in *both* places, and the one that matters
+    /// is the contract — asserted here on the string the model actually reads.
+    #[test]
+    fn the_prompt_contract_offers_the_retraction_not_only_the_note() {
+        // The contract is appended in code, not only in the profile template,
+        // so it has to be asserted on the string the model is actually handed.
+        let layout = crate::paths::Layout::new(crate::paths::Layout::find_root().unwrap());
+        let prepared = prepare_chapter("Hắn lật ra cuốn sách \"Khải hoàn\" bên trong.");
+        let prompt = build_attribution_prompt(&layout, &json!({}), &prepared).unwrap();
+        assert!(
+            prompt.contains("not_speech"),
+            "the schema block must show the field, or a model returning the \
+             documented shape has no way to reach it"
+        );
+        assert!(
+            prompt.contains("The ONE exception"),
+            "the absolute 'dialogue is NEVER Narrator' rule needs its exception \
+             next to it, not in a note"
+        );
+        // The exception must be an exception and not a replacement: a real
+        // speech still goes to a character, said aloud or not. Matched on
+        // folded whitespace so rewrapping the paragraph cannot silently
+        // un-assert this.
+        let flat = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("are real dialogue and stay with a character"),
+            "the contract must still forbid Narrator for real speech"
+        );
+        // And the view's note must not restate the rules, or the two can
+        // disagree — the first live run did exactly that.
+        let view: Value = serde_json::from_str(&attribution_view(&prepared)).unwrap();
+        let note = view["note"].as_str().unwrap();
+        assert!(!note.contains("NEVER"), "rules live in the contract: {note}");
     }
 
     /// The prompt has to offer the field, or the model cannot use it. The
