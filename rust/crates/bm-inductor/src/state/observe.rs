@@ -125,6 +125,46 @@ impl Inner {
             }
         }
 
+        // **A stage the policy wants and the bundle cannot serve.** The gate
+        // lives in `offer`; this is what stops the box merely looking idle. The
+        // cure is one keypress (`p`), so it is stated once per change in what
+        // the box reports rather than on every poll — the edge-triggering the
+        // duplicate-sidecar alarm above uses, and for the same reason.
+        if !h.sources_stages.is_empty() {
+            let was = self
+                .beats
+                .get(&h.worker_id)
+                .map(|b| b.sources_stages.clone())
+                .unwrap_or_default();
+            if was != h.sources_stages {
+                let missing: Vec<String> = self
+                    .machines
+                    .get(&addr)
+                    .map(|m| {
+                        m.effective_task_policy()
+                            .into_iter()
+                            .filter(|p| p.enabled)
+                            .map(|p| p.stage.as_str().to_string())
+                            .filter(|s| !h.sources_stages.contains(s))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !missing.is_empty() {
+                    self.push_event(
+                        "warn",
+                        format!(
+                            "[{}] policy covers {} but the sources bundle on this box does not \
+                             (it reports [{}]) — that work is withheld until the box is \
+                             provisioned (p)",
+                            h.worker_id,
+                            missing.join("+"),
+                            h.sources_stages.join("+"),
+                        ),
+                    );
+                }
+            }
+        }
+
         self.beats.insert(h.worker_id.clone(), h.clone());
 
         // The "unknown"-user placeholder carries no configured values, so it

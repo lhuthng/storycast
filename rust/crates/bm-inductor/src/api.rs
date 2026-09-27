@@ -55,6 +55,7 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
         sidecars: None,
         sidecar_gb: None,
         capabilities: r.capabilities,
+        sources_stages: r.sources_stages,
         // A registration carries no sidecar belief; the next beat does.
         sidecar_keep: None,
     };
@@ -1796,6 +1797,7 @@ mod tests {
                 addr: "192.168.2.2".into(),
                 hostname: "box".into(),
                 capabilities: vec![],
+                sources_stages: Vec::new(),
                 tts_url: None,
                 version: "0.2.0".into(),
             }),
@@ -1825,6 +1827,7 @@ mod tests {
                 sidecars: None,
                 sidecar_gb: None,
                 capabilities: vec![],
+                sources_stages: Vec::new(),
                 sidecar_keep: None,
             }),
         )
@@ -1869,6 +1872,7 @@ mod tests {
                 addr: "192.168.2.2".into(),
                 hostname: "thang".into(),
                 capabilities: vec!["render-segments".into()],
+                sources_stages: Vec::new(),
                 tts_url: None,
                 version: "0.2.3".into(),
             }),
@@ -1922,6 +1926,7 @@ mod tests {
             sidecars: None,
             sidecar_gb: None,
             capabilities: vec![],
+            sources_stages: Vec::new(),
             sidecar_keep: None,
         };
         heartbeat(State(st.clone()), Json(beat())).await;

@@ -979,6 +979,81 @@ mod tests {
         h
     }
 
+    /// A beat that says which stages the box's sources bundle covers.
+    fn beat_with_bundle(worker: &str, addr: &str, stages: &[&str]) -> bm_proto::Heartbeat {
+        let mut h = beat_with_load(worker, addr, None);
+        h.sources_stages = stages.iter().map(|s| s.to_string()).collect();
+        h
+    }
+
+    /// **The stage a box has no files for is not offered to it.** ch426's
+    /// failure: the box's policy enabled `digest`, its sources bundle had no
+    /// `prompts/`, and the stage died on `reading prompt template … No such file
+    /// or directory` on every retry while the operator saw an idle worker.
+    ///
+    /// The policy is what the operator asked for; the reported bundle is what
+    /// the box was actually handed. Neither alone is enough to schedule on, and
+    /// an agent that reports nothing is still trusted — no opinion is not a
+    /// verdict, which is the same rule the capability gate follows.
+    #[test]
+    fn a_stage_the_reported_bundle_does_not_cover_is_withheld() {
+        let _g = env_lock();
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::write(layout.chapter_txt(1), "Chương 1: X\n\nbody\n").unwrap();
+        inner.enqueue_translate(1, 1);
+        inner.workers.insert("w".into(), "192.168.2.2".into());
+        // The offer marks the row `Assigned`; put it back so the next case can
+        // be asked the same question.
+        let rearm = |inner: &mut Inner| {
+            let t = inner.tasks.get_mut("digest:1").unwrap();
+            t.state = TaskState::Pending;
+            t.assigned_to = None;
+            t.lease_until = None;
+        };
+
+        // No report: offered as it always was.
+        let offer = inner.offer("w").expect("an agent that reports nothing is fed");
+        assert_eq!(offer.task_id, "digest:1");
+        rearm(&mut inner);
+
+        // A bundle that covers the stage: offered.
+        inner.observe(&beat_with_bundle("w", "192.168.2.2", &["crawl", "digest"]));
+        let offer = inner.offer("w").expect("a provisioned box takes its digest");
+        assert_eq!(offer.task_id, "digest:1");
+        rearm(&mut inner);
+
+        // A bundle that does not: withheld, and the log says why once.
+        inner.observe(&beat_with_bundle(
+            "w",
+            "192.168.2.2",
+            &["crawl", "render", "merge"],
+        ));
+        assert!(
+            inner.offer("w").is_none(),
+            "no prompts on the box, so no digest offered"
+        );
+        assert!(
+            inner
+                .events
+                .iter()
+                .any(|e| e.level == "warn"
+                    && e.text.contains("does not")
+                    && e.text.contains("provisioned")),
+            "the operator has to be told the cure: {:?}",
+            inner.events.iter().map(|e| &e.text).collect::<Vec<_>>()
+        );
+        // Stated once, not on every beat: the same report changes nothing.
+        let before = inner.events.len();
+        inner.observe(&beat_with_bundle(
+            "w",
+            "192.168.2.2",
+            &["crawl", "render", "merge"],
+        ));
+        assert_eq!(inner.events.len(), before, "edge-triggered, not per poll");
+    }
+
     #[test]
     fn offer_withholds_a_box_the_oom_killer_is_circling() {
         // The guardrail for the boxes this repo actually runs: one TTS sidecar
@@ -2589,6 +2664,7 @@ mod tests {
                 sidecars: None,
                 sidecar_gb: None,
                 capabilities: vec![],
+                sources_stages: Vec::new(),
                 sidecar_keep: None,
             },
         );
@@ -2808,6 +2884,7 @@ mod tests {
                 sidecars: None,
                 sidecar_gb: None,
                 capabilities: vec![],
+                sources_stages: Vec::new(),
                 sidecar_keep: None,
             },
         );
@@ -2994,6 +3071,7 @@ mod tests {
                 sidecars: None,
                 sidecar_gb: None,
                 capabilities: vec![],
+                sources_stages: Vec::new(),
                 sidecar_keep: None,
             },
         );

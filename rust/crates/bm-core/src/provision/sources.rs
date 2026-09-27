@@ -19,10 +19,18 @@
 //! | stage | files |
 //! |---|---|
 //! | crawl | the crawler: workspace `crawl/` + `assets/crawl/templates/` |
-//! | digest | `prompts/`, and the four registries the prompt and the validators read |
+//! | digest | the four registries the prompt and the validators read |
 //! | render | nothing here — the voice store travels in `models/` |
 //! | merge | the scene map, the three clip pools, and the clips they register |
 //!
+//! `prompts/` is in **every** bundle rather than in the digest's share of it.
+//! It is 21 KB against a 59 MB artifact, and it is the one file a digest cannot
+//! begin without: a box whose policy gains `digest` after its last push was
+//! offered the work as soon as the operator enabled it, ran the stage, and died
+//! on `reading prompt template … No such file or directory` until somebody
+//! re-provisioned. The rest of the narrowing still stands — the registries, the
+//! crawlers and the clips are still selected, and `stages` in the manifest still
+//! says which of them a box has.
 //! `refs/` is in none of them: enrollment happens on the inductor, which is the
 //! machine with the encoder, and what crosses to a worker is the *encoded* store
 //! (`models/voices.json` holds codes and speaker embeddings — not one of its
@@ -147,6 +155,19 @@ impl Sources {
             .into_iter()
             .filter(|s| stages.contains(s))
             .collect();
+        // **A bundle for no stage is not a bundle.** It would carry the clone
+        // manifest and nothing else, and delivery *prunes* every tree the
+        // archive owns before it extracts — so pushing it would delete a box's
+        // prompts, assets and crawlers to put nothing in their place. A policy
+        // that enables nothing is a box that is deliberately not working, and
+        // the operator has to say what it should run before it is sent
+        // anything.
+        if stages.is_empty() {
+            anyhow::bail!(
+                "this box's policy covers no stage — enable one (P) and provision again; \
+                 an empty bundle would only prune its prompts and assets"
+            );
+        }
         let mut out = Sources {
             stages,
             members: Vec::new(),
@@ -158,6 +179,14 @@ impl Sources {
         // against it, so a box holding a different declaration is a silent
         // desync even though no stage opens it. Cheap enough to always send.
         out.push_file(root, "voices.json");
+
+        // The prompts, on the same reasoning and with more force: a digest
+        // reads `prompts/analyze.txt` before it does anything else, a box can
+        // gain `digest` at any time by a single keypress in the policy screen,
+        // and a stage whose *whole* input is a file is a stage that cannot
+        // degrade — it fails, on every retry, until the operator notices. 21 KB
+        // of text is not worth a class of failure.
+        out.push_tree(root, "prompts");
 
         for stage in out.stages.clone() {
             for reg in registries(stage) {
@@ -173,9 +202,10 @@ impl Sources {
                     // its own script keeps it out of the shared profile tree.
                     out.push_tree(&layout.work, "crawl");
                 }
-                Stage::Digest => {
-                    out.push_tree(root, "prompts");
-                }
+                // The registries the digest prompt renders from are still its
+                // own: they are JSON the merge path shares, so a merge box
+                // already has them and a digest-only box gets them here.
+                Stage::Digest => {}
                 Stage::Render | Stage::Merge => {
                     // The cast files decide the *filenames* a render writes and a
                     // merge looks for. The offer wins when it carries one (it
@@ -312,13 +342,6 @@ impl Sources {
     /// Total bytes, uncompressed.
     pub fn bytes(&self) -> u64 {
         self.members.iter().map(|m| m.bytes).sum()
-    }
-
-    /// Whether any member lives under one of the trees a push owns. A box whose
-    /// policy is render-only sends none of them, and its extraction still prunes
-    /// what an earlier push left — see [`extract_script`].
-    pub fn owns_trees(&self) -> bool {
-        self.members.iter().any(|m| is_owned(&m.to))
     }
 
     /// `path -> sha256`, plus the stages this set was built for.
@@ -663,17 +686,63 @@ mod tests {
             !got.contains(&"assets/scene-map.json".to_string()),
             "a crawler does not mix: {got:?}"
         );
+        assert!(
+            got.contains(&"prompts/analyze.txt".to_string()),
+            "the prompts are not a per-stage file: {got:?}"
+        );
     }
 
     /// Render reads none of these trees — its voice store travels in `models/`
     /// and its cast, script and bible ride in the offer — so a render-only box
-    /// is handed the two files that keep the legacy local path working.
+    /// is handed the cast, the clone manifest and the prompts.
     #[test]
     fn a_render_box_gets_its_cast_and_no_media() {
         let l = fixture("render");
         let got = paths(&l, &[Stage::Render]);
-        assert_eq!(got, vec!["data/cast.json".to_string(), "voices.json".to_string()]);
-        assert!(!Sources::plan(&l, &[Stage::Render]).unwrap().owns_trees());
+        assert_eq!(
+            got,
+            vec![
+                "data/cast.json".to_string(),
+                "prompts/analyze.txt".to_string(),
+                "prompts/script.txt".to_string(),
+                "voices.json".to_string(),
+            ]
+        );
+        assert!(
+            !got.iter().any(|p| p.starts_with("assets/")),
+            "no media, no registries: {got:?}"
+        );
+    }
+
+    /// **The prompt is not a stage's file.** A box can gain `digest` with one
+    /// keypress, and a stage that dies on a missing template fails on every
+    /// retry until somebody re-provisions — so the 21 KB rides every bundle,
+    /// whatever the policy says. This is the assertion that keeps a future
+    /// narrowing from taking it back out.
+    #[test]
+    fn every_bundle_carries_the_prompts_whatever_the_policy() {
+        let l = fixture("prompts-always");
+        for stages in [
+            vec![Stage::Crawl],
+            vec![Stage::Digest],
+            vec![Stage::Render],
+            vec![Stage::Merge],
+            vec![Stage::Render, Stage::Merge],
+            Stage::ALL.to_vec(),
+        ] {
+            let got = paths(&l, &stages);
+            for prompt in ["prompts/analyze.txt", "prompts/script.txt"] {
+                assert!(
+                    got.contains(&prompt.to_string()),
+                    "{prompt} missing for {stages:?}: {got:?}"
+                );
+            }
+        }
+        // …but a policy that covers no stage is refused outright, because the
+        // delivery this plan describes is a prune first: an empty set would
+        // delete a box's trees and hand it nothing back.
+        let err = Sources::plan(&l, &[]).unwrap_err().to_string();
+        assert!(err.contains("covers no stage"), "{err}");
     }
 
     /// The whole point of hashing a set rather than a tree: a policy change has

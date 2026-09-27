@@ -47,6 +47,13 @@ about 60 MB for a box that runs every stage — carrying only the files that box
 stages open. That is the change this document's tables are measured after, and
 the module that does it is `bm-core/src/provision/sources.rs`.
 
+`prompts/` is the one exception: 21 KB that rides **every** bundle whatever the
+policy says. A box can gain the `digest` stage with a single keypress, and a
+stage whose whole input is a file does not degrade when the file is missing — it
+fails, on every retry, until somebody re-provisions. The rest of the selection
+still follows the stage list, which is what the manifest records and what the
+scheduler reads back from the box before offering it a stage.
+
 Everything else, prompts (24 KB), the crawlers (72 KB), cast files, the scene
 map, the three pool registries, `voices.json` (492 KB), is under 1 MB combined
 and is never worth optimizing — which is why they ride in that same bundle
