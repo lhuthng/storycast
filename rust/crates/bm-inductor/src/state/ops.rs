@@ -1130,6 +1130,35 @@ impl Inner {
             );
         }
         item["speaker"] = serde_json::Value::String(to.to_string());
+        // The roster names who's in the chapter: drop speakers no segment
+        // uses anymore, append the new one in segment order. Render and cast
+        // assignment read segments too, so a stale roster never broke
+        // anything — but the file should not lie about its own contents.
+        // Order is preserved: only membership changes.
+        {
+            let speakers: Vec<String> = segments
+                .iter()
+                .filter_map(|s| {
+                    s.get("speaker")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .collect();
+            if let Some(roster) = data
+                .get_mut("roster")
+                .and_then(|r| r.as_array_mut())
+            {
+                roster.retain(|r| {
+                    r.as_str()
+                        .is_some_and(|n| speakers.iter().any(|s| s == n))
+                });
+                for s in &speakers {
+                    if !roster.iter().any(|r| r.as_str() == Some(s.as_str())) {
+                        roster.push(serde_json::Value::String(s.clone()));
+                    }
+                }
+            }
+        }
         let _ = bm_core::atomic_write(
             &path,
             &serde_json::to_string_pretty(&data).unwrap_or_default(),

@@ -1764,6 +1764,34 @@ fn command_line_maps_keys_and_words() {
     }
     assert_eq!(command_key("rerender"), Some(Command::Rerender));
     assert_eq!(command_key("remerge"), Some(Command::Remerge));
+    // Merge names the pair: first survives, the rest are absorbed. Quotes
+    // for spaces, like :speaker; one name is refused, not a silent no-op.
+    assert_eq!(
+        command_key("merge \"Huyền Vũ\" \"Huyền Vũ lão tổ\""),
+        Some(Command::Merge {
+            survivor: "Huyền Vũ".into(),
+            absorbed: vec!["Huyền Vũ lão tổ".into()],
+        })
+    );
+    assert_eq!(
+        command_key("merge A B C"),
+        Some(Command::Merge {
+            survivor: "A".into(),
+            absorbed: vec!["B".into(), "C".into()],
+        })
+    );
+    for bad in ["merge A", "merge \"\" B", "merge A \"\""] {
+        assert_eq!(command_key(bad), None, "{bad} must not parse");
+    }
+    // Bare `:merge` parses to the placeholder and is refused at dispatch
+    // with the usage, not with a confirm on an empty fold.
+    assert_eq!(
+        command_key("merge"),
+        Some(Command::Merge {
+            survivor: String::new(),
+            absorbed: Vec::new(),
+        })
+    );
     assert_eq!(command_key("backend"), Some(Command::Backend));
     assert_eq!(command_key("stop"), Some(Command::Stop));
     assert_eq!(command_key("quit"), Some(Command::Key(KeyCode::Char('q'))));

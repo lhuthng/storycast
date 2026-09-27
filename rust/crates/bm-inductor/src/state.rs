@@ -2170,7 +2170,7 @@ mod tests {
         std::fs::write(layout.final_mp3(25), vec![0u8; 2000]).unwrap();
 
         let msg = inner
-            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Huyền Vũ lão tổ".into()])])
+            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Huyền Vũ lão tổ".into()])], false)
             .unwrap();
         assert!(msg.contains("Huyền Vũ <= Huyền Vũ lão tổ"), "{msg}");
 
@@ -2213,7 +2213,7 @@ mod tests {
     #[test]
     fn reconcile_with_no_merges_changes_nothing() {
         let (_d, mut inner) = fixture();
-        let msg = inner.apply_reconcile(&[]).unwrap();
+        let msg = inner.apply_reconcile(&[], false).unwrap();
         assert!(msg.contains("nothing to fold"), "{msg}");
     }
 
@@ -2242,7 +2242,7 @@ mod tests {
         .unwrap();
 
         let msg = inner
-            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Huyền Vũ lão tổ".into()])])
+            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Huyền Vũ lão tổ".into()])], false)
             .unwrap();
         assert!(msg.contains("Huyền Vũ <= Huyền Vũ lão tổ"), "{msg}");
 
@@ -2256,6 +2256,224 @@ mod tests {
             script["segments"][0]["speaker"],
             serde_json::json!("Huyền Vũ")
         );
+    }
+
+    #[test]
+    fn merge_folds_a_named_pair_with_no_canon_match() {
+        // The `:merge` path: two genuinely different names the canon key
+        // would never match, folded by explicit instruction. Same surgery as
+        // a reconcile fold — bible, cast, scripts, caches.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.bible(),
+            serde_json::to_string(&serde_json::json!({"characters": [
+                {"name": "Huyền Vũ", "personality": "cold", "voice_hint": "adult male",
+                 "proper_aliases": ["Huyền Vũ"], "first_seen": "10", "chapters_seen": ["10"]},
+                {"name": "Vân Bá", "personality": "", "voice_hint": "",
+                 "proper_aliases": ["Vân Bá"], "first_seen": "25", "chapters_seen": ["25"]}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            layout.cast("vieneu"),
+            r#"{"Huyền Vũ":"Đức Trí","Vân Bá":"Adam","Narrator":"Đức Trí"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            layout.script(25),
+            r#"{"roster":["Vân Bá"],"segments":[{"speaker":"Vân Bá","text":"Ừ."}]}"#,
+        )
+        .unwrap();
+        let seg = layout.seg_dir("vieneu", 25);
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("0000_Adam.wav"), vec![0u8; 2000]).unwrap();
+
+        let msg = inner
+            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Vân Bá".into()])], true)
+            .unwrap();
+        assert!(msg.contains("Huyền Vũ <= Vân Bá"), "{msg}");
+
+        let bible: Value = bm_core::read_json(&layout.bible()).unwrap();
+        let chars = bible["characters"].as_array().unwrap();
+        assert_eq!(chars.len(), 1);
+        assert!(chars[0]["proper_aliases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "Vân Bá"));
+
+        let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
+        assert_eq!(cast["Huyền Vũ"], "Đức Trí", "survivor keeps its voice");
+        assert!(!cast.contains_key("Vân Bá"), "absorbed key disappears");
+
+        let script: Value = bm_core::read_json(&layout.script(25)).unwrap();
+        assert_eq!(
+            script["segments"][0]["speaker"],
+            serde_json::json!("Huyền Vũ")
+        );
+        assert!(!seg.join("0000_Adam.wav").exists(), "loser's cache goes");
+        assert_eq!(inner.tasks["merge:25"].state, TaskState::Pending);
+    }
+
+    #[test]
+    fn merge_refuses_unknown_names_and_the_narrator() {
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.bible(),
+            serde_json::to_string(&serde_json::json!({"characters": [
+                {"name": "Huyền Vũ", "personality": "cold", "voice_hint": "adult male",
+                 "proper_aliases": ["Huyền Vũ"], "first_seen": "10", "chapters_seen": ["10"]}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            layout.cast("vieneu"),
+            r#"{"Huyền Vũ":"Đức Trí","Vân Bá":"Adam","Narrator":"Đức Trí"}"#,
+        )
+        .unwrap();
+
+        // Survivor must live in the bible.
+        let err = inner
+            .apply_reconcile(&[("Nobody".into(), vec!["Huyền Vũ".into()])], true)
+            .unwrap_err();
+        assert!(err.to_string().contains("not in the bible"), "{err}");
+        // Absorbed must live in the bible or the cast.
+        let err = inner
+            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Nobody".into()])], true)
+            .unwrap_err();
+        assert!(err.to_string().contains("neither the bible nor the cast"), "{err}");
+        // The Narrator is a voice, not a character, on either side.
+        for (s, a) in [
+            ("Narrator", "Huyền Vũ"),
+            ("Huyền Vũ", "Narrator"),
+        ] {
+            let err = inner
+                .apply_reconcile(&[(s.into(), vec![a.into()])], true)
+                .unwrap_err();
+            assert!(err.to_string().contains("Narrator"), "{err}");
+        }
+        // Absorbing yourself is a no-op stated as an error.
+        let err = inner
+            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Huyền Vũ".into()])], true)
+            .unwrap_err();
+        assert!(err.to_string().contains("itself"), "{err}");
+
+        // Nothing was rewritten by any refusal above.
+        let bible: Value = bm_core::read_json(&layout.bible()).unwrap();
+        assert_eq!(bible["characters"].as_array().unwrap().len(), 1);
+        let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
+        assert!(cast.contains_key("Vân Bá"), "refusals write nothing");
+    }
+
+    /// Two chapters, one bible entry each — the merge helper both tests share.
+    /// Chapter 25 hears Vân Bá (folded); chapter 7 hears only Huyền Vũ.
+    fn merge_fixture() -> (tempfile::TempDir, Inner) {
+        let (_d, inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.bible(),
+            serde_json::to_string(&serde_json::json!({"characters": [
+                {"name": "Huyền Vũ", "personality": "cold", "voice_hint": "adult male",
+                 "proper_aliases": ["Huyền Vũ"], "first_seen": "10", "chapters_seen": ["10"]},
+                {"name": "Vân Bá", "personality": "", "voice_hint": "",
+                 "proper_aliases": ["Vân Bá"], "first_seen": "25", "chapters_seen": ["25"]}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            layout.cast("vieneu"),
+            r#"{"Huyền Vũ":"Đức Trí","Vân Bá":"Adam","Narrator":"Đức Trí"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            layout.script(25),
+            r#"{"roster":["Vân Bá"],"segments":[{"speaker":"Vân Bá","text":"Ừ."}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            layout.script(7),
+            r#"{"roster":["Huyền Vũ"],"segments":[{"speaker":"Huyền Vũ","text":"Ờ."}]}"#,
+        )
+        .unwrap();
+        (_d, inner)
+    }
+
+    /// A live row on some box: Running, assigned, beating now.
+    fn live_row(inner: &mut Inner, task: Task, worker: &str) {
+        let mut t = task;
+        t.state = TaskState::Running;
+        t.assigned_to = Some(worker.into());
+        let id = t.id();
+        inner.tasks.insert(id.clone(), t);
+        let mut beat = beat_with_load(worker, "192.168.2.2", None);
+        beat.task_id = Some(id);
+        inner.beats.insert(worker.into(), beat);
+    }
+
+    #[test]
+    fn merge_ignores_renders_on_chapters_it_does_not_rewrite() {
+        // The catch-22 this closes: the cluster is mid-render, but on
+        // chapters the merge never touches. Cluster-wide quiet would refuse;
+        // the merge only needs its own chapters still.
+        let (_d, mut inner) = merge_fixture();
+        live_row(&mut inner, Task::new_take(7, 0), "remote-w");
+
+        let msg = inner
+            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Vân Bá".into()])], true)
+            .unwrap();
+        assert!(msg.contains("Huyền Vũ <= Vân Bá"), "{msg}");
+        let bible: Value = bm_core::read_json(&inner.layout.bible()).unwrap();
+        assert_eq!(bible["characters"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_waits_on_renders_of_chapters_it_rewrites() {
+        // Same setup, but the live render is on chapter 25 — the chapter
+        // being rewritten. Its completion would land stale voice as done.
+        let (_d, mut inner) = merge_fixture();
+        live_row(&mut inner, Task::new_take(25, 0), "remote-w");
+
+        let err = inner
+            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Vân Bá".into()])], true)
+            .unwrap_err();
+        assert!(err.to_string().contains("render:25:0"), "{err}");
+        assert!(err.to_string().contains("waits on"), "{err}");
+
+        // Nothing was rewritten by the refusal.
+        let bible: Value = bm_core::read_json(&inner.layout.bible()).unwrap();
+        assert_eq!(bible["characters"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn merge_waits_on_a_digest_naming_the_absorbed() {
+        // A live digest whose chapter text names Vân Bá reports a bible delta
+        // after the fold and resurrects them. One that never heard of them
+        // is no obstacle.
+        let (_d, mut inner) = merge_fixture();
+        let layout = inner.layout.clone();
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::write(layout.chapter_txt(30), "Chương 30: X\n\nVân Bá cười.\n").unwrap();
+        std::fs::write(layout.chapter_txt(31), "Chương 31: Y\n\nTrời trong.\n").unwrap();
+        live_row(&mut inner, Task::new(30, Stage::Digest), "remote-w");
+
+        let err = inner
+            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Vân Bá".into()])], true)
+            .unwrap_err();
+        assert!(err.to_string().contains("digest:30"), "{err}");
+
+        // Same digest, innocent text: the merge proceeds.
+        inner.tasks.remove("digest:30");
+        inner.beats.remove("remote-w");
+        live_row(&mut inner, Task::new(31, Stage::Digest), "remote-w");
+        let msg = inner
+            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Vân Bá".into()])], true)
+            .unwrap();
+        assert!(msg.contains("Huyền Vũ <= Vân Bá"), "{msg}");
     }
 
     #[test]
@@ -3442,6 +3660,36 @@ mod tests {
         assert!(
             !seg.join(&files[1]).exists(),
             "the superseded voice's audio is swept, not left to be mixed by accident"
+        );
+    }
+
+    #[test]
+    fn fix_speaker_keeps_the_roster_honest() {
+        // The roster names who's in the chapter: the fix drops a speaker no
+        // segment uses anymore and adds the new one, in segment order, order
+        // otherwise preserved. Render and cast assignment read segments too,
+        // so this is hygiene, not repair — but the file should not lie.
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        rendered_chapter(
+            &mut inner,
+            18,
+            r#"{"roster":["Narrator","Thanh Sơn lão tổ"],
+                "segments":[
+                {"speaker":"Narrator","text":"Nàng nhíu mày, rồi lắc đầu."},
+                {"speaker":"Thanh Sơn lão tổ","text":"Đi thôi, hãy theo ta."},
+                {"speaker":"Narrator","text":"Cả hai rời đi."}]}"#,
+            r#"{"Narrator":"Đức Trí","Thanh Sơn lão tổ":"Âm Cung","Dịch Phong":"Thiếu Nữ"}"#,
+        );
+
+        inner
+            .op_fix_speaker(18, 2, "Thanh Sơn lão tổ", "Dịch Phong")
+            .unwrap();
+        let back: Value = bm_core::read_json(&layout.script(18)).unwrap();
+        assert_eq!(
+            back["roster"],
+            serde_json::json!(["Narrator", "Dịch Phong"]),
+            "Thanh Sơn lão tổ speaks nothing anymore; Dịch Phong is listed: {back:?}"
         );
     }
 

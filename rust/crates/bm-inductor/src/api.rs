@@ -663,6 +663,28 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                 )),
             }
         }
+        bm_proto::Op::Merge => {
+            // One survivor, one or more absorbed: the manual form of a
+            // reconcile fold, for a pair the canon key would never match.
+            // Names are validated inside (survivor in the bible, absorbed in
+            // the bible or the cast, no Narrator), so a typo refuses before
+            // anything is rewritten.
+            let (survivor, absorbed) = (req.survivor.clone(), req.absorbed.clone());
+            match survivor {
+                Some(survivor)
+                    if !survivor.trim().is_empty() && !absorbed.is_empty() =>
+                {
+                    let mut inner = st.lock().await;
+                    match inner.apply_reconcile(&[(survivor, absorbed)], true) {
+                        Ok(msg) => Json(OpResult::ok(msg)),
+                        Err(e) => Json(OpResult::fail(format!("merge failed: {e:#}"))),
+                    }
+                }
+                _ => Json(OpResult::fail(
+                    "merge requires a survivor and at least one absorbed name",
+                )),
+            }
+        }
         bm_proto::Op::Remix => {
             let mut inner = st.lock().await;
             match inner.op_remix(
@@ -775,7 +797,7 @@ async fn op_reconcile(
     }
     if !merges.is_empty() {
         let mut inner = st.lock().await;
-        return match inner.apply_reconcile(&merges) {
+        return match inner.apply_reconcile(&merges, false) {
             Ok(msg) => OpResult::ok(format!(
                 "{scrub_note}{msg}{}",
                 if plan.candidates.is_empty() {

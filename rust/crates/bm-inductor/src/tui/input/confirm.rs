@@ -146,8 +146,24 @@ pub(crate) async fn key_confirm(
                         "reconciling duplicate characters — watch events",
                     );
                 }
-                ConfirmAction::Rerender => {
+                ConfirmAction::Merge { survivor, absorbed } => {
                     dispatch_op(
+                        app,
+                        job_tx,
+                        http,
+                        OpRequest {
+                            op: Op::Merge,
+                            survivor: Some(survivor.clone()),
+                            absorbed: absorbed.clone(),
+                            ..Default::default()
+                        },
+                    );
+                    app.set_status(
+                        Level::Info,
+                        format!("merging {} into {survivor} — watch events", absorbed.join(", ")),
+                    );
+                }
+                ConfirmAction::Rerender => {                    dispatch_op(
                         app,
                         job_tx,
                         http,
