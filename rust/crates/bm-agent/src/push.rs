@@ -627,6 +627,7 @@ mod tests {
                 addr: "192.168.2.2".into(),
                 hostname: "box".into(),
                 alias: "hawk".into(),
+                root: root.to_path_buf(),
             },
             token: token.into(),
             shared: Arc::new(Mutex::new(Progress {

@@ -463,6 +463,26 @@ impl TaskPref {
             })
             .collect()
     }
+
+    /// Every stage listed, none enabled: a box that is configured to run
+    /// nothing.
+    ///
+    /// Deliberately **not** an empty `Vec`. [`Machine::effective_task_policy`]
+    /// reads an empty list as "no policy stored" and hands back the full
+    /// default, which is the opposite of what this means — a box the book
+    /// learned from a heartbeat alone (its `machines.json` record gone, its
+    /// `machine_state` row alive) used to be synthesized that way and was
+    /// therefore treated as able to run everything, including stages nothing
+    /// had given it the files for.
+    pub fn nothing() -> Vec<TaskPref> {
+        Stage::DEFAULT_PRIORITY
+            .iter()
+            .map(|s| TaskPref {
+                stage: *s,
+                enabled: false,
+            })
+            .collect()
+    }
 }
 
 /// A machine the inductor knows how to reach. Machines are added by address.
@@ -615,6 +635,12 @@ pub struct Register {
     pub hostname: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// The stages this box's sources bundle covers — see
+    /// [`Heartbeat::sources_stages`], whose gate reads the beat this
+    /// registration turns into. Carried here as well so the two routes into
+    /// the worker map cannot disagree about what the box can be asked to run.
+    #[serde(default)]
+    pub sources_stages: Vec<String>,
     #[serde(default)]
     pub tts_url: Option<String>,
     pub version: String,
@@ -678,6 +704,19 @@ pub struct Heartbeat {
     /// parse, the gate then treats it as "no render", which is the safe read.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// The stages the sources bundle on this box actually covers, read from
+    /// the `sources-manifest.json` a provision left at its root.
+    ///
+    /// The box's **policy** says what the operator wants it to run; this says
+    /// what it was handed the files for, and the difference between the two is
+    /// a stage that fails on every retry until somebody re-provisions. The
+    /// scheduler offers a stage only when this list names it.
+    ///
+    /// Empty from an agent with no bundle, or one that predates the field, and
+    /// empty is "no opinion": the box is offered work as before rather than
+    /// starved by a fact the inductor has not got.
+    #[serde(default)]
+    pub sources_stages: Vec<String>,
     /// Whether this worker keeps a TTS sidecar, as it currently believes.
     /// `None` from an older agent, read as "keeps one", which is both the
     /// default and the safe read (the old behaviour, never a stuck refusal).
@@ -1632,6 +1671,36 @@ impl OpResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Nothing enabled" and "no policy stored" are different answers, and the
+    /// difference is load-bearing: the second falls back to the full default, so
+    /// a box meant to run nothing would be handed every stage instead.
+    #[test]
+    fn a_nothing_policy_is_not_an_absent_one() {
+        let mut m = Machine::new("10.0.0.5", "thang", 22, None, "worker");
+        assert!(
+            m.effective_task_policy().iter().all(|p| p.enabled),
+            "no stored policy is the default, all four"
+        );
+        m.task_policy = Some(TaskPref::nothing());
+        assert!(
+            m.effective_task_policy().iter().all(|p| !p.enabled),
+            "a stored nothing-list has to survive the fallback"
+        );
+        assert!(
+            !TaskPref::nothing().is_empty(),
+            "an empty list is read as 'no policy', which is the opposite"
+        );
+        // And a box from a file that predates the field keeps the default.
+        let old: Machine = serde_json::from_str(
+            r#"{"id":"10.0.0.5","addr":"10.0.0.5","name":"","ssh_user":"thang",
+                "ssh_port":22,"ssh_key":null,"role":"worker","state":"unknown",
+                "state_since":0,"last_seen":0,"capabilities":[],"note":""}"#,
+        )
+        .unwrap();
+        assert!(old.task_policy.is_none());
+        assert!(old.effective_task_policy().iter().all(|p| p.enabled));
+    }
 
     #[test]
     fn stage_roundtrips_through_strings() {

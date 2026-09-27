@@ -845,6 +845,7 @@ mod tests {
             sidecars: None,
             sidecar_gb: None,
             capabilities: vec![],
+            sources_stages: Vec::new(),
             sidecar_keep,
         }
     }

@@ -243,7 +243,20 @@ pub fn join_all(
                 "name": addr, "addr": addr,
             }))
             .expect("name+addr with serde defaults always parses");
-            out.push(join_machine(&bxo, Some(r)));
+            let mut m = join_machine(&bxo, Some(r));
+            // **A box with no config record takes nothing.** The runtime
+            // outlives the config — a `machines.json` replaced wholesale, a
+            // hand-edited file, a box dropped from the list while its
+            // `machine_state` row stayed — and such a box came back with *no*
+            // policy, which `effective_task_policy` reads as the default: all
+            // four stages. It was then offered every stage in turn, including
+            // ones nothing had ever sent it files for (a digest with no prompt
+            // template fails on every retry), while being unprovisionable —
+            // provisioning walks the configured boxes. Nothing enabled says the
+            // truth: the box is here, and it is not working until somebody adds
+            // it and provisions it (`P` enables stages, then `p`).
+            m.task_policy = Some(bm_proto::TaskPref::nothing());
+            out.push(m);
         }
     }
     out.sort_by(|a, b| a.addr.cmp(&b.addr));
@@ -276,6 +289,56 @@ mod tests {
         assert!(
             super::join_machine(&written, None).relaxed(),
             "a park that did not survive the round trip would be lost on the next save"
+        );
+    }
+
+    /// A box whose config record is gone but whose runtime row stayed must not
+    /// come back able to run everything.
+    ///
+    /// The bug this pins: the synthesized machine carried no policy, which
+    /// `effective_task_policy` reads as the default — all four stages — so the
+    /// scheduler offered a ghost every stage in turn, including ones nothing
+    /// had ever sent it files for. Provisioning walks the *configured* boxes, so
+    /// this one could never be provisioned either: it was asked to run a stage
+    /// and permanently unable to. The live case was a digest on `192.168.2.2`
+    /// (`marmot`) failing on `prompts/analyze.txt: No such file or directory`
+    /// with a `machines.json` that no longer named it.
+    #[test]
+    fn a_box_with_no_config_record_is_a_box_that_works_on_nothing() {
+        let rt = serde_json::json!({
+            "192.168.2.2": {"state": "online", "last_seen": 123, "note": ""},
+        });
+        let joined = super::join_all(Vec::new(), rt.as_object().unwrap());
+        assert_eq!(joined.len(), 1, "liveness is still reported");
+        let m = &joined[0];
+        assert_eq!(m.addr, "192.168.2.2");
+        assert_eq!(m.state, bm_proto::MachineState::Online);
+        assert!(
+            m.effective_task_policy().iter().all(|p| !p.enabled),
+            "no config record is no stage it may run: {:?}",
+            m.effective_task_policy()
+        );
+        assert!(
+            super::sources::stages_of(&m.effective_task_policy()).is_empty(),
+            "so nothing is selected for it either"
+        );
+
+        // A *linked* box with no policy is a different thing entirely: the
+        // operator put it there, so it keeps the default it always had.
+        let bxo = super::LinkedBox {
+            name: "box-1".into(),
+            addr: "10.0.0.5".into(),
+            user: "thang".into(),
+            port: 22,
+            key: None,
+            role: "worker".into(),
+            task_policy: None,
+            accepting_work: true,
+        };
+        let one = super::join_all(vec![bxo], &serde_json::Map::new());
+        assert!(
+            one[0].effective_task_policy().iter().all(|p| p.enabled),
+            "a configured box with no policy still runs the default"
         );
     }
 

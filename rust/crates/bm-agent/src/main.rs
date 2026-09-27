@@ -1238,6 +1238,26 @@ struct WorkerIdentity {
     addr: String,
     hostname: String,
     alias: String,
+    /// This box's worker root. Carried here because a beat has to say which
+    /// stages the sources bundle on disk actually covers, and that bundle is
+    /// read from `sources-manifest.json` under this root.
+    root: PathBuf,
+}
+
+/// The stages this box's sources bundle covers, from the manifest the last
+/// provision left at the worker root.
+///
+/// Read **per beat** rather than cached at startup: a push happens under a
+/// running agent, so a list read once at boot would keep withholding the work
+/// the box has just been handed until somebody restarted the worker. A missing
+/// or unreadable manifest is an empty list, which the inductor reads as "no
+/// opinion" rather than "covers nothing".
+fn bundle_stages(root: &Path) -> Vec<String> {
+    std::fs::read_to_string(root.join(bm_core::provision::sources::MANIFEST_NAME))
+        .ok()
+        .and_then(|t| serde_json::from_str::<bm_core::provision::sources::SourcesManifest>(&t).ok())
+        .map(|m| m.stages)
+        .unwrap_or_default()
 }
 
 /// The heartbeat for right now. **One builder for both directions.**
@@ -1294,6 +1314,7 @@ fn heartbeat_now(
         sidecars,
         sidecar_gb,
         capabilities: capabilities(),
+        sources_stages: bundle_stages(&who.root),
         sidecar_keep: Some(sidecar_keep),
     }
 }
@@ -1794,6 +1815,7 @@ async fn worker_loop(
         addr: addr.clone(),
         hostname: hostname.clone(),
         alias: alias.clone(),
+        root: layout.root.clone(),
     };
     let shared: Shared = Arc::new(Mutex::new(Progress {
         activity: "starting".to_string(),
@@ -1896,6 +1918,7 @@ async fn worker_loop(
         addr: addr.clone(),
         hostname,
         capabilities: capabilities(),
+        sources_stages: bundle_stages(&layout.root),
         tts_url: Some(tts_url.clone()),
         version: VERSION.into(),
     };
@@ -2309,6 +2332,8 @@ mod tests {
             addr: "127.0.0.1".into(),
             hostname: "box".into(),
             alias: "owl".into(),
+            // No root: no bundle, so the beat says "no opinion" about stages.
+            root: PathBuf::new(),
         };
         let mut probe = LoadProbe::new();
         let beat = heartbeat_now(&p, &who, &mut probe, true);

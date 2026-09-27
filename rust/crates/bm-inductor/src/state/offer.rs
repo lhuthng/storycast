@@ -118,6 +118,24 @@ impl Inner {
                     continue;
                 }
             }
+            // **The stage this box was never sent the files for.** The policy
+            // is the operator's intent, the reported bundle is the fact, and
+            // when they disagree the box is asked to run a stage it cannot:
+            // a digest with no `prompts/analyze.txt` fails on every retry and
+            // the chapter wears the strikes. Widening a policy is one keypress
+            // and provisioning is another, so the two are read together here.
+            //
+            // An agent that reports nothing (no bundle yet, or one that
+            // predates the field) is offered work exactly as before: no
+            // opinion is not a verdict, the same rule the capability gate
+            // above and the memory ceiling already follow.
+            if let Some(beat) = self.beats.get(worker_id) {
+                if !beat.sources_stages.is_empty()
+                    && !beat.sources_stages.iter().any(|s| s == stage.as_str())
+                {
+                    continue;
+                }
+            }
             let mut ids: Vec<String> = self
                 .tasks
                 .iter()
