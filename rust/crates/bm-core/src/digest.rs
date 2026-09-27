@@ -1566,6 +1566,34 @@ fn carry_forward_fields(data: &mut Value, prepared: &PreparedChapter) {
             }
         }
     }
+
+    // The *head* of the chapter, which has nothing to inherit. The prompt asks
+    // for `music` where it changes, so a chapter whose first bed arrives at line
+    // 12 legitimately omits the field at lines 1-11 — and the validator refuses
+    // any blank once a single segment declares one, which is what `segment 0:
+    // missing music` was: 2 of ch386's 15 attempts. An empty value already means
+    // "no bed" to the mixer (`resolve_music`), so filling the blanks before the
+    // first declaration only says out loud what the mix does anyway.
+    //
+    // Only when something *is* declared: a script with no `music` at all
+    // predates the field and has to keep taking the legacy merge path rather
+    // than become a chapter of explicit silence.
+    let first_declared = segments.iter().position(|s| {
+        !crate::util::is_sound_item(s)
+            && !field_is_blank(s.as_object().unwrap_or(&serde_json::Map::new()), "music")
+    });
+    if let Some(first) = first_declared {
+        for segment in segments.iter_mut().take(first) {
+            if crate::util::is_sound_item(segment) {
+                continue;
+            }
+            if let Some(obj) = segment.as_object_mut() {
+                if field_is_blank(obj, "music") {
+                    obj.insert("music".into(), json!("none"));
+                }
+            }
+        }
+    }
 }
 
 /// Whether a carried field is absent or empty, the two ways a model declines to
@@ -2365,11 +2393,25 @@ fn corrected_source(event: &PreparedEvent, fixes: &[Value]) -> String {
     retag_text(&text).unwrap_or(text)
 }
 fn normalized_source(text: &str) -> String {
-    let text = text
-        .replace("[cười]", " ")
-        .replace("[thở dài]", " ")
-        .replace("[hắng giọng]", " ");
-    crate::util::squeeze_ws(&text)
+    let mut out = text.to_string();
+    for tag in ["[cười]", "[thở dài]", "[hắng giọng]"] {
+        // The tag, *and the punctuation it swallowed when it took the sound's
+        // place*. `retag_text` truncates `"…trượt tay, ha ha."` to
+        // `"…trượt tay, [cười]"` — the sentence period goes with the sound — so a
+        // model that writes the same line with its period (`"…[cười]."`) differs
+        // by one mark and was refused for it: 4 of ch386's 15 attempts died
+        // here, and the model's version is the more correct one.
+        //
+        // Punctuation only, never the adjacent words: `"…, [cười] ha ha."`
+        // still differs from `"…, [cười]"` after this, which is what keeps
+        // "the tag *and* the words it stands for" the error rule 7 says it is.
+        for punct in [",", ";", ":", ".", "…", "!", "?"] {
+            out = out.replace(&format!("{tag}{punct}"), " ");
+            out = out.replace(&format!("{punct}{tag}"), " ");
+        }
+        out = out.replace(tag, " ");
+    }
+    crate::util::squeeze_ws(&out)
 }
 
 /// Text with every *written* non-verbal sound, and every tag standing in for
@@ -2435,7 +2477,21 @@ fn leftover_written_sound(text: &str) -> Option<(&'static str, &'static str)> {
     let lower = text.to_lowercase();
     for (tag, spellings) in [
         ("[cười]", &["haha", "ha ha", "hắc hắc", "hô hô"][..]),
-        ("[thở dài]", &["haizz", "haiz"][..]),
+        // Longest spelling first, for the same reason the matcher does it: the
+        // sigh the corpus writes out (`thở dài một tiếng`) contains the bare
+        // form, and a hint that named the stub would send the repair to delete
+        // two words of its own sentence.
+        (
+            "[thở dài]",
+            &[
+                "thở dài một hơi rồi",
+                "thở dài một tiếng",
+                "thở dài một hơi",
+                "thở dài",
+                "haizz",
+                "haiz",
+            ][..],
+        ),
         ("[hắng giọng]", &["khụ khụ", "khụ"][..]),
     ] {
         if !lower.contains(tag) {
@@ -2837,6 +2893,41 @@ mod tests {
         assert_eq!(segs[1]["mood"], json!("urgent"));
         assert_eq!(segs[2]["mood"], json!("urgent"));
         assert_eq!(segs[1]["text"], json!("Hai."));
+    }
+
+    /// The head of a chapter whose first bed arrives mid-way.
+    ///
+    /// Rule 8 asks for `music` where it *changes*, so the lines before the
+    /// first change carry no value at all — there is nothing to inherit, and the
+    /// validator refuses a blank the moment any segment declares a bed. That was
+    /// `segment 0: missing music` on ch386, and it is a chapter the prompt told
+    /// the model to write exactly as it did.
+    #[test]
+    fn the_lines_before_the_first_music_declaration_are_none() {
+        let prepared = prepare_chapter("Một.\n\nHai.\n\nBa.");
+        let mut data = json!({
+            "segments": [
+                {"source_id": "e0001", "text": "Một."},
+                {"source_id": "e0002", "text": "Hai.", "music": "battle"},
+                {"source_id": "e0003", "text": "Ba."}
+            ]
+        });
+        carry_forward_fields(&mut data, &prepared);
+        let segs = data["segments"].as_array().unwrap();
+        assert_eq!(segs[0]["music"], json!("none"), "the silent head is `none`");
+        assert_eq!(segs[1]["music"], json!("battle"));
+        assert_eq!(segs[2]["music"], json!("battle"), "and it still carries on");
+
+        // A chapter with no `music` anywhere is left alone: it predates the
+        // field, and the legacy merge path is what reads it.
+        let mut legacy = json!({"segments": [
+            {"source_id": "e0001", "text": "Một."},
+            {"source_id": "e0002", "text": "Hai."}
+        ]});
+        carry_forward_fields(&mut legacy, &prepared);
+        for seg in legacy["segments"].as_array().unwrap() {
+            assert!(seg.get("music").is_none(), "nothing to say about a legacy script");
+        }
     }
 
     /// A reworded template must surface as a miss, not vanish. This is the
@@ -3797,6 +3888,38 @@ mod tests {
             model_shape["segments"][0]["text"],
             json!("Bành Anh [thở dài] nói:")
         );
+    }
+
+    /// The sentence's own period, which went with the sound on the way in.
+    ///
+    /// `retag_text` truncates `"…trượt tay, ha ha."` to `"…trượt tay, [cười]"`,
+    /// so a model that writes the line back with its period — the more correct
+    /// of the two — differed from the expectation by one mark and was refused
+    /// for it. ch386 lost 4 of its 15 attempts to exactly this, and no repair
+    /// could act on it: the message asks the model to delete a period it never
+    /// added. `written_sound_hint` has always compared the two texts with the
+    /// sounds stripped on *both* sides; this is the same courtesy for the mark
+    /// the tag swallowed.
+    #[test]
+    fn a_period_beside_an_engine_tag_is_not_a_source_change() {
+        let expected = "Cũng may, cũng may không bị trượt tay, [cười]";
+        assert!(
+            source_text_matches(
+                expected,
+                &["Cũng may, cũng may không bị trượt tay, [cười].".to_string()]
+            ),
+            "the tag's own period must not read as a change"
+        );
+        assert!(source_text_matches(
+            "Hắn gầm lên, [hắng giọng]",
+            &["Hắn gầm lên, [hắng giọng]!".to_string()]
+        ));
+        // The tag *and* the words it stands for is still the error it is: only
+        // punctuation around a tag is forgiven, never the text beside it.
+        assert!(!source_text_matches(
+            expected,
+            &["Cũng may, cũng may không bị trượt tay, [cười] ha ha.".to_string()]
+        ));
     }
 
     #[test]

@@ -228,6 +228,32 @@ local function is_artifact(line)
   return false
 end
 
+-- The translator's one-letter stub, which Storya leaves at the end of some
+-- paragraphs: `…cũng đều kinh hãi khi chứng kiến cảnh tượng đó. m.` (ch386) and
+-- `"Không, ngươi không xứng." m.` (ch362), both confirmed on the live page.
+--
+-- It is not a word and not part of the sentence, but the digest's source gate
+-- requires every word of the chapter to be spoken exactly once, and a model
+-- drops the stub on sight — so the chapter is refused for ever: ch386 burned 15
+-- attempts on this one fragment and was shelved. Cheaper and more honest to
+-- never hand it to the model.
+--
+-- Only the letters the site actually stubs with are listed. A paragraph ending
+-- `y.`, `a.` or `u.` is the pronoun, the sentence particle and `âm u` — real
+-- words, five of them in this corpus — so "drop a dangling letter" would delete
+-- prose to clean up two paragraphs.
+local STUB_LETTERS = { "m" }
+
+local function strip_stub(line)
+  for _, letter in ipairs(STUB_LETTERS) do
+    local stub = " " .. letter .. "."
+    if #line > #stub and line:sub(-#stub) == stub then
+      return (string.gsub(line:sub(1, -#stub - 1), "%s+$", ""))
+    end
+  end
+  return line
+end
+
 -- The old Rust extractor, as a script: one page of HTML in, one chapter out.
 local function extract(html)
   -- `<script>` and `<style>` bodies are not prose, and neither are the site's
@@ -322,7 +348,7 @@ local function extract(html)
   local kept = {}
   for _, line in ipairs(out) do
     if not is_artifact(line) and not is_numbered_heading(line) then
-      kept[#kept + 1] = line
+      kept[#kept + 1] = strip_stub(line)
     end
   end
   return sanitize(table.concat(kept, "\n\n"))
