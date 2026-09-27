@@ -1014,13 +1014,17 @@ mod tests {
         };
 
         // No report: offered as it always was.
-        let offer = inner.offer("w").expect("an agent that reports nothing is fed");
+        let offer = inner
+            .offer("w")
+            .expect("an agent that reports nothing is fed");
         assert_eq!(offer.task_id, "digest:1");
         rearm(&mut inner);
 
         // A bundle that covers the stage: offered.
         inner.observe(&beat_with_bundle("w", "192.168.2.2", &["crawl", "digest"]));
-        let offer = inner.offer("w").expect("a provisioned box takes its digest");
+        let offer = inner
+            .offer("w")
+            .expect("a provisioned box takes its digest");
         assert_eq!(offer.task_id, "digest:1");
         rearm(&mut inner);
 
@@ -1035,12 +1039,9 @@ mod tests {
             "no prompts on the box, so no digest offered"
         );
         assert!(
-            inner
-                .events
-                .iter()
-                .any(|e| e.level == "warn"
-                    && e.text.contains("does not")
-                    && e.text.contains("provisioned")),
+            inner.events.iter().any(|e| e.level == "warn"
+                && e.text.contains("does not")
+                && e.text.contains("provisioned")),
             "the operator has to be told the cure: {:?}",
             inner.events.iter().map(|e| &e.text).collect::<Vec<_>>()
         );
@@ -2245,7 +2246,10 @@ mod tests {
         std::fs::write(layout.final_mp3(25), vec![0u8; 2000]).unwrap();
 
         let msg = inner
-            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Huyền Vũ lão tổ".into()])], false)
+            .apply_reconcile(
+                &[("Huyền Vũ".into(), vec!["Huyền Vũ lão tổ".into()])],
+                false,
+            )
             .unwrap();
         assert!(msg.contains("Huyền Vũ <= Huyền Vũ lão tổ"), "{msg}");
 
@@ -2317,7 +2321,10 @@ mod tests {
         .unwrap();
 
         let msg = inner
-            .apply_reconcile(&[("Huyền Vũ".into(), vec!["Huyền Vũ lão tổ".into()])], false)
+            .apply_reconcile(
+                &[("Huyền Vũ".into(), vec!["Huyền Vũ lão tổ".into()])],
+                false,
+            )
             .unwrap();
         assert!(msg.contains("Huyền Vũ <= Huyền Vũ lão tổ"), "{msg}");
 
@@ -2420,12 +2427,12 @@ mod tests {
         let err = inner
             .apply_reconcile(&[("Huyền Vũ".into(), vec!["Nobody".into()])], true)
             .unwrap_err();
-        assert!(err.to_string().contains("neither the bible nor the cast"), "{err}");
+        assert!(
+            err.to_string().contains("neither the bible nor the cast"),
+            "{err}"
+        );
         // The Narrator is a voice, not a character, on either side.
-        for (s, a) in [
-            ("Narrator", "Huyền Vũ"),
-            ("Huyền Vũ", "Narrator"),
-        ] {
+        for (s, a) in [("Narrator", "Huyền Vũ"), ("Huyền Vũ", "Narrator")] {
             let err = inner
                 .apply_reconcile(&[(s.into(), vec![a.into()])], true)
                 .unwrap_err();
@@ -3670,7 +3677,9 @@ mod tests {
         for f in &files {
             std::fs::write(seg.join(f), vec![0u8; 2000]).unwrap();
         }
-        inner.materialize_render_takes(chapter).expect("plans again");
+        inner
+            .materialize_render_takes(chapter)
+            .expect("plans again");
         std::fs::write(layout.final_mp3(chapter), vec![0u8; 2000]).unwrap();
         let mut t = Task::new(chapter, Stage::Merge);
         t.state = TaskState::Done;
@@ -3704,7 +3713,10 @@ mod tests {
         assert!(msg.contains("1 take(s) to re-speak"), "{msg}");
 
         let back: Value = bm_core::read_json(&layout.script(18)).unwrap();
-        assert_eq!(back["segments"][1]["speaker"], serde_json::json!("Dịch Phong"));
+        assert_eq!(
+            back["segments"][1]["speaker"],
+            serde_json::json!("Dịch Phong")
+        );
         assert_eq!(
             back["segments"][0]["speaker"],
             serde_json::json!("Narrator"),
@@ -3719,7 +3731,11 @@ mod tests {
             .keys()
             .filter(|k| k.starts_with("render:18:") && inner.tasks[*k].state == TaskState::Pending)
             .collect();
-        assert_eq!(pending.len(), 1, "exactly one take is work again: {pending:?}");
+        assert_eq!(
+            pending.len(),
+            1,
+            "exactly one take is work again: {pending:?}"
+        );
         assert_eq!(
             inner.tasks["merge:18"].state,
             TaskState::Pending,
@@ -3730,11 +3746,20 @@ mod tests {
         let seg = layout.seg_dir("vieneu", 18);
         let plan = bm_core::assemble::RenderPlan::load(&layout.plan(18)).unwrap();
         assert_eq!(plan.takes[1].speaker, "Dịch Phong");
-        assert_eq!(plan.takes[1].voice, "Thiếu Nữ", "the voice follows the cast");
+        assert_eq!(
+            plan.takes[1].voice, "Thiếu Nữ",
+            "the voice follows the cast"
+        );
         // The two untouched takes are still on disk under the same names, and
         // the old bytes of the moved one are gone rather than left beside them.
-        assert!(seg.join(&plan.takes[0].file).exists(), "untouched take kept");
-        assert!(seg.join(&plan.takes[2].file).exists(), "untouched take kept");
+        assert!(
+            seg.join(&plan.takes[0].file).exists(),
+            "untouched take kept"
+        );
+        assert!(
+            seg.join(&plan.takes[2].file).exists(),
+            "untouched take kept"
+        );
         assert!(
             !seg.join(&files[1]).exists(),
             "the superseded voice's audio is swept, not left to be mixed by accident"
@@ -3781,13 +3806,21 @@ mod tests {
         let before = r#"{"segments":[
             {"speaker":"Narrator","text":"Một."},
             {"speaker":"Dịch Phong","text":"Hai."}]}"#;
-        rendered_chapter(&mut inner, 18, before, r#"{"Narrator":"Đức Trí","Dịch Phong":"Thiếu Nữ"}"#);
+        rendered_chapter(
+            &mut inner,
+            18,
+            before,
+            r#"{"Narrator":"Đức Trí","Dịch Phong":"Thiếu Nữ"}"#,
+        );
 
         let err = inner
             .op_fix_speaker(18, 1, "Thanh Sơn lão tổ", "Dịch Phong")
             .expect_err("segment 1 is the Narrator, not the character named")
             .to_string();
-        assert!(err.contains("\"Narrator\""), "names who is really there: {err}");
+        assert!(
+            err.contains("\"Narrator\""),
+            "names who is really there: {err}"
+        );
         assert!(
             err.contains("nowhere in this chapter"),
             "and that the expected speaker is not: {err}"
@@ -3798,7 +3831,10 @@ mod tests {
             "the script is byte-identical: the refusal wrote nothing"
         );
         assert_eq!(inner.tasks["merge:18"].state, TaskState::Done, "no churn");
-        assert!(layout.final_mp3(18).exists(), "the finished mp3 is untouched");
+        assert!(
+            layout.final_mp3(18).exists(),
+            "the finished mp3 is untouched"
+        );
     }
 
     #[test]
@@ -3881,9 +3917,7 @@ mod tests {
             .to_string();
         assert!(err.contains("numbered 1..1"), "{err}");
         assert!(
-            inner
-                .op_fix_speaker(18, 0, "A", "Narrator")
-                .is_ok(),
+            inner.op_fix_speaker(18, 0, "A", "Narrator").is_ok(),
             "segment 0 saturates to the first segment rather than panicking"
         );
     }

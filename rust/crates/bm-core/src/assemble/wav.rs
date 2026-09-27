@@ -174,8 +174,7 @@ impl WavInfo {
 }
 
 pub fn wav_info(path: &Path) -> Result<WavInfo> {
-    let mut f = std::fs::File::open(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let mut f = std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
     let mut head = [0u8; 12];
     f.read_exact(&mut head)?;
     if &head[0..4] != b"RIFF" || &head[8..12] != b"WAVE" {
@@ -188,9 +187,7 @@ pub fn wav_info(path: &Path) -> Result<WavInfo> {
     let mut pos = 12u64;
     let file_len = f.metadata()?.len();
     let mut chunk = [0u8; 8];
-    while f.seek(std::io::SeekFrom::Start(pos))? == pos
-        && f.read(&mut chunk)? == 8
-    {
+    while f.seek(std::io::SeekFrom::Start(pos))? == pos && f.read(&mut chunk)? == 8 {
         let id = &chunk[0..4];
         let size = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]) as u64;
         let body = pos + 8;

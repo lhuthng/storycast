@@ -160,10 +160,14 @@ pub(crate) async fn key_confirm(
                     );
                     app.set_status(
                         Level::Info,
-                        format!("merging {} into {survivor} — watch events", absorbed.join(", ")),
+                        format!(
+                            "merging {} into {survivor} — watch events",
+                            absorbed.join(", ")
+                        ),
                     );
                 }
-                ConfirmAction::Rerender => {                    dispatch_op(
+                ConfirmAction::Rerender => {
+                    dispatch_op(
                         app,
                         job_tx,
                         http,

@@ -433,16 +433,15 @@ impl Inner {
         // settings: keys are machine-global, and the offer below carries the
         // active key+model per task. Unconfigured (or legacy) falls back to
         // the workspace settings, which the `L` screen keeps mirrored.
-        let llm =
-            bm_core::config::LlmConfig::load_or_seed(&self.layout.root, &self.settings);
+        let llm = bm_core::config::LlmConfig::load_or_seed(&self.layout.root, &self.settings);
         let (analyzer, analyzer_settings) = llm.offer_analyzer(&self.settings);
         // Narrowed to what this stage reads, so a crawl offer carries no
         // secret and a digest carries only the analyzer's key. The slot (not
         // the provider id) decides the narrowing.
         let backend = analyzer_settings.backend.clone();
-        let credentials =
-            llm.credentials()
-                .for_stage(t.stage, &backend, &self.settings.engine);
+        let credentials = llm
+            .credentials()
+            .for_stage(t.stage, &backend, &self.settings.engine);
         TaskOffer {
             task_id: t.id(),
             chapter: n,

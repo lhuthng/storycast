@@ -28,7 +28,12 @@ pub(crate) fn open_llm(app: &mut App) {
 
 /// Save one field of one provider, then mirror the active provider into the
 /// workspace settings. Returns a status line; `Err` keeps the prompt open.
-pub(crate) fn save_llm_field(app: &App, provider: &str, kind: &TextKind, buf: &str) -> Result<String, String> {
+pub(crate) fn save_llm_field(
+    app: &App,
+    provider: &str,
+    kind: &TextKind,
+    buf: &str,
+) -> Result<String, String> {
     if app.layout.root.as_os_str().is_empty() {
         return Err("no repo root — restart the TUI from a checkout".into());
     }
@@ -90,7 +95,9 @@ pub(crate) fn activate(app: &App, provider: &str) -> Result<String, String> {
     let keyless = cfg.kind_of(provider) == bm_core::config::LlmKind::Ollama;
     let entry = cfg.providers.entry(provider.to_string()).or_default();
     if entry.model.trim().is_empty() {
-        return Err(format!("{provider} has no model — set one with `m` (or `f` to list) first"));
+        return Err(format!(
+            "{provider} has no model — set one with `m` (or `f` to list) first"
+        ));
     }
     if !keyless && !entry.has_key() {
         return Err(format!("{provider} has no key — add one with `k` first"));
@@ -205,11 +212,20 @@ pub(crate) async fn key_llm(
             } else {
                 "paste the provider's API key — empty leaves it off"
             };
-            app.screen = Screen::Text(TextPrompt::new(TextKind::LlmKey(id), "Provider key", hint, ""));
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::LlmKey(id),
+                "Provider key",
+                hint,
+                "",
+            ));
         }
         KeyCode::Char('u') => {
             app.llm_cursor = v.cursor;
-            let cur = cfg.providers.get(&id).map(|e| e.base_url.clone()).unwrap_or_default();
+            let cur = cfg
+                .providers
+                .get(&id)
+                .map(|e| e.base_url.clone())
+                .unwrap_or_default();
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::LlmUrl(id),
                 "Provider base URL",
@@ -219,7 +235,11 @@ pub(crate) async fn key_llm(
         }
         KeyCode::Char('m') => {
             app.llm_cursor = v.cursor;
-            let cur = cfg.providers.get(&id).map(|e| e.model.clone()).unwrap_or_default();
+            let cur = cfg
+                .providers
+                .get(&id)
+                .map(|e| e.model.clone())
+                .unwrap_or_default();
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::LlmModel(id),
                 "Provider model",
@@ -231,14 +251,18 @@ pub(crate) async fn key_llm(
             let e = cfg.providers.get(&id).cloned().unwrap_or_default();
             if e.base_url.trim().is_empty() {
                 app.screen = Screen::Llm(v);
-                app.set_status(Level::Warn, format!("{id} has no URL — set one with `u` first"));
+                app.set_status(
+                    Level::Warn,
+                    format!("{id} has no URL — set one with `u` first"),
+                );
                 return false;
             }
-            if !e.has_key()
-                && cfg.kind_of(&id) != bm_core::config::LlmKind::Ollama
-            {
+            if !e.has_key() && cfg.kind_of(&id) != bm_core::config::LlmKind::Ollama {
                 app.screen = Screen::Llm(v);
-                app.set_status(Level::Warn, format!("{id} has no key — add one with `k` first"));
+                app.set_status(
+                    Level::Warn,
+                    format!("{id} has no key — add one with `k` first"),
+                );
                 return false;
             }
             app.llm_models.clear();

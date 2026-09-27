@@ -599,7 +599,9 @@ impl LlmConfig {
                     shipped
                         .providers
                         .values()
-                        .find(|s| !s.base_url.trim().is_empty() && norm(&s.base_url) == norm(&e.base_url))
+                        .find(|s| {
+                            !s.base_url.trim().is_empty() && norm(&s.base_url) == norm(&e.base_url)
+                        })
                         .map(|s| s.kind.clone())
                 })
                 .unwrap_or_default();
@@ -635,13 +637,16 @@ impl LlmConfig {
         let mut cfg = Self::load(root);
         let legacy = read_legacy_env(&root.join(".env"));
         let legacy_var = |name: &str| {
-            std::env::var(name).ok().filter(|v| !v.is_empty()).or_else(|| {
-                legacy
-                    .iter()
-                    .find(|(k, _)| k == name)
-                    .map(|(_, v)| v.clone())
-                    .filter(|v| !v.is_empty())
-            })
+            std::env::var(name)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .or_else(|| {
+                    legacy
+                        .iter()
+                        .find(|(k, _)| k == name)
+                        .map(|(_, v)| v.clone())
+                        .filter(|v| !v.is_empty())
+                })
         };
         let gemini_key = legacy_var("GEMINI_API_KEY").unwrap_or_default();
         let or_key = legacy_var("OPENROUTER_API_KEY").unwrap_or_default();
@@ -1082,14 +1087,14 @@ mod tests {
         // An id the file invented still routes by its kind, not its name.
         cfg.providers
             .insert("my-gateway".into(), entry("openai", "k", "m"));
-        cfg.providers.get_mut("my-gateway").unwrap().base_url =
-            "https://gw.example/v1".into();
+        cfg.providers.get_mut("my-gateway").unwrap().base_url = "https://gw.example/v1".into();
         cfg.active = "my-gateway".into();
         let r = cfg.resolve().expect("custom provider resolves");
         assert_eq!(r.analyzer, "my-gateway");
         assert_eq!(r.base_url, "https://gw.example/v1");
         // The ollama kind needs a model but no key.
-        cfg.providers.insert("ollama".into(), entry("ollama", "", ""));
+        cfg.providers
+            .insert("ollama".into(), entry("ollama", "", ""));
         cfg.active = "ollama".into();
         assert!(cfg.resolve().is_none(), "ollama still model-less");
         cfg.providers.get_mut("ollama").unwrap().model = "gemma-4-12b".into();
@@ -1146,11 +1151,9 @@ mod tests {
         );
         assert_eq!(creds.pairs(), vec![("OPENROUTER_API_KEY", "t-key")]);
         // …and the Gemini slot still finds its own key for a gemini render.
-        let render = cfg.credentials().for_stage(
-            bm_proto::Stage::Render,
-            "gemini",
-            "gemini",
-        );
+        let render = cfg
+            .credentials()
+            .for_stage(bm_proto::Stage::Render, "gemini", "gemini");
         assert_eq!(render.pairs(), vec![("GEMINI_API_KEY", "g-key")]);
     }
 
@@ -1180,8 +1183,7 @@ mod tests {
         cfg.active = "tokenharbor".into();
         cfg.providers.get_mut("tokenharbor").unwrap().api_key = "t-key".into();
         cfg.providers.get_mut("tokenharbor").unwrap().model = "th-model".into();
-        cfg.providers.get_mut("tokenharbor").unwrap().base_url =
-            "https://th.example/v1".into();
+        cfg.providers.get_mut("tokenharbor").unwrap().base_url = "https://th.example/v1".into();
         let (analyzer, a) = cfg.offer_analyzer(&Settings::default());
         assert_eq!(analyzer, "tokenharbor");
         assert_eq!(a.backend, "openai");
@@ -1259,8 +1261,8 @@ mod tests {
         // The template a fresh clone copies: endpoints only. A default key
         // would be a leaked secret and a default model a choice the operator
         // never made — both are set with `L`, never shipped.
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../llm.default.json");
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../llm.default.json");
         let cfg: LlmConfig =
             read_json(&root).expect("llm.default.json parses — if you moved it, move this test");
         assert!(cfg.active.is_empty());
@@ -1275,8 +1277,7 @@ mod tests {
             );
         }
         assert_eq!(
-            cfg.providers["tokenharbor"].base_url,
-            "https://tokenharbor.ai/v1",
+            cfg.providers["tokenharbor"].base_url, "https://tokenharbor.ai/v1",
             "the OpenAI-compatible base, not the full /chat/completions path"
         );
     }

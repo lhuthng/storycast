@@ -382,13 +382,23 @@ mod tests {
     /// push makes, so a fixture that cannot be planned is a test failure rather
     /// than a silently empty digest.
     fn stamp(root: &std::path::Path) -> ProvisionStamp {
-        compute_provision_stamp(&crate::Layout::new(root), &STAGES, "0.2.0", &agent_bin(root))
-            .expect("the fixture plan must build")
+        compute_provision_stamp(
+            &crate::Layout::new(root),
+            &STAGES,
+            "0.2.0",
+            &agent_bin(root),
+        )
+        .expect("the fixture plan must build")
     }
 
     fn stamp_v(root: &std::path::Path, version: &str) -> ProvisionStamp {
-        compute_provision_stamp(&crate::Layout::new(root), &STAGES, version, &agent_bin(root))
-            .expect("the fixture plan must build")
+        compute_provision_stamp(
+            &crate::Layout::new(root),
+            &STAGES,
+            version,
+            &agent_bin(root),
+        )
+        .expect("the fixture plan must build")
     }
 
     /// The stamp with an explicit agent binary, for the rebuild cases that swap

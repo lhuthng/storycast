@@ -1038,9 +1038,7 @@ impl Inner {
             anyhow::bail!("segment {segment}: empty speaker");
         }
         if to == expect.trim() {
-            anyhow::bail!(
-                "segment {segment} already speaks as {to:?} — nothing to change"
-            );
+            anyhow::bail!("segment {segment} already speaks as {to:?} — nothing to change");
         }
         for t in self.tasks.values() {
             if t.chapter == chapter && matches!(t.state, TaskState::Assigned | TaskState::Running) {
@@ -1098,15 +1096,16 @@ impl Inner {
             let mut where_: Vec<String> = segments
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| {
-                    s.get("speaker").and_then(|v| v.as_str()) == Some(expect.trim())
-                })
+                .filter(|(_, s)| s.get("speaker").and_then(|v| v.as_str()) == Some(expect.trim()))
                 .map(|(i, _)| (i + 1).to_string())
                 .collect();
             where_.truncate(8);
             let near: Vec<String> = (index.saturating_sub(1)..(index + 2).min(len))
                 .map(|i| {
-                    let s = segments[i].get("speaker").and_then(|v| v.as_str()).unwrap_or("?");
+                    let s = segments[i]
+                        .get("speaker")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
                     let text: String = segments[i]
                         .get("text")
                         .and_then(|v| v.as_str())
@@ -1144,14 +1143,8 @@ impl Inner {
                         .map(str::to_string)
                 })
                 .collect();
-            if let Some(roster) = data
-                .get_mut("roster")
-                .and_then(|r| r.as_array_mut())
-            {
-                roster.retain(|r| {
-                    r.as_str()
-                        .is_some_and(|n| speakers.iter().any(|s| s == n))
-                });
+            if let Some(roster) = data.get_mut("roster").and_then(|r| r.as_array_mut()) {
+                roster.retain(|r| r.as_str().is_some_and(|n| speakers.iter().any(|s| s == n)));
                 for s in &speakers {
                     if !roster.iter().any(|r| r.as_str() == Some(s.as_str())) {
                         roster.push(serde_json::Value::String(s.clone()));

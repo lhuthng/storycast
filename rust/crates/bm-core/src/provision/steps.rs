@@ -589,7 +589,11 @@ echo "probe=done"
             plan.pack(&manifest, &bundle)?;
         }
 
-        let mut lines = vec![format!("sources: {} -> {}", plan.summary(), super::sources::BUNDLE_NAME)];
+        let mut lines = vec![format!(
+            "sources: {} -> {}",
+            plan.summary(),
+            super::sources::BUNDLE_NAME
+        )];
         // A registry naming a clip that is not on disk here is worth a line: the
         // merge degrades that one sound to silence with its own warning, and an
         // operator reading a provision log is the last person who can still fix
@@ -607,7 +611,11 @@ echo "probe=done"
             ));
         }
 
-        self.rsync_push_plain(&bundle, super::sources::BUNDLE_NAME, progress(live, "sources"))?;
+        self.rsync_push_plain(
+            &bundle,
+            super::sources::BUNDLE_NAME,
+            progress(live, "sources"),
+        )?;
         let (code, stdout, stderr) = self.run(&super::sources::extract_script(), 600)?;
         if code != 0 {
             let hint = if stderr.contains("zstd") || stdout.contains("zstd-missing") {
@@ -1379,10 +1387,7 @@ pub fn provision(
         }
 
         if sources_match {
-            log.push(format!(
-                "[{}] sources in sync (cache match)",
-                m.id
-            ));
+            log.push(format!("[{}] sources in sync (cache match)", m.id));
         } else {
             match ssh.install_sources(layout, &stages, live.as_ref()) {
                 Ok(lines) => {
@@ -1767,7 +1772,9 @@ mod tests {
         // unconditionally and still short-circuits when the tool is present.
         let zstd = zstd_script();
         assert!(
-            zstd.contains(r#"command -v zstd >/dev/null 2>&1 && { echo "ZSTD-OK (present)"; exit 0; }"#),
+            zstd.contains(
+                r#"command -v zstd >/dev/null 2>&1 && { echo "ZSTD-OK (present)"; exit 0; }"#
+            ),
             "a box that has it must pay one command: {zstd}"
         );
         assert!(
@@ -1827,7 +1834,10 @@ mod tests {
         let hash = "dda4efee13df0eb2b30ef45eb548741b5af633f6d55712e30f4da574b357c552";
         let r = crate::artifact::ModelsRelease::for_repo("lhuthng/storycast", hash).unwrap();
         let script = fetch_script(&r);
-        assert!(script.contains("~/bm-worker/bm-agent fetch-artifact"), "{script}");
+        assert!(
+            script.contains("~/bm-worker/bm-agent fetch-artifact"),
+            "{script}"
+        );
         assert!(script.contains(&format!("--expect {hash}")), "{script}");
         assert!(
             script.contains("~/bm-worker/models"),

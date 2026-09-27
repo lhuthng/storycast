@@ -202,7 +202,10 @@ pub fn read_npy(bytes: &[u8]) -> Result<Array> {
             let (chunks, []) = body[..count * 8].as_chunks::<8>() else {
                 bail!("truncated: wanted {} bytes, have {}", count * 8, body.len());
             };
-            chunks.iter().map(|c| f64::from_le_bytes(*c) as f32).collect()
+            chunks
+                .iter()
+                .map(|c| f64::from_le_bytes(*c) as f32)
+                .collect()
         }
         other => bail!("unsupported npy dtype {other}; expected <f4 or <f8"),
     };
@@ -312,7 +315,8 @@ mod tests {
                     .join(", ")
             )
         };
-        let header = format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape_s}, }}");
+        let header =
+            format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape_s}, }}");
         let padded = (64 - (10 + header.len() + 1) % 64) % 64;
         let mut h = header.into_bytes();
         h.extend(std::iter::repeat_n(b' ', padded));

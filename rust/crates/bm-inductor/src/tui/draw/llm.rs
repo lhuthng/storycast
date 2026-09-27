@@ -1,9 +1,5 @@
 //! The LLM setup overlay: providers, keys, models, and which one digests.
-use crate::tui::{
-    app::App,
-    screen::LlmView,
-    style::centered,
-};
+use crate::tui::{app::App, screen::LlmView, style::centered};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -28,8 +24,7 @@ pub(crate) fn draw_llm(f: &mut ratatui::Frame, app: &mut App, v: &LlmView) {
         let cursor = if i == v.cursor { "▸" } else { " " };
         let is_active = active.as_deref() == Some(id.as_str());
         let mark = if is_active { "●" } else { "○" };
-        let key_ok = e.has_key()
-            || cfg.kind_of(id) == bm_core::config::LlmKind::Ollama;
+        let key_ok = e.has_key() || cfg.kind_of(id) == bm_core::config::LlmKind::Ollama;
         let key = if e.has_key() { "key:set" } else { "key:—" };
         let key_style = if key_ok {
             Style::default().fg(Color::Green)
@@ -52,7 +47,11 @@ pub(crate) fn draw_llm(f: &mut ratatui::Frame, app: &mut App, v: &LlmView) {
             Span::styled(format!(" {key:<7}"), key_style),
             Span::raw(" "),
             Span::styled(
-                if is_active { format!("{model}  ACTIVE") } else { model.to_string() },
+                if is_active {
+                    format!("{model}  ACTIVE")
+                } else {
+                    model.to_string()
+                },
                 if is_active {
                     app.style(Color::Green)
                 } else {
@@ -82,7 +81,11 @@ pub(crate) fn draw_llm(f: &mut ratatui::Frame, app: &mut App, v: &LlmView) {
                 .saturating_sub(SHOW - 1)
                 .min(total.saturating_sub(SHOW));
             lines.push(Line::from(Span::styled(
-                format!("      {total} models ({}–{})", start + 1, (start + SHOW).min(total)),
+                format!(
+                    "      {total} models ({}–{})",
+                    start + 1,
+                    (start + SHOW).min(total)
+                ),
                 dim,
             )));
             for (m, name) in app.llm_models.iter().enumerate().skip(start).take(SHOW) {

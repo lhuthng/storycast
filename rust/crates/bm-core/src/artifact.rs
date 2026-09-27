@@ -143,8 +143,8 @@ pub fn manifest_hash(doc: &Value) -> Result<String> {
 
 fn read_manifest(models_dir: &Path) -> Result<Value> {
     let path = models_dir.join("manifest.json");
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
@@ -306,11 +306,7 @@ pub fn land_unpinned(archive: &Path, dest: &Path) -> Result<Landing, FetchError>
     land_with(archive, dest, None)
 }
 
-fn land_with(
-    archive: &Path,
-    dest: &Path,
-    expect: Option<&str>,
-) -> Result<Landing, FetchError> {
+fn land_with(archive: &Path, dest: &Path, expect: Option<&str>) -> Result<Landing, FetchError> {
     let parent = dest.parent().unwrap_or(Path::new("."));
     let stage = scratch_dir(parent, "models-stage");
     // `unpack_in` resolves every member against an existing directory, so the
@@ -542,13 +538,19 @@ mod tests {
             "a.onnx": {"sha256": "aa", "bytes": 1},
             "b.npz": {"sha256": "bb", "bytes": 2}
         }});
-        assert_eq!(manifest_hash(&doc).unwrap(), manifest_hash(&same_reordered).unwrap());
+        assert_eq!(
+            manifest_hash(&doc).unwrap(),
+            manifest_hash(&same_reordered).unwrap()
+        );
         let changed = json!({"files": {
             "a.onnx": {"sha256": "aa", "bytes": 1},
             "b.npz": {"sha256": "bb", "bytes": 2},
             "c.bin": {"sha256": "CHANGED", "bytes": 3}
         }});
-        assert_ne!(manifest_hash(&doc).unwrap(), manifest_hash(&changed).unwrap());
+        assert_ne!(
+            manifest_hash(&doc).unwrap(),
+            manifest_hash(&changed).unwrap()
+        );
     }
 
     #[test]
@@ -565,7 +567,15 @@ mod tests {
 
     #[test]
     fn a_repo_that_is_not_owner_name_is_refused() {
-        for bad in ["", "storycast", "a/b/c", "owner/", "/name", "own er/name", "o/name?x=1"] {
+        for bad in [
+            "",
+            "storycast",
+            "a/b/c",
+            "owner/",
+            "/name",
+            "own er/name",
+            "o/name?x=1",
+        ] {
             assert!(
                 ModelsRelease::for_repo(bad, "dda4efee13df").is_err(),
                 "`{bad}` was accepted"
@@ -598,13 +608,19 @@ mod tests {
         // A weight that is not the one the bake recorded.
         std::fs::write(dir.join("two.bin"), b"tampered").unwrap();
         let err = verify_dir(&dir, &want).unwrap_err();
-        assert!(err.contains("two.bin") && err.contains("does not match"), "{err}");
+        assert!(
+            err.contains("two.bin") && err.contains("does not match"),
+            "{err}"
+        );
 
         // A file nobody listed: the box would be checking a set it was not told.
         std::fs::write(dir.join("two.bin"), b"two").unwrap();
         std::fs::write(dir.join("smuggled.bin"), b"x").unwrap();
         let err = verify_dir(&dir, &want).unwrap_err();
-        assert!(err.contains("smuggled.bin") && err.contains("absent from its manifest"), "{err}");
+        assert!(
+            err.contains("smuggled.bin") && err.contains("absent from its manifest"),
+            "{err}"
+        );
     }
 
     /// The expectation travels from the inductor, so a bundle that verifies
