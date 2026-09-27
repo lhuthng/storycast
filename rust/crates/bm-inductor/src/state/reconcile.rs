@@ -272,19 +272,217 @@ impl Inner {
         (chapters, files)
     }
 
+    /// Chapters that would hear these names: a script speaking them
+    /// (literally, or through an alias the bible resolves) or a render plan
+    /// holding their takes. The merge rewrites exactly these chapters'
+    /// inputs — same predicate the invalidation below acts on, so the gate
+    /// and the surgery can never disagree about the blast radius.
+    fn chapters_hearing(&self, bible: &Value, names: &[String]) -> Vec<u32> {
+        let mut out = Vec::new();
+        for (n, sp) in self.script_paths() {
+            let data: Value = bm_core::read_json(&sp).unwrap_or(Value::Null);
+            let segments = data
+                .get("segments")
+                .and_then(|s| s.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let planned = bm_core::assemble::Planned::plan(&segments);
+            let heard = names.iter().any(|name| {
+                planned.runs().iter().any(|run| {
+                    run.speaker == *name
+                        || bm_core::digest::resolve_speaker(bible, &run.speaker) == *name
+                })
+            });
+            let in_plan =
+                bm_core::assemble::RenderPlan::load(&self.layout.plan(n))
+                    .map(|p| {
+                        p.takes
+                            .iter()
+                            .any(|t| names.contains(&t.speaker))
+                    })
+                    .unwrap_or(false);
+            if (heard || in_plan) && !out.contains(&n) {
+                out.push(n);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Refuse the merge only where it collides — never cluster-wide.
+    ///
+    /// A live render/merge on a chapter the merge rewrites would complete
+    /// into rows the merge requeued (stale voice marked done), and a live
+    /// digest whose chapter text names the absorbed would land its bible
+    /// delta after the fold (resurrecting them). Everything else keeps
+    /// working: a merge of unrendered chapters does not wait for rendered
+    /// ones. Pending digests are harmless — their prompts are built from the
+    /// post-merge bible — but a just-assigned one has no beat yet, so recent
+    /// assignment counts as live for them.
+    fn ensure_mergeable(
+        &self,
+        absorbs: &[String],
+        affected: &[u32],
+    ) -> anyhow::Result<()> {
+        let now = now_secs();
+        let fresh = |ts: u64| now.saturating_sub(ts) < 30;
+        let live_holders = |t: &Task| -> Vec<String> {
+            t.holders()
+                .into_iter()
+                .filter(|w| self.beats.get(*w).map(|b| fresh(b.ts)).unwrap_or(false))
+                .map(|w| w.to_string())
+                .collect::<Vec<_>>()
+        };
+        let mut busy: Vec<String> = Vec::new();
+        for t in self.tasks.values() {
+            if !matches!(t.state, TaskState::Assigned | TaskState::Running) {
+                continue;
+            }
+            // Renders and merges only collide on chapters being rewritten.
+            if matches!(t.stage, Stage::Render | Stage::Merge) {
+                if !affected.contains(&t.chapter) {
+                    continue;
+                }
+                let holders = live_holders(t);
+                if !holders.is_empty() {
+                    busy.push(format!("{} on {}", t.id(), holders.join(",")));
+                }
+                continue;
+            }
+            // Digests collide through the bible, but only when their chapter
+            // text actually names the absorbed — checked fold-insensitively,
+            // since the text is raw site prose and the name may wear casing.
+            if t.stage != Stage::Digest {
+                continue;
+            }
+            let holders: Vec<&str> = t.holders().into_iter().collect();
+            let live = holders.iter().any(|w| {
+                self.beats.get(*w).map(|b| fresh(b.ts)).unwrap_or(false)
+            });
+            if !live && now.saturating_sub(t.updated) >= 120 {
+                continue;
+            }
+            let folds: Vec<String> =
+                absorbs.iter().map(|a| bm_core::util::fold(a)).collect();
+            let risky = std::fs::read_to_string(self.layout.chapter_txt(t.chapter))
+                .map(|text| {
+                    let f = bm_core::util::fold(&text);
+                    folds.iter().any(|a| !a.is_empty() && f.contains(a.as_str()))
+                })
+                .unwrap_or(false);
+            if risky {
+                let who = if holders.is_empty() {
+                    "unstarted".to_string()
+                } else {
+                    holders.join(",")
+                };
+                busy.push(format!("{} on {who}", t.id()));
+            }
+        }
+        // Fresh beats naming affected chapters directly, for the row this
+        // scan cannot see — same belt as the cluster-wide gate.
+        for (w, b) in &self.beats {
+            if !fresh(b.ts) {
+                continue;
+            }
+            if let Some(tid) = &b.task_id {
+                if let Some(ch) = Task::chapter_of(tid) {
+                    if affected.contains(&ch)
+                        && !busy.iter().any(|s| s.starts_with(tid.as_str()))
+                    {
+                        busy.push(format!("{tid} on {w}"));
+                    }
+                }
+            }
+        }
+        if busy.is_empty() {
+            return Ok(());
+        }
+        busy.sort();
+        anyhow::bail!(
+            "merge waits on {} — its chapters are mid-play (or a digest names the absorbed); X, B, then merge before they resume",
+            busy.iter().take(4).cloned().collect::<Vec<_>>().join(", "),
+        )
+    }
+
     /// Fold duplicate characters into one: bible entries, cast keys, every
     /// persisted script, then the losers' cached audio. Same mid-play refusal
     /// as a voice swap — it performs the same surgery, once per absorbed name.
     ///
     /// Invalidation runs BEFORE the script rewrite: the stale-file scan
     /// matches variant speakers, which the rewrite then erases.
+    ///
+    /// `manual` is the `:merge` path: the operator named the pair instead of
+    /// the canon key, so two things change. Names are validated up front
+    /// (survivor in the bible, each absorbed in the bible or the cast, no
+    /// Narrator on either side) rather than silently folding nothing; and a
+    /// cast-only absorbed name folds regardless of its canon key, because an
+    /// explicit instruction beats a spelling heuristic.
     pub fn apply_reconcile(
         &mut self,
         merges: &[bm_core::digest::BibleMerge],
+        manual: bool,
     ) -> anyhow::Result<String> {
-        self.ensure_idle()?;
         let engine = self.settings.engine.clone();
         let path = self.layout.bible();
+        // No cluster-wide quiet: only the chapters this merge rewrites (plus
+        // digests naming the absorbed) must be still. The rest of the book
+        // keeps rendering.
+        {
+            let scan: Value =
+                bm_core::read_json(&path).unwrap_or(json!({"characters": []}));
+            let absorbs: Vec<String> = merges
+                .iter()
+                .flat_map(|(_, a)| a.iter().cloned())
+                .collect();
+            let affected = self.chapters_hearing(&scan, &absorbs);
+            self.ensure_mergeable(&absorbs, &affected)?;
+        }
+        if manual {
+            // A named pair that folds nothing must refuse, not silently pass:
+            // "nothing to fold" after rewriting nothing is how a typo becomes
+            // a mystery. The survivor needs a bible home for the aliases; the
+            // absorbed need to exist somewhere with a voice to take.
+            let bible: Value =
+                bm_core::read_json(&path).unwrap_or(json!({"characters": []}));
+            let names: Vec<&str> = bible
+                .get("characters")
+                .and_then(|c| c.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| c.get("name").and_then(|x| x.as_str()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let cast = bm_core::cast::read_cast(&engine, &self.layout.cast(&engine));
+            for (canonical, absorbs) in merges {
+                if canonical == "Narrator" || absorbs.iter().any(|a| a == "Narrator") {
+                    anyhow::bail!(
+                        "merge refuses the Narrator — it is a voice, not a character"
+                    );
+                }
+                if absorbs.is_empty() {
+                    anyhow::bail!("merge names nobody to absorb into {canonical:?}");
+                }
+                if !names.contains(&canonical.as_str()) {
+                    anyhow::bail!(
+                        "merge refuses: survivor {canonical:?} is not in the bible"
+                    );
+                }
+                for name in absorbs {
+                    if name == canonical {
+                        anyhow::bail!(
+                            "merge refuses: {name:?} cannot absorb itself"
+                        );
+                    }
+                    if !names.contains(&name.as_str()) && !cast.contains_key(name) {
+                        anyhow::bail!(
+                            "merge refuses: {name:?} is in neither the bible nor the cast"
+                        );
+                    }
+                }
+            }
+        }
         // Pre-mutation snapshot: one reconcile rewrites bible, cast and
         // dozens of scripts at once — a bad merge must be restorable.
         {
@@ -323,7 +521,12 @@ impl Inner {
                         || in_bible(&bible, name)
                         || !cast_now.contains_key(name)
                         || applied.iter().any(|(_, d)| d.contains(name))
-                        || bm_core::digest::canon_key(name) != bm_core::digest::canon_key(canonical)
+                        // Automatic folds only trust spelling variants; a
+                        // manual merge is an explicit instruction, so it folds
+                        // a cast-only name whatever its canon key.
+                        || (!manual
+                            && bm_core::digest::canon_key(name)
+                                != bm_core::digest::canon_key(canonical))
                     {
                         continue;
                     }

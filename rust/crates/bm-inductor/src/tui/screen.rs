@@ -322,6 +322,13 @@ pub(crate) enum ConfirmAction {
     StopBackend,
     Reconcile,
     Rerender,
+    /// Fold characters by hand: the first name survives, the rest are
+    /// absorbed. Asked first like every other rewrite, then dispatched as
+    /// one `merge` op.
+    Merge {
+        survivor: String,
+        absorbed: Vec<String>,
+    },
     /// Take one entry out of a sound-design pool. Carries the view it was
     /// asked from, so answering the dialog returns to the same tab and row
     /// instead of dumping the operator back on the dashboard.

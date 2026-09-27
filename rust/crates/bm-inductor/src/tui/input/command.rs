@@ -53,6 +53,15 @@ pub(crate) enum Command {
         expect: String,
         speaker: String,
     },
+    /// Fold characters into one by hand: the first name survives (keeps its
+    /// voice and bible entry), the rest are absorbed into its
+    /// `proper_aliases`. Scripts are rewritten and the losers' audio
+    /// invalidated, like a reconcile fold — but the operator names the pair,
+    /// so no canon-key match is needed.
+    Merge {
+        survivor: String,
+        absorbed: Vec<String>,
+    },
     Retry {
         stage: Option<Stage>,
         chapter: Option<u32>,
@@ -137,6 +146,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: Some('u'), names: &["retry"], desc: Some("requeue every shelved task — strikes reset; `:retry 24` narrows to one chapter, `:retry render 24` to one task"), cmd: Command::Retry { stage: None, chapter: None } },
     Word { key: None, names: &["speaker"], desc: Some("re-attribute one segment: `:speaker 18 67 \"Thanh Sơn lão tổ\" \"Dịch Phong\"` — segment is 1-based, the two names are checked, quotes for spaces; re-speaks only the takes the edit reached"), cmd: Command::FixSpeaker { chapter: 0, segment: 0, expect: String::new(), speaker: String::new() } },
     Word { key: Some('m'), names: &["reconcile"], desc: Some("fold duplicates — asks first; certain folds apply, ambiguous only listed"), cmd: Command::Reconcile },
+    Word { key: None, names: &["merge"], desc: Some("fold characters by hand: `:merge \"Survivor\" \"Absorbed\"…` — first name keeps its voice, the rest join its proper_aliases; scripts rewritten, losers re-rendered; asks first"), cmd: Command::Merge { survivor: String::new(), absorbed: Vec::new() } },
     Word { key: Some('B'), names: &["backend"], desc: Some("backend up now, machines provision in background and join as ready"), cmd: Command::Backend },
     Word { key: None, names: &["mix"], desc: Some("story speed and fx/music/inject volumes — requeues every merge"), cmd: Command::Mix },
     Word { key: None, names: &["sound", "sounds", "pools"], desc: Some("the three clip pools: add, edit, retune, remove"), cmd: Command::Sound },
@@ -230,6 +240,26 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
                     segment,
                     expect: expect.clone(),
                     speaker: speaker.clone(),
+                });
+            }
+            // A name is almost always two or three words, so the arguments
+            // are quoted like a shell: `:merge "Vân Bá" "Vân bá"`. The first
+            // name survives, the rest are absorbed. One name is a no-op
+            // stated as an error rather than a merge that folds nothing.
+            "merge" if !rest.is_empty() => {
+                let args = split_args(&rest.join(" "));
+                let [survivor, absorbed @ ..] = args.as_slice() else {
+                    return None;
+                };
+                if survivor.trim().is_empty()
+                    || absorbed.is_empty()
+                    || absorbed.iter().any(|a| a.trim().is_empty())
+                {
+                    return None;
+                }
+                return Some(Command::Merge {
+                    survivor: survivor.clone(),
+                    absorbed: absorbed.to_vec(),
                 });
             }
             _ => {}
@@ -936,6 +966,41 @@ pub(crate) fn do_command(
                     "Cast rewritten, losers re-rendered. Workers keep working.".into(),
                 ],
                 action: ConfirmAction::Reconcile,
+            });
+        }
+        Command::Merge { survivor, absorbed } => {
+            // The word alone (`:merge` with no names) parses to the
+            // placeholder: refuse with the usage rather than confirming an
+            // empty fold.
+            if survivor.trim().is_empty() || absorbed.is_empty() {
+                app.set_status(
+                    Level::Warn,
+                    "merge needs names: `:merge \"Survivor\" \"Absorbed\"…` — quotes for spaces",
+                );
+                return;
+            }
+            // Same bargain as reconcile: worth one Enter. The op itself
+            // validates (survivor in the bible, absorbed known, no
+            // Narrator), refuses mid-play, and snapshots before writing.
+            let body = vec![
+                format!(
+                    "{} keeps its voice; {} join{} its proper_aliases.",
+                    survivor,
+                    absorbed.join(", "),
+                    if absorbed.len() == 1 { "s" } else { "" },
+                ),
+                String::new(),
+                "Scripts rewritten through the folded bible, losers re-rendered.".into(),
+                "Workers keep working.".into(),
+            ];
+            app.screen = Screen::Confirm(Confirm {
+                title: "Fold these characters?".into(),
+                danger: false,
+                body,
+                action: ConfirmAction::Merge {
+                    survivor: survivor.clone(),
+                    absorbed: absorbed.clone(),
+                },
             });
         }
         Command::Backend => {

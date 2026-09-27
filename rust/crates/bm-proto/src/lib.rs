@@ -1372,6 +1372,12 @@ pub enum Op {
     /// text moved and nothing else — and the merge, because the mp3 on disk was
     /// mixed from the old ones.
     FixSpeaker,
+    /// Fold named characters into one: the survivor keeps its voice and
+    /// bible entry, each absorbed name joins its `proper_aliases`, scripts
+    /// are rewritten through the folded bible, and the losers' cached audio
+    /// is invalidated. The manual form of `reconcile`'s certain folds — same
+    /// surgery, but the operator names the pair instead of the canon key.
+    Merge,
     /// Save a new mix (story speed + layer volumes) and requeue every merge:
     /// the finished mp3s were mixed with the old one. Render cache is kept
     /// tempo and layers apply at merge time, so no segment needs re-speaking.
@@ -1421,6 +1427,7 @@ impl Op {
             Op::Retag => "retag",
             Op::Recast => "recast",
             Op::FixSpeaker => "fix-speaker",
+            Op::Merge => "merge",
             Op::Remix => "remix",
             Op::SoundChanged => "sound-changed",
             Op::Rerender => "rerender",
@@ -1447,6 +1454,7 @@ impl Op {
             Op::Retag,
             Op::Recast,
             Op::FixSpeaker,
+            Op::Merge,
             Op::Remix,
             Op::SoundChanged,
             Op::Rerender,
@@ -1513,6 +1521,14 @@ pub struct OpRequest {
     /// The speaker to put there, for `fix-speaker`.
     #[serde(default)]
     pub speaker: Option<String>,
+    /// The character that survives a `merge`: keeps its voice and bible
+    /// entry, and adopts every absorbed name into `proper_aliases`.
+    #[serde(default)]
+    pub survivor: Option<String>,
+    /// The characters a `merge` folds into the survivor. Each must name a
+    /// bible entry or a cast voice; anything else refuses before writing.
+    #[serde(default)]
+    pub absorbed: Vec<String>,
     #[serde(default)]
     pub force: Option<bool>,
     /// Literal text to speak, for the ops that render speech. `None` means "the
@@ -1800,6 +1816,7 @@ mod tests {
             Op::Retag,
             Op::Recast,
             Op::FixSpeaker,
+            Op::Merge,
             Op::Remix,
             Op::SoundChanged,
             Op::Rerender,
