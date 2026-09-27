@@ -15,7 +15,9 @@ That is what this document designs.
 
 What stays on the rsync is everything that genuinely differs per box or changes
 often: the prompts, the crawlers, the cast files, the small JSON manifests, and
-one 492 KB voice store that is rewritten every time a voice is enrolled.
+one 492 KB voice store that is rewritten every time a voice is enrolled. What
+has left the rsync entirely is `refs/`, the reference clips: those are enrolled
+here, on this machine, and a box receives the *encoded* voice store instead.
 
 The result is that provisioning a new box sends roughly **24 MB from your
 machine** instead of 886 MB. The box still downloads the weights, from a CDN,
@@ -27,19 +29,28 @@ operation.** The voice store fails that test. The weights pass it.
 
 ## What is in the plane, and what is not
 
-Four pushes dominate provisioning. Only one of them is a candidate for
-publishing, and the reasons differ for each.
+Three pushes dominate provisioning. Two of them are candidates for publishing,
+and the reasons differ for each.
 
 | Push | Size | Verdict |
 |---|---|---|
 | `models/` | 668 MB | **publish**, 16 immutable weight files |
-| `refs/` | 125 MB | candidate, changes only when a clip is added |
-| `assets/` media | 55 MB | candidate, same |
+| `assets/` media | 58 MB | candidate, changes only when a clip is added |
 | binaries + runtime | 52 MB | ship, but small enough not to matter |
+| `refs/` | 144 MB | **not pushed at all** (see below) |
+
+`refs/` used to be the second-largest push and the worst one: 144 MB per box per
+push, 107 MB of it the operator's own download staging under `refs/temp/`, which
+no worker has ever read. It is not a publish candidate, it is simply not sent.
+What it and the two trees beside it became is one `sources.tar.zst` per policy —
+about 60 MB for a box that runs every stage — carrying only the files that box's
+stages open. That is the change this document's tables are measured after, and
+the module that does it is `bm-core/src/provision/sources.rs`.
 
 Everything else, prompts (24 KB), the crawlers (72 KB), cast files, the scene
 map, the three pool registries, `voices.json` (492 KB), is under 1 MB combined
-and is never worth optimizing.
+and is never worth optimizing — which is why they ride in that same bundle
+rather than getting a plane of their own.
 
 ## The split: weights out, voice store stays
 
@@ -271,7 +282,7 @@ different push:
 
 | digest | covers | gates |
 |---|---|---|
-| `sources_hash` | prompts, small manifests, casts, clips, crawls, **`refs/`**, agent version | `install_sources` |
+| `sources_hash` | the bundle's manifest: one sha256 per file, keyed by the path it lands on the worker, plus the stage list the box's policy covers and the agent version | `install_sources` |
 | `tts_hash` | the bake **minus `models/voices.json`**, by signature, + `manifest.json` by content | the weights push |
 | `voices_hash` | `models/voices.json` by content | the weights push, alongside `tts_hash` |
 | `tts_bin_hash` | the `bm-tts` bytes | the sidecar push |
@@ -279,12 +290,19 @@ different push:
 Three of those used to be wrong or absent, all in the same direction, a gate
 that was not where the push was:
 
-- **`refs/` was gated by nothing.** It is pushed by `install_sources`, but it
-  was only folded into `voices_hash`, which provisioning computed, carried, and
-  never read. So adding or editing a 125 MB reference clip drifted no gate that
-  any push consulted. It is now in `sources_hash`, which is the digest the push
-  that carries it actually reads. (The test that asserted the old behaviour
-  "refs/ is not part of the sources hash", is now its inverse.)
+- **`refs/` was gated by nothing — and is now not pushed at all.**
+  `install_sources` carried it, but only `voices_hash` covered it, and that was
+  a digest provisioning computed, carried and never read. So editing a 144 MB
+  reference clip drifted no gate any push consulted. The answer turned out not
+  to be a better gate but a narrower push: **no worker reads `refs/`.**
+  Enrollment runs on the inductor, which is the machine with the encoder, and
+  what crosses to a box is the *encoded* store, `models/voices.json` — 0 of its
+  75 presets names a clip path. A new reference clip therefore reaches a box as
+  a **bake**, through `voices_hash`. `install_sources` no longer touches `refs/`
+  at all, and the extract line prunes the tree from boxes that predate this.
+  (The test that asserted the old behaviour, "refs/ is not part of the sources
+  hash", is replaced by one asserting the clone manifest is a source and a
+  reference clip is not.)
 - **The sidecar never redeployed.** `install_tts_runtime` was only called in the
   `else` of `if already`, and `tts_hash` covers `models/`, not the binary. A
   rebuilt `bm-tts` stayed on the inductor for ever while the box served the old
@@ -318,25 +336,31 @@ Two smaller things landed with them:
 
 ## What the inductor still sends
 
-| | today | after |
-|---|---|---|
-| `models/` | 363 MB (`-z`) | **0**, box fetches |
-| `libonnxruntime.so*` | 28 MB | 0, rides in the same artifact |
-| `refs/` | 125 MB | 125 MB |
-| `assets/` media | 55 MB | 55 MB |
-| `bm-agent` | 15 MB | 15 MB |
-| `bm-tts` | 9.4 MB | 9.4 MB |
-| casts, prompts, crawlers, `voices.json` | 1 MB | 1 MB |
-| **from your machine** | **~595 MB** | **~205 MB** |
+Sizes measured on this repo. "before the bundle" is what the three whole-tree
+rsyncs cost; "now" is one `sources.tar.zst` selected by the box's policy.
+
+| | before the bundle | now | after the artifact |
+|---|---|---|---|
+| `models/` | 363 MB (`-z`) | 363 MB (`-z`) | **0**, box fetches |
+| `libonnxruntime.so*` | 28 MB | 28 MB | 0, rides in the same artifact |
+| `refs/` | 144 MB | **0** | 0 |
+| `assets/` + prompts + crawlers + casts + `voices.json` | 58 MB, three rsyncs | **60 MB**, one file | 0, box fetches |
+| `bm-agent` | 15 MB | 15 MB | 15 MB |
+| `bm-tts` | 9.4 MB | 9.4 MB | 9.4 MB |
+| **from your machine** | **~617 MB** | **~475 MB** | **~24 MB** |
 
 `bm-agent` is irreducibly 15 MB: it is the thing doing the fetching, so it has to
 be on the box first. Chasing that last 15 MB means a bootstrap that cannot verify
 what it downloaded, which is the trade this design exists to avoid.
 
-Publishing `refs/` and the `assets/` media as well, they qualify under the same
-rule, changing only when a clip is added, takes the final figure to **~24 MB**.
-`refs/` needs its own hash gate first (see above); that gate is the prerequisite,
-not an optional extra.
+Publishing the `assets/` media as well — it qualifies under the same rule,
+changing only when a clip is added — takes the final figure to **~24 MB**, the
+number the top of this document quotes. The media is now one artifact instead of
+three directories, and `sources_hash` is already a *content* hash of exactly that
+set, so the name is there; what it still needs is the fetch half (release,
+download, verify, extract on the box) that the weights are waiting on too.
+`refs/` is out of scope now and permanently: it is not published, it is not
+pushed, and nothing on a box reads it.
 
 ## Failure modes
 
@@ -392,14 +416,13 @@ because every launch names an instance profile.
    weights are fine, they are baked from public models and contain nothing
    secret, but this is a decision to make deliberately, and the answer changes
    if anyone ever bakes private material into `models/`.
-4. **`refs/` and `assets/` media.** Worth publishing for the same reason
-   they change only when a clip is added, not per-provision. `refs/` now has the
-   gate it needed (`sources_hash`, above), so it is unblocked; `assets/effects`,
-   `assets/music` and `assets/injects` were already gated by signature there.
-   What is still missing is a *content* hash for them, since a signature is
-   size+mtime and the artifact name has to be a content hash to be worth
-   anything. That is a 180 MB sha256 pass on the inductor, run once per publish,
-   not per provision.
+4. **The `assets/` media.** Worth publishing for the same reason it changes
+   only when a clip is added, not per-provision, and it is now a single artifact
+   rather than four directories, so it is one release instead of five. The gate
+   it needed is already there: `sources_hash` is a content hash of exactly that
+   set, one sha256 per file keyed by where it lands. What is missing is the
+   fetch half. `refs/` is no longer part of this question at all — it is never
+   pushed and never read on a box.
 5. **Verifying the weights on a box that did not just receive them.** The
    `sha256sum -c` check runs inside `install_models`, so it runs only when the
    gate decided to push. A weight swapped at the same size within the same

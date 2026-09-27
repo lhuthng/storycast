@@ -94,7 +94,7 @@ Everything book-specific is runtime-created and git-ignored:
 | Created by you / at runtime | What it is |
 | --- | --- |
 | **`url_template` + `crawl` in `workspaces/<name>/settings.json`** | **Required.** Where chapters come from: `{n}` is the number, plus the [crawl script](docs/CRAWLING.md) that fetches them. The only novel-specific settings you must change. New workspaces default to `crawl.mode: "manual"`, nothing fetches until you name a crawler and set `"mode": "script"` |
-| **`workspaces/<name>/crawl/*.lua` \| `*.js`** | **Required if crawling.** Your crawler, per book. `assets/crawl/templates/` has five to start from, four written against a page captured from the live site they are for: `storya.lua` (the site this was built for), `truyencom.lua` (the easy shape), `madara.lua` (a paginated listing), `readnovelfull.lua` (slug URLs and a book index that stops at 30 chapters), `webnovel.lua` (the hard shape, a site behind a bot check). Synced to every worker with the next provision. See [docs/CRAWLING.md](docs/CRAWLING.md) |
+| **`workspaces/<name>/crawl/*.lua` \| `*.js`** | **Required if crawling.** Your crawler, per book. `assets/crawl/templates/` has five to start from, four written against a page captured from the live site they are for: `storya.lua` (the site this was built for), `truyencom.lua` (the easy shape), `madara.lua` (a paginated listing), `readnovelfull.lua` (slug URLs and a book index that stops at 30 chapters), `webnovel.lua` (the hard shape, a site behind a bot check). Pushed with the next provision to every worker whose policy runs crawl. See [docs/CRAWLING.md](docs/CRAWLING.md) |
 | **`prompts/script.txt`** | Your style and language, if the example does not fit |
 | `voices.json`, `voice-pool.json`, `refs/` | Cloned voices and clips (skip to use catalogue voices) |
 | `data/`, `output/` | Scripts, bible, cached audio, finished MP3s |
@@ -595,7 +595,7 @@ at top).
 | `data/crawl-index.json` | The chapter index: `n` to url for the current range. Hand-editable, the escape hatch for slug URLs |
 | `data/bible.json`, `data/cast-vieneu.json` | Character bible, speaker-to-voice (one per engine) |
 | `data/audio/segments-vieneu-NN/` | Cached segment audio, resumable renders |
-| `voices.json`, `voice-pool.json`, `refs/` | Clone mapping, sample pool, clips |
+| `voices.json`, `voice-pool.json`, `refs/` | Clone mapping, sample pool, clips. **This machine only** — `refs/` is never pushed to a worker (enrollment happens here, and a box is sent the encoded voice store in `models/voices.json`) |
 | `workspaces/<name>/settings.json` | Run config **per book**: url_template, engine, range, speed, gap_ms, ambience, music, volumes, analyzer, models, render_batch (`:mix`, `:batch`). No workspace: the same file is `.bm/settings.json` |
 | `workspaces/<name>/ledger.json` | Task states, survive restarts. Root form: `.bm/ledger.json` |
 | `.bm/machines.json` | Linked machines (addr, ssh user/port/key), machine-global |

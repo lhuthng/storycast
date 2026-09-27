@@ -1591,8 +1591,8 @@ mod tests {
         // The other half of the same defect. The backend *name* already
         // travelled in `analyzer`, but the model chain did not, so a
         // provisioned box, which has no `.bm/settings.json` to read, because
-        // provisioning copies `prompts/`, `python/`, `assets/` and `refs/` and
-        // never `.bm/`, digested with the compiled-in `Settings::default()`
+        // provisioning copies the sources bundle and never `.bm/`, digested
+        // with the compiled-in `Settings::default()`
         // and called `gemini-3.5-flash` long after the operator had switched
         // to `-lite`. No env involved: settings live on `Inner`.
         let (_d, mut inner) = fixture();

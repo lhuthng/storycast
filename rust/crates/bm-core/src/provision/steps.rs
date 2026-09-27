@@ -286,6 +286,36 @@ echo "FFMPEG-SKIP (already configured, not reinstalling; force a re-provision to
     }
 }
 
+/// The `zstd` step: the sources bundle is `tar` + `zstd`, so every box that
+/// takes sources needs the decompressor.
+///
+/// **The one install that is attempted on an already-configured box**, and the
+/// exception is the point. What the `allow_install` rule protects is *minutes* —
+/// `npm i -g` is bounded at ten of them, ffmpeg is tens of megabytes — and zstd
+/// is a one-second, ~1 MB package that the very next push cannot proceed
+/// without. A box provisioned before bundles existed would otherwise fail its
+/// first re-provision with an error it can do nothing about, which is the
+/// failure mode this whole module is written to avoid.
+fn zstd_script() -> String {
+    r#"export DEBIAN_FRONTEND=noninteractive
+command -v zstd >/dev/null 2>&1 && { echo "ZSTD-OK (present)"; exit 0; }
+install() { $1 >/dev/null 2>&1; }
+if command -v apt-get >/dev/null 2>&1; then
+  sudo -n apt-get install -y zstd >/dev/null 2>&1 || install "apt-get install -y zstd"
+elif command -v dnf >/dev/null 2>&1; then
+  sudo -n dnf install -y zstd >/dev/null 2>&1 || install "dnf install -y zstd"
+elif command -v yum >/dev/null 2>&1; then
+  sudo -n yum install -y zstd >/dev/null 2>&1 || install "yum install -y zstd"
+elif command -v brew >/dev/null 2>&1; then
+  install "brew install zstd"
+else
+  echo "ZSTD-SKIP (no known package manager, install zstd by hand)"; exit 0
+fi
+if command -v zstd >/dev/null 2>&1; then echo "ZSTD-OK (installed)"; else echo "ZSTD-SKIP (install refused, needs sudo? run: sudo apt-get install -y zstd)"; fi
+"#
+    .into()
+}
+
 impl Ssh {
     /// Ask a machine what it already has.
     pub fn probe(&self) -> Probe {
@@ -406,7 +436,7 @@ echo "probe=done"
     pub fn ensure_root(&self) -> Result<()> {
         let script = format!(
             "mkdir -p $HOME/{d}/models $HOME/{d}/prompts $HOME/{d}/assets/effects \
-             $HOME/{d}/assets/music $HOME/{d}/refs $HOME/{d}/data/chapters \
+             $HOME/{d}/assets/music $HOME/{d}/assets/injects $HOME/{d}/data/chapters \
              $HOME/{d}/data/audio $HOME/{d}/crawl $HOME/{d}/output && echo READY",
             d = REMOTE_DIR
         );
@@ -435,73 +465,116 @@ echo "probe=done"
         Ok(stdout.trim().to_string())
     }
 
-    /// Push the source files the worker needs (never the inductor's state).
+    /// Push the files this box's policy needs, as one bundle.
     ///
-    /// Three halves, from three different places. `prompts`, `assets` and `refs`
-    /// are profile content and live at the root. The cast files are the
-    /// *book's*, `data/` is in the active workspace, so they are read
-    /// through the layout; naming them root-relative shipped no cast at all
-    /// the moment a workspace was selected, and the worker then rendered with
-    /// the catalogue's default voices. The workspace's own crawlers are
-    /// per-book too and ride along (see the `crawl/` push below).
+    /// Replaces three whole-tree rsyncs (`prompts/`, `assets/`, `refs/`) — 202 MB
+    /// per box on this repo, 144 MB of it `refs/`, which no worker reads. What
+    /// travels instead is the set `super::sources` selects: the registries a
+    /// stage opens, the clips they register, the prompts a digest reads, the
+    /// crawlers a crawl resolves, and the cast files the legacy paths fall back
+    /// to. See that module for the per-stage table and why `refs/` is in none of
+    /// it.
+    ///
+    /// The bundle is **named by its own manifest digest**, which is also the
+    /// stamp's `sources_hash`. That is what makes the cache safe to keep: a file
+    /// at that name is by definition the artifact this plan would produce, so
+    /// there is no mtime to compare and nothing to rebuild.
+    ///
+    /// Delivery is a *replacement*, not a merge: the box prunes the trees the
+    /// archive owns and extracts over them, which is the `--delete` semantics
+    /// the old rsyncs had, plus the one-time removal of the `refs/` tree earlier
+    /// versions left on every configured box.
     pub fn install_sources(
         &self,
         layout: &crate::Layout,
+        stages: &[bm_proto::Stage],
         live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
-    ) -> Result<()> {
-        for rel in ["prompts", "assets", "refs"] {
-            let src = layout.root.join(rel);
-            if src.exists() {
-                self.rsync_push(&src, rel, true, progress(live, rel))?;
-            }
+    ) -> Result<Vec<String>> {
+        let plan = super::sources::Sources::plan(layout, stages)?;
+        let manifest = plan.manifest()?;
+        let hash = super::sources::Sources::hash(&manifest);
+        let dir = layout.root.join(".bm").join("sources");
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let bundle = dir.join(format!("{hash}.tar.zst"));
+        if !bundle.is_file() {
+            plan.pack(&manifest, &bundle)?;
         }
-        // The active workspace's crawlers, so a book whose site needs its own
-        // script keeps it out of the shared profile tree and still reaches
-        // every box. Searched first by `crawl::resolve_script`, a same-named
-        // file here shadows the profile's. `--delete` keeps the copy an exact
-        // mirror of the workspace's dir; when the dir is gone locally the rm
-        // below clears what a previous provision left, so a worker never
-        // holds a crawler its own inductor can no longer resolve.
-        let ws_crawl = layout.crawl_workspace();
-        if ws_crawl.is_dir() {
-            self.rsync_push(&ws_crawl, "crawl", true, progress(live, "crawl"))?;
-        } else {
-            let script = format!(
-                "rm -rf $HOME/{d}/crawl && echo CRAWL-CLEARED",
-                d = REMOTE_DIR
+
+        let mut lines = vec![format!("sources: {} -> {}", plan.summary(), super::sources::BUNDLE_NAME)];
+        // A registry naming a clip that is not on disk here is worth a line: the
+        // merge degrades that one sound to silence with its own warning, and an
+        // operator reading a provision log is the last person who can still fix
+        // it cheaply. Bounded, because a pool with a moved directory would
+        // otherwise fill the pane.
+        for missing in plan.missing.iter().take(5) {
+            lines.push(format!(
+                "registry names a clip that is not here (the merge goes silent for it): {missing}"
+            ));
+        }
+        if plan.missing.len() > 5 {
+            lines.push(format!(
+                "…and {} more missing clip(s)",
+                plan.missing.len() - 5
+            ));
+        }
+
+        self.rsync_push_plain(&bundle, super::sources::BUNDLE_NAME, progress(live, "sources"))?;
+        let (code, stdout, stderr) = self.run(&super::sources::extract_script(), 600)?;
+        if code != 0 {
+            let hint = if stderr.contains("zstd") || stdout.contains("zstd-missing") {
+                " — install zstd on the box (apt install -y zstd)"
+            } else {
+                ""
+            };
+            anyhow::bail!(
+                "unpacking the sources bundle failed (exit {code}){hint}: {}",
+                crate::util::head_chars(stderr.trim(), 300)
             );
-            let _ = self.run(&script, 10)?;
         }
-        for (engine, rel) in [
-            ("vieneu", "data/cast-vieneu.json"),
-            ("gemini", "data/cast.json"),
-        ] {
-            let src = layout.cast(engine);
-            if src.exists() {
-                self.rsync_push(&src, rel, false, progress(live, rel))?;
+        if !stdout.contains("SOURCES-OK") {
+            anyhow::bail!(
+                "the box did not confirm the bundle: {}",
+                crate::util::head_chars(stdout.trim(), 200)
+            );
+        }
+        lines.push(format!(
+            "sources in sync ({} @ {})",
+            &hash[..12.min(hash.len())],
+            if plan.stages.is_empty() {
+                "no stage".to_string()
+            } else {
+                plan.stages
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("+")
+            }
+        ));
+
+        // One bundle per policy, kept as a cache; anything a day old goes. Age
+        // rather than "everything but mine": provisions run one per machine and
+        // several can be in flight, so a sweep by name could delete the artifact
+        // another push is about to send.
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let now = std::time::SystemTime::now();
+            for e in entries.filter_map(|e| e.ok()) {
+                let p = e.path();
+                if p == bundle || p.extension().and_then(|x| x.to_str()) != Some("zst") {
+                    continue;
+                }
+                let old = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| now.duration_since(t).ok())
+                    .map(|age| age.as_secs() > 24 * 3600)
+                    .unwrap_or(false);
+                if old {
+                    let _ = std::fs::remove_file(p);
+                }
             }
         }
-        // `python/` used to be pushed here. It is not any more: the sidecar is
-        // `bm-tts`, and the one thing a worker still needed Python for
-        // enrolling a clone, now happens on the inductor, whose store travels
-        // inside `models/voices.json`.
-        //
-        // Voice assignments travel with sources (additive only, a worker's
-        // segment cache is keyed by voice, so clobbering mid-render would
-        // strand it; the voices op is the writer, this is just transport).
-        // The clone manifest travels too: nothing on a worker reads it yet,
-        // but the inductor's warnings are computed against it, so a box
-        // holding a different declaration is a silent desync.
-        let manifest = layout.root.join("voices.json");
-        if manifest.exists() {
-            self.rsync_push(
-                &manifest,
-                "voices.json",
-                false,
-                progress(live, "voices.json"),
-            )?;
-        }
-        Ok(())
+        Ok(lines)
     }
 
     /// Push the TTS sidecar binary and the shared ONNX Runtime it links.
@@ -686,6 +759,17 @@ fi
     /// `allow_install` carries the same meaning as on [`Self::ensure_opencode`]:
     /// a present `ffmpeg` short-circuits either way, so the flag only decides
     /// whether a *missing* one is chased with a package manager this time.
+    pub fn ensure_zstd(&self) -> Result<String> {
+        let (code, stdout, stderr) = self.run(&zstd_script(), 300)?;
+        if code != 0 {
+            return Ok(format!(
+                "ZSTD-SKIP (check failed: {})",
+                crate::util::head_chars(stderr.trim(), 120)
+            ));
+        }
+        Ok(stdout.trim().to_string())
+    }
+
     pub fn ensure_ffmpeg(&self, allow_install: bool) -> Result<String> {
         let (code, stdout, stderr) = self.run(&ffmpeg_script(allow_install), 300)?;
         if code != 0 {
@@ -910,7 +994,7 @@ pub fn provision(
     // their byte-progress streams.
     let mut log = LiveLog::new(live.clone());
 
-    let probe = match initial_probe {
+    let mut probe = match initial_probe {
         Some(p) => {
             log.push(format!("[{}] {}", m.id, p.summary()));
             p
@@ -925,6 +1009,16 @@ pub fn provision(
     if !probe.reachable {
         log.push(format!("[{}] unreachable, aborting provision", m.id));
         return (probe, log.lines);
+    }
+
+    // Before anything is pushed: the sources bundle is `tar` + `zstd`, so the
+    // tool that opens it has to be here first. This is the one install attempted
+    // on an already-configured box (see `zstd_script`); a box that cannot get it
+    // still gets a line here, and the push below fails with the remedy in its
+    // own message rather than a shell error naming nothing.
+    match ssh.ensure_zstd() {
+        Ok(v) => log.push(format!("[{}] {v}", m.id)),
+        Err(e) => log.push(format!("[{}] zstd check failed: {e}", m.id)),
     }
 
     // Self-healing enrollment: the manifest may name clones the pushed store
@@ -943,7 +1037,18 @@ pub fn provision(
         ));
     }
 
-    let local_stamp = compute_provision_stamp(&layout.root, agent_version, agent_binary);
+    // What this box's own policy says it may run decides what it must hold. A
+    // box with no stored policy enables all four, so the ordinary case is the
+    // full set and only an explicitly narrowed panel goes lean.
+    let stages = super::sources::stages_of(&m.effective_task_policy());
+    let local_stamp = match compute_provision_stamp(layout, &stages, agent_version, agent_binary) {
+        Ok(s) => s,
+        Err(e) => {
+            probe.note = format!("cannot read the sources it would push: {e:#}");
+            log.push(format!("[{}] {}", m.id, probe.note));
+            return (probe, log.lines);
+        }
+    };
     let remote_stamp = probe.stamp.as_ref();
 
     let sources_match = !force
@@ -1030,11 +1135,16 @@ pub fn provision(
         if sources_match {
             log.push(format!("[{}] sources in sync (cache match)", m.id));
         } else {
-            // Sources still sync: cast/asset/prompt updates must reach workers
-            // without a venv rebuild. Cheap rsync deltas when nothing changed.
-            match ssh.install_sources(layout, live.as_ref()) {
-                Ok(()) => log.push(format!("[{}] sources in sync", m.id)),
-                Err(e) => log.push(format!("[{}] source sync failed: {e}", m.id)),
+            // One artifact, pushed whole. The hash in the bundle's name is the
+            // same digest `sources_match` just compared, so a box that reaches
+            // this branch is one whose set really differs.
+            match ssh.install_sources(layout, &stages, live.as_ref()) {
+                Ok(lines) => {
+                    for l in lines {
+                        log.push(format!("[{}] {l}", m.id));
+                    }
+                }
+                Err(e) => log.push(format!("[{}] sources push failed: {e}", m.id)),
             }
         }
 
@@ -1075,13 +1185,17 @@ pub fn provision(
 
         if sources_match {
             log.push(format!(
-                "[{}] prompts/assets/refs in sync (cache match)",
+                "[{}] sources in sync (cache match)",
                 m.id
             ));
         } else {
-            match ssh.install_sources(layout, live.as_ref()) {
-                Ok(()) => log.push(format!("[{}] prompts/assets/refs distributed", m.id)),
-                Err(e) => log.push(format!("[{}] source distribution failed: {e}", m.id)),
+            match ssh.install_sources(layout, &stages, live.as_ref()) {
+                Ok(lines) => {
+                    for l in lines {
+                        log.push(format!("[{}] {l}", m.id));
+                    }
+                }
+                Err(e) => log.push(format!("[{}] sources push failed: {e}", m.id)),
             }
         }
 
@@ -1452,6 +1566,23 @@ mod tests {
         // The full path keeps both halves: a fresh box still gets them.
         assert!(opencode_script(true).contains("npm i -g"));
         assert!(ffmpeg_script(true).contains("install -y ffmpeg"));
+
+        // zstd is the deliberate exception to that rule: one second, ~1 MB, and
+        // the very next push cannot proceed without it. Its script installs
+        // unconditionally and still short-circuits when the tool is present.
+        let zstd = zstd_script();
+        assert!(
+            zstd.contains(r#"command -v zstd >/dev/null 2>&1 && { echo "ZSTD-OK (present)"; exit 0; }"#),
+            "a box that has it must pay one command: {zstd}"
+        );
+        assert!(
+            zstd.contains("install -y zstd"),
+            "and one that does not must be able to get it: {zstd}"
+        );
+        assert!(
+            !zstd.contains("force a re-provision"),
+            "the exception is that this one does not wait for a forced box: {zstd}"
+        );
         // A box that already has the tool short-circuits in *both* flavours
         // the flag only decides what happens when it is missing.
         for script in [opencode_script(true), opencode_script(false)] {

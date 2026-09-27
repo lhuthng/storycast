@@ -355,7 +355,7 @@ Named so the gap is not discovered at the wrong moment.
 | **The artifact plane** | Every new box takes the full ~886 MB upload from your connection, 668 MB of it models that are identical on every machine and change only when you re-bake. Publishing them as a release artifact each box fetches and verifies itself is designed in [ARTIFACTS.md](ARTIFACTS.md) and not built. There is also no `S3Store`: `SegmentStore` has only `LocalStore` |
 | **The TTL reaper** | `ttl_hours` is in the config, sanity-checked by `missing()` and printed in the summary, and enforced by nothing. A box that outlives its work is the whole cost of a cloud pool |
 | **A headless worker-start** | `provision` on the CLI onboards a box but cannot start its worker; only the TUI can (`:prov`, or `:B` for the catch-up). Small to add, and it is what makes a scripted launch possible |
-| **The AMI bake** | Provisioning pushes the whole mirror every time. Baking an image with the models, binaries and ffmpeg already in place drops it to a few MB, and `.provision_stamp.json` already decides what is missing |
+| **The AMI bake** | A **new** box still takes the whole first copy: the ~60 MB sources bundle, 363 MB of weights and the two binaries. Baking an image with the models, binaries and ffmpeg already in place drops it to the sources bundle alone, and `.provision_stamp.json` already decides what is missing |
 | **Deleting the pull protocol** | `bm-agent --inductor …` still exists and still works. Nothing this inductor launches uses it, it is the transition path, and removing it is the point at which the local/remote conditionals are finally gone for good |
 
 **The spawn-to-registry seam is closed.** `:up` in the dashboard launches tagged

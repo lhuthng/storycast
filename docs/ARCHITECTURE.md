@@ -486,19 +486,25 @@ visible in the TUI log (the machine overlay shows which key won:
 2. **decide**: compute a local stamp (`compute_provision_stamp`): three SHA-256
    digests, compared against the stamp the target stored at
    `~/.bm-worker/.provision_stamp.json` during its last provision.
-   * `sources_hash`: `prompts/` by signature; the content of the small
-     manifests that must match exactly (requirements, cast files, the clone
-     manifest `voices.json`, the scene map, the three clip-pool registries);
-     the effect, music and inject clip directories by signature; the crawl
-     scripts by content, from **both** the profile's `assets/crawl/` and the
-     active workspace's `crawl/`; and the agent version.
+   * `sources_hash`: the **manifest of the bundle** the push would send: one
+     sha256 per file, keyed by the path it lands on the worker, over the set the
+     box's own work policy selects — the prompts and the registry files a digest
+     box reads, the scene map, the pools and the clips they register for a merge
+     box, the crawlers for a crawl box — plus the stage list itself and the
+     agent version. The selection lives in `provision/sources.rs`. Nothing
+     travels because it happened to be in a directory, so a clip copied into
+     `assets/music/` and left unregistered stops travelling, and widening a
+     policy is drift by construction: the new stage is in the list, so the
+     digest changes and the box is re-handed what it now needs.
    * `tts_hash`: the baked `models/` directory **minus**
      `models/voices.json`, by signature, plus `manifest.json` by content, plus
      the `bm-tts` binary by content. Excluding the store is what lets a new
      voice ship without re-sending 668 MB of weights, and including the
      binary's bytes is what lets a rebuilt sidecar actually redeploy.
-   * `voices_hash`: the clone manifest and the baked store by content, plus
-     `refs/` by signature.
+   * `voices_hash`: `models/voices.json` by content — the encoded store the
+     sidecar loads, and the one file the bundle does not carry. `refs/` is in no
+     digest and no push: enrollment runs on the inductor, which is the machine
+     with the encoder, and a reference clip reaches a box as a *bake*.
 
    A digest being *computed* is not the same as being *consulted*, and the
    difference has bitten this repo twice. `tts_hash` and `sources_hash` each
@@ -508,7 +514,8 @@ visible in the TUI log (the machine overlay shows which key won:
    fourth field that exists because a version *string* cannot see a rebuild:
    every dev build between releases reports the same version. Nothing in the
    stamp is decorative.
-3. **do only what changed**: sources in sync, skip the whole rsync pass.
+3. **do only what changed**: sources in sync, skip the bundle push entirely —
+   one file, not three trees.
    Models in sync *and* the remote roster already naming every declared voice,
    skip the push of `models/`. Local copies compare size+mtime per file,
    exactly like rsync.
