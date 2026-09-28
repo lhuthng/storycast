@@ -67,7 +67,7 @@ pub const MANIFEST_NAME: &str = "sources-manifest.json";
 /// The trees the bundle owns. Extraction prunes exactly these, which is what
 /// gives a push rsync's `--delete` semantics: the archive is the whole truth
 /// for them, so a file that fell out of the selection goes.
-pub const OWNED: [&str; 3] = ["prompts", "assets", "crawl"];
+pub const OWNED: [&str; 4] = ["prompts", "assets", "crawl", "adapters"];
 
 /// One filesystem read of the tree the bundle owns on a *worker*: everything
 /// under these names is the bundle's to replace, and anything else on a box is
@@ -194,7 +194,23 @@ impl Sources {
         // reads. Shipping the root tree unconditionally would hand a box one
         // language's prompts while the inductor driving it reads another's, and
         // the two would agree on every file name and disagree on every word.
-        out.push_tree(&layout.prompts_base(), "prompts");
+        // The adapter's whole **home** when it has one: its prompts *and* its
+        // crawlers, in one member at the relative path its own resolver reads
+        // (`adapters/<name>/`, which is what the box's binding names). Shipping
+        // a flat `prompts/` beside a bundle would be worse than redundant — the
+        // resolver prefers the bundle, so the flat copy would be a stale tree
+        // the box quietly ignored, and a prompt edit would stop reaching it.
+        match layout.adapter_home() {
+            Some(home) => {
+                if let Some(scope) = home.parent().and_then(|p| p.parent()) {
+                    out.push_tree(
+                        scope,
+                        &format!("{}/{}", crate::paths::ADAPTERS_DIR, layout.adapter),
+                    );
+                }
+            }
+            None => out.push_tree(&layout.prompts_base(), "prompts"),
+        }
 
         for stage in out.stages.clone() {
             for reg in registries(stage) {
@@ -202,9 +218,13 @@ impl Sources {
             }
             match stage {
                 Stage::Crawl => {
-                    // The bundled templates: a crawler named by a registry
-                    // resolves out of `assets/crawl/templates/`.
-                    out.push_tree(root, "assets/crawl");
+                    // The bundled templates — pre-split only. With an adapter
+                    // bundle they already rode its home above, and a crawler
+                    // named by a registry resolves out of whichever
+                    // `templates/` the resolver reaches first: the language's.
+                    if layout.adapter_home().is_none() {
+                        out.push_tree(root, "assets/crawl");
+                    }
                     // …and the workspace's own crawlers, which
                     // `resolve_script` searches first: a book whose site needs
                     // its own script keeps it out of the shared profile tree.
@@ -907,7 +927,7 @@ mod tests {
     fn the_extract_script_prunes_the_trees_it_owns_and_removes_refs() {
         let s = extract_script();
         assert!(
-            s.contains(r#"rm -rf "$D/prompts" "$D/assets" "$D/crawl""#),
+            s.contains(r#"rm -rf "$D/prompts" "$D/assets" "$D/crawl" "$D/adapters""#),
             "{s}"
         );
         assert!(

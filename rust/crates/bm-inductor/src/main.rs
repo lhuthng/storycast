@@ -2010,12 +2010,29 @@ async fn main() -> anyhow::Result<()> {
     // problem is carried, not swallowed, the dashboard prints it, and
     // `workspace list` shows which names are still there.
     let manages = matches!(&cli.cmd, Cmd::Workspace { .. } | Cmd::Tui { .. });
-    let (layout, pointer_problem) = match cli.root {
+    let (mut layout, mut pointer_problem) = match cli.root {
         Some(r) if manages => Layout::resolve_or_root(r),
         Some(r) => (Layout::resolve(r)?, None),
         None if manages => Layout::resolve_or_root(Layout::find_root()?),
         None => (Layout::discover()?, None),
     };
+    // One-time history migration, before anything resolves a path through the
+    // layout: a language that was flat at the root — `prompts/` plus the pack's
+    // `assets/crawl/` — gets its own home, and the binding is stamped with its
+    // name. Silent and idempotent once done, which is every start after this
+    // one, and it does nothing at all on a checkout that never loaded a profile.
+    if let Some(name) = layout.migrate_adapter_tree().unwrap_or(None) {
+        println!(
+            "adapter '{name}': prompts/ and assets/crawl/ moved under adapters/{name}/ — the language has its own tree now"
+        );
+        // Re-read: the name the pointer now carries is what every path below
+        // resolves through, including the ones already computed above.
+        let (relaid, problem) = Layout::resolve_or_root(layout.root.clone());
+        layout = relaid;
+        if problem.is_some() {
+            pointer_problem = problem;
+        }
+    }
     let settings = Settings::load(&layout.settings());
     // One-time migration: first run after the upgrade seeds `.bm/llm.json`
     // from the legacy workspace settings + environment, then saves it.

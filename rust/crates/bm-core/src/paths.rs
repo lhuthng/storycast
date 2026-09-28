@@ -66,6 +66,16 @@ pub const ADAPTERS_DIR: &str = "adapters";
 /// A second engine never had a flat tree to migrate.
 pub const LEGACY_ENGINE: &str = "vieneu";
 
+/// The one language that ever had a *flat* tree at the root.
+///
+/// History, the same shape of argument as [`LEGACY_ENGINE`]: before the adapter
+/// had a home, a language *was* two directory names the checkout happened to
+/// have — the root's `prompts/` and, for its crawlers, the pack's
+/// `assets/crawl/` — and they were this project's own: the Vietnamese one, whose
+/// sites the bundled templates are written for. So the one-time move puts both
+/// under `adapters/vi-VN/`. A second language never had a flat tree to migrate.
+pub const LEGACY_ADAPTER: &str = "vi-VN";
+
 /// The engine's name as it appears in a cache path.
 ///
 /// Derived rather than switched on, so a second engine gets its own space
@@ -332,6 +342,63 @@ impl Layout {
         ))
     }
 
+    /// Bring a pre-adapter-home checkout into the `adapters/<name>/` shape.
+    ///
+    /// Before the adapter was a home, a language was two directory names the
+    /// checkout happened to have: `prompts/` at the root and, for its crawlers,
+    /// the pack's `assets/crawl/`. Neither said which language it was — which is
+    /// why a second one could not exist, and why the crawlers ended up in the
+    /// pack, where nothing about them is a genre fact.
+    ///
+    /// So the trees are **moved**, never rebuilt, into one directory that names
+    /// the language: `adapters/<name>/{prompts,crawl}/`. The name is the
+    /// checkout's own when it already names one, and [`LEGACY_ADAPTER`] when it
+    /// does not. Rename-only, never overwriting, idempotent — and it does
+    /// nothing at all until a pointer exists, because stamping a name is a claim
+    /// about a checkout that has loaded something.
+    pub fn migrate_adapter_tree(&self) -> Result<Option<String>> {
+        if self.adapter_home().is_some() {
+            return Ok(None); // already has one; nothing to move again
+        }
+        if crate::profile::read_binding(&self.root).is_err() {
+            return Ok(None); // a fresh clone: no pointer, so nothing to name
+        }
+        let name = if self.adapter == DEFAULT_ADAPTER {
+            LEGACY_ADAPTER.to_string()
+        } else {
+            self.adapter.clone()
+        };
+        let home = self.root.join(ADAPTERS_DIR).join(&name);
+        let mut moved = false;
+        for (from, to) in [
+            (self.root.join("prompts"), home.join("prompts")),
+            (self.assets().join("crawl"), home.join("crawl")),
+        ] {
+            if !from.exists() || to.exists() {
+                continue;
+            }
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            std::fs::rename(&from, &to)
+                .with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
+            moved = true;
+        }
+        if !moved {
+            return Ok(None);
+        }
+        // The name is what every path below resolves through, so the pointer
+        // carries it. `assets/` lost its crawlers in the same breath, so the
+        // pack's hash has moved — re-stamping here keeps the next start from
+        // warning about a drift this migration caused.
+        let mut binding = crate::profile::read_binding(&self.root)?;
+        binding.adapter.name = name.clone();
+        crate::profile::write_binding(&self.root, &binding)?;
+        let _ = crate::profile::verify_binding(&self.root, None);
+        Ok(Some(name))
+    }
+
     /// Bring a pre-split cache into the `(adapter, engine)` shape.
     ///
     /// Before the adapter reached the path, the cast was `cast-<engine>.json`
@@ -348,6 +415,15 @@ impl Layout {
     pub fn migrate_cache_keys(&self, engine: &str) -> Result<Vec<PathBuf>> {
         let mut moved = Vec::new();
         let data = self.data();
+
+        // The adapter half first, when this checkout was migrated *out of*
+        // `default`: those bytes are in the language that now has a name, and
+        // leaving them keyed by the name-less default would re-render every
+        // chapter already spoken — the same waste, and the same fix, as the
+        // engine half below.
+        if self.adapter != DEFAULT_ADAPTER {
+            moved.extend(self.rename_default_caches(&data)?);
+        }
 
         let legacy_cast = match engine {
             "vieneu" => Some(data.join("cast-vieneu.json")),
@@ -385,6 +461,75 @@ impl Layout {
                 continue;
             };
             let (from, to) = (audio.join(&name), self.seg_dir(engine, n));
+            if to.exists() {
+                continue;
+            }
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(&from, &to)
+                .with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
+            moved.push(to);
+        }
+        Ok(moved)
+    }
+
+    /// Rename `default`-keyed caches to this adapter's name.
+    ///
+    /// `cast-default-<engine>.json` and `segments-default-<engine>-NN` were
+    /// correct content under a name that said nothing, written before the
+    /// language had one. The engine half is taken from each filename rather
+    /// than assumed, so `gemini-v2` (which carries its own `-`) renames as
+    /// faithfully as `vieneu` does.
+    fn rename_default_caches(&self, data: &Path) -> Result<Vec<PathBuf>> {
+        let mut moved = Vec::new();
+        let cast_prefix = format!("cast-{DEFAULT_ADAPTER}-");
+        if let Ok(entries) = std::fs::read_dir(data) {
+            let mut names: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| n.starts_with(&cast_prefix) && n.ends_with(".json"))
+                .collect();
+            names.sort();
+            for name in names {
+                let engine = &name[cast_prefix.len()..name.len() - ".json".len()];
+                if engine.is_empty() {
+                    continue;
+                }
+                let (from, to) = (data.join(&name), self.cast(engine));
+                if to.exists() {
+                    continue;
+                }
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::rename(&from, &to)
+                    .with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
+                moved.push(to);
+            }
+        }
+
+        let seg_prefix = format!("segments-{DEFAULT_ADAPTER}-");
+        let audio = data.join("audio");
+        let Ok(entries) = std::fs::read_dir(&audio) else {
+            return Ok(moved);
+        };
+        let mut names: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|name| name.starts_with(&seg_prefix))
+            .collect();
+        names.sort();
+        for name in names {
+            // `segments-default-<engine>-NN`: the chapter is the last field, so
+            // an engine that carries a `-` of its own still splits right.
+            let Some((rest, chapter)) = name[seg_prefix.len()..].rsplit_once('-') else {
+                continue;
+            };
+            let (Ok(n), false) = (chapter.parse::<u32>(), rest.is_empty()) else {
+                continue;
+            };
+            let (from, to) = (audio.join(&name), self.seg_dir(rest, n));
             if to.exists() {
                 continue;
             }
@@ -1005,6 +1150,86 @@ mod tests {
             "the old name is gone, not duplicated"
         );
         // Idempotent: nothing left to move, and nothing overwritten.
+        assert!(l.migrate_cache_keys("vieneu").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A language that was flat at the root takes its own home, and the pointer
+    /// is stamped with the name every path below then resolves through —
+    /// rename-only, never overwriting, idempotent.
+    #[test]
+    fn a_pre_adapter_home_checkout_moves_both_trees_into_the_languages_home() {
+        let root = fixture_root("adapter-migrate");
+        // The flat language, as it sat before adapters were a directory: the
+        // root's prompts, and the crawlers still inside the pack.
+        std::fs::create_dir_all(root.join("prompts")).unwrap();
+        std::fs::write(root.join("prompts/analyze.txt"), "vi-VN").unwrap();
+        std::fs::create_dir_all(root.join("assets/crawl/templates")).unwrap();
+        std::fs::write(root.join("assets/crawl/templates/storya.lua"), "-- crawl").unwrap();
+        std::fs::create_dir_all(root.join("assets/music")).unwrap();
+        std::fs::write(root.join("assets/music/day-1.mp3"), b"bed").unwrap();
+        std::fs::create_dir_all(root.join(".bm")).unwrap();
+        std::fs::write(
+            root.join(".bm/profile"),
+            r#"{"name":"xianxia","hash":"deadbeef"}"#,
+        )
+        .unwrap();
+
+        let l = Layout::new(&root);
+        assert_eq!(l.adapter, DEFAULT_ADAPTER, "nothing has named the language");
+        assert_eq!(l.migrate_adapter_tree().unwrap().as_deref(), Some("vi-VN"));
+
+        let home = root.join("adapters/vi-VN");
+        assert!(home.join("prompts/analyze.txt").is_file());
+        assert!(home.join("crawl/templates/storya.lua").is_file());
+        assert!(!root.join("prompts").exists(), "moved, not copied");
+        assert!(!root.join("assets/crawl").exists());
+        assert!(
+            root.join("assets/music/day-1.mp3").is_file(),
+            "the art stays"
+        );
+
+        // The name is the pointer's, and it is what the layout now resolves
+        // through: both of the language's trees come from one directory.
+        let after = Layout::resolve(&root).unwrap();
+        assert_eq!(after.adapter, "vi-VN");
+        assert_eq!(after.adapter_home(), Some(home.clone()));
+        assert_eq!(after.prompts_base(), home);
+        assert_eq!(after.crawl_scripts(), home.join("crawl"));
+
+        // Idempotent: a bundle exists, so there is nothing left to move.
+        assert_eq!(after.migrate_adapter_tree().unwrap(), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A cache written before the language had a name holds the right bytes
+    /// under a name that says nothing. It is *renamed*, because the alternative
+    /// is re-synthesising every chapter already spoken for a path string — and
+    /// the engine half is read out of each filename rather than assumed, so an
+    /// engine whose key carries its own `-` renames as faithfully as any other.
+    #[test]
+    fn default_keyed_caches_are_re_keyed_for_the_language_that_now_has_a_name() {
+        let root = fixture_root("adapter-cache");
+        let l = Layout {
+            adapter: "vi-VN".into(),
+            ..Layout::new(&root)
+        };
+        let data = l.data();
+        std::fs::create_dir_all(data.join("audio/segments-default-vieneu-07")).unwrap();
+        std::fs::create_dir_all(data.join("audio/segments-default-gemini-v2-07")).unwrap();
+        std::fs::write(data.join("cast-default-vieneu.json"), "{}").unwrap();
+        std::fs::write(data.join("cast-default-gemini-v2.json"), "{}").unwrap();
+
+        assert_eq!(l.migrate_cache_keys("vieneu").unwrap().len(), 4);
+        assert!(data.join("cast-vi-VN-vieneu.json").is_file());
+        assert!(data.join("cast-vi-VN-gemini-v2.json").is_file());
+        assert!(data.join("audio/segments-vi-VN-vieneu-07").is_dir());
+        assert!(data.join("audio/segments-vi-VN-gemini-v2-07").is_dir());
+        assert!(
+            !data.join("cast-default-vieneu.json").exists(),
+            "the name-less key is gone, not duplicated"
+        );
+        // Idempotent, and the `default` spelling is left alone once named.
         assert!(l.migrate_cache_keys("vieneu").unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
