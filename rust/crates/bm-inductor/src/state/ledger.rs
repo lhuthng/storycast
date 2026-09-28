@@ -24,6 +24,7 @@ impl Inner {
             shutdown_when_idle: false,
             stats: super::StatsAgg::default(),
             unreadable_tasks: Vec::new(),
+            exclusive: Vec::new(),
         }
     }
 
@@ -206,7 +207,8 @@ impl Inner {
                          "machine_state": state,
                          "workers": self.workers,
                          "caps": self.caps,
-                         "profile": self.ledger_profile});
+                         "profile": self.ledger_profile,
+                         "exclusive": self.exclusive});
         let _ = bm_core::write_json(&self.ledger_path(), &doc);
     }
 
@@ -295,6 +297,15 @@ impl Inner {
         self.ledger_profile = doc
             .get("profile")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+        // The exclusive-write queue survives restarts the way tasks do: an
+        // operator who asked for a swap and restarted the inductor before it
+        // ran asked for a swap, not for its disappearance. `serde_json::Value`
+        // deserialises as `Null` when the key is absent (old ledgers), which
+        // is an empty queue.
+        self.exclusive = doc
+            .get("exclusive")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
         let boxes = load_boxes(&self.layout.machines());
         let empty = serde_json::Map::new();
         let rt = doc

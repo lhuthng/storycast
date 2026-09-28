@@ -647,6 +647,14 @@ impl Inner {
     /// (empty beats, e.g. swapping while the inductor is down) always passes.
     pub fn op_swap_voice(&mut self, character: &str, voice: &str) -> anyhow::Result<String> {
         self.ensure_idle()?;
+        self.swap_apply(character, voice)
+    }
+
+    /// The swap body, guardless: the exclusive queue's gate has already
+    /// cleared exactly the chapters this invalidates, so the cluster-wide
+    /// refusal must not re-run here — a crawl finishing somewhere else is
+    /// not a reason to error a write that cannot reach it.
+    pub(crate) fn swap_apply(&mut self, character: &str, voice: &str) -> anyhow::Result<String> {
         let engine = self.settings.engine.clone();
         // The shipped catalogue is the gate that decides what may be assigned
         // on this machine.
@@ -739,6 +747,17 @@ impl Inner {
         inject_volume: Option<f64>,
     ) -> anyhow::Result<String> {
         self.ensure_idle()?;
+        self.remix_apply(speed, effect_volume, music_volume, inject_volume)
+    }
+
+    /// The remix body, guardless — see [`Self::swap_apply`].
+    pub(crate) fn remix_apply(
+        &mut self,
+        speed: Option<f64>,
+        effect_volume: Option<f64>,
+        music_volume: Option<f64>,
+        inject_volume: Option<f64>,
+    ) -> anyhow::Result<String> {
         let (speed, fx, music) = match (speed, effect_volume, music_volume) {
             (Some(s), Some(f), Some(m)) => (s, f, m),
             _ => anyhow::bail!("remix needs speed + fx + music volumes"),
@@ -813,6 +832,11 @@ impl Inner {
     /// Refused while workers are mid-play, like every other cache surgery.
     pub fn op_remerge_all(&mut self) -> anyhow::Result<String> {
         self.ensure_idle()?;
+        self.remerge_apply()
+    }
+
+    /// The remerge body, guardless — see [`Self::swap_apply`].
+    pub(crate) fn remerge_apply(&mut self) -> anyhow::Result<String> {
         let n = self.requeue_stage(Stage::Merge, "requeued: remerge", now_secs());
         self.save();
         Ok(format!("remerge: {n} merge(s) requeued, render cache kept"))
@@ -825,6 +849,11 @@ impl Inner {
     /// and keep the render cache instead.
     pub fn op_rerender_all(&mut self) -> anyhow::Result<String> {
         self.ensure_idle()?;
+        self.rerender_apply()
+    }
+
+    /// The rerender body, guardless — see [`Self::swap_apply`].
+    pub(crate) fn rerender_apply(&mut self) -> anyhow::Result<String> {
         let engine = self.settings.engine.clone();
         let store = bm_core::segments::LocalStore::new(self.layout.clone());
         let mut chapters: Vec<u32> = self
@@ -1033,11 +1062,36 @@ impl Inner {
         if !dry_run {
             self.ensure_idle()?;
         }
+        self.retag_chapters(None, dry_run)
+    }
+
+    /// The queued retag: the same rewrite, gated by the queue instead of
+    /// `ensure_idle` — it runs only once the digests (and renders) it could
+    /// disturb have gone quiet. `chapters` is the ask-time scope; the
+    /// per-chapter plan diff at write time still decides what actually moves.
+    pub(crate) fn op_retag_queued(&mut self, chapters: Vec<u32>) -> anyhow::Result<String> {
+        let scope = if chapters.is_empty() { None } else { Some(chapters) };
+        self.retag_chapters(scope, true)
+    }
+
+    /// The retag body, shared by the direct op (which gates on
+    /// `ensure_idle`) and the queued one (which the exclusive gate has
+    /// already cleared). `scope` = `None` for every script, or exactly the
+    /// ask-time chapters.
+    fn retag_chapters(
+        &mut self,
+        scope: Option<Vec<u32>>,
+        dry_run: bool,
+    ) -> anyhow::Result<String> {
         let mut chapters: Vec<u32> = Vec::new();
         let mut edits = 0u32;
         let mut files = 0u32;
         let mut detail: Vec<String> = Vec::new();
-        for (n, sp) in self.script_paths() {
+        for (n, sp) in self
+            .script_paths()
+            .into_iter()
+            .filter(|(n, _)| scope.as_ref().map(|s| s.contains(n)).unwrap_or(true))
+        {
             let mut data: serde_json::Value =
                 bm_core::read_json(&sp).unwrap_or(serde_json::Value::Null);
             let owned: Vec<serde_json::Value> = data

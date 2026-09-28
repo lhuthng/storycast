@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
 mod design;
+mod exclusive;
 mod ledger;
 mod observe;
 mod offer;
@@ -118,6 +119,9 @@ pub struct Inner {
     /// In-memory like the beats, a fresh window beats stale history,
     /// the same reason the file estimator only reads the last 20.
     pub stats: StatsAgg,
+    /// The exclusive-write queue: surgeries that wait for the work they
+    /// would disturb instead of refusing. See [`exclusive`].
+    pub(crate) exclusive: Vec<exclusive::Exclusive>,
     /// Ledger rows this build could not deserialise, kept **verbatim** and
     /// re-emitted on every save.
     ///
@@ -2882,6 +2886,9 @@ mod tests {
         let mut t = Task::new(1, Stage::Render);
         t.state = TaskState::Assigned;
         t.assigned_to = Some("w1".into());
+        // Well inside the render lease (5400s): the reaper must leave the row
+        // alone in these tests — only the queue's own 30s beat rule may judge
+        // liveness there.
         t.lease_until = Some(now_secs() + 5000);
         inner.tasks.insert("render:1".into(), t);
         inner.beats.insert(
@@ -2937,6 +2944,203 @@ mod tests {
             t.assigned_to = Some("ghost".into());
         }
         assert!(inner.op_swap_voice("A", "Quang Sơn").is_ok());
+    }
+
+    // ——— the exclusive-write queue ———
+
+    use bm_proto::ExclusiveOp;
+
+    /// The `busy_inner` cluster plus a second chapter's crawl, so the tests
+    /// can show a swap waiting on render:1 while crawl:2 keeps flowing.
+    fn queue_inner() -> (tempfile::TempDir, Inner) {
+        let (d, mut inner) = busy_inner();
+        let mut crawl = Task::new(2, Stage::Crawl);
+        crawl.state = TaskState::Assigned;
+        crawl.assigned_to = Some("w1".into());
+        crawl.lease_until = Some(now_secs() + 600);
+        inner.tasks.insert("crawl:2".into(), crawl);
+        // Chapter 1's script hears "A": the ask-time scope scan must find it,
+        // exactly as a real workspace's would.
+        std::fs::create_dir_all(inner.layout.script_dir()).unwrap();
+        std::fs::write(
+            inner.layout.script(1),
+            r#"{"segments":[{"speaker":"A","text":"Xin chào."}]}"#,
+        )
+        .unwrap();
+        (d, inner)
+    }
+
+    #[test]
+    fn a_swap_waits_on_its_chapters_and_runs_when_they_settle() {
+        let (_d, mut inner) = queue_inner();
+        // The swap's scope is chapters hearing "A" — render:1 holds chapter
+        // 1. Crawl:2 is outside any voice's reach and must not block.
+        // The live beat on w1 is what blocks: render:1 is out with a box
+        // that is answering right now, so the swap queues instead of
+        // running. (A stale beat would be the wedged-box shape, where the
+        // 30s rule is deliberately indifferent — the queue waits on the
+        // living only.)
+        let msg = inner
+            .exclusive_request(ExclusiveOp::SwapVoice {
+                character: "A".into(),
+                voice: "Quang Sơn".into(),
+                chapters: vec![1],
+            })
+            .unwrap();
+        assert!(msg.contains("queued"), "{msg}");
+        assert!(msg.contains("render:1"), "names what it waits on: {msg}");
+        assert_eq!(inner.exclusive.len(), 1, "parked, not run");
+        assert!(!inner.exclusive_clear(&inner.exclusive[0].op));
+
+        // The render finishes (Done, holders gone) — the way is clear.
+        let t = inner.tasks.get_mut("render:1").unwrap();
+        t.state = TaskState::Done;
+        t.clear_holders();
+        inner.run_exclusive();
+        assert!(
+            inner.exclusive.is_empty(),
+            "the write ran once the chapter went quiet"
+        );
+        // And it really ran: the cast moved.
+        let cast = bm_core::cast::read_cast(
+            &inner.settings.engine,
+            &inner.layout.cast(&inner.settings.engine),
+        );
+        assert_eq!(cast.get("A").map(String::as_str), Some("Quang Sơn"));
+    }
+
+    #[test]
+    fn a_blocked_chapter_stops_taking_work_but_the_rest_never_pauses() {
+        let (_d, mut inner) = queue_inner();
+        // Well past the boot grace: the reaper may run, and must find
+        // nothing to do (the leases here are young) — the offer below then
+        // shows the *gate's* verdict, not the reaper's.
+        inner.started_at = now_secs() - 600;
+        // Upstreams Done, so *only* the write gate can explain a non-offer:
+        // without this, an absent crawl:7/digest:7 would refuse render:7
+        // anyway and the test would prove nothing.
+        for (n, stage) in [(1, Stage::Crawl), (1, Stage::Digest), (7, Stage::Crawl), (7, Stage::Digest)] {
+            let mut t = Task::new(n, stage);
+            t.state = TaskState::Done;
+            inner.tasks.insert(format!("{}:{n}", stage.as_str()), t);
+        }
+        // A pending merge on the swapped chapter: in scope, so not offered.
+        let merge = Task::new(1, Stage::Merge);
+        inner.tasks.insert("merge:1".into(), merge);
+        // A pending render elsewhere: outside the swap's scope, offered.
+        let other = Task::new(7, Stage::Render);
+        inner.tasks.insert("render:7".into(), other);
+        inner.exclusive.push(super::exclusive::Exclusive {
+            op: ExclusiveOp::SwapVoice {
+                character: "A".into(),
+                voice: "Quang Sơn".into(),
+                chapters: vec![1],
+            },
+            label: "swap-voice".into(),
+            queued: now_secs(),
+        });
+        inner.workers.insert("w2".into(), "127.0.0.1".into());
+        // w2 has no beats at all (fresh box): the gates that need facts pass,
+        // which is exactly what lets this test isolate the write gate.
+        let offer = inner.offer("w2").expect("an out-of-scope row is offered");
+        assert_eq!(offer.task_id, "render:7", "chapter 7 renders under the swap");
+        // And chapter 1's merge is not the offer, whatever the policy said.
+        assert_ne!(offer.task_id, "merge:1");
+    }
+
+    #[test]
+    fn a_cluster_wide_write_blocks_every_chapter_of_its_stage() {
+        let (_d, _inner) = queue_inner();
+        let remix = ExclusiveOp::Remix {
+            speed: 1.05,
+            effect_volume: 1.0,
+            music_volume: 1.0,
+            inject_volume: 1.0,
+        };
+        assert!(remix.blocks(Stage::Merge, 1));
+        assert!(remix.blocks(Stage::Merge, 400));
+        assert!(!remix.blocks(Stage::Render, 1), "render cache is kept");
+        let swap = ExclusiveOp::SwapVoice {
+            character: "A".into(),
+            voice: "v".into(),
+            chapters: vec![41, 90],
+        };
+        assert!(swap.blocks(Stage::Render, 41));
+        assert!(!swap.blocks(Stage::Render, 42), "chapter 42 keeps rendering");
+        assert!(!swap.blocks(Stage::Crawl, 41), "crawl never pauses for a swap");
+    }
+
+    #[test]
+    fn a_typo_is_refused_at_ask_time_and_nothing_is_parked() {
+        let (_d, mut inner) = queue_inner();
+        let err = inner
+            .exclusive_request(ExclusiveOp::SwapVoice {
+                character: "A".into(),
+                voice: "no-such-voice".into(),
+                chapters: vec![1],
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("neither a preset nor an enrolled"), "{err}");
+        assert!(
+            inner.exclusive.is_empty(),
+            "a refused write must not park"
+        );
+    }
+
+    #[test]
+    fn the_queue_survives_a_restart_and_cancels_by_route() {
+        let (d, mut inner) = queue_inner();
+        // Blocked for real: render:1 out with a box that is beating now.
+        inner
+            .exclusive_request(ExclusiveOp::SwapVoice {
+                character: "A".into(),
+                voice: "Quang Sơn".into(),
+                chapters: vec![1],
+            })
+            .unwrap();
+        assert_eq!(inner.exclusive.len(), 1, "queued, not run");
+        inner.save();
+
+        // A fresh Inner over the same files: the operator's ask survived.
+        let mut reborn = Inner::new(inner.layout.clone(), inner.settings.clone());
+        reborn.load_ledger();
+        assert_eq!(reborn.exclusive.len(), 1, "the ask is still there");
+        assert_eq!(reborn.exclusive[0].label, "swap-voice");
+
+        // Dropping by route: the right entries, by name.
+        assert_eq!(reborn.exclusive_cancel(Some("remix")), 0);
+        assert_eq!(reborn.exclusive_cancel(Some("swap-voice")), 1);
+        assert!(reborn.exclusive.is_empty());
+        let _ = d;
+    }
+
+    #[test]
+    fn a_second_write_lines_up_behind_the_first() {
+        let (_d, mut inner) = queue_inner();
+        // The head write is blocked for real: a merge row out with a box
+        // that is beating right now. A remix waits on merges, so it lines
+        // up behind rather than running beside it.
+        let mut merge = Task::new(5, Stage::Merge);
+        merge.state = TaskState::Running;
+        merge.assigned_to = Some("w1".into());
+        merge.lease_until = Some(now_secs() + 1800);
+        inner.tasks.insert("merge:5".into(), merge);
+        inner.exclusive.push(super::exclusive::Exclusive {
+            op: ExclusiveOp::Remerge,
+            label: "remerge".into(),
+            queued: now_secs(),
+        });
+        let msg = inner
+            .exclusive_request(ExclusiveOp::Remix {
+                speed: 1.0,
+                effect_volume: 1.0,
+                music_volume: 1.0,
+                inject_volume: 1.0,
+            })
+            .unwrap();
+        assert!(msg.contains("behind 1"), "{msg}");
+        assert_eq!(inner.exclusive.len(), 2);
     }
 
     #[test]

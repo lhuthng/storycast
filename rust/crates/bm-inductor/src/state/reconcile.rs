@@ -254,6 +254,16 @@ impl Inner {
         (chapters, files)
     }
 
+    /// Chapters that would hear one speaker, under the name or any alias
+    /// the bible resolves: a script speaking them, or a render plan
+    /// holding their takes. The shared predicate of the invalidation
+    /// ([`Self::invalidate_character`]) and the exclusive-write gate — the
+    /// blast radius of one voice move, computed once, read by both.
+    pub(crate) fn chapters_hearing_speaker(&self, character: &str) -> Vec<u32> {
+        let bible = bm_core::digest::load_bible(&self.layout.bible());
+        self.chapters_hearing(&bible, &[character.to_string()])
+    }
+
     /// Chapters that would hear these names: a script speaking them
     /// (literally, or through an alias the bible resolves) or a render plan
     /// holding their takes. The merge rewrites exactly these chapters'

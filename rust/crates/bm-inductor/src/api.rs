@@ -747,6 +747,62 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             let mut inner = st.lock().await;
             Json(OpResult::ok(inner.op_shutdown_when_idle()))
         }
+        bm_proto::Op::Exclusive => {
+            // The write the request already carries its arguments for: swap
+            // fields in their usual slots, remix volumes likewise. Building
+            // the arm here — from the same request — means an enqueued swap
+            // is byte-identical to a direct one, so the runner needs no
+            // second argument vocabulary.
+            let Some(mut op) = req.exclusive else {
+                return Json(OpResult::fail("exclusive requires a write to queue"));
+            };
+            match &mut op {
+                bm_proto::ExclusiveOp::SwapVoice { character, voice, .. } => {
+                    *character = req.character.clone().unwrap_or_default();
+                    *voice = req.voice.clone().unwrap_or_default();
+                }
+                bm_proto::ExclusiveOp::Recast { chapter, fixes, remove } => {
+                    *chapter = req.chapter.unwrap_or(0);
+                    *fixes = req.fixes.clone();
+                    *remove = req.remove.clone();
+                }
+                bm_proto::ExclusiveOp::FixSpeaker {
+                    chapter,
+                    segment,
+                    expect,
+                    speaker,
+                } => {
+                    *chapter = req.chapter.unwrap_or(0);
+                    *segment = req.segment.unwrap_or(0);
+                    *expect = req.expect.clone().unwrap_or_default();
+                    *speaker = req.speaker.clone().unwrap_or_default();
+                }
+                bm_proto::ExclusiveOp::Merge { survivor, absorbed, .. } => {
+                    *survivor = req.survivor.clone().unwrap_or_default();
+                    *absorbed = req.absorbed.clone();
+                }
+                _ => {}
+            }
+            let mut inner = st.lock().await;
+            match inner.exclusive_request(op) {
+                Ok(msg) => Json(OpResult::ok(msg)),
+                Err(e) => Json(OpResult::fail(format!("queued write refused: {e:#}"))),
+            }
+        }
+        bm_proto::Op::ExclusiveCancel => {
+            let route = req.exclusive.as_ref().map(|e| e.route().to_string());
+            let mut inner = st.lock().await;
+            let n = inner.exclusive_cancel(route.as_deref());
+            if n == 0 {
+                Json(OpResult::fail(
+                    "nothing queued to drop".to_string(),
+                ))
+            } else {
+                Json(OpResult::ok(format!(
+                    "dropped {n} queued write(s) — the stages it held open take work again"
+                )))
+            }
+        }
     }
 }
 
@@ -976,6 +1032,10 @@ async fn state(State(st): State<Shared>) -> impl IntoResponse {
         // Scheduler events (task done/fail, retry, orphan reap, …) surfaced in
         // the TUI's event pane. The TUI deduplicates by event id.
         "events": events,
+        // The exclusive-write queue, when an operator has parked one: the
+        // ledger's blocked-by readout and the TUI's queue line both read
+        // this. Empty almost always, so it costs one empty array.
+        "exclusive": inner.exclusive_snapshot(),
     }))
 }
 
