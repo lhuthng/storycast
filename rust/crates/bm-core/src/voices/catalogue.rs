@@ -9,8 +9,8 @@ use super::consts::{VoicePolicy, CONTENT_LANGUAGE};
 
 // --- the committed catalogue ------------------------------------------------
 //
-// `voices.default.json` is the shipped roster: both engines, their metadata,
-// their accent policy and their default cast, in one place.
+// `voices.default.json` is the shipped roster: both engines, their metadata
+// and their default cast, in one place.
 //
 // Stage 1 of `.docs/VOICE_CONFIG_PROPOSAL.md` adds it *alongside* the `const`
 // tables above. Nothing in the render path reads it yet — the tests at the
@@ -41,7 +41,7 @@ pub struct RosterFile {
 
 /// One engine's slice of the catalogue.
 ///
-/// `Default` is the "engine not declared" answer: no pools, no policy, no cast.
+/// `Default` is the "engine not declared" answer: no pools, no cast.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngineRoster {
     /// Human-readable description, for the picker header.
@@ -50,8 +50,6 @@ pub struct EngineRoster {
     /// What this engine's audio comes back as, before any resampling.
     #[serde(default)]
     pub sample_rate: u32,
-    #[serde(default)]
-    pub policy: EnginePolicy,
     /// Declaration order is meaningful: the offline roster groups by gender in
     /// this order, so male voices come first, then female, then neutral.
     #[serde(default)]
@@ -60,32 +58,6 @@ pub struct EngineRoster {
     /// is a presentation change that touches nothing else.
     #[serde(default)]
     pub default_cast: BTreeMap<String, String>,
-}
-
-/// The declared accent policy for one engine.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct EnginePolicy {
-    /// Accents a voice may carry and still be assignable. Empty means "no
-    /// restriction", matching the `VoicePolicy::allowed` semantics above.
-    #[serde(default)]
-    pub allowed_accents: Vec<String>,
-    /// Accents that veto assignment even when `allowed_accents` admits them.
-    ///
-    /// This is the operator's half of the policy. The shipped catalogue leaves
-    /// it empty on purpose: a regional preference is one person's, and the
-    /// catalogue is public. A preset whose accent is `"Central/South"` matches
-    /// either segment, so excluding `"Northern"` cannot accidentally catch it.
-    #[serde(default)]
-    pub excluded_accents: Vec<String>,
-    /// One line for the picker header.
-    #[serde(default)]
-    pub note: String,
-    /// Presets deliberately left out, recorded so the omission reads as a
-    /// decision rather than an oversight. Not a filter: exclusion happens by
-    /// absence from `voices` plus the accent rule, and a test asserts no
-    /// excluded name is declared.
-    #[serde(default)]
-    pub excluded: Vec<String>,
 }
 
 /// One voice in the catalogue.
@@ -141,29 +113,6 @@ impl EngineRoster {
             .collect()
     }
 
-    /// Whether a voice's accent satisfies the declared policy.
-    ///
-    /// Two rules, both derived from the accents rather than hand-listed, so
-    /// adding a preset to `voices` cannot widen the policy by accident:
-    ///
-    /// * `allowed_accents` empty means "anything"; otherwise the voice must
-    ///   match one of them. The SDK labels a preset with one combined region, so
-    ///   `"Central/South"` is split on `/` and any matching segment admits it.
-    /// * `excluded_accents` then vetoes, and the veto wins. The shipped
-    ///   catalogue leaves this empty; it is the operator's lever.
-    pub(crate) fn accent_allowed(&self, accent: &str) -> bool {
-        let parts: Vec<&str> = accent.split('/').map(|p| p.trim()).collect();
-        let matches = |list: &[String]| {
-            parts
-                .iter()
-                .any(|part| list.iter().any(|a| a.eq_ignore_ascii_case(part)))
-        };
-        if matches(&self.policy.excluded_accents) {
-            return false;
-        }
-        self.policy.allowed_accents.is_empty() || matches(&self.policy.allowed_accents)
-    }
-
     /// The runtime policy, in the shape the rest of the crate already speaks.
     pub fn to_policy(&self, engine: &str) -> VoicePolicy {
         let male = self.pool("male");
@@ -174,26 +123,11 @@ impl EngineRoster {
             // unknown-gender character has always fallen back to the male pool.
             neutral = male.clone();
         }
-        // Both lists empty is the shipped default: an empty `allowed` is "no
-        // restriction", which also lets undeclared names (enrolled clones)
-        // through. Listing every declared name instead would silently narrow it.
-        let unrestricted =
-            self.policy.allowed_accents.is_empty() && self.policy.excluded_accents.is_empty();
-        let allowed = if unrestricted {
-            Vec::new()
-        } else {
-            self.voices
-                .iter()
-                .filter(|v| self.accent_allowed(&v.accent))
-                .map(|v| v.name.clone())
-                .collect()
-        };
         VoicePolicy {
             engine: engine.to_string(),
             male,
             female,
             neutral,
-            allowed,
             default_cast: self.resolve_cast(),
         }
     }
@@ -250,7 +184,6 @@ impl EngineRoster {
                     // A catalogue preset is never auto-assigned: the pool is.
                     pool_tags: Vec::new(),
                     enrolled: false,
-                    allowed: policy.allowed.is_empty() || policy.allowed.iter().any(|a| a == name),
                 });
             }
         }
@@ -258,10 +191,10 @@ impl EngineRoster {
     }
 }
 
-/// One engine of the catalogue: the single entry point for "what is allowed",
-/// with no machine-local overlay. The operator roster (`.bm/voices.json`) is
-/// gone — nothing created it and every path using it is removed — so the
-/// shipped catalogue is the whole policy.
+/// One engine of the catalogue: the single entry point for its declared
+/// voices, with no machine-local overlay. The operator roster
+/// (`.bm/voices.json`) is gone — nothing created it and every path using it is
+/// removed — so the shipped catalogue is the whole roster.
 pub fn effective_engine(engine: &str) -> EngineRoster {
     RosterFile::catalogue()
         .engine(engine)
@@ -333,15 +266,14 @@ pub fn resolve_voice_name(engine: &str, value: &str) -> String {
 mod tests {
     use super::*;
     use crate::voices::consts::{gemini_policy, vieneu_policy};
-    use crate::voices::label::{offline_voices, policy_note};
+    use crate::voices::label::offline_voices;
 
     #[test]
-    fn offline_roster_for_gemini_claims_no_accent_restriction() {
+    fn the_gemini_roster_claims_no_accent_of_its_own() {
+        // Google's labels do not encode a region, so every Gemini voice reads
+        // `unknown` — a fact about the engine, not a policy statement.
         let v = offline_voices("gemini");
         assert!(v.iter().all(|x| x.accent == "unknown"));
-        assert!(v.iter().all(|x| x.allowed), "gemini has no allow-list");
-        assert!(policy_note(catalogue_engine("gemini")).contains("none"));
-        assert!(policy_note(catalogue_engine("vieneu")).contains("none"));
     }
 
     // --- stage 1: the catalogue must agree with the consts ------------------
@@ -399,7 +331,6 @@ mod tests {
             assert_eq!(got.male, expected.male, "{engine}: male pool");
             assert_eq!(got.female, expected.female, "{engine}: female pool");
             assert_eq!(got.neutral, expected.neutral, "{engine}: neutral pool");
-            assert_eq!(got.allowed, expected.allowed, "{engine}: allow-list");
             // `default_cast` is order-insensitive at every call site: `cast.rs`
             // collects it into a map, `state.rs` into a BTreeSet. Compare the
             // assignments, not the iteration order.
@@ -424,43 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn the_accent_rule_is_what_produces_the_allow_list() {
-        // Guards the inference stage 5 will depend on: `allowed` is *derived*
-        // from the accents, so neither adding a preset to the catalogue nor
-        // adding an exclusion to the operator's roster can be undone by editing
-        // the other list.
-        let base = catalogue_engine("vieneu");
-
-        // The shipped catalogue restricts nothing at all.
-        assert!(base.accent_allowed("Northern"));
-        assert!(base.accent_allowed("Central"));
-        assert!(
-            base.to_policy("vieneu").allowed.is_empty(),
-            "no restriction"
-        );
-
-        // An allow-list admits by accent, and `"Central/South"` matches either
-        // half of the combined region the SDK labels.
-        let mut allowed_only = base.clone();
-        allowed_only.policy.allowed_accents = vec!["Central".into(), "South".into()];
-        assert!(allowed_only.accent_allowed("Central/South"));
-        assert!(!allowed_only.accent_allowed("Northern"));
-
-        // The veto wins over the allow-list; an empty allow-list is not a veto.
-        let mut vetoed = base.clone();
-        vetoed.policy.excluded_accents = vec!["Northern".into()];
-        assert!(!vetoed.accent_allowed("Northern"));
-        assert!(vetoed.accent_allowed("Central/South"));
-        assert_eq!(vetoed.to_policy("vieneu").allowed.len(), 10);
-
-        // Empty `allowed_accents` means no restriction, not "nothing allowed".
-        assert!(catalogue_engine("gemini")
-            .to_policy("gemini")
-            .allowed
-            .is_empty());
-    }
-
-    #[test]
     fn every_default_cast_key_resolves_within_its_own_engine() {
         for (engine, roster) in &RosterFile::catalogue().engines {
             assert_eq!(
@@ -468,21 +362,6 @@ mod tests {
                 roster.default_cast.len(),
                 "{engine}: a default_cast key resolves to no declared voice"
             );
-        }
-    }
-
-    #[test]
-    fn no_excluded_preset_is_declared() {
-        // `excluded` records a deliberate omission. If the name ever came back
-        // into `voices`, the accent rule — not the list — would decide, and the
-        // recorded note would be lying about why.
-        for (engine, roster) in &RosterFile::catalogue().engines {
-            for name in &roster.policy.excluded {
-                assert!(
-                    !roster.voices.iter().any(|v| &v.name == name),
-                    "{engine}: `{name}` is listed as excluded but is declared"
-                );
-            }
         }
     }
 
@@ -538,7 +417,6 @@ mod tests {
     #[test]
     fn the_catalogue_needs_no_overlay() {
         let p = effective_policy("vieneu");
-        assert!(p.allowed.is_empty(), "unrestricted");
         assert!(p.default_cast.is_empty(), "no seeded cast");
         let (engine, err) = effective_engine_lenient("vieneu");
         assert!(err.is_none());

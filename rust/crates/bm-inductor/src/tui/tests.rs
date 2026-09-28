@@ -2151,7 +2151,7 @@ fn task_rollup_hides_zero_failure_and_shelved_counters() {
 // --- cast overview ------------------------------------------------------
 
 fn roster_fixture() -> Roster {
-    let voice = |name: &str, gender: &str, accent: &str, allowed: bool, enrolled: bool| {
+    let voice = |name: &str, gender: &str, accent: &str, enrolled: bool| {
         VoiceInfo {
             // Keys come from the real catalogue, so the fixture cannot drift
             // from what the picker actually receives, and a name the
@@ -2164,7 +2164,6 @@ fn roster_fixture() -> Roster {
             style: "tin tức".to_string(),
             pool_tags: Vec::new(),
             enrolled,
-            allowed,
         }
     };
     // A pooled sample, as `voice-pool.json` describes it: tags and all. It is
@@ -2179,15 +2178,14 @@ fn roster_fixture() -> Roster {
         style: format!("pool: {}", tags.join(", ")),
         pool_tags: tags.iter().map(|t| t.to_string()).collect(),
         enrolled: true,
-        allowed: true,
     };
     Roster {
         engine: "vieneu".into(),
         source: "live".into(),
         voices: vec![
-            voice("Đức Trí", "male", "South", true, false),
-            voice("Adam", "male", "unknown", false, true),
-            voice("Bắc Kỳ", "male", "Northern", false, false),
+            voice("Đức Trí", "male", "South", false),
+            voice("Adam", "male", "unknown", true),
+            voice("Bắc Kỳ", "male", "Northern", false),
             pooled("young-male-10", &["young", "male"]),
         ],
         cast: BTreeMap::from([
@@ -2205,7 +2203,6 @@ fn roster_fixture() -> Roster {
             "Hà".into(),
             "Mới".into(),
         ],
-        policy_note: "Central/South only".into(),
     }
 }
 
@@ -2236,20 +2233,16 @@ fn cast_rows_flag_shared_voices_from_both_sides() {
 }
 
 #[test]
-fn cast_rows_separate_blocked_from_unknown_and_accept_enrolled_clones() {
+fn cast_rows_accept_every_voice_the_roster_lists_and_flag_unknown_ones() {
     let rows = cast_rows(&roster_fixture());
     let by = |n: &str| rows.iter().find(|r| r.character == n).unwrap().verdict();
-    assert_eq!(
-        by("Lâm"),
-        Verdict::Blocked,
-        "listed, and the policy rejects it"
-    );
+    assert_eq!(by("Lâm"), Verdict::Ok, "listed, so assignable");
     assert_eq!(
         by("Hà"),
         Verdict::Unknown,
         "the roster has never heard of it"
     );
-    assert_eq!(by("Kiên"), Verdict::Ok, "enrolled clones bypass the policy");
+    assert_eq!(by("Kiên"), Verdict::Ok, "enrolled clones are assignable");
     assert_eq!(by("Narrator"), Verdict::Ok);
 }
 
@@ -2312,7 +2305,7 @@ fn cast_rows_carry_the_voice_metadata_through() {
     assert_eq!(narrator.gender, "male");
     assert_eq!(narrator.accent, "South");
     assert!(narrator.in_roster);
-    assert!(narrator.allowed && !narrator.enrolled);
+    assert!(!narrator.enrolled);
     // A voice the roster does not list carries no metadata at all, so
     // anything that renders it has nothing to invent. The table shows none of
     // this now — the row is the flattened roster, not the table — but the
@@ -2843,7 +2836,10 @@ fn the_cast_overview_renders_every_speaker_and_flags_shared_voices() {
     );
     assert!(text.contains("4 voices in use"), "{text}");
     assert!(text.contains("1 shared"), "only Adam is shared:\n{text}");
-    assert!(text.contains("2 to fix"), "Lâm and Hà:\n{text}");
+    assert!(
+        text.contains("1 to fix"),
+        "Hà is the one the roster cannot resolve:\n{text}"
+    );
     assert!(
         text.contains("1 unassigned — :v fills gaps"),
         "Mới:\n{text}"
@@ -2852,7 +2848,7 @@ fn the_cast_overview_renders_every_speaker_and_flags_shared_voices() {
     // *other* speakers share it. `gender` and `accent` were a third of the
     // width repeating `unknown`, and the prose status was four words that said
     // the same thing on every row that had anything to say — the verdict is
-    // the count's colour and the summary's `2 to fix` above.
+    // the count's colour and the summary's `1 to fix` above.
     assert!(text.contains("shared"), "the column is named:\n{text}");
     for gone in [
         "accent policy concern",
@@ -7303,7 +7299,6 @@ fn pooled_roster() -> Roster {
         style: format!("pool: {}", tags.join(", ")),
         pool_tags: tags.iter().map(|t| t.to_string()).collect(),
         enrolled: true,
-        allowed: true,
     };
     r.voices = vec![
         sample("young-male-10", &["young", "male"]),
@@ -7318,7 +7313,6 @@ fn pooled_roster() -> Roster {
             style: "trầm".into(),
             pool_tags: Vec::new(),
             enrolled: false,
-            allowed: true,
         },
         VoiceInfo {
             key: String::new(),
@@ -7329,7 +7323,6 @@ fn pooled_roster() -> Roster {
             style: "tin tức".into(),
             pool_tags: Vec::new(),
             enrolled: false,
-            allowed: true,
         },
     ];
     // `young-male-10` is the busiest of the two male+young samples, so it must
@@ -7459,7 +7452,6 @@ fn a_pool_samples_gender_comes_from_its_tag_when_the_roster_does_not_know() {
         style: String::new(),
         pool_tags: tags.iter().map(|t| t.to_string()).collect(),
         enrolled: true,
-        allowed: true,
     };
     assert_eq!(
         gender_of(&v("female", &["young"])),
@@ -7494,7 +7486,6 @@ fn the_picker_step_two_keeps_its_columns_aligned_however_long_a_voice_is() {
         style: "pool: female, young".into(),
         pool_tags: vec!["female".into(), "young".into()],
         enrolled: true,
-        allowed: true,
     });
     for c in ["Một", "Hai", "Ba"] {
         roster.cast.insert(c.into(), "Võ Tắc Thiên".into());
@@ -7553,7 +7544,6 @@ fn step_one_shows_the_incumbent_voice_and_its_gender_and_no_column_that_repeats_
         style: "pool: young, female".into(),
         pool_tags: vec!["young".into(), "female".into()],
         enrolled: true,
-        allowed: true,
     });
     roster.cast.insert("Bé Mắt".into(), "young-female-9".into());
     // Step 1 lists the *speakers*, so the name has to be one of those.
@@ -7693,7 +7683,7 @@ fn the_cast_table_names_only_what_it_shows() {
         assert!(text.contains(kept), "the header is here: {kept}\n{text}");
     }
     assert!(
-        text.contains("2 to fix"),
+        text.contains("1 to fix"),
         "…and the problems are still counted:\n{text}"
     );
 }

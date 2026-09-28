@@ -72,7 +72,7 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
     let unassigned = all.iter().filter(|r| r.unassigned()).count();
     let flagged = all
         .iter()
-        .filter(|r| matches!(r.verdict(), Verdict::Blocked | Verdict::Unknown))
+        .filter(|r| matches!(r.verdict(), Verdict::Unknown))
         .count();
 
     let mut summary = vec![
@@ -229,7 +229,6 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
                             // in the one place the table still has room for it;
                             // the prose for it was the same three words on
                             // every row that had it.
-                            Verdict::Blocked => Color::Yellow,
                             Verdict::Unknown => Color::Red,
                             _ if r.shared() => Color::Yellow,
                             _ => Color::DarkGray,

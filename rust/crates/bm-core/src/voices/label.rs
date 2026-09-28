@@ -1,6 +1,6 @@
 use bm_proto::VoiceInfo;
 
-use super::catalogue::{key_for_name, EngineRoster};
+use super::catalogue::key_for_name;
 use super::consts::{policy_for, CONTENT_LANGUAGE, PRESET_META};
 
 fn preset_meta(name: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
@@ -91,7 +91,7 @@ pub fn voice_name(label: &str) -> String {
 /// A bare label (`label == id`) is an enrolled clone: no gender or accent is
 /// claimed, and it is flagged so the picker can distinguish cast members the
 /// operator added by hand from the shipped presets.
-fn voice_from_label(label: &str, id: &str, allowed: &[String], engine: &str) -> VoiceInfo {
+fn voice_from_label(label: &str, id: &str, engine: &str) -> VoiceInfo {
     let (name, fields) = split_label(label);
     let name = if name.is_empty() {
         id.to_string()
@@ -112,11 +112,6 @@ fn voice_from_label(label: &str, id: &str, allowed: &[String], engine: &str) -> 
     let key = key_for_name(engine, &name).unwrap_or_default();
     VoiceInfo {
         key,
-        // `allowed.is_empty()` is "no restriction", the same reading
-        // `VoicePolicy::violations` and `offline_voices` use. Omitting it here
-        // would make the sidecar-backed roster reject every preset the moment
-        // the policy became permissive, while the offline roster accepted them.
-        allowed: enrolled || allowed.is_empty() || allowed.contains(&name),
         enrolled,
         name,
         gender: gender.to_string(),
@@ -130,17 +125,10 @@ fn voice_from_label(label: &str, id: &str, allowed: &[String], engine: &str) -> 
 }
 
 /// Turn the sidecar's `(label, id)` roster into voice infos.
-///
-/// `allowed` is passed in rather than resolved here, because the effective
-/// policy depends on the operator's roster and this function has no path to it.
-pub fn voices_from_labels(
-    engine: &str,
-    labels: &[(String, String)],
-    allowed: &[String],
-) -> Vec<VoiceInfo> {
+pub fn voices_from_labels(engine: &str, labels: &[(String, String)]) -> Vec<VoiceInfo> {
     labels
         .iter()
-        .map(|(label, id)| voice_from_label(label, id, allowed, engine))
+        .map(|(label, id)| voice_from_label(label, id, engine))
         .collect()
 }
 
@@ -175,44 +163,10 @@ pub fn offline_voices(engine: &str) -> Vec<VoiceInfo> {
                 style: style.to_string(),
                 pool_tags: Vec::new(),
                 enrolled: false,
-                allowed: policy.allowed.is_empty() || policy.allowed.iter().any(|a| a == name),
             });
         }
     }
     out
-}
-
-/// One line describing the active accent policy, for the picker header.
-///
-/// Derived from the roster rather than restated. This used to hardcode
-/// "Central/South presets only (Northern excluded)" — the same regional
-/// preference in a fourth place, phrased as though it were a property of the
-/// engine rather than somebody's choice.
-pub fn policy_note(roster: &EngineRoster) -> String {
-    let pol = &roster.policy;
-    if pol.allowed_accents.is_empty() && pol.excluded_accents.is_empty() {
-        return format!(
-            "accent policy: none — all {} declared presets are assignable",
-            roster.voices.len()
-        );
-    }
-    let allowed = roster
-        .voices
-        .iter()
-        .filter(|v| roster.accent_allowed(&v.accent))
-        .count();
-    let mut parts: Vec<String> = Vec::new();
-    if !pol.allowed_accents.is_empty() {
-        parts.push(format!("only {}", pol.allowed_accents.join("/")));
-    }
-    if !pol.excluded_accents.is_empty() {
-        parts.push(format!("excluding {}", pol.excluded_accents.join("/")));
-    }
-    format!(
-        "accent policy: {} — {allowed} of {} declared presets assignable; enrolled clones always pass",
-        parts.join(", "),
-        roster.voices.len()
-    )
 }
 
 /// Operator-enrolled clones, read from `voices.json` (`name -> refs/clip.wav`).
@@ -245,7 +199,6 @@ pub fn enrolled_voices(path: &std::path::Path) -> Vec<VoiceInfo> {
             // which samples the cast may roll.
             pool_tags: Vec::new(),
             enrolled: true,
-            allowed: true, // vetted when it was enrolled
         })
         .collect()
 }
@@ -253,81 +206,33 @@ pub fn enrolled_voices(path: &std::path::Path) -> Vec<VoiceInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::voices::catalogue::RosterFile;
-    use crate::voices::consts::{gemini_policy, vieneu_policy};
 
     #[test]
     fn label_fields_are_positional_so_nam_is_male_then_south() {
         // "Nam" appears twice with two different meanings; only position
         // disambiguates them.
-        let v = voice_from_label(
-            "Thái Sơn — Nam · Nam · Kể chuyện",
-            "thai_son",
-            &vieneu_policy().allowed,
-            "vieneu",
-        );
+        let v = voice_from_label("Thái Sơn — Nam · Nam · Kể chuyện", "thai_son", "vieneu");
         assert_eq!(v.name, "Thái Sơn");
         assert_eq!(v.gender, "male");
         assert_eq!(v.accent, "South");
         assert_eq!(v.style, "Kể chuyện");
         assert!(!v.enrolled);
-        assert!(v.allowed, "Thái Sơn is a Central/South preset");
         assert_eq!(v.language, "vi-VN");
     }
 
     #[test]
     fn female_beats_the_male_substring_in_a_label_field() {
-        let v = voice_from_label(
-            "Thục Đoan — Nữ · Trung · kể chuyện",
-            "thuc_doan",
-            &vieneu_policy().allowed,
-            "vieneu",
-        );
+        let v = voice_from_label("Thục Đoan — Nữ · Trung · kể chuyện", "thuc_doan", "vieneu");
         assert_eq!(v.gender, "female");
         assert_eq!(v.accent, "Central");
     }
 
     #[test]
-    fn a_bare_label_is_an_enrolled_clone_that_passes_the_policy() {
-        let v = voice_from_label("Suneo", "Suneo", &vieneu_policy().allowed, "vieneu");
+    fn a_bare_label_is_an_enrolled_clone() {
+        let v = voice_from_label("Suneo", "Suneo", "vieneu");
         assert_eq!(v.name, "Suneo");
         assert!(v.enrolled);
-        assert!(v.allowed, "clones are vetted at enrolment");
         assert_eq!(v.gender, "unknown");
-    }
-
-    #[test]
-    fn excluding_an_accent_is_what_makes_a_northern_preset_unassignable() {
-        // The shipped policy admits every preset; the exclusion is the
-        // operator's. This is the path that turns
-        // `"excluded_accents": ["Northern"]` into an unassignable voice.
-        let mut roster = RosterFile::catalogue()
-            .engine("vieneu")
-            .expect("vieneu is declared")
-            .clone();
-        roster.policy.excluded_accents = vec!["Northern".to_string()];
-
-        let p = roster.to_policy("vieneu");
-        assert!(
-            !p.allowed.contains(&"Minh Đức".to_string()),
-            "Northern, excluded"
-        );
-        assert!(p.allowed.contains(&"Đức Trí".to_string()), "South, kept");
-        assert!(
-            p.allowed.contains(&"Quang Sơn".to_string()),
-            "Central, kept"
-        );
-        assert_eq!(p.allowed.len(), 10, "23 declared minus the 13 Northern");
-
-        // The same rule, applied to a live sidecar label.
-        let v = voice_from_label(
-            "Xuân Vĩnh — Nam · Bắc · đọc truyện",
-            "xuan_vinh",
-            &p.allowed,
-            "vieneu",
-        );
-        assert_eq!(v.accent, "Northern");
-        assert!(!v.allowed, "the operator's roster excludes Northern");
     }
 
     #[test]
@@ -339,10 +244,6 @@ mod tests {
             23,
             "{:?}",
             v.iter().map(|x| &x.name).collect::<Vec<_>>()
-        );
-        assert!(
-            v.iter().all(|x| x.allowed),
-            "the shipped policy admits everything"
         );
         assert_eq!(v.iter().filter(|x| x.gender == "male").count(), 12);
         assert_eq!(v.iter().filter(|x| x.gender == "female").count(), 11);
@@ -365,12 +266,7 @@ mod tests {
     #[test]
     fn neutral_is_not_misread_as_female() {
         // "neutral" contains "nu"; only the diacritic form may mean female.
-        let v = voice_from_label(
-            "Puck — Neutral · unknown · breezy",
-            "puck",
-            &gemini_policy().allowed,
-            "gemini",
-        );
+        let v = voice_from_label("Puck — Neutral · unknown · breezy", "puck", "gemini");
         assert_eq!(v.gender, "neutral");
     }
 
@@ -387,7 +283,7 @@ mod tests {
         );
         // A label the catalogue does not declare (an enrolled clone) gets no key
         // rather than a derived slug that the next rename would invalidate.
-        let clone = voice_from_label("Suneo", "Suneo", &vieneu_policy().allowed, "vieneu");
+        let clone = voice_from_label("Suneo", "Suneo", "vieneu");
         assert_eq!(clone.key, "");
         assert!(clone.enrolled);
     }

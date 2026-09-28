@@ -887,8 +887,8 @@ async fn op_crawl_setup(
         Err(e) => OpResult::fail(format!("probe crawl failed: {e}")),
     }
 }
-/// Read the sidecar roster, enforce the accent policy on the cast file, and
-/// refill any gaps. Falls back to the offline roster when no sidecar answers.
+/// Read the sidecar roster and refill the cast's gaps. Falls back to the
+/// offline roster when no sidecar answers.
 /// Distribution to workers rides the next provision sync.
 async fn op_voices(layout: &bm_core::Layout, engine: &str) -> OpResult {
     // Strict, unlike the picker: this op *prunes* the cast, so it refuses
@@ -911,17 +911,8 @@ async fn op_voices(layout: &bm_core::Layout, engine: &str) -> OpResult {
             live = true;
         }
     }
-    let allowed: std::collections::HashSet<&str> =
-        policy.allowed.iter().map(|s| s.as_str()).collect();
     let cast_path = layout.cast(engine);
-    let mut cast = bm_core::cast::read_cast(engine, &cast_path);
-    let before = cast.len();
-    // Drop assignments the policy rejects and that no enrolled clone covers.
-    cast.retain(|_, v| allowed.contains(v.as_str()) || enrolled.iter().any(|e| e == v));
-    let dropped = before - cast.len();
-    if dropped > 0 {
-        let _ = bm_core::cast::write_cast(engine, &cast_path, &cast);
-    }
+    let cast = bm_core::cast::read_cast(engine, &cast_path);
     let filled_from = cast.len();
     // Refill gaps across every script. load_cast never overwrites an existing
     // assignment, so curated voices survive; newcomers get least-used voices.
@@ -946,7 +937,7 @@ async fn op_voices(layout: &bm_core::Layout, engine: &str) -> OpResult {
     let cast = bm_core::cast::read_cast(engine, &cast_path);
     let gaps = cast.len().saturating_sub(filled_from);
     OpResult::ok(format!(
-        "voices ({}, {} enrolled clones): pruned {dropped}, filled {gaps} gaps, {} speakers mapped",
+        "voices ({}, {} enrolled clones): filled {gaps} gaps, {} speakers mapped",
         if live {
             "live roster"
         } else {
@@ -1162,13 +1153,12 @@ fn disk_voices(
                 style,
                 pool_tags: entry.tags.clone(),
                 enrolled: true,
-                allowed: true,
             }),
         }
     }
     // Assignable voices first, then by gender then name: a stable order means
     // the picker's cursor does not jump between refreshes.
-    voices.sort_by(|a, b| (!a.allowed, &a.gender, &a.name).cmp(&(!b.allowed, &b.gender, &b.name)));
+    voices.sort_by(|a, b| (&a.gender, &a.name).cmp(&(&b.gender, &b.name)));
     voices
 }
 
@@ -1181,17 +1171,13 @@ pub(crate) fn local_roster(layout: &bm_core::Layout) -> Roster {
     inner.load_ledger();
     let characters = inner.known_characters();
     let cast = inner.cast_snapshot();
-    let (effective, roster_error) = bm_core::voices::effective_engine_lenient(&engine);
+    let (effective, _) = bm_core::voices::effective_engine_lenient(&engine);
     Roster {
         engine: engine.clone(),
         source: "offline".into(),
         voices: disk_voices(layout, &engine, &effective),
         cast,
         characters,
-        policy_note: match roster_error {
-            Some(e) => format!("roster error — {e}"),
-            None => bm_core::voices::policy_note(&effective),
-        },
     }
 }
 
@@ -1213,11 +1199,8 @@ async fn build_roster(
     let mut source = "offline".to_string();
     let mut voices: Vec<VoiceInfo> = Vec::new();
 
-    // The effective roster is the shipped catalogue. Resolved once so the
-    // voice list, the allow-list and the header line cannot disagree about
-    // what is assignable.
-    let (effective, roster_error) = bm_core::voices::effective_engine_lenient(engine);
-    let policy = effective.to_policy(engine);
+    // The effective roster is the shipped catalogue.
+    let (effective, _) = bm_core::voices::effective_engine_lenient(engine);
 
     if let Ok(r) = http.get(format!("{SIDECAR}/roster")).send().await {
         if let Ok(v) = r.json::<Vec<VoiceInfo>>().await {
@@ -1239,7 +1222,7 @@ async fn build_roster(
                     })
                     .collect();
                 if !labels.is_empty() {
-                    voices = bm_core::voices::voices_from_labels(engine, &labels, &policy.allowed);
+                    voices = bm_core::voices::voices_from_labels(engine, &labels);
                     source = "live (labels)".into();
                 }
             }
@@ -1281,23 +1264,18 @@ async fn build_roster(
                 style,
                 pool_tags: entry.tags.clone(),
                 enrolled: true,
-                allowed: true,
             }),
         }
     }
     // Assignable voices first, then by gender then name: a stable order means
     // the picker's cursor does not jump between refreshes.
-    voices.sort_by(|a, b| (!a.allowed, &a.gender, &a.name).cmp(&(!b.allowed, &b.gender, &b.name)));
+    voices.sort_by(|a, b| (&a.gender, &a.name).cmp(&(&b.gender, &b.name)));
     Roster {
         engine: engine.to_string(),
         source,
         voices,
         cast,
         characters,
-        policy_note: match roster_error {
-            Some(e) => format!("roster error — {e}"),
-            None => bm_core::voices::policy_note(&effective),
-        },
     }
 }
 

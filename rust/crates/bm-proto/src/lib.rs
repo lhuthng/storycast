@@ -1328,9 +1328,6 @@ pub struct VoiceInfo {
     /// An operator-enrolled clone rather than a shipped preset.
     #[serde(default)]
     pub enrolled: bool,
-    /// Passes the engine's accent policy (clones are vetted at enrolment).
-    #[serde(default)]
-    pub allowed: bool,
 }
 
 /// Everything the voice picker needs in one round trip: the roster, the
@@ -1347,8 +1344,6 @@ pub struct Roster {
     /// Every speaker seen in the cast, the bible or any script, the picker's
     /// first step. Sorted, `Narrator` first.
     pub characters: Vec<String>,
-    /// One line describing the active accent policy, for the picker header.
-    pub policy_note: String,
 }
 
 /// The operator-facing operations.
@@ -1369,7 +1364,7 @@ pub enum Op {
     /// refused, so importing a truncated paste fails here rather than three
     /// stages downstream.
     Import,
-    /// Read the sidecar roster, apply the accent policy, write the cast.
+    /// Read the sidecar roster and refill the cast.
     Voices,
     /// Repoint one character's voice and invalidate only its cached segments.
     SwapVoice,

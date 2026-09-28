@@ -120,37 +120,32 @@ pub(crate) async fn key_picker(
                     {
                         None => app.set_status(Level::Error, "no voice selected"),
                         Some(v) => {
-                            if !v.allowed {
-                                app.set_status(
-                                    Level::Warn,
-                                    format!(
-                                        "{} is an accent policy concern — pick another",
-                                        v.name
-                                    ),
-                                );
-                            } else {
-                                // Lock the speech the voice is picked on: the
-                                // confirm — and every later audition — keeps
-                                // this sentence instead of another random pick.
-                                if let Some(l) = &p.line {
-                                    app.locked_lines.insert(p.character.clone(), l.clone());
-                                }
-                                app.screen = Screen::Confirm(Confirm {
-                                    title: "Confirm voice swap".into(),
-                                    danger: true,
-                                    body: vec![
-                                        format!("Repoint “{}” from its current voice to “{}”.", p.character, v.name),
-                                        String::new(),
-                                        "This deletes only that speaker's cached segments, drops the".into(),
-                                        "stale mp3s for the affected chapters and requeues render +".into(),
-                                        "merge. Every other character keeps its cache.".into(),
-                                    ],
-                                    action: ConfirmAction::SwapVoice {
-                                        character: p.character.clone(),
-                                        voice: v.name.clone(),
-                                    },
-                                });
+                            // Lock the speech the voice is picked on: the
+                            // confirm — and every later audition — keeps this
+                            // sentence instead of another random pick.
+                            if let Some(l) = &p.line {
+                                app.locked_lines.insert(p.character.clone(), l.clone());
                             }
+                            app.screen = Screen::Confirm(Confirm {
+                                title: "Confirm voice swap".into(),
+                                danger: true,
+                                body: vec![
+                                    format!(
+                                        "Repoint “{}” from its current voice to “{}”.",
+                                        p.character, v.name
+                                    ),
+                                    String::new(),
+                                    "This deletes only that speaker's cached segments, drops the"
+                                        .into(),
+                                    "stale mp3s for the affected chapters and requeues render +"
+                                        .into(),
+                                    "merge. Every other character keeps its cache.".into(),
+                                ],
+                                action: ConfirmAction::SwapVoice {
+                                    character: p.character.clone(),
+                                    voice: v.name.clone(),
+                                },
+                            });
                         }
                     }
                 }

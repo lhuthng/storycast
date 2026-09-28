@@ -1,16 +1,10 @@
 {
-  "_note": "The shipped voice catalogue: every preset the pipeline may assign, its metadata, and the accent policy. Committed on purpose — a fresh clone with no local config must still render, so the roster cannot live only in the ignored .bm/. This file is PUBLIC, so it states no preference: every preset is declared, no accent is excluded, and no character is pre-cast. An operator narrows it and seeds their cast in .bm/voices.json, which is ignored. See .docs/VOICE_CONFIG_PROPOSAL.md.",
+  "_note": "The shipped voice catalogue: every preset the pipeline may assign, its metadata and its default cast. Committed on purpose — a fresh clone with no local config must still render, so the roster cannot live only in the ignored .bm/. This file is PUBLIC, so it states no preference: every preset is declared and no character is pre-cast. See .docs/VOICE_CONFIG_PROPOSAL.md.",
   "version": 1,
   "engines": {
     "vieneu": {
       "label": "VieNeu-TTS v3 Turbo — local, 48 kHz",
       "sample_rate": 48000,
-      "policy": {
-        "allowed_accents": [],
-        "excluded_accents": [],
-        "note": "No restriction — all 23 presets are declared and assignable. A regional preference belongs to the operator, not the catalogue: put e.g. \"excluded_accents\": [\"Northern\"] in .bm/voices.json. An unknown-gender character falls back to the male pool (the store declares no neutral preset).",
-        "excluded": []
-      },
       "voices": [
         { "key": "minh-duc", "name": "Minh Đức", "gender": "male", "accent": "Northern", "style": "tin tức" },
         { "key": "pham-tuyen", "name": "Phạm Tuyên", "gender": "male", "accent": "Northern", "style": "tự nhiên" },
@@ -41,12 +35,6 @@
     "gemini": {
       "label": "Gemini prebuilt TTS — cloud",
       "sample_rate": 24000,
-      "policy": {
-        "allowed_accents": [],
-        "excluded_accents": [],
-        "note": "No restriction — cloud prebuilt voices, any of the roster is assignable. Google's labels do not encode a region, so there is nothing to exclude by accent here.",
-        "excluded": []
-      },
       "voices": [
         { "key": "orus", "name": "Orus", "gender": "male", "accent": "unknown", "style": "" },
         { "key": "charon", "name": "Charon", "gender": "male", "accent": "unknown", "style": "" },

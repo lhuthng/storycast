@@ -304,19 +304,15 @@ pub(crate) fn users_of(cast: &BTreeMap<String, String>, voice: &str) -> Vec<Stri
         .collect()
 }
 
-/// How one assignment sits against the accent policy.
+/// How one assignment sits against the roster.
 ///
-/// `Blocked` and `Unknown` are deliberately distinct. A voice the roster lists
-/// and the policy rejects is a *decision*; a voice the roster has never heard
-/// of means the cast is stale, or the roster fell back to the offline table
-/// because the sidecar is down. Reporting the second as the first would send
-/// an operator hunting for a policy problem that does not exist.
+/// `Unknown` is the one worth looking at: a voice the roster has never heard of
+/// means the cast is stale, or the roster fell back to the offline table
+/// because the sidecar is down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verdict {
-    /// Assignable — the policy permits it, or it is an enrolled clone.
+    /// Assignable — the roster lists it, or it is an enrolled clone.
     Ok,
-    /// The roster lists it and the accent policy rejects it.
-    Blocked,
     /// Not in the roster at all.
     Unknown,
     /// No assignment yet.
@@ -336,7 +332,6 @@ pub(crate) struct CastRow {
     pub(crate) style: String,
     /// The roster lists this voice at all.
     pub(crate) in_roster: bool,
-    pub(crate) allowed: bool,
     pub(crate) enrolled: bool,
     /// Other speakers sharing this voice, sorted. Never counts unassigned
     /// speakers as sharing the empty voice.
@@ -351,10 +346,8 @@ impl CastRow {
     pub(crate) fn verdict(&self) -> Verdict {
         if self.voice.is_empty() {
             Verdict::Unassigned
-        } else if self.allowed || self.enrolled {
+        } else if self.in_roster || self.enrolled {
             Verdict::Ok
-        } else if self.in_roster {
-            Verdict::Blocked
         } else {
             Verdict::Unknown
         }
@@ -369,7 +362,7 @@ impl CastRow {
 
 /// Flatten a roster into one row per speaker.
 ///
-/// Pure, so the duplicate and policy logic is testable without a terminal.
+/// Pure, so the duplicate logic is testable without a terminal.
 pub(crate) fn cast_rows(roster: &Roster) -> Vec<CastRow> {
     let meta: BTreeMap<&str, &VoiceInfo> =
         roster.voices.iter().map(|v| (v.name.as_str(), v)).collect();
@@ -411,7 +404,6 @@ pub(crate) fn cast_rows(roster: &Roster) -> Vec<CastRow> {
                 accent: v.map(|x| x.accent.clone()).unwrap_or_default(),
                 style: v.map(|x| x.style.clone()).unwrap_or_default(),
                 in_roster: v.is_some(),
-                allowed: v.map(|x| x.allowed).unwrap_or(false),
                 enrolled: v.map(|x| x.enrolled).unwrap_or(false),
                 shared_with,
             }
