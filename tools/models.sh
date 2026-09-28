@@ -2,7 +2,7 @@
 # Models: the baked TTS weights as a single transfer file.
 #
 #   tools/models.sh pack [--level N]
-#                                     verify the bake -> models/models.tar.zst
+#                      verify the bake -> engines/vieneu/models/models.tar.zst
 #   tools/models.sh verify            bundle manifest vs. bundle contents
 #   tools/models.sh publish [--notes "..."]
 #                                     gh release create models-v<hash> with the bundle
@@ -15,9 +15,9 @@
 # same archive. The design is docs/ARTIFACTS.md; `bm-agent fetch-artifact` is
 # the half that takes delivery.
 #
-# What goes in, and what deliberately does not: the files `models/manifest.json`
-# lists — the 16 immutable weights — plus that manifest. `models/voices.json`
-# sits in the same directory and is **excluded**, because it is not a bake
+# What goes in, and what deliberately does not: the files `manifest.json` lists
+# — the 16 immutable weights — plus that manifest. `voices.json` sits in the
+# same directory and is **excluded**, because it is not a bake
 # output: `pool::bake_missing_voices` rewrites it on the inductor during
 # provisioning, and its source is a pip-installed package rather than a pinned
 # revision. `bake-models.py` already leaves it out of the record; the file list
@@ -53,7 +53,9 @@ command -v zstd >/dev/null || { echo "zstd not on PATH (brew install zstd)" >&2;
 command -v python3 >/dev/null || { echo "python3 not on PATH" >&2; exit 1; }
 
 root=$(dirname "$0")/..; root=$(cd "$root" && pwd)
-models="$root/models"
+# The bake lives in VieNeu's own tree. A second engine's would be
+# `engines/<its-name>/models/`, alongside its own binary and runtime.
+models="$root/engines/vieneu/models"
 bundle="$models/models.tar.zst"
 manifest="$models/manifest.json"
 

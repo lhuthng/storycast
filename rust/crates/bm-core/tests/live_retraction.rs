@@ -25,6 +25,7 @@ fn layout() -> Layout {
             .to_path_buf(),
         work: PathBuf::from(SANDBOX),
         adapter: bm_core::paths::DEFAULT_ADAPTER.into(),
+        engine: bm_core::paths::DEFAULT_ENGINE.into(),
     }
 }
 

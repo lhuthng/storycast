@@ -462,7 +462,7 @@ pub fn provision_machine(
         key: key.clone(),
         local: bm_core::is_local_node(addr),
     };
-    let pre = probe_ssh.probe();
+    let pre = probe_ssh.probe(&layout.engine);
     log.push(format!("[{addr}] {}", pre.summary()));
     // Unreachable means nothing downstream can run: no platform was learned
     // (os/arch stay empty, the old flow continued and failed confusingly on
@@ -599,6 +599,10 @@ async fn cmd_serve(
     // directories now carry the adapter as well as the engine, so a workspace
     // from before the split is renamed into the new shape rather than
     // re-rendering every chapter it already spoke.
+    // Also one-time, and before any path is planned: the weights, the sidecar
+    // and its runtime used to sit at the root, and they are the bound engine's
+    // files now. A checkout from before this moves rather than re-provisions.
+    inner.migrate_engine_tree();
     inner.migrate_cache_keys();
     inner.check_profile()?;
     inner.reconcile(start, count);
@@ -1911,6 +1915,17 @@ fn cmd_roster_add_sample(
     tags: Vec<String>,
     name: Option<String>,
 ) -> anyhow::Result<()> {
+    // A reference clip is only useful to an engine that clones from one, and
+    // whether it can is the engine's own declaration rather than an assumption
+    // every caller makes. Refusing here names the engine and the fix, instead
+    // of enrolling a voice no render can ever speak through.
+    if !bm_core::voices::clones(&layout.engine) {
+        anyhow::bail!(
+            "engine '{}' declares no voice cloning — a reference clip has nothing to enrol from; \
+             switch to an engine that clones (`settings.engine`), or pick one of its presets",
+            layout.engine
+        );
+    }
     let tags = if tags.is_empty() { None } else { Some(tags) };
     for line in bm_core::pool::add_sample(&layout.root, path, tags, name)? {
         println!("{line}");

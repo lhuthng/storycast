@@ -423,9 +423,9 @@ mod tests {
             male_voices: p.male,
             female_voices: p.female,
             // Always empty: the field stays because `bm-agent` probes for it to
-        // tell a serving sidecar from a stale one. Nothing restricts voices
-        // any more — the catalogue is the whole roster.
-        allowed_voices: Vec::new(),
+            // tell a serving sidecar from a stale one. Nothing restricts voices
+            // any more — the catalogue is the whole roster.
+            allowed_voices: Vec::new(),
             default_cast: Default::default(),
         })
         .unwrap();

@@ -122,6 +122,37 @@ impl Inner {
         }
     }
 
+    /// Bring a pre-engine-tree checkout into the `engines/<name>/` shape.
+    ///
+    /// The same load-time, once-only reasoning as [`Inner::migrate_cache_keys`],
+    /// and for a heavier reason: `models/`, `bm-tts` and `libonnxruntime.so.1`
+    /// used to sit at the root and no path points at them there any more, so
+    /// leaving them behind does not merely misname a cache — it makes the
+    /// sidecar unspawnable and the weights unreachable.
+    ///
+    /// The files are VieNeu's whatever this checkout now runs, so the target is
+    /// named by history rather than by `settings.engine`; a second engine never
+    /// had a flat tree to move.
+    pub fn migrate_engine_tree(&mut self) {
+        let target = self
+            .layout
+            .root
+            .join(bm_core::paths::ENGINES_DIR)
+            .join(bm_core::paths::LEGACY_ENGINE);
+        match self.layout.migrate_engine_tree() {
+            Ok(moved) if moved.is_empty() => {}
+            Ok(moved) => self.push_event(
+                "info",
+                format!(
+                    "engine tree: {} path(s) moved into {} — the sidecar, its runtime and the weights are the engine's own files now",
+                    moved.len(),
+                    target.display(),
+                ),
+            ),
+            Err(e) => self.push_event("error", format!("engine tree move failed: {e:#}")),
+        }
+    }
+
     fn ledger_path(&self) -> std::path::PathBuf {
         self.layout.ledger()
     }

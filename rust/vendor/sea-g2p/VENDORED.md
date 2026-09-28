@@ -70,7 +70,8 @@ sha256  4346e690d0711ebc5231e7a42c5c88aaf6e40377e894b4617c018fd81c6f4096
 
 Verified byte-identical across the upstream repository at the pinned commit and
 the `sea-g2p==0.9.1` wheel, so either is a sound source. Resolution order for
-tooling that needs it (`tools/g2p-parity.py`): `models/sea_g2p.bin`, then
+tooling that needs it (`tools/g2p-parity.py`): `engines/vieneu/models/sea_g2p.bin`,
+then
 `rust/vendor/sea-g2p/python/sea_g2p/sea_g2p.bin` (upstream's own layout, which
 is what upstream's `tests/*.rs` hard-code), then the installed wheel.
 

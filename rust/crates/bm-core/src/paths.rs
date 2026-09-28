@@ -24,10 +24,39 @@ pub struct Layout {
     /// already using, before the split gave it a name. Public because tests in
     /// other crates build a `Layout` by literal.
     pub adapter: String,
+    /// The voice engine this checkout runs: the name of its `engines/<name>/`
+    /// tree, and the `settings.engine` name every cache path is keyed by.
+    ///
+    /// A property of the checkout like `adapter`, and read the same way — from
+    /// the load pointer, falling back to [`DEFAULT_ENGINE`]. It is what gives
+    /// the engine an identity on disk: before this, `models/`, `bm-tts` and
+    /// `libonnxruntime.so.1` sat at the root with the engine's name nowhere in
+    /// a path, so a second engine had nowhere to live and the dictionary was
+    /// hardcoded to VieNeu's.
+    pub engine: String,
 }
 
 /// What a checkout with no adapter bundle keys its caches under.
 pub const DEFAULT_ADAPTER: &str = "default";
+
+/// What a checkout with no engine named runs: the local engine that was there
+/// before engines had names.
+pub const DEFAULT_ENGINE: &str = "vieneu";
+
+/// The directory every engine's own files hang off, at the root: `engines/`.
+///
+/// One subdirectory per engine, each with its own `models/`, `bm-tts`,
+/// `libonnxruntime.so.1`, `refs/` and `samples/`. Shipped bytes are enormous
+/// (about a gigabyte live) and gitignored like `models/` always was.
+pub const ENGINES_DIR: &str = "engines";
+
+/// The one engine that ever had a *flat* tree at the root.
+///
+/// History, like [`LEGACY_CACHE_ENGINES`]: before the engine tree, `models/`
+/// and `bm-tts` were the root's, and they were VieNeu's — so the one-time
+/// rename moves them under `engines/vieneu/` whatever the checkout now runs.
+/// A second engine never had a flat tree to migrate.
+pub const LEGACY_ENGINE: &str = "vieneu";
 
 /// The engine's name as it appears in a cache path.
 ///
@@ -70,6 +99,7 @@ impl Layout {
             work: root.clone(),
             root,
             adapter: DEFAULT_ADAPTER.to_string(),
+            engine: DEFAULT_ENGINE.to_string(),
         }
     }
 
@@ -84,6 +114,17 @@ impl Layout {
             .unwrap_or_else(|_| DEFAULT_ADAPTER.to_string())
     }
 
+    /// The engine the load pointer names, or [`DEFAULT_ENGINE`].
+    ///
+    /// Best-effort for the same reason `bound_adapter` is: a fresh clone and a
+    /// box mid-provision both have no pointer, and a path lookup is not the
+    /// place to refuse to work.
+    fn bound_engine(root: &Path) -> String {
+        crate::profile::read_binding(root)
+            .map(|b| b.cache_engine())
+            .unwrap_or_else(|_| DEFAULT_ENGINE.to_string())
+    }
+
     /// Resolve the active workspace: `.bm/active-workspace` names a directory
     /// under `workspaces/`. No pointer means this root *is* the workspace
     /// (the implicit default) — a fresh clone just works, and state appears
@@ -93,10 +134,12 @@ impl Layout {
     pub fn resolve(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         let adapter = Self::bound_adapter(&root);
+        let engine = Self::bound_engine(&root);
         let pointer = Self::active_workspace_file(&root);
         if !pointer.is_file() {
             return Ok(Layout {
                 adapter,
+                engine,
                 work: root.clone(),
                 root,
             });
@@ -117,6 +160,7 @@ impl Layout {
             root,
             work,
             adapter,
+            engine,
         })
     }
 
@@ -335,6 +379,55 @@ impl Layout {
         Ok(moved)
     }
 
+    /// Bring a pre-engine-tree checkout into the `engines/<name>/` shape.
+    ///
+    /// Before engines had trees, `models/`, `bm-tts`, `libonnxruntime.so.1`
+    /// and the `.bm/voices/` pair sat at the root — and they were **VieNeu's**,
+    /// because it was the only local engine. So the files are *moved*, never
+    /// rebuilt, into [`LEGACY_ENGINE`]'s tree whatever this checkout now runs:
+    /// the bytes have a fixed owner even though `settings.engine` is a setting
+    /// somebody can switch.
+    ///
+    /// Rename-only, never overwriting, and idempotent. Everything it moves sits
+    /// on one filesystem, so this is a handful of renames rather than a
+    /// gigabyte of copying — and the alternative, leaving the old tree where no
+    /// new path points, would make the sidecar unspawnable and the weights
+    /// unreachable rather than merely misnamed.
+    pub fn migrate_engine_tree(&self) -> Result<Vec<PathBuf>> {
+        let target = self.root.join(ENGINES_DIR).join(LEGACY_ENGINE);
+        let bm = self.bm_state();
+        let mut moved = Vec::new();
+        for (from, to) in [
+            (self.root.join("models"), target.join("models")),
+            (self.root.join("bm-tts"), target.join("bm-tts")),
+            (
+                self.root.join("libonnxruntime.so"),
+                target.join("libonnxruntime.so"),
+            ),
+            (
+                self.root.join("libonnxruntime.so.1"),
+                target.join("libonnxruntime.so.1"),
+            ),
+            (bm.join("voices/refs"), target.join("refs")),
+            (bm.join("voices/samples"), target.join("samples")),
+        ] {
+            if !from.exists() || to.exists() {
+                continue;
+            }
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            std::fs::rename(&from, &to)
+                .with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
+            moved.push(to);
+        }
+        // `.bm/voices/` only ever held the pair above, so an empty one is
+        // leftover scaffolding rather than state.
+        let _ = std::fs::remove_dir(bm.join("voices"));
+        Ok(moved)
+    }
+
     pub fn audio(&self) -> PathBuf {
         self.data().join("audio")
     }
@@ -420,13 +513,28 @@ impl Layout {
         self.root.join("python")
     }
 
-    /// The TTS sidecar binary, `bm-tts`, at the worker root.
+    /// One engine's own tree: `engines/<name>/`.
+    ///
+    /// Every file that *is* the engine lives under here — the binary, its
+    /// runtime library, the weights, the lexicon and the voice store — so the
+    /// engine name is in the path rather than only in `settings.engine`. It is
+    /// what makes a second engine possible at all: before this, two engines
+    /// would have shared one `models/`, one `bm-tts` and one dictionary.
+    pub fn engine_dir(&self) -> PathBuf {
+        self.root.join(ENGINES_DIR).join(&self.engine)
+    }
+
+    /// The TTS sidecar binary: `engines/<name>/bm-tts`, at the worker root.
     ///
     /// The same spelling on the inductor and on a worker: `root` is the repo
     /// locally and `~/bm-worker` remotely, so one method serves both. This is
     /// what `provision::Probe` looks for and what the agent spawns.
+    ///
+    /// Per engine rather than per root, deliberately: `bm-tts` is not a generic
+    /// sidecar that any engine plugs into — it *is* VieNeu, and a second engine
+    /// ships its own binary beside its own weights.
     pub fn tts_binary(&self) -> PathBuf {
-        self.root.join("bm-tts")
+        self.engine_dir().join("bm-tts")
     }
 
     /// The baked model directory: one flat directory, codec included.
@@ -435,22 +543,29 @@ impl Layout {
     /// flattens it so provisioning can rsync bytes and a worker needs no
     /// `huggingface_hub` and no internet.
     pub fn models_dir(&self) -> PathBuf {
-        self.root.join("models")
+        self.engine_dir().join("models")
     }
 
-    /// Where `libonnxruntime.so.1` sits — beside the binary, at the root.
+    /// Where `libonnxruntime.so.1` sits — beside the engine's binary.
     ///
     /// This is the directory `LD_LIBRARY_PATH` has to name. The SONAME matters:
     /// the file must be reachable as `libonnxruntime.so.1`, not only under its
     /// versioned filename, or the binary dies at startup with "error while
     /// loading shared libraries".
     pub fn tts_lib_dir(&self) -> PathBuf {
-        self.root.clone()
+        self.engine_dir()
     }
 
-    /// The G2P dictionary inside the model directory.
-    pub fn tts_dict(&self) -> PathBuf {
-        self.models_dir().join("sea_g2p.bin")
+    /// The G2P dictionary the engine's front end reads, if it has one.
+    ///
+    /// The file name comes from the engine's own declaration rather than being
+    /// spelled here: it used to hardcode `sea_g2p.bin`, VieNeu's Southeast-Asian
+    /// lexicon, so a second engine would have loaded the wrong dictionary and
+    /// *mispronounced* — worse than a missing file, which at least fails.
+    /// `None` means this engine needs no lexicon, and the sidecar is not handed
+    /// a `--dict` it has nothing to read.
+    pub fn tts_dict(&self) -> Option<PathBuf> {
+        crate::voices::dictionary(&self.engine).map(|name| self.models_dir().join(name))
     }
 
     /// The voice store the Rust server reads: the shipped presets *and* every
@@ -460,8 +575,8 @@ impl Layout {
         self.models_dir().join("voices.json")
     }
 
-    /// The sidecar binary to spawn: the provisioned copy at the worker root
-    /// first, then the workspace's own debug/release builds beside it.
+    /// The sidecar binary to spawn: the engine's provisioned copy first, then
+    /// the workspace's own debug/release builds beside it.
     ///
     /// The local worker runs from the repo, where no provision ever installs
     /// `bm-tts` — but `cargo build --workspace` keeps `target/debug/bm-tts`
@@ -469,9 +584,13 @@ impl Layout {
     /// though a working binary sits one directory over. Order matters only
     /// in that the provisioned copy wins where it exists, so remote
     /// behaviour is unchanged.
+    ///
+    /// The repo-build fallbacks stay at their historical paths: the build tree
+    /// is a build artifact, not an engine's own file, and `cargo` is the one
+    /// that decides where it goes.
     pub fn sidecar_binary(&self) -> PathBuf {
         [
-            self.root.join("bm-tts"),
+            self.tts_binary(),
             self.root.join("rust/target/debug/bm-tts"),
             self.root.join("rust/target/release/bm-tts"),
         ]
@@ -487,24 +606,29 @@ impl Layout {
     /// remotely.
     pub fn sidecar_command(&self, port: u16) -> (PathBuf, Vec<String>) {
         let models = self.models_dir();
-        (
-            self.sidecar_binary(),
-            vec![
-                "--models".into(),
-                models.display().to_string(),
-                // One directory, codec included — see `tools/bake-models.py`.
-                "--codec".into(),
-                models.display().to_string(),
-                "--dict".into(),
-                self.tts_dict().display().to_string(),
-                "--voices".into(),
-                self.tts_voices().display().to_string(),
-                "--port".into(),
-                port.to_string(),
-                "--bind".into(),
-                "127.0.0.1".into(),
-            ],
-        )
+        let mut args: Vec<String> = vec![
+            "--models".into(),
+            models.display().to_string(),
+            // One directory, codec included — see `tools/bake-models.py`.
+            "--codec".into(),
+            models.display().to_string(),
+        ];
+        // Only an engine with a declared lexicon is handed one. Passing
+        // VieNeu's `sea_g2p.bin` to an engine that does not read it is the bug
+        // this optional argument removes.
+        if let Some(dict) = self.tts_dict() {
+            args.push("--dict".into());
+            args.push(dict.display().to_string());
+        }
+        args.extend([
+            "--voices".into(),
+            self.tts_voices().display().to_string(),
+            "--port".into(),
+            port.to_string(),
+            "--bind".into(),
+            "127.0.0.1".into(),
+        ]);
+        (self.sidecar_binary(), args)
     }
 
     /// Interpreter for local voice work (enroll now, preview offline): the
@@ -625,14 +749,22 @@ impl Layout {
     /// Reference clips for enrolled clones — supplied by the operator and the
     /// input to enrolment. Ignored, and the only voice asset that reaches a
     /// worker.
+    ///
+    /// Under the engine, because a reference clip is only meaningful to the
+    /// engine that clones from it: enrolling VieNeu from a clip says nothing
+    /// about any other engine, and a clip with no engine beside it would have to
+    /// be paired up again by whoever reads it.
+    ///
+    /// **Not** [`Layout::refs`], which is the sample pool's own `root/refs/`
+    /// and a different thing entirely — see `pool::add_sample`.
     pub fn voice_refs(&self) -> PathBuf {
-        self.bm_state().join("voices/refs")
+        self.engine_dir().join("refs")
     }
 
     /// Audition clips for the picker — generated, disposable, and deliberately
     /// never synced to a worker, which needs only `voice_refs()` to enrol.
     pub fn voice_samples(&self) -> PathBuf {
-        self.bm_state().join("voices/samples")
+        self.engine_dir().join("samples")
     }
 
     /// Transient working space for the merge stage.
@@ -750,19 +882,32 @@ mod tests {
         let layout = Layout::new(&root);
         assert_eq!(
             layout.sidecar_binary(),
-            root.join("bm-tts"),
+            layout.tts_binary(),
             "absent everywhere reports the canonical path"
+        );
+        assert_eq!(
+            layout.tts_binary(),
+            root.join("engines/vieneu/bm-tts"),
+            "the sidecar is the engine's, inside its own tree"
         );
         let debug = root.join("rust/target/debug/bm-tts");
         std::fs::create_dir_all(debug.parent().unwrap()).unwrap();
         std::fs::write(&debug, b"fake").unwrap();
         assert_eq!(layout.sidecar_binary(), debug);
-        let provisioned = root.join("bm-tts");
+        let provisioned = layout.tts_binary();
+        std::fs::create_dir_all(provisioned.parent().unwrap()).unwrap();
         std::fs::write(&provisioned, b"fake").unwrap();
         assert_eq!(layout.sidecar_binary(), provisioned);
         let (bin, args) = layout.sidecar_command(8818);
         assert_eq!(bin, provisioned);
         assert!(args.windows(2).any(|w| w[0] == "--port" && w[1] == "8818"));
+        // VieNeu declares a lexicon, so it is handed one — from its own tree.
+        let dict_at = args.iter().position(|a| a == "--dict").expect("--dict");
+        assert_eq!(
+            args[dict_at + 1],
+            layout.tts_dict().unwrap().display().to_string()
+        );
+        assert!(args[dict_at + 1].contains("engines/vieneu/models/sea_g2p.bin"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -819,6 +964,105 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The engine's own files have an identity now: one tree per engine, and the
+    /// name is in every path rather than only in `settings.engine`.
+    #[test]
+    fn engine_files_live_under_a_named_tree_and_the_dictionary_is_declared() {
+        let l = Layout::new("/repo");
+        assert_eq!(l.engine, "vieneu", "no binding means the local engine");
+        assert_eq!(l.engine_dir(), Path::new("/repo/engines/vieneu"));
+        assert!(l.models_dir().ends_with("engines/vieneu/models"));
+        assert!(l
+            .tts_voices()
+            .ends_with("engines/vieneu/models/voices.json"));
+        assert_eq!(
+            l.tts_lib_dir(),
+            l.engine_dir(),
+            "the SONAME sits by the binary"
+        );
+        assert!(l
+            .tts_dict()
+            .unwrap()
+            .ends_with("engines/vieneu/models/sea_g2p.bin"));
+
+        // A second engine gets its own space and its own answer to the question
+        // that used to be hardcoded: Gemini is cloud and has no lexicon, so it
+        // must not be handed VieNeu's — which would \*mispronounce*.
+        let cloud = Layout {
+            engine: "gemini".into(),
+            ..Layout::new("/repo")
+        };
+        assert_eq!(cloud.tts_dict(), None);
+        assert_ne!(cloud.models_dir(), l.models_dir());
+        assert_ne!(cloud.tts_binary(), l.tts_binary());
+        // And a name nobody declared has no dictionary either, rather than
+        // inheriting the local engine's.
+        let unknown = Layout {
+            engine: "neutts-air".into(),
+            ..Layout::new("/repo")
+        };
+        assert_eq!(unknown.tts_dict(), None);
+    }
+
+    /// The one-time move into the engine tree: rename-only, never overwriting,
+    /// idempotent. Leaving the old tree where no path points would make the
+    /// sidecar unspawnable and the weights unreachable rather than misnamed.
+    #[test]
+    fn a_pre_engine_tree_checkout_is_renamed_into_the_engine_tree() {
+        let root = fixture_root("engine-migrate");
+        let l = Layout::new(&root);
+        let bm = l.bm_state();
+        // The flat tree, as it sat before engines had one — VieNeu's, always.
+        std::fs::create_dir_all(root.join("models")).unwrap();
+        std::fs::write(root.join("models/manifest.json"), "{}").unwrap();
+        std::fs::write(root.join("models/sea_g2p.bin"), b"lexicon").unwrap();
+        std::fs::write(root.join("bm-tts"), b"binary").unwrap();
+        std::fs::write(root.join("libonnxruntime.so.1"), b"soname").unwrap();
+        std::fs::create_dir_all(bm.join("voices/refs")).unwrap();
+        std::fs::write(bm.join("voices/refs/narrator.mp3"), b"clip").unwrap();
+
+        let moved = l.migrate_engine_tree().unwrap();
+        assert_eq!(moved.len(), 4, "weights, binary, lib and refs: {moved:?}");
+        assert!(l.models_dir().join("sea_g2p.bin").is_file());
+        assert!(l.tts_binary().is_file());
+        assert!(l.tts_lib_dir().join("libonnxruntime.so.1").is_file());
+        assert!(l.voice_refs().join("narrator.mp3").is_file());
+        assert!(
+            !root.join("models").exists(),
+            "the old name is gone, not duplicated"
+        );
+        assert!(!root.join("bm-tts").exists());
+        assert!(
+            !bm.join("voices").exists(),
+            "the emptied scaffolding goes too"
+        );
+
+        // Idempotent: nothing left to move, so a second start is silent.
+        assert!(l.migrate_engine_tree().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The migration never overwrites: a target that already exists wins, so a
+    /// checkout that has already moved on cannot have its tree clobbered by a
+    /// stray flat file.
+    #[test]
+    fn the_engine_tree_migration_never_overwrites_what_is_already_there() {
+        let root = fixture_root("engine-migrate-keep");
+        let l = Layout::new(&root);
+        std::fs::write(root.join("bm-tts"), b"the old flat binary").unwrap();
+        std::fs::create_dir_all(l.engine_dir()).unwrap();
+        std::fs::write(l.tts_binary(), b"the engine's own binary").unwrap();
+
+        assert!(l.migrate_engine_tree().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read(l.tts_binary()).unwrap(),
+            b"the engine's own binary"
+        );
+        // …and the loser is left exactly where it was rather than deleted.
+        assert!(root.join("bm-tts").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The prompts come from the adapter: a workspace that carries a `prompts/`
     /// tree speaks its own language, and a checkout that carries none keeps
     /// reading the root's — which is what every workspace read before the
@@ -845,6 +1089,7 @@ mod tests {
             root: root.clone(),
             work: book.clone(),
             adapter: "xianxia-en-US".into(),
+            engine: DEFAULT_ENGINE.into(),
         };
         assert_eq!(l.prompts_base(), book, "and the bundle is cut from there");
         assert_eq!(l.prompt(), book.join("prompts/analyze.txt"));
@@ -961,13 +1206,17 @@ mod tests {
         // The catalogue is repo content: a fresh clone has to render with no
         // local config, so this one is committed at the root.
         assert_eq!(l.roster_default(), Path::new("/repo/voices.default.json"));
-        // Everything personal lives under `.bm/`, which `.gitignore` already
-        // covers — which is the whole reason the split needs no ignore churn.
+        // Everything engine-owned lives under the engine's own tree, which
+        // `/engines/` ignores the way `/models/` used to.
         for p in [l.voice_refs(), l.voice_samples()] {
-            assert!(p.starts_with(l.bm_state()), "{} escaped .bm/", p.display());
+            assert!(
+                p.starts_with(l.engine_dir()),
+                "{} escaped the engine tree",
+                p.display()
+            );
         }
-        assert!(l.voice_refs().ends_with(".bm/voices/refs"));
-        assert!(l.voice_samples().ends_with(".bm/voices/samples"));
+        assert!(l.voice_refs().ends_with("engines/vieneu/refs"));
+        assert!(l.voice_samples().ends_with("engines/vieneu/samples"));
         // refs and samples are different things and stay separable, so
         // `roster ls` can tell "no sample rendered yet" from "no ref provided".
         assert_ne!(l.voice_refs(), l.voice_samples());

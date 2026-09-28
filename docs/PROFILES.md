@@ -55,7 +55,7 @@ back to a bundle.
 | --- | --- | --- |
 | Pack | `assets/` | **58 MB** |
 | Adapter | `prompts/` | **21 KB** (`analyze.txt` 4,985 + `script.txt` 15,930) |
-| Engine | `models/`, `bm-tts`, `.bm/voices/` | **1.0 GB** |
+| Engine | `engines/<name>/` — weights, binary, runtime, lexicon, voice store, clips | **1.0 GB** |
 
 What each actually holds:
 
@@ -68,17 +68,80 @@ What each actually holds:
 - **Adapter** — the two prompt templates. Everything else the adapter will
   eventually own (a text front end for the language) lives inside the engine's
   code, not here.
-- **Engine** — `root/models/` (weights, the live voice store `voices.json`, the
-  G2P dictionary `sea_g2p.bin`), `root/bm-tts`, `root/libonnxruntime.so.1`, and
-  `.bm/voices/{refs,samples}` for enrollment. These are named one path at a time
-  by `Layout`; there is no `engines/` directory at the root and the engine name
-  is not on disk, which is why `Binding` carries it.
+- **Engine** — `engines/<name>/`: `models/` (weights, the live voice store
+  `voices.json`, the G2P dictionary `sea_g2p.bin`), `bm-tts`,
+  `libonnxruntime.so.1`, and `refs/` + `samples/` for enrollment. The engine's
+  name is in **every** path, so a second engine gets a tree of its own rather
+  than sharing one `models/`, one binary and one dictionary with the first.
 
 Two engines are already declared in the compiled catalogue
 (`voices.default.json`, embedded at compile time as `CATALOGUE_JSON`):
-`vieneu` with 23 presets and `gemini` with 17 cloud presets. The engine axis is
-therefore half-built — the catalogue, the paths and `Settings::engine` all speak
-it — and what is missing is the engine's *files* having an identity of their own.
+`vieneu` with 23 presets and `gemini` with 17 cloud presets. The catalogue, the
+paths and `Settings::engine` all speak the axis; §"The engine tree" is where its
+*files* got an identity of their own.
+
+## The engine tree
+
+The engine's files used to sit at the root — `models/`, `bm-tts`,
+`libonnxruntime.so.1`, the dictionary inside `models/` — and the engine's name
+was nowhere in a path. `Layout` named them one method at a time and `Binding`
+carried the name, which is not the same thing: a second engine had no directory
+to live in, and `tts_dict()` hardcoded `models/sea_g2p.bin`.
+
+So every engine's files hang off one tree, and the name is in it:
+
+```rust
+pub fn engine_dir(&self) -> PathBuf { self.root.join(ENGINES_DIR).join(&self.engine) }
+pub fn models_dir(&self) -> PathBuf { self.engine_dir().join("models") }
+pub fn tts_binary(&self) -> PathBuf { self.engine_dir().join("bm-tts") }
+pub fn tts_lib_dir(&self) -> PathBuf { self.engine_dir() }          // LD_LIBRARY_PATH
+pub fn tts_voices(&self) -> PathBuf { self.models_dir().join("voices.json") }
+pub fn voice_refs(&self) -> PathBuf { self.engine_dir().join("refs") }
+```
+
+`engine` is a field on `Layout` beside `adapter`, read the same way — from the
+load pointer, falling back to `DEFAULT_ENGINE` — and a checkout that never named
+one keeps the engine it was already running.
+
+The dictionary is the one that used to *mispronounce* rather than fail: a second
+engine reading `sea_g2p.bin` gets VieNeu's Southeast-Asian lexicon. It is now
+the engine's own declaration (`dict: Some("sea_g2p.bin")`), and
+`Layout::tts_dict()` answers `None` for an engine that declares none — so the
+sidecar is not handed a `--dict` it has nothing to read.
+
+**The move is a rename, and it happens once at load.** Every existing checkout
+has the flat tree, and no new path points at it, so `bm-inductor` calls
+`Layout::migrate_engine_tree()` immediately after `load_ledger` — beside the
+cache re-key, and for the same reason: leaving the files behind would make the
+sidecar unspawnable and the weights unreachable. It moves into **`engines/vieneu/`
+whatever this checkout now runs**, because the flat tree was VieNeu's — the
+history is fixed even though `settings.engine` is a setting somebody can change.
+It is rename-only (one filesystem, so no copy), never overwrites, and idempotent.
+
+## The engine's declaration
+
+`voices::ENGINES` is one row per engine, and it is the API: nothing outside the
+table branches on an engine's *name*. It grew from `nonverbal` (which tags the
+front end implements) to everything a caller otherwise hardcodes:
+
+| Field | What it answers | Who reads it |
+| --- | --- | --- |
+| `nonverbal` | sounds it voices as tags | `digest::render_nonverbal` |
+| `languages` | BCP-47 tags it can voice | `voices_language` (the gate is the adapter manifest's job — see below) |
+| `cloning` | whether a reference clip means anything to it | `roster add-sample` refuses when it is `false` |
+| `dict` | its G2P lexicon, if any | `Layout::tts_dict`, `start_tts` |
+| `sample_rate` / `channels` | the format its audio comes back in | `assemble::sample_rate_for` (moved off the catalogue row, which nothing read) |
+
+Undeclared answers the *refusing* way for all of them: no tags, no languages,
+no cloning, no dictionary, and not VieNeu's 48 kHz. That is the same rule the
+non-verbal slice follows, and it is what makes a typo in `settings.engine` safe.
+
+`adapter_language(pack, adapter)` is the other half, and it is all that is built:
+an adapter is `<pack>-<language>`, so `xianxia-en-US` names `en-US` and an
+unnamed adapter claims nothing. Comparing that against `languages` is where a
+mismatch becomes a refusal — and that belongs with the adapter manifest, below,
+because until an adapter declares its language as *data* the derived tag is a
+convention rather than a fact.
 
 ## The binding
 
@@ -139,8 +202,11 @@ So the rule is:
   property is a test, not a hope, because it is the whole reason for having
   separate names.
 - **The engine is a declaration, not a digest.** Its identity is its name from
-  `settings.engine` plus, later, the roster it speaks from. `verify_binding`
-  takes the engine name as an argument for exactly this reason.
+  `settings.engine` plus its own declared facts — the languages, the cloning
+  capability, the lexicon, the output format (see "The engine's declaration").
+  `verify_binding` takes the engine name as an argument for exactly this reason,
+  and `Piece::Engine::trees()` stays empty so nobody hashes a gigabyte by adding
+  the engine to a loop.
 
 `verify_binding` still refuses a tree with *both* file-backed halves missing —
 that is a missing unpack — but leaves a piece whose trees are simply absent
@@ -180,10 +246,12 @@ adapter-independent because they do not *read* the adapter, not because a
 corpus is shared between languages.
 
 The rule is why a worker is held to a language at all: an engine that cannot
-voice the adapter's language is a mismatch rather than a setting, and nothing
-declares that yet. A *translating* adapter — bilingual prompts, one corpus
-feeding both sides — is a third shape, future work, and deliberately not
-designed here.
+voice the adapter's language is a mismatch rather than a setting. The engine's
+half is declared (`EngineDecl.languages`); the adapter's half is a convention
+derived from its id (`adapter_language`), and turning the two into a refusal
+waits on the adapter manifest below. A *translating* adapter — bilingual
+prompts, one corpus feeding both sides — is a third shape, future work, and
+deliberately not designed here.
 
 The adapter is therefore **bound to a pack** — `xianxia-en-US`, not `en-US` —
 because its prompts carry the genre's register the way the pack carries its
@@ -350,14 +418,12 @@ a per-engine override is a larger decision than the tags it would serve.
 
 ## Not built yet
 
-- **Phase 3 — the engine's identity.** `models/`, `bm-tts`, `.bm/voices/` and
-  the G2P dictionary move under a named engine tree. Today
-  `Layout::tts_dict()` hardcodes `models/sea_g2p.bin`, which is VieNeu's
-  Southeast-Asian G2P: a second engine would read the wrong dictionary and
-  *mispronounce* rather than fail, which is worse than the missing-file bug the
-  provisioning work just fixed. The engine also needs a declared capability —
-  `cloning`, and whether enrollment wants a reference transcript — because `:A`
-  and `:N` assume the engine can clone at all.
+- **An adapter manifest — the mismatch gate.** An adapter declares
+  `(pack, language, engine)` in `adapters/<id>/adapter.json`, and the binding
+  refuses a pair that disagrees rather than deriving the language from the id.
+  `EngineDecl.languages`, `adapter_language()` and the ledger gate are all in
+  place; what is missing is the language being *data* on the adapter side. Which
+  is also what would let a worker be held to a language before it is offered one.
 - **An adapter packer.** `tools/profile.sh` packs `assets/` + `prompts/`
   together, which is the pre-split shape. `adapters/<adapter>/prompts/` needs the
   same treatment — one `tar.zst`, a manifest, a release — and that is what turns

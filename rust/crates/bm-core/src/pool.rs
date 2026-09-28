@@ -340,12 +340,13 @@ pub fn add_sample(
 /// the `tts_hash` drift pushes the updated store to workers in the same run.
 /// Returns the names baked (empty = nothing to do). Voices enrolled nowhere
 /// stay missing — the provision warning still names exactly those.
-pub fn bake_missing_voices(root: &Path) -> Vec<String> {
+pub fn bake_missing_voices(layout: &crate::Layout) -> Vec<String> {
+    let root = layout.root.as_path();
     let manifest: BTreeMap<String, String> = std::fs::read_to_string(root.join("voices.json"))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
-    let bake_path = root.join("models/voices.json");
+    let bake_path = layout.tts_voices();
     let mut bake: serde_json::Value = std::fs::read_to_string(&bake_path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
@@ -803,8 +804,9 @@ mod tests {
         let d = std::env::temp_dir().join("bm-pool-bake");
         let _ = std::fs::remove_dir_all(&d);
         let assets = d.join(".venv/lib/python3.12/site-packages/vieneu/assets");
+        let store = crate::Layout::new(&d).tts_voices();
         std::fs::create_dir_all(&assets).unwrap();
-        std::fs::create_dir_all(d.join("models")).unwrap();
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
         std::fs::create_dir_all(d.join(".venv/bin")).unwrap();
         std::fs::write(d.join(".venv/bin/python"), b"x").unwrap();
         std::fs::write(
@@ -813,7 +815,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            d.join("models/voices.json"),
+            &store,
             r#"{"meta":{},"default_voice":"Have","presets":{"Have":{"emb":[1]}}}"#,
         )
         .unwrap();
@@ -823,10 +825,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(bake_missing_voices(&d), vec!["Want".to_string()]);
+        let layout = crate::Layout::new(&d);
+        assert_eq!(bake_missing_voices(&layout), vec!["Want".to_string()]);
         let bake: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(d.join("models/voices.json")).unwrap())
-                .unwrap();
+            serde_json::from_str(&std::fs::read_to_string(layout.tts_voices()).unwrap()).unwrap();
         assert_eq!(bake["presets"]["Have"]["emb"], serde_json::json!([1]));
         assert_eq!(bake["presets"]["Want"]["emb"], serde_json::json!([2]));
         assert!(
@@ -838,7 +840,7 @@ mod tests {
             "enrolled nowhere stays missing for the warning"
         );
         // Idempotent: nothing missing, nothing written.
-        assert!(bake_missing_voices(&d).is_empty());
+        assert!(bake_missing_voices(&layout).is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -846,14 +848,15 @@ mod tests {
     fn bake_without_a_venv_or_bake_is_a_quiet_noop() {
         let d = std::env::temp_dir().join("bm-pool-bake-none");
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(d.join("models")).unwrap();
+        let layout = crate::Layout::new(&d);
+        std::fs::create_dir_all(layout.models_dir()).unwrap();
         std::fs::write(d.join("voices.json"), r#"{"Want":"refs/w.mp3"}"#).unwrap();
-        std::fs::write(d.join("models/voices.json"), r#"{"presets":{"Have":{}}}"#).unwrap();
+        std::fs::write(layout.tts_voices(), r#"{"presets":{"Have":{}}}"#).unwrap();
         // No venv here, so nothing can be baked — and nothing breaks.
-        assert!(bake_missing_voices(&d).is_empty());
+        assert!(bake_missing_voices(&layout).is_empty());
         // No bake file at all: also nothing, not an error.
-        std::fs::remove_file(d.join("models/voices.json")).unwrap();
-        assert!(bake_missing_voices(&d).is_empty());
+        std::fs::remove_file(layout.tts_voices()).unwrap();
+        assert!(bake_missing_voices(&layout).is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

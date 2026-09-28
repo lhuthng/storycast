@@ -34,7 +34,7 @@ and the reasons differ for each.
 
 | Push | Size | Verdict |
 |---|---|---|
-| `models/` | 668 MB | **publish**, 16 immutable weight files |
+| the engine's `engines/<name>/models/` | 668 MB | **publish**, 16 immutable weight files |
 | `assets/` media | 58 MB | candidate, changes only when a clip is added |
 | binaries + runtime | 52 MB | ship, but small enough not to matter |
 | `refs/` | 144 MB | **not pushed at all** (see below) |
@@ -54,6 +54,11 @@ fails, on every retry, until somebody re-provisions. The rest of the selection
 still follows the stage list, which is what the manifest records and what the
 scheduler reads back from the box before offering it a stage.
 
+> `models/` used to be a directory of its own at the root. It is the **engine's**
+> now — `engines/<name>/models/`, beside that engine's own binary and runtime
+> (see [PROFILES.md](PROFILES.md), "The engine tree") — and the sidecar resolves
+> it from there. Every bare `models/…` below reads as that one.
+
 Everything else, prompts (21 KB), the crawlers (72 KB), cast files, the scene
 map, the three pool registries, `voices.json` (492 KB), is under 1 MB combined
 and is never worth optimizing — which is why they ride in that same bundle
@@ -61,9 +66,9 @@ rather than getting a plane of their own.
 
 ## The split: weights out, voice store stays
 
-`models/` is not one thing. It is a large immutable body and one small mutable
-file that happens to sit in the same directory, and the two have opposite
-requirements.
+The engine's `models/` is not one thing. It is a large immutable body and one
+small mutable file that happens to sit in the same directory, and the two have
+opposite requirements.
 
 **The 16 weight files** are decided by `tools/bake-models.py`, which pins two
 upstream HuggingFace commits (`backbone_rev`, `codec_rev`) and a vendored
@@ -116,7 +121,7 @@ artifact  models.tar.zst                 17 files, 667.5 MB → 363 MB compresse
          manifest.json + the 16 weight files
          pinned by a version, verified per file, never rewritten in place
 
-rsync     models/voices.json             1 file, 492 KB
+rsync     engines/<name>/models/voices.json   1 file, 492 KB
          rewritten on enrollment; the stamp already gates it correctly
 ```
 
