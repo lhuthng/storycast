@@ -193,6 +193,19 @@ impl Inner {
                     continue;
                 }
             }
+            // **The exclusive-write gate.** A queued surgery (a swap, a
+            // remix, …) holds its stages and chapters: rows inside the scope
+            // are not offered while it waits, because a task completing into
+            // work the write is about to requeue is the stale-done the old
+            // refusal existed to prevent. Outside the scope delivery is
+            // untouched — a swap parked on chapter 41 still lets chapter 42
+            // render, and crawl never pauses at all. One closure, read by
+            // both the pending filter and the digest-racing one below, so a
+            // parked retag cannot draw new digests onto the scripts it edits.
+            let write_blocks = self.exclusive.first().map(|w| {
+                let op = w.op.clone();
+                move |ch: u32| op.blocks(stage, ch)
+            });
             // **The stage this box was never sent the files for.** The policy
             // is the operator's intent, the reported bundle is the fact, and
             // when they disagree the box is asked to run a stage it cannot:
@@ -221,7 +234,8 @@ impl Inner {
                 .filter(|(_, t)| t.stage == stage)
                 .filter(|(_, t)| {
                     if t.state == TaskState::Pending && !self.shelved(t.chapter) {
-                        return self.upstream_done(t.chapter, t.stage);
+                        return !write_blocks.as_ref().is_some_and(|f| f(t.chapter))
+                            && self.upstream_done(t.chapter, t.stage);
                     }
                     // Digest racing: the head digest is the pipeline's
                     // bottleneck (the N-1→N chain leaves exactly one digest
@@ -238,6 +252,7 @@ impl Inner {
                         && matches!(t.state, TaskState::Assigned | TaskState::Running)
                         && !self.shelved(t.chapter)
                         && !t.is_holder(worker_id)
+                        && !write_blocks.as_ref().is_some_and(|f| f(t.chapter))
                         && self.upstream_done(t.chapter, t.stage)
                 })
                 // No affinity gate on any stage: takes are independent and a
@@ -746,6 +761,9 @@ impl Inner {
                 // Closing a chapter may have drained the queue, trip the
                 // armed latch, exactly as a completion does.
                 self.maybe_auto_shutdown();
+        // And: did a queued exclusive write just become runnable? Same
+        // moment, same question shape — work landed, ask what is left.
+        self.run_exclusive();
                 return format!("ch{chapter} absent: {reason}");
             }
             Outcome::Shelved { task_id, detail } => {
@@ -974,6 +992,9 @@ impl Inner {
         }
         // A completion may have drained the queue, trip the armed latch.
         self.maybe_auto_shutdown();
+        // And: did a queued exclusive write just become runnable? Same
+        // moment, same question shape — work landed, ask what is left.
+        self.run_exclusive();
         format!(
             "{}: {} {} ({})",
             c.worker_id,
@@ -1078,6 +1099,9 @@ impl Inner {
         );
         self.save();
         self.maybe_auto_shutdown();
+        // And: did a queued exclusive write just become runnable? Same
+        // moment, same question shape — work landed, ask what is left.
+        self.run_exclusive();
         format!(
             "{n} row(s) shelved: {}",
             bm_core::util::head_chars(detail, 120)
@@ -1199,6 +1223,9 @@ impl Inner {
         self.save();
         // A shelving may have drained the queue, trip the armed latch.
         self.maybe_auto_shutdown();
+        // And: did a queued exclusive write just become runnable? Same
+        // moment, same question shape — work landed, ask what is left.
+        self.run_exclusive();
         // The log line carries the same distinction as the event. It used to say
         // only "failed", so a shelving, the outcome that needs an operator
         // was indistinguishable from a failure that retries itself, in the one

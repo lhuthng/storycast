@@ -70,6 +70,7 @@ pub(crate) enum ProfileReq {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // boxed at every send site (`Job::Tracked`); the variants are construction-time only
 pub(crate) enum Job {
     Tracked {
         id: u64,

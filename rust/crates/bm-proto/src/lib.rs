@@ -1516,6 +1516,16 @@ pub enum Op {
     /// Arm drain-then-exit: workers stop on their own once no unfinished
     /// task remains. Fires at once when the queue is already drained.
     ShutdownWhenIdle,
+    /// Run a queued exclusive write (`swap-voice`, `remix`, `retag`, …) —
+    /// the writes that used to refuse while any worker held a task. The
+    /// write is validated now, parked, the stages it could disturb stop
+    /// being offered, and it runs the moment the way is clear. One entry
+    /// at a time: a second exclusive write joins the line behind it.
+    Exclusive,
+    /// Drop the queued exclusive write (or clear the whole line with
+    /// `force`). The stages it was holding open start taking work again
+    /// on the next ask.
+    ExclusiveCancel,
 }
 
 impl Op {
@@ -1544,6 +1554,8 @@ impl Op {
             Op::Remerge => "remerge",
             Op::ShutdownWorkers => "shutdown-workers",
             Op::ShutdownWhenIdle => "shutdown-when-idle",
+            Op::Exclusive => "exclusive",
+            Op::ExclusiveCancel => "exclusive-cancel",
         }
     }
 
@@ -1572,6 +1584,8 @@ impl Op {
             Op::Remerge,
             Op::ShutdownWorkers,
             Op::ShutdownWhenIdle,
+            Op::Exclusive,
+            Op::ExclusiveCancel,
         ]
         .into_iter()
         .find(|o| o.as_str() == s)
@@ -1581,10 +1595,187 @@ impl Op {
 /// One speaker reassignment inside a chapter's script: the segment at
 /// `index` (position in the script's `segments` array, sounds included)
 /// is re-attributed to `speaker`. Part of the `recast` op.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpeakerFix {
     pub index: usize,
     pub speaker: String,
+}
+
+/// The writes that wait for the work they would disturb, instead of
+/// refusing.
+///
+/// Each arm carries exactly the arguments its surgery needs — the same
+/// fields the request already carries, plus the **chapter scope** the
+/// enqueue computed: the gate pauses delivery only inside the scope, and
+/// the surgery re-scans at run time (its own invalidation loop), so a
+/// chapter that enters the scope between ask and run is caught by the
+/// apply, not missed by the gate. Enqueued through `Op::Exclusive` with
+/// the arguments in their usual `OpRequest` fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ExclusiveOp {
+    /// Repoint one character's voice. Waits on the render + merge rows of
+    /// every chapter that hears the speaker (its takes, or its stored
+    /// plan's) — chapters the voice cannot reach keep rendering.
+    SwapVoice {
+        character: String,
+        voice: String,
+        #[serde(default)]
+        chapters: Vec<u32>,
+    },
+    /// New mix, render cache kept: waits on merges, cluster-wide. The
+    /// volumes are already resolved (`None` = keep current), so the parked
+    /// entry needs no settings read at run time.
+    Remix {
+        speed: f64,
+        effect_volume: f64,
+        music_volume: f64,
+        inject_volume: f64,
+    },
+    /// Re-mix every chapter: waits on merges.
+    Remerge,
+    /// Full re-speak: waits on renders and merges, cluster-wide.
+    Rerender,
+    /// Sound-tag rewrite: waits on digests (the scripts are being
+    /// rewritten under them), then renders and merges.
+    Retag {
+        chapters: Vec<u32>,
+    },
+    /// Re-attribute one chapter's speakers: waits on that chapter's
+    /// digest, render and merge rows.
+    Recast {
+        chapter: u32,
+        fixes: Vec<SpeakerFix>,
+        remove: Vec<usize>,
+    },
+    /// One segment, one speaker, checked: same wait as `recast`.
+    FixSpeaker {
+        chapter: u32,
+        segment: usize,
+        expect: String,
+        speaker: String,
+    },
+    /// Fold names into one: waits on the chapters the fold rewrites (the
+    /// ones hearing the absorbed names), on render and merge.
+    Merge {
+        survivor: String,
+        absorbed: Vec<String>,
+        #[serde(default)]
+        chapters: Vec<u32>,
+    },
+}
+
+impl ExclusiveOp {
+    /// The route name of the surgery inside: how an operator says it, on
+    /// the command line or over the API. `parse` is the inverse.
+    pub fn route(&self) -> &'static str {
+        match self {
+            ExclusiveOp::SwapVoice { .. } => "swap-voice",
+            ExclusiveOp::Remix { .. } => "remix",
+            ExclusiveOp::Remerge => "remerge",
+            ExclusiveOp::Rerender => "rerender",
+            ExclusiveOp::Retag { .. } => "retag",
+            ExclusiveOp::Recast { .. } => "recast",
+            ExclusiveOp::FixSpeaker { .. } => "fix-speaker",
+            ExclusiveOp::Merge { .. } => "merge",
+        }
+    }
+
+    /// The stages this write could disturb while it runs, so delivery of
+    /// exactly those stages pauses. A swap touches audio only: crawl and
+    /// digest keep flowing while it waits — a crawl finishing under a
+    /// parked swap is work the swap cannot reach.
+    pub fn stages(&self) -> &'static [Stage] {
+        match self {
+            ExclusiveOp::SwapVoice { .. }
+            | ExclusiveOp::Recast { .. }
+            | ExclusiveOp::FixSpeaker { .. }
+            | ExclusiveOp::Merge { .. }
+                => &[Stage::Render, Stage::Merge],
+            ExclusiveOp::Remix { .. }
+            | ExclusiveOp::Remerge
+                => &[Stage::Merge],
+            ExclusiveOp::Rerender => &[Stage::Render, Stage::Merge],
+            ExclusiveOp::Retag { .. } => &[Stage::Digest, Stage::Render, Stage::Merge],
+        }
+    }
+
+    /// Whether a task of `stage` on `chapter` would race this write.
+    /// The chapter-scoped arms name their scope (`chapters`); the others
+    /// hold every chapter of their stages.
+    pub fn blocks(&self, stage: Stage, chapter: u32) -> bool {
+        self.stages().contains(&stage)
+            && match self {
+                ExclusiveOp::SwapVoice { chapters, .. }
+                | ExclusiveOp::Merge { chapters, .. }
+                | ExclusiveOp::Retag { chapters }
+                    => chapters.contains(&chapter),
+                ExclusiveOp::Recast { chapter: c, .. }
+                | ExclusiveOp::FixSpeaker { chapter: c, .. }
+                    => *c == chapter,
+                _ => true,
+            }
+    }
+
+    /// The one-line description the status line and the ledger show.
+    pub fn describe(&self) -> String {
+        match self {
+            ExclusiveOp::SwapVoice { character, voice, .. } => {
+                format!("swap {character} → {voice}")
+            }
+            ExclusiveOp::Remix { speed, .. } => format!("remix at speed {speed}"),
+            ExclusiveOp::Remerge => "remerge every chapter".into(),
+            ExclusiveOp::Rerender => "re-render everything".into(),
+            ExclusiveOp::Retag { .. } => "sound-tag rewrite".into(),
+            ExclusiveOp::Recast { chapter, .. } => format!("recast ch{chapter}"),
+            ExclusiveOp::FixSpeaker {
+                chapter, segment, speaker, ..
+            } => format!("ch{chapter} seg{segment} → {speaker}"),
+            ExclusiveOp::Merge { survivor, absorbed, .. } => {
+                format!("merge {} into {survivor}", absorbed.join(", "))
+            }
+        }
+    }
+
+    /// From a route name, with placeholder arguments: the *shape* an
+    /// `:xdrop swap-voice` needs (only `route()` is read on the cancel
+    /// path), and what a test builds a scope from before filling in.
+    /// A route the queue does not run — `crawl-setup`, a typo — is `None`,
+    /// so callers refuse instead of parking an unrunnable entry.
+    pub fn parse(route: &str) -> Option<ExclusiveOp> {
+        match route.trim() {
+            "swap-voice" | "swap" => Some(ExclusiveOp::SwapVoice {
+                character: String::new(),
+                voice: String::new(),
+                chapters: Vec::new(),
+            }),
+            "remix" => Some(ExclusiveOp::Remix {
+                speed: 0.0,
+                effect_volume: 0.0,
+                music_volume: 0.0,
+                inject_volume: 0.0,
+            }),
+            "remerge" => Some(ExclusiveOp::Remerge),
+            "rerender" => Some(ExclusiveOp::Rerender),
+            "retag" => Some(ExclusiveOp::Retag { chapters: Vec::new() }),
+            "recast" => Some(ExclusiveOp::Recast {
+                chapter: 0,
+                fixes: Vec::new(),
+                remove: Vec::new(),
+            }),
+            "fix-speaker" => Some(ExclusiveOp::FixSpeaker {
+                chapter: 0,
+                segment: 0,
+                expect: String::new(),
+                speaker: String::new(),
+            }),
+            "merge" => Some(ExclusiveOp::Merge {
+                survivor: String::new(),
+                absorbed: Vec::new(),
+                chapters: Vec::new(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1666,6 +1857,12 @@ pub struct OpRequest {
     pub music_volume: Option<f64>,
     #[serde(default)]
     pub inject_volume: Option<f64>,
+    /// Which write an `exclusive` request queues, as the operator's own
+    /// route names it (`swap-voice`, `remix`, …). Only the surgeries in
+    /// [`ExclusiveOp::parse`] are queueable; anything else is refused, so
+    /// a typo can never park a request the runner could not run.
+    #[serde(default)]
+    pub exclusive: Option<ExclusiveOp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

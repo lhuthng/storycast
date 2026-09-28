@@ -5,7 +5,10 @@ use crate::tui::{
     input::{audition, dispatch, dispatch_op},
     jobs::Job,
     model::{busy_on, instance_addresses, is_live_state},
-    screen::{CastView, CloudView, Confirm, ConfirmAction, Picker, Screen, TextKind, TextPrompt},
+    screen::{
+        CastView, CloudView, Confirm, ConfirmAction, Picker, Screen, ScriptView, TextKind,
+        TextPrompt,
+    },
     style::{Conn, Level},
 };
 use bm_proto::{Op, OpRequest, Stage};
@@ -84,6 +87,11 @@ pub(crate) enum Command {
     Rerender,
     Remerge,
     ShutdownWhenIdle,
+    /// Drop the queued exclusive write (`:xdrop`), or the whole line with
+    /// a route name.
+    ExclusiveCancel { route: Option<String> },
+    /// Open the script inspection window (`:script`).
+    Script,
     Workspace,
     Profile,
     /// LLM providers: keys, endpoints, models, and which one digests.
@@ -148,6 +156,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: Some('e'), names: &["eta"], desc: Some("estimate the remaining wall-clock time"), cmd: Command::Eta },
     Word { key: Some('u'), names: &["retry"], desc: Some("requeue every shelved task — strikes reset; `:retry 24` narrows to one chapter, `:retry render 24` to one task"), cmd: Command::Retry { stage: None, chapter: None } },
     Word { key: None, names: &["speaker"], desc: Some("re-attribute one segment: `:speaker 18 67 \"Thanh Sơn lão tổ\" \"Dịch Phong\"` — segment is 1-based, the two names are checked, quotes for spaces; re-speaks only the takes the edit reached"), cmd: Command::FixSpeaker { chapter: 0, segment: 0, expect: String::new(), speaker: String::new() } },
+    Word { key: None, names: &["script"], desc: Some("script inspection: every digested chapter, its segments with their speakers, and s to re-point one — the guided form of :speaker"), cmd: Command::Script },
     Word { key: Some('m'), names: &["reconcile"], desc: Some("fold duplicates — asks first; certain folds apply, ambiguous only listed"), cmd: Command::Reconcile },
     Word { key: None, names: &["merge"], desc: Some("fold characters by hand: `:merge \"Survivor\" \"Absorbed\"…` — first name keeps its voice, the rest join its proper_aliases; scripts rewritten, losers re-rendered; asks first"), cmd: Command::Merge { survivor: String::new(), absorbed: Vec::new() } },
     Word { key: Some('B'), names: &["backend"], desc: Some("backend up now, machines provision in background and join as ready"), cmd: Command::Backend },
@@ -156,6 +165,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["remerge"], desc: Some("requeue every merge — render cache kept, no confirm"), cmd: Command::Remerge },
     Word { key: None, names: &["rerender"], desc: Some("requeue every render + merge — full re-speak, asks first"), cmd: Command::Rerender },
     Word { key: None, names: &["shutdown-when-idle", "drain"], desc: Some("workers exit on their own once the queue drains — restart with :B"), cmd: Command::ShutdownWhenIdle },
+    Word { key: None, names: &["xdrop"], desc: Some("drop the queued exclusive write (swap/remix waiting for the cluster to quiet) — :xdrop swap-voice drops only that kind"), cmd: Command::ExclusiveCancel { route: None } },
     Word { key: None, names: &["workspace", "ws"], desc: Some("list, switch or create a workspace — one per book; only with the cluster stopped"), cmd: Command::Workspace },
     Word { key: None, names: &["profile"], desc: Some("list, load or pack a genre profile — loading replaces assets/ + prompts/, so only with the cluster stopped"), cmd: Command::Profile },
     Word { key: None, names: &["login"], desc: Some("store the IAM user's key from the console's accessKeys.csv — setup, once"), cmd: Command::AwsLogin },
@@ -952,6 +962,20 @@ pub(crate) fn do_command(
                 action: ConfirmAction::AwsDown { ids },
             });
         }
+        Command::Script => {
+            // The window reads the scripts off disk itself, so it works
+            // with the inductor down — the same independence the cast
+            // table's offline half has.
+            app.screen = Screen::Script(ScriptView::new(&app.layout));
+            let n = match &app.screen {
+                Screen::Script(v) => v.chapters.len(),
+                _ => 0,
+            };
+            app.set_status(
+                Level::Info,
+                format!("script window — {n} chapter(s) · Enter open · s re-point a speaker · Esc close"),
+            );
+        }
         Command::ShutdownWhenIdle => {
             // Graceful and reversible (nothing deleted, `:B` brings workers
             // back), so no confirm — but command-line only, never a key.
@@ -968,6 +992,26 @@ pub(crate) fn do_command(
                 Level::Info,
                 "shutdown armed — workers exit once the queue drains",
             );
+        }
+        Command::ExclusiveCancel { route } => {
+            // Nothing to confirm: dropping a queued write changes nothing
+            // that has already happened — the stages it held simply take
+            // work again.
+            dispatch_op(
+                app,
+                job_tx,
+                http,
+                OpRequest {
+                    op: Op::ExclusiveCancel,
+                    exclusive: route.map(|r| {
+                        bm_proto::ExclusiveOp::parse(&r).unwrap_or(
+                            bm_proto::ExclusiveOp::Remerge,
+                        )
+                    }),
+                    ..Default::default()
+                },
+            );
+            app.set_status(Level::Info, "dropping the queued write — watch events");
         }
         Command::Reconcile => {
             // Reconcile rewrites cast + scripts and re-renders losers: worth
