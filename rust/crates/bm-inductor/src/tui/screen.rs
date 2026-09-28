@@ -1,5 +1,6 @@
 //! Screens: the modal states the key chain and the painter agree on.
 use crate::tui::audition::AuditionLine;
+use crate::tui::model::Facet;
 use crate::tui::sound::SoundView;
 use bm_proto::Stage;
 
@@ -337,6 +338,17 @@ pub(crate) enum ConfirmAction {
     /// asked from, so answering the dialog returns to the same tab and row
     /// instead of dumping the operator back on the dashboard.
     SoundRemove(SoundRemoval),
+    /// Take every row one worker holds back off it. The only release that
+    /// asks first: a single row is one keypress with nothing to lose, while
+    /// this can be a whole box's afternoon and the operator cannot see the
+    /// size of it from the row they pressed on. `list` is the ledger view it
+    /// was asked from, so answering leaves the rows leaving in front of them.
+    ReleaseWorker {
+        worker: String,
+        count: usize,
+        beating: bool,
+        list: TasksView,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -364,6 +376,46 @@ impl Confirm {
                 ":mix instead: it requeues merges and keeps this cache.".into(),
             ],
             action: ConfirmAction::Rerender,
+        }
+    }
+
+    /// Take every row one worker holds back off it — `W` on the ledger.
+    ///
+    /// One dialog for both cases, because the *answer* is the same; only the
+    /// sentence changes, and `beating` decides it. A silent box is the ordinary
+    /// case and nothing is at risk. A box that is still answering is the
+    /// surprising one, and there the operator has to be told the price in the
+    /// one place they can still say no: the work is not lost, it is spoken
+    /// twice.
+    pub(crate) fn release_worker(
+        worker: String,
+        count: usize,
+        beating: bool,
+        list: TasksView,
+    ) -> Self {
+        let mut body = vec![
+            format!("{count} row(s) held by {worker} go back to the pool."),
+            String::new(),
+        ];
+        if beating {
+            body.push("It is still beating, so whatever it has in hand finishes and".into());
+            body.push("its report lands stale — and the rows here are offered again,".into());
+            body.push("so a take can be spoken twice before the ledger settles.".into());
+        } else {
+            body.push("It has stopped beating, so nothing is in flight: every row".into());
+            body.push("returns exactly as it was — attempts kept, nothing deleted —".into());
+            body.push("and is offered to the next box that asks.".into());
+        }
+        Confirm {
+            title: format!("Release everything {worker} holds?"),
+            danger: beating,
+            body,
+            action: ConfirmAction::ReleaseWorker {
+                worker,
+                count,
+                beating,
+                list,
+            },
         }
     }
 }
@@ -434,6 +486,9 @@ pub(crate) struct TasksView {
     pub(crate) cursor: usize,
     pub(crate) scroll: usize,
     pub(crate) filter: String,
+    /// Which kind the ledger is narrowed to. See [`Facet`](crate::tui::model::Facet):
+    /// `←/→` steps it, so "only render" is one keypress rather than a word.
+    pub(crate) facet: Facet,
 }
 
 impl TasksView {
@@ -442,6 +497,7 @@ impl TasksView {
             cursor: 0,
             scroll: 0,
             filter: String::new(),
+            facet: Facet::All,
         }
     }
 }

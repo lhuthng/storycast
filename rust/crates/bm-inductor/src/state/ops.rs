@@ -233,6 +233,137 @@ impl Inner {
         )
     }
 
+    /// The worker ids still answering: a beat inside the 90s window.
+    ///
+    /// Takes the beat map rather than `&self` **on purpose**: the caller holds
+    /// this answer across a mutation of `tasks`, and a method borrowing all of
+    /// `self` would forbid that. Same window the reaper uses, so the ledger's
+    /// idea of a live holder and the screen's cannot drift apart.
+    fn live_workers(
+        beats: &std::collections::HashMap<String, bm_proto::Heartbeat>,
+    ) -> std::collections::HashSet<&str> {
+        let now = now_secs();
+        beats
+            .values()
+            .filter(|b| now.saturating_sub(b.ts) < 90)
+            .map(|b| b.worker_id.as_str())
+            .collect()
+    }
+
+    /// Take one row back off whoever holds it, by hand.
+    ///
+    /// `stage` + `chapter` names a row, and for `render` that is every take of
+    /// the chapter: a render ledger row is one take, an offer carries a batch
+    /// of them, and a box that died holds the batch. Attempts are kept and
+    /// nothing on disk is touched, so a released row is offered again exactly
+    /// as it was — only its owner changes.
+    ///
+    /// Refused against a *live* holder unless `force`, because re-offering work
+    /// that is still happening is how one chapter gets spoken twice. `force` is
+    /// the whole reason this exists as an op rather than as `requeue`: a box can
+    /// be beating and wedged, and `op_requeue_orphans` has no opinion about
+    /// that, while the person looking at the row does.
+    pub fn op_release_task(&mut self, stage: Stage, chapter: u32, force: bool) -> String {
+        // No `now` here: this scope decides *what* to release, and
+        // `finish_release` is the one place that stamps and saves it.
+        let live = Self::live_workers(&self.beats);
+        // Both facts are read before anything is mutated: the refusal has to be
+        // decided on the whole set, not on however much of it a previous
+        // iteration already released.
+        let mut ids: Vec<String> = Vec::new();
+        let mut beating: Option<String> = None;
+        for t in self.tasks.values() {
+            if t.stage != stage || t.chapter != chapter {
+                continue;
+            }
+            if !matches!(t.state, TaskState::Assigned | TaskState::Running) {
+                continue;
+            }
+            ids.push(t.id());
+            if let Some(w) = t.holders().into_iter().find(|w| live.contains(w)) {
+                beating.get_or_insert_with(|| w.to_string());
+            }
+        }
+        ids.sort();
+        if ids.is_empty() {
+            return format!("{stage}:{chapter} holds nothing — no assignment to release");
+        }
+        let Some(beating) = beating else {
+            return self.finish_release(&ids, &format!("{stage}:{chapter}"), None);
+        };
+        if !force {
+            return format!(
+                "{stage}:{chapter} is held by {beating}, which is still beating — X releases it anyway"
+            );
+        }
+        self.finish_release(&ids, &format!("{stage}:{chapter}"), Some(&beating))
+    }
+
+    /// The wider question the same primitive answers: not "this row", but
+    /// "what is this box sitting on".
+    ///
+    /// A racing digest row with other holders keeps them — the box leaves the
+    /// row, the row does not leave the fleet. Everything else it holds goes back
+    /// to the pool in one pass, which is the point: a dead box's work is a set,
+    /// and releasing it row by row is how an operator misses one.
+    pub fn op_release_worker(&mut self, worker: &str, force: bool) -> String {
+        let now = now_secs();
+        let live = Self::live_workers(&self.beats);
+        let beating = live.contains(worker);
+        if beating && !force {
+            return format!("{worker} is still beating — X releases its work anyway");
+        }
+        let mut ids: Vec<String> = self
+            .tasks
+            .values()
+            .filter(|t| matches!(t.state, TaskState::Assigned | TaskState::Running))
+            .filter(|t| t.is_holder(worker))
+            .map(|t| t.id())
+            .collect();
+        ids.sort();
+        if ids.is_empty() {
+            return format!("{worker} holds nothing — no assignment to release");
+        }
+        for id in &ids {
+            if let Some(t) = self.tasks.get_mut(id) {
+                // Still held by a racer: this box leaves, the row stays.
+                if t.remove_holder(worker) {
+                    t.updated = now;
+                    continue;
+                }
+                Self::release(t, now, "released by hand");
+            }
+        }
+        self.save();
+        let msg = format!(
+            "released {} row(s) from {worker}{}",
+            ids.len(),
+            if beating { ", which is still beating" } else { "" }
+        );
+        self.push_event("ok", msg.clone());
+        msg
+    }
+
+    /// The shared tail of both scopes: release the rows, save, say so.
+    fn finish_release(&mut self, ids: &[String], what: &str, beating: Option<&str>) -> String {
+        let now = now_secs();
+        for id in ids {
+            if let Some(t) = self.tasks.get_mut(id) {
+                Self::release(t, now, "released by hand");
+            }
+        }
+        self.save();
+        let msg = match beating {
+            Some(w) => format!(
+                "released {} row(s) of {what} from {w}, which is still beating",
+                ids.len()
+            ),
+            None => format!("released {} row(s) of {what} — their worker is gone", ids.len()),
+        };
+        self.push_event("ok", msg.clone());
+        msg
+    }
+
     /// Manual retry for every shelved task after fixing the cause.
     ///
     /// Strikes reset — unlike `release`, which keeps them — so the next failure

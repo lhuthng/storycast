@@ -560,6 +560,20 @@ impl App {
             .collect()
     }
 
+    /// The same set as identities: the worker ids the *ledger* may treat as
+    /// alive.
+    ///
+    /// Two shapes because two questions are asked of the same two predicates.
+    /// The pane draws rows and needs the beats themselves; the ledger's
+    /// `abandoned` facet and its release keys only need to know **who** is
+    /// answering, and a set answers that in one lookup per holder — which is
+    /// what a filter over five thousand rows wants. Both read `live_beats` and
+    /// `beat_backed`, so the pane and the facet cannot come to disagree about
+    /// whether a box is gone.
+    pub(crate) fn live_worker_ids(&self) -> std::collections::BTreeSet<String> {
+        crate::tui::model::live_worker_ids(&self.beats, &self.machines, bm_proto::now_secs())
+    }
+
     pub(crate) fn set_status(&mut self, level: Level, text: impl Into<String>) {
         self.status = LogLine {
             level,

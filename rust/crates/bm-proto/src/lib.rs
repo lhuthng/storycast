@@ -1438,6 +1438,21 @@ pub enum Op {
     Retry,
     /// Retry an individual task by stage/chapter, optionally forcing re-run.
     RetryTask,
+    /// Take work back off the worker holding it, without a strike.
+    ///
+    /// The operator's answer to a box that took a task and never came back.
+    /// Distinct from `Requeue`, which is the same idea **timed**: that one
+    /// releases only what has no live beat, so it cannot help against a box
+    /// that is still beating but wedged, which is the case the liveness window
+    /// has no opinion about and a person does. Nothing is deleted and attempts
+    /// are kept, so a released task is offered again exactly as it was; what
+    /// changes is only who may take it.
+    ///
+    /// `stage` + `chapter` names one row (every take of it, for `render`);
+    /// `worker` names every row that worker holds. One or the other, and
+    /// `force` is the difference between releasing a silent holder and
+    /// releasing one that is answering right now.
+    Release,
     /// Fold duplicate characters into one (title/case/description variants
     /// of the same person), rewrite cast + scripts, re-render the losers.
     /// Only deterministic same-key folds apply; ambiguous pairs are listed
@@ -1517,6 +1532,7 @@ impl Op {
             Op::Requeue => "requeue",
             Op::Retry => "retry",
             Op::RetryTask => "retry-task",
+            Op::Release => "release",
             Op::Reconcile => "reconcile",
             Op::Retag => "retag",
             Op::Recast => "recast",
@@ -1544,6 +1560,7 @@ impl Op {
             Op::Requeue,
             Op::Retry,
             Op::RetryTask,
+            Op::Release,
             Op::Reconcile,
             Op::Retag,
             Op::Recast,
@@ -1603,6 +1620,11 @@ pub struct OpRequest {
     pub stage: Option<Stage>,
     #[serde(default)]
     pub chapter: Option<u32>,
+    /// The worker whose rows a `release` takes back, by the id it reports on
+    /// its beat. Widening a release from one row to a whole box is the
+    /// question "what is this box sitting on", so it is asked of the box.
+    #[serde(default)]
+    pub worker: Option<String>,
     /// The segment to re-attribute, for `fix-speaker`. 1-based, because it is
     /// typed by a person counting lines; the op converts and says so on any
     /// refusal.
@@ -1936,6 +1958,7 @@ mod tests {
             Op::Requeue,
             Op::Retry,
             Op::RetryTask,
+            Op::Release,
             Op::Reconcile,
             Op::Retag,
             Op::Recast,

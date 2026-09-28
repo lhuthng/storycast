@@ -3330,6 +3330,182 @@ mod tests {
         );
     }
 
+    /// A beat that counts as live: stamped now, for `id`.
+    fn live_beat(id: &str) -> bm_proto::Heartbeat {
+        bm_proto::Heartbeat {
+            worker_id: id.into(),
+            addr: "127.0.0.1".into(),
+            task_id: None,
+            stage: None,
+            chapter: None,
+            progress: 0.0,
+            activity: "working".into(),
+            eta_secs: None,
+            ts: now_secs(),
+            hostname: "box".into(),
+            alias: String::new(),
+            cpu_pct: None,
+            mem_pct: None,
+            mem_gb: None,
+            sidecars: None,
+            sidecar_gb: None,
+            capabilities: vec![],
+            sources_stages: Vec::new(),
+            sidecar_keep: None,
+        }
+    }
+
+    /// The hand-driven twin of the orphan pass: a row comes back off a box that
+    /// is *still beating*, which is the one thing the liveness window refuses to
+    /// do — and the reason `release` exists next to `requeue`.
+    #[test]
+    fn release_task_takes_one_row_back_and_keeps_its_strikes() {
+        let (_d, mut inner) = fixture();
+        let mut t = Task::new(7, Stage::Merge);
+        t.state = TaskState::Running;
+        t.assigned_to = Some("w-live".into());
+        t.attempts = 2;
+        t.lease_until = Some(now_secs() + 5000);
+        inner.tasks.insert("merge:7".into(), t);
+        inner.beats.insert("w-live".into(), live_beat("w-live"));
+
+        // Without `force` the live box wins: re-offering work that is still
+        // happening is how one chapter gets spoken twice.
+        let msg = inner.op_release_task(Stage::Merge, 7, false);
+        assert!(msg.contains("still beating"), "{msg}");
+        assert_eq!(
+            inner.tasks["merge:7"].state,
+            TaskState::Running,
+            "a refusal must not half-apply"
+        );
+        assert_eq!(inner.tasks["merge:7"].assigned_to.as_deref(), Some("w-live"));
+
+        let msg = inner.op_release_task(Stage::Merge, 7, true);
+        assert!(msg.contains("1 row(s)"), "{msg}");
+        let row = &inner.tasks["merge:7"];
+        assert_eq!(row.state, TaskState::Pending);
+        assert_eq!(row.attempts, 2, "a release is not a retry");
+        assert!(row.assigned_to.is_none(), "the box no longer holds it");
+        assert!(row.lease_until.is_none(), "and its lease is gone");
+        assert!(
+            row.detail.contains("released by hand"),
+            "the row says why it moved: {}",
+            row.detail
+        );
+
+        assert!(
+            inner
+                .op_release_task(Stage::Merge, 7, true)
+                .contains("holds nothing"),
+            "a second press has nothing left to take"
+        );
+    }
+
+    /// A render ledger row is one take and an offer carries a batch, so a box
+    /// that died holds *several* rows of one chapter. Releasing one take would
+    /// leave the rest pinned to that same dead box, which is the state this key
+    /// exists to clear, so the chapter is the unit here.
+    #[test]
+    fn releasing_a_render_chapter_takes_every_take_of_it() {
+        let (_d, mut inner) = fixture();
+        for take in 0..3 {
+            let mut t = Task::new_take(9, take);
+            t.state = TaskState::Assigned;
+            t.assigned_to = Some("w-gone".into());
+            inner.tasks.insert(t.id(), t);
+        }
+        // The chapter's merge is nobody's yet, and a neighbouring chapter is out
+        // with another box: neither may move.
+        inner
+            .tasks
+            .insert("merge:9".into(), Task::new(9, Stage::Merge));
+        let mut neighbour = Task::new_take(10, 0);
+        neighbour.state = TaskState::Assigned;
+        neighbour.assigned_to = Some("w-other".into());
+        inner.tasks.insert(neighbour.id(), neighbour);
+
+        let msg = inner.op_release_task(Stage::Render, 9, false);
+        assert!(msg.contains("3 row(s)"), "{msg}");
+        assert!(msg.contains("their worker is gone"), "{msg}");
+        for take in 0..3 {
+            let id = format!("render:9:{take}");
+            assert_eq!(inner.tasks[&id].state, TaskState::Pending, "{id}");
+        }
+        assert_eq!(inner.tasks["merge:9"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["render:10:0"].state, TaskState::Assigned);
+    }
+
+    #[test]
+    fn releasing_a_box_takes_its_rows_and_leaves_a_co_holder_the_row() {
+        let (_d, mut inner) = fixture();
+        let mut merge = Task::new(2, Stage::Merge);
+        merge.state = TaskState::Assigned;
+        merge.assigned_to = Some("w-gone".into());
+        merge.attempts = 4;
+        inner.tasks.insert("merge:2".into(), merge);
+        let mut render = Task::new(3, Stage::Render);
+        render.state = TaskState::Running;
+        render.assigned_to = Some("w-gone".into());
+        inner.tasks.insert("render:3".into(), render);
+        // A racing digest row: assigned to the box that left, ground by one
+        // that is still here. The box leaves the row; the row does not leave
+        // the fleet.
+        let mut racing = Task::new(4, Stage::Digest);
+        racing.state = TaskState::Assigned;
+        racing.assigned_to = Some("w-gone".into());
+        racing.racers = vec!["w-here".into()];
+        inner.tasks.insert("digest:4".into(), racing);
+        let mut other = Task::new(5, Stage::Merge);
+        other.state = TaskState::Assigned;
+        other.assigned_to = Some("w-other".into());
+        inner.tasks.insert("merge:5".into(), other);
+
+        let msg = inner.op_release_worker("w-gone", false);
+        assert!(msg.contains("3 row(s)"), "every row it holds: {msg}");
+        assert_eq!(inner.tasks["merge:2"].state, TaskState::Pending);
+        assert_eq!(inner.tasks["merge:2"].attempts, 4, "a release is not a retry");
+        assert_eq!(inner.tasks["render:3"].state, TaskState::Pending);
+        assert_eq!(
+            inner.tasks["merge:5"].state,
+            TaskState::Assigned,
+            "another box's work is not touched"
+        );
+        assert_eq!(inner.tasks["digest:4"].state, TaskState::Assigned);
+        assert!(inner.tasks["digest:4"].is_holder("w-here"));
+        assert!(!inner.tasks["digest:4"].is_holder("w-gone"));
+
+        assert!(
+            inner
+                .op_release_worker("w-gone", false)
+                .contains("holds nothing"),
+            "a second pass has nothing left to take"
+        );
+    }
+
+    #[test]
+    fn releasing_a_box_that_is_still_beating_asks_to_be_forced() {
+        let (_d, mut inner) = fixture();
+        let mut t = Task::new(6, Stage::Merge);
+        t.state = TaskState::Assigned;
+        t.assigned_to = Some("w-live".into());
+        inner.tasks.insert("merge:6".into(), t);
+        inner.beats.insert("w-live".into(), live_beat("w-live"));
+
+        let msg = inner.op_release_worker("w-live", false);
+        assert!(msg.contains("still beating"), "{msg}");
+        assert_eq!(
+            inner.tasks["merge:6"].state,
+            TaskState::Assigned,
+            "a refusal must not half-apply"
+        );
+
+        // The forced form does it and says so: the operator's judgement that a
+        // beating box is wedged is the whole input to this branch.
+        let msg = inner.op_release_worker("w-live", true);
+        assert!(msg.contains("still beating"), "{msg}");
+        assert_eq!(inner.tasks["merge:6"].state, TaskState::Pending);
+    }
+
     #[test]
     fn retry_shelved_resets_strikes_and_reoffers_the_chapter() {
         let (_d, mut inner) = fixture();

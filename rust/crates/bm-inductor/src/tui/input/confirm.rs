@@ -178,6 +178,37 @@ pub(crate) async fn key_confirm(
                     );
                     app.set_status(Level::Info, "re-rendering everything — watch events");
                 }
+                ConfirmAction::ReleaseWorker {
+                    worker,
+                    count,
+                    beating,
+                    list,
+                } => {
+                    // `beating` *is* the force flag: releasing from a box that
+                    // is still answering is exactly the case the op refuses
+                    // without one, and the dialog the operator just answered is
+                    // where that decision was made.
+                    dispatch_op(
+                        app,
+                        job_tx,
+                        http,
+                        OpRequest {
+                            op: Op::Release,
+                            worker: Some(worker.clone()),
+                            force: Some(beating),
+                            ..Default::default()
+                        },
+                    );
+                    app.set_status(
+                        Level::Info,
+                        format!("releasing {count} row(s) from {worker} — watch the ledger"),
+                    );
+                    // Back to the ledger, not the dashboard: the rows leaving
+                    // *are* the confirmation, and this is the only screen where
+                    // they can be seen leaving. The same reason the sound
+                    // editor's removal returns to its own tab.
+                    app.screen = Screen::Tasks(list);
+                }
                 ConfirmAction::SoundRemove(r) => {
                     // Sets the screen itself: answering this dialog returns to
                     // the pool tab it was asked from, not to the dashboard.
