@@ -3857,7 +3857,12 @@ mod tests {
     fn the_prompt_contract_offers_the_retraction_not_only_the_note() {
         // The contract is appended in code, not only in the profile template,
         // so it has to be asserted on the string the model is actually handed.
-        let layout = crate::paths::Layout::new(crate::paths::Layout::find_root().unwrap());
+        // Resolved, not built: which tree the prompts come from is the *binding's*
+        // answer now (`adapters/<adapter>/prompts/`), and `Layout::new` knows only
+        // the pre-split one at the root — which is why this reads the real
+        // checkout rather than a fixture.
+        let root = crate::paths::Layout::find_root().unwrap();
+        let layout = crate::paths::Layout::resolve(root).unwrap();
         let prepared = prepare_chapter("Hắn lật ra cuốn sách \"Khải hoàn\" bên trong.");
         let prompt = build_attribution_prompt(&layout, &json!({}), &prepared).unwrap();
         assert!(

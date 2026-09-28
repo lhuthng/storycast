@@ -57,7 +57,7 @@ use anyhow::Result;
 /// tree, and an operator is expected to copy it and edit the copy for their own
 /// site. Compiling it in would make the first thing they must do (read it) the
 /// hardest.
-pub const DEFAULT_SCRIPT: &str = "assets/crawl/templates/storya.lua";
+pub const DEFAULT_SCRIPT: &str = "crawl/templates/storya.lua";
 
 /// The index a run works from: `data/crawl-index.json`.
 ///

@@ -1210,7 +1210,7 @@ fn a_known_site_url_names_its_crawler_instead_of_only_refusing() {
     let err = submit_text(&mut app, &p).unwrap_err();
     assert!(err.contains("readnovelfull.com"), "{err}");
     assert!(
-        err.contains("assets/crawl/templates/readnovelfull.lua"),
+        err.contains("crawl/templates/readnovelfull.lua"),
         "the refusal must name the crawler, not just refuse: {err}"
     );
 
