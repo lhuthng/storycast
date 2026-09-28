@@ -595,6 +595,11 @@ async fn cmd_serve(
     let token = bm_core::token::load_or_create(&inner.layout.root)?;
     println!("cluster token {}", &token[..8.min(token.len())]);
     inner.load_ledger();
+    // One-time, and before anything plans a path: the cast and the segment
+    // directories now carry the adapter as well as the engine, so a workspace
+    // from before the split is renamed into the new shape rather than
+    // re-rendering every chapter it already spoke.
+    inner.migrate_cache_keys();
     inner.check_profile()?;
     inner.reconcile(start, count);
     let shared = std::sync::Arc::new(tokio::sync::Mutex::new(inner));

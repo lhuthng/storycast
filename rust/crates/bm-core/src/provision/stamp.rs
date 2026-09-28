@@ -360,7 +360,11 @@ mod tests {
         }
         std::fs::write(root.join("prompts/digest.md"), "prompt v1").unwrap();
         std::fs::write(root.join("python/requirements.txt"), "torch\n").unwrap();
-        std::fs::write(root.join("data/cast.json"), r#"{"Narrator":"Đức Trí"}"#).unwrap();
+        std::fs::write(
+            root.join("data/cast-default-vieneu.json"),
+            r#"{"Narrator":"Đức Trí"}"#,
+        )
+        .unwrap();
         std::fs::write(root.join("voices.json"), r#"{"Narrator":"refs/n.wav"}"#).unwrap();
         std::fs::write(root.join("refs/n.wav"), vec![1u8; 64]).unwrap();
         root
@@ -421,6 +425,7 @@ mod tests {
         crate::Layout {
             root: root.to_path_buf(),
             work: root.join("workspaces").join(name),
+            adapter: crate::paths::DEFAULT_ADAPTER.into(),
         }
     }
 
@@ -435,7 +440,11 @@ mod tests {
         assert!(a.sources_in_sync(&b) && a.voices_in_sync(&b));
 
         // A cast edit is a source change and nothing else.
-        std::fs::write(root.join("data/cast.json"), r#"{"Narrator":"Adam"}"#).unwrap();
+        std::fs::write(
+            root.join("data/cast-default-vieneu.json"),
+            r#"{"Narrator":"Adam"}"#,
+        )
+        .unwrap();
         let c = stamp(&root);
         assert_ne!(
             a.sources_hash, c.sources_hash,
@@ -465,7 +474,7 @@ mod tests {
         std::fs::write(root.join(".bm/active-workspace"), "book\n").unwrap();
         std::fs::create_dir_all(root.join("workspaces/book/data")).unwrap();
         std::fs::write(
-            root.join("workspaces/book/data/cast-vieneu.json"),
+            root.join("workspaces/book/data/cast-default-vieneu.json"),
             r#"{"A":"Đức Trí"}"#,
         )
         .unwrap();
@@ -477,7 +486,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            root.join("workspaces/book/data/cast-vieneu.json"),
+            root.join("workspaces/book/data/cast-default-vieneu.json"),
             r#"{"A":"Quang Sơn"}"#,
         )
         .unwrap();

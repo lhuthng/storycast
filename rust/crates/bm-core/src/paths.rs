@@ -15,7 +15,53 @@ pub struct Layout {
     /// test uses it, so production entry points resolve through
     /// [`Layout::resolve`].
     pub work: PathBuf,
+    /// The adapter (language) caches are keyed by, taken from the load pointer.
+    ///
+    /// A property of the checkout like `work`, and for the same reason: the
+    /// cast and every segment directory hold text and audio in *one* language,
+    /// and a second language is a second workspace. `default` is what a
+    /// checkout that has no adapter bundle yet keys under — the language it was
+    /// already using, before the split gave it a name. Public because tests in
+    /// other crates build a `Layout` by literal.
+    pub adapter: String,
 }
+
+/// What a checkout with no adapter bundle keys its caches under.
+pub const DEFAULT_ADAPTER: &str = "default";
+
+/// The engine's name as it appears in a cache path.
+///
+/// Derived rather than switched on, so a second engine gets its own space
+/// instead of the one the old `else` handed it. `gemini` keeps its historical
+/// on-disk spelling because renaming those directories would orphan every
+/// cloud-rendered chapter for no benefit; an empty engine would otherwise
+/// produce `cast-default-.json`.
+fn engine_key(engine: &str) -> &str {
+    match engine {
+        "" => "unknown",
+        "gemini" => "gemini-v2",
+        other => other,
+    }
+}
+
+/// The pre-split spelling of `engine`'s cache, for the one-time rename.
+///
+/// `None` for an engine that never had a pre-split directory to move — which
+/// includes every engine added from here on.
+fn legacy_engine_key(engine: &str) -> Option<&'static str> {
+    match engine {
+        "vieneu" => Some("vieneu"),
+        "gemini" => Some("gemini-v2"),
+        _ => None,
+    }
+}
+
+/// The engines that have a pre-split spelling on disk to move.
+///
+/// Deliberately not "the engines this build knows": this is *history*, so it is
+/// a fixed list that stops growing. An engine added later has nothing to
+/// migrate, and [`Layout::migrate_cache_keys`] is a no-op for it.
+pub const LEGACY_CACHE_ENGINES: [&str; 2] = ["vieneu", "gemini"];
 
 impl Layout {
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -23,7 +69,19 @@ impl Layout {
         Layout {
             work: root.clone(),
             root,
+            adapter: DEFAULT_ADAPTER.to_string(),
         }
+    }
+
+    /// The adapter the load pointer names, or [`DEFAULT_ADAPTER`].
+    ///
+    /// Best-effort on purpose: a fresh clone and a box mid-provision both have
+    /// no pointer, and a path lookup is not the place to refuse to work. The
+    /// pointer is checked by `profile::verify`, where a missing one matters.
+    fn bound_adapter(root: &Path) -> String {
+        crate::profile::read_binding(root)
+            .map(|b| b.cache_adapter())
+            .unwrap_or_else(|_| DEFAULT_ADAPTER.to_string())
     }
 
     /// Resolve the active workspace: `.bm/active-workspace` names a directory
@@ -34,9 +92,14 @@ impl Layout {
     /// state where another was expected.
     pub fn resolve(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
+        let adapter = Self::bound_adapter(&root);
         let pointer = Self::active_workspace_file(&root);
         if !pointer.is_file() {
-            return Ok(Layout::new(root));
+            return Ok(Layout {
+                adapter,
+                work: root.clone(),
+                root,
+            });
         }
         let name = std::fs::read_to_string(&pointer)
             .map(|s| s.trim().to_string())
@@ -50,7 +113,11 @@ impl Layout {
                 name,
             );
         }
-        Ok(Layout { root, work })
+        Ok(Layout {
+            root,
+            work,
+            adapter,
+        })
     }
 
     /// Resolve, or fall back to the bare root when the pointer is stale.
@@ -180,23 +247,92 @@ impl Layout {
         self.data().join("bible.json")
     }
 
-    /// Cast file is per-engine so swapping voices never poisons another
-    /// engine's segment cache.
+    /// Cast file, keyed by adapter **and** engine: swapping either one must
+    /// never poison the other's segment cache.
     pub fn cast(&self, engine: &str) -> PathBuf {
-        if engine == "vieneu" {
-            self.data().join("cast-vieneu.json")
-        } else {
-            self.data().join("cast.json")
-        }
+        self.data()
+            .join(format!("cast-{}-{}.json", self.adapter, engine_key(engine)))
     }
 
-    /// Per-chapter segment cache, also per-engine.
+    /// Per-chapter segment cache, keyed the same way.
+    ///
+    /// The engine half is what the old `if engine == "vieneu" … else
+    /// "gemini-v2"` got wrong: the `else` named one engine for *every* engine
+    /// that was not VieNeu, so a third engine would have read and written
+    /// Gemini's segments — one engine's audio served under another's name.
+    /// Deriving the key is what makes a second engine possible at all.
     pub fn seg_dir(&self, engine: &str, n: u32) -> PathBuf {
-        if engine == "vieneu" {
-            self.data().join(format!("audio/segments-vieneu-{n:02}"))
-        } else {
-            self.data().join(format!("audio/segments-gemini-v2-{n:02}"))
+        self.data().join(format!(
+            "audio/segments-{}-{}-{n:02}",
+            self.adapter,
+            engine_key(engine)
+        ))
+    }
+
+    /// Bring a pre-split cache into the `(adapter, engine)` shape.
+    ///
+    /// Before the adapter reached the path, the cast was `cast-<engine>.json`
+    /// (and plain `cast.json` for anything but VieNeu) and the segment
+    /// directories were `segments-<engine>-NN`. Those bytes are already
+    /// correct — they were produced by this adapter and this engine; only the
+    /// *name* was missing a component — so this renames rather than rebuilds.
+    /// Leaving the old names behind would re-render every chapter already
+    /// spoken, which is hours of synthesis for a path string.
+    ///
+    /// Idempotent, and it never overwrites: a target that already exists wins.
+    /// Returns what it moved, so a caller can say so once instead of silently
+    /// rewriting the operator's data directory.
+    pub fn migrate_cache_keys(&self, engine: &str) -> Result<Vec<PathBuf>> {
+        let mut moved = Vec::new();
+        let data = self.data();
+
+        let legacy_cast = match engine {
+            "vieneu" => Some(data.join("cast-vieneu.json")),
+            _ => Some(data.join("cast.json")),
+        };
+        if let Some(legacy) = legacy_cast {
+            let target = self.cast(engine);
+            if legacy.is_file() && !target.exists() {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::rename(&legacy, &target).with_context(|| {
+                    format!("renaming {} to {}", legacy.display(), target.display())
+                })?;
+                moved.push(target);
+            }
         }
+
+        let Some(legacy_engine) = legacy_engine_key(engine) else {
+            return Ok(moved);
+        };
+        let prefix = format!("segments-{legacy_engine}-");
+        let audio = data.join("audio");
+        let Ok(entries) = std::fs::read_dir(&audio) else {
+            return Ok(moved);
+        };
+        let mut names: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|name| name.starts_with(&prefix))
+            .collect();
+        names.sort();
+        for name in names {
+            let Ok(n) = name[prefix.len()..].parse::<u32>() else {
+                continue;
+            };
+            let (from, to) = (audio.join(&name), self.seg_dir(engine, n));
+            if to.exists() {
+                continue;
+            }
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(&from, &to)
+                .with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
+            moved.push(to);
+        }
+        Ok(moved)
     }
 
     pub fn audio(&self) -> PathBuf {
@@ -601,16 +737,56 @@ mod tests {
     }
 
     #[test]
-    fn paths_are_engine_scoped() {
+    fn paths_are_adapter_and_engine_scoped() {
         let l = Layout::new("/repo");
-        assert!(l.cast("vieneu").ends_with("cast-vieneu.json"));
-        assert!(l.cast("gemini").ends_with("cast.json"));
+        // A checkout with no adapter bundle keys under `default`.
+        assert!(l.cast("vieneu").ends_with("cast-default-vieneu.json"));
         assert!(l
             .seg_dir("vieneu", 7)
-            .ends_with("data/audio/segments-vieneu-07"));
+            .ends_with("data/audio/segments-default-vieneu-07"));
+        // `gemini` keeps its historical on-disk spelling, so renaming nothing
+        // orphans the cloud-rendered chapters. Anything else gets its own.
         assert!(l
             .seg_dir("gemini", 7)
-            .ends_with("data/audio/segments-gemini-v2-07"));
+            .ends_with("data/audio/segments-default-gemini-v2-07"));
+        assert!(l
+            .seg_dir("neutts-air", 7)
+            .ends_with("data/audio/segments-default-neutts-air-07"));
+        assert_ne!(
+            l.seg_dir("neutts-air", 7),
+            l.seg_dir("gemini", 7),
+            "a third engine must not land in another engine's cache"
+        );
+        // A named adapter is its own namespace: vi-VN and en-US of one book are
+        // two workspaces, and must not share a segment directory even if they
+        // somehow shared a `data/`.
+        let named = Layout {
+            adapter: "en-US".into(),
+            ..Layout::new("/repo")
+        };
+        assert!(named.cast("vieneu").ends_with("cast-en-US-vieneu.json"));
+        assert_ne!(named.seg_dir("vieneu", 7), l.seg_dir("vieneu", 7));
+    }
+
+    #[test]
+    fn a_pre_split_cache_is_renamed_into_the_new_shape() {
+        let root = fixture_root("cache-migrate");
+        let l = Layout::new(&root);
+        let data = l.data();
+        std::fs::create_dir_all(data.join("audio/segments-vieneu-07")).unwrap();
+        std::fs::write(data.join("cast-vieneu.json"), "{\"Narrator\":\"Adam\"}").unwrap();
+
+        let moved = l.migrate_cache_keys("vieneu").unwrap();
+        assert_eq!(moved.len(), 2, "the cast and one chapter: {moved:?}");
+        assert!(l.cast("vieneu").is_file(), "the cast was carried over");
+        assert!(l.seg_dir("vieneu", 7).is_dir(), "and the segments with it");
+        assert!(
+            !data.join("cast-vieneu.json").exists(),
+            "the old name is gone, not duplicated"
+        );
+        // Idempotent: nothing left to move, and nothing overwritten.
+        assert!(l.migrate_cache_keys("vieneu").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
