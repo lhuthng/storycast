@@ -270,7 +270,6 @@ async fn roster(State(s): State<Arc<Server>>) -> Response {
         Some(i) => Json(bm_core::voices::voices_from_labels(
             "vieneu",
             &labels(&i.roster),
-            &[],
         ))
         .into_response(),
         None => loading(),
@@ -301,7 +300,10 @@ async fn policy(State(s): State<Arc<Server>>) -> Response {
         sample_rate: SAMPLE_RATE as u32,
         male_voices: p.male,
         female_voices: p.female,
-        allowed_voices: p.allowed,
+        // Always empty: the field stays because `bm-agent` probes for it to
+        // tell a serving sidecar from a stale one. Nothing restricts voices
+        // any more — the catalogue is the whole roster.
+        allowed_voices: Vec::new(),
         default_cast: cast,
     })
     .into_response()
@@ -400,7 +402,7 @@ mod tests {
     fn the_roster_reads_gender_and_accent_positionally() {
         let dir = tempfile::tempdir().unwrap();
         let r = Roster::load(&store(dir.path())).unwrap();
-        let v = bm_core::voices::voices_from_labels("vieneu", &labels(&r), &[]);
+        let v = bm_core::voices::voices_from_labels("vieneu", &labels(&r));
         let a = v.iter().find(|v| v.name == "A").unwrap();
         assert_eq!(a.gender, "male");
         assert_eq!(a.accent, "Northern");
@@ -420,7 +422,10 @@ mod tests {
             sample_rate: SAMPLE_RATE as u32,
             male_voices: p.male,
             female_voices: p.female,
-            allowed_voices: p.allowed,
+            // Always empty: the field stays because `bm-agent` probes for it to
+        // tell a serving sidecar from a stale one. Nothing restricts voices
+        // any more — the catalogue is the whole roster.
+        allowed_voices: Vec::new(),
             default_cast: Default::default(),
         })
         .unwrap();

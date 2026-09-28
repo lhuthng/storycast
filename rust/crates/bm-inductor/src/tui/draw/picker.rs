@@ -123,13 +123,10 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
             } else {
                 ("OFFLINE roster — metadata may be incomplete", Color::Yellow)
             };
-            Line::from(vec![
-                Span::styled(
-                    format!("{label} · engine {}   ", r.engine),
-                    app.style(colour),
-                ),
-                Span::styled(r.policy_note.clone(), Style::default().fg(Color::DarkGray)),
-            ])
+            Line::from(Span::styled(
+                format!("{label} · engine {}", r.engine),
+                app.style(colour),
+            ))
         }
         (_, _, true) => Line::from(Span::styled(
             "loading roster from disk…",
@@ -342,14 +339,8 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                                     pad(&v.name, NAME_W),
                                     if selected {
                                         style_bold_of(colour, Color::White)
-                                    } else if v.allowed {
-                                        Style::default()
                                     } else {
-                                        // An accent-policy voice is not hidden —
-                                        // it is dimmed, because refusing to
-                                        // assign it is the policy's job and
-                                        // refusing to show it is not.
-                                        Style::default().fg(Color::DarkGray)
+                                        Style::default()
                                     },
                                 ),
                                 Span::styled(

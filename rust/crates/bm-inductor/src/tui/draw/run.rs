@@ -110,7 +110,7 @@ pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
             let unassigned = rows.iter().filter(|x| x.unassigned()).count();
             let flagged = rows
                 .iter()
-                .filter(|x| matches!(x.verdict(), Verdict::Blocked | Verdict::Unknown))
+                .filter(|x| matches!(x.verdict(), Verdict::Unknown))
                 .count();
             lines.push(kv(
                 "voices",

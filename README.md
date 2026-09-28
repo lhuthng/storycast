@@ -347,8 +347,8 @@ the size guard refuses a whole-page scrape. Everything else about the format is
 - `voice-pool.json` is the tag-matched pool: `bm-inductor roster add-sample
   refs/young-female-4.mp3`, tags from the filename, enrolled on every worker at
   the next provision.
-- Nothing added: built-in catalogue voices; per-engine accent policy assigns
-  automatically.
+- Nothing added: the built-in catalogue voices are the whole roster, and
+  assignment is automatic.
 
 ### Sound design
 

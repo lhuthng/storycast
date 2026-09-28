@@ -369,22 +369,10 @@ pub fn load_cast(
             cast.insert(name.clone(), voice);
             continue;
         }
-        let preset = policy.pool_for_hint(&hint).to_vec();
-        // The accent policy binds the assigner too, not just the gates: with
-        // an exclusion in force, an excluded preset must never be written into
-        // the cast for a gate to reject later. Empty `allowed` is "no
-        // restriction", so the shipped catalogue behaves exactly as before.
-        // A character with nothing admissible stays unassigned and fails
-        // loudly at planning, naming them — instead of shelving three renders
-        // against a voice nobody may use.
-        let preset: Vec<String> = if policy.allowed.is_empty() {
-            preset
-        } else {
-            preset
-                .into_iter()
-                .filter(|v| policy.allowed.iter().any(|a| a == v))
-                .collect()
-        };
+        // A character with no pool left stays unassigned and fails loudly at
+        // planning, naming them — instead of shelving three renders against a
+        // voice nobody may use.
+        let preset: Vec<String> = policy.pool_for_hint(&hint).to_vec();
         let pick = preset
             .iter()
             .min_by_key(|v| {
@@ -468,12 +456,6 @@ mod tests {
         assert!(cast.contains_key("Narrator"));
         assert!(cast.contains_key("New Guy"));
         assert!(cast_path.exists(), "save=true must persist");
-        // The shipped policy restricts nothing, so the invariant is "no
-        // violations" rather than "the name appears in an allow-list".
-        let p = vieneu_policy();
-        let pairs: Vec<(String, String)> =
-            cast.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        assert!(p.violations(&pairs, &[]).is_empty());
     }
 
     #[test]
@@ -742,7 +724,6 @@ mod tests {
         .unwrap();
 
         let policy = policy_for_bible("vieneu");
-        assert!(policy.allowed.is_empty(), "unrestricted");
         let cast = load_cast(&script, &d.join("cast-vieneu.json"), &bible, &policy, false).unwrap();
         let got = cast.get("Ông Già").unwrap();
         assert!(
@@ -754,12 +735,14 @@ mod tests {
     #[test]
     fn the_policy_is_the_catalogue_with_no_overlay() {
         // No machine-local roster exists any more: even a stray .bm/voices.json
-        // is ignored, and the policy is the shipped catalogue (unrestricted).
+        // is ignored, and the policy is the shipped catalogue.
         let d = tmpdir("policy-catalogue");
         std::fs::create_dir_all(d.join(".bm")).unwrap();
         std::fs::write(d.join(".bm/voices.json"), "{ nope").unwrap();
         let policy = policy_for_bible("vieneu");
-        assert!(policy.allowed.is_empty(), "unrestricted");
+        assert_eq!(policy.engine, "vieneu");
+        assert_eq!(policy.male, vieneu_policy().male);
+        assert_eq!(policy.female, vieneu_policy().female);
     }
 
     #[test]

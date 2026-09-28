@@ -369,7 +369,7 @@ impl Confirm {
 }
 
 /// Read-only overview of the whole cast: who speaks with what, which voices
-/// are shared, and which assignments the accent policy would reject.
+/// are shared, and which assignments the roster cannot resolve.
 ///
 /// The picker can only answer "what is this one character's voice"; this
 /// answers "is the cast healthy", which previously meant reading the cast file

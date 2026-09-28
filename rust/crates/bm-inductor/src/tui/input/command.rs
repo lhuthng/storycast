@@ -142,7 +142,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: Some('t'), names: &["translate"], desc: Some("enqueue crawl + digest for a chapter range"), cmd: Command::Translate },
     Word { key: Some('c'), names: &["crawl"], desc: Some("save the URL template, then probe-crawl one chapter"), cmd: Command::CrawlSetup },
     Word { key: Some('i'), names: &["import"], desc: Some("adopt a chapter from a file — `:import 34 /tmp/ch34.txt`"), cmd: Command::Import },
-    Word { key: Some('v'), names: &["voices"], desc: Some("re-read the roster, enforce the accent policy, refill gaps"), cmd: Command::Voices },
+    Word { key: Some('v'), names: &["voices"], desc: Some("re-read the roster and refill gaps"), cmd: Command::Voices },
     Word { key: Some('s'), names: &["swap"], desc: Some("repoint one character — destructive, see below"), cmd: Command::SwapVoice },
     Word { key: Some('S'), names: &["cast"], desc: Some("cast overview: every speaker × voice, read-only"), cmd: Command::Cast },
     Word { key: Some('e'), names: &["eta"], desc: Some("estimate the remaining wall-clock time"), cmd: Command::Eta },

@@ -826,10 +826,10 @@ closes the race, not the gate.
    worker during provisioning (enrollment is keyed by name, so a renamed entry
    re-enrolls even with an identical clip).
 3. **Cast**: `data/cast-<engine>.json`, speaker to voice. Assignment is
-   automatic under a per-engine **accent policy** (the shipped Vieneu policy
-   restricts to Central/South accents), constrained by the bible's
-   `voice_hint` and the pool's tags. `s` repoints one speaker, `S` shows the
-   whole cast with health verdicts, `v` re-reads the roster and refills gaps.
+   automatic: the catalogue declares the pools, the pool's tags and the
+   bible's `voice_hint` choose between them, and the least-used voice wins.
+   `s` repoints one speaker, `S` shows the whole cast with health verdicts,
+   `v` re-reads the roster and refills gaps.
 
 ## 6. The TUI (bm-inductor/src/tui/)
 
