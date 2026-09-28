@@ -1,10 +1,13 @@
 # Assets: a genre's art, composed, and released
 
-> **Status: designed, not built.** This is the plan of record for the next
-> phases. On disk today `LIVE_DIRS` is still `["assets", "prompts"]`, the
-> crawlers are still under `assets/crawl/`, one `profiles/<name>.tar.zst` still
-> carries art and prompts together, and the adapter's checkout-level home is
-> still the root `prompts/`. *What this breaks* lists exactly what has to move.
+> **Status: composition is built; the other two are not.** `pack.json`, the
+> `_extends/` fold-in, the `_extends.json` record and the `asset resolve` verb
+> all exist — `bm_core::compose` is the one entry point, and `asset resolve
+> --dry-run` reports what it would do. **Not built:** the crawler move (they sit
+> under `assets/crawl/` still, so `LIVE_DIRS` is still `["assets", "prompts"]`)
+> and the per-piece release split (one `profiles/<name>.tar.zst` still carries
+> art and prompts together). *What this breaks* lists what those two must move,
+> and *Releases* is the manifest the split still has to write.
 
 ## In plain words
 
@@ -100,6 +103,9 @@ the three pool registries are the layered ones, named once.
 The dependencies are unpacked at `assets/_extends/<name>/`, so the whole thing
 lives inside `assets/` — one tree, one hash, one ship. Resolving fills the live
 tree in:
+
+`bm-inductor asset resolve` does it (and `--dry-run` reports without writing),
+and it touches nothing at all when the answer is already on disk:
 
 ```
 assets/                      the working tree — this asset's own art, plus what it inherited
