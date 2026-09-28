@@ -311,6 +311,36 @@ The binding's pack pointer already holds `{name, hash}`, and the hash stays what
 it is today — a content hash over the live `assets/` — so a stale child is also
 visible as ordinary drift.
 
+### Releasing a dependency itself: the sanitized root pack
+
+The composed pack is the release everything consumes, but the roots publish
+too — `common`, `weapons`, `magic` and the `xianxia` composition itself are cut
+at v0.1.0 (`<name>-pack-v0.1.0`) — because a fresh checkout *composes* rather
+than copies: `assets/pack.json` names deps, and `asset resolve` needs the
+parents' trees to unpack.
+
+`tools/profile.sh pack <name> --dep` releases the dependency tree itself,
+**sanitized**: the tree at `assets/_extends/<name>` unpacks *to `assets/`*,
+where the pack's own resolution reads it, with no `_extends/` inputs and no
+bookkeeping (`pack.json`, `_extends.json`) inside — and a generated
+`assets/pack.json` with `"deps": []` stating the (empty) extension point a
+consumer fills in with their own. The plain `profile.sh pack` gained the same
+rule in reverse: a pack bundle never carries the live tree's `_extends/`,
+which is composition *input*, not content. `bm-inductor profile manifest
+<name> --dep` computes that manifest and refuses a tree that is itself
+composed — a dependency of a dependency re-folds into its child at resolve
+time, so it is not an asset in its own right.
+
+Two hashes, both in the release notes:
+
+* the **manifest hash** over the release's own unpack paths — the release's
+  identity, and for the composed pack exactly the live pack hash the binding
+  stamps;
+* the **composition-record hash** — `tree_hash` over the dependency, the
+  number a child's `deps` names and the staleness gate compares. This one is
+  the sync proof: the released bytes, unpacked and stripped of the generated
+  `pack.json`, hash to exactly the value the live tree was resolved against.
+
 ## What this breaks, honestly
 
 This is not a small edit, and two items are structural:

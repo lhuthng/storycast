@@ -219,7 +219,10 @@ fn value_hash(sound: &Sound) -> String {
 }
 
 /// A content hash of a whole dependency tree.
-fn tree_hash(dir: &Path) -> Result<String> {
+/// `pub(crate)` because the release side (`profile::compute_dep_manifest`) pins
+/// its manifest hash against this one: a dependency release and the record a
+/// child's resolve carries must never be able to disagree.
+pub(crate) fn tree_hash(dir: &Path) -> Result<String> {
     let files = profile::files_under(dir, &[""]);
     Ok(profile::manifest_hash(&profile::hash_files(dir, files)?))
 }

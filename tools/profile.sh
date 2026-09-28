@@ -36,8 +36,9 @@
 set -euo pipefail
 
 LEVEL=3
-VERSION=1
+VERSION=
 PIECE=pack
+DEP=
 cmd=${1:?usage: profile.sh 'pack|fetch|unpack|list|verify' ...}; shift || true
 case "$cmd" in
   pack|unpack|verify) name=${1:?usage: profile.sh "$cmd" <name>}; shift || true;;
@@ -49,6 +50,7 @@ while [ $# -gt 0 ]; do
     --level) LEVEL=${2:?--level needs a value}; shift 2;;
     --version) VERSION=${2:?--version needs a value}; shift 2;;
     --piece) PIECE=${2:?--piece needs a value}; shift 2;;
+    --dep) DEP=1; shift;;
     *) echo "unknown flag $1" >&2; exit 1;;
   esac
 done
@@ -87,6 +89,20 @@ piece_members() { # $1 = piece, $2 = name
   case "$1" in
     pack) echo "assets";;
     adapter) echo "adapters/$2";;
+  esac
+}
+
+# The directories of a member tree that never enter a bundle. A pack release is
+# the **resolved** content every reader wants — `_extends/` is the unpacked
+# *input* side of the composition, and shipping it inside `assets/` would fold
+# composition inputs into whatever unpacked the bundle (a worker, a workspace,
+# a fresh checkout). `bm-inductor profile manifest` already refuses `_extends`
+# keys in a pack manifest — and a manifest that says one thing while the
+# tarball holds another is exactly the drift this toolchain exists to refuse.
+piece_excludes() { # $1 = piece
+  case "$1" in
+    pack) echo "--exclude=assets/_extends";;
+    adapter) ;;
   esac
 }
 
@@ -160,23 +176,60 @@ sys.exit("origin is not a github remote: " + u) if not m else print(m.group(1))'
 
 case "$cmd" in
   pack)
+    # `--dep` releases a dependency tree itself, so the bundle is named by the
+    # dependency and lands in the same per-piece directory.
+    if [ -n "$DEP" ]; then
+      PIECE=pack
+    fi
     bundle="$root/profiles/$PIECE/$name.tar.zst"
     mkdir -p "$root/profiles/$PIECE"
     stage=$(mktemp -d "$root/profiles/.pack.XXXXXX")
     trap 'rm -rf "$stage"' EXIT
     # The manifest first, deliberately: it is where a stale tree is refused, so
     # nothing is copied or compressed for a release that will not be true.
-    inductor profile manifest "$name" --piece "$PIECE" --version "$VERSION" \
+    inductor profile manifest "$name" --piece "$PIECE" ${DEP:+--dep} \
+      ${VERSION:+--version "$VERSION"} \
       > "$stage/manifest.json"
-    for member in $(piece_members "$PIECE" "$name"); do
-      [ -d "$root/$member" ] || { echo "no live $member/ to pack" >&2; exit 1; }
-      mkdir -p "$stage/$(dirname "$member")"
-      cp -r "$root/$member" "$stage/$member"
-    done
+    # A `--dep` release is a dependency of the live pack, sanitized: the tree
+    # at `assets/_extends/<name>` is copied **to `assets/`**, where the pack's
+    # own resolution reads it, and the manifest the gate just refused to lie
+    # about is written beside it as the generated `assets/pack.json`.
+    if [ -n "${DEP:-}" ]; then
+      src="$root/assets/_extends/$name"
+      [ -d "$src" ] || { echo "no dependency tree at assets/_extends/$name — resolve first" >&2; exit 1; }
+      # Rename semantics on purpose: `$stage/assets` does not exist yet, so the
+      # dependency's tree BECOMES `assets/`. Pre-creating it would nest the tree
+      # inside (`assets/<name>/…`) — which is exactly the paths the manifest
+      # does not list.
+      cp -R "$src" "$stage/assets"
+      # Bookkeeping is not content, and the manifest refuses it — the same rule
+      # `compose` applies when folding a dependency in. `pack.json` is written
+      # here instead so the release states its own, empty extension point: a
+      # consumer fills theirs in, they never inherit this one's.
+      rm -f "$stage/assets/_extends.json"
+      rm -f "$stage/assets/pack.json"
+      python3 - "$stage/assets/pack.json" <<'EOF'
+import json, sys
+open(sys.argv[1], "w").write(json.dumps({
+    "_note": "Generated at release time: this is the dependency tree of the live"
+             " checkout, unpacked to assets/ — what a pack that extends this one"
+             " names in its own deps (weakest first). Own content wins over every"
+             " dependency.",
+    "deps": [],
+}, indent=2) + "\n")
+EOF
+    else
+      for member in $(piece_members "$PIECE" "$name"); do
+        [ -d "$root/$member" ] || { echo "no live $member/ to pack" >&2; exit 1; }
+        mkdir -p "$stage/$(dirname "$member")"
+        cp -r "$root/$member" "$stage/$member"
+      done
+    fi
     out="$root/profiles/.pack.$name.tar.zst"
     # OS noise never enters a bundle: a .DS_Store would hash-drift every
     # unpack on a different machine for zero content.
-    tar --exclude=.DS_Store -cf - -C "$stage" $(piece_members "$PIECE" "$name") manifest.json \
+    tar --exclude=.DS_Store $(piece_excludes "$PIECE") -cf - -C "$stage" \
+      $(piece_members "$PIECE" "$name") manifest.json \
       | zstd -"$LEVEL" -o "$out"
     mv "$out" "$bundle"
     trap - EXIT; rm -rf "$stage"

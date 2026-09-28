@@ -288,6 +288,11 @@ enum ProfileCmd {
         /// Pack even when a dependency this asset was built on has moved.
         #[arg(long)]
         force: bool,
+        /// Release a dependency of the live pack itself (`assets/_extends/<name>`
+        /// unpacked to `assets/`) rather than the live composition: the
+        /// sanitized, self-contained root pack.
+        #[arg(long)]
+        dep: bool,
     },
     /// What this checkout's adapter, the binding and the engine say about each
     /// other, and whether a run will cook this language at all.
@@ -2326,6 +2331,7 @@ async fn main() -> anyhow::Result<()> {
                 piece,
                 version,
                 force,
+                dep: dep_manifest,
             } => {
                 let Some(piece) = bm_core::profile::Piece::from_noun(&piece) else {
                     anyhow::bail!("unknown piece '{piece}' (pack|adapter)");
@@ -2341,7 +2347,16 @@ async fn main() -> anyhow::Result<()> {
                         stale.join(", ")
                     );
                 }
-                let manifest = bm_core::profile::compute_manifest(&layout, piece, &name, &version)?;
+                // `--dep` releases a dependency tree itself (`assets/_extends/<dep>`
+                // unpacked to `assets/`), the sanitized self-contained root pack —
+                // content only, no composition inputs, with a generated
+                // `assets/pack.json` for whatever extends it later. Without it,
+                // `name` is the live composition and `piece` picks its trees.
+                let manifest = if dep_manifest {
+                    bm_core::profile::compute_dep_manifest(&layout, &name, &version)?
+                } else {
+                    bm_core::profile::compute_manifest(&layout, piece, &name, &version)?
+                };
                 println!("{}", serde_json::to_string_pretty(&manifest)?);
                 if !stale.is_empty() {
                     eprintln!("warning: packed while {} had moved", stale.join(", "));

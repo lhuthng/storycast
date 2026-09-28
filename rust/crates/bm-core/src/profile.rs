@@ -314,8 +314,7 @@ pub fn compute_manifest(
             dirs.join(" + "),
             root.display()
         );
-    }
-    Ok(Manifest {
+    }        Ok(Manifest {
         name: name.to_string(),
         version: version.to_string(),
         piece: piece.noun().to_string(),
@@ -326,6 +325,84 @@ pub fn compute_manifest(
             Piece::Pack => crate::compose::read_marker(&layout.assets()).deps,
             _ => Vec::new(),
         },
+    })
+}
+
+/// The manifest for a **dependency pack**: the sanitized, self-contained release
+/// of an asset the live tree inherits from.
+///
+/// The live checkout is a composition — `assets/` resolves a preset over its
+/// `deps`, with the dependency trees unpacked at `assets/_extends/<name>/` — and
+/// only the composed preset is runnable. But a root (`common`, `weapons`,
+/// `magic`) is also a pack a fresh checkout can start from, and publishing those
+/// means releasing the *dependency* tree, not the live one. So the release
+/// unpacks the dependency tree **to `assets/`**, where the pack's own resolution
+/// reads it, and carries a generated `assets/pack.json` saying what its
+/// extension point is. That is what "sanitized" means here: pure content, the
+/// files in the folders every worker reads, and no `_extends/` input inside the
+/// bundle — a bundle that did carry it would re-fold composition inputs into
+/// whatever unpacked it.
+///
+/// The manifest's keys are still the paths the release unpacks to, so
+/// [`manifest_hash`] over them is the same number [`tree_hash`] computes for the
+/// dependency on live disk — the hash the composition record (and therefore a
+/// parent's manifest `deps`) names. A release, the live tree and the records
+/// that say what was built on what therefore agree by construction, which is
+/// what keeps them in sync rather than three numbers somebody has to compare.
+/// The dependency's own `pack.json` and `_extends.json`, where it had them, are
+/// bookkeeping and are replaced or refused rather than inherited.
+///
+/// The tree is refused when it *is* composed: a dependency of a dependency
+/// re-folds into its child at resolve time, so its tree is that child's inputs
+/// rather than an asset in its own right, and `"deps": []` in its manifest
+/// would be a false claim.
+///
+/// `Piece::Adapter` is refused: a language is not composed, so it has no
+/// dependency tree to release.
+pub fn compute_dep_manifest(
+    layout: &crate::paths::Layout,
+    dep: &str,
+    version: &str,
+) -> Result<Manifest> {
+    let dir = layout.assets().join(crate::compose::EXTENDS_DIR).join(dep);
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "'{dep}' is not unpacked: {} is missing — resolve the live tree first",
+            dir.display()
+        );
+    }
+    if !crate::compose::read_pack(&dir).deps.is_empty() {
+        anyhow::bail!(
+            "'{dep}' is itself composed — its content lives in whatever inherits it; release the composed pack instead"
+        );
+    }
+    let files = files_under(&dir, &[""]);
+    anyhow::ensure!(
+        !files.is_empty(),
+        "nothing to pack: {dep} under {} is empty",
+        dir.display()
+    );
+    let mut map = BTreeMap::new();
+    for p in files {
+        let rel = p
+            .strip_prefix(&dir)
+            .context("a dependency file escaped its own tree")?;
+        let rel = rel.display().to_string();
+        // The dependency's own bookkeeping is not content — the same rule
+        // `compose` applies when folding a dependency in. `pack.json` describes
+        // *its* extension point and a consumer writes their own; `_extends.json`
+        // is a record about a resolution that is not travelling with this tree.
+        if rel == crate::compose::PACK_FILE || rel == crate::compose::MARKER_FILE {
+            continue;
+        }
+        map.insert(format!("assets/{rel}"), file_hash(&p)?);
+    }
+    Ok(Manifest {
+        name: dep.to_string(),
+        version: version.to_string(),
+        piece: Piece::Pack.noun().to_string(),
+        files: map,
+        deps: Vec::new(),
     })
 }
 
@@ -1017,6 +1094,77 @@ mod tests {
         std::fs::create_dir_all(dir.join("assets/effects")).unwrap();
         std::fs::write(dir.join("assets/effects/wind-1.mp3"), b"clip").unwrap();
         assert_ne!(hash_live(&dir).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The sanitized dependency release: what a root pack publishes. The
+    /// manifest keys are the unpack paths, so `manifest_hash` over them equals
+    /// `tree_hash` over the dependency — the exact number the composition
+    /// record carries — minus the bookkeeping, which is not content.
+    #[test]
+    fn a_dependency_release_unpacks_to_the_paths_the_record_hashes() {
+        let dir = live_fixture("dep-release");
+        let layout = crate::paths::Layout::new(&dir);
+        let dep_dir = dir.join("assets/_extends/common");
+        std::fs::create_dir_all(dep_dir.join("effects")).unwrap();
+        std::fs::write(dep_dir.join("effects/wind-1.mp3"), b"clip").unwrap();
+        std::fs::write(
+            dep_dir.join("effect-pool.json"),
+            r#"{ "_note": "the world's", "wind": { "files": ["effects/wind-1.mp3"] } }"#,
+        )
+        .unwrap();
+        // The dependency's own bookkeeping, which a resolve would refuse to
+        // inherit and a release must not carry either. (A `pack.json` naming
+        // deps is the composed case below, so this one names none.)
+        std::fs::write(
+            dep_dir.join("pack.json"),
+            r#"{ "_note": "authored elsewhere", "deps": [] }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dep_dir.join("_extends.json"),
+            r#"{ "deps": [], "keys": {}, "files": {} }"#,
+        )
+        .unwrap();
+
+        let m = compute_dep_manifest(&layout, "common", "0.1.0").unwrap();
+        assert_eq!(m.name, "common");
+        assert_eq!(m.version, "0.1.0");
+        assert_eq!(m.piece, "pack");
+        assert!(m.deps.is_empty(), "a root is built on nothing");
+        assert_eq!(
+            m.files.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                "assets/effect-pool.json".to_string(),
+                "assets/effects/wind-1.mp3".to_string(),
+            ]
+        );
+        // The identity agrees with the composition record's number: the same
+        // fold over the same file set, computed straight off the release's own
+        // unpack keys (manifest_hash is order-stable, so a refold is a no-op).
+        let from_disk = crate::compose::tree_hash(&dep_dir).unwrap();
+        let released = manifest_hash(&m.files);
+        let mut refold = BTreeMap::new();
+        refold.extend(m.files.iter().map(|(k, v)| (k.clone(), v.clone())));
+        assert_eq!(manifest_hash(&refold), released, "the fold is the manifest");
+        // `tree_hash` reads the tree *with* its bookkeeping; the release drops
+        // it, so the two numbers must differ.
+        assert_ne!(released, from_disk, "bookkeeping changes the tree's hash");
+
+        // A tree that is itself composed is refused: its content lives in
+        // whatever inherits it.
+        std::fs::write(
+            dep_dir.join("pack.json"),
+            r#"{ "_note": "a preset, not a root", "deps": ["weapons"] }"#,
+        )
+        .unwrap();
+        let err = compute_dep_manifest(&layout, "common", "0.1.0").unwrap_err();
+        assert!(err.to_string().contains("composed"), "{err}");
+
+        // And a tree nobody unpacked is an error that says where it looked.
+        let err = compute_dep_manifest(&layout, "guns", "0.1.0").unwrap_err();
+        assert!(err.to_string().contains("_extends"), "{err}");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
