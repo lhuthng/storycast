@@ -170,12 +170,20 @@ which side of the line every future stage belongs on:
 - **`digest` onward is per-adapter.** The prompts *are* the adapter, and so are
   the artifacts they produce: the cast, the segment text, the segment cache.
 
-That is a claim about the **code**, not a promise that one corpus serves two
-languages. A book whose English edition is crawled from an English site has a
-different source for its English adapter, and then the two editions share
-nothing at all — `data/chapters/` is per-book *and* per-source. Sharing the
-crawl happens when the adapter reads the same bytes, which is a property of the
-deployment rather than of the pipeline.
+That is a claim about the **code**, and it pairs with the rule that keeps it
+tractable: **an adapter has one language, and it is both the source's and the
+target's.** Nothing translates. `xianxia-en-US` is crawled in English and
+written in English; `japanesefantasy-ja` would be crawled in Japanese and
+written in Japanese. So two languages of one book are two crawls, and
+`data/chapters/` is shared with nothing — the stages above are
+adapter-independent because they do not *read* the adapter, not because a
+corpus is shared between languages.
+
+The rule is why a worker is held to a language at all: an engine that cannot
+voice the adapter's language is a mismatch rather than a setting, and nothing
+declares that yet. A *translating* adapter — bilingual prompts, one corpus
+feeding both sides — is a third shape, future work, and deliberately not
+designed here.
 
 The adapter is therefore **bound to a pack** — `xianxia-en-US`, not `en-US` —
 because its prompts carry the genre's register the way the pack carries its
@@ -325,9 +333,10 @@ to:
 
 - **`en-US` reads English; it does not translate.** Chapter text, `mentions`
   keys, segment text and title are all English, and nothing in either prompt is
-  bilingual. The adapter that translates is a different adapter — and one that
-  reads this same corpus on both sides, which is what makes the shared
-  `data/chapters/` above worth having.
+  bilingual. That is the rule and not a property of this pair — the adapter's
+  language *is* the source's language, so a Japanese adapter is crawled and
+  written in Japanese the same way. A translation layer is future work and is
+  not designed here.
 
 The three axes multiply, and the binding already names all three: `xianxia`
 (pack) × `vi` / `en` (adapter) × `vieneu` / `gemini` (engine) covers

@@ -467,13 +467,16 @@ stage needs to know which side of it it is on**:
 * **`digest` onward is per-adapter.** The prompts *are* the adapter, and so are
   the artifacts they produce: the cast, the segment text, the segment cache.
 
-That is a statement about the code, not a promise that one corpus serves two
-languages: a book whose English edition is crawled from an English site has a
-different source for it, and then the two editions share nothing at all. Where
-they *do* share, `data/chapters/` is the shared piece and nothing downstream of
-it is. `Layout::prompt()` and `script_prompt()` follow the same rule — the
-workspace's adapter tree when it has one, the checkout's otherwise, which is why
-a box can be sent a language it can act on (see [PROFILES.md](PROFILES.md)).
+That is a statement about the code, and it pairs with the rule that keeps it
+tractable: **an adapter has one language, and it is both the source's and the
+target's.** Nothing translates — an English adapter is crawled in English and
+written in English — so two languages of one book are two crawls, and
+`data/chapters/` is shared with nothing. A translating adapter would be a third
+shape, bilingual in its prompts with one corpus feeding both sides, and is
+deliberately not designed. `Layout::prompt()` and `script_prompt()` follow the
+same rule — the workspace's adapter tree when it has one, the checkout's
+otherwise, which is why a box can be sent a language it can act on (see
+[PROFILES.md](PROFILES.md)).
 
 Which is why the caches are keyed the way they are:
 `Layout::cast(engine)` is `data/cast-<adapter>-<engine>.json` and
