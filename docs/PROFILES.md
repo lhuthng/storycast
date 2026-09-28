@@ -23,9 +23,11 @@ So a profile is now three pieces, each named and recorded separately:
 | **Adapter** | The language: the prompts a stage renders from **and the crawlers it is read with** | You, or a shipped bundle |
 | **Engine** | The voices: the weights, the binary, the voice store | Code — a new engine is a port |
 
-**Not yet in the tree.** The crawler column above is the designed shape, not the
-current one: `crawl/` still sits under `assets/` and `LIVE_DIRS` is still two
-names. [ASSETS.md](ASSETS.md) carries the plan and the migration.
+**In the tree.** The root's flat `prompts/` and the pack's `assets/crawl/` were
+moved into `adapters/vi-VN/` (`Layout::migrate_adapter_tree`, rename-only and
+idempotent), the binding now names the language, and provisioning ships the
+tree as one member. `LIVE_DIRS` is three names. What is left of
+[ASSETS.md](ASSETS.md) is the per-piece release split.
 
 **The payoff.** A second language costs a pair of prompt files and, eventually,
 a second engine — not a second set of music. A second genre costs art and
@@ -243,8 +245,11 @@ language touches Rust; the engine is the only piece that is a software project.
 Where a book splits into languages is worth stating once, because it decides
 which side of the line every future stage belongs on:
 
-- **`crawl` and `prepare` are adapter-independent** — they never read the
-  adapter. The crawled text and the quote split are properties of the *source*.
+- **`crawl` and `prepare` never read the adapter's prompts** — what they read
+  is its *crawlers*, which is the one thing the adapter owns that is not
+  prompt text. The crawled text and the quote split are properties of the
+  *source*, and the source's language is the adapter's, so the site's script
+  belongs to the same piece the prompts do.
 - **`digest` onward is per-adapter.** The prompts *are* the adapter, and so are
   the artifacts they produce: the cast, the segment text, the segment cache.
 

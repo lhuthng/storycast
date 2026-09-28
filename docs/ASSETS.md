@@ -1,13 +1,15 @@
 # Assets: a genre's art, composed, and released
 
-> **Status: composition is built; the other two are not.** `pack.json`, the
-> `_extends/` fold-in, the `_extends.json` record and the `asset resolve` verb
-> all exist — `bm_core::compose` is the one entry point, and `asset resolve
-> --dry-run` reports what it would do. **Not built:** the crawler move (they sit
-> under `assets/crawl/` still, so `LIVE_DIRS` is still `["assets", "prompts"]`)
-> and the per-piece release split (one `profiles/<name>.tar.zst` still carries
-> art and prompts together). *What this breaks* lists what those two must move,
-> and *Releases* is the manifest the split still has to write.
+> **Status: built, except the release split.** `pack.json`, the `_extends/`
+> fold-in, the `_extends.json` record and the `asset resolve` verb all exist —
+> `bm_core::compose` is the one entry point, and `asset resolve --dry-run`
+> reports what it would do. The crawlers left the pack: they and the language's
+> prompts live in `adapters/<name>/`, the binding names the language, the caches
+> were re-keyed for the name it did not have before, and provisioning ships the
+> language as one tree (`.gitignore`'s un-ignore chain for the bundled templates
+> moved with them). **Not built:** the per-piece release split — one
+> `profiles/<name>.tar.zst` still carries art and prompts together. *Releases* is
+> the manifest that split still has to write.
 
 ## In plain words
 
