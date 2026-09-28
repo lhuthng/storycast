@@ -16,6 +16,7 @@ mod picker;
 mod policy;
 mod run;
 pub(crate) mod runconfig;
+pub(crate) mod script;
 pub(crate) mod sound;
 pub(crate) mod submit;
 mod tasks;
@@ -191,6 +192,16 @@ fn is_layer(screen: &Screen) -> bool {
     )
 }
 
+/// The `:`-opened windows that are a *step*, not a floor. They behave like
+/// the sound editor's own layers: `Esc` closes them to the screen they were
+/// opened from, so `:script` from Normal goes back to Normal, but the two
+/// Escs *inside* the window are its own before that. Kept out of
+/// [`is_layer`] on purpose: they are not drawn over another screen, and the
+/// `:`-return logic would double-unwrap them.
+fn is_place_with_exit(screen: &Screen) -> bool {
+    matches!(screen, Screen::Script(_) | Screen::Sound(_) | Screen::Digest(_))
+}
+
 /// Remember where a layer was opened over, once the key that opened it has run.
 ///
 /// **After the handler, not before**, because only the handler knows whether
@@ -207,7 +218,10 @@ fn note_layer(app: &mut App, before: Screen, code: KeyCode) {
     // would raise its confirmation over a prompt that is no longer on screen,
     // and cancelling it would bring the dead prompt back.
     if let Some(parent) = app.prompt_spent.take() {
-        if is_layer(&after) {
+        if is_layer(&after) || is_place_with_exit(&after) {
+            // A layer sits over `parent`; a `:`-opened window with its own
+            // internal Esc ladder closes to `parent` when its ladder runs
+            // out. Same entry shape, same one-`back_out` exit.
             app.back.push(parent);
         } else {
             // The command left a place screen on top: the prompt is gone, and
@@ -286,6 +300,9 @@ pub(crate) async fn route(
     }
     if let Screen::Digest(view) = app.screen.clone() {
         return digest::key_digest(app, view, key, http, job_tx).await;
+    }
+    if let Screen::Script(view) = app.screen.clone() {
+        return script::key_script(app, view, key, http, job_tx).await;
     }
     if let Screen::Llm(view) = app.screen.clone() {
         return llm::key_llm(app, view, key, http, job_tx).await;

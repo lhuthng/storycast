@@ -699,6 +699,15 @@ recipe: what you changed, what to press, and why the press is needed.
 
 ### A segment is attributed to the wrong character
 
+Prefer `:script` — the guided route. It lists every digested chapter, opens
+one to show each segment with its speaker and the opening of the sentence,
+and `s` on a row opens a type-ahead speaker picker: the chapter's own roster
+first, then everyone else alphabetically, PgUp/PgDn to page, Enter to
+re-point. The segment number and the expected speaker travel with the
+request, so the command below is what it runs — no counting lines by hand.
+
+Or type it directly:
+
 ```
 :speaker 18 67 "Thanh Sơn lão tổ" "Dịch Phong"
 ```

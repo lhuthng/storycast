@@ -1,4 +1,5 @@
 //! Screens: the modal states the key chain and the painter agree on.
+use crate::tui::app::App;
 use crate::tui::audition::AuditionLine;
 use crate::tui::model::Facet;
 use crate::tui::sound::SoundView;
@@ -452,6 +453,225 @@ impl CastView {
     }
 }
 
+/// One segment of a script, as the inspection window shows it.
+///
+/// `n` is the **1-based** segment number — the same number `op_fix_speaker`
+/// takes and the number the refusal message names, so a row on screen, the
+/// number in the status line and the number in an error are all one count.
+/// `speaker` is empty for a sound item, which is drawn dimmed with its tag.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScriptSegment {
+    pub(crate) n: usize,
+    pub(crate) speaker: String,
+    pub(crate) text: String,
+}
+
+/// The script inspection window: the digested chapters as a list, one open
+/// chapter's segments beside their speakers, and `s` to re-point a segment.
+///
+/// Shaped like the digest manager on purpose — one view, two modes — so
+/// `Esc` has exactly one meaning (step back) in both. Segments are read
+/// from disk on open, not kept warm: a chapter is a hundred-odd rows, the
+/// read is microseconds, and a warm cache would lie the moment a digest or
+/// an edit rewrote the file underneath it.
+#[derive(Debug, Clone)]
+pub(crate) struct ScriptView {
+    /// Every chapter with a script on disk, ascending.
+    pub(crate) chapters: Vec<u32>,
+    pub(crate) cursor: usize,
+    /// The chapter whose segments are open, if any.
+    pub(crate) open: Option<u32>,
+    /// The open chapter's segments, read when it was opened.
+    pub(crate) segments: Vec<ScriptSegment>,
+    /// The segment cursor: which row `s` would re-point.
+    pub(crate) seg_cursor: usize,
+    /// The speaker picker (`s`): type-ahead filter, cursor, and the row it
+    /// was opened on. `None` while the segments are the active list.
+    pub(crate) pick: Option<ScriptPick>,
+    /// Filter text over the chapter list.
+    pub(crate) filter: String,
+}
+
+/// A speaker being picked for one segment.
+#[derive(Debug, Clone)]
+pub(crate) struct ScriptPick {
+    /// The segment the pick is for (1-based). Carried so the header can
+    /// name what is being re-pointed while the list scrolls under it.
+    pub(crate) segment: usize,
+    /// Who the segment speaks as now — `Enter` on them is a no-op, and
+    /// `expect` is the check the op runs.
+    pub(crate) expect: String,
+    pub(crate) filter: String,
+    pub(crate) cursor: usize,
+    pub(crate) scroll: usize,
+    /// The open chapter's roster, read when the pick was opened. The
+    /// suggestion list's prefix and the drawn rows' "(this chapter)" tag
+    /// both read this, so the two can never disagree about who is local.
+    pub(crate) roster_cache: Vec<String>,
+}
+
+impl ScriptPick {
+    /// Visible at once. Five, like the model list on the LLM screen: a
+    /// whole-cast list is hundreds of names, and the cursor scrolls the
+    /// window rather than growing the box.
+    pub(crate) const SHOW: usize = 5;
+}
+
+impl ScriptView {
+    /// Open on the chapters that have scripts — `Layout::script_chapters`,
+    /// the same scan the audition index and the reconcile pass use.
+    pub(crate) fn new(layout: &bm_core::Layout) -> Self {
+        ScriptView {
+            chapters: layout.script_chapters(),
+            cursor: 0,
+            open: None,
+            segments: Vec::new(),
+            seg_cursor: 0,
+            pick: None,
+            filter: String::new(),
+        }
+    }
+
+    /// The chapter rows actually drawn: the filter applies here, and the
+    /// cursor indexes this list rather than `chapters` — otherwise filtering
+    /// would leave the highlight on a chapter the operator did not choose.
+    pub(crate) fn rows(&self) -> Vec<u32> {
+        self.chapters
+            .iter()
+            .copied()
+            .filter(|n| {
+                self.filter.is_empty()
+                    || format!("{n}").contains(&self.filter)
+            })
+            .collect()
+    }
+
+    /// The chapter under the list cursor.
+    pub(crate) fn selected(&self) -> Option<u32> {
+        self.rows().get(self.cursor).copied()
+    }
+
+    /// Read one chapter's segments off disk, newest file wins. Sound items
+    /// (no `speaker`) are kept as rows with an empty speaker so the numbers
+    /// on screen stay the numbers the op takes — hiding them would renumber
+    /// every row below a sound, and a re-point aimed from this window must
+    /// never be off by the number of sound items above it.
+    pub(crate) fn read_segments(&self, layout: &bm_core::Layout, chapter: u32) -> Vec<ScriptSegment> {
+        let Ok(data) = bm_core::read_json::<serde_json::Value>(&layout.script(chapter)) else {
+            return Vec::new();
+        };
+        data.get("segments")
+            .and_then(|s| s.as_array())
+            .map(|segments| {
+                segments
+                    .iter()
+                    .enumerate()
+                    .map(|(i, seg)| ScriptSegment {
+                        n: i + 1,
+                        speaker: seg
+                            .get("speaker")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string(),
+                        text: seg
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The speaker suggestions for the open pick: the open chapter's own
+    /// roster first (the digest's answer to "who is here"), then every other
+    /// known speaker alphabetically. Fold-folded so "thai son" finds
+    /// "Thái Sơn" the way the picker's filter does — and deduped the same
+    /// way, so a name the roster holds is never offered twice.
+    ///
+    /// Reads the chapter's script once per call (a keystroke in the picker,
+    /// not a frame): a digest finishing between two keystrokes is picked up
+    /// on the next one, which is the freshness a cached list would hide.
+    pub(crate) fn suggestions(&self, app: &App, pick: &ScriptPick) -> Vec<String> {
+        let fold = |s: &str| bm_core::util::fold(s);
+        let want = fold(&pick.filter);
+        let mut out: Vec<String> = Vec::new();
+        let push = |name: String, out: &mut Vec<String>| {
+            if name.trim().is_empty() || out.iter().any(|n| fold(n) == fold(&name)) {
+                return;
+            }
+            if !want.is_empty() && !fold(&name).contains(&want) {
+                return;
+            }
+            out.push(name);
+        };
+        for name in &pick.roster_cache {
+            push(name.clone(), &mut out);
+        }
+        // The rest of the universe, alphabetically — the roster block stays
+        // first because it is pushed before this walk, and the fold is what
+        // "alphabetical" means for accented names.
+        let mut others: Vec<String> = crate::tui::screen::known_speakers(app);
+        others.sort_by(|a, b| fold(a).cmp(&fold(b)).then_with(|| a.cmp(b)));
+        for name in others {
+            push(name, &mut out);
+        }
+        out
+    }
+}
+
+/// Every speaker the TUI knows about, folded into one sorted list: the
+/// roster's characters (`Narrator` included), then any speaker a script
+/// names — the picker's own universe, shared with the segment window's
+/// suggestions. The inductor's `known_characters` computed over the files
+/// it owns; here, over what the TUI has already fetched plus the scripts
+/// on disk, because the TUI may be running while the inductor is not.
+pub(crate) fn known_speakers(app: &App) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut set: BTreeSet<String> = BTreeSet::new();
+    if let Some(r) = &app.roster {
+        set.extend(r.characters.iter().cloned());
+    }
+    if app.layout.root.as_os_str().is_empty() {
+        return set.into_iter().collect();
+    }
+    let bible = bm_core::digest::load_bible(&app.layout.bible());
+    if let Some(chars) = bible.get("characters").and_then(|c| c.as_array()) {
+        for c in chars {
+            if let Some(n) = c.get("name").and_then(|n| n.as_str()) {
+                if !n.trim().is_empty() {
+                    set.insert(n.to_string());
+                }
+            }
+        }
+    }
+    for sp in app.layout.scripts() {
+        let Ok(data) = bm_core::read_json::<serde_json::Value>(&sp) else {
+            continue;
+        };
+        if let Some(list) = data.get("roster").and_then(|r| r.as_array()) {
+            for n in list.iter().filter_map(|v| v.as_str()) {
+                if !n.trim().is_empty() {
+                    set.insert(n.to_string());
+                }
+            }
+        }
+        if let Some(segs) = data.get("segments").and_then(|s| s.as_array()) {
+            for seg in segs {
+                if let Some(n) = seg.get("speaker").and_then(|v| v.as_str()) {
+                    if !n.trim().is_empty() {
+                        set.insert(n.to_string());
+                    }
+                }
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
 /// The Cloud view: what the EC2 account holds, one row per instance.
 ///
 /// Kept separate from the Machines pane on purpose. A `Machine` is a *linked*
@@ -548,6 +768,9 @@ pub(crate) enum Screen {
     Policy(PolicyView),
     /// The digest manager: every chapter, and a manual two-round digest for one.
     Digest(DigestView),
+    /// The script inspection window: digested chapters, one open chapter's
+    /// segments with their speakers, `s` to re-point one. `:script` opens it.
+    Script(ScriptView),
     /// What the crawl settings actually are, this book's links, the crawlers
     /// on this machine, and the sites we know. Scroll only.
     Crawl {

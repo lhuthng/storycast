@@ -80,6 +80,12 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         ),
         ("D / :digest", "digest manager: every chapter, manual digest by clipboard"),
         (
+            ":script",
+            "script inspection: every digested chapter, its segments with their speakers, and `s` to \
+             re-point one — the guided form of :speaker. The suggestion list puts the chapter's own \
+             roster first, then everyone else alphabetically; type to filter, PgUp/PgDn to page",
+        ),
+        (
             "L / :llm",
             "LLM providers: add a key, set the endpoint and model, switch the \
              active one. The next offer carries the active key+model, so this \

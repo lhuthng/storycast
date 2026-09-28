@@ -8202,3 +8202,158 @@ fn the_cast_table_names_only_what_it_shows() {
         "…and the problems are still counted:\n{text}"
     );
 }
+
+#[tokio::test]
+async fn the_script_window_suggests_the_chapter_roster_first_then_alphabet() {
+    // The picker's ordering rule, pinned: the open chapter's own roster is
+    // the prefix, everything else follows folded-alphabetically, and a name
+    // the roster holds is never offered twice.
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    let dir = tempfile::tempdir().unwrap();
+    app.layout.root = dir.path().to_path_buf();
+    app.layout.ensure().unwrap();
+    std::fs::create_dir_all(app.layout.script_dir()).unwrap();
+    // The script carries a roster that is a *subset* of who actually speaks:
+    // "Lan" is in the segments but missing from the roster array — the shape
+    // a hand-edited or half-migrated chapter has. The universe must still
+    // find her.
+    std::fs::write(
+        app.layout.script(7),
+        r#"{"roster":["Mai","Narrator"],"segments":[
+            {"speaker":"Mai","text":"Hi."},
+            {"speaker":"Lan","text":"Chào."}]}"#,
+    )
+    .unwrap();
+
+    let mut v = ScriptView::new(&app.layout);
+    v.open = Some(7);
+    v.segments = v.read_segments(&app.layout, 7);
+    let pick = ScriptPick {
+        segment: 1,
+        expect: "Mai".into(),
+        filter: String::new(),
+        cursor: 0,
+        scroll: 0,
+        // The roster cache is what `s` fills from the open chapter's file.
+        roster_cache: vec!["Mai".into(), "Narrator".into()],
+    };
+    let out = v.suggestions(&app, &pick);
+    assert_eq!(
+        out.iter().take(2).collect::<Vec<_>>(),
+        vec!["Mai", "Narrator"],
+        "the chapter's roster first: {out:?}"
+    );
+    // The universe beyond the roster: "Lan" joins because the script's
+    // *segments* name her — a speaker the window is showing but the roster
+    // forgot is exactly who a fix needs. "Mai" and "Narrator" are not
+    // re-offered (fold-deduped).
+    assert_eq!(
+        out.iter().skip(2).collect::<Vec<_>>(),
+        vec!["Lan"],
+        "segment speakers join, roster names never duplicate: {out:?}"
+    );
+    // Typing narrows without dropping the ordering rule.
+    let filtered = v.suggestions(
+        &app,
+        &ScriptPick {
+            filter: "mai".into(),
+            ..pick.clone()
+        },
+    );
+    assert_eq!(filtered, vec!["Mai"], "{filtered:?}");
+    let _ = job_tx;
+}
+
+#[tokio::test]
+async fn the_script_window_walks_a_chapter_and_repoints_a_segment() {
+    // The full ladder with keys: open the window, filter to a chapter,
+    // Enter, move down a row, `s`, type to filter, Enter — and the request
+    // that lands carries the segment number, the *expected* current
+    // speaker, and the chosen one. That expect is the feature: it is the
+    // guard `op_fix_speaker` checks, so a stale screen refuses instead of
+    // mis-editing.
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    let dir = tempfile::tempdir().unwrap();
+    app.layout.root = dir.path().to_path_buf();
+    app.layout.ensure().unwrap();
+    std::fs::write(app.layout.bible(), r#"{"characters":[]}"#).unwrap();
+    std::fs::create_dir_all(app.layout.script_dir()).unwrap();
+    std::fs::write(
+        app.layout.script(12),
+        r#"{"roster":["Lan"],"segments":[
+            {"speaker":"Narrator","text":"Trời hôm nay đẹp."},
+            {"speaker":"Lan","text":"Chúng ta đi thôi."}]}"#,
+    )
+    .unwrap();
+
+    // `:script` opens the window.
+    handle_key(&mut app, key(KeyCode::Char(':')), &http, &job_tx).await;
+    for c in "script".chars() {
+        handle_key(&mut app, key(KeyCode::Char(c)), &http, &job_tx).await;
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Script(_)), "{:?}", app.screen);
+
+    // Filter `12`, Enter opens chapter 12.
+    handle_key(&mut app, key(KeyCode::Char('1')), &http, &job_tx).await;
+    handle_key(&mut app, key(KeyCode::Char('2')), &http, &job_tx).await;
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    let Screen::Script(v) = app.screen.clone() else {
+        panic!("{:?}", app.screen)
+    };
+    assert_eq!(v.open, Some(12));
+    assert_eq!(v.segments.len(), 2);
+
+    // Down to segment 2 (Lan), `s` opens the picker.
+    handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
+    handle_key(&mut app, key(KeyCode::Char('s')), &http, &job_tx).await;
+    let Screen::Script(v) = app.screen.clone() else {
+        panic!("{:?}", app.screen)
+    };
+    let pick = v.pick.as_ref().expect("the picker is up");
+    assert_eq!(pick.segment, 2);
+    assert_eq!(pick.expect, "Lan", "the guard rides with the request");
+
+    // Type "narr", the roster's Narrator is first so the cursor is on it.
+    for c in "narr".chars() {
+        handle_key(&mut app, key(KeyCode::Char(c)), &http, &job_tx).await;
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+
+    // The dispatched op is the same one `:speaker 12 2 Lan Narrator` runs;
+    // it arrives wrapped (`Job::Tracked`), so unwrap the tracking first.
+    let req = match job_rx.try_recv() {
+        Ok(crate::tui::jobs::Job::Tracked { job, .. }) => match *job {
+            crate::tui::jobs::Job::Op { req, .. } => req,
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(req.op, bm_proto::Op::FixSpeaker);
+    assert_eq!(req.chapter, Some(12));
+    assert_eq!(req.segment, Some(2));
+    assert_eq!(req.expect.as_deref(), Some("Lan"));
+    assert_eq!(req.speaker.as_deref(), Some("Narrator"));
+
+    // And the picker closed back onto the segments.
+    let Screen::Script(v) = app.screen.clone() else {
+        panic!("{:?}", app.screen)
+    };
+    assert!(v.pick.is_none(), "{:?}", v.pick);
+
+    // Esc steps back: segments, then the list, then gone.
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    let Screen::Script(v) = app.screen.clone() else {
+        panic!("{:?}", app.screen)
+    };
+    assert!(v.open.is_none(), "first Esc leaves the chapter");
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Normal),
+        "second Esc closes the window: {:?}",
+        app.screen
+    );
+}

@@ -111,12 +111,12 @@ pub(crate) const COMPACT_FOOTER_H: u16 = 4;
 // remain in full on the help screen, which is what `?` opens.
 pub(crate) const KEYS_FULL: [&str; 2] = [
     "Tab jobs · K tasks · i inspect · P policy · z park · D digest · c crawl · R run · S cast · L llm",
-    ":add :prov :drop :translate :crawl :retry :m :backend :stop :swap :voices · M mouse · r · ? · q",
+    ":add :prov :drop :translate :crawl :retry :script :speaker :m :backend :stop · M mouse · ? q",
 ];
 
 pub(crate) const KEYS_COMPACT: [&str; 2] = [
     "Tab jobs · K tasks · i inspect · P policy · z park · R run · S cast · L llm",
-    ":add :prov :drop :translate :crawl :stop :retry :swap :voices · M copy · ? q",
+    ":add :prov :translate :stop :retry :script :swap · M copy · ? q",
 ];
 
 /// Compact-tier column widths. The full tier has slack and keeps its widths
