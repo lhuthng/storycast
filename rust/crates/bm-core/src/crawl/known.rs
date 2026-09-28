@@ -75,7 +75,13 @@ pub struct KnownSite {
 
 /// The bundled Storya path. **Not a default** — see
 /// [`crate::crawl::DEFAULT_SCRIPT`], which is what this is for.
-const STORYA: &str = "assets/crawl/templates/storya.lua";
+///
+/// Relative to the **language's home**, not to the checkout: a crawler is one
+/// site read in one language, so `crawl/templates/…` is where it lives —
+/// `adapters/vi-VN/crawl/templates/…` once a checkout has an adapter bundle, and
+/// `assets/crawl/templates/…` while it still has the pre-split flat tree, which
+/// is why the same spelling resolves in both.
+const STORYA: &str = "crawl/templates/storya.lua";
 
 /// Every site this project has verified, in the order a reader should meet them:
 /// the one that works out of the box, then the shapes worth learning from.
@@ -96,7 +102,7 @@ pub fn known_sites() -> &'static [KnownSite] {
         },
         KnownSite {
             host: "truyencom.com",
-            script: "assets/crawl/templates/truyencom.lua",
+            script: "crawl/templates/truyencom.lua",
             params: &[],
             url_template: "https://truyencom.com/{book}/chuong-{n}.html",
             max_fetches: 64,
@@ -107,7 +113,7 @@ pub fn known_sites() -> &'static [KnownSite] {
         },
         KnownSite {
             host: "readnovelfull.com",
-            script: "assets/crawl/templates/readnovelfull.lua",
+            script: "crawl/templates/readnovelfull.lua",
             params: &[(
                 "book",
                 "https://readnovelfull.com/the-sword-god-of-the-universe.html",
@@ -126,7 +132,7 @@ pub fn known_sites() -> &'static [KnownSite] {
         },
         KnownSite {
             host: "webnovel.com",
-            script: "assets/crawl/templates/webnovel.lua",
+            script: "crawl/templates/webnovel.lua",
             params: &[(
                 "book",
                 "https://www.webnovel.com/book/tu-chan-lieu-thien-quan_13320161405417805",
@@ -442,19 +448,24 @@ mod tests {
         // A registry that names a file we do not ship is worse than no registry:
         // it is a confident answer that fails at the moment it is trusted.
         //
-        // Reading the repo's own `assets/crawl/templates/` is the point, not a
-        // shortcut: that directory is **tracked** (see `.gitignore`, which
-        // excludes the rest of the live profile tree and un-ignores this one
-        // directory), so this test passes on a fresh clone with no profile
-        // fetched. It did not always — while the whole of `assets/` was
-        // ignored, this passed only on machines that had fetched a profile, and
-        // a clone could not crawl at all without failing silently.
-        let root = format!("{}/../../../assets", env!("CARGO_MANIFEST_DIR"));
+        // Reading the repo's own `adapters/vi-VN/crawl/templates/` is the point,
+        // not a shortcut: that directory is **tracked** (see `.gitignore`, which
+        // excludes the rest of the live tree and un-ignores this one directory),
+        // so this test passes on a fresh clone with no release fetched. It did
+        // not always — while the whole of `assets/` was ignored, this passed only
+        // on machines that had fetched a profile, and a clone could not crawl at
+        // all without failing silently.
+        //
+        // `vi-VN` is named because that is the language these templates are
+        // written for. The names they are configured under are relative to it
+        // (`crawl/templates/…`) and resolve through a checkout's adapter home,
+        // which is why the check has to look in that home.
+        let root = format!("{}/../../../adapters/vi-VN", env!("CARGO_MANIFEST_DIR"));
         for site in known_sites() {
             if !site.is_crawlable() {
                 continue;
             }
-            let path = format!("{root}/{}", site.script.strip_prefix("assets/").unwrap());
+            let path = format!("{root}/{}", site.script);
             assert!(
                 std::path::Path::new(&path).is_file(),
                 "{} names a script that is not there: {path}",
@@ -464,12 +475,7 @@ mod tests {
         // The one every workspace leans on: `DEFAULT_SCRIPT` is what a settings
         // file with no `crawl` block deserializes to, so a missing file here is
         // not one site's problem, it is every uncloned book's.
-        let default = format!(
-            "{root}/{}",
-            crate::crawl::DEFAULT_SCRIPT
-                .strip_prefix("assets/")
-                .unwrap()
-        );
+        let default = format!("{root}/{}", crate::crawl::DEFAULT_SCRIPT);
         assert!(
             std::path::Path::new(&default).is_file(),
             "the default crawler is not there: {default}"

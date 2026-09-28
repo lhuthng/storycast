@@ -180,7 +180,7 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                         } else {
                             format!(
                                 "{} is known and we have no crawler for it: {}. Pick another site, \
-                                 or write one against assets/crawl/templates/truyencom.lua.",
+                                 or write one against crawl/templates/truyencom.lua.",
                                 site.host,
                                 site.caveat.unwrap_or("nothing on file")
                             )

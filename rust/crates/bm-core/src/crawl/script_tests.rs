@@ -239,14 +239,16 @@ fn site_golden(name: &str) -> String {
 /// The two templates, read from the repo rather than inlined: these tests are
 /// the gate for those *files*, so reading them is the point.
 ///
-/// The directory is tracked (`.gitignore` excludes the rest of the live profile
-/// tree and un-ignores `assets/crawl/templates/`), so these run on a fresh
-/// clone. While the whole of `assets/` was ignored they read machine-local
-/// state, and passed or failed depending on whether somebody had fetched a
-/// profile.
+/// The directory is tracked (`.gitignore` excludes the rest of the live tree and
+/// un-ignores `adapters/vi-VN/crawl/templates/`), so these run on a fresh clone.
+/// While the whole of `assets/` was ignored they read machine-local state, and
+/// passed or failed depending on whether somebody had fetched a profile.
+///
+/// The templates are the **language's** now, so they are read out of the home
+/// those templates belong to rather than out of the pack's old copy.
 fn template(file: &str) -> String {
     std::fs::read_to_string(format!(
-        "{}/../../../assets/crawl/templates/{file}",
+        "{}/../../../adapters/vi-VN/crawl/templates/{file}",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap_or_else(|e| panic!("reading the template {file}: {e}"))
@@ -1003,7 +1005,7 @@ fn spec(engine: &str, name: &str, source: &str) -> CrawlSpec {
 /// the parity gate for that *file*, so reading it is the point.
 fn bundled(file: &str) -> String {
     std::fs::read_to_string(format!(
-        "{}/../../../assets/crawl/templates/{file}",
+        "{}/../../../adapters/vi-VN/crawl/templates/{file}",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap_or_else(|e| panic!("reading the bundled {file}: {e}"))
