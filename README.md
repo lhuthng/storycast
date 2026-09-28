@@ -467,8 +467,22 @@ make tui
 | **r** / **?** / **C** / **q** | Refresh, help, theme, quit |
 
 `:` + `B` with no machines is a local-only cluster, the easy first run. Ledger
-(`K`): move, type to filter (`shelved`, `digest`, `42`), `u` retry / `F` force,
-`Enter` full error, `Esc`/`q` close.
+(`K`): move, type to filter (`shelved`, `digest`, `42`), `←/→` step a facet bar
+(stage, `queued`, `active`, `done`, `shelved`, `failed`, `abandoned`) that
+composes with the typed filter, `u` retry / `F` force, `Enter` full error,
+`x`/`X` release the row off its worker, `W` everything one box holds, `A`
+requeue every assignment whose worker went quiet, `Ctrl-U` clear both halves
+of the narrowing, `Esc`/`q` close.
+
+**`Esc` goes back exactly one step, and the dashboard is the floor.** Screens
+come in two kinds. A *layer* (a confirmation, the `:` line, the voice picker)
+is drawn over another screen, and `Esc` returns to the one that raised it — a
+dialog asked from the ledger answers back to the ledger. Layers nest, so
+`Cast → picker → dialog` unwinds in three presses. A *place* (the dashboard,
+the ledger, the cast table, the sound editor) has the dashboard under it, and
+`Esc` closes it there. `Tab` opens the jobs view from any screen that has not
+spent the key on tabs of its own, and comes back to the screen it was pressed
+on.
 
 **Background jobs run together unless they contend.** Two provisions: parallel.
 Two `aws` commands: serial (same account document). A waiting row says why:

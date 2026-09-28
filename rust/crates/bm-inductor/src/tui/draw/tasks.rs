@@ -247,7 +247,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
         // be the reason the list is empty and the operator is looking at the
         // one they set three keypresses ago.
         if view.facet != Facet::All {
-            why.push("←→ steps the facet · Tab clears both the facet and the filter".into());
+            why.push("←→ steps the facet · Ctrl-U clears both the facet and the filter".into());
         } else {
             why.push("Backspace widens the filter · Ctrl-U clears it".into());
         }
@@ -364,7 +364,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
         vec![
             Line::from(Span::styled("Esc or q closes", dim)),
             Line::from(Span::styled(
-                "←→ facet · Backspace widens the filter · Tab clears both",
+                "←→ facet · Backspace widens the filter · Ctrl-U clears both",
                 dim,
             )),
         ]

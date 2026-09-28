@@ -228,8 +228,13 @@ pub(crate) async fn key_confirm(
                 }
             }
         }
+        // Back to whatever raised the dialog, not to the dashboard. Every
+        // caller that answers `y` returns to its own screen (the sound editor
+        // to its tab, `W` to the ledger), and answering `n` has to land in the
+        // same place — otherwise the two answers to one question leave the
+        // operator in two different rooms.
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-            app.screen = Screen::Normal;
+            app.screen = app.back_out();
             app.set_status(Level::Info, "cancelled — nothing changed");
         }
         _ => {}

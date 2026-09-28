@@ -151,12 +151,23 @@ pub(crate) async fn key_tasks(
             }
             None => app.set_status(Level::Warn, "no task selected"),
         },
-        // Ctrl-U clears the filter, so a Ctrl chord must never be read as a
-        // plain `u` — that would re-queue a task while clearing the filter.
+        // Ctrl-U widens: chips off, text cleared, cursor home — both halves of
+        // the narrowing in one keypress, which is the way back to the whole
+        // ledger without stepping the cycle eleven times or holding Backspace
+        // down. It used to clear only the filter, with `Tab` clearing both,
+        // which is how this one screen came to disagree with every other screen
+        // about what `Tab` means. The footer says jobs, so Tab is jobs now, and
+        // the widening happens here.
+        //
+        // A Ctrl chord must never be read as a plain `u`: that would re-queue a
+        // task while widening the list.
         KeyCode::Char(c) if ctrl && c == 'u' => {
             v.filter.clear();
+            v.facet = Facet::All;
             v.cursor = 0;
             v.scroll = 0;
+            let note = facet_note(app, &v.filter, v.facet, &live);
+            app.set_status(Level::Info, format!("widened — {note}"));
             app.screen = Screen::Tasks(v);
         }
         KeyCode::Char(_) if ctrl => {}
@@ -294,18 +305,6 @@ pub(crate) async fn key_tasks(
             v.filter.pop();
             v.cursor = 0;
             v.scroll = 0;
-            app.screen = Screen::Tasks(v);
-        }
-        KeyCode::Tab => {
-            // Tab widens: chips off, text cleared. The way back to the whole
-            // ledger without stepping the cycle eleven times or holding
-            // Backspace down.
-            v.facet = Facet::All;
-            v.filter.clear();
-            v.cursor = 0;
-            v.scroll = 0;
-            let note = facet_note(app, &v.filter, v.facet, &live);
-            app.set_status(Level::Info, format!("widened — {note}"));
             app.screen = Screen::Tasks(v);
         }
         KeyCode::Char(c) if !alt => {

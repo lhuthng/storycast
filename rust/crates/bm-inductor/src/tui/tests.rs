@@ -3087,14 +3087,218 @@ async fn the_arrow_keys_step_the_facet_and_the_bar_shows_where_it_is() {
         other => panic!("{other:?}"),
     }
     handle_key(&mut app, key(KeyCode::Right), &http, &job_tx).await;
-    handle_key(&mut app, key(KeyCode::Tab), &http, &job_tx).await;
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        &http,
+        &job_tx,
+    )
+    .await;
     match &app.screen {
         Screen::Tasks(v) => {
-            assert_eq!(v.facet, Facet::All, "Tab is the way back to everything");
+            assert_eq!(v.facet, Facet::All, "Ctrl-U is the way back to everything");
             assert!(v.filter.is_empty());
         }
         other => panic!("{other:?}"),
     }
+    // Tab is not this screen's to spend any more: it opens the jobs view — the
+    // key the footer advertises — and comes back to the ledger with the cursor
+    // and the facet where they were.
+    handle_key(&mut app, key(KeyCode::Tab), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Jobs { .. }),
+        "{:?}",
+        app.screen
+    );
+    handle_key(&mut app, key(KeyCode::Tab), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Tasks(_)), "{:?}", app.screen);
+}
+
+/// A `:` line, one keypress at a time, then Enter on it.
+async fn type_command(app: &mut App, http: &reqwest::Client, job_tx: &tokio::sync::mpsc::UnboundedSender<Job>, word: &str) {
+    handle_key(app, key(KeyCode::Char(':')), http, job_tx).await;
+    for c in word.chars() {
+        handle_key(app, key(KeyCode::Char(c)), http, job_tx).await;
+    }
+    handle_key(app, key(KeyCode::Enter), http, job_tx).await;
+}
+
+#[tokio::test]
+async fn a_dialog_answers_back_to_the_screen_that_asked() {
+    // `W` on the ledger: everything one box holds goes back to the pool, behind
+    // one question. Answering `n` used to drop the operator on the dashboard
+    // with the rows they were reading gone — at the exact moment those rows are
+    // the thing worth watching.
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let (mut app, _live) = ledger_with_a_silent_box();
+    app.screen = Screen::Tasks(TasksView::new());
+
+    handle_key(&mut app, key(KeyCode::Char('W')), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Confirm(_)), "{:?}", app.screen);
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Tasks(_)),
+        "Esc from the dialog lands on the ledger it was asked from: {:?}",
+        app.screen
+    );
+    // Not a one-way door: the ledger still closes to the dashboard.
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+}
+
+#[tokio::test]
+async fn the_command_line_comes_back_to_the_screen_it_was_typed_in() {
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.screen = Screen::Cast(CastView::new());
+
+    handle_key(&mut app, key(KeyCode::Char(':')), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Text(_)), "{:?}", app.screen);
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Cast(_)),
+        "a `:` typed on the cast table cancels back to it: {:?}",
+        app.screen
+    );
+}
+
+#[tokio::test]
+async fn a_command_that_raises_a_dialog_never_reopens_the_prompt_under_it() {
+    // `:rerender` asks first. That question belongs over the dashboard — the
+    // screen the command ran in — not over a `:` line that has already been
+    // answered, which is what cancelling it used to bring back.
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+
+    type_command(&mut app, &http, &job_tx, "rerender").await;
+    assert!(matches!(app.screen, Screen::Confirm(_)), "{:?}", app.screen);
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Normal),
+        "the cancelled dialog lands on the dashboard, not on a spent prompt: {:?}",
+        app.screen
+    );
+}
+
+#[tokio::test]
+async fn esc_walks_a_stack_of_layers_down_one_at_a_time() {
+    // Cast → picker → `:` line, all three through the keys that open them, then
+    // three Escs in reverse order. This is the ladder a single saved screen
+    // cannot express, and the one an operator builds without meaning to: start a
+    // swap from the cast table, look up a word on the command line, change your
+    // mind.
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.screen = Screen::Cast(CastView::new());
+
+    type_command(&mut app, &http, &job_tx, "s").await;
+    assert!(matches!(app.screen, Screen::Pick(_)), "{:?}", app.screen);
+    handle_key(&mut app, key(KeyCode::Char(':')), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Text(_)), "{:?}", app.screen);
+
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Pick(_)),
+        "the prompt closes onto the picker, not past it: {:?}",
+        app.screen
+    );
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Cast(_)),
+        "and the picker closes onto the cast table that started it: {:?}",
+        app.screen
+    );
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+}
+
+#[tokio::test]
+async fn the_run_config_editor_closes_back_onto_the_run_screen() {
+    // `e` on the system overview opens a prompt that never recorded where it
+    // came from, so Esc landed on `command_return` — the dashboard, or worse,
+    // whatever screen the last `:` line happened to be typed on.
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.screen = Screen::Run;
+
+    handle_key(&mut app, key(KeyCode::Char('e')), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Text(_)), "{:?}", app.screen);
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Run),
+        "Esc from the config editor lands on the screen that opened it: {:?}",
+        app.screen
+    );
+}
+
+#[tokio::test]
+async fn esc_leaves_the_model_list_before_it_leaves_the_llm_screen() {
+    // The fetched list is a step of the screen, like the picker's step 2: Esc
+    // used to walk out of both at once, losing the provider row underneath.
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    // One provider in `.bm/llm.json`, because an empty roster closes the screen
+    // on any key — there is nothing to come back to.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".bm")).unwrap();
+    std::fs::write(
+        dir.path().join(".bm").join("llm.json"),
+        r#"{"active":"","providers":{"google":{"kind":"gemini",
+           "base_url":"https://generativelanguage.googleapis.com",
+           "api_key":"","model":""}}}"#,
+    )
+    .unwrap();
+    app.layout.root = dir.path().to_path_buf();
+
+    let mut v = LlmView::new();
+    v.picking = true;
+    app.screen = Screen::Llm(v);
+    // The list belongs to the provider it was fetched for, and the screen drops
+    // it on entry when the id does not match — so make it match, exactly as `f`
+    // leaves it.
+    app.llm_models_for = "google".to_string();
+
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Llm(v) => assert!(!v.picking, "the list closed"),
+        other => panic!("{other:?}"),
+    }
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+}
+
+#[tokio::test]
+async fn tab_opens_jobs_from_places_but_never_from_a_dialog() {
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+
+    // A confirmation swallows every press: a Tab that swapped it for the jobs
+    // view would lose the question it was about to ask.
+    app.screen = Screen::Confirm(Confirm::rerender());
+    handle_key(&mut app, key(KeyCode::Tab), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Confirm(_)),
+        "Tab must not answer a dialog: {:?}",
+        app.screen
+    );
+
+    // On a place it is the footer's key again, from anywhere.
+    app.screen = Screen::Digest(DigestView::new(vec![1, 2, 3]));
+    handle_key(&mut app, key(KeyCode::Tab), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Jobs { .. }), "{:?}", app.screen);
+    handle_key(&mut app, key(KeyCode::Tab), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Digest(_)),
+        "Tab comes back to where it was pressed: {:?}",
+        app.screen
+    );
 }
 
 #[tokio::test]
