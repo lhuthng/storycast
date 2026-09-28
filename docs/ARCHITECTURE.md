@@ -243,9 +243,12 @@ both ends.
 ### The profile is the other pointer, and it is checked
 
 `assets/` and `prompts/` are the **profile**: the live, git-ignored set of files
-that decides how your book sounds and how it is dramatized. The file
-`.bm/profile` records which profile that tree claims to be, *and a fingerprint
-(hash) of its contents*.
+that decides how your book sounds and how it is dramatized. They are now two
+named pieces of a three-piece **binding** — the genre's pack, the language's
+adapter, and the voice engine — each with a name and a fingerprint of its own;
+[PROFILES.md](PROFILES.md) is the whole story, and this section is about the
+gate. The file `.bm/profile` records which pieces that tree claims to be, *and
+a fingerprint (hash) of its contents*.
 
 `bm_core::profile::verify` is the gate every program checks before it runs
 anything: the pointer must exist **and** the files on disk must still hash to
@@ -258,6 +261,12 @@ order, and the version that runs in parallel **must produce byte-identical
 output** to the one that runs in sequence: every machine's pointer was computed
 the sequential way, so a different order would look like false "your files have
 drifted" warnings on every machine at once.
+
+Each piece is fingerprinted over its own trees, so an edited prompt moves the
+adapter and leaves the pack alone. The engine is the exception on purpose: its
+files are a gigabyte of weights, so its identity is the name it is bound to
+rather than a digest of its bytes — see
+[PROFILES.md](PROFILES.md#hashing-what-is-hashed-and-what-deliberately-is-not).
 
 This is also why each box's marker records the profile hash it was started for,
 and why `:profile` then `load` is a step you must do before `:up`. A box is a
@@ -447,6 +456,28 @@ of a pipeline where it is expensive to notice.
   inductor itself ships no MP3: the finished file on disk *is* the evidence. A
   merge on a remote machine sends its MP3 home, base64-encoded, inside its
   report.
+
+### The fork line: where a book becomes a language
+
+The stages above are one chain, but the chain has a seam, and **every future
+stage needs to know which side of it it is on**:
+
+* **`crawl` and `prepare` are adapter-independent.** The crawled chapter text and
+  the quote split are properties of the *source*. The same bytes serve every
+  language the book is ever produced in.
+* **`digest` onward is per-adapter.** The prompts *are* the adapter, and for a
+  translating adapter this is more than wording: the `script` stage's segments
+  *become* text in the target language, so the cast and the segment cache are
+  per-adapter artifacts.
+
+Two adapters of one book can therefore share `data/chapters/` and can share
+nothing downstream of it. That is why the caches are keyed the way they are:
+`Layout::cast(engine)` is `data/cast-<adapter>-<engine>.json` and
+`Layout::seg_dir(engine, n)` is `data/audio/segments-<adapter>-<engine>-NN`, so a
+segment directory names its own language instead of relying on the operator to
+remember which one it holds. [PROFILES.md](PROFILES.md#the-caches-what-they-key-on)
+has the split, the engine half of that key, and the one-time rename that carries
+a pre-split cache over rather than re-rendering it.
 
 ## 3. The control API (bm-inductor, axum, default :8901)
 
