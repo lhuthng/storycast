@@ -1,0 +1,310 @@
+# Profiles: a genre, a language and an engine
+
+## In plain words
+
+*You can stop reading after this section.*
+
+A checkout used to be bound to one thing, called a **profile** — `xianxia`.
+That single bundle carried two quite different things: the **art** (the music,
+the sound effects, and the rules for where they go) and the **prompts** (how the
+AI casts a chapter, and how it writes the performance).
+
+Those two only travelled together by accident. The art is about the *genre*: a
+xianxia book wants the same tavern music whether it is read in Vietnamese or in
+English. The prompts are about the *language*: Vietnamese prompts are no use for
+an English performance, and the English ones want a different voice engine
+behind them.
+
+So a profile is now three pieces, each named and recorded separately:
+
+| Piece | What it is | Who makes it |
+| --- | --- | --- |
+| **Pack** | The genre: music, effects, the scene map, crawlers | You, or a shipped bundle |
+| **Adapter** | The language: the prompts a stage renders from | You, or a shipped bundle |
+| **Engine** | The voices: the weights, the binary, the voice store | Code — a new engine is a port |
+
+**The payoff.** A second language costs a pair of prompt files and, eventually,
+a second engine — not a second set of music. A second genre costs art and
+reuses the language you already have. Before the split, either one meant
+copying everything.
+
+## What a profile was
+
+`profile.rs` has always described a profile as two live trees, and that
+constant was the split line before anyone noticed:
+
+```rust
+pub const LIVE_DIRS: [&str; 2] = ["assets", "prompts"];
+```
+
+A profile is `profiles/<name>.tar.zst`: those two trees plus a `manifest.json`
+(`{name, version, files: {path: sha256}}`). The bundle is transfer only — day to
+day the pipeline reads the unpacked tree, so no code path reaches through
+decompression.
+
+"Loaded" was a pointer file, `.bm/profile`, holding `{name, hash}` where `hash`
+is recomputed over the live tree. Anything that runs calls `verify`: a
+hand-edited tree, or one unpacked from a different profile, is *adopted* — the
+pointer is re-stamped and a warning goes out — rather than refused. The live
+tree is the source of truth; `profile pack <name>` is the verb that saves it
+back to a bundle.
+
+## The pieces, measured
+
+| Piece | Trees | Bytes |
+| --- | --- | --- |
+| Pack | `assets/` | **58 MB** |
+| Adapter | `prompts/` | **21 KB** (`analyze.txt` 4,985 + `script.txt` 15,930) |
+| Engine | `models/`, `bm-tts`, `.bm/voices/` | **1.0 GB** |
+
+What each actually holds:
+
+- **Pack** — `music/` (13 beds), `injects/` (+ `inject-pool.json`),
+  `effects/` (+ `effect-pool.json`), `scene-map.json` (rules, palette, layers,
+  pause, reverb, duck), `crawl/` templates, `tag-aliases.json`, `LICENSES.json`.
+  `tag-aliases.json` is the prompt-side synonym table for the closed sound
+  vocabularies, and its values must be canonical palette names — which is why it
+  is pack-side and stays in English.
+- **Adapter** — the two prompt templates. Everything else the adapter will
+  eventually own (a text front end for the language) lives inside the engine's
+  code, not here.
+- **Engine** — `root/models/` (weights, the live voice store `voices.json`, the
+  G2P dictionary `sea_g2p.bin`), `root/bm-tts`, `root/libonnxruntime.so.1`, and
+  `.bm/voices/{refs,samples}` for enrollment. These are named one path at a time
+  by `Layout`; there is no `engines/` directory at the root and the engine name
+  is not on disk, which is why `Binding` carries it.
+
+Two engines are already declared in the compiled catalogue
+(`voices.default.json`, embedded at compile time as `CATALOGUE_JSON`):
+`vieneu` with 23 presets and `gemini` with 17 cloud presets. The engine axis is
+therefore half-built — the catalogue, the paths and `Settings::engine` all speak
+it — and what is missing is the engine's *files* having an identity of their own.
+
+## The binding
+
+`profile::Binding` is three pieces, each a `Pointer { name, hash }`:
+
+```json
+{
+  "pack":    { "name": "xianxia", "hash": "6b8d5fc00761…" },
+  "adapter": { "name": "vi-VN",   "hash": "…" },
+  "engine":  { "name": "vieneu",  "hash": "" }
+}
+```
+
+It is stored in three places, and they must agree:
+
+| Where | What it means | Written by |
+| --- | --- | --- |
+| `.bm/profile` | The load pointer: what this checkout was unpacked from | `profile load`, `verify` |
+| `workspaces/<name>/settings.json` | What this *book* runs under | `workspace new`, stamped from the pointer |
+| The ledger's `"profile"` key | What the existing tasks were created under | Reconcile, on the first run |
+
+The third is the gate. `check_profile` refuses to run a ledger that holds
+another binding's tasks, and it now **names the pieces that moved**, because
+"another profile" sends an operator looking for the wrong thing — a different
+pack or adapter is a re-unpack of files, while a different engine invalidates
+the segment cache and every clip already rendered.
+
+### The shim, and why it is in `Deserialize`
+
+A pre-split document is `{name, hash}`, one hash over `assets/` **plus**
+`prompts/`. Both shapes have to keep parsing, in all three places, so the shim
+lives in `Binding`'s hand-written `Deserialize` rather than at one call site:
+
+- A legacy document becomes `pack`, with the adapter and engine left **unnamed**
+  rather than guessed at. `profile::label` skips unnamed pieces, so a pre-split
+  checkout still reads as plain `xianxia` instead of `xianxia ·  ·  `.
+- The ledger stamp matters most. A derived `Deserialize` would turn an existing
+  `{name, hash}` into an *empty* binding, which reads as "this workspace runs
+  nothing" — and every workspace on disk would trip its own gate on first run.
+  The shim is what makes the split a non-event for existing ledgers.
+
+No per-piece hash can reproduce a hash taken over both trees, so the first
+`verify_binding` re-stamps pack and adapter from disk. That is what `verify` has
+always done on drift.
+
+## Hashing: what is hashed, and what deliberately is not
+
+`hash_files` reads every byte of every file it is given, on as many cores as the
+machine has. That is affordable for the pack and the adapter — 58 MB and 21 KB,
+against the 57 MB the pre-split tree measured at 0.60 s release — and *not*
+affordable for the engine, which is 1.0 GB of weights on every `serve` and
+`worker` start.
+
+So the rule is:
+
+- **Pack and adapter are content-hashed**, each over its own trees. An edited
+  `prompts/analyze.txt` moves the adapter and leaves the pack alone; that
+  property is a test, not a hope, because it is the whole reason for having
+  separate names.
+- **The engine is a declaration, not a digest.** Its identity is its name from
+  `settings.engine` plus, later, the roster it speaks from. `verify_binding`
+  takes the engine name as an argument for exactly this reason.
+
+`verify_binding` still refuses a tree with *both* file-backed halves missing —
+that is a missing unpack — but leaves a piece whose trees are simply absent
+alone, because a checkout that has not split yet has no adapter bundle and that
+is not an error.
+
+## What each piece costs to add
+
+The cost model falls straight out of the table above, and it is not symmetric:
+
+| Adding | Cost |
+| --- | --- |
+| A **genre** | Data. A pack bundle: art, a scene map, crawlers. |
+| A **language** | Data, *plus* prompts authored for that language — and a text front end in the engine's code if the language needs one. |
+| An **engine** | Code. A port, a roster entry in `voices.default.json`, and around a gigabyte of files. |
+
+That is why the phases run in that order. Nothing about adding a genre or a
+language touches Rust; the engine is the only piece that is a software project.
+
+## The fork line
+
+Where a book splits into languages is worth stating once, because it decides
+which side of the line every future stage belongs on:
+
+- **`crawl` and `prepare` are adapter-independent.** The raw chapter text and
+  the quote split are properties of the source, not of the language being
+  produced.
+- **`digest` onward is per-adapter.** For a translating adapter this is not
+  merely a matter of wording: the `script` stage's segments *become* text in the
+  target language, so the segment cache holds translated audio and translated
+  text.
+
+The consequence to design around rather than discover: a translating adapter is
+bilingual in effect. For `en-US` reading a Vietnamese source, `analyze` must
+attribute Vietnamese speakers while writing an English title and atmosphere,
+and `script` emits the English segments. Translation is therefore not a separate
+pass — it is per-stage prompt behaviour, and the prompts are the adapter.
+
+## The caches: what they key on
+
+Today, from `Layout`:
+
+```rust
+pub fn cast(&self, engine: &str) -> PathBuf {
+    if engine == "vieneu" { self.data().join("cast-vieneu.json") }
+    else                  { self.data().join("cast.json") }
+}
+
+pub fn seg_dir(&self, engine: &str, n: u32) -> PathBuf {
+    if engine == "vieneu" { self.data().join(format!("audio/segments-vieneu-{n:02}")) }
+    else                  { self.data().join(format!("audio/segments-gemini-v2-{n:02}")) }
+}
+```
+
+**The bug is in the `else`.** It names `gemini` for *any* engine that is not
+`vieneu`, so a third engine would read and write Gemini's segment directory —
+serving one engine's audio under another engine's name. That is already wrong
+today with two engines declared, and it is the single thing blocking a second
+*local* engine: the moment `neutts-air` renders a chapter it would either
+inherit Gemini's cache or overwrite it.
+
+**The adapter belongs in the key as well, and that is the part worth arguing.**
+A workspace is bound to exactly one adapter and the ledger gate enforces it, so
+from the *workspace's* point of view naming the language is redundant. But a
+segment directory is not scoped to the workspace that made it: it travels inside
+an offer, gets copied between boxes, and outlives the run. A path that does not
+name its language is a path that has to be *believed* — and no path should have
+to be.
+
+**Both halves are derived, then:**
+
+```rust
+pub fn cast(&self, engine: &str) -> PathBuf {
+    self.data()
+        .join(format!("cast-{}-{}.json", self.adapter, engine_key(engine)))
+}
+
+pub fn seg_dir(&self, engine: &str, n: u32) -> PathBuf {
+    self.data().join(format!(
+        "audio/segments-{}-{}-{n:02}",
+        self.adapter,
+        engine_key(engine)
+    ))
+}
+```
+
+`engine_key` is a lookup rather than an `if/else`, and it keeps the two
+historical spellings so no cache is orphaned: `vieneu → vieneu`,
+`gemini → gemini-v2` (its on-disk spelling), anything else → its own name. An
+empty engine becomes `unknown` rather than producing `cast-default-.json`.
+
+`adapter` is a field on `Layout`, beside `work`, and for the same reason: it is
+a property of the checkout. It is read from the binding at construction
+(`cache_adapter()`), and a checkout whose pointer predates the split keys under
+`default` — the language it was already using, before the split gave it a name.
+
+**And the rename is real, which is what the adapter in the key costs.** Every
+existing workspace has `data/cast-vieneu.json` and
+`data/audio/segments-vieneu-NN/`, and no path points at them any more. So
+`bm-inductor` re-keys once at load — `Inner::migrate_cache_keys`, immediately
+after `load_ledger` — and says so in the event log:
+
+- the cast is **moved**, never rebuilt: the bytes were produced by this adapter
+  and this engine, and only the name was missing a component;
+- only the *pre-split* spellings move, and only for engines that ever had one
+  (`LEGACY_CACHE_ENGINES`), so an engine added later has nothing to migrate;
+- it never overwrites. A target that already exists wins, and a `vieneu`
+  workspace does **not** pick up the plain `cast.json`, which belonged to the
+  non-VieNeu engine;
+- it is idempotent, so a second start is silent.
+
+Getting this wrong is not a crash. It is every chapter already spoken being
+re-synthesised under a name nobody asked for — hours of synthesis for a path
+string — which is why the move lives in the code rather than in a release note.
+
+The tests that pin it: an `en-US` layout and a `vi-VN` one never resolve to the
+same cast or segment directory; a pre-split cache is renamed rather than
+orphaned; and `migrate_cache_keys` runs at load, not at plan time.
+
+> A first draft had the adapter *out* of the key, arguing that one workspace has
+> one adapter so the key need not say so. That is sound about the gate and wrong
+> about the file — see the paragraph above. Worth keeping as a reminder that
+> "cannot happen through the UI" is a different claim from "cannot be on disk".
+
+## Not built yet
+
+- **Phase 2 — prompts behind the adapter.** `Layout::prompt()` and
+  `script_prompt()` are root-scoped (`root/prompts/*.txt`), so one checkout
+  holds one language. They resolve through the binding instead, and the adapter
+  unpacks into `workspaces/<name>/prompts/` — exactly as `work/crawl` already
+  does, and for the same reason. The `en-US` prompts get authored here.
+- **Phase 3 — the engine's identity.** `models/`, `bm-tts`, `.bm/voices/` and
+  the G2P dictionary move under a named engine tree. Today
+  `Layout::tts_dict()` hardcodes `models/sea_g2p.bin`, which is VieNeu's
+  Southeast-Asian G2P: a second engine would read the wrong dictionary and
+  *mispronounce* rather than fail, which is worse than the missing-file bug the
+  provisioning work just fixed. The engine also needs a declared capability —
+  `cloning`, and whether enrollment wants a reference transcript — because `:A`
+  and `:N` assume the engine can clone at all.
+- **Phase 4 — provisioning and scheduling.** Bundles become per piece, and
+  `sources_stages` grows the second dimension so a vi-VN box is never offered an
+  en-US chapter. Two things ride with it: the worker resolves the same
+  `Layout::cast()` through its own `.bm/profile`, so the binding — the adapter
+  name in particular — has to travel to the box or the two ends disagree about
+  the filename; and the ledger gate has to name the piece, which it now does.
+- **A binding stamp inside the cache.** The key names the language and the
+  engine, but nothing *checks* what it finds: a hand-edited `settings.json` can
+  still point a workspace at another adapter's cast. A stamp beside the cache
+  would turn that from a silent mix into a refusal. Deferred rather than
+  dropped, because the rename above had to land first and the ledger gate covers
+  the ordinary path.
+
+On the second engine itself: **NeuTTS Air** is the candidate, Apache-2.0, and
+architecturally the same species as the existing port — a prefill, a decode step
+with its KV cache fed back, and a neural codec decoder that turns codes into
+audio, which is what `engine.rs` and `codec.rs` already do for VieNeu. Two
+caveats worth knowing before anyone starts: it ships as PyTorch and GGUF with the
+ONNX artifacts **decoder-only**, so exporting the language model with its KV
+cache in and out would be ours to do; and every file the Python path generates is
+Perth-watermarked by default, which is a decision about published audio rather
+than a detail.
+
+## See also
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — §4 provisioning, §5 voices, §6 the TUI.
+- [ARTIFACTS.md](ARTIFACTS.md) — what a publish candidate is; the stamp table.
+- [ROADMAP.md](ROADMAP.md) — what is queued.
