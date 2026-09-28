@@ -1,15 +1,15 @@
 # Assets: a genre's art, composed, and released
 
-> **Status: built, except the release split.** `pack.json`, the `_extends/`
+> **Status: built.** `pack.json`, the `_extends/`
 > fold-in, the `_extends.json` record and the `asset resolve` verb all exist —
 > `bm_core::compose` is the one entry point, and `asset resolve --dry-run`
 > reports what it would do. The crawlers left the pack: they and the language's
 > prompts live in `adapters/<name>/`, the binding names the language, the caches
 > were re-keyed for the name it did not have before, and provisioning ships the
 > language as one tree (`.gitignore`'s un-ignore chain for the bundled templates
-> moved with them). **Not built:** the per-piece release split — one
-> `profiles/<name>.tar.zst` still carries art and prompts together. *Releases* is
-> the manifest that split still has to write.
+> moved with them). The release is per piece — `profiles/<piece>/<name>.tar.zst`
+> — with the manifest that records what it was built on, and the gate that
+> refuses to pack behind a moved dependency. See *Releases* below.
 
 ## In plain words
 
@@ -149,15 +149,32 @@ now three kinds, and `profiles/<name>.tar.zst` stops meaning "all of it":
 | language | `prompts/` + `crawl/` | nothing |
 | engine | not a bundle: `engines/<name>/` is provisioned from the models release | — |
 
+In practice: `tools/profile.sh pack <name> --piece pack|adapter`, a file per
+piece under `profiles/<piece>/`, and a GitHub release tagged
+`<name>-<piece>-v<version>` holding the plain `<name>.tar.zst`. The manifest is
+computed by `bm-inductor profile manifest` rather than by the shell script — it
+needs the piece's live trees and the composition record, and duplicating either
+is how the two would drift. Tar and zstd stay in shell, where they have always
+been.
+
+**The manifest's keys are the paths the release unpacks to** (`assets/…` for a
+pack, `adapters/<name>/…` for a language), so `manifest_hash` over them is the
+same number `verify_binding` computes for the live piece. A release and the tree
+it came from therefore agree *by construction*, and loading one never re-stamps
+a hash it just changed — which is what the old combined bundle could not do.
+
 **Self-contained**, deliberately: the asset release is the resolved tree, so a
 box needs none of the dependency releases and provisioning is unchanged — one
 tree, registry-selected, as `assets/` already is. The cost is that composition
 happens at **pack** time rather than at read time, which is exactly the rebuild
 rule:
 
-* `asset pack <name>` withdraws everything the marker says was inherited, folds
-  the current `deps` back in, and packs the result. The manifest records each
-  dependency's name and hash.
+* `asset resolve` withdraws everything the marker says was inherited, folds the
+  current `deps` back in, and records the result — which is what makes the tree
+  packable again.
+* `profile.sh pack … --piece pack` then records each dependency's name and hash
+  in the manifest. It **refuses** while a dependency has moved: the check is
+  `stale_dependencies`, and `--force` packs behind a moved parent on purpose.
 * Editing a parent moves the parent's hash. Every child that names it is
   therefore **stale**, which is a comparison, not a guess: the child's manifest
   holds the hash it was built against.
