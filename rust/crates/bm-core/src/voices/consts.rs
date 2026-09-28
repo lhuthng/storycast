@@ -1,5 +1,73 @@
 use serde::{Deserialize, Serialize};
 
+/// What one engine declares about itself.
+///
+/// **This table is the API, and nothing outside it branches on an engine's
+/// name.** A stage that needs to know whether the bound engine voices
+/// non-verbal tags asks [`nonverbals`]; a build that grows a third engine adds
+/// a row here and is handled everywhere the declaration is read. An `if engine
+/// == "…"` in a consumer is the thing this exists to avoid — the engine axis is
+/// meant to be extended by declaration, not by editing every reader.
+///
+/// The engine's *facts*, not the pipeline's preferences: its front end is the
+/// authority on what a tag means (`bm-tts/src/text.rs` maps each to an
+/// `<|emotion_N|>` token), and this is the pipeline's copy of what it can say.
+/// Voices and sample rate stay in the catalogue; this is what has no voice-list
+/// home.
+pub struct EngineDecl {
+    /// The `settings.engine` name, which is what every path keys on.
+    pub name: &'static str,
+    /// The sounds it voices as tags, as `(placeholder, gloss, tag)`.
+    ///
+    /// The first field is the half a prompt refers to (`{tag_laugh}`); the gloss
+    /// is only what the rendered vocabulary calls the sound. Empty means the
+    /// engine voices none, which is a declaration and not a gap.
+    pub nonverbal: &'static [(&'static str, &'static str, &'static str)],
+}
+
+/// VieNeu-TTS v3 Turbo — the local engine, and the only one here that voices
+/// tags: its front end turns each into an `<|emotion_N|>` token.
+pub const VIENEU: EngineDecl = EngineDecl {
+    name: "vieneu",
+    nonverbal: &[
+        ("laugh", "laugh", "[cười]"),
+        ("sigh", "sigh", "[thở dài]"),
+        ("throat", "throat-clear", "[hắng giọng]"),
+    ],
+};
+
+/// Gemini prebuilt TTS — cloud, and tagless. Every non-verbal sound stays as the
+/// words the chapter wrote, because a bracket this engine does not implement is
+/// read aloud.
+pub const GEMINI: EngineDecl = EngineDecl {
+    name: "gemini",
+    nonverbal: &[],
+};
+
+/// Every engine this build declares, in declaration order.
+pub const ENGINES: &[EngineDecl] = &[VIENEU, GEMINI];
+
+/// `engine`'s declaration, or `None` when nothing here declares that name.
+pub fn declaration(engine: &str) -> Option<&'static EngineDecl> {
+    ENGINES.iter().find(|d| d.name == engine)
+}
+
+/// The non-verbal vocabulary `engine` voices — empty when it voices none, **and
+/// empty when nothing declares it at all**.
+///
+/// A slice rather than an `Option` on purpose: both answers mean the same thing
+/// to a caller (there is no tag to write), so no reader has to tell them apart
+/// to be correct, and a typo in `settings.engine` cannot produce a prompt that
+/// asks for tokens.
+pub fn nonverbals(engine: &str) -> &'static [(&'static str, &'static str, &'static str)] {
+    declaration(engine).map(|d| d.nonverbal).unwrap_or(&[])
+}
+
+/// Whether `engine` voices any non-verbal tags, for callers that only branch.
+pub fn supports_nonverbal(engine: &str) -> bool {
+    !nonverbals(engine).is_empty()
+}
+
 /// Every male VieNeu preset, in the store's declaration order.
 ///
 /// Complete on purpose — see the module comment. Accents are per-voice and
@@ -203,6 +271,48 @@ mod tests {
         assert_eq!(p.pool_for_hint("adult male, stern"), &p.male);
         assert_eq!(p.pool_for_hint("giọng nữ trẻ"), &p.female);
         assert_eq!(p.pool_for_hint(""), &p.neutral);
+    }
+    /// The declarations answer for their engine, and nothing else does.
+    #[test]
+    fn an_engines_declaration_is_what_gates_its_tags() {
+        assert!(supports_nonverbal("vieneu"));
+        let tags = nonverbals("vieneu");
+        assert_eq!(tags.len(), 3);
+        assert!(
+            tags.iter()
+                .any(|(_key, _gloss, tag)| *tag == "[hắng giọng]"),
+            "{tags:?}"
+        );
+
+        // Gemini declares none, so its prompt carries no rule at all: the
+        // bracket would be read aloud rather than voiced.
+        assert!(!supports_nonverbal("gemini"));
+        assert!(nonverbals("gemini").is_empty());
+
+        // **And a name nobody declared answers the same way**, which is the
+        // point of a slice over an `Option`: adding an engine is adding a row
+        // here, and a typo in `settings.engine` cannot produce a prompt that
+        // asks for a token.
+        assert!(!supports_nonverbal("not-an-engine"));
+        assert!(nonverbals("not-an-engine").is_empty());
+        assert!(declaration("not-an-engine").is_none());
+        assert_eq!(declaration("vieneu").map(|d| d.name), Some("vieneu"));
+        assert!(ENGINES.iter().any(|d| d.name == "gemini"));
+    }
+
+    /// The two lists must not drift: a catalogue engine with no declaration is
+    /// an engine no stage can ask about, and a declaration with no catalogue row
+    /// is an engine with no voices. Adding one without the other is a build
+    /// failure rather than a silent half-addition.
+    #[test]
+    fn every_declared_engine_has_a_catalogue_row_and_the_reverse() {
+        let declared: std::collections::BTreeSet<&str> = ENGINES.iter().map(|d| d.name).collect();
+        let catalogued: std::collections::BTreeSet<&str> = crate::voices::RosterFile::catalogue()
+            .engines
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(declared, catalogued);
     }
 
     #[test]

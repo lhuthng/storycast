@@ -367,6 +367,7 @@ fn cast_context(context: &Value) -> String {
 /// changed, and the drift would be silent.
 pub fn build_script_prompt(
     layout: &Layout,
+    engine: &str,
     bible: &Value,
     context: &Value,
     chapter_text: &str,
@@ -381,13 +382,64 @@ pub fn build_script_prompt(
     let injects = crate::ambience::inject_prompt(&crate::audio_pool::load_pool(
         &layout.assets().join("inject-pool.json"),
     ));
-    Ok(template
+    let mut body = template
         .replace("{bible_json}", &bible_context(bible))
         .replace("{cast_json}", &cast_context(context))
         .replace("{music_palette}", &palette)
         .replace("{effect_tags}", &effects)
         .replace("{inject_sounds}", &injects)
-        .replace("{chapter_text}", chapter_text))
+        .replace("{chapter_text}", chapter_text);
+    render_nonverbal(&mut body, engine, &mut Vec::new());
+    Ok(body)
+}
+
+/// Render the bound engine's non-verbal vocabulary into a prompt — or take the
+/// rule out of it.
+///
+/// **The rule is VieNeu's**, so an engine that voices no tags gets *no such
+/// rule* rather than one that says "none": a negated rule still teaches the
+/// model that brackets are a thing it may write, and this engine reads them
+/// aloud. The section is bounded by its own heading and the next rule's — the
+/// same mechanism rules 1–3 use — and a template that has been renumbered is
+/// reported rather than silently left alone.
+fn render_nonverbal(body: &mut String, engine: &str, missed: &mut Vec<String>) {
+    // The declaration API, not a name test: whichever engine is bound answers
+    // for itself, and an engine nobody declared answers "none" for the same
+    // reason a tagless one does.
+    let tags = crate::voices::nonverbals(engine);
+    if tags.is_empty() {
+        if !replace_prompt_section(body, NONVERBAL_RULE, MUSIC_RULE, "") {
+            missed.push("rule 7 (non-verbal)".into());
+        }
+        // Backstop for a template numbered differently: a placeholder that
+        // survives to the model is a token it copies.
+        for ph in NONVERBAL_PLACEHOLDERS {
+            *body = body.replace(ph, "");
+        }
+        return;
+    }
+    *body = body.replace("{voice_tags}", &vocabulary_block(tags));
+    for (key, _gloss, tag) in tags {
+        *body = body.replace(&format!("{{tag_{key}}}"), tag);
+    }
+}
+
+/// The non-verbal rule's opening heading, which is also how it is found when it
+/// has to be removed.
+const NONVERBAL_RULE: &str = "7. NON-VERBAL SOUNDS.";
+/// The rule after it: the far bound of the section.
+const MUSIC_RULE: &str = "8. MUSIC:";
+
+/// Every placeholder the non-verbal rule uses, for the engine that has none.
+const NONVERBAL_PLACEHOLDERS: [&str; 4] =
+    ["{voice_tags}", "{tag_laugh}", "{tag_sigh}", "{tag_throat}"];
+
+/// The concept/tag list the rule renders: the gloss, then the exact token.
+fn vocabulary_block(tags: &[(&str, &str, &str)]) -> String {
+    tags.iter()
+        .map(|(_key, gloss, tag)| format!("  {gloss:<15}{tag}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A deterministic, source-aware view of one chapter.
@@ -856,6 +908,7 @@ no invented ids, no dropped line.
 /// data and the model never returns it; code attaches it after generation.
 fn build_staging_prompt(
     layout: &Layout,
+    engine: &str,
     bible: &Value,
     context: &Value,
     prepared: &PreparedChapter,
@@ -917,6 +970,7 @@ fn build_staging_prompt(
         &prepared.prompt_json,
         &mut missed,
     );
+    render_nonverbal(&mut body, engine, &mut missed);
     body = body.replace("{\"speaker\": \"Narrator\", ", "{\"");
     if let Some(task) = body.find("TASK:") {
         let end = body
@@ -1035,7 +1089,8 @@ pub async fn analyze_chapter(
     };
 
     progress(0.42, format!("digest ch{n} via {analyzer}: staging"));
-    let staging_prompt = build_staging_prompt(layout, bible, &context, &prepared)?;
+    let staging_prompt =
+        build_staging_prompt(layout, &settings.engine, bible, &context, &prepared)?;
     let raw = generate_retrying(&staging_prompt, analyzer, settings, progress, 0.42, 0.82).await?;
     dump_raw(layout, "digest-staging", &raw);
     let parse_staging = |raw: &str| parse_staged_script(raw, bible, &context, &prepared, &vocab);
@@ -1331,7 +1386,12 @@ fn manual_inputs(layout: &Layout, n: u32) -> Result<(Value, String)> {
 /// staging prompt is rendered *against that immutable speaker map*, exactly as
 /// the worker's is, so an operator who skipped round 1 gets an error rather than
 /// a prompt that quietly asks for the wrong thing.
-pub fn manual_prompt(layout: &Layout, n: u32, cast: Option<&Value>) -> Result<ManualPrompt> {
+pub fn manual_prompt(
+    layout: &Layout,
+    engine: &str,
+    n: u32,
+    cast: Option<&Value>,
+) -> Result<ManualPrompt> {
     let (bible, text) = manual_inputs(layout, n)?;
     let prepared = prepare_chapter(&text);
     match cast {
@@ -1341,7 +1401,7 @@ pub fn manual_prompt(layout: &Layout, n: u32, cast: Option<&Value>) -> Result<Ma
         }),
         Some(context) => Ok(ManualPrompt {
             round: Round::Script,
-            text: build_staging_prompt(layout, &bible, context, &prepared)?,
+            text: build_staging_prompt(layout, engine, &bible, context, &prepared)?,
         }),
     }
 }
@@ -3061,13 +3121,13 @@ mod tests {
             "mentions": {},
             "speakers": {"e0001": "anonymous:anon-1"}
         });
-        let staging = build_staging_prompt(&layout, &bible, &fixed, &prepared).unwrap();
+        let staging = build_staging_prompt(&layout, "vieneu", &bible, &fixed, &prepared).unwrap();
         assert!(staging.contains("---STAGING OUTPUT CONTRACT---"));
         assert!(staging.contains("fixed_speakers"));
         assert!(staging.contains("Do not return `speaker`"));
 
         // The script prompt: the three vocabularies and the resolved cast.
-        let p = build_script_prompt(&layout, &bible, &context, "text").unwrap();
+        let p = build_script_prompt(&layout, "vieneu", &bible, &context, "text").unwrap();
         assert!(p.contains("quiet (soft; low)"), "{p}");
         assert!(p.contains("night"), "{p}");
         // the inject vocabulary renders the clip's own mode first
@@ -4319,7 +4379,7 @@ mod tests {
         }
 
         let context = json!({"roster": ["Narrator"], "mentions": {}});
-        let p = build_script_prompt(&layout, &bible, &context, &text).unwrap();
+        let p = build_script_prompt(&layout, "vieneu", &bible, &context, &text).unwrap();
         for ph in [
             "{music_palette}",
             "{effect_tags}",
@@ -4327,12 +4387,28 @@ mod tests {
             "{cast_json}",
             "{bible_json}",
             "{chapter_text}",
+            "{voice_tags}",
+            "{tag_laugh}",
+            "{tag_sigh}",
+            "{tag_throat}",
         ] {
             assert!(!p.contains(ph), "placeholder leaked: {ph}");
         }
         assert!(p.contains("quiet (soft, calm;"), "{p}");
         assert!(p.contains("battle, birds, calm"), "{p}");
         assert!(p.contains("blood-spatter (hit; blood"), "{p}");
+
+        // The non-verbal vocabulary is VieNeu's, so its tags render — and an
+        // engine that voices none gets the *rule* removed rather than negated:
+        // a rule that says "none" still teaches the model to write brackets.
+        assert!(p.contains("[cười] [thở dài] [hắng giọng]"), "{p}");
+        let none = build_script_prompt(&layout, "gemini", &bible, &context, &text).unwrap();
+        assert!(
+            !none.contains("NON-VERBAL"),
+            "another engine must not be taught the rule at all: {none}"
+        );
+        assert!(!none.contains("[cười]"), "{none}");
+        assert!(!none.contains("{tag_"), "placeholder leaked: {none}");
     }
 
     /// The manual path's contract, against the fixture.
@@ -4360,7 +4436,7 @@ mod tests {
         // Round 1 is the attribution pass, and the fixture's template is a stub
         // ("production prompts live in the profile"), so the assertions are on
         // substitution and on the contract appended to it.
-        let first = manual_prompt(&layout, 51, None).unwrap();
+        let first = manual_prompt(&layout, "vieneu", 51, None).unwrap();
         assert_eq!(first.round, Round::Cast);
         assert!(
             first.text.contains("Fixture dramatization prompt"),
@@ -4399,7 +4475,7 @@ mod tests {
             "mentions": {},
             "speakers": {"e0002": "Anonymous"}
         });
-        let second = manual_prompt(&layout, 51, Some(&cast)).unwrap();
+        let second = manual_prompt(&layout, "vieneu", 51, Some(&cast)).unwrap();
         assert_eq!(second.round, Round::Script);
         assert_ne!(second.text, first.text, "a different pass, not a repeat");
         assert!(second.text.contains("---STAGING OUTPUT CONTRACT---"));
@@ -4413,7 +4489,7 @@ mod tests {
 
         // A chapter with no text fails by path, so the operator knows which file
         // the crawl never produced rather than reading a bare "no such file".
-        let err = manual_prompt(&layout, 999, None).expect_err("no chapter text");
+        let err = manual_prompt(&layout, "vieneu", 999, None).expect_err("no chapter text");
         assert!(err.to_string().contains("ch999"), "{err:#}");
     }
 

@@ -1,5 +1,7 @@
 Fixture script prompt template: split the chapter into labeled segments.
-Same placeholder contract as analyze.txt.
+Same placeholder contract as analyze.txt, and the same rule headings: the
+non-verbal rule is bounded by its own number and the next rule's, because an
+engine that voices no tags gets that section removed rather than negated.
 
 CAST
 {cast_json}
@@ -15,6 +17,12 @@ EFFECTS
 
 SOUNDS
 {inject_sounds}
+
+7. NON-VERBAL SOUNDS. The tags this engine voices:
+{voice_tags}
+{tag_laugh} {tag_sigh} {tag_throat}
+
+8. MUSIC: one token from the palette above.
 
 CHAPTER
 {chapter_text}

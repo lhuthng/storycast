@@ -71,12 +71,17 @@ impl Next {
 
 /// Start a chapter: round 1's prompt, or a refusal.
 ///
+/// `engine` is not decoration: round 2's prompt carries the *engine's* non-verbal
+/// vocabulary, so it has to be built against the engine that will speak it. A
+/// tag the engine does not implement is read aloud.
+///
 /// Manual digest re-digests — plus the one next chapter past the digested run,
 /// so the operator can work ahead of a bottlenecked digest queue. Its delta then
 /// lands on top of its predecessor's, which is the bible order the workers keep.
 /// Anything further ahead is refused: skipping would merge deltas out of order.
 pub(crate) fn open(
     layout: &Layout,
+    engine: &str,
     n: u32,
     digested: &dyn Fn(u32) -> bool,
 ) -> Result<Next, String> {
@@ -85,7 +90,8 @@ pub(crate) fn open(
             "ch{n} is not next — manual digest does the chapter after the last digested one"
         ));
     }
-    let step = bm_core::digest::manual_prompt(layout, n, None).map_err(|e| format!("{e:#}"))?;
+    let step =
+        bm_core::digest::manual_prompt(layout, engine, n, None).map_err(|e| format!("{e:#}"))?;
     Ok(Next::Prompt {
         round: step.round,
         text: step.text,
@@ -100,6 +106,7 @@ pub(crate) fn open(
 /// forward. `Ok(Done)` means the chapter finished.
 pub(crate) fn advance(
     layout: &Layout,
+    engine: &str,
     n: u32,
     round: bm_core::digest::Round,
     pasted: &str,
@@ -112,7 +119,7 @@ pub(crate) fn advance(
         // Round 1 done. Round 2's prompt is rendered *against this cast*, which
         // is why the context is carried rather than re-derived — the worker
         // makes exactly this hand-off between its two calls.
-        let step = bm_core::digest::manual_prompt(layout, n, Some(&context))
+        let step = bm_core::digest::manual_prompt(layout, engine, n, Some(&context))
             .map_err(|e| format!("{e:#}"))?;
         return Ok(Next::Prompt {
             round: step.round,
@@ -266,7 +273,7 @@ mod tests {
         // chapter right after the digested run may be worked by hand.
         let d = tempfile::tempdir().unwrap();
         let layout = Layout::new(d.path());
-        let err = open(&layout, 7, &|n| layout.digested(n)).unwrap_err();
+        let err = open(&layout, "vieneu", 7, &|n| layout.digested(n)).unwrap_err();
         assert!(err.contains("not next"), "{err}");
     }
 
@@ -281,7 +288,7 @@ mod tests {
         std::fs::write(layout.chapter_txt(2), "text").unwrap();
         std::fs::write(layout.chapter_txt(3), "text").unwrap();
         let digested = |n: u32| n == 1;
-        assert!(open(&layout, 2, &digested).is_ok());
-        assert!(open(&layout, 3, &digested).is_err());
+        assert!(open(&layout, "vieneu", 2, &digested).is_ok());
+        assert!(open(&layout, "vieneu", 3, &digested).is_err());
     }
 }

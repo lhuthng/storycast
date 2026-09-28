@@ -2488,8 +2488,8 @@ async fn cmd_backup(
 
     let mut done = 0u32;
     for n in start..=last {
-        let mut next =
-            manual::open(layout, n, &digested).map_err(|e| anyhow::anyhow!("ch{n}: {e}"))?;
+        let mut next = manual::open(layout, &settings.engine, n, &digested)
+            .map_err(|e| anyhow::anyhow!("ch{n}: {e}"))?;
         let mut cast: Option<serde_json::Value> = None;
 
         loop {
@@ -2550,7 +2550,7 @@ async fn cmd_backup(
                 let answer = manual::ask(&asked, &analyzer, &settings)
                     .await
                     .map_err(|e| anyhow::anyhow!("ch{n} round {}: {e}", round.as_str()))?;
-                match manual::advance(layout, n, round, &answer, cast.as_ref()) {
+                match manual::advance(layout, &settings.engine, n, round, &answer, cast.as_ref()) {
                     Ok(step) => {
                         accepted = Some(step);
                         break;

@@ -107,7 +107,12 @@ pub(crate) async fn key_digest(
             }
             KeyCode::Enter => {
                 if let Some(n) = v.selected(&digested) {
-                    match open_chapter(&layout, n, &digested) {
+                    // The engine, because round 2's prompt carries the
+                    // engine's own non-verbal vocabulary: a tag the bound
+                    // engine does not implement is read aloud.
+                    let engine =
+                        app.setting_str("engine", &bm_core::config::Settings::default().engine);
+                    match open_chapter(&layout, &engine, n, &digested) {
                         Ok(ch) => {
                             app.set_status(
                                 Level::Info,
@@ -168,29 +173,33 @@ pub(crate) async fn key_digest(
                     ch.note = e.clone();
                     app.set_status(Level::Error, e);
                 }
-                Ok(pasted) => match accept(&layout, &mut ch, &pasted, &app.api, http) {
-                    Ok(Some(job)) => {
-                        dispatch(app, job_tx, job);
-                        ch.note = "accepted — reporting it to the inductor".into();
-                        app.set_status(Level::Info, format!("ch{}: digest accepted", ch.n));
+                Ok(pasted) => {
+                    let engine =
+                        app.setting_str("engine", &bm_core::config::Settings::default().engine);
+                    match accept(&layout, &engine, &mut ch, &pasted, &app.api, http) {
+                        Ok(Some(job)) => {
+                            dispatch(app, job_tx, job);
+                            ch.note = "accepted — reporting it to the inductor".into();
+                            app.set_status(Level::Info, format!("ch{}: digest accepted", ch.n));
+                        }
+                        Ok(None) => {
+                            // Round 1 landed: round 2's prompt is already on the
+                            // clipboard, so the operator's next move is the same one
+                            // they just made.
+                            app.set_status(
+                                Level::Info,
+                                format!("ch{}: cast accepted — script prompt copied", ch.n),
+                            );
+                        }
+                        Err(e) => {
+                            // The validator's own words. They are the instruction:
+                            // the operator can paste the complaint back into their
+                            // model and ask for a correction.
+                            ch.note = e.clone();
+                            app.set_status(Level::Error, format!("ch{}: {e}", ch.n));
+                        }
                     }
-                    Ok(None) => {
-                        // Round 1 landed: round 2's prompt is already on the
-                        // clipboard, so the operator's next move is the same one
-                        // they just made.
-                        app.set_status(
-                            Level::Info,
-                            format!("ch{}: cast accepted — script prompt copied", ch.n),
-                        );
-                    }
-                    Err(e) => {
-                        // The validator's own words. They are the instruction:
-                        // the operator can paste the complaint back into their
-                        // model and ask for a correction.
-                        ch.note = e.clone();
-                        app.set_status(Level::Error, format!("ch{}: {e}", ch.n));
-                    }
-                },
+                }
             }
         }
         _ => {}
@@ -217,10 +226,11 @@ pub(crate) async fn key_digest(
 /// inductor will invalidate the audio built from the old one.
 fn open_chapter(
     layout: &bm_core::Layout,
+    engine: &str,
     n: u32,
     digested: &dyn Fn(u32) -> bool,
 ) -> Result<DigestChapter, String> {
-    let step = crate::manual::open(layout, n, digested)?;
+    let step = crate::manual::open(layout, engine, n, digested)?;
     let round = step
         .round()
         .ok_or_else(|| format!("ch{n} opened on a finished digest"))?;
@@ -250,12 +260,13 @@ fn open_chapter(
 /// `Ok(Some(job))` means the chapter is finished and the caller should report it.
 fn accept(
     layout: &bm_core::Layout,
+    engine: &str,
     ch: &mut DigestChapter,
     pasted: &str,
     api: &str,
     http: &reqwest::Client,
 ) -> Result<Option<Job>, String> {
-    let step = crate::manual::advance(layout, ch.n, ch.round, pasted, ch.cast.as_ref())?;
+    let step = crate::manual::advance(layout, engine, ch.n, ch.round, pasted, ch.cast.as_ref())?;
 
     let outcome = match step {
         Next::Prompt { round, text, cast } => {
@@ -313,7 +324,7 @@ mod tests {
         // chapter right after the digested run may be worked by hand.
         let d = tempfile::tempdir().unwrap();
         let layout = bm_core::Layout::new(d.path());
-        let err = open_chapter(&layout, 7, &|n| layout.digested(n)).unwrap_err();
+        let err = open_chapter(&layout, "vieneu", 7, &|n| layout.digested(n)).unwrap_err();
         assert!(err.contains("not next"), "{err}");
     }
 
@@ -328,7 +339,7 @@ mod tests {
         std::fs::write(layout.chapter_txt(2), "text").unwrap();
         std::fs::write(layout.chapter_txt(3), "text").unwrap();
         let digested = |n: u32| n == 1;
-        assert!(open_chapter(&layout, 2, &digested).is_ok());
-        assert!(open_chapter(&layout, 3, &digested).is_err());
+        assert!(open_chapter(&layout, "vieneu", 2, &digested).is_ok());
+        assert!(open_chapter(&layout, "vieneu", 3, &digested).is_err());
     }
 }
