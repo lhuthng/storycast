@@ -446,11 +446,12 @@ a per-engine override is a larger decision than the tags it would serve.
   `EngineDecl.languages`, `adapter_language()` and the ledger gate are all in
   place; what is missing is the language being *data* on the adapter side. Which
   is also what would let a worker be held to a language before it is offered one.
-- **An adapter packer.** `tools/profile.sh` packs `assets/` + `prompts/`
-  together, which is the pre-split shape. `adapters/<adapter>/{prompts,crawl}`
-  needs the same treatment — one `tar.zst`, a manifest, a release — and that is
-  what turns the untracked tree above into something a second machine can bind.
-  [ASSETS.md](ASSETS.md) splits the bundle three ways.
+- **A release per member.** `tools/profile.sh` is per piece now
+  (`profiles/<piece>/<name>.tar.zst`, `--piece pack|adapter`), which is what
+  turns the untracked `adapters/<adapter>/` tree into something a second machine
+  can bind. What is *not* built is the tag scheme's tail: a machine that trusts
+  a release it fetched still has nothing to check the manifest's dependency
+  hashes against beyond its own `assets/_extends/`.
 - **Phase 4 — provisioning and scheduling.** Bundles become per piece, and
   `sources_stages` grows the second dimension so a vi-VN box is never offered an
   en-US chapter. Two things ride with it: the worker resolves the same

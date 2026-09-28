@@ -256,6 +256,33 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AssetCmd,
     },
+    /// Profile releases: one bundle per piece, and the manifest that says what
+    /// it was built against. Local only, touches no worker.
+    Profile {
+        #[command(subcommand)]
+        cmd: ProfileCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProfileCmd {
+    /// Print the manifest for one piece of the live tree, as JSON.
+    ///
+    /// `tools/profile.sh pack` stages the trees and writes this to
+    /// `manifest.json`; the *staleness* gate lives here rather than there
+    /// because it needs the composition record, which the assets own.
+    Manifest {
+        /// Release name (`xianxia`).
+        name: String,
+        /// Which piece: `pack` or `adapter`.
+        #[arg(long, default_value = "pack")]
+        piece: String,
+        #[arg(long, default_value = "1")]
+        version: String,
+        /// Pack even when a dependency this asset was built on has moved.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2049,6 +2076,7 @@ async fn main() -> anyhow::Result<()> {
             | Cmd::Workspace { .. }
             | Cmd::Aws { .. }
             | Cmd::Asset { .. }
+            | Cmd::Profile { .. }
     ) {
         check_bins()?;
     }
@@ -2226,6 +2254,35 @@ async fn main() -> anyhow::Result<()> {
                             .collect::<Vec<_>>()
                             .join(", ")
                     );
+                }
+                Ok(())
+            }
+        },
+        Cmd::Profile { cmd } => match cmd {
+            ProfileCmd::Manifest {
+                name,
+                piece,
+                version,
+                force,
+            } => {
+                let Some(piece) = bm_core::profile::Piece::from_noun(&piece) else {
+                    anyhow::bail!("unknown piece '{piece}' (pack|adapter)");
+                };
+                // The gate first, so a stale tree is refused before anything is
+                // staged: a release is a claim about what it was built on, and
+                // packing one behind a parent that has moved would make that
+                // claim false in the file that exists to record it.
+                let stale = bm_core::profile::stale_dependencies(&layout)?;
+                if !stale.is_empty() && !force {
+                    anyhow::bail!(
+                        "{} moved since the last resolve — `asset resolve` to rebuild this tree, or --force to pack what is on disk",
+                        stale.join(", ")
+                    );
+                }
+                let manifest = bm_core::profile::compute_manifest(&layout, piece, &name, &version)?;
+                println!("{}", serde_json::to_string_pretty(&manifest)?);
+                if !stale.is_empty() {
+                    eprintln!("warning: packed while {} had moved", stale.join(", "));
                 }
                 Ok(())
             }

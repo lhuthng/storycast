@@ -79,13 +79,20 @@ impl Piece {
         }
     }
 
-    /// What the piece is called in a message: `pack 'xianxia'`.
+    /// What the piece is called in a message — and in a release: `pack 'xianxia'`,
+    /// `profiles/pack/xianxia.tar.zst`.
     pub fn noun(self) -> &'static str {
         match self {
             Piece::Pack => "pack",
             Piece::Adapter => "adapter",
             Piece::Engine => "engine",
         }
+    }
+
+    /// [`Piece::noun`], parsed back. `None` for a name no piece answers to,
+    /// which a caller must refuse rather than guess at.
+    pub fn from_noun(noun: &str) -> Option<Piece> {
+        Piece::ALL.into_iter().find(|p| p.noun() == noun)
     }
 }
 
@@ -216,18 +223,37 @@ pub fn pieces_differing(a: &Binding, b: &Binding) -> Vec<Piece> {
         .collect()
 }
 
-/// Manifest stored as `manifest.json` at the bundle root.
+/// Manifest stored as `manifest.json` at the release root.
+///
+/// The keys in `files` are the paths the release **unpacks to**, relative to the
+/// checkout root — `assets/…` for a pack, `adapters/<name>/…` for a language.
+/// That is not a detail: it is why `manifest_hash` over these keys is the same
+/// number [`verify_binding`] computes for the piece on disk, so a bundle and the
+/// tree it came from agree by construction instead of by a re-stamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub name: String,
     #[serde(default = "default_version")]
     pub version: String,
+    /// Which piece this release is ([`Piece::noun`]). A pre-split manifest has
+    /// no field and is therefore a **pack**, which is what the one bundle held
+    /// before the split — the art, with the language riding along uninvited.
+    #[serde(default = "default_piece")]
+    pub piece: String,
     #[serde(default)]
     pub files: BTreeMap<String, String>,
+    /// The assets this one was built on, name and content hash, in the order
+    /// they were folded in. Empty for a language, which is built on nothing.
+    #[serde(default)]
+    pub deps: Vec<crate::compose::DepRecord>,
 }
 
 fn default_version() -> String {
     "1".into()
+}
+
+fn default_piece() -> String {
+    Piece::Pack.noun().to_string()
 }
 
 /// The load pointer: which profile the live tree claims to be. Empty
@@ -238,8 +264,79 @@ pub struct Pointer {
     pub hash: String,
 }
 
+/// The pre-split bundle: one file holding every piece.
+///
+/// Kept only so a checkout that has one keeps parsing it; a release is per
+/// piece now ([`release_path`]), because the two halves change for different
+/// reasons and a second language should cost a prompt file rather than a second
+/// copy of the art.
 pub fn bundle_path(root: &Path, name: &str) -> PathBuf {
     root.join("profiles").join(format!("{name}.tar.zst"))
+}
+
+/// Where a piece's releases live: `profiles/<piece>/`.
+///
+/// A directory per piece rather than one flat `profiles/`, so `xianxia` the pack
+/// and `xianxia` the language cannot shadow each other — which is the whole
+/// point of the split, and would be the first thing a flat directory broke.
+pub fn release_dir(root: &Path, piece: Piece) -> PathBuf {
+    root.join("profiles").join(piece.noun())
+}
+
+/// One piece's release file.
+pub fn release_path(root: &Path, piece: Piece, name: &str) -> PathBuf {
+    release_dir(root, piece).join(format!("{name}.tar.zst"))
+}
+
+/// Build the manifest for one piece of the live tree.
+///
+/// The engine is refused: it is not a bundle. Its tree is gigabytes of weights
+/// fetched from a models release and rsynced, and "pack it into a tar.zst" is
+/// the one thing the engine axis has never done.
+pub fn compute_manifest(
+    layout: &crate::paths::Layout,
+    piece: Piece,
+    name: &str,
+    version: &str,
+) -> Result<Manifest> {
+    let root = layout.root.as_path();
+    let dirs: Vec<String> = match piece {
+        Piece::Pack => vec!["assets".to_string()],
+        Piece::Adapter => adapter_dirs(root, name),
+        Piece::Engine => anyhow::bail!(
+            "an engine is not a bundle: engines/<name>/ comes from the models release, not from profiles/"
+        ),
+    };
+    let files = files_under(root, &dirs);
+    if files.is_empty() {
+        anyhow::bail!(
+            "nothing to pack: {} is missing or empty under {}",
+            dirs.join(" + "),
+            root.display()
+        );
+    }
+    Ok(Manifest {
+        name: name.to_string(),
+        version: version.to_string(),
+        piece: piece.noun().to_string(),
+        files: hash_files(root, files).context("hashing the live piece")?,
+        // Only an asset is built on anything, and the record of what it was
+        // built on is the one composition already keeps.
+        deps: match piece {
+            Piece::Pack => crate::compose::read_marker(&layout.assets()).deps,
+            _ => Vec::new(),
+        },
+    })
+}
+
+/// Dependencies the live pack was built against that have since moved.
+///
+/// A comparison, never a guess: the composition record holds each dependency's
+/// tree hash, so an edited or re-unpacked parent is *named* here — and the
+/// asset that was packed against it is stale until it is resolved again. This
+/// is the check that turns "editing a parent" into "rebuilding the children".
+pub fn stale_dependencies(layout: &crate::paths::Layout) -> Result<Vec<String>> {
+    Ok(crate::compose::resolve(&layout.assets(), true)?.stale)
 }
 
 pub fn pointer_path(root: &Path) -> PathBuf {
@@ -776,6 +873,120 @@ mod tests {
         assert_eq!(after.pack.hash, before.pack.hash, "the pack did not move");
         assert_ne!(after.adapter.hash, before.adapter.hash, "the adapter did");
         assert_eq!(after, read_binding(&dir).unwrap(), "and it was re-stamped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The point of keying a release's manifest by *where it unpacks to*: the
+    /// bundle and the live tree it came from hash to the same number, so loading
+    /// one never re-stamps a hash it just changed. A language release is only its
+    /// own two trees — nothing of the pack's rides along, which is the split.
+    #[test]
+    fn a_pieces_manifest_hashes_to_what_the_binding_holds() {
+        let dir = live_fixture("manifest");
+        let layout = crate::paths::Layout::new(&dir);
+        write_binding(
+            &dir,
+            &Binding {
+                pack: Pointer {
+                    name: "xianxia".into(),
+                    hash: String::new(),
+                },
+                adapter: Pointer {
+                    name: "vi-VN".into(),
+                    hash: String::new(),
+                },
+                engine: Pointer::default(),
+            },
+        )
+        .unwrap();
+        let verified = verify_binding(&dir, Some("vieneu")).unwrap();
+
+        let pack = compute_manifest(&layout, Piece::Pack, "xianxia", "1").unwrap();
+        assert_eq!(pack.piece, "pack");
+        assert_eq!(manifest_hash(&pack.files), verified.pack.hash);
+        assert!(pack.deps.is_empty(), "the fixture was built on nothing");
+        assert!(pack.files.keys().any(|k| k.starts_with("assets/")));
+
+        let language = compute_manifest(&layout, Piece::Adapter, "vi-VN", "1").unwrap();
+        assert_eq!(language.piece, "adapter");
+        assert_eq!(manifest_hash(&language.files), verified.adapter.hash);
+        assert!(
+            language
+                .files
+                .keys()
+                .all(|k| k.starts_with("prompts/") || k.starts_with("crawl/")),
+            "a language release carries its own two trees and nothing else: {:?}",
+            language.files.keys().take(3).collect::<Vec<_>>()
+        );
+        assert!(language.deps.is_empty(), "a language is built on nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One file per piece, in a directory per piece — so `xianxia` the pack and
+    /// `xianxia` the language cannot shadow each other — and the engine, which
+    /// is not a bundle at all.
+    #[test]
+    fn a_release_is_one_file_per_piece_and_the_engine_is_not_one() {
+        let root = Path::new("/repo");
+        assert!(
+            release_path(root, Piece::Pack, "xianxia").ends_with("profiles/pack/xianxia.tar.zst")
+        );
+        assert!(release_path(root, Piece::Adapter, "xianxia")
+            .ends_with("profiles/adapter/xianxia.tar.zst"));
+        assert_ne!(
+            release_path(root, Piece::Pack, "xianxia"),
+            release_path(root, Piece::Adapter, "xianxia"),
+            "the same name on two axes is two releases"
+        );
+        assert_eq!(Piece::from_noun("adapter"), Some(Piece::Adapter));
+        assert_eq!(Piece::from_noun("engine"), Some(Piece::Engine));
+        assert_eq!(
+            Piece::from_noun("language"),
+            None,
+            "no piece answers to that"
+        );
+
+        let dir = live_fixture("engine-release");
+        let layout = crate::paths::Layout::new(&dir);
+        let err = compute_manifest(&layout, Piece::Engine, "vieneu", "1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("models release"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Editing a parent is what makes a child stale, and the check *names* the
+    /// parent: the composition record holds the hash each dependency was folded
+    /// in at, so nothing has to be guessed at or re-hashed to answer it.
+    #[test]
+    fn a_release_is_stale_when_a_dependency_it_was_built_on_has_moved() {
+        let dir = live_fixture("stale-deps");
+        let layout = crate::paths::Layout::new(&dir);
+        assert!(stale_dependencies(&layout).unwrap().is_empty(), "no deps");
+
+        let assets = layout.assets();
+        std::fs::write(assets.join("pack.json"), r#"{"deps":["common"]}"#).unwrap();
+        let dep = assets.join("_extends/common");
+        std::fs::create_dir_all(&dep).unwrap();
+        let pool = |extra: &str| {
+            format!(r#"{{"wind":{{"tags":["wind"],"files":["effects/wind-1.mp3"]}}{extra}}}"#)
+        };
+        std::fs::write(dep.join("effect-pool.json"), pool("")).unwrap();
+        // The record is written by a *resolve*; until then there is nothing to
+        // compare against, and a first sighting is not staleness.
+        crate::compose::resolve(&assets, false).unwrap();
+        assert!(stale_dependencies(&layout).unwrap().is_empty());
+
+        // The parent gains a sound, so this tree is built on something that has
+        // moved — and stays so until it is resolved again.
+        std::fs::write(
+            dep.join("effect-pool.json"),
+            pool(r#","rain":{"tags":["rain"],"files":["effects/rain-1.mp3"]}"#),
+        )
+        .unwrap();
+        assert_eq!(stale_dependencies(&layout).unwrap(), vec!["common"]);
+        crate::compose::resolve(&assets, false).unwrap();
+        assert!(stale_dependencies(&layout).unwrap().is_empty(), "resolved");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
