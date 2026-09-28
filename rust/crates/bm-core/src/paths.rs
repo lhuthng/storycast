@@ -353,8 +353,40 @@ impl Layout {
         self.work.join("crawl")
     }
 
+    /// The chapter's script: `data/script/NN.json`.
     pub fn script(&self, n: u32) -> PathBuf {
-        self.data().join(format!("script-{n:02}.json"))
+        self.script_dir().join(format!("{n:02}.json"))
+    }
+
+    /// Every script in the workspace, in chapter order.
+    ///
+    /// **One definition, because eight places ask it** — the audition index, the
+    /// cast refill, the inject screen's usage map, the speaker index, the
+    /// character's-lines test, the two planners that walk a range, and the
+    /// reconciler — and because they cannot be allowed to disagree. A `read_dir`
+    /// order is arbitrary, so an unsorted answer makes a "random" pick differ
+    /// between two runs of the same session for no reason anyone could see.
+    pub fn scripts(&self) -> Vec<PathBuf> {
+        let mut out = chapter_files(&self.script_dir());
+        out.sort();
+        out
+    }
+
+    /// Chapter numbers that have a script, ascending.
+    pub fn script_chapters(&self) -> Vec<u32> {
+        self.scripts().iter().filter_map(|p| chapter_of(p)).collect()
+    }
+
+    /// The scripts, one directory: `data/script/`.
+    ///
+    /// A directory, because a book of five hundred chapters wrote five hundred
+    /// `script-NN.json` and five hundred `render-NN.json` in one folder beside
+    /// the cast and the bible — so *finding* the scripts meant filtering a name
+    /// prefix, which every reader spelled out for itself. The name now lives in
+    /// the folder and the file is the chapter, which is the shape
+    /// `chapters/chNN.txt` beside it already had.
+    pub fn script_dir(&self) -> PathBuf {
+        self.data().join("script")
     }
 
     /// Whether this chapter has been digested.
@@ -375,7 +407,32 @@ impl Layout {
     /// The recorded render plan: the single namer for a chapter's audio. See
     /// [`crate::assemble::RenderPlan`].
     pub fn plan(&self, n: u32) -> PathBuf {
-        self.data().join(format!("render-{n:02}.json"))
+        self.render_dir().join(format!("{n:02}.json"))
+    }
+
+    /// The plans, one directory: `data/render/` — the sibling of
+    /// [`script_dir`](Self::script_dir), and for the same reason.
+    pub fn render_dir(&self) -> PathBuf {
+        self.data().join("render")
+    }
+
+    /// The workspace a chapter's script lives in, and the chapter, both read
+    /// back off the script's own path.
+    ///
+    /// The merge path is handed one file and nothing else — `data/script/NN.json`
+    /// — and must answer for the layout behind it. The workspace is the parent
+    /// of the `data` that holds the script folder, and the folder is recognised
+    /// **by name** rather than by counting levels: a count is silent when it is
+    /// wrong, and being one level short of the workspace does not fail, it hands
+    /// back a layout whose `chapters/` is somewhere else entirely. A path that
+    /// is not in a script folder is `None` rather than a guess.
+    pub fn of_script(script_path: &Path) -> Option<(Self, u32)> {
+        let chapter = chapter_of(script_path)?;
+        let script_dir = script_path.parent()?;
+        if script_dir.file_name()? != std::ffi::OsStr::new("script") {
+            return None;
+        }
+        Some((Self::new(script_dir.parent()?.parent()?), chapter))
     }
 
     pub fn bible(&self) -> PathBuf {
@@ -1045,6 +1102,8 @@ impl Layout {
         for d in [
             self.data(),
             self.chapters(),
+            self.script_dir(),
+            self.render_dir(),
             self.audio(),
             self.output(),
             self.bm_state(),
@@ -1107,6 +1166,31 @@ impl Layout {
         self.output()
             .join(format!("Ch.{n} - {}.mp3", self.chapter_title(n)))
     }
+}
+
+/// The chapter a `NN.json` in a chapter directory names. `None` for anything
+/// else, so a stray file a reader drops in is skipped rather than read as a
+/// chapter.
+pub fn chapter_of(path: &Path) -> Option<u32> {
+    let stem = path.file_stem()?.to_str()?;
+    if stem.is_empty() || !stem.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    stem.parse().ok()
+}
+
+/// The `NN.json` files in a chapter directory, in whatever order the
+/// filesystem hands them over. Callers that order the answer ask
+/// [`Layout::scripts`].
+fn chapter_files(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|x| x.path()))
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+                .filter(|p| chapter_of(p).is_some())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1509,6 +1593,7 @@ mod tests {
         let root = fixture_root("title-script");
         let l = Layout::new(&root);
         std::fs::create_dir_all(l.chapters()).unwrap();
+        std::fs::create_dir_all(l.script_dir()).unwrap();
         std::fs::write(
             l.chapter_txt(9),
             "Chương 9: Tê! Thật là khủng khiếp dao phay\n\nbody\n",
@@ -1764,5 +1849,34 @@ mod tests {
         // `prompts/` for exactly this case.
         let bare = Layout::new(fixture_root("homes-bare"));
         assert!(bare.adapter_homes().is_empty());
+    }
+
+    /// A script knows its chapter; recovering the workspace from the script's
+    /// own path is how the merge path gets a layout at all, and the depth is
+    /// easy to get wrong in a way that does not fail — a layout rooted at
+    /// `data/` has a perfectly good `chapters()`, just somewhere else, so the
+    /// chapter text is silently not found and the chapter loses its title. So
+    /// the assertion is on the *resolved* path, not on the return value.
+    #[test]
+    fn a_script_path_resolves_the_workspace_behind_it() {
+        let l = Layout::new(fixture_root("of-script"));
+        l.ensure().unwrap();
+        std::fs::write(l.chapter_txt(9), "Chương 9: Tiêu đề\n\nbody\n").unwrap();
+        std::fs::write(l.script(9), r#"{"segments":[]}"#).unwrap();
+
+        let (back, chapter) = Layout::of_script(&l.script(9)).expect("the script is in a script dir");
+        assert_eq!(chapter, 9, "the chapter is the file's own name");
+        assert_eq!(
+            back.chapter_txt(9),
+            l.chapter_txt(9),
+            "and the layout is rooted at the workspace, not at data/"
+        );
+        assert_eq!(back.script(9), l.script(9), "so it also agrees about the script");
+
+        // A path that is not in a script folder is refused rather than guessed
+        // at: a wrong guess is a layout that resolves to nothing and says so
+        // nowhere.
+        assert!(Layout::of_script(&l.chapter_txt(9)).is_none());
+        assert!(Layout::of_script(&l.data().join("bible.json")).is_none());
     }
 }

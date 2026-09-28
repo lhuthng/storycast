@@ -19,7 +19,7 @@ failure with the worker's own error text, and **K** shows it per task.
    worker's actual error (the full text, not a summary).
 2. Fix the cause. Then either `u` (retry: strikes reset) or `F`
    (force: also deletes the stage's partial output, e.g. a half-written
-   `script-NN.json`, so it truly runs again). A forced **merge** also forces
+   `script/NN.json`, so it truly runs again). A forced **merge** also forces
    its render when the chapter has no published mp3, a merge makes none of its
    own input, so re-offering it alone fails again on the same box for the same
    reason. The command line reaches the same three scopes: `:retry` is every

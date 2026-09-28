@@ -1263,7 +1263,7 @@ definition, so a flag cannot mean two things depending on which end it was
 typed at.
 
 **The sound-design editor (`:sound`) is a screen because its guard needs a
-load.** Three registries, the scene map and every `data/script-*.json` decide
+load.** Three registries, the scene map and every `data/script/NN.json` decide
 what may be removed, so it is a `Job` like the audition index rather than a
 keypress handler, and it is re-run after every save, because the guard is read
 off it. The rule it enforces is the one this pipeline keeps having to relearn:

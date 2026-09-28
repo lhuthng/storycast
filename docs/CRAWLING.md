@@ -652,7 +652,7 @@ a chapter you already have.
 * A whole batch validates before any of it lands: a three-file import that fails
   on the second writes nothing.
 * Importing over a chapter that is already digested is refused (it would leave
-  the old script describing the new text). Remove `data/script-NN.json` first.
+  the old script describing the new text). Remove `data/script/NN.json` first.
 * An import **is** the crawl: the crawl row closes Done and a shelved digest is
   queued again. So one broken page in a 500-chapter book is one `:import`, and
   nothing else about the run changes.

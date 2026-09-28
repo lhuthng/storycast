@@ -447,7 +447,7 @@ mod tests {
         crate::atomic_write(&l.script(3), r#"{"segments":[]}"#).unwrap();
         let err = import_text(&l, 3, &body("new")).unwrap_err().to_string();
         assert!(err.contains("already digested"), "{err}");
-        assert!(err.contains("script-03.json"), "{err}");
+        assert!(err.contains("script/03.json"), "{err}");
         assert!(!l.chapter_txt(3).is_file());
     }
 

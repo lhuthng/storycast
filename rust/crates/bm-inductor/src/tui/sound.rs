@@ -263,7 +263,7 @@ pub(crate) fn master_level(map: &SceneMap, layer: PoolKind) -> f64 {
 /// entry is still used for.
 ///
 /// A job rather than a keypress handler: it is three registries, the map and
-/// every `data/script-*.json` — the same hundred file opens the audition index
+/// every `data/script/NN.json` — the same hundred file opens the audition index
 /// makes, and the same reason for keeping them off the UI task.
 ///
 /// The layout is passed whole because the two halves are read together: the
@@ -305,13 +305,7 @@ pub(crate) fn load(layout: &bm_core::Layout) -> Result<SoundData, String> {
 fn read_script_uses(layout: &bm_core::Layout) -> BTreeMap<String, Vec<u32>> {
     let mut scripts: Vec<(u32, serde_json::Value)> = Vec::new();
     for path in crate::tui::audition::script_files(layout) {
-        let Some(n) = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_prefix("script-"))
-            .and_then(|n| n.strip_suffix(".json"))
-            .and_then(|n| n.parse::<u32>().ok())
-        else {
+        let Some(n) = bm_core::paths::chapter_of(&path) else {
             continue;
         };
         if let Ok(doc) = bm_core::read_json::<serde_json::Value>(&path) {
@@ -884,13 +878,14 @@ mod tests {
     #[test]
     fn a_script_placing_an_inject_is_what_makes_it_unremovable() {
         let (_d, dir) = fixture();
-        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let layout = bm_core::Layout::new(&dir);
+        layout.ensure().unwrap();
         std::fs::write(
-            dir.join("data/script-09.json"),
+            layout.script(9),
             r#"{"segments":[{"speaker":"A","text":"x"},{"sound":"coin"},{"stop":"cooking"}]}"#,
         )
         .unwrap();
-        let data = load(&bm_core::Layout::new(&dir)).unwrap();
+        let data = load(&layout).unwrap();
         let inject = rows(&data, PoolKind::Inject);
         let coin = inject.iter().find(|r| r.name == "coin").unwrap();
         assert!(coin.in_use());

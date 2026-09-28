@@ -4145,7 +4145,7 @@ async fn a_failed_line_index_says_which_half_is_out() {
     app.lines = None;
     app.lines_loading = true;
     app.apply(Ev::Lines(Err(
-        "no data/script-*.json under /r — run :translate first".into(),
+        "no data/script/NN.json under /r — run :translate first".into(),
     )));
     assert!(
         !app.lines_loading,
@@ -4666,7 +4666,7 @@ async fn roster_job_shows_disk_first_without_contacting_anyone() {
     use std::time::Duration;
     let d = tempfile::tempdir().unwrap();
     let layout = bm_core::Layout::new(d.path());
-    std::fs::create_dir_all(layout.data()).unwrap();
+    layout.ensure().unwrap();
     std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -5035,13 +5035,14 @@ async fn the_guard_is_re_read_when_the_confirmation_is_answered() {
     assert!(matches!(app.screen, Screen::Confirm(_)), "{:?}", app.screen);
 
     // While the dialog is open, a script starts placing that sound.
-    std::fs::create_dir_all(root.join("data")).unwrap();
+    let layout = bm_core::Layout::new(&root);
+    layout.ensure().unwrap();
     std::fs::write(
-        root.join("data/script-04.json"),
+        layout.script(4),
         format!(r#"{{"segments":[{{"sound":"{name}"}}]}}"#),
     )
     .unwrap();
-    app.sound = Some(sound::load(&bm_core::Layout::new(&root)).unwrap());
+    app.sound = Some(sound::load(&layout).unwrap());
 
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
     assert!(
@@ -5330,7 +5331,7 @@ async fn an_entry_whose_clip_is_gone_can_still_be_retagged() {
 fn local_cache_layout() -> (tempfile::TempDir, bm_core::Layout) {
     let dir = tempfile::tempdir().unwrap();
     let layout = bm_core::Layout::new(dir.path());
-    std::fs::create_dir_all(layout.data()).unwrap();
+    layout.ensure().unwrap();
     std::fs::write(
         layout.script(1),
         serde_json::json!({"segments": [
