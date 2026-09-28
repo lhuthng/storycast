@@ -135,7 +135,13 @@ The jargon, defined once here:
   carried on every beat) says which of those it was actually sent the files for.
   A stage the policy names and the bundle does not cover is withheld rather than
   attempted — a digest with no `prompts/analyze.txt` fails on every retry and
-  wears the chapter's strikes — and the log says so once per change.
+  wears the chapter's strikes — and the log says so once per change. What the
+  bundle reports is a **slot**: a stage *and* the adapter whose prompts it would
+  read (`digest@vi-VN`), because one bundle carries every language the inductor
+  has and a stage alone does not say which of them a box can run. The offer
+  carries the same binding the other way (pack, adapter, engine), so the box
+  keys its cast and its segments where the inductor will look for them. See
+  [PROFILES.md](PROFILES.md#the-slots-and-the-binding-on-the-wire).
 * **lease**: a time limit on one running task (crawl 10 min, digest 20 min,
   render 90 min, merge 30 min). If the time runs out, the task goes back on the
   pile **without a mark against it**, because silence is not failure. A
@@ -540,8 +546,11 @@ visible in the TUI log (the machine overlay shows which key won:
      sha256 per file, keyed by the path it lands on the worker, over the set the
      box's own work policy selects — the registry files a digest box reads, the
      scene map, the pools and the clips they register for a merge box, the
-     crawlers for a crawl box — plus the stage list itself and the agent
-     version. The `prompts/` are the one exception: 21 KB that rides every
+     crawlers for a crawl box — plus the slot list itself and the agent
+     version. The adapter trees are the other axis: every one this checkout
+     carries is in every bundle (21 KB each), and each lands at
+     `adapters/<name>/`, which is where the box's own resolver reads. The
+     `prompts/` are the one exception to the stage split: 21 KB that rides every
      bundle, so a box that gains `digest` by a keypress is not left without the
      one file the stage cannot start without. The selection lives in `provision/sources.rs`. Nothing
      travels because it happened to be in a directory, so a clip copied into

@@ -578,13 +578,14 @@ keeps the shipped crawler, and switching workspaces switches crawlers with no
 edit at all, because each workspace's directory is searched first.
 
 **It reaches the machines.** A box whose work policy runs **crawl** is sent
-`workspaces/<active>/crawl/` and the profile's `assets/crawl/` inside the
-sources bundle, and the bundle's manifest hashes every file in them, so an edit
-is drift and a removed crawler is cleared by the prune-then-extract that takes
-delivery. Edit the script, run `:prov` (or wait for the next one), and the
-cluster crawls through the new bytes — the same guarantee the profile's
-`assets/crawl/` has always had. A box with crawl turned off gets neither of
-them, and no other stage opens the directory.
+`workspaces/<active>/crawl/` and every language's own crawlers —
+`adapters/<name>/crawl/`, or the pack's `assets/crawl/` in a checkout that has
+no adapter trees yet — inside the sources bundle, and the bundle's manifest
+hashes every file in them, so an edit is drift and a removed crawler is cleared
+by the prune-then-extract that takes delivery. Edit the script, run `:prov` (or
+wait for the next one), and the cluster crawls through the new bytes — the same
+guarantee the profile's `assets/crawl/` has always had. A box with crawl turned
+off gets none of them, and no other stage opens the directory.
 
 Without an active workspace (legacy mode) the root *is* the workspace, so its
 directory is `<root>/crawl/`, the same path on both sides.

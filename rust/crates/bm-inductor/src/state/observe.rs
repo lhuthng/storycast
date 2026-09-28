@@ -137,6 +137,7 @@ impl Inner {
                 .map(|b| b.sources_stages.clone())
                 .unwrap_or_default();
             if was != h.sources_stages {
+                let adapter = self.layout.adapter.clone();
                 let missing: Vec<String> = self
                     .machines
                     .get(&addr)
@@ -144,8 +145,14 @@ impl Inner {
                         m.effective_task_policy()
                             .into_iter()
                             .filter(|p| p.enabled)
+                            .filter(|p| {
+                                !bm_core::provision::sources::holds(
+                                    &h.sources_stages,
+                                    p.stage,
+                                    &adapter,
+                                )
+                            })
                             .map(|p| p.stage.as_str().to_string())
-                            .filter(|s| !h.sources_stages.contains(s))
                             .collect()
                     })
                     .unwrap_or_default();

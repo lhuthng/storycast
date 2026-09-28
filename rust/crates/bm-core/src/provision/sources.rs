@@ -18,7 +18,7 @@
 //!
 //! | stage | files |
 //! |---|---|
-//! | crawl | the crawler: workspace `crawl/` + `assets/crawl/templates/` |
+//! | crawl | the crawler: workspace `crawl/` + the language's own `crawl/` |
 //! | digest | the four registries the prompt and the validators read |
 //! | render | nothing here — the voice store travels in `models/` |
 //! | merge | the scene map, the three clip pools, and the clips they register |
@@ -29,8 +29,8 @@
 //! offered the work as soon as the operator enabled it, ran the stage, and died
 //! on `reading prompt template … No such file or directory` until somebody
 //! re-provisioned. The rest of the narrowing still stands — the registries, the
-//! crawlers and the clips are still selected, and `stages` in the manifest still
-//! says which of them a box has.
+//! crawlers and the clips are still selected, and `slots` in the manifest says
+//! which `(stage, adapter)` pairs a box has.
 //! `refs/` is in none of them: enrollment happens on the inductor, which is the
 //! machine with the encoder, and what crosses to a worker is the *encoded* store
 //! (`models/voices.json` holds codes and speaker embeddings — not one of its
@@ -41,7 +41,7 @@
 //! it because a manifest names it or a stage declares it, never because it
 //! happened to be in a directory — so a clip copied into `assets/music/` but
 //! left unregistered stops travelling. And it is *hashed as a set*: the
-//! manifest, including the stage list it was built for, is the stamp's
+//! manifest, including the slot list it was built for, is the stamp's
 //! `sources_hash`. Widening a box's policy is therefore drift by construction,
 //! which is what stops the narrowing from being silent.
 //!
@@ -119,6 +119,35 @@ pub fn stages_of(policy: &[TaskPref]) -> Vec<Stage> {
         .collect()
 }
 
+/// One **slot**: a stage, and the adapter whose files make it runnable.
+///
+/// **The unit of the gate.** A box may hold several adapters — every adapter on
+/// the inductor ships to every box — so "digest" is not a fact about a box;
+/// "digest for vi-VN" is. The policy says which stages the operator wants, the
+/// manifest says which (stage, adapter) pairs the box was actually handed the
+/// files for, and a chapter is offered only where the two meet.
+///
+/// The wire spelling is `stage@adapter` (`digest@vi-VN`). A bare stage is the
+/// pre-slot spelling and reads as *that stage, whatever adapter* — which is
+/// exactly what it meant when a box held one language and could not say which.
+pub fn slot(stage: Stage, adapter: &str) -> String {
+    format!("{}@{}", stage.as_str(), adapter)
+}
+
+/// Whether `slots` covers `stage` for `adapter`.
+///
+/// A bare stage name — a manifest or a beat from before the second dimension
+/// existed — covers it for every adapter, so an old box is offered work exactly
+/// as before rather than starved by a fact its reporter never had.
+pub fn holds(slots: &[String], stage: Stage, adapter: &str) -> bool {
+    slots.iter().any(|s| match s.split_once('@') {
+        Some((named_stage, named_adapter)) => {
+            named_stage == stage.as_str() && named_adapter == adapter
+        }
+        None => s == stage.as_str(),
+    })
+}
+
 /// One file: where it lands on the worker, and the base its path is relative to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
@@ -141,6 +170,15 @@ pub struct Sources {
     /// The stages this set was built for — part of the manifest, so a policy
     /// change is drift.
     pub stages: Vec<Stage>,
+    /// The adapters (languages) whose trees this set carries.
+    ///
+    /// **Every adapter home on the inductor**, which is the decision rather
+    /// than an accident: one bundle is handed to every box, so no box needs an
+    /// adapter set of its own, and no field or screen has to describe the
+    /// subset. One entry even when the checkout has no `adapters/` tree at all
+    /// — the pre-split layout, whose language is the flat `prompts/` and whose
+    /// name is the one in force.
+    pub adapters: Vec<String>,
     /// Sorted by `to`, so the archive's member order is a property of the set.
     pub members: Vec<Member>,
     /// Clips a registry names that are not on disk here. Reported, not shipped:
@@ -172,6 +210,7 @@ impl Sources {
         }
         let mut out = Sources {
             stages,
+            adapters: Vec::new(),
             members: Vec::new(),
             missing: Vec::new(),
         };
@@ -189,27 +228,33 @@ impl Sources {
         // degrade — it fails, on every retry, until the operator notices. 21 KB
         // of text is not worth a class of failure.
         //
-        // The tree *in force*, which is the workspace's adapter when it has one
-        // and the checkout's otherwise — the same tree a digest on this root
-        // reads. Shipping the root tree unconditionally would hand a box one
-        // language's prompts while the inductor driving it reads another's, and
-        // the two would agree on every file name and disagree on every word.
-        // The adapter's whole **home** when it has one: its prompts *and* its
-        // crawlers, in one member at the relative path its own resolver reads
-        // (`adapters/<name>/`, which is what the box's binding names). Shipping
-        // a flat `prompts/` beside a bundle would be worse than redundant — the
-        // resolver prefers the bundle, so the flat copy would be a stale tree
-        // the box quietly ignored, and a prompt edit would stop reaching it.
-        match layout.adapter_home() {
-            Some(home) => {
-                if let Some(scope) = home.parent().and_then(|p| p.parent()) {
-                    out.push_tree(
-                        scope,
-                        &format!("{}/{}", crate::paths::ADAPTERS_DIR, layout.adapter),
-                    );
-                }
+        // The adapter trees: **every one this checkout carries**, not only the
+        // one in force. A whole **home** each — its prompts *and* its crawlers —
+        // in one member at the relative path its own resolver reads
+        // (`adapters/<name>/`, which is what a box's binding names).
+        //
+        // All of them for two reasons. The narrow one is the one the single
+        // tree in force was already chosen for: shipping the *root* tree
+        // unconditionally would hand a box one language's prompts while the
+        // inductor driving it reads another's, agreeing on every file name and
+        // disagreeing on every word. The wider one is that a box need not be
+        // re-provisioned to run a language it did not — 21 KB of text against a
+        // 59 MB artifact, and it retires the per-machine adapter set (and the
+        // field, and the screen) that a subset would need.
+        //
+        // Shipping a flat `prompts/` *beside* the homes would be worse than
+        // redundant: the resolver prefers the home, so the flat copy would be a
+        // stale tree the box quietly ignored and a prompt edit would stop
+        // reaching it. Hence one or the other, never both.
+        let homes = layout.adapter_homes();
+        if homes.is_empty() {
+            out.push_tree(&layout.prompts_base(), "prompts");
+            out.adapters.push(layout.adapter.clone());
+        } else {
+            for (name, scope) in &homes {
+                out.push_tree(scope, &format!("{}/{name}", crate::paths::ADAPTERS_DIR));
+                out.adapters.push(name.clone());
             }
-            None => out.push_tree(&layout.prompts_base(), "prompts"),
         }
 
         for stage in out.stages.clone() {
@@ -218,11 +263,11 @@ impl Sources {
             }
             match stage {
                 Stage::Crawl => {
-                    // The bundled templates — pre-split only. With an adapter
-                    // bundle they already rode its home above, and a crawler
-                    // named by a registry resolves out of whichever
-                    // `templates/` the resolver reaches first: the language's.
-                    if layout.adapter_home().is_none() {
+                    // The bundled templates — pre-split only. With adapter
+                    // homes they already rode them above, and a crawler named
+                    // by a registry resolves out of whichever `templates/` the
+                    // resolver reaches first: the language's.
+                    if homes.is_empty() {
                         out.push_tree(root, "assets/crawl");
                     }
                     // …and the workspace's own crawlers, which
@@ -372,7 +417,21 @@ impl Sources {
         self.members.iter().map(|m| m.bytes).sum()
     }
 
-    /// `path -> sha256`, plus the stages this set was built for.
+    /// The slots this set covers: every stage it was built for, for every
+    /// adapter it carries. Canonical on both axes, so the list is a property of
+    /// the set rather than of the order the policy or the filesystem answered
+    /// in.
+    pub fn slots(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(self.stages.len() * self.adapters.len());
+        for stage in &self.stages {
+            for adapter in &self.adapters {
+                out.push(slot(*stage, adapter));
+            }
+        }
+        out
+    }
+
+    /// `path -> sha256`, plus the slots this set was built for.
     ///
     /// The manifest *is* the path system: every member is keyed by where it
     /// lands, so the artifact carries its own map from the archive to the
@@ -385,7 +444,7 @@ impl Sources {
             files.insert(m.to.clone(), hex(Sha256::digest(&bytes)));
         }
         Ok(SourcesManifest {
-            stages: self.stages.iter().map(|s| s.as_str().to_string()).collect(),
+            slots: self.slots(),
             files,
         })
     }
@@ -398,8 +457,8 @@ impl Sources {
         let mut h = Sha256::new();
         h.update(b"bm-sources-v1");
         h.update([0]);
-        for stage in &manifest.stages {
-            h.update(stage.as_bytes());
+        for slot in &manifest.slots {
+            h.update(slot.as_bytes());
             h.update([0]);
         }
         h.update([0]);
@@ -552,14 +611,24 @@ impl Sources {
     }
 }
 
-/// The manifest inside the artifact: the stages it was built for, and one
+/// The manifest inside the artifact: the slots it was built for, and one
 /// sha256 per path.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SourcesManifest {
-    /// The stages the set covers. In the manifest *on purpose*: widening a
-    /// box's policy has to be visible to the drift check, or the box quietly
-    /// keeps running a stage whose files it was never given.
-    pub stages: Vec<String>,
+    /// The `(stage, adapter)` slots the set covers — see [`slot`].
+    ///
+    /// In the manifest *on purpose*: widening a box's policy has to be visible
+    /// to the drift check, or the box quietly keeps running a stage whose files
+    /// it was never given. The same argument added the second dimension, because
+    /// the box's bundle now carries several languages and a stage alone no
+    /// longer says which of them the box can run.
+    ///
+    /// `#[serde(default)]` so a manifest extracted before slots existed (an
+    /// `install_sources` from an older inductor) still parses: an empty list is
+    /// "no opinion", which is the safe read, and the next provisioning replaces
+    /// the file.
+    #[serde(default)]
+    pub slots: Vec<String>,
     /// Worker-relative path -> sha256 of the bytes.
     pub files: BTreeMap<String, String>,
 }
@@ -755,12 +824,14 @@ mod tests {
         );
     }
 
-    /// The prompts a box receives are the tree **in force** — the workspace's
-    /// adapter when it has one, the checkout's otherwise — and they land under
-    /// the names the box already reads. The member path is identical either way,
-    /// which is exactly why the source has to be the one the inductor's digest
-    /// reads: agreeing on every file name and disagreeing on every word is the
-    /// failure this pins.
+    /// A checkout with **no adapter home at all** — the pre-split shape, where
+    /// a language was two directory names it happened to carry — still ships
+    /// its prompts, from the scope that holds them: the workspace's own tree
+    /// when it has one, the checkout's otherwise.
+    ///
+    /// The member path is identical either way, which is exactly why the source
+    /// has to be the tree *in force*: agreeing on every file name and
+    /// disagreeing on every word is the failure this pins.
     #[test]
     fn a_workspace_adapter_ships_its_own_prompts_under_the_same_names() {
         let root = fixture("adapter-prompts");
@@ -793,6 +864,96 @@ mod tests {
             .expect("the prompts ride every bundle");
         assert_eq!(prompt.from, root.prompts_dir().join("analyze.txt"));
         assert_eq!(prompt.base, root.root);
+    }
+
+    /// **Every adapter this checkout carries ships**, not only the one in
+    /// force, and each lands under the path its own resolver reads.
+    ///
+    /// The alternative — a per-machine adapter set — needs a field, a screen
+    /// and an answer to "why is this box not offered the book"; 21 KB of text
+    /// against a 59 MB artifact does not pay for any of that, and a box that
+    /// holds both languages is a box that can be handed either chapter the
+    /// moment the operator switches.
+    #[test]
+    fn every_adapter_home_ships_and_the_bundle_says_which_languages_it_holds() {
+        let l = fixture("adapters-all");
+        let adapters = l.root.join(crate::paths::ADAPTERS_DIR);
+        for (name, file) in [
+            ("xianxia-vi-VN", "prompts/analyze.txt"),
+            ("xianxia-vi-VN", "crawl/site.lua"),
+            ("xianxia-en-US", "prompts/analyze.txt"),
+        ] {
+            let p = adapters.join(name).join(file);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, format!("{name}/{file}")).unwrap();
+        }
+
+        let s = Sources::plan(&l, &[Stage::Crawl, Stage::Digest]).unwrap();
+        assert_eq!(
+            s.adapters,
+            vec!["xianxia-en-US".to_string(), "xianxia-vi-VN".to_string()],
+            "sorted, both, and neither had to be in force"
+        );
+        assert_eq!(
+            s.slots(),
+            vec![
+                "crawl@xianxia-en-US",
+                "crawl@xianxia-vi-VN",
+                "digest@xianxia-en-US",
+                "digest@xianxia-vi-VN",
+            ]
+        );
+        let got = paths(&l, &[Stage::Crawl, Stage::Digest]);
+        for want in [
+            "adapters/xianxia-vi-VN/prompts/analyze.txt",
+            "adapters/xianxia-vi-VN/crawl/site.lua",
+            "adapters/xianxia-en-US/prompts/analyze.txt",
+        ] {
+            assert!(got.contains(&want.to_string()), "{want} missing: {got:?}");
+        }
+        // The flat trees are *not* beside them: the resolver prefers the home,
+        // so a flat copy would be a stale tree the box silently ignored — and a
+        // prompt edit would stop reaching it.
+        assert!(
+            !got.contains(&"prompts/analyze.txt".to_string()),
+            "the checkout's own prompts travelled beside the homes: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|p| p.starts_with("assets/crawl/")),
+            "the bundled templates travelled beside the language's own: {got:?}"
+        );
+        // …while a book's own crawlers still ride along, which is what keeps a
+        // site-specific script out of the shared profile tree.
+        assert!(got.contains(&"crawl/site.lua".to_string()), "{got:?}");
+
+        // The manifest carries the same claim, so the box can report it.
+        let manifest = s.manifest().unwrap();
+        assert_eq!(manifest.slots, s.slots());
+    }
+
+    /// The two halves of the gate's vocabulary: the spelling a slot travels
+    /// under, and the rule that a bare stage — a report from before the second
+    /// dimension — covers it for every adapter.
+    #[test]
+    fn a_slot_names_its_adapter_and_a_bare_stage_covers_them_all() {
+        assert_eq!(slot(Stage::Digest, "vi-VN"), "digest@vi-VN");
+        let slots = vec![slot(Stage::Digest, "vi-VN"), slot(Stage::Merge, "en-US")];
+        assert!(holds(&slots, Stage::Digest, "vi-VN"));
+        assert!(
+            !holds(&slots, Stage::Digest, "en-US"),
+            "the pair is the unit, not the stage"
+        );
+        assert!(!holds(&slots, Stage::Render, "vi-VN"));
+        // A stage with no adapter is the pre-slot spelling, and reads as every
+        // adapter: an old agent is offered work rather than starved.
+        let bare = vec!["digest".to_string()];
+        assert!(holds(&bare, Stage::Digest, "vi-VN"));
+        assert!(holds(&bare, Stage::Digest, "anything-at-all"));
+        assert!(!holds(&bare, Stage::Merge, "vi-VN"));
+        assert!(
+            !holds(&[], Stage::Digest, "vi-VN"),
+            "nothing covers nothing"
+        );
     }
 
     /// **The prompt is not a stage's file.** A box can gain `digest` with one
@@ -982,7 +1143,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(dst.join(MANIFEST_NAME)).unwrap())
                 .unwrap();
         assert_eq!(back.files, manifest.files);
-        assert_eq!(back.stages, vec!["digest", "merge"]);
+        assert_eq!(back.slots, vec!["digest@default", "merge@default"]);
         assert!(!dst.join("assets/music/leftover-bg-9.mp3").exists());
     }
 

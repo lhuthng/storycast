@@ -1244,19 +1244,24 @@ struct WorkerIdentity {
     root: PathBuf,
 }
 
-/// The stages this box's sources bundle covers, from the manifest the last
-/// provision left at the worker root.
+/// The `(stage, adapter)` slots this box's sources bundle covers, from the
+/// manifest the last provision left at the worker root.
 ///
 /// Read **per beat** rather than cached at startup: a push happens under a
 /// running agent, so a list read once at boot would keep withholding the work
 /// the box has just been handed until somebody restarted the worker. A missing
 /// or unreadable manifest is an empty list, which the inductor reads as "no
 /// opinion" rather than "covers nothing".
-fn bundle_stages(root: &Path) -> Vec<String> {
+///
+/// The manifest is the box's own statement of what it holds; the inductor turns
+/// it into a gate against the adapter the offer is *for*, which is why the list
+/// is two-dimensional — one bundle carries every language, and a stage name
+/// alone cannot say which of them this box can run.
+fn bundle_slots(root: &Path) -> Vec<String> {
     std::fs::read_to_string(root.join(bm_core::provision::sources::MANIFEST_NAME))
         .ok()
         .and_then(|t| serde_json::from_str::<bm_core::provision::sources::SourcesManifest>(&t).ok())
-        .map(|m| m.stages)
+        .map(|m| m.slots)
         .unwrap_or_default()
 }
 
@@ -1314,7 +1319,7 @@ fn heartbeat_now(
         sidecars,
         sidecar_gb,
         capabilities: capabilities(),
-        sources_stages: bundle_stages(&who.root),
+        sources_stages: bundle_slots(&who.root),
         sidecar_keep: Some(sidecar_keep),
     }
 }
@@ -1438,6 +1443,35 @@ fn set_task(shared: &Shared, offer: &TaskOffer) {
     }
 }
 
+/// Say so when the box's own profile is not the one the task came from.
+///
+/// The **pack** is the leg of the binding a box can disagree about silently.
+/// The adapter and the engine are in every cache path it writes, so a
+/// mismatch shows up in the filenames; the pack is a property of the `assets/`
+/// and `prompts/` a provision left here, and a box carrying another pack's
+/// registries is being handed prompts that read files this pack never wrote.
+///
+/// Warned, not refused — "refuse where bytes are made, warn on load" — and
+/// refused on the inductor, where the workspace's binding, the adapter it
+/// names and the engine those bytes would be spoken with are all in one hand.
+/// Silent when either side is silent, so an older inductor and a pre-split
+/// pointer are both just quiet.
+fn warn_on_pack_mismatch(layout: &Layout, offer: &TaskOffer) {
+    if offer.pack.is_empty() {
+        return;
+    }
+    let Ok(binding) = bm_core::profile::read_binding(&layout.root) else {
+        return;
+    };
+    if !binding.pack.name.is_empty() && binding.pack.name != offer.pack {
+        println!(
+            "warning: this box holds profile '{}' but the task came from '{}' — its assets are \
+             another profile's; re-provision it",
+            binding.pack.name, offer.pack
+        );
+    }
+}
+
 fn clear_task(shared: &Shared) {
     if let Ok(mut p) = shared.lock() {
         p.task_id = None;
@@ -1499,6 +1533,17 @@ async fn run_offer(
 ) -> Result<TaskResult> {
     use bm_proto::Stage::*;
     let n = offer.chapter;
+    // **The offer's binding decides where this task's files live.** See
+    // `Layout::rebind` for the divergence it closes; in one line, a worker root
+    // is a flat mirror, so without this the box keys `cast-*` and
+    // `segments-*` under `default` while the inductor that drives it keys them
+    // under the adapter its ledger names. The offer is the authority because it
+    // is the inductor's answer, taken at the moment it decided to hand this box
+    // this task — a re-pointed inductor reaches a box on its next offer rather
+    // than on its next provisioning.
+    let bound = layout.rebind(&offer.adapter, &offer.engine);
+    let layout = &bound;
+    warn_on_pack_mismatch(layout, offer);
     // Credentials first: everything below, including the TTS sidecar this
     // call may spawn, reads them from the environment.
     let installed = install_credentials(&offer.credentials);
@@ -1918,7 +1963,7 @@ async fn worker_loop(
         addr: addr.clone(),
         hostname,
         capabilities: capabilities(),
-        sources_stages: bundle_stages(&layout.root),
+        sources_stages: bundle_slots(&layout.root),
         tts_url: Some(tts_url.clone()),
         version: VERSION.into(),
     };
@@ -2840,6 +2885,8 @@ mod tests {
             crawl: None,
             attempt: 1,
             tts_url: Some(format!("http://{addr}")),
+            adapter: "vi-VN".into(),
+            pack: "xianxia".into(),
             engine: "vieneu".into(),
             model_order: vec![],
             analyzer: "local".into(),
@@ -2887,7 +2934,16 @@ mod tests {
             sidecar.served, 10,
             "and all ten counted against the model, which is what the guard reads"
         );
-        let seg = layout.seg_dir("vieneu", 7);
+        // **Under the offer's adapter, not this box's own.** The root this
+        // worker runs in is a flat mirror with no pointer, so `layout` says
+        // `default`; the binding on the offer is what makes the two ends agree
+        // on the filename, which is the difference between the inductor finding
+        // these takes and re-rendering them. Asserted here rather than only in
+        // `Layout::rebind`'s own test because this is the write that has to
+        // land where the inductor will look.
+        let seg = layout
+            .rebind(&offer.adapter, &offer.engine)
+            .seg_dir(&offer.engine, 7);
         for u in &units {
             let p = seg.join(&u.name);
             let len = p.metadata().map(|m| m.len()).unwrap_or(0);
@@ -3142,6 +3198,8 @@ mod tests {
             crawl: None,
             attempt: 1,
             tts_url: None,
+            adapter: "vi-VN".into(),
+            pack: "xianxia".into(),
             engine: "vieneu".into(),
             model_order: vec![],
             analyzer: "local".into(),

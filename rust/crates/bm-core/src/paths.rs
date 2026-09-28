@@ -182,6 +182,68 @@ impl Layout {
         })
     }
 
+    /// This layout, re-bound to the adapter and engine a task arrives with.
+    ///
+    /// **The offer is the authority for where a task's bytes live.** A worker's
+    /// root is a flat mirror — no `.bm/profile` of the inductor's shape, and on
+    /// a box provisioned before the split not even a name — so a layout
+    /// resolved at startup keys `cast-*` and `segments-*` under `default`
+    /// while the inductor that drives it, which has a pointer and a ledger,
+    /// keys them under `vi-VN`. Nothing noticed while segment files travelled
+    /// by *name* (`RenderUnitSpec.name`), so the cost was a wasted re-render
+    /// rather than wrong audio — until a stage reads a cast or a prompt on the
+    /// box, and then it is a chapter mixed from another language's cast.
+    ///
+    /// An empty name is no opinion (an inductor that predates the field sends
+    /// nothing), and keeps whatever this box resolved for itself.
+    pub fn rebind(&self, adapter: &str, engine: &str) -> Self {
+        let mut bound = self.clone();
+        if !adapter.trim().is_empty() {
+            bound.adapter = adapter.trim().to_string();
+        }
+        if !engine.trim().is_empty() {
+            bound.engine = engine.trim().to_string();
+        }
+        bound
+    }
+
+    /// Every adapter home this checkout carries: `(name, scope)`, the tree
+    /// being `scope/adapters/<name>/`.
+    ///
+    /// **All of them, in every scope**, because the bundle ships every one:
+    /// a language is 21 KB of prompts, the artifact it rides is 59 MB of clips,
+    /// and the alternative — a per-machine adapter set — needs a field, a
+    /// screen and a way to answer "why is this box not offered the book". One
+    /// bundle for the whole cluster is also what keeps a box ready for a
+    /// language it is not running today.
+    ///
+    /// The workspace's scope is walked first and a name found in both resolves
+    /// to it, the rule [`Self::adapter_home`] already follows for the one in
+    /// force. Sorted within each scope, so `Sources::plan` — and therefore the
+    /// bundle's digest — is a property of the tree rather than of the order the
+    /// filesystem answers in.
+    pub fn adapter_homes(&self) -> Vec<(String, PathBuf)> {
+        let mut out: Vec<(String, PathBuf)> = Vec::new();
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for scope in [&self.work, &self.root] {
+            let Ok(entries) = std::fs::read_dir(scope.join(ADAPTERS_DIR)) else {
+                continue;
+            };
+            let mut names: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect();
+            names.sort();
+            for name in names {
+                if seen.insert(name.clone()) {
+                    out.push((name, scope.clone()));
+                }
+            }
+        }
+        out
+    }
+
     /// Resolve, or fall back to the bare root when the pointer is stale.
     ///
     /// **Management plane only.** The dashboard and `workspace` must open on a
@@ -1617,5 +1679,90 @@ mod tests {
         // No workspace pointer means the worker root *is* the workspace.
         assert_eq!(found.work, found.root);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The divergence the offer's binding closes.** A worker's root is a flat
+    /// mirror: nothing on it names an adapter, so a layout resolved there keys
+    /// every cache under `default` while the inductor — which has a pointer and
+    /// a ledger — keys them under `vi-VN`. One chapter's takes under two names,
+    /// which is a re-render nobody asked for today and would be an empty store
+    /// the day a merge looks for what the render wrote.
+    #[test]
+    fn rebind_moves_the_caches_to_the_adapter_the_offer_is_for() {
+        let root = fixture_root("rebind");
+        let worker = Layout::resolve(&root).unwrap();
+        assert_eq!(worker.adapter, DEFAULT_ADAPTER, "no pointer, no language");
+        let audio = worker.data().join("audio");
+        assert_eq!(
+            worker.seg_dir(DEFAULT_ENGINE, 7),
+            audio.join("segments-default-vieneu-07")
+        );
+
+        let bound = worker.rebind("vi-VN", "gemini");
+        assert_eq!(bound.adapter, "vi-VN");
+        assert_eq!(
+            bound.seg_dir("gemini", 7),
+            audio.join("segments-vi-VN-gemini-v2-07"),
+            "the engine is the argument, the adapter is the binding"
+        );
+        assert_eq!(
+            bound.cast("gemini"),
+            worker.data().join("cast-vi-VN-gemini-v2.json"),
+            "and the cast moves with it, under its historical spelling"
+        );
+        // A name, not a tree: the root and the workspace are untouched.
+        assert_eq!(&bound.root, &worker.root);
+        assert_eq!(&bound.work, &worker.work);
+
+        // An empty name is no opinion — an inductor from before the binding
+        // rode the offer — and keeps what this box resolved for itself.
+        let kept = worker.rebind("", "   ");
+        assert_eq!(kept.adapter, DEFAULT_ADAPTER);
+        assert_eq!(kept.engine, DEFAULT_ENGINE);
+    }
+
+    /// Every home in every scope, sorted, with a name found in both resolving
+    /// to the workspace's — the rule `adapter_home()` already follows for the
+    /// one in force, so "the tree the bundle ships" and "the tree this run
+    /// reads" cannot disagree about which scope an adapter lives in.
+    #[test]
+    fn adapter_homes_walks_both_scopes_and_the_workspace_wins() {
+        let root = fixture_root("homes");
+        let book = root.join("workspaces/book");
+        std::fs::create_dir_all(&book).unwrap();
+        for (scope, name) in [
+            (&root, "vi-VN"),
+            (&root, "en-US"),
+            (&book, "vi-VN"),
+            (&book, "ja-JP"),
+        ] {
+            std::fs::create_dir_all(scope.join(ADAPTERS_DIR).join(name).join("prompts")).unwrap();
+        }
+        let layout = Layout {
+            root: root.clone(),
+            work: book.clone(),
+            adapter: "vi-VN".into(),
+            engine: DEFAULT_ENGINE.into(),
+        };
+        assert_eq!(
+            layout.adapter_homes(),
+            vec![
+                ("ja-JP".to_string(), book.clone()),
+                ("vi-VN".to_string(), book.clone()),
+                ("en-US".to_string(), root.clone()),
+            ],
+            "workspace scope first, each scope sorted, a shadowed name once"
+        );
+        assert_eq!(
+            layout.adapter_home(),
+            Some(book.join(ADAPTERS_DIR).join("vi-VN")),
+            "and the one in force resolves in that same scope"
+        );
+
+        // No `adapters/` anywhere is the pre-split shape, and it is an empty
+        // list rather than an error: `Sources::plan` falls back to the flat
+        // `prompts/` for exactly this case.
+        let bare = Layout::new(fixture_root("homes-bare"));
+        assert!(bare.adapter_homes().is_empty());
     }
 }

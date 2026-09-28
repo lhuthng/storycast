@@ -79,9 +79,10 @@ What each actually holds:
   vocabularies, and its values must be canonical palette names — which is why it
   is pack-side and stays in English.
 - **Adapter** — the two prompt templates, plus the crawler templates the source
-  language is read with (`crawl/`, 72 KB, one file per site). Everything else it will
-  eventually own (a text front end for the language) lives inside the engine's
-  code, not here.
+  language is read with (`crawl/`, 72 KB, one file per site), plus
+  `adapter.json`, which is where the language stops being a guess about a
+  folder name. Everything else it will eventually own (a text front end for the
+  language) lives inside the engine's code, not here.
 - **Engine** — `engines/<name>/`: `models/` (weights, the live voice store
   `voices.json`, the G2P dictionary `sea_g2p.bin`), `bm-tts`,
   `libonnxruntime.so.1`, and `refs/` + `samples/` for enrollment. The engine's
@@ -150,12 +151,80 @@ Undeclared answers the *refusing* way for all of them: no tags, no languages,
 no cloning, no dictionary, and not VieNeu's 48 kHz. That is the same rule the
 non-verbal slice follows, and it is what makes a typo in `settings.engine` safe.
 
-`adapter_language(pack, adapter)` is the other half, and it is all that is built:
-an adapter is `<pack>-<language>`, so `xianxia-en-US` names `en-US` and an
-unnamed adapter claims nothing. Comparing that against `languages` is where a
-mismatch becomes a refusal — and that belongs with the adapter manifest, below,
-because until an adapter declares its language as *data* the derived tag is a
-convention rather than a fact.
+`adapter_language(pack, adapter)` is the other half: an adapter is
+`<pack>-<language>`, so `xianxia-en-US` names `en-US` and an unnamed adapter
+claims nothing. Comparing that against `languages` is where a mismatch becomes
+a refusal, and it does now — `adapter::inspect` compares the two and names
+them — but the id is only the *fallback* for it. An adapter declares its own
+language in `adapter.json` (see [The adapter manifest](#the-adapter-manifest)),
+because a tag derived from a folder name is a convention and a refusal built on
+a convention is a guess with a straight face.
+
+## The adapter manifest
+
+`adapters/<id>/adapter.json`, read by `bm_core::adapter`:
+
+```json
+{ "pack": "xianxia", "language": "vi-VN", "engine": "" }
+```
+
+Every field is a **claim**, and an empty one is silence: nothing refuses on an
+empty field, so `{"language":"en-US"}` is a complete manifest and `{}` is the
+same as having none. `language` is what the prompts write *and* what the source
+text is in, because an adapter has one language and it is both the source's and
+the target's. `pack` is the genre the prompts are written for — an adapter is
+pack-bound, so prompts written for one register behind another pack's binding
+is a real error. `engine` is optional and pins one engine, for wording that
+depends on the engine rather than the language; empty means "any engine that
+can voice the language", which is every adapter shipped today.
+
+`language` is preferred over the id's suffix, and the id is the fallback for an
+adapter written before this file. The pre-split checkout is the third case: its
+adapter is `default`, which claims nothing and therefore **cannot** be
+mismatched — which is what lets the split land on an existing checkout with no
+re-provisioning.
+
+**One implementation, two callers.** `adapter::inspect` answers for a triple
+(the adapter in force, the binding's pack, the bound engine) and says one
+sentence per disagreement. Both halves use it, deliberately, because a gate
+that disagreed with the warning would be a pipeline that stalls with nothing in
+the log about why:
+
+| Where | Behaviour | Why |
+| --- | --- | --- |
+| The offer (`Inner::voice_gate`) | **Refuses** `digest` and `render`; the rows stay `Pending`, nothing is struck | these are the stages that cook bytes in one language, and both are cached under content-addressed names, so a wrong-language chapter is forever |
+| Startup (`serve`, once) | **Warns**, in the Events pane | a withheld row looks exactly like an idle cluster, so the verdict is read where a human is certainly looking |
+
+`crawl` and `prepare` are outside the gate on purpose: the crawled text and the
+quote split are properties of the *source*, which is the adapter-independent
+side of the fork line. An operator can keep crawling a book while the engine or
+the adapter is being sorted out.
+
+The engine it is judged against is **`settings.engine`, not `layout.engine`**.
+Those are two different facts — the run config's engine, and the engine whose
+`engines/<name>/` tree the load pointer names — and the gate has to judge the
+one the offer will actually name, because every offer builds on
+`settings.engine`: the segment directory, the cast, the sidecar's dictionary.
+
+A manifest that exists and cannot be parsed is a *problem*, not silence: an
+operator who wrote a declaration and cannot tell whether it is being honoured is
+worse off than one who never wrote one, so the complaint names the file.
+
+**Asking instead of inferring.** `bm-inductor profile check` prints the four
+facts (the binding, the adapter and what it declares, the language and where it
+came from, the engine and what it declares) and exits non-zero when they
+disagree — the same verdict the scheduler gates on, asked before a run rather
+than deduced from a chapter that has been `Pending` for an hour. It is
+read-only, so it is safe with the cluster up, and the exit status is the answer,
+so a script can gate on it:
+
+```
+profile   xianxia · xianxia-en-US
+adapter   adapters/xianxia-en-US/adapter.json — declares language en-US, pack xianxia
+language  en-US (declared)
+engine    vieneu — declares vi-VN
+problem   adapter 'xianxia-en-US' writes en-US and engine 'vieneu' cannot voice it
+```
 
 ## The binding
 
@@ -264,9 +333,9 @@ corpus is shared between languages.
 
 The rule is why a worker is held to a language at all: an engine that cannot
 voice the adapter's language is a mismatch rather than a setting. The engine's
-half is declared (`EngineDecl.languages`); the adapter's half is a convention
-derived from its id (`adapter_language`), and turning the two into a refusal
-waits on the adapter manifest below. A *translating* adapter — bilingual
+half is declared (`EngineDecl.languages`), the adapter's half is declared too
+now (`adapter.json`, else its id), and the two become a refusal in
+`adapter::inspect` — enforced at the offer, warned about at load. A *translating* adapter — bilingual
 prompts, one corpus feeding both sides — is a third shape, future work, and
 deliberately not designed here.
 
@@ -438,26 +507,100 @@ rather than per language, as `-vi-VieNeu` versus `-vi-GeminiTTS` suggests — is
 not built: today the engine reaches a prompt only through this declaration, and
 a per-engine override is a larger decision than the tags it would serve.
 
+## The slots, and the binding on the wire
+
+A box is handed **one bundle**, and that bundle carries **every adapter the
+inductor has**. So a stage name is not a fact about a box: "this box can
+digest" is half an answer, because a digest reads the adapter's prompts and
+writes a script in the adapter's language. What the manifest reports, and what
+the scheduler gates on, is a **slot** — a stage *and* an adapter:
+
+```rust
+slot(Stage::Digest, "vi-VN")                                      // "digest@vi-VN"
+holds(&beat.sources_stages, Stage::Digest, &layout.adapter)       // the gate
+```
+
+`sources-manifest.json` carries `slots` (it carried `stages`), `Heartbeat` and
+`Register` report them, `ProvisionStamp.sources_stages` records them, and
+`state/offer.rs` offers a stage only when the beat holds the slot **for the
+adapter the offer is for** — `self.layout.adapter`, the name every cache path on
+this machine is keyed by. A bare stage name — a manifest or a beat from before
+the second dimension — covers it for every adapter, which is what it meant when
+a box held one language and could not say which, so an old agent is offered work
+rather than starved.
+
+Three decisions made the shape what it is:
+
+- **The pair is the unit, not the adapter.** One bundle, several languages, so a
+  policy that enables `digest` on a box whose bundle covers it for `en-US` is a
+  digest that dies on a missing prompt. The gate could read the stage list alone
+  while there was one language; the second one is what makes the pair necessary.
+- **Every adapter on the inductor ships to every box.** 21 KB of text against a
+  59 MB artifact. The alternative needs a per-machine adapter set — a field, a
+  `P`-screen surface, and an answer to "why is this box not offered the book" —
+  and it buys nothing the prompt tree does not already buy.
+- **The stages that read the *source* are outside the gate.** `crawl` and
+  `prepare` are the fork line's adapter-independent side: the crawled text and
+  the quote split are properties of the source, so they run whichever language
+  the pipeline is in the middle of deciding.
+
+### The offer carries the binding
+
+`slots` is the *box's* claim about files. The companion question is which files
+a *task* writes, and the answer is the **binding**: `pack`, `adapter`, `engine`,
+all three on `TaskOffer` beside the analyzer block and `CrawlSpec` and for the
+same reason — one source of truth, on the wire, so no box has to guess.
+
+The guess it replaces was wrong in a way nothing could see. A worker's root is a
+flat mirror with no `.bm/profile` of the inductor's shape, so `Layout::resolve`
+there reads `adapter = default` and keys `cast-*` and `segments-*` under it,
+while the inductor — which has a pointer and a ledger — keys them under `vi-VN`.
+Nothing noticed because segment files travel **by name**
+(`RenderUnitSpec.name`), so the cost was a re-render nobody asked for. The day a
+stage reads a cast on the box it would be a chapter spoken from the wrong
+roster.
+
+So `run_offer` begins with `layout.rebind(&offer.adapter, &offer.engine)` — one
+line, and both the pull path and the serve path go through it. An empty name is
+no opinion (an inductor from before the field), and keeps whatever the box
+resolved for itself. Provisioning writes the **whole binding** to the worker's
+`.bm/profile` for the same reason, so a box's own hand-driven run agrees with no
+offer to read; it used to write the pack `Pointer`, which is the shape from
+before the split, and the adapter was silently absent from it.
+
+`pack` is the third leg, and the one a box can disagree about *silently*: the
+adapter and the engine are in every cache path it writes, while the pack is a
+property of the `assets/` a provision left behind. So the box **warns** when the
+offer's pack is not its own — *refuse where bytes are made, warn on load*, and
+the refusal is made on the inductor, where the workspace's binding, the adapter
+it names and the engine those bytes would be spoken with are all in one hand
+(see [The adapter manifest](#the-adapter-manifest)).
+
+The tests that pin it: the same stage for two adapters is two different answers
+(`a_slot_is_a_stage_and_its_language`); a second adapter home drifts every box's
+stamp (`a_second_adapter_home_is_sources_drift_for_every_box`); every home ships
+and the flat tree does not travel beside it
+(`every_adapter_home_ships_and_the_bundle_says_which_languages_it_holds`); and a
+render writes under the offer's adapter rather than its own
+(`a_batched_offer_renders_every_take_it_carries`, with `Layout::rebind`'s own
+test for the mechanism).
+
 ## Not built yet
 
-- **An adapter manifest — the mismatch gate.** An adapter declares
-  `(pack, language, engine)` in `adapters/<id>/adapter.json`, and the binding
-  refuses a pair that disagrees rather than deriving the language from the id.
-  `EngineDecl.languages`, `adapter_language()` and the ledger gate are all in
-  place; what is missing is the language being *data* on the adapter side. Which
-  is also what would let a worker be held to a language before it is offered one.
+- **The cast fallback is one language.** A render or merge box is sent the cast
+  file in force (`data/cast-<adapter>-<engine>.json`), and with several adapters
+  shipped that is several files — but `data/` is the *workspace's*, so there is
+  exactly one adapter's to send. Nothing depends on it today: the offer carries
+  the cast (it is what names the segment files) and the shipped copy is the
+  fallback for an inductor old enough not to. The day a box has to plan a
+  chapter with no offer to read — a hand-driven merge on a provisioned worker —
+  the one language it holds is the one it was provisioned for.
 - **A release per member.** `tools/profile.sh` is per piece now
   (`profiles/<piece>/<name>.tar.zst`, `--piece pack|adapter`), which is what
   turns the untracked `adapters/<adapter>/` tree into something a second machine
   can bind. What is *not* built is the tag scheme's tail: a machine that trusts
   a release it fetched still has nothing to check the manifest's dependency
   hashes against beyond its own `assets/_extends/`.
-- **Phase 4 — provisioning and scheduling.** Bundles become per piece, and
-  `sources_stages` grows the second dimension so a vi-VN box is never offered an
-  en-US chapter. Two things ride with it: the worker resolves the same
-  `Layout::cast()` through its own `.bm/profile`, so the binding — the adapter
-  name in particular — has to travel to the box or the two ends disagree about
-  the filename; and the ledger gate has to name the piece, which it now does.
 - **A binding stamp inside the cache.** The key names the language and the
   engine, but nothing *checks* what it finds: a hand-edited `settings.json` can
   still point a workspace at another adapter's cast. A stamp beside the cache

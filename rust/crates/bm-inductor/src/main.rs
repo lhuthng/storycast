@@ -174,8 +174,14 @@ enum Cmd {
         /// The model service's base URL, where the two digest calls go. This is
         /// **not** the inductor: the report target is this machine's own control
         /// API, `127.0.0.1:<control_port>`, unless `--inductor` says otherwise.
-        #[arg(long, default_value = "https://openrouter.ai/api/v1")]
-        api: String,
+        ///
+        /// Omitting it uses the chosen provider's own endpoint from
+        /// `.bm/llm.json`. It is deliberately **not** defaulted to a service
+        /// URL: a default would override whatever `L` was configured with,
+        /// which is how `--analyzer tokenharbor` would end up calling
+        /// OpenRouter's address with a TokenHarbor key.
+        #[arg(long)]
+        api: Option<String>,
         /// Where the finished chapters are reported. Default: this machine's
         /// inductor, on the port in settings. Rarely needs saying.
         #[arg(long)]
@@ -283,6 +289,19 @@ enum ProfileCmd {
         #[arg(long)]
         force: bool,
     },
+    /// What this checkout's adapter, the binding and the engine say about each
+    /// other, and whether a run will cook this language at all.
+    ///
+    /// The same verdict the scheduler gates on (`Inner::voice_gate`) and the
+    /// same one `serve` warns about — asked *before* a run, which is the whole
+    /// point: the alternative today is inferring it from a chapter that has
+    /// been sitting `Pending` for an hour with an idle cluster beside it.
+    ///
+    /// **The exit status is the answer**, so a script can gate on it: `ok`
+    /// prints and exits 0, anything else prints every fact it read and then
+    /// fails with the consequence. Read-only — nothing is re-stamped and no
+    /// file is written, so it is safe to run with the cluster up.
+    Check,
 }
 
 #[derive(Subcommand)]
@@ -659,6 +678,36 @@ async fn cmd_serve(
     inner.migrate_engine_tree();
     inner.migrate_cache_keys();
     inner.check_profile()?;
+    // The language the adapter writes against the language the bound engine can
+    // voice. Raised **once, here**, because a mismatch withholds every digest
+    // and render (`Inner::voice_gate`) and a withheld row is indistinguishable
+    // from an idle cluster on the dashboard — this is the one moment the
+    // operator is certainly reading, and it is the only warning the run gets.
+    //
+    // A warning and not a refusal to start: nothing is broken on disk, the
+    // other two stages (`crawl`, `prepare`) are adapter-independent and still
+    // work, and one keypress fixes it.
+    {
+        let binding = inner
+            .ledger_profile
+            .as_ref()
+            .unwrap_or(&inner.settings.profile)
+            .clone();
+        // `settings.engine`, matching `Inner::voice_gate`: the warning has to
+        // be about the engine the run will name, or it would name one engine
+        // while the scheduler judged another.
+        let verdict =
+            bm_core::adapter::inspect(&inner.layout, &binding.pack.name, &inner.settings.engine);
+        if !verdict.agrees() {
+            inner.push_event(
+                "warn",
+                format!(
+                    "{} — no digest or render will be offered until this is fixed",
+                    verdict.reason()
+                ),
+            );
+        }
+    }
     inner.reconcile(start, count);
     let shared = std::sync::Arc::new(tokio::sync::Mutex::new(inner));
     // Lease reaper: expired leases return to the pool, no strike.
@@ -2259,6 +2308,19 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Cmd::Profile { cmd } => match cmd {
+            ProfileCmd::Check => {
+                let (lines, ok) = profile_check(&layout, &settings)?;
+                for line in &lines {
+                    println!("{line}");
+                }
+                if ok {
+                    return Ok(());
+                }
+                anyhow::bail!(
+                    "the adapter, the binding and the engine disagree — no digest or \
+                     render will be offered until one of them changes"
+                );
+            }
             ProfileCmd::Manifest {
                 name,
                 piece,
@@ -2289,6 +2351,92 @@ async fn main() -> anyhow::Result<()> {
         },
         Cmd::Check { url, timeout } => cmd_check(settings.clone(), url, timeout).await,
     }
+}
+
+/// The adapter, the binding and the engine, as printable lines, plus whether
+/// they agree.
+///
+/// **The lines come back rather than being printed here**, so a test can read
+/// them — the same reason `workspace_cmd` and `aws_cmd` return their output.
+/// The verdict comes back separately for the one thing that cannot be a line:
+/// a disagreement has to print every fact it read *before* the process exits
+/// non-zero, because a check that exits with nothing printed is a check nobody
+/// can act on.
+///
+/// The engine is the one a run will name (`settings.engine`, what every offer
+/// builds on) and the load pointer's own `engines/<name>/` tree is reported
+/// beside it when the two differ, since that is a second, quieter way to get
+/// the wrong voice: the run names one engine while the weights on disk are
+/// another's.
+fn profile_check(layout: &Layout, settings: &Settings) -> anyhow::Result<(Vec<String>, bool)> {
+    let binding = bm_core::profile::read_binding(&layout.root)?;
+    let declared = bm_core::adapter::in_force(layout)?;
+    let verdict = bm_core::adapter::inspect(layout, &binding.pack.name, &settings.engine);
+    let home = format!("{}/{}", bm_core::paths::ADAPTERS_DIR, layout.adapter);
+    let mut lines = vec![format!("profile   {}", bm_core::profile::label(&binding))];
+    lines.push(match &declared {
+        Some(m) => {
+            let mut claims = Vec::new();
+            for (what, value) in [
+                ("language", &m.language),
+                ("pack", &m.pack),
+                ("engine", &m.engine),
+            ] {
+                if !value.trim().is_empty() {
+                    claims.push(format!("{what} {}", value.trim()));
+                }
+            }
+            format!(
+                "adapter   {home}/{} — declares {}",
+                bm_core::adapter::MANIFEST,
+                if claims.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    claims.join(", ")
+                }
+            )
+        }
+        None => format!(
+            "adapter   {home}/ — no {}, so the language is the id's suffix",
+            bm_core::adapter::MANIFEST
+        ),
+    });
+    let from_manifest = declared
+        .as_ref()
+        .map(|m| !m.language.trim().is_empty())
+        .unwrap_or(false);
+    lines.push(format!(
+        "language  {}",
+        match &verdict.language {
+            Some(l) if from_manifest => format!("{l} (declared)"),
+            Some(l) => format!("{l} (from the id)"),
+            None => "unclaimed — a pre-split adapter, which cannot be mismatched".to_string(),
+        }
+    ));
+    let langs = bm_core::voices::languages(&settings.engine);
+    lines.push(format!(
+        "engine    {}{}",
+        settings.engine,
+        if langs.is_empty() {
+            " — declares no languages".to_string()
+        } else {
+            format!(" — declares {}", langs.join(", "))
+        }
+    ));
+    if layout.engine != settings.engine {
+        lines.push(format!(
+            "tree      engines/{} — what the load pointer names, and not the engine a run names",
+            layout.engine
+        ));
+    }
+    if verdict.agrees() {
+        lines.push("verdict   ok".to_string());
+        return Ok((lines, true));
+    }
+    for problem in &verdict.problems {
+        lines.push(format!("problem   {problem}"));
+    }
+    Ok((lines, false))
 }
 
 /// The link check, on a blocking thread.
@@ -2464,8 +2612,9 @@ struct BackupOpts {
     through: Option<u32>,
     analyzer: Option<String>,
     model: Option<String>,
-    /// The **model service's** base URL, not the inductor's.
-    model_api: String,
+    /// The **model service's** base URL, not the inductor's. `None` means the
+    /// flag was not given, which leaves the provider's own entry alone.
+    model_api: Option<String>,
     /// Where the accepted chapters are reported. Defaults to this machine.
     inductor: Option<String>,
     /// Re-asks per refused round. See `--retries`.
@@ -2501,7 +2650,8 @@ async fn cmd_backup(
     // this machine's own control API: it is where the ledger and the bible
     // live, exactly as it is for `make tui`.
     let api = inductor.unwrap_or_else(|| format!("http://127.0.0.1:{}", settings.control_port));
-    let model_api = model_api.trim_end_matches('/').to_string();
+    let model_api = model_api.map(|a| a.trim_end_matches('/').to_string());
+    let api_hint = model_api.as_deref().unwrap_or_default();
     // The flag wins; otherwise the active provider in `.bm/llm.json`. The
     // address only decides when neither says (a gateway at a name of its
     // own): the operator passes an API, a key and a model, never a transport.
@@ -2510,8 +2660,8 @@ async fn cmd_backup(
     let analyzer = match analyzer {
         Some(a) => a.to_string(),
         None if !active.is_empty() => active,
-        None if model_api.contains("openrouter") => "openrouter".to_string(),
-        None if model_api.contains("googleapis") => "gemini".to_string(),
+        None if api_hint.contains("openrouter") => "openrouter".to_string(),
+        None if api_hint.contains("googleapis") => "gemini".to_string(),
         None => settings.analyzer.clone(),
     };
     {
@@ -2540,8 +2690,16 @@ async fn cmd_backup(
             _ => settings.local_model = model,
         }
     }
-    if backend == "openai" {
-        settings.openrouter_url = model_api;
+    // `--api` lands on the endpoint field the chosen slot actually reads —
+    // both wires append their own path to it — so one flag covers every
+    // backend. Leaving the Gemini slot out meant `--analyzer gemini --api
+    // https://gateway.example` quietly called Google instead.
+    if let Some(url) = model_api.as_deref() {
+        match backend.as_str() {
+            "openai" => settings.openrouter_url = url.to_string(),
+            "gemini" => settings.gemini_url = url.to_string(),
+            _ => {}
+        }
     }
     // Where a digest may begin is not a free choice: the deltas have to land in
     // chapter order, so the only legal start is the chapter after the last one
@@ -2604,10 +2762,14 @@ async fn cmd_backup(
             layout.chapter_txt(start).display()
         );
     }
+    // Every arm reads the settings the run will actually use, `--api`
+    // included: a constant here printed Google's host while the requests went
+    // to the operator's gateway, which is a bug in the one line a human reads
+    // to work out where a backup digest is going.
     let endpoint = match backend.as_str() {
         "openai" => settings.openrouter_url.clone(),
         "ollama" => settings.ollama_url.clone(),
-        _ => "https://generativelanguage.googleapis.com".to_string(),
+        _ => settings.gemini_url.clone(),
     };
     eprintln!(
         "backup digest: ch{start}..ch{last} via {analyzer} at {endpoint} → reporting to {api}"
@@ -2716,6 +2878,84 @@ async fn cmd_backup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_check_says_whether_this_checkout_can_cook_its_language() {
+        // The question `Inner::voice_gate` answers for the scheduler, asked
+        // before a run rather than inferred from a stalled one. Both halves are
+        // asserted: a checkout whose three facts disagree, and the same
+        // checkout once the engine that declares the language is named. A test
+        // that only saw the refusal would pass if the check refused everything.
+        let root = std::env::temp_dir().join(format!("bm-profile-check{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("adapters/xianxia-en-US")).unwrap();
+        std::fs::create_dir_all(root.join(".bm")).unwrap();
+        std::fs::write(
+            root.join("adapters/xianxia-en-US/adapter.json"),
+            r#"{"pack":"xianxia","language":"en-US"}"#,
+        )
+        .unwrap();
+        let mut binding = bm_core::profile::Binding::default();
+        binding.pack.name = "xianxia".into();
+        binding.adapter.name = "xianxia-en-US".into();
+        bm_core::profile::write_binding(&root, &binding).unwrap();
+        let layout = Layout {
+            adapter: "xianxia-en-US".into(),
+            ..Layout::new(&root)
+        };
+
+        // VieNeu declares `vi-VN`, so this checkout cannot cook its own book.
+        let settings = Settings::default();
+        assert_eq!(
+            settings.engine, "vieneu",
+            "the default engine is the local one"
+        );
+        let (lines, ok) = profile_check(&layout, &settings).unwrap();
+        assert!(!ok, "{lines:?}");
+        let text = lines.join("\n");
+        assert!(text.contains("xianxia · xianxia-en-US"), "{text}");
+        assert!(text.contains("declares language en-US"), "{text}");
+        assert!(text.contains("cannot voice"), "{text}");
+        assert!(text.contains("problem"), "{text}");
+        assert!(!text.contains("verdict   ok"), "{text}");
+
+        // The engine that declares it: the same checkout is fine, and the
+        // language is still reported as declared rather than as the id's.
+        let settings = Settings {
+            engine: "gemini".into(),
+            ..Settings::default()
+        };
+        let (lines, ok) = profile_check(&layout, &settings).unwrap();
+        assert!(ok, "{lines:?}");
+        let text = lines.join("\n");
+        assert!(text.contains("language  en-US (declared)"), "{text}");
+        assert!(text.contains("declares vi-VN, en-US"), "{text}");
+        assert!(text.contains("verdict   ok"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_backup_without_an_api_flag_leaves_the_providers_endpoint_alone() {
+        // The flag's *absence* is the fact worth pinning. With a
+        // `default_value` clap cannot tell it apart from `--api <that
+        // default>`, so the default silently overrode whatever `L` had
+        // configured — an OpenRouter address called with a TokenHarbor key.
+        let cli = Cli::try_parse_from(["bm-inductor", "backup"])
+            .expect("`backup` needs no required flags");
+        let Cmd::Backup { api, .. } = cli.cmd else {
+            panic!("parsed as another subcommand");
+        };
+        assert_eq!(api, None, "an unsaid `--api` must not become a URL");
+
+        // Given, it is kept verbatim: the slot that reads it appends its own
+        // path and strips its own trailing slash.
+        let cli = Cli::try_parse_from(["bm-inductor", "backup", "--api", "https://gw.example/v1"])
+            .expect("`--api` is accepted");
+        let Cmd::Backup { api, .. } = cli.cmd else {
+            panic!("parsed as another subcommand");
+        };
+        assert_eq!(api.as_deref(), Some("https://gw.example/v1"));
+    }
 
     #[test]
     fn workspace_new_use_list_roundtrip() {

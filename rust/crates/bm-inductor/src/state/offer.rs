@@ -21,6 +21,61 @@ use std::collections::HashMap;
 const MEM_PCT_CEILING: f32 = 90.0;
 
 impl Inner {
+    /// Why no digest or render may be offered, or `None` when the adapter, the
+    /// binding's pack and the bound engine agree.
+    ///
+    /// **The language refusal, and the reason it lives here.** An adapter has
+    /// one language and it is both the source's and the target's, so a digest
+    /// writes a script in that language and a render bakes audio in it — and
+    /// neither is undoable cheaply: the script is content-addressed and the
+    /// segments are cached, so a wrong-language chapter is hours of synthesis
+    /// carrying a mistake. `crawl` and `prepare` are deliberately not gated:
+    /// the crawled text and the quote split are properties of the source, and
+    /// the fork line puts them on the adapter-independent side.
+    ///
+    /// The binding read is the ledger's stamp when it has one — that is the
+    /// authority for the tasks that exist, and [`Inner::check_profile`] refuses
+    /// a ledger from another binding — falling back to the workspace's own
+    /// settings, which is what a run about to be planned is stamped from.
+    ///
+    /// **This refuses; it does not strike or shelve.** Nothing about the box or
+    /// the chapter is wrong, and one keypress (a different engine, or a fixed
+    /// adapter) makes every withheld row offerable again — so the rows stay
+    /// `Pending` and untouched. The same verdict is raised as a warning once at
+    /// load, which is where the operator will actually read it.
+    fn voice_gate(&self) -> Option<String> {
+        let binding = self.bound();
+        // `settings.engine` and not `layout.engine`: the two are different
+        // facts (the run config's engine, and the one the load pointer's
+        // `engines/<name>/` tree belongs to), and **this gate must judge the
+        // engine the offer will actually name** — every offer builds on
+        // `settings.engine`, from `seg_dir` to the cast to the sidecar's
+        // dictionary. Judging the other one would be a gate that passes a
+        // chapter the render lane then bakes in the wrong engine's language.
+        let verdict =
+            bm_core::adapter::inspect(&self.layout, &binding.pack.name, &self.settings.engine);
+        if verdict.agrees() {
+            None
+        } else {
+            Some(verdict.reason())
+        }
+    }
+
+    /// The binding the tasks in flight were created under, and the one an offer
+    /// is made under.
+    ///
+    /// The ledger's stamp when it has one — that is the authority for the tasks
+    /// that exist, and [`Inner::check_profile`] refuses a ledger from another
+    /// binding — falling back to the workspace's own settings, which is what a
+    /// run about to be planned is stamped from. Both the language gate and the
+    /// three fields of the offer's binding read it, so the two cannot disagree
+    /// about whose chapter this is.
+    fn bound(&self) -> &bm_core::profile::Binding {
+        self.ledger_profile
+            .as_ref()
+            .unwrap_or(&self.settings.profile)
+    }
+
     /// The task this worker should do next.
     ///
     /// The box's own **policy** decides which stages it will run and in what
@@ -103,9 +158,29 @@ impl Inner {
         // grouping is an assignment detail, each take keeps its own ledger row
         //, and it is recorded on the row the offer names (`Task::batch`) so
         // the completion settles the whole group.
+        //
+        // **The language gate's answer, read once per offer rather than per
+        // stage.** The adapter in force is a property of this checkout, so
+        // every stage sees the same verdict; reading it inside the loop would
+        // re-read the manifest for each stage of each ask.
+        //
+        // It is raised here, in the scheduler, and not on a box, because this
+        // is the only place that knows all three facts at once: the workspace's
+        // binding, the adapter it names, and the engine those bytes would be
+        // spoken with.
+        let language = self.voice_gate();
         let mut pick: Option<(Vec<String>, Stage)> = None;
         for pref in policy.iter().filter(|p| p.enabled) {
             let stage = pref.stage;
+            // **The stage that would cook bytes in a language nothing can
+            // speak.** `crawl` and `prepare` are deliberately outside this: the
+            // crawled text and the quote split are properties of the *source*,
+            // and the fork line puts them on the adapter-independent side. A
+            // digest writes a script and a render writes audio, and both are
+            // one language that stays for ever.
+            if language.is_some() && matches!(stage, Stage::Digest | Stage::Render) {
+                continue;
+            }
             // Capability gates. Render uploads units; merge shells out to
             // ffmpeg and a box without it advertises no `merge`. A worker with
             // no recorded capabilities is allowed, failing closed here would
@@ -131,7 +206,11 @@ impl Inner {
             // above and the memory ceiling already follow.
             if let Some(beat) = self.beats.get(worker_id) {
                 if !beat.sources_stages.is_empty()
-                    && !beat.sources_stages.iter().any(|s| s == stage.as_str())
+                    && !bm_core::provision::sources::holds(
+                        &beat.sources_stages,
+                        stage,
+                        &self.layout.adapter,
+                    )
                 {
                     continue;
                 }
@@ -451,6 +530,17 @@ impl Inner {
             crawl: crawl_spec,
             attempt: t.attempts + 1,
             tts_url: t.stage.needs_tts().then_some(tts_url),
+            // **The binding, on the wire.** See `Layout::rebind` for what the
+            // box does with it and `TaskOffer::adapter` for why the box cannot
+            // work it out for itself. The adapter is the layout's — the one
+            // every cache path on this machine is keyed by — not the binding's
+            // own field: they are the same name in the ordinary case, and when
+            // they differ it is the caches that decide where the bytes land.
+            adapter: self.layout.adapter.clone(),
+            // The pack is a *claim* rather than a cache key: the registries the
+            // prompts read are the pack's, and nothing else reports which pack
+            // a box is holding.
+            pack: self.bound().pack.name.clone(),
             engine: self.settings.engine.clone(),
             model_order: self.settings.model_order.clone(),
             analyzer,
