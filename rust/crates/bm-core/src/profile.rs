@@ -23,7 +23,89 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The live trees a profile owns, relative to the repo/workspace root.
+///
+/// The union of every piece's trees, kept for the fixture install — which lays
+/// down a whole checkout regardless of which piece owns what — and for the
+/// messages that still name the pair.
 pub const LIVE_DIRS: [&str; 2] = ["assets", "prompts"];
+
+/// One of the three things a checkout is bound to.
+///
+/// A profile used to be one bundle of two trees with one name and one hash.
+/// The trees are the split, and they are split because they change for
+/// different reasons and are shared differently: a genre's art is universal
+/// across languages, a language's prompts are not, and the engine's files are
+/// gigabytes the other two never touch.
+///
+/// `assets/` and `prompts/` were literally [`LIVE_DIRS`]; the engine is named
+/// by `settings.engine` because it has no tree at the root to be found in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Piece {
+    /// The genre: `assets/` — music, injects, effects, the scene map, crawlers.
+    Pack,
+    /// The language: `prompts/` — the templates a stage renders from.
+    Adapter,
+    /// The voice engine: its weights, binary and voice store.
+    Engine,
+}
+
+impl Piece {
+    pub const ALL: [Piece; 3] = [Piece::Pack, Piece::Adapter, Piece::Engine];
+
+    /// The live trees this piece owns, relative to the root. Empty for the
+    /// engine, whose files `Layout` names one path at a time.
+    pub fn trees(self) -> &'static [&'static str] {
+        match self {
+            Piece::Pack => &["assets"],
+            Piece::Adapter => &["prompts"],
+            Piece::Engine => &[],
+        }
+    }
+
+    /// What the piece is called in a message: `pack 'xianxia'`.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Piece::Pack => "pack",
+            Piece::Adapter => "adapter",
+            Piece::Engine => "engine",
+        }
+    }
+}
+
+/// The three pieces a checkout is bound to, each with the name it was loaded
+/// from and the hash of what is on disk now.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Binding {
+    #[serde(default)]
+    pub pack: Pointer,
+    #[serde(default)]
+    pub adapter: Pointer,
+    #[serde(default)]
+    pub engine: Pointer,
+}
+
+impl Binding {
+    pub fn get(&self, piece: Piece) -> &Pointer {
+        match piece {
+            Piece::Pack => &self.pack,
+            Piece::Adapter => &self.adapter,
+            Piece::Engine => &self.engine,
+        }
+    }
+
+    pub fn get_mut(&mut self, piece: Piece) -> &mut Pointer {
+        match piece {
+            Piece::Pack => &mut self.pack,
+            Piece::Adapter => &mut self.adapter,
+            Piece::Engine => &mut self.engine,
+        }
+    }
+
+    /// Nothing named: a workspace that has never loaded anything.
+    pub fn is_unset(&self) -> bool {
+        self.pack.name.is_empty() && self.adapter.name.is_empty() && self.engine.name.is_empty()
+    }
+}
 
 /// Manifest stored as `manifest.json` at the bundle root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,12 +166,21 @@ pub fn hash_live(root: &Path) -> Result<BTreeMap<String, String>> {
 }
 
 /// Every file a profile owns, relative to `root`, sorted.
+fn live_files(root: &Path) -> Vec<PathBuf> {
+    files_under(root, &LIVE_DIRS)
+}
+
+/// Every file under `dirs`, relative to `root`, sorted.
 ///
 /// `.DS_Store` is skipped because OS noise is not content: the pack manifest
 /// skips it too, so a Finder visit must never hash-drift the live tree.
-fn live_files(root: &Path) -> Vec<PathBuf> {
+///
+/// Per `dirs` rather than over [`LIVE_DIRS`] so each piece can be hashed on
+/// its own — which is the point of the split: a prompts edit must move the
+/// adapter without moving the pack.
+fn files_under(root: &Path, dirs: &[&str]) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    for dir in LIVE_DIRS {
+    for dir in dirs {
         let mut stack = vec![root.join(dir)];
         while let Some(d) = stack.pop() {
             let Ok(entries) = std::fs::read_dir(&d) else {
@@ -190,58 +281,126 @@ pub fn manifest_hash(files: &BTreeMap<String, String>) -> String {
     hex_digest(h.finalize())
 }
 
-pub fn read_pointer(root: &Path) -> Result<Pointer> {
-    let path = pointer_path(root);
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+/// The stored `.bm/profile`, in either shape.
+///
+/// `Legacy` is the pre-split document — `{name, hash}`, one hash over `assets/`
+/// **plus** `prompts/` — and it has to keep parsing: every checkout that
+/// exists carries one. `Legacy` is tried first and requires both fields, so a
+/// binding document (which has neither) falls through to `Split`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Stored {
+    Legacy(Pointer),
+    Split(Binding),
 }
 
-pub fn write_pointer(root: &Path, pointer: &Pointer) -> Result<()> {
+/// The load pointer, as a binding.
+///
+/// The shim: a legacy document becomes `pack = {name, hash}` with the adapter
+/// and engine unnamed. No per-piece hash can reproduce the old combined one,
+/// so the first [`verify_binding`] re-stamps the pack and the adapter from the
+/// live trees — which is what `verify` has always done on drift.
+pub fn read_binding(root: &Path) -> Result<Binding> {
+    let path = pointer_path(root);
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        "no profile loaded (.bm/profile missing) — load one before running".to_string()
+    })?;
+    let stored: Stored =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(match stored {
+        Stored::Legacy(pack) => Binding {
+            pack,
+            ..Binding::default()
+        },
+        Stored::Split(binding) => binding,
+    })
+}
+
+pub fn write_binding(root: &Path, binding: &Binding) -> Result<()> {
     let path = pointer_path(root);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    crate::atomic_write(&path, &serde_json::to_string_pretty(pointer)?)?;
+    crate::atomic_write(&path, &serde_json::to_string_pretty(binding)?)?;
     Ok(())
 }
 
+/// The pack piece: what "the profile" meant before the split.
+///
+/// Still the answer six call sites want — the dashboard's header, the release
+/// path, the provision stamp — so the split does not have to reach them yet.
+pub fn read_pointer(root: &Path) -> Result<Pointer> {
+    read_binding(root).map(|b| b.pack)
+}
+
+/// Re-stamp the pack piece, keeping the other two.
+pub fn write_pointer(root: &Path, pointer: &Pointer) -> Result<()> {
+    let mut binding = read_binding(root).unwrap_or_default();
+    binding.pack = pointer.clone();
+    write_binding(root, &binding)
+}
+
 /// The load gate: the pointer must exist. A drifted live tree (hand edit,
-/// `:sound` retune, different unpack) is adopted, not refused: the pointer
-/// is re-stamped to the live hash so the next run is clean, and the operator
-/// is told to `profile pack <name>` to save it back to a bundle. An empty
-/// live tree is still refused — that is a missing unpack, not an edit.
+/// `:sound` retune, different unpack) is adopted, not refused: the piece is
+/// re-stamped to the live hash so the next run is clean, and the operator is
+/// told to `profile pack <name>` to save it back to a bundle. An empty live
+/// tree is still refused — that is a missing unpack, not an edit.
 pub fn verify(root: &Path) -> Result<Pointer> {
-    let pointer = read_pointer(root)
-        .with_context(|| "no profile loaded (.bm/profile missing) — load one before running")?;
-    let live = hash_live(root).context("hashing the live profile tree")?;
-    if live.is_empty() {
+    verify_binding(root, None).map(|b| b.pack)
+}
+
+/// [`verify`], one piece at a time.
+///
+/// Each piece is hashed over its own trees, so an edited `prompts/analyze.txt`
+/// moves the adapter and leaves the pack untouched — and the warning names the
+/// piece that moved, which is the whole point of having names for them.
+///
+/// A piece whose tree is absent is left exactly as it is: a checkout that has
+/// not split yet has no adapter bundle, and that is not an error. Both of the
+/// file-backed trees missing *is* — that is a missing unpack.
+///
+/// The engine's hash is not computed here. Its identity is its declaration
+/// (the roster plus the name), not the bytes of its weights: `hash_files`
+/// reads every file, and `models/` is gigabytes. `engine` names the piece
+/// from `settings.engine`, which is where that name lives.
+pub fn verify_binding(root: &Path, engine: Option<&str>) -> Result<Binding> {
+    let mut binding = read_binding(root)?;
+    if let Some(name) = engine {
+        binding.engine.name = name.to_string();
+    }
+    let pack = files_under(root, Piece::Pack.trees());
+    let adapter = files_under(root, Piece::Adapter.trees());
+    if pack.is_empty() && adapter.is_empty() {
         anyhow::bail!(
-            "live {} + {} are missing or empty for profile '{}' — `profile load {}` to unpack it",
+            "live {} + {} are missing or empty for pack '{}' — `profile load {}` to unpack it",
             LIVE_DIRS[0],
             LIVE_DIRS[1],
-            pointer.name,
-            pointer.name,
+            binding.pack.name,
+            binding.pack.name,
         );
     }
-    let hash = manifest_hash(&live);
-    if hash != pointer.hash {
-        let updated = Pointer {
-            name: pointer.name.clone(),
-            hash: hash.clone(),
-        };
-        write_pointer(root, &updated)?;
+    let mut drifted: Vec<&str> = Vec::new();
+    for (piece, files) in [(Piece::Pack, pack), (Piece::Adapter, adapter)] {
+        if files.is_empty() {
+            continue;
+        }
+        let hash = manifest_hash(&hash_files(root, files).context("hashing a live piece")?);
+        let p = binding.get_mut(piece);
+        if p.hash != hash {
+            p.hash = hash;
+            drifted.push(piece.noun());
+        }
+    }
+    if !drifted.is_empty() {
+        write_binding(root, &binding)?;
         eprintln!(
-            "warning: live {} + {} drifted from profile '{}' — adopting live tree ({}); `profile pack {}` to save it",
-            LIVE_DIRS[0],
-            LIVE_DIRS[1],
-            pointer.name,
-            &hash[..12.min(hash.len())],
-            pointer.name,
+            "warning: live tree drifted from profile '{}' — adopting and re-stamping {}; `profile pack {}` to save it",
+            binding.pack.name,
+            drifted.join(" + "),
+            binding.pack.name,
         );
-        return Ok(updated);
     }
-    Ok(pointer)
+    Ok(binding)
 }
 
 /// Copy the tracked test fixture (`rust/fixtures/profile/`) over `dest`,
@@ -353,6 +512,101 @@ mod tests {
         install_fixture(&dir).unwrap();
         assert!(dir.join("assets/scene-map.json").is_file());
         assert!(dir.join("prompts/analyze.txt").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pre_split_pointer_becomes_the_pack_piece() {
+        let dir = live_fixture("legacy");
+        let hash = manifest_hash(&hash_live(&dir).unwrap());
+        std::fs::create_dir_all(dir.join(".bm")).unwrap();
+        // The document as it exists on every checkout today.
+        std::fs::write(
+            pointer_path(&dir),
+            format!(r#"{{"name":"xianxia","hash":"{hash}"}}"#),
+        )
+        .unwrap();
+
+        let b = read_binding(&dir).unwrap();
+        assert_eq!(b.pack.name, "xianxia");
+        assert_eq!(b.pack.hash, hash);
+        assert!(
+            b.adapter.name.is_empty() && b.engine.name.is_empty(),
+            "the other two pieces are unnamed, not guessed at"
+        );
+        // And the six callers that still want "the profile" keep working.
+        assert_eq!(read_pointer(&dir).unwrap().name, "xianxia");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_binding_round_trips_and_names_all_three_pieces() {
+        let dir = live_fixture("binding");
+        let b = Binding {
+            pack: Pointer {
+                name: "xianxia".into(),
+                hash: "p".into(),
+            },
+            adapter: Pointer {
+                name: "vi-VN".into(),
+                hash: "a".into(),
+            },
+            engine: Pointer {
+                name: "vieneu".into(),
+                hash: "e".into(),
+            },
+        };
+        write_binding(&dir, &b).unwrap();
+        assert_eq!(read_binding(&dir).unwrap(), b);
+        assert!(!b.is_unset());
+        // The legacy view still resolves, and re-stamping the pack keeps the
+        // adapter and engine exactly as they were.
+        write_pointer(
+            &dir,
+            &Pointer {
+                name: "xianxia".into(),
+                hash: "p2".into(),
+            },
+        )
+        .unwrap();
+        let after = read_binding(&dir).unwrap();
+        assert_eq!(after.pack.hash, "p2");
+        assert_eq!(after.adapter.name, "vi-VN");
+        assert_eq!(after.engine.name, "vieneu");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_hashes_each_tree_separately_and_leaves_the_other_alone() {
+        let dir = live_fixture("split");
+        write_binding(
+            &dir,
+            &Binding {
+                pack: Pointer {
+                    name: "xianxia".into(),
+                    hash: String::new(),
+                },
+                adapter: Pointer {
+                    name: "vi-VN".into(),
+                    hash: String::new(),
+                },
+                engine: Pointer::default(),
+            },
+        )
+        .unwrap();
+
+        let before = verify_binding(&dir, Some("vieneu")).unwrap();
+        assert!(!before.pack.hash.is_empty(), "the pack was hashed");
+        assert!(!before.adapter.hash.is_empty(), "so was the adapter");
+        assert_eq!(before.engine.name, "vieneu", "named from settings");
+
+        // The claim the split exists for: one tree moving does not move the
+        // other, and the piece that moved is the one that gets re-stamped.
+        std::fs::write(dir.join("prompts/analyze.txt"), "tampered").unwrap();
+        let after = verify_binding(&dir, Some("vieneu")).unwrap();
+        assert_eq!(after.pack.hash, before.pack.hash, "the pack did not move");
+        assert_ne!(after.adapter.hash, before.adapter.hash, "the adapter did");
+        assert_eq!(after, read_binding(&dir).unwrap(), "and it was re-stamped");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
