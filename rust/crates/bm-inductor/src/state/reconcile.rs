@@ -146,29 +146,11 @@ impl Inner {
     /// Every persisted chapter script, sorted: the unit every bulk pass
     /// (swap invalidation, reconcile rewrite) walks.
     pub(crate) fn script_paths(&self) -> Vec<(u32, std::path::PathBuf)> {
-        let mut scripts: Vec<std::path::PathBuf> = std::fs::read_dir(self.layout.data())
-            .map(|rd| rd.filter_map(|e| e.ok().map(|x| x.path())).collect())
-            .unwrap_or_default();
-        scripts.retain(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("script-") && n.ends_with(".json"))
-                .unwrap_or(false)
-        });
-        let mut out: Vec<(u32, std::path::PathBuf)> = scripts
+        self.layout
+            .scripts()
             .into_iter()
-            .map(|sp| {
-                let n: u32 = sp
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .and_then(|s| s.strip_prefix("script-"))
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                (n, sp)
-            })
-            .collect();
-        out.sort();
-        out
+            .filter_map(|sp| bm_core::paths::chapter_of(&sp).map(|n| (n, sp)))
+            .collect()
     }
 
     /// The script changed underneath the chapter, so every unit's inputs are

@@ -266,10 +266,7 @@ pub fn title_speech_for_script(
     cast: &Cast,
     segments: &[Value],
 ) -> Option<TitleSpeech> {
-    let stem = script_path.file_stem()?.to_str()?;
-    let n: u32 = stem.strip_prefix("script-")?.parse().ok()?;
-    let data_dir = script_path.parent()?;
-    let layout = crate::Layout::new(data_dir.parent()?);
+    let (layout, n) = crate::Layout::of_script(script_path)?;
     let planned = drop_headline(segments);
     let first = planned.first().map(seg_text).unwrap_or("");
     title_speech(&layout, n, cast, first)
@@ -861,22 +858,8 @@ pub fn character_has_lines(layout: &Layout, character: &str) -> bool {
     if character.trim().is_empty() {
         return false;
     }
-    let Ok(rd) = std::fs::read_dir(layout.data()) else {
-        return false;
-    };
-    for e in rd.flatten() {
-        let n = e.file_name().to_string_lossy().to_string();
-        let num = match n
-            .strip_prefix("script-")
-            .and_then(|s| s.strip_suffix(".json"))
-        {
-            Some(num) => num,
-            None => continue,
-        };
-        if num.parse::<u32>().is_err() {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(e.path()) else {
+    for path in layout.scripts() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
         let Ok(doc) = serde_json::from_str::<Value>(&text) else {
@@ -971,21 +954,7 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
 
     // Chapters present as scripts, in order. A missing script or seg dir is
     // skipped, not an error — the range is aspirational, the files are truth.
-    let mut chapters: Vec<u32> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(layout.data()) {
-        for e in rd.flatten() {
-            let n = e.file_name().to_string_lossy().to_string();
-            if let Some(num) = n
-                .strip_prefix("script-")
-                .and_then(|s| s.strip_suffix(".json"))
-            {
-                if let Ok(c) = num.parse::<u32>() {
-                    chapters.push(c);
-                }
-            }
-        }
-    }
-    chapters.sort();
+    let chapters = layout.script_chapters();
 
     let mut out: Vec<RenderedSegment> = Vec::new();
     for n in chapters {

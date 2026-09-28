@@ -916,19 +916,7 @@ async fn op_voices(layout: &bm_core::Layout, engine: &str) -> OpResult {
     let filled_from = cast.len();
     // Refill gaps across every script. load_cast never overwrites an existing
     // assignment, so curated voices survive; newcomers get least-used voices.
-    let mut scripts: Vec<std::path::PathBuf> = std::fs::read_dir(layout.data())
-        .map(|rd| {
-            rd.filter_map(|e| e.ok().map(|x| x.path()))
-                .filter(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.starts_with("script-") && n.ends_with(".json"))
-                        .unwrap_or(false)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    scripts.sort();
+    let scripts = layout.scripts();
     for sp in &scripts {
         if let Err(e) = bm_core::cast::load_cast(sp, &cast_path, &layout.bible(), &policy, true) {
             return OpResult::fail(format!("cast refill failed on {}: {e:#}", sp.display()));
@@ -1558,8 +1546,7 @@ mod tests {
     fn scratch() -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
         let layout = bm_core::Layout::new(d.path());
-        std::fs::create_dir_all(layout.data()).unwrap();
-        std::fs::create_dir_all(layout.output()).unwrap();
+        layout.ensure().unwrap();
         std::fs::write(layout.bible(), r#"{"characters":[]}"#).unwrap();
         d
     }
@@ -2360,7 +2347,7 @@ mod segment_tests {
     fn segment_serves_a_rendered_wav_and_its_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let layout = bm_core::Layout::new(dir.path());
-        std::fs::create_dir_all(layout.data()).unwrap();
+        layout.ensure().unwrap();
         // Two speakers; the wav covers segment 1 in Adam's voice.
         std::fs::write(
             layout.script(1),
@@ -2420,7 +2407,7 @@ mod segment_tests {
         // (`Adam`), or an ASCII slug (`pham-tuyen`) for `Phạm Tuyên`.
         let dir = tempfile::tempdir().unwrap();
         let layout = bm_core::Layout::new(dir.path());
-        std::fs::create_dir_all(layout.data()).unwrap();
+        layout.ensure().unwrap();
         std::fs::write(
             layout.script(3),
             serde_json::json!({"segments": [
@@ -2448,7 +2435,7 @@ mod segment_tests {
     fn segment_miss_names_where_the_renders_are() {
         let dir = tempfile::tempdir().unwrap();
         let layout = bm_core::Layout::new(dir.path());
-        std::fs::create_dir_all(layout.data()).unwrap();
+        layout.ensure().unwrap();
         std::fs::write(
             layout.script(4),
             serde_json::json!({"segments": [{"speaker": "Kiên", "text": "Kiên đáp."}]}).to_string(),
@@ -2474,7 +2461,7 @@ mod segment_tests {
     fn segment_prefers_the_characters_own_lines() {
         let dir = tempfile::tempdir().unwrap();
         let layout = bm_core::Layout::new(dir.path());
-        std::fs::create_dir_all(layout.data()).unwrap();
+        layout.ensure().unwrap();
         std::fs::write(
             layout.script(2),
             serde_json::json!({"segments": [

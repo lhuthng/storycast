@@ -193,8 +193,7 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, Inner) {
         let d = tempfile::tempdir().unwrap();
         let layout = Layout::new(d.path());
-        std::fs::create_dir_all(layout.data()).unwrap();
-        std::fs::create_dir_all(layout.output()).unwrap();
+        layout.ensure().unwrap();
         std::fs::write(layout.bible(), r#"{"characters":[]}"#).unwrap();
         let inner = Inner::new(layout, Settings::default());
         (d, inner)
@@ -547,7 +546,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let layout = Layout::new(dir.path());
         std::fs::create_dir_all(layout.bm_state()).unwrap();
-        std::fs::create_dir_all(layout.data()).unwrap();
+        layout.ensure().unwrap();
         std::fs::write(layout.bible(), r#"{"characters":[]}"#).unwrap();
         std::fs::copy(&src, layout.ledger()).unwrap();
 
@@ -2295,7 +2294,7 @@ mod tests {
         let layout = inner.layout.clone();
         let why = inner.why_unplannable(7);
         assert!(
-            why.contains("script-07.json"),
+            why.contains("script/07.json"),
             "the missing file is named: {why}"
         );
 
@@ -2312,7 +2311,7 @@ mod tests {
         std::fs::write(layout.script(8), r#"{"chapter":8}"#).unwrap();
         let why = inner.why_unplannable(8);
         assert!(
-            why.contains("no `segments` array") && why.contains("script-08.json"),
+            why.contains("no `segments` array") && why.contains("script/08.json"),
             "the shape and the file are both named: {why}"
         );
 

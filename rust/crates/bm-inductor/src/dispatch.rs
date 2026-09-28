@@ -697,7 +697,7 @@ mod tests {
     fn state() -> (tempfile::TempDir, Shared) {
         let d = tempfile::tempdir().unwrap();
         let layout = Layout::new(d.path());
-        std::fs::create_dir_all(layout.data()).unwrap();
+        layout.ensure().unwrap();
         let st: Shared = Arc::new(Mutex::new(Inner::new(
             layout,
             bm_core::config::Settings::default(),

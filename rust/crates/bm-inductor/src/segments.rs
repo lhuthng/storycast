@@ -83,26 +83,7 @@ fn targets(layout: &Layout, settings: &Settings, only: &[String]) -> Vec<Target>
 
 /// Chapters the inductor can prove anything about: scripts present locally.
 fn chapters(layout: &Layout) -> Vec<u32> {
-    let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(layout.data()) else {
-        return out;
-    };
-    for e in rd.filter_map(|e| e.ok()) {
-        let n = e.file_name().to_string_lossy().into_owned();
-        if let Some(num) = n
-            .strip_prefix("script-")
-            .and_then(|s| s.strip_suffix(".json"))
-        {
-            if let Ok(ch) = num.parse::<u32>() {
-                if layout.script(ch).is_file() {
-                    out.push(ch);
-                }
-            }
-        }
-    }
-    out.sort_unstable();
-    out.dedup();
-    out
+    layout.script_chapters()
 }
 
 /// Names the expected set holds that the local store lacks. Empty means the

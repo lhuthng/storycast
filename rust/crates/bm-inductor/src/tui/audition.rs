@@ -28,30 +28,17 @@ pub(crate) const MAX_LINE_CHARS: usize = 160;
 /// small, but a cap keeps one pathological script from being held forever.
 const PER_CHARACTER_CAP: usize = 200;
 
-/// Every `data/script-*.json` in the workspace, sorted.
+/// Every `data/script/NN.json` in the workspace, sorted.
 ///
 /// Takes the whole [`bm_core::Layout`] rather than a root because the scripts
 /// are the *book's*: `data/` lives in the active workspace, and a root-only
 /// path would index whichever book happened to be at the top of the checkout.
 ///
-/// Sorted so the index is built in a stable order: `read_dir` order is arbitrary
-/// and reorders on insert, which would make a "random" pick differ between two
-/// runs of the same session for no reason anyone could see.
+/// A name for [`Layout::scripts`](bm_core::Layout::scripts), which is the
+/// answer; this exists so the screens say "scripts" rather than reaching for a
+/// path builder.
 pub(crate) fn script_files(layout: &bm_core::Layout) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = std::fs::read_dir(layout.data())
-        .map(|rd| {
-            rd.filter_map(|e| e.ok().map(|x| x.path()))
-                .filter(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.starts_with("script-") && n.ends_with(".json"))
-                        .unwrap_or(false)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    out.sort();
-    out
+    layout.scripts()
 }
 
 /// `speaker -> every line they speak`, deduplicated, in script order.
@@ -65,8 +52,8 @@ pub(crate) fn index_lines(
     let files = script_files(layout);
     if files.is_empty() {
         return Err(format!(
-            "no data/script-*.json under {} — run :translate first",
-            layout.data().display()
+            "no data/script/NN.json under {} — run :translate first",
+            layout.script_dir().display()
         ));
     }
     let mut index: HashMap<String, Vec<String>> = HashMap::new();
@@ -311,11 +298,12 @@ mod tests {
     #[test]
     fn the_index_is_built_from_scripts_and_skips_what_it_cannot_read() {
         let root = std::env::temp_dir().join(format!("bmlines{}", std::process::id()));
-        let data = root.join("data");
-        std::fs::create_dir_all(&data).unwrap();
-        // A readable script, a corrupt one, and a file that is not a script.
+        let layout = bm_core::Layout::new(&root);
+        layout.ensure().unwrap();
+        // A readable script, a corrupt one, and a file in the script folder
+        // that is not a chapter.
         std::fs::write(
-            data.join("script-01.json"),
+            layout.script(1),
             r#"{"segments":[
                  {"speaker":"Kiên","text":"một"},
                  {"speaker":"Kiên","text":"một"},
@@ -323,10 +311,14 @@ mod tests {
                  {"speaker":"","text":"ignored"}]}"#,
         )
         .unwrap();
-        std::fs::write(data.join("script-02.json"), "{ this is not json").unwrap();
-        std::fs::write(data.join("notes.json"), r#"{"segments":[]}"#).unwrap();
+        std::fs::write(layout.script(2), "{ this is not json").unwrap();
+        std::fs::write(
+            layout.script_dir().join("notes.json"),
+            r#"{"segments":[]}"#,
+        )
+        .unwrap();
 
-        let idx = index_lines(&bm_core::Layout::new(&root)).unwrap();
+        let idx = index_lines(&layout).unwrap();
         // Deduplicated, and the corrupt script did not take the rest down.
         let kien = idx.get("Kiên").expect("Kiên is indexed");
         assert_eq!(kien, &vec!["một".to_string()], "the duplicate was dropped");

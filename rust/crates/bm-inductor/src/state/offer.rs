@@ -1258,19 +1258,7 @@ impl Inner {
                 }
             }
         }
-        let mut scripts: Vec<std::path::PathBuf> = std::fs::read_dir(self.layout.data())
-            .map(|rd| {
-                rd.filter_map(|e| e.ok().map(|x| x.path()))
-                    .filter(|p| {
-                        p.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| n.starts_with("script-") && n.ends_with(".json"))
-                            .unwrap_or(false)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        scripts.sort();
+        let scripts = self.layout.scripts();
         for sp in scripts {
             let Ok(data) = bm_core::read_json::<Value>(&sp) else {
                 continue;

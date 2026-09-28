@@ -113,7 +113,7 @@ Four stages per chapter:
 ```mermaid
 flowchart TB
     IDX["crawl-index.json<br/>n to url, built once per range"] -->|crawl| TEXT["clean chapter text"]
-    TEXT -->|digest| SCRIPT["script-NN.json<br/>segments, speakers, moods, scenes"]
+    TEXT -->|digest| SCRIPT["script/NN.json<br/>segments, speakers, moods, scenes"]
     BIBLE[("bible.json<br/>who the characters are")] -.->|"prompt context"| SCRIPT
     SCRIPT -.->|"bible delta + roster"| BIBLE
     SCRIPT -.->|"roster + aliases"| CAST[("cast-vieneu.json<br/>voice per speaker")]
@@ -179,7 +179,7 @@ means the model got this chapter wrong rather than that the input was junk.
   Rust. See [docs/CRAWLING.md](docs/CRAWLING.md).
 - **digest**: the chapter is split deterministically into `narration` /
   `dialogue` events with stable ids, then one LLM call answers cast and script
-  together in strict JSON, into `data/script-NN.json`. A gate rejects the
+  together in strict JSON, into `data/script/NN.json`. A gate rejects the
   answer unless every event was spoken exactly once, in source order, with
   narration on `Narrator` and no quote delimiter inside a segment.
 - **render**: speak each segment with its speaker's voice. Every segment is
@@ -591,7 +591,7 @@ at top).
 | `assets/*` | Clips, pools, scene map, licenses (tracked) |
 | `voices.default.json` | Catalogue voices (tracked) |
 | `output/Ch.N - Title.mp3` | **Finished chapters** |
-| `data/chapters/NN.txt`, `data/script-NN.json` | Crawled (or imported) text, dramatized script |
+| `data/chapters/NN.txt`, `data/script/NN.json` | Crawled (or imported) text, dramatized script |
 | `data/crawl-index.json` | The chapter index: `n` to url for the current range. Hand-editable, the escape hatch for slug URLs |
 | `data/bible.json`, `data/cast-vieneu.json` | Character bible, speaker-to-voice (one per engine) |
 | `data/audio/segments-vieneu-NN/` | Cached segment audio, resumable renders |
@@ -713,7 +713,7 @@ into a single take, so re-pointing the middle of a run splits that run and
 re-speaks both halves. The ledger says how many takes it queued; `e` estimates
 the rest.
 
-### You edited `data/script-NN.json` by hand
+### You edited `data/script/NN.json` by hand
 
 Changing a segment's `speaker`, or its text, changes that segment and nothing
 else. A take's filename is a hash of engine, voice and text, so the edit gives

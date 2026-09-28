@@ -2856,7 +2856,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let layout = Layout::new(&root);
-        std::fs::create_dir_all(layout.data()).unwrap();
+        layout.ensure().unwrap();
 
         let calls = std::sync::Arc::new(AtomicU32::new(0));
         let app = {
