@@ -1163,6 +1163,48 @@ fn a_settings_file_naming_the_pre_move_path_still_finds_its_crawler() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The crawlers are the **adapter's** now. With a language bundle unpacked, the
+/// language's `crawl/` is a scope the resolver walks, and its `templates/` is
+/// the bundled directory a bare-ish name falls back to — while the pack's
+/// pre-split `assets/crawl/` is only reached by a checkout that has no bundle.
+#[test]
+fn a_bundled_crawler_resolves_out_of_the_adapters_own_tree() {
+    let dir = std::env::temp_dir().join(format!("bm-adapter-crawl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("assets/crawl/templates")).unwrap();
+    std::fs::create_dir_all(dir.join("adapters/vi-VN/crawl/templates")).unwrap();
+    std::fs::write(dir.join("assets/crawl/templates/storya.lua"), "pack copy").unwrap();
+    std::fs::write(
+        dir.join("adapters/vi-VN/crawl/templates/storya.lua"),
+        "language copy",
+    )
+    .unwrap();
+
+    // A checkout with no bundle still reads the pack's — nothing on disk has
+    // changed meaning for it.
+    assert_eq!(Layout::new(&dir).crawl_scripts(), dir.join("assets/crawl"));
+
+    let named = Layout {
+        adapter: "vi-VN".into(),
+        ..Layout::new(&dir)
+    };
+    assert_eq!(named.crawl_scripts(), dir.join("adapters/vi-VN/crawl"));
+
+    // A name relative to a scope resolves inside the language's own home…
+    std::fs::write(dir.join("adapters/vi-VN/crawl/site.lua"), "language").unwrap();
+    assert_eq!(
+        resolve_script(&named, "crawl/site.lua").unwrap(),
+        dir.join("adapters/vi-VN/crawl/site.lua")
+    );
+    // …and the bundled lookup goes to the language's `templates/` rather than
+    // the pack's.
+    assert_eq!(
+        resolve_script(&named, "templates/storya.lua").unwrap(),
+        dir.join("adapters/vi-VN/crawl/templates/storya.lua")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A page that is served happily and holds no chapter: the bundled crawler
 /// hands back nothing, and the length guard is what turns that into an `empty`
 /// block rather than a stub three stages downstream.

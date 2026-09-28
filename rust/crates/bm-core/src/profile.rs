@@ -26,8 +26,13 @@ use std::path::{Path, PathBuf};
 ///
 /// The union of every piece's trees, kept for the fixture install — which lays
 /// down a whole checkout regardless of which piece owns what — and for the
-/// messages that still name the pair.
-pub const LIVE_DIRS: [&str; 2] = ["assets", "prompts"];
+/// messages that still name them.
+///
+/// It is **not** what any piece is hashed over: the adapter's trees are the
+/// bundle's (`adapters/<name>/{prompts,crawl}`, see [`adapter_dirs`]) when the
+/// checkout has one, and the flat pair here when it does not. So the names are
+/// the *pre-split* shape, which is also the shape a fresh clone has.
+pub const LIVE_DIRS: [&str; 3] = ["assets", "prompts", "crawl"];
 
 /// One of the three things a checkout is bound to.
 ///
@@ -52,8 +57,14 @@ pub enum Piece {
 impl Piece {
     pub const ALL: [Piece; 3] = [Piece::Pack, Piece::Adapter, Piece::Engine];
 
-    /// The live trees this piece owns, relative to the root — and, because the
-    /// two coincide, the set `verify_binding` content-hashes.
+    /// The live trees this piece owns, relative to the root, in the **pre-split
+    /// flat shape** — `assets/`, `prompts/` and the engine's own tree.
+    ///
+    /// The adapter is the one piece whose trees are not settled here: a
+    /// checkout with an adapter bundle keeps its prompts *and* its crawlers
+    /// under `adapters/<name>/`, so what is hashed is answered by
+    /// [`adapter_dirs`] from the binding, not by a constant. This is the
+    /// fallback — the shape every checkout that predates the split has on disk.
     ///
     /// Empty for the engine on purpose. It does own a tree now
     /// (`engines/<name>/`, see `Layout::engine_dir`), but the engine's identity
@@ -63,7 +74,7 @@ impl Piece {
     pub fn trees(self) -> &'static [&'static str] {
         match self {
             Piece::Pack => &["assets"],
-            Piece::Adapter => &["prompts"],
+            Piece::Adapter => &["prompts", "crawl"],
             Piece::Engine => &[],
         }
     }
@@ -285,9 +296,10 @@ fn live_files(root: &Path) -> Vec<PathBuf> {
 /// Per `dirs` rather than over [`LIVE_DIRS`] so each piece can be hashed on
 /// its own — which is the point of the split: a prompts edit must move the
 /// adapter without moving the pack.
-pub(crate) fn files_under(root: &Path, dirs: &[&str]) -> Vec<PathBuf> {
+pub(crate) fn files_under<S: AsRef<str>>(root: &Path, dirs: &[S]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in dirs {
+        let dir = dir.as_ref();
         // An empty entry walks `root` itself, which is what a caller holding a
         // tree in hand (a composition dependency) wants: `root.join("")` would
         // prefix every path with `./` and hash the same tree twice over.
@@ -326,6 +338,29 @@ pub(crate) fn files_under(root: &Path, dirs: &[&str]) -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+/// The adapter's trees, relative to `root`, for the binding that names it.
+///
+/// The bundle's pair when the checkout has one —
+/// `adapters/<name>/prompts` and `adapters/<name>/crawl` — else the pre-split
+/// flat `prompts/`, where the crawlers were still the pack's and were therefore
+/// hashed as the pack's.
+///
+/// The **checkout's** scope, not the workspace's: the load pointer lives at the
+/// root (`.bm/profile`), so the hash it holds has to be a claim about the root's
+/// trees. A workspace that carries its own prompts is read through
+/// `Layout::prompts_base` and is deliberately not part of this claim.
+fn adapter_dirs(root: &Path, adapter: &str) -> Vec<String> {
+    let dir = crate::paths::ADAPTERS_DIR;
+    if root.join(dir).join(adapter).is_dir() {
+        vec![
+            format!("{dir}/{adapter}/prompts"),
+            format!("{dir}/{adapter}/crawl"),
+        ]
+    } else {
+        vec!["prompts".to_string()]
+    }
 }
 
 /// Hash `files` on as many threads as the machine has cores, and fold them into
@@ -496,7 +531,7 @@ pub fn verify_binding(root: &Path, engine: Option<&str>) -> Result<Binding> {
         binding.engine.name = name.to_string();
     }
     let pack = files_under(root, Piece::Pack.trees());
-    let adapter = files_under(root, Piece::Adapter.trees());
+    let adapter = files_under(root, &adapter_dirs(root, &binding.cache_adapter()));
     if pack.is_empty() && adapter.is_empty() {
         anyhow::bail!(
             "live {} + {} are missing or empty for pack '{}' — `profile load {}` to unpack it",
@@ -539,7 +574,14 @@ pub fn verify_binding(root: &Path, engine: Option<&str>) -> Result<Binding> {
 pub fn install_fixture(dest: &Path) -> Result<()> {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/profile");
     for dir in LIVE_DIRS {
-        copy_dir(&src.join(dir), &dest.join(dir))?;
+        let from = src.join(dir);
+        // The fixture ships what a test needs, not every name in `LIVE_DIRS`:
+        // a language's crawlers are optional, and most of the suite never
+        // crawls at all.
+        if !from.is_dir() {
+            continue;
+        }
+        copy_dir(&from, &dest.join(dir))?;
     }
     Ok(())
 }

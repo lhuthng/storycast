@@ -459,7 +459,21 @@ pub fn resolve_script(layout: &Layout, name: &str) -> Option<std::path::PathBuf>
         let inside = candidate.starts_with(&layout.root);
         return (inside && candidate.is_file()).then(|| candidate.to_path_buf());
     }
-    for base in [layout.work.clone(), layout.root.clone(), layout.assets()] {
+    // Nearest scope first: this book's own crawlers, then the checkout's, then
+    // the adapter's own home, then the pack. The adapter is *after* the two
+    // book scopes on purpose — a book that has written a crawler for its own
+    // site means it, and a language release arriving later must not silently
+    // take that over. It is *before* `assets/` because the crawlers are the
+    // language's now: with a bundle unpacked, `assets/crawl/` is the pre-split
+    // tree and is only reached by a checkout that has no bundle at all.
+    let mut bases = vec![layout.work.clone(), layout.root.clone()];
+    if let Some(home) = layout.adapter_home() {
+        if !bases.contains(&home) {
+            bases.push(home);
+        }
+    }
+    bases.push(layout.assets());
+    for base in bases {
         let p = base.join(candidate);
         if p.is_file() {
             return Some(p);
@@ -468,10 +482,16 @@ pub fn resolve_script(layout: &Layout, name: &str) -> Option<std::path::PathBuf>
     if candidate.components().count() < 2 {
         return None;
     }
-    let moved = layout
-        .assets()
-        .join("crawl")
-        .join("templates")
-        .join(candidate.file_name()?);
-    moved.is_file().then_some(moved)
+    // A bare name is a *bundled* crawler: one that ships in a `templates/`
+    // directory rather than being configured by path. Two can exist, and the
+    // adapter's is the live one.
+    let file = candidate.file_name()?;
+    let mut bundled = vec![layout.assets().join("crawl").join("templates")];
+    if let Some(home) = layout.adapter_home() {
+        bundled.insert(0, home.join("crawl").join("templates"));
+    }
+    bundled
+        .into_iter()
+        .map(|dir| dir.join(file))
+        .find(|p| p.is_file())
 }
