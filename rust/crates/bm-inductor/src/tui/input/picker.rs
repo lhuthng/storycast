@@ -58,7 +58,11 @@ pub(crate) async fn key_picker(
                 app.screen = Screen::Pick(p);
             }
             PickStage::Character => {
-                app.screen = Screen::Normal;
+                // Back to whatever opened the picker — the cast overview, the
+                // ledger, the dashboard. Esc used to land on the dashboard
+                // from all three, which meant a pick started from the cast
+                // table cost two screens to walk back from.
+                app.screen = app.back_out();
                 app.set_status(Level::Info, "cancelled — nothing changed");
             }
         },

@@ -28,7 +28,7 @@ use crate::tui::{
     style::Level,
 };
 use bm_proto::{OpRequest, Stage};
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) fn dispatch(
     app: &mut App,
@@ -142,6 +142,101 @@ pub(crate) fn urlencode(s: &str) -> String {
 }
 
 pub(crate) async fn handle_key(
+    app: &mut App,
+    key: KeyEvent,
+    http: &reqwest::Client,
+    job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
+) -> bool {
+    // Tab is the footer's own key: "the other side of the dashboard". A screen
+    // may spend it on something of its own (the sound editor's layer tabs, the
+    // jobs view's own toggle), and the three modal screens swallow every press —
+    // but everywhere else it means what the footer says, and it comes back to
+    // the screen it was pressed on, exactly like the jobs view already did from
+    // the dashboard.
+    if key.code == KeyCode::Tab && tab_is_free(&app.screen) {
+        let previous = Box::new(app.screen.clone());
+        app.screen = Screen::Jobs {
+            scroll: 0,
+            previous,
+        };
+        return false;
+    }
+    let before = app.screen.clone();
+    let quit = route(app, key, http, job_tx).await;
+    note_layer(app, before, key.code);
+    quit
+}
+
+/// Whether screens have spent `Tab` on something of their own.
+///
+/// The three modal screens are on the list for a different reason: their keys
+/// are a closed set, and a `Tab` that swapped a confirmation for the jobs view
+/// would lose the question it was about to ask.
+fn tab_is_free(screen: &Screen) -> bool {
+    !matches!(
+        screen,
+        Screen::Sound(_)
+            | Screen::Jobs { .. }
+            | Screen::Text(_)
+            | Screen::Confirm(_)
+            | Screen::Pick(_)
+    )
+}
+
+/// The screens that are drawn *over* another one rather than replacing it.
+fn is_layer(screen: &Screen) -> bool {
+    matches!(
+        screen,
+        Screen::Confirm(_) | Screen::Text(_) | Screen::Pick(_)
+    )
+}
+
+/// Remember where a layer was opened over, once the key that opened it has run.
+///
+/// **After the handler, not before**, because only the handler knows whether
+/// this keypress opened a layer or cancelled one — and from the outside the two
+/// are the same pair of screens in the same order. So the cancel keys push
+/// nothing (the arm that ran has already popped), a place screen is not a layer
+/// at all, and a layer that was *answered* rather than cancelled pops the entry
+/// it was holding, which is what keeps the stack from drifting away from the
+/// screens actually on it.
+fn note_layer(app: &mut App, before: Screen, code: KeyCode) {
+    let after = app.screen.clone();
+    // The `:` line ran: the prompt is spent, and what the command opened sits
+    // over the screen the command ran in. Without this, `:m` on the dashboard
+    // would raise its confirmation over a prompt that is no longer on screen,
+    // and cancelling it would bring the dead prompt back.
+    if let Some(parent) = app.prompt_spent.take() {
+        if is_layer(&after) {
+            app.back.push(parent);
+        } else {
+            // The command left a place screen on top: the prompt is gone, and
+            // so is the entry it pushed on the way in.
+            app.back.pop();
+        }
+        return;
+    }
+    if matches!(
+        code,
+        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N')
+    ) {
+        return;
+    }
+    if is_layer(&after) {
+        if std::mem::discriminant(&after) != std::mem::discriminant(&before) {
+            app.back.push(before);
+        }
+    } else if is_layer(&before) {
+        app.back.pop();
+    }
+}
+
+/// Route one key to the screen that owns it.
+///
+/// Split from [`handle_key`] so the recursion behind a `:` command — which
+/// presses the key the word names — cannot push a second layer entry for one
+/// keypress. Every key runs exactly one [`note_layer`].
+pub(crate) async fn route(
     app: &mut App,
     key: KeyEvent,
     http: &reqwest::Client,

@@ -317,12 +317,12 @@ pub(crate) async fn normal_key(
         // read-only until an edit key is pressed on purpose.
         KeyCode::Char('L') => crate::tui::input::llm::open_llm(app),
         // The background jobs (what the footer's "N job(s) running" actually
-        // is). Tab is the spelling the footer advertises — it is the one
-        // free top-row key and "flip to the other side of the dashboard" is
-        // what Tab already means in the sound editor — with `J` kept as the
-        // mnemonic alias (sibling of `K`, capital so lowercase `j` stays
-        // "move down").
-        KeyCode::Tab | KeyCode::Char('J') => {
+        // is). `J` is the mnemonic alias (sibling of `K`, capital so lowercase
+        // `j` stays "move down"); `Tab` — the spelling the footer advertises —
+        // is handled once in `input::handle_key`, so it opens the jobs view from
+        // every screen that has not spent the key on something of its own
+        // rather than from this one alone.
+        KeyCode::Char('J') => {
             let previous = Box::new(app.screen.clone());
             app.screen = Screen::Jobs {
                 scroll: 0,

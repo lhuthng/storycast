@@ -261,6 +261,26 @@ pub(crate) struct App {
     /// context they were typed in, so `:F` in the task list retries the
     /// highlighted row instead of losing it.
     pub(crate) command_return: Option<Screen>,
+    /// The screens `Esc` steps back through, outermost first: one entry per
+    /// **layer** currently open, each holding the screen that layer sits on.
+    ///
+    /// A *layer* is a screen drawn over another one — a dialog, a `:` line, the
+    /// voice picker. A *place* is a screen you are standing in — the dashboard,
+    /// the ledger, the cast table — and `Esc` closes those rather than stepping
+    /// out of them, because the place under them is the dashboard and the
+    /// dashboard is the floor.
+    ///
+    /// The two are pushed and popped by one rule, in `input::note_layer`, so a
+    /// dialog raised over a picker raised over the cast table unwinds one press
+    /// at a time — `Cast → picker → swap dialog → Esc → picker → Esc → Cast →
+    /// Esc → dashboard` — instead of dropping the operator three screens at
+    /// once, which is what every layer doing `Esc → Normal` used to do.
+    pub(crate) back: Vec<Screen>,
+    /// Set by the `:` line as it hands control to the screen its command runs
+    /// in. The prompt is spent, not stacked: a dialog the command raises
+    /// belongs over the screen the command ran in, not over a prompt that is no
+    /// longer on screen.
+    pub(crate) prompt_spent: Option<Screen>,
     /// The active palette. Replaces the old `colour: bool`: mono is now one
     /// of three themes, and `C` cycles all of them. `colour()` is the boolean
     /// the panes already read — false exactly when the theme is `Mono` — so
@@ -362,6 +382,8 @@ impl App {
             onboarded: std::collections::HashSet::new(),
             catchup_jobs: Vec::new(),
             command_return: None,
+            back: Vec::new(),
+            prompt_spent: None,
             theme: Theme::default(),
             mouse_capture: true,
             mouse_toggle: false,
@@ -572,6 +594,22 @@ impl App {
     /// whether a box is gone.
     pub(crate) fn live_worker_ids(&self) -> std::collections::BTreeSet<String> {
         crate::tui::model::live_worker_ids(&self.beats, &self.machines, bm_proto::now_secs())
+    }
+
+    /// Step back one layer: the screen under this one, or the dashboard.
+    ///
+    /// The dashboard is the floor, so an `Esc` that runs off the bottom of the
+    /// stack closes rather than doing nothing — which is what the screens that
+    /// are only ever opened from the dashboard did before the stack existed,
+    /// and what they must keep doing.
+    ///
+    /// `command_return` is the fallback for a prompt opened outside a key
+    /// handler (a test, or anything that sets a screen directly): it is the
+    /// same value the stack would have held, recorded by the opener itself.
+    pub(crate) fn back_out(&mut self) -> Screen {
+        let target = self.back.pop().or_else(|| self.command_return.take());
+        self.command_return = None;
+        target.unwrap_or(Screen::Normal)
     }
 
     pub(crate) fn set_status(&mut self, level: Level, text: impl Into<String>) {

@@ -27,7 +27,11 @@ pub(crate) async fn key_text(
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
         KeyCode::Esc => {
-            app.screen = app.command_return.take().unwrap_or(Screen::Normal);
+            // Back to the screen this prompt was opened over. The layer stack
+            // knows it — the prompt pushed it on the way in — and falls back to
+            // `command_return`, which is the same screen recorded by the opener
+            // (for a prompt a test or a job opens without a keypress).
+            app.screen = app.back_out();
             app.set_status(Level::Info, "cancelled — nothing was submitted");
         }
         KeyCode::Enter => {
@@ -42,6 +46,12 @@ pub(crate) async fn key_text(
                     app.set_status(Level::Info, "cancelled — nothing was submitted");
                     return false;
                 }
+                // From here the prompt is spent, not stacked, and the command
+                // owns the keypress: anything it opens — `:m` raises a
+                // confirmation — belongs over the screen the command runs in, so
+                // cancelling it comes back *here* rather than re-opening a
+                // prompt that has already been answered.
+                app.prompt_spent = Some(app.screen.clone());
                 return match command_key(&buf) {
                     // Read-only commands press a still-live key, so a
                     // context (task list) reacts exactly as if it had been
@@ -54,7 +64,10 @@ pub(crate) async fn key_text(
                         if matches!(app.screen, Screen::Pick(_) | Screen::Cast(_)) {
                             app.screen = Screen::Normal;
                         }
-                        Box::pin(super::handle_key(
+                        // Straight to the owning screen, skipping the wrapper
+                        // `handle_key` adds: this is still one keypress, and a
+                        // second `note_layer` for it would push the layer twice.
+                        Box::pin(super::route(
                             app,
                             KeyEvent::new(code, KeyModifiers::empty()),
                             http,

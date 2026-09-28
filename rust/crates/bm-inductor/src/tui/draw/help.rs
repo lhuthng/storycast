@@ -74,7 +74,9 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         ),
         (
             "Tab / J",
-            "background jobs: running against queued, elapsed time, activity",
+            "background jobs: running against queued, elapsed time, activity. Tab opens it \
+             from any screen that has not spent the key on tabs of its own (the sound editor, \
+             the jobs view itself) and comes back to the screen it was pressed on",
         ),
         ("D / :digest", "digest manager: every chapter, manual digest by clipboard"),
         (
@@ -140,13 +142,42 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         Style::default().fg(Color::DarkGray),
     )));
 
+    section(&mut lines, "Backing out (Esc)");
+    for v in [
+        "Screens come in two kinds, and Esc means one thing to each.",
+        "A **layer** is drawn over another screen: a confirmation, the `:` line,",
+        "the voice picker, a model list. Esc leaves it and lands on the screen",
+        "underneath — which is the one that raised it, not the dashboard.",
+        "Layers nest, so `Cast → picker → swap confirmation` unwinds in three",
+        "presses, one screen at a time.",
+        "A **place** is a screen you are standing in: the dashboard, the ledger,",
+        "the cast table, the sound editor. The screen under those is the",
+        "dashboard, so Esc (or `q`) closes them back to it.",
+        "One wall, in other words: `Esc` goes back exactly one step, and the",
+        "dashboard is the floor.",
+    ] {
+        lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
+    }
+
     section(&mut lines, "Task ledger (K)");
     for v in [
         "Filter with a few letters, Enter for the full failure reason.",
-        "u retries the highlighted row; F force re-runs it. Both are direct",
-        "keys here — this screen is read-only navigation otherwise.",
-        "R requeues every merge (render cache kept); E re-renders everything,",
-        "asking first. Capitals, so lowercase keeps typing into the filter.",
+        "←/→ step the facet bar on the counts line: all, the four stages, then",
+        "queued, active, done, shelved, failed, abandoned. Arrows rather than",
+        "letters because every letter on this screen types into the filter, and",
+        "the two narrowings compose: facet render plus `41` is chapter 41's",
+        "render rows. `Ctrl-U` clears both halves at once.",
+        "`abandoned` is computed, not a state: a row that is assigned or running",
+        "whose box has stopped beating. Those rows are tinted, and the counts",
+        "line says how many there are.",
+        "Taking work back off a box that left: `x` releases the highlighted row",
+        "(refused on a row nobody holds), `X` releases it even from a box that is",
+        "still answering — the work is not lost, it is spoken twice — `W` takes",
+        "everything one box holds, after naming the box and the row count, and",
+        "`A` requeues every assignment whose worker went quiet.",
+        "u retries the highlighted row; F force re-runs it. R requeues every",
+        "merge (render cache kept); E re-renders everything, asking first.",
+        "Capitals, so lowercase keeps typing into the filter.",
     ] {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }

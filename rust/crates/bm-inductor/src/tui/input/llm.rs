@@ -158,8 +158,19 @@ pub(crate) async fn key_llm(
     }
     match key.code {
         KeyCode::Esc => {
-            app.screen = Screen::Normal;
-            app.set_status(Level::Info, "cancelled — nothing was submitted");
+            if v.picking {
+                // The fetched list is a step of this screen, like the voice
+                // picker's second stage: Esc leaves the list, and only the
+                // next Esc closes the screen. It used to walk out of both.
+                v.picking = false;
+                v.model_cursor = 0;
+                v.note.clear();
+                app.screen = Screen::Llm(v);
+                app.set_status(Level::Info, "model list closed — `f` fetches it again");
+            } else {
+                app.screen = Screen::Normal;
+                app.set_status(Level::Info, "closed the LLM screen");
+            }
         }
         KeyCode::Up | KeyCode::Char('k') if v.picking => {
             v.model_cursor = v.model_cursor.saturating_sub(1);
