@@ -188,7 +188,13 @@ impl Sources {
         // and a stage whose *whole* input is a file is a stage that cannot
         // degrade — it fails, on every retry, until the operator notices. 21 KB
         // of text is not worth a class of failure.
-        out.push_tree(root, "prompts");
+        //
+        // The tree *in force*, which is the workspace's adapter when it has one
+        // and the checkout's otherwise — the same tree a digest on this root
+        // reads. Shipping the root tree unconditionally would hand a box one
+        // language's prompts while the inductor driving it reads another's, and
+        // the two would agree on every file name and disagree on every word.
+        out.push_tree(&layout.prompts_base(), "prompts");
 
         for stage in out.stages.clone() {
             for reg in registries(stage) {
@@ -727,6 +733,45 @@ mod tests {
             !got.iter().any(|p| p.starts_with("assets/")),
             "no media, no registries: {got:?}"
         );
+    }
+
+    /// The prompts a box receives are the tree **in force** — the workspace's
+    /// adapter when it has one, the checkout's otherwise — and they land under
+    /// the names the box already reads. The member path is identical either way,
+    /// which is exactly why the source has to be the one the inductor's digest
+    /// reads: agreeing on every file name and disagreeing on every word is the
+    /// failure this pins.
+    #[test]
+    fn a_workspace_adapter_ships_its_own_prompts_under_the_same_names() {
+        let root = fixture("adapter-prompts");
+        let book = root.root.join("workspaces/book");
+        std::fs::create_dir_all(book.join("prompts")).unwrap();
+        std::fs::write(book.join("prompts/analyze.txt"), "xianxia-en-US").unwrap();
+        let l = crate::Layout {
+            root: root.root.clone(),
+            work: book.clone(),
+            adapter: "xianxia-en-US".into(),
+        };
+
+        let shipped = Sources::plan(&l, &[Stage::Digest]).unwrap();
+        let prompt = shipped
+            .members
+            .iter()
+            .find(|m| m.to == "prompts/analyze.txt")
+            .expect("the prompts ride every bundle");
+        assert_eq!(prompt.from, book.join("prompts/analyze.txt"));
+        assert_eq!(prompt.base, book, "cut from the adapter's tree");
+
+        // The checkout's tree answers when the workspace has none: the
+        // pre-split behaviour, unchanged.
+        let bare = Sources::plan(&root, &[Stage::Digest]).unwrap();
+        let prompt = bare
+            .members
+            .iter()
+            .find(|m| m.to == "prompts/analyze.txt")
+            .expect("the prompts ride every bundle");
+        assert_eq!(prompt.from, root.prompts_dir().join("analyze.txt"));
+        assert_eq!(prompt.base, root.root);
     }
 
     /// **The prompt is not a stage's file.** A box can gain `digest` with one

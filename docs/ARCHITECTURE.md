@@ -462,16 +462,20 @@ of a pipeline where it is expensive to notice.
 The stages above are one chain, but the chain has a seam, and **every future
 stage needs to know which side of it it is on**:
 
-* **`crawl` and `prepare` are adapter-independent.** The crawled chapter text and
-  the quote split are properties of the *source*. The same bytes serve every
-  language the book is ever produced in.
-* **`digest` onward is per-adapter.** The prompts *are* the adapter, and for a
-  translating adapter this is more than wording: the `script` stage's segments
-  *become* text in the target language, so the cast and the segment cache are
-  per-adapter artifacts.
+* **`crawl` and `prepare` are adapter-independent** — they never read the
+  adapter. The crawled text and the quote split are properties of the *source*.
+* **`digest` onward is per-adapter.** The prompts *are* the adapter, and so are
+  the artifacts they produce: the cast, the segment text, the segment cache.
 
-Two adapters of one book can therefore share `data/chapters/` and can share
-nothing downstream of it. That is why the caches are keyed the way they are:
+That is a statement about the code, not a promise that one corpus serves two
+languages: a book whose English edition is crawled from an English site has a
+different source for it, and then the two editions share nothing at all. Where
+they *do* share, `data/chapters/` is the shared piece and nothing downstream of
+it is. `Layout::prompt()` and `script_prompt()` follow the same rule — the
+workspace's adapter tree when it has one, the checkout's otherwise, which is why
+a box can be sent a language it can act on (see [PROFILES.md](PROFILES.md)).
+
+Which is why the caches are keyed the way they are:
 `Layout::cast(engine)` is `data/cast-<adapter>-<engine>.json` and
 `Layout::seg_dir(engine, n)` is `data/audio/segments-<adapter>-<engine>-NN`, so a
 segment directory names its own language instead of relying on the operator to

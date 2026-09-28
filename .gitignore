@@ -26,6 +26,14 @@ __pycache__/
 /workspaces/
 /profiles/
 
+# Language adapters: `adapters/<adapter>/prompts/` is where a language's own
+# analyze/script prompts live (a workspace that carries this tree speaks its own
+# language — see docs/PROFILES.md). Machine-local for the same reason the live
+# `prompts/` tree is: the text is the artifact, shipped as a release bundle, and
+# cutting a release is where a prompt edit becomes visible. The suite builds its
+# own stubs under rust/fixtures/, so nothing here is needed to test.
+/adapters/
+
 # Inductor state, run logs
 .bm/
 *.log

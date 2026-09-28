@@ -343,18 +343,48 @@ impl Layout {
         self.work.join("output")
     }
 
+    /// The directory the live `prompts/` tree hangs off: the workspace when it
+    /// carries one, else the checkout.
+    ///
+    /// `work/prompts/` is the adapter's home for the same reason `work/crawl/`
+    /// is a book's: `:profile load` replaces `assets/` + `prompts/` for the
+    /// whole checkout, so prompts at the root are prompts every workspace on
+    /// this root must share — one language per checkout, which is the limit the
+    /// adapter exists to remove. A workspace that carries its own tree speaks
+    /// its own language.
+    ///
+    /// Returning the *base* rather than the directory is what lets a caller
+    /// both read the tree and ship it: a bundle member is a path relative to
+    /// its base, so `prompts/analyze.txt` travels from either tree to the same
+    /// place on a box.
+    pub fn prompts_base(&self) -> PathBuf {
+        if self.work.join("prompts").is_dir() {
+            self.work.clone()
+        } else {
+            self.root.clone()
+        }
+    }
+
+    /// The live `prompts/` tree in force, whole. The fallback is not silence:
+    /// it is the checkout's tree, which is what every workspace read before the
+    /// adapter split. A workspace whose own tree is incomplete fails on the
+    /// missing template, and that error names the file it wanted.
+    pub fn prompts_dir(&self) -> PathBuf {
+        self.prompts_base().join("prompts")
+    }
+
     /// The chapter attribution template. The automatic worker adds its prepared
     /// events and immutable-speaker contract; the manual manager also uses the
     /// legacy raw-chapter rendering of this file.
     pub fn prompt(&self) -> PathBuf {
-        self.root.join("prompts/analyze.txt")
+        self.prompts_dir().join("analyze.txt")
     }
 
     /// The audio-staging contract. The automatic builder appends the immutable
     /// speaker map and prepared-source obligations; the manual manager renders
     /// the legacy full script contract directly.
     pub fn script_prompt(&self) -> PathBuf {
-        self.root.join("prompts/script.txt")
+        self.prompts_dir().join("script.txt")
     }
 
     pub fn assets(&self) -> PathBuf {
@@ -786,6 +816,40 @@ mod tests {
         );
         // Idempotent: nothing left to move, and nothing overwritten.
         assert!(l.migrate_cache_keys("vieneu").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The prompts come from the adapter: a workspace that carries a `prompts/`
+    /// tree speaks its own language, and a checkout that carries none keeps
+    /// reading the root's — which is what every workspace read before the
+    /// split, so no existing checkout changes behaviour.
+    #[test]
+    fn prompts_come_from_the_workspace_adapter_and_fall_back_to_the_checkout() {
+        let root = fixture_root("adapter-prompts");
+        std::fs::create_dir_all(root.join("prompts")).unwrap();
+        std::fs::write(root.join("prompts/analyze.txt"), "checkout").unwrap();
+
+        // No tree of its own: the checkout answers, exactly as before.
+        let bare = Layout::new(&root);
+        assert_eq!(bare.prompts_base(), root);
+        assert_eq!(bare.prompt(), root.join("prompts/analyze.txt"));
+
+        // Now the workspace carries one, and *both* prompts move with it: a
+        // workspace reading its own `analyze.txt` beside the checkout's
+        // `script.txt` would be half one language and half another.
+        let book = root.join("workspaces/book");
+        std::fs::create_dir_all(book.join("prompts")).unwrap();
+        std::fs::write(book.join("prompts/analyze.txt"), "xianxia-en-US").unwrap();
+        std::fs::write(book.join("prompts/script.txt"), "xianxia-en-US").unwrap();
+        let l = Layout {
+            root: root.clone(),
+            work: book.clone(),
+            adapter: "xianxia-en-US".into(),
+        };
+        assert_eq!(l.prompts_base(), book, "and the bundle is cut from there");
+        assert_eq!(l.prompt(), book.join("prompts/analyze.txt"));
+        assert_eq!(l.script_prompt(), book.join("prompts/script.txt"));
+        assert_ne!(l.prompt(), bare.prompt());
         let _ = std::fs::remove_dir_all(&root);
     }
 

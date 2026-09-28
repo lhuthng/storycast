@@ -165,19 +165,23 @@ language touches Rust; the engine is the only piece that is a software project.
 Where a book splits into languages is worth stating once, because it decides
 which side of the line every future stage belongs on:
 
-- **`crawl` and `prepare` are adapter-independent.** The raw chapter text and
-  the quote split are properties of the source, not of the language being
-  produced.
-- **`digest` onward is per-adapter.** For a translating adapter this is not
-  merely a matter of wording: the `script` stage's segments *become* text in the
-  target language, so the segment cache holds translated audio and translated
-  text.
+- **`crawl` and `prepare` are adapter-independent** — they never read the
+  adapter. The crawled text and the quote split are properties of the *source*.
+- **`digest` onward is per-adapter.** The prompts *are* the adapter, and so are
+  the artifacts they produce: the cast, the segment text, the segment cache.
 
-The consequence to design around rather than discover: a translating adapter is
-bilingual in effect. For `en-US` reading a Vietnamese source, `analyze` must
-attribute Vietnamese speakers while writing an English title and atmosphere,
-and `script` emits the English segments. Translation is therefore not a separate
-pass — it is per-stage prompt behaviour, and the prompts are the adapter.
+That is a claim about the **code**, not a promise that one corpus serves two
+languages. A book whose English edition is crawled from an English site has a
+different source for its English adapter, and then the two editions share
+nothing at all — `data/chapters/` is per-book *and* per-source. Sharing the
+crawl happens when the adapter reads the same bytes, which is a property of the
+deployment rather than of the pipeline.
+
+The adapter is therefore **bound to a pack** — `xianxia-en-US`, not `en-US` —
+because its prompts carry the genre's register the way the pack carries its
+music: "Senior Brother", "this one", "qi", Title Case headlines. A romance pack
+wants different prompts for the same language, and the binding says which pair
+is in force.
 
 ## The caches: what they key on
 
@@ -265,13 +269,78 @@ orphaned; and `migrate_cache_keys` runs at load, not at plan time.
 > about the file — see the paragraph above. Worth keeping as a reminder that
 > "cannot happen through the UI" is a different claim from "cannot be on disk".
 
+## The prompts: one tree per adapter
+
+`Layout::prompt()` and `script_prompt()` were root-scoped
+(`root/prompts/*.txt`), so one checkout held exactly one language. They resolve
+through `prompts_base()` now:
+
+```rust
+if self.work.join("prompts").is_dir() { self.work.clone() } else { self.root.clone() }
+```
+
+- **`workspaces/<name>/prompts/` is the adapter's home**, for the same reason
+  `workspaces/<name>/crawl/` is a book's: `:profile load` replaces `assets/` +
+  `prompts/` for the *whole checkout*, so a language kept at the root is a
+  language every workspace on that root must share — one language per checkout,
+  which is the limit the adapter exists to remove.
+- **The checkout's tree is the fallback**, and that is what every workspace read
+  before the split, so nothing on disk changes meaning and no migration is
+  needed. A workspace whose own tree is *incomplete* fails on the missing
+  template, and that error names the file it wanted.
+- **`prompts_base()` returns the base, not the directory**, so the same call both
+  reads and ships the tree: a bundle member is a path relative to its base, so
+  `prompts/analyze.txt` lands identically from either one. `provision::sources`
+  cuts the tree in force — the same tree a digest on this root reads. Shipping
+  the root tree unconditionally would hand a box one language's prompts while
+  the inductor driving it read another's, agreeing on every file name and
+  disagreeing on every word.
+
+The adapter's tree is **live and untracked**, at `adapters/<adapter>/prompts/`
+(`.gitignore`), shipped as a release bundle the way a pack is. The text is the
+artifact: a prompt edit becomes visible when a release is cut, and the suite
+builds its own stubs under `rust/fixtures/`, so nothing here is needed to test.
+
+Two things the `xianxia-en-US` pair settles that the Vietnamese pair never had
+to:
+
+- **The non-verbal tags are the engine's, declared by the engine, and read
+  through an API.** A tag names a sound *one engine's front end* knows how to
+  make — `bm-tts` maps each to an `<|emotion_N|>` token — so it cannot be prompt
+  text, and it cannot be a list of `if engine == …` either. `voices::ENGINES` is
+  one row per engine (`EngineDecl { name, nonverbal }`); `voices::nonverbals()`
+  answers for whatever name is bound, and a name nothing declares answers
+  "none". **Adding an engine is adding a row**, not editing every reader. A test
+  keeps that table equal to the catalogue's engine list, so adding one without
+  the other is a build failure rather than a silent half-addition.
+
+  Which means the rule is **rendered or removed, never negated**. An engine that
+  voices no tags gets a prompt with no non-verbal rule in it at all, because a
+  rule that says "none" still teaches the model that brackets are a thing it may
+  write — and a token the bound engine does not implement is read aloud
+  literally. The prompts carry `{voice_tags}`, `{tag_laugh}`, `{tag_sigh}` and
+  `{tag_throat}`, and the rule is bounded by its own heading (`7. NON-VERBAL
+  SOUNDS.` through `8. MUSIC:`), so the section mechanism that rewrites rules
+  1–3 for the automatic path is what takes this one out.
+
+- **`en-US` reads English; it does not translate.** Chapter text, `mentions`
+  keys, segment text and title are all English, and nothing in either prompt is
+  bilingual. The adapter that translates is a different adapter — and one that
+  reads this same corpus on both sides, which is what makes the shared
+  `data/chapters/` above worth having.
+
+The three axes multiply, and the binding already names all three: `xianxia`
+(pack) × `vi` / `en` (adapter) × `vieneu` / `gemini` (engine) covers
+`xianxia · vi · vieneu`, `xianxia · en · some-english-engine` and
+`xianxia · vi · gemini` with none of them a special case in code — the adapter
+resolves the language and the declaration answers for the engine. What an
+*engine-specific prompt* would need — an adapter whose wording differs per engine
+rather than per language, as `-vi-VieNeu` versus `-vi-GeminiTTS` suggests — is
+not built: today the engine reaches a prompt only through this declaration, and
+a per-engine override is a larger decision than the tags it would serve.
+
 ## Not built yet
 
-- **Phase 2 — prompts behind the adapter.** `Layout::prompt()` and
-  `script_prompt()` are root-scoped (`root/prompts/*.txt`), so one checkout
-  holds one language. They resolve through the binding instead, and the adapter
-  unpacks into `workspaces/<name>/prompts/` — exactly as `work/crawl` already
-  does, and for the same reason. The `en-US` prompts get authored here.
 - **Phase 3 — the engine's identity.** `models/`, `bm-tts`, `.bm/voices/` and
   the G2P dictionary move under a named engine tree. Today
   `Layout::tts_dict()` hardcodes `models/sea_g2p.bin`, which is VieNeu's
@@ -280,6 +349,10 @@ orphaned; and `migrate_cache_keys` runs at load, not at plan time.
   provisioning work just fixed. The engine also needs a declared capability —
   `cloning`, and whether enrollment wants a reference transcript — because `:A`
   and `:N` assume the engine can clone at all.
+- **An adapter packer.** `tools/profile.sh` packs `assets/` + `prompts/`
+  together, which is the pre-split shape. `adapters/<adapter>/prompts/` needs the
+  same treatment — one `tar.zst`, a manifest, a release — and that is what turns
+  the untracked tree above into something a second machine can bind.
 - **Phase 4 — provisioning and scheduling.** Bundles become per piece, and
   `sources_stages` grows the second dimension so a vi-VN box is never offered an
   en-US chapter. Two things ride with it: the worker resolves the same
