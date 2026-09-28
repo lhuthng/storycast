@@ -249,6 +249,33 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AwsCmd,
     },
+    /// Asset composition: fold the assets this one depends on into the live
+    /// tree, and record what was inherited so a re-resolve can withdraw it.
+    /// Local only, touches no worker.
+    Asset {
+        #[command(subcommand)]
+        cmd: AssetCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AssetCmd {
+    /// Fold every dependency named in `assets/pack.json` into the live tree,
+    /// weakest first: a key or a file the asset already ships wins, a missing
+    /// one is filled in from the dependency, and everything the *last* resolve
+    /// put there is withdrawn first — so a parent that has since dropped a
+    /// sound does not leave it behind for good.
+    ///
+    /// Run it after editing a dependency, or after unpacking one under
+    /// `assets/_extends/`. It writes only what changed (a registry is rewritten
+    /// entry by entry, so a resolve touching one sound diffs as one sound), and
+    /// it names any dependency that has moved since the last resolve — which is
+    /// what makes a child visibly stale rather than quietly out of date.
+    Resolve {
+        /// Report what would change and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2004,6 +2031,7 @@ async fn main() -> anyhow::Result<()> {
             | Cmd::Backup { .. }
             | Cmd::Workspace { .. }
             | Cmd::Aws { .. }
+            | Cmd::Asset { .. }
     ) {
         check_bins()?;
     }
@@ -2167,6 +2195,24 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Cmd::Asset { cmd } => match cmd {
+            AssetCmd::Resolve { dry_run } => {
+                let report = bm_core::compose::resolve(&layout.assets(), dry_run)?;
+                println!("assets/ — {}", report.summary());
+                if !dry_run && !report.deps.is_empty() {
+                    println!(
+                        "  built on {}",
+                        report
+                            .deps
+                            .iter()
+                            .map(|d| format!("{} ({})", d.name, &d.hash[..8.min(d.hash.len())]))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                Ok(())
+            }
+        },
         Cmd::Check { url, timeout } => cmd_check(settings.clone(), url, timeout).await,
     }
 }

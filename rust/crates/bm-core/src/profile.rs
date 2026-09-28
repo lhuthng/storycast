@@ -238,9 +238,18 @@ pub fn pointer_path(root: &Path) -> PathBuf {
 /// sha256 of one file, hex.
 fn file_hash(path: &Path) -> Result<String> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(content_hash(&bytes))
+}
+
+/// sha256 of some bytes, hex — the one digest everything here is built from.
+///
+/// Shared with [`crate::compose`], which hashes a single registry *value* to
+/// tell an entry it inserted from the same key the operator has since edited.
+/// One primitive, so "the bytes changed" means the same thing in both places.
+pub(crate) fn content_hash(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
-    h.update(&bytes);
-    Ok(hex_digest(h.finalize()))
+    h.update(bytes);
+    hex_digest(h.finalize())
 }
 
 fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
@@ -276,10 +285,18 @@ fn live_files(root: &Path) -> Vec<PathBuf> {
 /// Per `dirs` rather than over [`LIVE_DIRS`] so each piece can be hashed on
 /// its own — which is the point of the split: a prompts edit must move the
 /// adapter without moving the pack.
-fn files_under(root: &Path, dirs: &[&str]) -> Vec<PathBuf> {
+pub(crate) fn files_under(root: &Path, dirs: &[&str]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in dirs {
-        let mut stack = vec![root.join(dir)];
+        // An empty entry walks `root` itself, which is what a caller holding a
+        // tree in hand (a composition dependency) wants: `root.join("")` would
+        // prefix every path with `./` and hash the same tree twice over.
+        let base = if dir.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(dir)
+        };
+        let mut stack = vec![base];
         while let Some(d) = stack.pop() {
             let Ok(entries) = std::fs::read_dir(&d) else {
                 continue;
@@ -287,7 +304,16 @@ fn files_under(root: &Path, dirs: &[&str]) -> Vec<PathBuf> {
             let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
             paths.sort();
             for p in paths {
-                if p.file_name().and_then(|n| n.to_str()) == Some(".DS_Store") {
+                let name = p.file_name().and_then(|n| n.to_str());
+                if name == Some(".DS_Store") {
+                    continue;
+                }
+                // A composition *input*, not this piece's own content:
+                // `assets/_extends/` holds other assets' whole trees, so
+                // hashing them would both double the pack's digest and make a
+                // dependency's edit read as the child's. What is hashed is the
+                // resolved result, which is what every reader sees.
+                if p.is_dir() && name == Some(crate::compose::EXTENDS_DIR) {
                     continue;
                 }
                 if p.is_dir() {
@@ -708,6 +734,36 @@ mod tests {
         assert_eq!(after.pack.hash, before.pack.hash, "the pack did not move");
         assert_ne!(after.adapter.hash, before.adapter.hash, "the adapter did");
         assert_eq!(after, read_binding(&dir).unwrap(), "and it was re-stamped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A composition input is not this pack's own content. `assets/_extends/`
+    /// holds other assets' whole trees, so hashing them would double the digest
+    /// and make a dependency's edit read as this pack's own — while the
+    /// *resolved* result, which is what every reader and every worker sees, is
+    /// hashed as it always was.
+    #[test]
+    fn a_dependency_tree_is_not_part_of_the_packs_own_digest() {
+        let dir = live_fixture("extends");
+        let before = hash_live(&dir).unwrap();
+        assert!(!before.keys().any(|k| k.contains("_extends")));
+
+        std::fs::create_dir_all(dir.join("assets/_extends/common/effects")).unwrap();
+        std::fs::write(
+            dir.join("assets/_extends/common/effects/wind-1.mp3"),
+            b"clip",
+        )
+        .unwrap();
+        assert_eq!(
+            hash_live(&dir).unwrap(),
+            before,
+            "an unpacked dependency is an input, not a change to the pack"
+        );
+
+        // The resolved result, on the other hand, *is* the pack.
+        std::fs::create_dir_all(dir.join("assets/effects")).unwrap();
+        std::fs::write(dir.join("assets/effects/wind-1.mp3"), b"clip").unwrap();
+        assert_ne!(hash_live(&dir).unwrap(), before);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
