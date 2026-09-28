@@ -1348,6 +1348,7 @@ fn the_footer_names_the_active_workspace_and_the_loaded_profile() {
     let named = bm_core::Layout {
         root: "/repo".into(),
         work: "/repo/workspaces/beyond-myriads".into(),
+        ..bm_core::Layout::new("/repo")
     };
     assert_eq!(super::model::workspace_label(&named), "beyond-myriads");
     // No profile is the state every runner refuses to start in, so it is

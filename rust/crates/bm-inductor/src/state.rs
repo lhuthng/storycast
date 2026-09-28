@@ -221,6 +221,44 @@ mod tests {
         })
     }
 
+    /// The caches are keyed by adapter **and** engine, and a workspace from
+    /// before the split is renamed into that shape at load rather than
+    /// re-rendering every chapter it already spoke.
+    #[test]
+    fn load_re_keys_a_pre_split_cache_instead_of_orphaning_it() {
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        let data = layout.data();
+        std::fs::create_dir_all(data.join("audio/segments-vieneu-07")).unwrap();
+        std::fs::write(data.join("audio/segments-vieneu-07/s-00.wav"), b"wav").unwrap();
+        std::fs::write(data.join("cast-vieneu.json"), r#"{"Narrator":"Adam"}"#).unwrap();
+
+        inner.migrate_cache_keys();
+
+        assert!(layout.cast("vieneu").is_file(), "the cast was carried over");
+        assert!(
+            layout.seg_dir("vieneu", 7).join("s-00.wav").is_file(),
+            "and the segments with it — the bytes were never wrong, only the name"
+        );
+        assert!(
+            !data.join("cast-vieneu.json").exists(),
+            "the old name is gone, not duplicated"
+        );
+        let said = |inner: &Inner| {
+            inner
+                .recent_events(8)
+                .iter()
+                .filter(|e| e.text.contains("cache re-keyed"))
+                .count()
+        };
+        assert_eq!(said(&inner), 1, "and it is said once, not silently");
+
+        // A second start finds nothing left to move, so it stays quiet.
+        inner.migrate_cache_keys();
+        assert_eq!(said(&inner), 1);
+        assert!(layout.seg_dir("vieneu", 7).join("s-00.wav").is_file());
+    }
+
     #[test]
     fn ledger_splits_config_from_runtime_and_migrates_old_shape() {
         let (_d, mut inner) = fixture();

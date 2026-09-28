@@ -555,7 +555,7 @@ pub fn extract_script() -> String {
         r#"set -e
 D="$HOME/{d}"
 command -v zstd >/dev/null || {{ echo "zstd-missing on this box"; exit 6; }}
-rm -rf {owned} "$D/refs" "$D/data/cast.json" "$D/data/cast-vieneu.json"
+rm -rf {owned} "$D/refs" "$D/data"/cast*.json
 zstd -dc "$D/{bundle}" | tar -xf - -C "$D"
 rm -f "$D/{bundle}"
 test -f "$D/{manifest}" || {{ echo "bundle carried no {manifest}"; exit 8; }}
@@ -606,7 +606,7 @@ mod tests {
             std::fs::write(&p, b"x").unwrap();
         }
         std::fs::create_dir_all(l.work.join("data")).unwrap();
-        std::fs::write(l.work.join("data/cast.json"), "{}").unwrap();
+        std::fs::write(l.work.join("data/cast-default-vieneu.json"), "{}").unwrap();
         std::fs::write(
             l.root.join("voices.json"),
             r#"{"Narrator":"refs/narrator.mp3"}"#,
@@ -717,7 +717,7 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                "data/cast.json".to_string(),
+                "data/cast-default-vieneu.json".to_string(),
                 "prompts/analyze.txt".to_string(),
                 "prompts/script.txt".to_string(),
                 "voices.json".to_string(),
@@ -906,7 +906,7 @@ mod tests {
             "assets/effect-pool.json",
             "prompts/analyze.txt",
             "voices.json",
-            "data/cast.json",
+            "data/cast-default-vieneu.json",
             MANIFEST_NAME,
         ] {
             assert!(dst.join(rel).is_file(), "{rel} did not land");

@@ -89,6 +89,39 @@ impl Inner {
         }
     }
 
+    /// Bring a pre-split cache into the `(adapter, engine)` shape.
+    ///
+    /// Load time, and not inside `Layout`: `Layout` is a pure path constructor
+    /// with a thousand callers and no error channel, while this is a rename.
+    /// Skipping it is not a crash — it is every chapter already spoken being
+    /// re-synthesised under a name nobody asked for, which is why the old files
+    /// are *moved* rather than abandoned.
+    ///
+    /// Swept for every engine that ever had a pre-split spelling rather than
+    /// only the selected one: which engine spoke a chapter is history, and
+    /// `settings.engine` is a setting somebody can change back.
+    pub fn migrate_cache_keys(&mut self) {
+        let mut moved = 0;
+        for engine in bm_core::paths::LEGACY_CACHE_ENGINES {
+            match self.layout.migrate_cache_keys(engine) {
+                Ok(m) => moved += m.len(),
+                Err(e) => {
+                    self.push_event("error", format!("cache re-key failed: {e:#}"));
+                    return;
+                }
+            }
+        }
+        if moved > 0 {
+            self.push_event(
+                "info",
+                format!(
+                    "cache re-keyed for adapter '{}': {moved} path(s) moved into the (adapter, engine) shape",
+                    self.layout.adapter
+                ),
+            );
+        }
+    }
+
     fn ledger_path(&self) -> std::path::PathBuf {
         self.layout.ledger()
     }

@@ -112,6 +112,19 @@ impl Binding {
         self.pack.name.is_empty() && self.adapter.name.is_empty() && self.engine.name.is_empty()
     }
 
+    /// The adapter name a cache path is keyed by.
+    ///
+    /// The bound adapter, or [`crate::paths::DEFAULT_ADAPTER`] when this
+    /// checkout has not been given one — which is the language it was already
+    /// using, and therefore what its pre-split caches are named after.
+    pub fn cache_adapter(&self) -> String {
+        if self.adapter.name.is_empty() {
+            crate::paths::DEFAULT_ADAPTER.to_string()
+        } else {
+            self.adapter.name.clone()
+        }
+    }
+
     /// The shim, in one place: a pre-split `{name, hash}` becomes the pack.
     fn from_stored(stored: Stored) -> Self {
         match stored {
