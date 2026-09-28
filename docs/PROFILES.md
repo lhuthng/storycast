@@ -19,9 +19,13 @@ So a profile is now three pieces, each named and recorded separately:
 
 | Piece | What it is | Who makes it |
 | --- | --- | --- |
-| **Pack** | The genre: music, effects, the scene map, crawlers | You, or a shipped bundle |
-| **Adapter** | The language: the prompts a stage renders from | You, or a shipped bundle |
+| **Pack** (an *asset*) | The genre: music, effects, injects, the scene map | You, or a shipped bundle |
+| **Adapter** | The language: the prompts a stage renders from **and the crawlers it is read with** | You, or a shipped bundle |
 | **Engine** | The voices: the weights, the binary, the voice store | Code — a new engine is a port |
+
+**Not yet in the tree.** The crawler column above is the designed shape, not the
+current one: `crawl/` still sits under `assets/` and `LIVE_DIRS` is still two
+names. [ASSETS.md](ASSETS.md) carries the plan and the migration.
 
 **The payoff.** A second language costs a pair of prompt files and, eventually,
 a second engine — not a second set of music. A second genre costs art and
@@ -30,12 +34,17 @@ copying everything.
 
 ## What a profile was
 
-`profile.rs` has always described a profile as two live trees, and that
-constant was the split line before anyone noticed:
+`profile.rs` has always described a profile as a flat set of live trees, and
+that constant was the split line before anyone noticed:
 
 ```rust
 pub const LIVE_DIRS: [&str; 2] = ["assets", "prompts"];
 ```
+
+It is three names now — `assets`, `prompts`, `crawl` — because the crawlers
+left the pack for the adapter, where the language they are written in lives.
+[ASSETS.md](ASSETS.md) is the design of record for that, and for what came
+with it: an asset names its dependencies and every piece cuts its own release.
 
 A profile is `profiles/<name>.tar.zst`: those two trees plus a `manifest.json`
 (`{name, version, files: {path: sha256}}`). The bundle is transfer only — day to
@@ -61,11 +70,14 @@ What each actually holds:
 
 - **Pack** — `music/` (13 beds), `injects/` (+ `inject-pool.json`),
   `effects/` (+ `effect-pool.json`), `scene-map.json` (rules, palette, layers,
-  pause, reverb, duck), `crawl/` templates, `tag-aliases.json`, `LICENSES.json`.
+  pause, reverb, duck), `tag-aliases.json`, `LICENSES.json`. What is **gone** is
+  `crawl/` (the adapter's now) and what is **new** is `pack.json`, the ordered
+  list of assets this one builds on — see [ASSETS.md](ASSETS.md).
   `tag-aliases.json` is the prompt-side synonym table for the closed sound
   vocabularies, and its values must be canonical palette names — which is why it
   is pack-side and stays in English.
-- **Adapter** — the two prompt templates. Everything else the adapter will
+- **Adapter** — the two prompt templates, plus the crawler templates the source
+  language is read with (`crawl/`, 72 KB, one file per site). Everything else it will
   eventually own (a text front end for the language) lives inside the engine's
   code, not here.
 - **Engine** — `engines/<name>/`: `models/` (weights, the live voice store
@@ -355,11 +367,13 @@ through `prompts_base()` now:
 if self.work.join("prompts").is_dir() { self.work.clone() } else { self.root.clone() }
 ```
 
-- **`workspaces/<name>/prompts/` is the adapter's home**, for the same reason
-  `workspaces/<name>/crawl/` is a book's: `:profile load` replaces `assets/` +
-  `prompts/` for the *whole checkout*, so a language kept at the root is a
+- **A workspace's own `prompts/` (+ `crawl/`) is the adapter's home**, for the
+  same reason `workspaces/<name>/crawl/` is a book's: `:profile load` replaces the
+  adapter's trees for the *whole checkout*, so a language kept at the root is a
   language every workspace on that root must share — one language per checkout,
-  which is the limit the adapter exists to remove.
+  which is the limit the adapter exists to remove. The checkout's own home is
+  `adapters/<adapter>/{prompts,crawl}`; a scope's own tree wins over it, and it
+  wins over the retired root `prompts/`.
 - **The checkout's tree is the fallback**, and that is what every workspace read
   before the split, so nothing on disk changes meaning and no migration is
   needed. A workspace whose own tree is *incomplete* fails on the missing
@@ -372,8 +386,11 @@ if self.work.join("prompts").is_dir() { self.work.clone() } else { self.root.clo
   the inductor driving it read another's, agreeing on every file name and
   disagreeing on every word.
 
-The adapter's tree is **live and untracked**, at `adapters/<adapter>/prompts/`
-(`.gitignore`), shipped as a release bundle the way a pack is. The text is the
+The adapter's tree is **live and untracked**, at `adapters/<adapter>/`, holding
+both `prompts/` and `crawl/` (`.gitignore`), shipped as a release bundle the way
+a pack is. Neither tree may share a directory with the workspace's own: a
+book's `work/crawl/` is its own crawlers, and `profile load` replaces the
+adapter wholesale. The text is the
 artifact: a prompt edit becomes visible when a release is cut, and the suite
 builds its own stubs under `rust/fixtures/`, so nothing here is needed to test.
 
@@ -425,9 +442,10 @@ a per-engine override is a larger decision than the tags it would serve.
   place; what is missing is the language being *data* on the adapter side. Which
   is also what would let a worker be held to a language before it is offered one.
 - **An adapter packer.** `tools/profile.sh` packs `assets/` + `prompts/`
-  together, which is the pre-split shape. `adapters/<adapter>/prompts/` needs the
-  same treatment — one `tar.zst`, a manifest, a release — and that is what turns
-  the untracked tree above into something a second machine can bind.
+  together, which is the pre-split shape. `adapters/<adapter>/{prompts,crawl}`
+  needs the same treatment — one `tar.zst`, a manifest, a release — and that is
+  what turns the untracked tree above into something a second machine can bind.
+  [ASSETS.md](ASSETS.md) splits the bundle three ways.
 - **Phase 4 — provisioning and scheduling.** Bundles become per piece, and
   `sources_stages` grows the second dimension so a vi-VN box is never offered an
   en-US chapter. Two things ride with it: the worker resolves the same

@@ -211,7 +211,7 @@ flowchart TB
     ROOT["root: the checkout<br/>machine-global, shared by every book"]
     WORK["work: the active workspace<br/>one book's state"]
     ROOT --> R1["machines.json · roster"]
-    ROOT --> R2["assets/ · prompts/ · engines/ · profiles/ · tools/"]
+    ROOT --> R2["assets/ · prompts/ · crawl/ · adapters/ · engines/ · profiles/ · tools/"]
     ROOT --> R3[".bm/profile · .bm/aws.json · .bm/aws/"]
     WORK --> W1["settings.json · ledger.json"]
     WORK --> W2["data/ · output/ · scratch/"]
@@ -242,10 +242,11 @@ both ends.
 
 ### The profile is the other pointer, and it is checked
 
-`assets/` and `prompts/` are the **profile**: the live, git-ignored set of files
-that decides how your book sounds and how it is dramatized. They are now two
-named pieces of a three-piece **binding** — the genre's pack, the language's
-adapter, and the voice engine — each with a name and a fingerprint of its own;
+`assets/`, `prompts/` and `crawl/` are the **profile**: the live, git-ignored set
+of files that decides how your book sounds and how it is dramatized. They are now
+three named pieces of a three-piece **binding** — the genre's pack, the
+language's adapter (prompts *and* crawlers), and the voice engine — each with a
+name and a fingerprint of its own;
 [PROFILES.md](PROFILES.md) is the whole story, and this section is about the
 gate. The file `.bm/profile` records which pieces that tree claims to be, *and
 a fingerprint (hash) of its contents*.
@@ -327,7 +328,7 @@ of a pipeline where it is expensive to notice.
   you supply (`:import`). If you set `crawl.mode: "script"`, it runs your
   **crawler script** instead, a small Lua or JavaScript file, looked for in
   your own book's `crawl/` folder first (so your crawler wins over the shared
-  one) and in `assets/crawl/` after that. Whatever the script returns is
+  one) and in the adapter's `crawl/` after that. Whatever the script returns is
   written to `data/chapters/chNN.txt`.
   The program supplies the script with tools (`fetch`, `select`, `select_text`,
   `strip_tags`, `sanitize`, `challenge`) and a time budget. **Every rule about
