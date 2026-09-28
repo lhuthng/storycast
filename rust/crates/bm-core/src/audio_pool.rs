@@ -223,10 +223,106 @@ pub fn load_pool(path: &Path) -> ClipPool {
 const INLINE_MAX: usize = 80;
 
 /// One top-level member of a JSON object, with the byte span of its value.
-struct RawEntry {
-    key: String,
-    value_start: usize,
-    value_end: usize,
+pub(crate) struct RawEntry {
+    pub(crate) key: String,
+    pub(crate) value_start: usize,
+    pub(crate) value_end: usize,
+}
+
+/// Index just past the string starting at `i` (which must be a `"`).
+pub(crate) fn skip_string(b: &[u8], mut i: usize) -> Option<usize> {
+    if b.get(i) != Some(&b'"') {
+        return None;
+    }
+    i += 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'"' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Index just past the value starting at `i`: a string, a nested object or
+/// array, or a bare literal. Nesting is tracked so a `}` inside a value is
+/// not mistaken for the object's own end.
+pub(crate) fn skip_value(b: &[u8], mut i: usize) -> Option<usize> {
+    match b.get(i)? {
+        b'"' => skip_string(b, i),
+        b'{' | b'[' => {
+            let mut depth = 0usize;
+            while i < b.len() {
+                match b[i] {
+                    b'"' => i = skip_string(b, i)?,
+                    b'{' | b'[' => {
+                        depth += 1;
+                        i += 1;
+                    }
+                    b'}' | b']' => {
+                        depth -= 1;
+                        i += 1;
+                        if depth == 0 {
+                            return Some(i);
+                        }
+                    }
+                    _ => i += 1,
+                }
+            }
+            None
+        }
+        _ => {
+            while i < b.len() && !matches!(b[i], b',' | b'}' | b']') && !b[i].is_ascii_whitespace()
+            {
+                i += 1;
+            }
+            Some(i)
+        }
+    }
+}
+
+/// Walk a JSON array's top level, recording the byte span of each element.
+///
+/// The same scanner as [`scan_entries`], for the one layered member that is a
+/// list. Withdrawing an inherited rule means finding the entries a previous
+/// resolve appended and dropping exactly those, and a parsed tree cannot do it:
+/// re-emitting a rule reorders its fields and reflows its list, so an
+/// append-then-withdraw would rewrite rules nobody touched.
+pub(crate) fn scan_array(text: &str) -> Option<Vec<(usize, usize)>> {
+    let b = text.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if b.get(i) != Some(&b'[') {
+        return None;
+    }
+    i += 1;
+    let mut out = Vec::new();
+    loop {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if b.get(i)? == &b']' {
+            return Some(out);
+        }
+        let start = i;
+        let end = skip_value(b, i)?;
+        if end <= start {
+            return None;
+        }
+        out.push((start, end));
+        i = end;
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        match b.get(i)? {
+            b',' => i += 1,
+            b']' => return Some(out),
+            _ => return None,
+        }
+    }
 }
 
 /// Walk a JSON object's top level, recording where each value begins and ends.
@@ -236,7 +332,7 @@ struct RawEntry {
 /// be right about two things — where a string ends (escapes included) and how
 /// deep the braces go — and it refuses rather than guesses, so a file this
 /// cannot read is a file the writer will not touch.
-fn scan_entries(text: &str) -> Option<Vec<RawEntry>> {
+pub(crate) fn scan_entries(text: &str) -> Option<Vec<RawEntry>> {
     let b = text.as_bytes();
     let mut i = 0usize;
     let skip_ws = |i: &mut usize| {
@@ -244,58 +340,6 @@ fn scan_entries(text: &str) -> Option<Vec<RawEntry>> {
             *i += 1;
         }
     };
-    /// Index just past the string starting at `i` (which must be a `"`).
-    fn skip_string(b: &[u8], mut i: usize) -> Option<usize> {
-        debug_assert_eq!(b[i], b'"');
-        i += 1;
-        while i < b.len() {
-            match b[i] {
-                b'\\' => i += 2,
-                b'"' => return Some(i + 1),
-                _ => i += 1,
-            }
-        }
-        None
-    }
-    /// Index just past the value starting at `i`: a string, a nested object or
-    /// array, or a bare literal. Nesting is tracked so a `}` inside a value is
-    /// not mistaken for the object's own end.
-    fn skip_value(b: &[u8], mut i: usize) -> Option<usize> {
-        match b.get(i)? {
-            b'"' => skip_string(b, i),
-            b'{' | b'[' => {
-                let mut depth = 0usize;
-                while i < b.len() {
-                    match b[i] {
-                        b'"' => i = skip_string(b, i)?,
-                        b'{' | b'[' => {
-                            depth += 1;
-                            i += 1;
-                        }
-                        b'}' | b']' => {
-                            depth -= 1;
-                            i += 1;
-                            if depth == 0 {
-                                return Some(i);
-                            }
-                        }
-                        _ => i += 1,
-                    }
-                }
-                None
-            }
-            _ => {
-                while i < b.len()
-                    && !matches!(b[i], b',' | b'}' | b']')
-                    && !b[i].is_ascii_whitespace()
-                {
-                    i += 1;
-                }
-                Some(i)
-            }
-        }
-    }
-
     skip_ws(&mut i);
     if b.get(i) != Some(&b'{') {
         return None;

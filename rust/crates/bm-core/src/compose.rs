@@ -164,13 +164,17 @@ pub struct Report {
     pub added: usize,
     /// Entries an operator had edited, left alone and dropped from the record.
     pub adopted: usize,
+    /// Layered files whose bytes a resolve would rewrite while the record stays
+    /// the same — a list that gained an entry the accounting cannot name. The
+    /// counters describe the records; this describes the text.
+    pub rewritten: usize,
     pub dry_run: bool,
 }
 
 impl Report {
     /// Whether the tree would change. A dry run that reports this must write.
     pub fn changed(&self) -> bool {
-        self.withdrawn > 0 || self.added > 0
+        self.withdrawn > 0 || self.added > 0 || self.rewritten > 0
     }
 
     /// One line for the operator, in the order the questions are asked.
@@ -183,6 +187,9 @@ impl Report {
         )];
         if self.adopted > 0 {
             parts.push(format!("{} kept (edited here)", self.adopted));
+        }
+        if self.rewritten > 0 {
+            parts.push(format!("{} rewritten", self.rewritten));
         }
         if !self.stale.is_empty() {
             parts.push(format!("STALE: {} moved", self.stale.join(", ")));
@@ -215,6 +222,626 @@ fn value_hash(sound: &Sound) -> String {
 fn tree_hash(dir: &Path) -> Result<String> {
     let files = profile::files_under(dir, &[""]);
     Ok(profile::manifest_hash(&profile::hash_files(dir, files)?))
+}
+
+// ---------------------------------------------------------------------------
+// Layered files
+//
+// The pools merge by key. Every other file used to be all-or-nothing, which put
+// a ceiling on what a root asset could be: `common` is the world — rain, night,
+// a market, and the rules that score them — and a genre that shipped its own
+// `scene-map.json` replaced the world's outright, so the world's rules had to be
+// copied into every genre and a level fixed in one reached none of the others.
+//
+// These files layer now, member by member, and the merge is by **raw text**: an
+// inherited rule arrives with the dependency's own bytes, and every member the
+// file already had keeps its own. Nothing is re-serialised, so no `_note` is
+// reflowed and no key order is lost — the argument `save_pool` is built on, one
+// level down.
+
+/// How one member of a layered file merges.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Mode {
+    /// The file's own member wins whole; a dependency's is added only when the
+    /// file has none, and a stronger dependency's replaces a weaker one's. The
+    /// default, and the only mode a `_note` ever gets: a note is prose about
+    /// *this* file, and half-inheriting one is a sentence about something else.
+    Whole,
+    /// A map of name -> value: the file's names win, the dependency's missing
+    /// ones are added, a later dependency overrides an earlier one. The pool
+    /// rule, applied to a member instead of a whole file.
+    ByKey,
+    /// An ordered list: the file's entries stay first and each dependency's
+    /// follow, in `deps` order. Order is the whole point — the scene map's
+    /// rules are ordered specific-to-general and the first match wins, so an
+    /// inherited rule may only ever sit *behind* the file's own. It is also
+    /// what makes an override work: a genre that restates a world rule is seen
+    /// first, and the world's copy never runs.
+    Concat,
+}
+
+/// A file whose members layer, and how each one merges.
+struct Layered {
+    file: &'static str,
+    /// Members that do not take the `fallback` mode. A `_`-prefixed name is
+    /// always [`Mode::Whole`] whatever this says.
+    members: &'static [(&'static str, Mode)],
+    fallback: Mode,
+}
+
+/// The layered files. Everything not named here is still copied whole, and a
+/// file that is one of these never appears in the marker's `files`.
+const LAYERED: &[Layered] = &[
+    Layered {
+        file: "scene-map.json",
+        members: &[
+            ("rules", Mode::Concat),
+            ("music_palette", Mode::ByKey),
+            ("reverb_presets", Mode::ByKey),
+        ],
+        fallback: Mode::Whole,
+    },
+    Layered {
+        file: "tag-aliases.json",
+        members: &[],
+        fallback: Mode::ByKey,
+    },
+    Layered {
+        file: "LICENSES.json",
+        members: &[],
+        fallback: Mode::ByKey,
+    },
+];
+
+fn layered(file: &str) -> Option<&'static Layered> {
+    LAYERED.iter().find(|l| l.file == file)
+}
+
+impl Layered {
+    fn mode(&self, member: &str) -> Mode {
+        if member.starts_with('_') {
+            return Mode::Whole;
+        }
+        self.members
+            .iter()
+            .find(|(name, _)| *name == member)
+            .map(|(_, mode)| *mode)
+            .unwrap_or(self.fallback)
+    }
+}
+
+/// Escape a name so the record separators cannot appear inside one.
+///
+/// Load-bearing, not tidiness: a member name is arbitrary text and the names
+/// here are prose — `LICENSES.json`'s categories are literally `sound effects
+/// (effects/, injects/)` — so without this a record could be read as a
+/// different kind of record and a withdrawal would silently drop it. `%` is
+/// escaped first, or the escapes themselves would not round-trip.
+fn escape(part: &str) -> String {
+    part.replace('%', "%25")
+        .replace('/', "%2F")
+        .replace('+', "%2B")
+}
+
+fn unescape(part: &str) -> String {
+    part.replace("%2B", "+")
+        .replace("%2F", "/")
+        .replace("%25", "%")
+}
+
+/// The marker key for a whole member's value.
+fn whole_key(member: &str) -> String {
+    escape(member)
+}
+
+/// The marker key for one key of a keyed member.
+fn keyed_key(member: &str, key: &str) -> String {
+    format!("{}/{}", escape(member), escape(key))
+}
+
+/// The marker key for the entries one dependency appended to a list.
+fn concat_key(member: &str, dep: &str) -> String {
+    format!("{}+{}", escape(member), escape(dep))
+}
+
+/// A list record is `<count>:<hash>`, because a list cannot be withdrawn by
+/// value alone: the record has to say how many entries to drop.
+fn list_record(count: usize, hash: &str) -> String {
+    format!("{count}:{hash}")
+}
+
+fn parse_list_record(record: &str) -> Option<(usize, &str)> {
+    let (count, hash) = record.split_once(':')?;
+    Some((count.parse().ok()?, hash))
+}
+
+fn text_hash(text: &str) -> String {
+    profile::content_hash(text.as_bytes())
+}
+
+/// `"name": value`, the shape a member has in the file.
+fn member_text(member: &str, value: &str) -> String {
+    format!(
+        "{}: {value}",
+        serde_json::to_string(member).unwrap_or_else(|_| format!("\"{member}\""))
+    )
+}
+
+/// One inserted run, framed the way the file frames its own members.
+fn piece(entry_indent: &str, close_indent: &str, text: &str) -> String {
+    format!("\n{entry_indent}{text}\n{close_indent}")
+}
+
+/// Append a rendered run before the closing bracket of a JSON object or array,
+/// keeping every byte that is already there.
+///
+/// Two JSON files written by the same hands indent the same way, which is what
+/// makes inserting a dependency's own text produce a correctly laid-out result
+/// rather than a guess; and the container's own closing indent is restored from
+/// the `pieces`, so a member inserted into a file whose last entry was on its
+/// own line still ends on one.
+fn append_inside(value: &str, pieces: &str) -> Option<String> {
+    let trimmed = value.trim_end();
+    let close = trimmed.chars().last()?;
+    let open = match close {
+        ']' => '[',
+        '}' => '{',
+        _ => return None,
+    };
+    let inner = trimmed.get(open.len_utf8()..trimmed.len() - close.len_utf8())?;
+    let mut out = String::with_capacity(value.len() + pieces.len() + 2);
+    out.push(open);
+    if !inner.trim().is_empty() {
+        out.push_str(inner.trim_end());
+        out.push(',');
+    }
+    out.push_str(pieces);
+    out.push(close);
+    Some(out)
+}
+
+/// Replace one member's value, keeping every other byte of the file.
+fn replace_member(text: &str, member: &str, value: &str) -> Option<String> {
+    let entries = crate::audio_pool::scan_entries(text)?;
+    let e = entries.iter().find(|e| e.key == member)?;
+    Some(format!(
+        "{}{}{}",
+        &text[..e.value_start],
+        value,
+        &text[e.value_end..]
+    ))
+}
+
+/// Drop one member, and its separator, keeping every other byte.
+fn remove_member(text: &str, member: &str) -> Option<String> {
+    let entries = crate::audio_pool::scan_entries(text)?;
+    let at = entries.iter().position(|e| e.key == member)?;
+    let start = if at == 0 {
+        text.find('{')? + 1
+    } else {
+        entries[at - 1].value_end
+    };
+    // Removing the first member has no separator before it to take with it, so
+    // it takes the one after it instead — or the file would open with a comma.
+    let end = if at == 0 {
+        match entries.get(1) {
+            Some(next) => text[entries[0].value_end..next.value_start]
+                .find(',')
+                .map(|o| entries[0].value_end + o + 1)
+                .unwrap_or(entries[0].value_end),
+            None => entries[0].value_end,
+        }
+    } else {
+        entries[at].value_end
+    };
+    Some(format!("{}{}", &text[..start], &text[end..]))
+}
+
+/// The raw text of a run of JSON values, joined — what a list record hashes, so
+/// a comparison is about the entries and not about their layout.
+fn entries_text(text: &str) -> Option<String> {
+    let spans = crate::audio_pool::scan_array(text)?;
+    Some(
+        spans
+            .iter()
+            .map(|(a, b)| &text[*a..*b])
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+/// One layered file's live text, and what a resolve has put into it.
+struct Layer {
+    file: &'static str,
+    text: String,
+    /// Members whose value came from a dependency, so a later one may override
+    /// an earlier one while the file's own is never touched.
+    filled: BTreeSet<String>,
+    filled_keys: BTreeSet<(String, String)>,
+    records: BTreeMap<String, String>,
+    original: String,
+}
+
+impl Layer {
+    /// Open `assets/<file>`, or start one empty.
+    fn open(assets: &Path, file: &'static str) -> Result<Self> {
+        let path = assets.join(file);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) if !t.trim().is_empty() => t,
+            Ok(_) => bail!("{} is empty — refusing to merge into it", path.display()),
+            Err(_) => "{}".to_string(),
+        };
+        if crate::audio_pool::scan_entries(&text).is_none() {
+            bail!(
+                "{} is not a JSON object this merge can read — refusing to rewrite it",
+                path.display()
+            );
+        }
+        Ok(Layer {
+            file,
+            original: text.clone(),
+            text,
+            filled: BTreeSet::new(),
+            filled_keys: BTreeSet::new(),
+            records: BTreeMap::new(),
+        })
+    }
+
+    fn policy(&self) -> &'static Layered {
+        layered(self.file).expect("only a layered file is ever opened as one")
+    }
+
+    fn member_value(&self, member: &str) -> Option<String> {
+        let entries = crate::audio_pool::scan_entries(&self.text)?;
+        let e = entries.iter().find(|e| e.key == member)?;
+        Some(self.text[e.value_start..e.value_end].to_string())
+    }
+
+    fn has_member(&self, member: &str) -> bool {
+        self.member_value(member).is_some()
+    }
+
+    /// Forget a member an earlier dependency contributed, so a later one wins
+    /// it outright — the pool rule, one level down.
+    fn override_member(&mut self, member: &str) {
+        if !self.filled.remove(member) {
+            return;
+        }
+        if let Some(next) = remove_member(&self.text, member) {
+            self.text = next;
+        }
+        self.records
+            .retain(|k, _| k != member && !k.starts_with(&format!("{member}/")));
+    }
+
+    fn fill_whole(&mut self, member: &str, value: &str) {
+        if self.has_member(member) {
+            // The file's own member wins. A member a *dependency* put there does
+            // not: this pass runs weakest first, so a stronger one has to be able
+            // to take it, the way it takes a keyed name.
+            if !self.filled.contains(member) {
+                return;
+            }
+            self.override_member(member);
+        }
+        let run = piece("  ", "", &member_text(member, value));
+        let Some(next) = append_inside(&self.text, &run) else {
+            return;
+        };
+        self.text = next;
+        self.filled.insert(member.to_string());
+        self.records.insert(whole_key(member), text_hash(value));
+    }
+
+    /// A member whose value is an object merges key by key; anything else (a
+    /// licence line is a string) is the member itself, the member's name being
+    /// the key.
+    fn fill_keyed(&mut self, member: &str, value: &str) {
+        let Some(parent_keys) = crate::audio_pool::scan_entries(value) else {
+            self.override_member(member);
+            self.fill_whole(member, value);
+            return;
+        };
+        // No `override_member` here, deliberately. A keyed member *accumulates*:
+        // the file's names win, every dependency's are added, and "a later
+        // dependency overrides an earlier one" is per key — see `filled_keys`
+        // below. Replacing the member instead would mean the second dependency to
+        // state `sound` in `tag-aliases.json` silently erased the first one's
+        // whole synonym table, which is what a two-dependency asset did the first
+        // time this ran for real.
+        let Some(current) = self.member_value(member) else {
+            let run = piece("  ", "", &member_text(member, value));
+            let Some(next) = append_inside(&self.text, &run) else {
+                return;
+            };
+            self.text = next;
+            self.filled.insert(member.to_string());
+            for pk in &parent_keys {
+                // Marked as well as recorded: the member arriving created these
+                // names, so a stronger dependency is allowed to take them — and
+                // only one that arrived later is, which is what makes the pass
+                // weakest-first mean anything.
+                self.filled_keys
+                    .insert((member.to_string(), pk.key.clone()));
+                self.records.insert(
+                    keyed_key(member, &pk.key),
+                    text_hash(&value[pk.value_start..pk.value_end]),
+                );
+            }
+            return;
+        };
+        let Some(mine) = crate::audio_pool::scan_entries(&current) else {
+            return; // the file's member is not an object; it wins as it stands
+        };
+        let mut merged = current.clone();
+        let mut touched = false;
+        for pk in &parent_keys {
+            let own = mine.iter().any(|m| m.key == pk.key);
+            let filled = self
+                .filled_keys
+                .contains(&(member.to_string(), pk.key.clone()));
+            if own && !filled {
+                continue; // the file's own name wins
+            }
+            let one = &value[pk.value_start..pk.value_end];
+            // The names the file lacks are *added* to what is already here, never
+            // swapped for it: this member accumulates across dependencies, which
+            // is the whole point of a keyed member in a layered file.
+            if filled {
+                merged = remove_member(&merged, &pk.key).unwrap_or(merged);
+            }
+            let run = piece("    ", "  ", &member_text(&pk.key, one));
+            match append_inside(&merged, &run) {
+                Some(next) => merged = next,
+                None => continue,
+            }
+            touched = true;
+            self.filled_keys
+                .insert((member.to_string(), pk.key.clone()));
+            self.records
+                .insert(keyed_key(member, &pk.key), text_hash(one));
+        }
+        if touched {
+            if let Some(next) = replace_member(&self.text, member, &merged) {
+                self.text = next;
+            }
+        }
+    }
+
+    /// An ordered list: the file's entries first, then this dependency's.
+    fn fill_list(&mut self, member: &str, value: &str, dep: &str) {
+        let Some(entries) = entries_text(value) else {
+            return;
+        };
+        let count = crate::audio_pool::scan_array(value)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        if count == 0 {
+            return;
+        }
+        // A list never overrides — it accumulates, and each dependency's
+        // entries are its own record (`member+dep`). Which order they arrive in
+        // is [`Layer::fill_lists`]'s business.
+        match self.member_value(member) {
+            None => {
+                let run = piece("  ", "", &member_text(member, value));
+                let Some(next) = append_inside(&self.text, &run) else {
+                    return;
+                };
+                self.text = next;
+                self.filled.insert(member.to_string());
+            }
+            Some(current) => {
+                // The dependency's own inner text, verbatim: its entries, its
+                // layout, its closing indent.
+                let trimmed = value.trim_end();
+                let inner = match trimmed.get(1..trimmed.len().saturating_sub(1)) {
+                    Some(i) => i,
+                    None => return,
+                };
+                let Some(merged) = append_inside(&current, inner) else {
+                    return;
+                };
+                if let Some(next) = replace_member(&self.text, member, &merged) {
+                    self.text = next;
+                }
+            }
+        }
+        self.records.insert(
+            concat_key(member, dep),
+            list_record(count, &text_hash(&entries)),
+        );
+    }
+
+    /// Fold one dependency into this file.
+    ///
+    /// No dependency name: every record this writes is keyed by the member it
+    /// filled, because a member is only ever filled once — the file's own first,
+    /// then the strongest dependency's, and a weaker one is refused. The lists
+    /// are the exception, and they are the ones that carry the name.
+    fn fill(&mut self, dir: &Path) {
+        let path = dir.join(self.file);
+        let Ok(parent) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Some(entries) = crate::audio_pool::scan_entries(&parent) else {
+            return; // a dependency's file this cannot read contributes nothing
+        };
+        let policy = self.policy();
+        for e in &entries {
+            let value = &parent[e.value_start..e.value_end];
+            match policy.mode(&e.key) {
+                Mode::Whole => {
+                    self.override_member(&e.key);
+                    self.fill_whole(&e.key, value);
+                }
+                Mode::ByKey => self.fill_keyed(&e.key, value),
+                // Folded in by `fill_lists`, after the scalars and strongest
+                // dependency first.
+                Mode::Concat => {}
+            }
+        }
+    }
+
+    /// Fold in the members that are *lists*, after the scalars and **strongest
+    /// dependency first**.
+    ///
+    /// A keyed member can say "later in `deps` wins" by replacing a value. A list
+    /// has no key to replace: the only way a stronger dependency can win is to be
+    /// *seen* earlier, because the scene map's rules are matched in order and the
+    /// first match takes the scene. So the lists are appended in reverse `deps`
+    /// order, which leaves the strongest nearest the file's own entries — the
+    /// ones that are already matched first.
+    fn fill_lists(&mut self, dir: &Path, dep: &str) {
+        let path = dir.join(self.file);
+        let Ok(parent) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Some(entries) = crate::audio_pool::scan_entries(&parent) else {
+            return;
+        };
+        let policy = self.policy();
+        for e in &entries {
+            if policy.mode(&e.key) == Mode::Concat {
+                let value = &parent[e.value_start..e.value_end];
+                self.fill_list(&e.key, value, dep);
+            }
+        }
+    }
+
+    /// Take back what a previous resolve put here, and only where nobody has
+    /// edited it since. The marker is what makes a re-resolve regenerate rather
+    /// than duplicate, so this runs before any fill.
+    fn withdraw(
+        &mut self,
+        records: &BTreeMap<String, String>,
+        deps: &[DepRecord],
+        adopted: &mut BTreeSet<(String, String)>,
+    ) {
+        // Lists first, in `deps` order — which is the reverse of the order they
+        // were appended in. The fill adds them strongest-first, so the *weakest*
+        // dependency's entries are the tail, and the tail is what has to come
+        // off first. Taking them off in the wrong order does not fail loudly:
+        // the one whose block is not at the tail reads as "edited here", is
+        // adopted, and its rules are then appended a second time.
+        for dep in deps {
+            for (member, _) in self
+                .policy()
+                .members
+                .iter()
+                .copied()
+                .filter(|(_, m)| *m == Mode::Concat)
+            {
+                let key = concat_key(member, &dep.name);
+                let Some(record) = records.get(&key) else {
+                    continue;
+                };
+                let Some((count, hash)) = parse_list_record(record) else {
+                    continue;
+                };
+                let Some(current) = self.member_value(member) else {
+                    continue;
+                };
+                let Some(spans) = crate::audio_pool::scan_array(&current) else {
+                    continue;
+                };
+                if count == 0 || spans.len() < count {
+                    continue;
+                }
+                let at = spans.len() - count;
+                let tail: String = spans[at..]
+                    .iter()
+                    .map(|(a, b)| &current[*a..*b])
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if text_hash(&tail) != hash {
+                    // Edited here: the operator has adopted it, so it stays and
+                    // it stops being tracked.
+                    adopted.insert((self.file.to_string(), key));
+                    continue;
+                }
+                // Everything the dependency appended was the tail, so what is
+                // left is the file's own — and it keeps its own layout.
+                let head = current[..spans[at].0]
+                    .trim_end_matches([',', ' ', '\n'])
+                    .to_string();
+                let next = if at == 0 {
+                    "[]".to_string()
+                } else if head.contains('\n') {
+                    format!("{head}\n  ]")
+                } else {
+                    format!("{head}]")
+                };
+                if let Some(text) = replace_member(&self.text, member, &next) {
+                    self.text = text;
+                }
+                self.filled.remove(member);
+            }
+        }
+        // Then whole members and keyed names, whose hash is of the value.
+        for (key, hash) in records {
+            if key.contains('+') {
+                continue; // a list, above
+            }
+            match key.split_once('/') {
+                Some((member, name)) => {
+                    let (member, name) = (&unescape(member), &unescape(name));
+                    let Some(current) = self.member_value(member) else {
+                        continue;
+                    };
+                    let Some(mine) = crate::audio_pool::scan_entries(&current) else {
+                        continue;
+                    };
+                    let Some(m) = mine.iter().find(|m| m.key == *name) else {
+                        continue;
+                    };
+                    if text_hash(&current[m.value_start..m.value_end]) != *hash {
+                        adopted.insert((self.file.to_string(), key.clone()));
+                        continue;
+                    }
+                    let Some(merged) = remove_member(&current, name) else {
+                        continue;
+                    };
+                    let next = if crate::audio_pool::scan_entries(&merged)
+                        .map(|e| e.is_empty())
+                        .unwrap_or(false)
+                    {
+                        // Nothing left of it: the member itself came from the
+                        // dependency, so it goes too.
+                        remove_member(&self.text, member).unwrap_or(merged)
+                    } else {
+                        replace_member(&self.text, member, &merged).unwrap_or(merged)
+                    };
+                    self.text = next;
+                    self.filled_keys
+                        .remove(&(member.to_string(), name.to_string()));
+                }
+                None => {
+                    let member = unescape(key);
+                    let Some(current) = self.member_value(&member) else {
+                        continue;
+                    };
+                    if text_hash(&current) != *hash {
+                        adopted.insert((self.file.to_string(), key.clone()));
+                        continue;
+                    }
+                    if let Some(text) = remove_member(&self.text, &member) {
+                        self.text = text;
+                    }
+                    self.filled.remove(&member);
+                }
+            }
+        }
+    }
+
+    /// Write the merged file, and only when it differs.
+    fn finish(&self, assets: &Path) -> Result<()> {
+        if self.text == self.original {
+            return Ok(());
+        }
+        crate::atomic_write(&assets.join(self.file), &self.text)?;
+        Ok(())
+    }
 }
 
 /// Fold this asset's dependencies into the live tree.
@@ -252,6 +879,12 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
     let original = pools.clone();
     let mut adopted_keys: BTreeSet<(String, String)> = BTreeSet::new();
     let mut adopted_files: BTreeSet<String> = BTreeSet::new();
+    // The layered files, opened once: their members merge by name rather than
+    // whole-file, which is what lets a root asset own the world's rules.
+    let mut layers: Vec<Layer> = Vec::new();
+    for l in LAYERED {
+        layers.push(Layer::open(assets, l.file)?);
+    }
 
     // 1. Withdraw what the last resolve put here and nobody has edited since.
     for (registry, keys) in &old.keys {
@@ -274,18 +907,35 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
             }
         }
     }
+    // An inherited file is *marked*, not deleted, here: whether it comes back is
+    // a question for the fill, and deleting it first is how a resolve came to
+    // rewrite every clip it had already put there — 58 MB of churn for a change
+    // of nothing. It also made a dry run lie, because a dry run cannot delete,
+    // so its fill found every file already present and reported them all as
+    // withdrawn.
+    let mut withdrawable: BTreeSet<String> = BTreeSet::new();
     for (rel, hash) in &old.files {
+        // A file that layers now is the layers' business, whatever a marker
+        // written before it did says.
+        if layered(rel).is_some() {
+            continue;
+        }
         let path = assets.join(rel);
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
         if profile::content_hash(&bytes) == *hash {
-            if !dry_run {
-                std::fs::remove_file(&path)
-                    .with_context(|| format!("withdrawing {}", path.display()))?;
-            }
+            withdrawable.insert(rel.clone());
         } else {
             adopted_files.insert(rel.clone());
+        }
+    }
+
+    // Then the layered members, whose record is what lets a re-resolve withdraw
+    // its own last answer instead of stacking another on top of it.
+    for layer in layers.iter_mut() {
+        if let Some(records) = old.keys.get(layer.file) {
+            layer.withdraw(records, &old.deps, &mut adopted_keys);
         }
     }
 
@@ -346,6 +996,10 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
             }
         }
 
+        for layer in layers.iter_mut() {
+            layer.fill(&dir);
+        }
+
         for path in profile::files_under(&dir, &[""]) {
             let Ok(rel) = path.strip_prefix(&dir) else {
                 continue;
@@ -359,16 +1013,24 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
             // the key-by-key pass above, so copying it whole would both bypass
             // that merge and record the same content twice — once as a file and
             // once as its keys.
-            if rel == PACK_FILE || rel == MARKER_FILE || kind_of(&rel).is_some() {
+            if rel == PACK_FILE
+                || rel == MARKER_FILE
+                || kind_of(&rel).is_some()
+                || layered(&rel).is_some()
+            {
                 continue;
             }
             let to = assets.join(&rel);
-            if to.exists() && !filled_files.contains(&rel) {
+            // `to.exists()` alone cannot tell this asset's own file from one a
+            // previous resolve put here; the record can, and that is what keeps
+            // a resolve from rewriting a clip that is already right.
+            if to.exists() && !filled_files.contains(&rel) && !withdrawable.contains(&rel) {
                 continue; // the asset's own file wins
             }
             let bytes =
                 std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            if !dry_run {
+            let same = std::fs::read(&to).map(|now| now == bytes).unwrap_or(false);
+            if !dry_run && !same {
                 if let Some(parent) = to.parent() {
                     std::fs::create_dir_all(parent)
                         .with_context(|| format!("creating {}", parent.display()))?;
@@ -380,6 +1042,41 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
         }
     }
 
+    // And now the files a dependency no longer provides: marked withdrawable
+    // before the fill, still unclaimed after it. Deleting them here rather than
+    // before the fill is what makes a dry run and a real one agree.
+    if !dry_run {
+        for rel in &withdrawable {
+            if marker.files.contains_key(rel) {
+                continue;
+            }
+            let path = assets.join(rel);
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("withdrawing {}", path.display()))?;
+            }
+        }
+    }
+
+    // The lists last, strongest dependency first: see `Layer::fill_lists`.
+    for dep in pack.deps.iter().rev() {
+        let dir = extends_dir(assets).join(dep);
+        for layer in layers.iter_mut() {
+            layer.fill_lists(&dir, dep);
+        }
+    }
+
+    // What the layered files put in is recorded in the same map the pools use,
+    // keyed by filename — a whole member by its name, a keyed member by
+    // `member/name`, an appended list by `member+dep`.
+    for layer in &layers {
+        if !layer.records.is_empty() {
+            marker
+                .keys
+                .insert(layer.file.to_string(), layer.records.clone());
+        }
+    }
+
     // 3. Count, then record. The counters describe the *tree*, not the
     //    algorithm: withdrawing and refilling is how the merge works, so a
     //    resolve that reaches the same answer must report no change rather than
@@ -387,10 +1084,18 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
     //    inherited at all; a key is added when it is inherited *as something
     //    else* — which is why the withdrawal compares names and the addition
     //    compares names and values.
+    // A list record is left out of both sets and counted by its own number
+    // below: its *name* is the member and the dependency, which does not change
+    // when the list does, so a name comparison cannot see a root gaining or
+    // dropping a rule — and the honest unit for a list is entries.
     let names = |m: &Inherited| -> BTreeSet<(String, String)> {
         m.keys
             .iter()
-            .flat_map(|(r, ks)| ks.keys().map(move |k| (r.clone(), k.clone())))
+            .flat_map(|(r, ks)| {
+                ks.keys()
+                    .filter(|k| !k.contains('+'))
+                    .map(move |k| (r.clone(), k.clone()))
+            })
             .collect()
     };
     let named_values = |m: &Inherited| -> BTreeSet<(String, String, String)> {
@@ -398,6 +1103,7 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
             .iter()
             .flat_map(|(r, ks)| {
                 ks.iter()
+                    .filter(|(k, _)| !k.contains('+'))
                     .map(move |(k, h)| (r.clone(), k.clone(), h.clone()))
             })
             .collect()
@@ -421,6 +1127,35 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
         .difference(&named_values(&old))
         .count()
         + named_files(&marker).difference(&named_files(&old)).count();
+    // Then the lists, by entries: a dependency's rule that is gone is a rule
+    // withdrawn, one it gained is a rule filled in, and an edit to one of its
+    // rules is one filled in and none withdrawn.
+    for (file, records) in &old.keys {
+        for (key, record) in records.iter().filter(|(k, _)| k.contains('+')) {
+            let Some((was, hash)) = parse_list_record(record) else {
+                continue;
+            };
+            match marker
+                .keys
+                .get(file)
+                .and_then(|r| r.get(key))
+                .and_then(|r| parse_list_record(r))
+            {
+                Some((now, now_hash)) => {
+                    if now > was {
+                        report.added += now - was;
+                    }
+                    if was > now {
+                        report.withdrawn += was - now;
+                    }
+                    if now == was && now_hash != hash {
+                        report.added += 1;
+                    }
+                }
+                None => report.withdrawn += was,
+            }
+        }
+    }
     report.adopted = adopted_keys.len() + adopted_files.len();
 
     if !dry_run {
@@ -431,6 +1166,9 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
             if pools[registry] != original.get(registry).cloned().unwrap_or_default() {
                 save_pool(&assets.join(registry), kind, &pools[registry])?;
             }
+        }
+        for layer in &layers {
+            layer.finish(assets)?;
         }
         // A record that would say nothing is not written, and an empty one left
         // over from a dependency that has since been dropped is removed —
@@ -444,6 +1182,10 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
             }
         }
     }
+    // A layered file is a change the marker cannot always see, so it is counted
+    // from the text: a list that duplicated itself keeps its records, keeps its
+    // counts, and still rewrites the file.
+    report.rewritten = layers.iter().filter(|l| l.text != l.original).count();
     Ok(report)
 }
 
@@ -672,6 +1414,36 @@ mod tests {
     }
 
     #[test]
+    fn a_second_resolve_leaves_the_files_already_in_place_alone() {
+        // Delete-then-refill rewrites every inherited clip on every resolve —
+        // and a dry run, which cannot delete, would then find each file already
+        // present and report it as withdrawn.
+        let assets = scratch("file-churn");
+        std::fs::write(pack_path(&assets), r#"{"deps":["common"]}"#).unwrap();
+        let dep = dep_tree(&assets, "common");
+        write_pool(&dep, "effect-pool.json", &[("wind", "wind")]);
+        std::fs::create_dir_all(dep.join("effects")).unwrap();
+        std::fs::write(dep.join("effects/wind-1.mp3"), b"clip").unwrap();
+
+        resolve(&assets, false).unwrap();
+        let clip = assets.join("effects/wind-1.mp3");
+        let before = std::fs::metadata(&clip).unwrap().modified().unwrap();
+
+        let dry = resolve(&assets, true).unwrap();
+        assert!(
+            !dry.changed(),
+            "a dry run over a settled tree changes nothing: {dry:?}"
+        );
+        let real = resolve(&assets, false).unwrap();
+        assert!(!real.changed(), "{real:?}");
+        assert_eq!(
+            std::fs::metadata(&clip).unwrap().modified().unwrap(),
+            before,
+            "and the clip was never rewritten"
+        );
+    }
+
+    #[test]
     fn a_missing_dependency_tree_refuses_and_names_the_path() {
         let assets = scratch("missing-dep");
         std::fs::write(pack_path(&assets), r#"{"deps":["common"]}"#).unwrap();
@@ -724,5 +1496,302 @@ mod tests {
             !marker_path(&assets).exists(),
             "a tree with no dependencies carries no record claiming otherwise"
         );
+    }
+
+    /// A scene map on disk, laid out the way the shipped one is.
+    fn write_map(dir: &Path, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let text = format!("{{\n  {body}\n}}\n");
+        std::fs::write(dir.join("scene-map.json"), text).unwrap();
+    }
+
+    fn read(assets: &Path, file: &str) -> String {
+        std::fs::read_to_string(assets.join(file)).unwrap()
+    }
+
+    /// Every rule's first `match`, in order — the one thing about a rule list
+    /// that order decides.
+    fn matches_of(assets: &Path) -> Vec<String> {
+        let text = read(assets, "scene-map.json");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        v["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["match"][0].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_root_asset_owns_the_rules_and_a_genres_own_are_seen_first() {
+        let assets = scratch("layered-rules");
+        std::fs::write(pack_path(&assets), r#"{"deps":["common"]}"#).unwrap();
+        write_map(
+            &assets,
+            r#""_note": "xianxia only", "rules": [{"match": ["sect"], "effect": ["hall"]}]"#,
+        );
+        write_map(
+            &dep_tree(&assets, "common"),
+            r#""_note": "the world", "rules": [{"match": ["rain"]}, {"match": ["night"]}], "layers": {"effect": {"trim": 1.0}}"#,
+        );
+
+        resolve(&assets, false).unwrap();
+        assert_eq!(
+            matches_of(&assets),
+            vec!["sect", "rain", "night"],
+            "the genre's rule is seen first and the world's sit behind it"
+        );
+        let text = read(&assets, "scene-map.json");
+        assert!(
+            text.contains(r#""match": ["sect"]"#),
+            "the genre's own rule is still its own bytes: {text}"
+        );
+        assert!(
+            text.contains("\"layers\""),
+            "a member it never stated came in: {text}"
+        );
+        assert!(
+            text.contains("xianxia only") && !text.contains("the world"),
+            "its own note is the one that stays: {text}"
+        );
+
+        // Idempotent: the same answer, and the file is left alone.
+        let before = read(&assets, "scene-map.json");
+        let again = resolve(&assets, false).unwrap();
+        assert!(!again.changed(), "{again:?}");
+        assert_eq!(read(&assets, "scene-map.json"), before);
+    }
+
+    #[test]
+    fn a_rule_the_root_drops_is_withdrawn_from_the_genre() {
+        let assets = scratch("layer-withdraw");
+        std::fs::write(pack_path(&assets), r#"{"deps":["common"]}"#).unwrap();
+        write_map(&assets, r#""rules": [{"match": ["sect"]}]"#);
+        let dep = dep_tree(&assets, "common");
+        write_map(
+            &dep,
+            r#""rules": [{"match": ["rain"]}, {"match": ["night"]}]"#,
+        );
+        resolve(&assets, false).unwrap();
+        assert_eq!(matches_of(&assets), vec!["sect", "rain", "night"]);
+
+        // The root drops `night`. A fill-in-only merge would leave it here for
+        // good, which is the reason the marker exists.
+        write_map(&dep, r#""rules": [{"match": ["rain"]}]"#);
+        let r = resolve(&assets, false).unwrap();
+        assert_eq!(r.withdrawn, 1, "{r:?}");
+        assert_eq!(matches_of(&assets), vec!["sect", "rain"]);
+        assert!(!resolve(&assets, false).unwrap().changed());
+    }
+
+    #[test]
+    fn a_stronger_dependency_has_its_rules_seen_before_a_weaker_one() {
+        // `deps` is weakest first, and a keyed name wins by replacing a value —
+        // but a rule list has no key to replace, so a stronger dependency can
+        // only win a scene by being matched *first*. Hence the lists fold in
+        // reverse `deps` order.
+        let assets = scratch("rules-order");
+        std::fs::write(
+            pack_path(&assets),
+            r#"{"deps":["common","weapons","magic"]}"#,
+        )
+        .unwrap();
+        write_map(&assets, r#""rules": [{"match": ["mine"]}]"#);
+        write_map(
+            &dep_tree(&assets, "common"),
+            r#""rules": [{"match": ["common"]}]"#,
+        );
+        write_map(
+            &dep_tree(&assets, "weapons"),
+            r#""rules": [{"match": ["weapons"]}]"#,
+        );
+        write_map(
+            &dep_tree(&assets, "magic"),
+            r#""rules": [{"match": ["magic"]}]"#,
+        );
+
+        resolve(&assets, false).unwrap();
+        assert_eq!(
+            matches_of(&assets),
+            vec!["mine", "magic", "weapons", "common"],
+            "the file's own first, then the strongest dependency"
+        );
+        // And it settles. Asserting the list rather than only the report: a
+        // withdrawal that takes the wrong block off reads as an operator edit,
+        // is adopted, and the rules arrive a second time — while the record is
+        // unchanged, so the counters alone would call that "up to date".
+        let again = resolve(&assets, false).unwrap();
+        assert!(!again.changed(), "{again:?}");
+        assert_eq!(
+            matches_of(&assets),
+            vec!["mine", "magic", "weapons", "common"]
+        );
+    }
+
+    #[test]
+    fn a_genre_that_states_a_knob_keeps_its_own_and_inherits_none_of_it() {
+        let assets = scratch("layer-whole");
+        std::fs::write(pack_path(&assets), r#"{"deps":["common"]}"#).unwrap();
+        write_map(&assets, r#""layers": {"effect": {"trim": 0.8}}"#);
+        write_map(
+            &dep_tree(&assets, "common"),
+            r#""layers": {"effect": {"trim": 1.0}, "music": {"level": 0.16}}"#,
+        );
+
+        resolve(&assets, false).unwrap();
+        let text = read(&assets, "scene-map.json");
+        assert!(
+            text.contains("0.8"),
+            "the genre's block is the one in force: {text}"
+        );
+        assert!(
+            !text.contains("0.16"),
+            "and none of the dependency's is half-merged into it: {text}"
+        );
+    }
+
+    #[test]
+    fn a_licence_line_from_the_root_survives_a_genre_stating_its_own() {
+        let assets = scratch("layer-licences");
+        std::fs::write(pack_path(&assets), r#"{"deps":["common"]}"#).unwrap();
+        std::fs::write(
+            assets.join("LICENSES.json"),
+            r#"{"_note": "ours", "background music (music/)": "Suno"}"#,
+        )
+        .unwrap();
+        let dep = dep_tree(&assets, "common");
+        std::fs::write(
+            dep.join("LICENSES.json"),
+            r#"{"_note": "theirs", "sound effects (effects/, injects/)": "Pixabay"}"#,
+        )
+        .unwrap();
+
+        resolve(&assets, false).unwrap();
+        let text = read(&assets, "LICENSES.json");
+        assert!(
+            text.contains("Pixabay"),
+            "the line that came with the clips is still here: {text}"
+        );
+        assert!(text.contains("Suno"), "and the genre's own is untouched");
+        assert!(
+            text.contains("ours") && !text.contains("theirs"),
+            "the nearer note wins: {text}"
+        );
+    }
+
+    #[test]
+    fn a_member_name_that_looks_like_a_record_key_is_still_withdrawn() {
+        // `LICENSES.json`'s categories are prose, and a record's two separators
+        // can appear inside one — so the encoding has to be injective or a
+        // withdrawal reads the record as a different kind, silently drops it,
+        // and the line arrives again on every resolve after that.
+        let assets = scratch("layer-separators");
+        std::fs::write(pack_path(&assets), r#"{"deps":["common"]}"#).unwrap();
+        std::fs::write(assets.join("LICENSES.json"), r#"{"_note": "ours"}"#).unwrap();
+        let dep = dep_tree(&assets, "common");
+        std::fs::write(
+            dep.join("LICENSES.json"),
+            r#"{"sound effects (effects/, injects/)": "Pixabay", "ns/+odd": "x"}"#,
+        )
+        .unwrap();
+
+        resolve(&assets, false).unwrap();
+        let text = read(&assets, "LICENSES.json");
+        assert!(text.contains("Pixabay") && text.contains("odd"), "{text}");
+        let again = resolve(&assets, false).unwrap();
+        assert!(!again.changed(), "and it settles: {again:?}");
+        assert_eq!(read(&assets, "LICENSES.json"), text);
+    }
+
+    #[test]
+    fn a_palette_gains_a_mood_the_root_has_and_keeps_the_one_it_had() {
+        let assets = scratch("layer-palette");
+        std::fs::write(pack_path(&assets), r#"{"deps":["common"]}"#).unwrap();
+        write_map(&assets, r#""music_palette": {"quiet": {"tags": ["soft"]}}"#);
+        write_map(
+            &dep_tree(&assets, "common"),
+            r#""music_palette": {"quiet": {"tags": ["quiet", "calm"]}, "tense": {"tags": ["tense"]}}"#,
+        );
+
+        resolve(&assets, false).unwrap();
+        let text = read(&assets, "scene-map.json");
+        assert!(text.contains("tense"), "the mood it lacked came in: {text}");
+        assert!(
+            text.contains(r#""tags": ["soft"]"#),
+            "and the name it had is its own, not the root's: {text}"
+        );
+    }
+
+    #[test]
+    fn a_later_dependency_wins_a_keyed_name_over_an_earlier_one() {
+        let assets = scratch("layer-order");
+        std::fs::write(pack_path(&assets), r#"{"deps":["common","xianxia-base"]}"#).unwrap();
+        write_map(
+            &dep_tree(&assets, "common"),
+            r#""music_palette": {"tense": {"tags": ["common-tense"]}}"#,
+        );
+        write_map(
+            &dep_tree(&assets, "xianxia-base"),
+            r#""music_palette": {"tense": {"tags": ["genre-tense"]}}"#,
+        );
+
+        resolve(&assets, false).unwrap();
+        let text = read(&assets, "scene-map.json");
+        assert!(text.contains("genre-tense"), "the later one wins: {text}");
+        assert!(
+            !text.contains("common-tense"),
+            "and the earlier one is gone: {text}"
+        );
+    }
+
+    #[test]
+    fn a_keyed_member_accumulates_across_dependencies() {
+        // The shape a real asset now has: `common` states the world's words,
+        // `weapons` the ones for its own clips. Every dependency's names are
+        // *added* to the member. Losing a weaker dependency's whole table
+        // because a stronger one states the same member is the one outcome that
+        // would make the vocabulary unusable — and the quietest, because the
+        // file still parses and the names are simply gone.
+        let assets = scratch("layer-keyed");
+        std::fs::write(pack_path(&assets), r#"{"deps":["common","weapons"]}"#).unwrap();
+        std::fs::create_dir_all(dep_tree(&assets, "common")).unwrap();
+        std::fs::write(
+            dep_tree(&assets, "common").join("tag-aliases.json"),
+            r#"{"sound": {"knock": "door-knock", "clang": "metal-hit"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dep_tree(&assets, "weapons").join("tag-aliases.json"),
+            r#"{"sound": {"slash": "sword-slash"}}"#,
+        )
+        .unwrap();
+
+        resolve(&assets, false).unwrap();
+        let text = read(&assets, "tag-aliases.json");
+        for name in ["knock", "clang", "slash"] {
+            assert!(text.contains(name), "{name} survived: {text}");
+        }
+    }
+
+    #[test]
+    fn a_stronger_dependency_takes_a_whole_member_a_weaker_one_filled() {
+        // `Whole` means the *file's* member wins, not the first dependency's to
+        // arrive: the fill runs weakest first, and a knob a weak dependency set
+        // would otherwise be impossible for a strong one to correct.
+        let assets = scratch("layer-whole-order");
+        std::fs::write(pack_path(&assets), r#"{"deps":["common","xianxia-base"]}"#).unwrap();
+        write_map(&dep_tree(&assets, "common"), r#""pause": {"min_s": 1.0}"#);
+        write_map(
+            &dep_tree(&assets, "xianxia-base"),
+            r#""pause": {"min_s": 3.0}"#,
+        );
+
+        resolve(&assets, false).unwrap();
+        let text = read(&assets, "scene-map.json");
+        assert!(
+            text.contains("3.0"),
+            "the stronger dependency's knob: {text}"
+        );
+        assert!(!text.contains("1.0"), "and not the weaker one's: {text}");
     }
 }
