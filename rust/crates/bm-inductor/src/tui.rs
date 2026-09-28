@@ -85,7 +85,7 @@ async fn run_loop(
     app.layout = layout;
     // Read once here, not per frame: the footer shows it, and the footer is
     // redrawn on every keystroke.
-    app.profile = bm_core::profile::read_pointer(&app.layout.root).ok();
+    app.profile = bm_core::profile::read_binding(&app.layout.root).ok();
     app.http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         // The inductor is a LAN service — loopback for a solo run, a private

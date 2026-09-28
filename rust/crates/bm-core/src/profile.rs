@@ -74,7 +74,13 @@ impl Piece {
 
 /// The three pieces a checkout is bound to, each with the name it was loaded
 /// from and the hash of what is on disk now.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Deserialize` is hand-written so the pre-split shim applies *everywhere* a
+/// binding is read — `settings.json` and the ledger's stamp as well as
+/// `.bm/profile`. A derived impl would turn an old `{name, hash}` into an
+/// empty binding, which reads as "this workspace runs nothing" and trips the
+/// ledger gate on every workspace that exists.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Binding {
     #[serde(default)]
     pub pack: Pointer,
@@ -105,6 +111,66 @@ impl Binding {
     pub fn is_unset(&self) -> bool {
         self.pack.name.is_empty() && self.adapter.name.is_empty() && self.engine.name.is_empty()
     }
+
+    /// The shim, in one place: a pre-split `{name, hash}` becomes the pack.
+    fn from_stored(stored: Stored) -> Self {
+        match stored {
+            Stored::Legacy(pack) => Binding {
+                pack,
+                ..Binding::default()
+            },
+            Stored::Split(f) => Binding {
+                pack: f.pack,
+                adapter: f.adapter,
+                engine: f.engine,
+            },
+        }
+    }
+}
+
+/// A binding's own fields, kept out of [`Stored`] so the untagged try-order
+/// cannot recurse through the shim it is standing beside.
+#[derive(Deserialize)]
+struct BindingFields {
+    #[serde(default)]
+    pack: Pointer,
+    #[serde(default)]
+    adapter: Pointer,
+    #[serde(default)]
+    engine: Pointer,
+}
+
+/// A one-line name for a binding: `xianxia · vi-VN · vieneu`.
+///
+/// Unnamed pieces are skipped rather than printed as blanks, so a checkout
+/// that has not split yet still reads as `xianxia` — the name the operator
+/// knows — instead of `xianxia ·  ·  `.
+pub fn label(binding: &Binding) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for piece in Piece::ALL {
+        let name = &binding.get(piece).name;
+        if !name.is_empty() {
+            parts.push(name.clone());
+        }
+    }
+    if parts.is_empty() {
+        "none".into()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+/// The pieces two bindings disagree on, in `Piece::ALL` order.
+///
+/// The ledger gate names them, because "another profile" does not tell an
+/// operator *what* changed — and the pieces do not carry the same weight: a
+/// different pack or adapter is a re-unpack of files, while a different engine
+/// invalidates the segment cache and every rendered clip.
+pub fn pieces_differing(a: &Binding, b: &Binding) -> Vec<Piece> {
+    Piece::ALL
+        .into_iter()
+        .filter(|piece| a.get(*piece) != b.get(*piece))
+        .collect()
 }
 
 /// Manifest stored as `manifest.json` at the bundle root.
@@ -291,7 +357,16 @@ pub fn manifest_hash(files: &BTreeMap<String, String>) -> String {
 #[serde(untagged)]
 enum Stored {
     Legacy(Pointer),
-    Split(Binding),
+    Split(BindingFields),
+}
+
+impl<'de> Deserialize<'de> for Binding {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Binding::from_stored(Stored::deserialize(d)?))
+    }
 }
 
 /// The load pointer, as a binding.
@@ -307,13 +382,7 @@ pub fn read_binding(root: &Path) -> Result<Binding> {
     })?;
     let stored: Stored =
         serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    Ok(match stored {
-        Stored::Legacy(pack) => Binding {
-            pack,
-            ..Binding::default()
-        },
-        Stored::Split(binding) => binding,
-    })
+    Ok(Binding::from_stored(stored))
 }
 
 pub fn write_binding(root: &Path, binding: &Binding) -> Result<()> {

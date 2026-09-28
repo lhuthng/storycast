@@ -47,9 +47,10 @@ impl Inner {
         self.events.iter().skip(skip).collect()
     }
 
-    /// Workspace/profile gate: a ledger holding another profile's tasks
-    /// refuses to run here rather than mixing two genres' output. Empty or
-    /// unstamped ledgers pass and adopt the workspace profile at reconcile.
+    /// Workspace/profile gate: a ledger holding another binding's tasks
+    /// refuses to run here rather than mixing two genres' or two languages'
+    /// output. Empty or unstamped ledgers pass and adopt the workspace profile
+    /// at reconcile.
     pub fn check_profile(&self) -> Result<()> {
         // Preserved-but-unreadable rows count as *held work*: they came from a
         // ledger, and calling a ledger we could not fully read "empty" would let
@@ -59,12 +60,31 @@ impl Inner {
             return Ok(());
         }
         match &self.ledger_profile {
-            Some(stamped) if *stamped != self.settings.profile => anyhow::bail!(
-                "ledger holds {} task(s) for profile '{}' but this workspace runs '{}' — switch back (`workspace use` / `profile load`) or clear the ledger; refusing to mix",
-                self.tasks.len() + self.unreadable_tasks.len(),
-                stamped.name,
-                self.settings.profile.name,
-            ),
+            Some(stamped) if *stamped != self.settings.profile => {
+                // Name the pieces that moved. "another profile" sends an
+                // operator looking for the wrong thing: a changed pack or
+                // adapter is a re-unpack, while a changed engine invalidates
+                // the segment cache and every clip already rendered.
+                let which: Vec<String> =
+                    bm_core::profile::pieces_differing(stamped, &self.settings.profile)
+                        .iter()
+                        .map(|piece| {
+                            format!(
+                                "{} '{}' -> '{}'",
+                                piece.noun(),
+                                stamped.get(*piece).name,
+                                self.settings.profile.get(*piece).name,
+                            )
+                        })
+                        .collect();
+                anyhow::bail!(
+                    "ledger holds {} task(s) for profile {} but this workspace runs {} — {}; switch back (`workspace use` / `profile load`) or clear the ledger; refusing to mix",
+                    self.tasks.len() + self.unreadable_tasks.len(),
+                    bm_core::profile::label(stamped),
+                    bm_core::profile::label(&self.settings.profile),
+                    which.join(", "),
+                )
+            }
             _ => Ok(()),
         }
     }

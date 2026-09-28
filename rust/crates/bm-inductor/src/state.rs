@@ -86,10 +86,11 @@ pub struct Inner {
     pub layout: Layout,
     pub settings: Settings,
     pub tasks: HashMap<String, Task>,
-    /// The profile the ledger's tasks were created under, from the last
-    /// save. `None` means unstamped (empty or pre-profile ledger), the next
-    /// reconcile adopts the workspace profile.
-    pub ledger_profile: Option<bm_core::profile::Pointer>,
+    /// The binding the ledger's tasks were created under, from the last save.
+    /// `None` means unstamped (empty or pre-profile ledger), the next reconcile
+    /// adopts the workspace binding. A pre-split stamp reads as a pack-only
+    /// binding, so an existing ledger is not treated as a foreign one.
+    pub ledger_profile: Option<bm_core::profile::Binding>,
     pub machines: HashMap<String, Machine>,
     pub workers: HashMap<String, String>,
     /// Advertised capabilities per worker, refreshed at every registration.
@@ -543,10 +544,14 @@ mod tests {
         );
     }
 
-    fn ptr(name: &str, hash: &str) -> bm_core::profile::Pointer {
-        bm_core::profile::Pointer {
-            name: name.into(),
-            hash: hash.into(),
+    /// A pack-only binding: what a pre-split profile stamp reads as.
+    fn ptr(name: &str, hash: &str) -> bm_core::profile::Binding {
+        bm_core::profile::Binding {
+            pack: bm_core::profile::Pointer {
+                name: name.into(),
+                hash: hash.into(),
+            },
+            ..Default::default()
         }
     }
 
