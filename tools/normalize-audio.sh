@@ -11,6 +11,10 @@
 #
 #   * leading/trailing silence trimmed (a clip that opens with 2 s of nothing
 #     reads as a 2 s hole in the mix)
+#   * a short fade at each end. A trim cuts at whatever sample the sound
+#     happened to open or end on, which is rarely zero, and a step to or from
+#     silence is a click — audible on a hit, and on a bed it is the seam at the
+#     loop point every time it comes round
 #   * loudness normalized, two-pass, to I=-26 LUFS / TP=-3 dBTP
 #     (-26 LUFS keeps the effect beds below the voice while preserving headroom;
 #     TP=-3 leaves room for ducking and the final mp3 encode)
@@ -31,7 +35,13 @@ I_TARGET=${I_TARGET:--26}      # integrated loudness, LUFS (-20 for foreground i
 TP_TARGET=${TP_TARGET:--3}      # true peak ceiling, dBTP
 LRA_TARGET=11     # loudness range the normalizer is allowed to work with
 BITRATE=${BITRATE:-64k}       # mono 48 kHz mp3; smaller pool files with acceptable bed quality
-TRIM_FLOOR=-50dB  # what counts as silence at either end
+# What counts as silence at either end. -45 dB, not -50: the detector below
+# compares *peak* against this, and a 64k mono recording's own room tone sits
+# around -45, so at -50 the trim cannot see the near-silence it exists to cut.
+# Measured on this pool: a 78.8 s war din kept 5.9 s of tail at -50, which on a
+# looped bed plays as a hole in the din every time the clip comes round.
+TRIM_FLOOR=${TRIM_FLOOR:--45dB}
+FADE_MS=${FADE_MS:-12}  # click guard at both new edges, in ms
 
 src=${1:?usage: normalize-audio.sh <src-dir> <dest-dir>}
 dest=${2:?usage: normalize-audio.sh <src-dir> <dest-dir>}
@@ -87,12 +97,15 @@ for f in "$src"/*.mp3 "$src"/*.wav "$src"/*.m4a "$src"/*.ogg "$src"/*.flac; do
     continue
   fi
 
-  # 1. trim dead air off both ends, downmix, resample. `areverse` twice is how
-  #    the *trailing* silence is trimmed: silenceremove only ever works on the
-  #    head of its input.
+  # 1. trim dead air off both ends, fade the two new edges, downmix, resample.
+  #    `areverse` twice is how the *trailing* silence is trimmed: silenceremove
+  #    only ever works on the head of its input. The tail fade reuses the same
+  #    trick for the same reason — neither may need the duration up front.
   trimmed="$tmp/$name.wav"
+  fade_s=$(awk -v ms="$FADE_MS" 'BEGIN { printf "%.3f", ms / 1000 }')
+  fade="afade=t=in:st=0:d=$fade_s"
   ffmpeg -y -hide_banner -loglevel error -i "$f" -map_metadata -1 \
-    -af "highpass=f=20,silenceremove=start_periods=1:start_threshold=$TRIM_FLOOR:detection=peak,areverse,silenceremove=start_periods=1:start_threshold=$TRIM_FLOOR:detection=peak,areverse,aresample=48000" \
+    -af "highpass=f=20,silenceremove=start_periods=1:start_threshold=$TRIM_FLOOR:detection=peak,areverse,silenceremove=start_periods=1:start_threshold=$TRIM_FLOOR:detection=peak,areverse,$fade,areverse,$fade,areverse,aresample=48000" \
     -ac 1 -ar 48000 -c:a pcm_s16le "$trimmed"
 
   # 2. measure, then 3. apply as a linear gain.

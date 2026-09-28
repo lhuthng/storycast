@@ -83,6 +83,179 @@ runtime. The `python/` tree that remains is the enrollment tooling, the last
 thing still needing an interpreter, until that is ported too. It is not on the
 serving path, so a worker needs no Python at all.
 
+## The map: the book, the machine, and what each one borrows
+
+This is the picture the rest of the document explains. A **workspace** is one
+book. A **profile** is what the machine is loaded with: a pack, a language and an
+engine, named in `.bm/profile`. Around the two of them sit the things they borrow
+from — pack presets, a library of external material, engines — and the arrows say
+how: *extends* composes something (a dependency, tracked by hash), *imports*
+copies it in (yours, nothing to ask), *ref* resolves against it (the book's file
+wins, the profile's is the fallback) and *use* points at an identity.
+
+![The workspace and its profile, with the presets and library each one borrows](img/architecture-map.svg)
+
+The drawing is the **intent**; the mermaid below is its **transcription**, and the
+two are kept together on purpose — the text is what a review can diff, the picture
+is what it meant. The editable source is
+[`docs/img/architecture-map.excalidraw`](img/architecture-map.excalidraw), so the
+picture can be changed rather than redrawn; the embedded
+`docs/img/architecture-map.svg` is its export, with the hand-drawn font baked in
+as a data URI so it renders anywhere it is displayed.
+
+```mermaid
+flowchart LR
+    subgraph W["workspace — one book"]
+        WV(("Voice"))
+        WP["Pack<br/>not built: assets/ is the checkout's"]
+        WD{"Data"}
+        WL["Language"]
+    end
+
+    subgraph P["profile — the binding, .bm/profile"]
+        PP["Pack"]
+        subgraph PL["Language — adapters/&lt;name&gt;/"]
+            P1["Prompt"]
+            P2["Crawler"]
+        end
+    end
+
+    VP(["Voice Presets<br/>not on this stage"])
+    EL(["External Library"])
+    PPS(["Pack Presets"])
+    EN(["Engines"])
+
+    WV -.->|"extends"| VP
+    WP -.->|"imports"| EL
+    WP -.->|"extends"| PPS
+    WP ==>|"extends"| PP
+    WL -.->|"imports"| PL
+    PP -.->|"extends"| PPS
+    P ==>|"use"| EN
+```
+
+Dashed is one-to-many and solid is one-to-one. The thick arrow is the structural
+one and the point of the picture: a workspace's **Pack extends its profile's
+Pack**, one-to-one — which is what "a workspace without a profile is meaningless"
+means, and what the code does not do yet.
+
+The other three borrow differently, and the difference is *ownership*:
+
+* **`imports` takes a copy.** The book's language tree is seeded from the
+  profile's at the moment the workspace is made — its prompts, its crawler
+  templates — and is then the book's own, so a user can modify one as they like
+  and nothing outside that book moves. That one is a **seed**: it happens once,
+  `:profile load` never touches the copy afterwards, and re-seeding is an explicit
+  act rather than a side effect. A clip pulled in from the External Library is the
+  other kind of import — the user repeats that whenever they want — and the
+  difference matters to whoever builds it: a seed needs a re-seed story, a
+  repeatable import needs a conflict story. Neither is tracked, because there is
+  nothing to track: it is yours now.
+* **`extends` composes.** The profile's pack stays the profile's, shared and
+  untouched; the workspace's pack is a delta on top of it, and every inherited
+  entry is recorded by hash so a change in the base propagates and a removal
+  withdraws it. The base is not copied into the book's meaning; it is named.
+* **`use` points at an identity.** The profile names an engine; it does not own
+  the weights.
+
+Where each edge lives in the code. A row that says *not built* is a gap in this
+repo, not a plan someone forgot to mention:
+
+| edge, as drawn | where it is | |
+| --- | --- | --- |
+| workspace → **Data** | `Layout.work` is `workspaces/<name>/`; `workspace new` scaffolds `data/chapters/`, `data/audio/` and `output/` | built |
+| workspace → **Voice** | the book's cast, keyed by the adapter ([§5](#5-voices-three-layers)), the assignment held in the workspace | built |
+| workspace's **Pack** → profile's **Pack**, *extends*, 1:1 | nothing: `Layout::assets()` is `root/assets`, the one tree with no workspace scope. Which profile it would extend is already recorded — `workspace new` stamps the **whole binding** into `workspaces/<name>/settings.json`, *born bound to the loaded profile, so its first run cannot mix genres* | **not built** |
+| workspace's **Language** → profile's **Language**, *imports*, 1:* | today a **read-time fallback**: `prompts_base()`, `adapter_home()`, `crawl_workspace()` resolve the book's tree first and fall through to the profile's, per tree for the prompts and per file for the crawlers. That leaves the *profile's* file live, so editing a prompt a book is merely *using* edits that language for every book on the root. The design is a seed at workspace creation instead | **not built as a seed** |
+| workspace's pack → **Pack Presets**, *extends* | nothing yet, and it needs no new mechanism: same `deps` list as the profile's pack, after the profile's | **not built** |
+| workspace's pack → **External Library**, *imports* | nothing. The only `import` in the program adopts a *chapter*: `:import 34 /tmp/ch34.txt` | **not built** |
+| profile's pack → **Pack Presets**, *extends* | `assets/pack.json` names them, each unpacked under `assets/_extends/<name>/`, tracked by hash in `_extends.json` — [ASSETS.md](ASSETS.md) | built |
+| profile → **Engines**, *use*, 1:1 | `Binding.engine` → `engines/<name>/`, provisioned from the models release | built |
+| profile → **Language** `{Prompt, Crawler}` | `adapters/<name>/{prompts,crawl}`, named by `Binding.adapter` | built |
+| **Voice** → **Voice Presets**, *extends* | off this stage; in code it would be the preset catalogue and `pool.rs`, **not** the pack's `deps` | not on this stage |
+
+### What the code does today: one read-time fallback, and one missing tree
+
+Today the language is a **fallback**: four lookups resolve the book's tree first
+and fall through to the profile's — `prompts_base()` (workspace, then root),
+`adapter_home()` (`work/adapters/<name>`, then `root/adapters/<name>`),
+`adapter_homes()` (both scopes, workspace first) and `crawl_workspace()`, whose
+scripts `crawl::resolve_script` searches **before** the profile's. That works,
+and it is the wrong shape for what the chart says: a fallback leaves the
+*profile's* file as the live one, so a book that has never copied a prompt is
+reading the profile's copy, and editing it edits every book on the box. The
+import makes the copy the book's, and there is no lookup left to be surprised by.
+
+`Layout::assets()` is not even that: it is `root.join("assets")`, and every reader
+goes through `scene_map()`, `pool()` and `pool_dir()`, which all join it. So **one
+pack is live per checkout and every book shares it** — the box the chart draws
+that the code cannot answer at all.
+
+Neither gap needs a new idea, and they are not the same fix. The pack's is a
+workspace scope plus the composition already built: `work/assets/pack.json` whose
+`deps` name the **profile's pack** first — one, and structural — and any presets
+of the book's own after it, so the book's files win over its base and its presets
+win over the book's. `workspace new` would scaffold that file beside the `data/`
+it already scaffolds, and there is nothing to invent in it: it is the same
+`pack.json` a genre already writes. The language's is an import at the same
+moment — seed the book's prompts and crawler templates from the profile's — and
+one rule is settled with it: it happens once, the copy is the book's, and
+`:profile load` never touches the book's tree again. So a book that has edited its prompts cannot
+be changed by a profile load, and a book that wants the profile's newer prompts
+asks for them. That is the whole reason to make it a seed rather than a live
+fallback: no edit of one book's prompt can reach another's.
+
+### A workspace's pack extends its profile's — it does not stand alone
+
+That thick arrow is one-to-one and it is an *extends*, the same relation the
+dashed arrows to Pack Presets use: a composition, not a copy and not a bare
+pointer. **A workspace extends exactly one pack, the one its profile is loaded
+with**, and everything else about it is delta — its own voice cast, its own data,
+its own language tree. So there is no such thing as a workspace without a
+profile, and the code already agrees twice over: `workspace new` stamps the whole
+binding into `settings.json` at birth, and the ledger gate re-checks it. What the
+code does not do is give the workspace a pack that names the profile's.
+
+The no-pointer case the program still supports is not a counterexample: there
+`work == root`, so the book *is* the profile's tree — the machine's own pack,
+which is the one thing every book on this box shares.
+
+The remaining question is a cost, not a fork in that semantics: the profile's
+pack has to *be* somewhere for the composition to run, either unpacked into the
+workspace's `assets/_extends/` or shared from the machine's single copy. The
+first is what everything built here already does — one tree, one hash, one ship,
+and a book that is a complete artifact — and it costs the art per book, about
+58 MB while it is all clips. The second saves those bytes and gives up the
+workspace's tree as something you can ship on its own. It is an implementation
+choice inside "extends", not a redesign of it.
+
+### Composed is tracked; copied is yours
+
+The chart draws *extends* into presets and *imports* from a library, and the
+difference between them is the one rule that keeps a pack honest: a **composed**
+thing is recorded (`_extends.json` says which dependency contributed it, and a
+hash of the value), so a parent's change propagates and a parent's removal
+withdraws it; a **copied** thing is simply yours, with no record and nobody to
+ask. What arrives from a dependency is also never shipped as if it were content.
+
+**The reading this table assumes**, because the drawing admits two: *extends* into
+*Pack Presets* is composing a pack, and the arrow into *External Library* is
+pulling material *into* your own tree. If that second arrow instead means
+composing a pack that lives outside this checkout, then nothing new is needed at
+all — `deps` names any unpacked directory under `assets/_extends/<name>` whatever
+its origin, and the only missing piece is fetching a foreign pack by name, which
+`tools/profile.sh fetch` already does for releases. The distinction worth keeping
+either way is the one below, not which oval an arrow points at.
+
+Only the first half has a verb. There is no `import` for a clip and no `adopt`
+for a file you have decided to own, and this is not theoretical: when the score
+moved from `common` to the genre, the tracks were the genre's own files and the
+marker still claimed them as inherited, so the ownership was handed over by
+pruning the record by hand. `asset import <file>` (copy the bytes in, add the
+registry entry, land the licence line) and `asset adopt <rel>` (stop claiming a
+file you inherited) are the two commands that would make the External Library box
+real. Both are noted in [ASSETS.md](ASSETS.md#what-is-not-decided-here).
+
 ## 1. One idea: work is a list of tasks, not a loop
 
 *This section is about the one decision the whole system rests on. If you only
@@ -229,6 +402,14 @@ flowchart TB
 * **The machine** (always the checkout root): which boxes exist, the voice
   roster, the shared assets and prompts, the AWS account, and which profile is
   loaded.
+
+The prompts, the adapter bundles and the book's own crawlers are read in **both**
+scopes today, the book's copy winning — a fallback, which [the map](#the-map-the-book-the-machine-and-what-each-one-borrows)
+records as the shape the language's *imports* arrow replaces. `assets/` does not
+work that way at all: it has no workspace scope, so one pack is shared by every
+book on the machine while the other trees are not. That asymmetry is the
+*workspace has no Pack* box, and it is the one that changes what a book sounds
+like.
 
 In code these are the two halves of `Layout`: `work` and `root`. There are three
 ways to build one, and **picking the wrong one fails silently**:

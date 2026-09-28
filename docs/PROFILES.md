@@ -74,7 +74,16 @@ What each actually holds:
   `effects/` (+ `effect-pool.json`), `scene-map.json` (rules, palette, layers,
   pause, reverb, duck), `tag-aliases.json`, `LICENSES.json`. What is **gone** is
   `crawl/` (the adapter's now) and what is **new** is `pack.json`, the ordered
-  list of assets this one builds on — see [ASSETS.md](ASSETS.md).
+  list of assets this one builds on, `_extends/<name>/` (each dependency
+  unpacked — an input that is never shipped) and `_extends.json`, the generated
+  record of what a resolve inherited — see [ASSETS.md](ASSETS.md). The three pool
+  registries, `scene-map.json`'s `rules`/`music_palette`/`reverb_presets`,
+  `tag-aliases.json` and `LICENSES.json` all layer by name, so the live tree is
+  its own content with its dependencies' filled in behind it: `deps` is
+  `["common", "weapons", "magic"]` — the world, real arms, spells — and this
+  asset is a **preset**, whose own content is the score and one rule. `common`
+  is where the beds, the rules, the palette, the mixer knobs and the synonym
+  table live, which is why a pack with no `common` in its chain is not runnable.
   `tag-aliases.json` is the prompt-side synonym table for the closed sound
   vocabularies, and its values must be canonical palette names — which is why it
   is pack-side and stays in English.
@@ -459,6 +468,21 @@ if self.work.join("prompts").is_dir() { self.work.clone() } else { self.root.clo
   the root tree unconditionally would hand a box one language's prompts while
   the inductor driving it read another's, agreeing on every file name and
   disagreeing on every word.
+
+**The fallback is a shape this is meant to leave behind.** Resolving book-first
+and falling through to the profile's works, but it leaves the *profile's* file as
+the live one: a book that has never copied a prompt is reading the profile's
+copy, so editing it edits that language for every book on the root. The design in
+[ARCHITECTURE.md's map](ARCHITECTURE.md#the-map-the-book-the-machine-and-what-each-one-borrows)
+makes the relation an **import** instead — the book's prompts and crawler
+templates are copied in when the workspace is made, and are then the book's own,
+to modify as its owner likes. Nothing here changes meaning on disk: a workspace
+that already carries its own tree keeps it, and one that does not is seeded, not
+migrated. And it is settled how the two coexist, since `:profile load` replaces
+the adapter for the whole checkout: it **never** touches a workspace's own tree,
+so a book that edited its copy keeps it, and re-seeding is an explicit act. That
+is the reason to make it a seed rather than a live fallback — no edit of one
+book's prompt can reach another's, which a shared file cannot promise.
 
 The adapter's tree is **live and untracked**, at `adapters/<adapter>/`, holding
 both `prompts/` and `crawl/` (`.gitignore`), shipped as a release bundle the way

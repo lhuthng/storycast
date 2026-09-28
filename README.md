@@ -602,6 +602,13 @@ at top).
 | `.bm/digest-suspend.json` | `:off` only: each box's policy as-was, so `:on` restores what each had. File, not latch: a restart cannot leave digest off with no way back. Deleted after restore |
 | `~/.bm-worker/` | The worker's whole world: agent, bm-tts, models, sources, provision stamp |
 
+Three of those paths are the **pieces** a machine is loaded with — `assets/` (the
+pack), `adapters/<name>/` (the language: its prompts *and* its crawlers) and
+`engines/<name>/` (the voices) — and which ones are loaded is the profile. The
+map of what belongs to the book, what belongs to the machine, and what each one
+borrows from is drawn once in
+[docs/ARCHITECTURE.md §The map](docs/ARCHITECTURE.md#the-map-the-book-the-machine-and-what-each-one-borrows).
+
 **Restart-safe**: kill anything anytime. The ledger says where to resume;
 cached segments never re-render.
 
@@ -635,6 +642,17 @@ voice is withheld rather than failed — the rows stay `Pending`, nothing is
 struck and nothing is shelved — so an idle cluster beside a stalled chapter is
 what a language mismatch looks like. `serve` warns about it once, in the Events
 pane, when it starts.
+
+**A sound went missing after a resolve, or `asset resolve` refuses.** The pack is
+an asset *composition*: `assets/pack.json` names what it is built on — the live
+checkout is a preset over `common`, `weapons` and `magic`, in that order — each
+dependency sits unpacked under `assets/_extends/<name>/`, and `bm-inductor asset
+resolve` folds them into the live tree — the pools and the scene map's rules
+included. A dependency that is not unpacked is named along with the path it was
+looked for in, and a parent that has since moved makes this asset **stale** until
+it is resolved again. `asset resolve --dry-run` reports what a resolve would
+change and writes nothing; running it twice says `up to date` the second time.
+See [the assets guide](docs/ASSETS.md).
 
 **The book comes out in one voice.** The chapter had no quote marks in it, so
 there was nothing for the program to tell narration from dialogue. The digest
