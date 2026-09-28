@@ -287,11 +287,18 @@ pub struct Settings {
     /// the same trick `analyze_models` below relies on.
     #[serde(default)]
     pub ssh: SshDefaults,
-    /// The profile this workspace runs under, stamped from the load pointer
-    /// when the workspace is created. A ledger holding another profile's
-    /// tasks refuses to run here rather than mixing two genres' output.
+    /// The pieces this workspace runs under, stamped from the load pointer
+    /// when the workspace is created. A ledger holding another binding's tasks
+    /// refuses to run here rather than mixing two genres' or two languages'
+    /// output.
+    ///
+    /// A binding rather than one pointer: the pack (the genre's art), the
+    /// adapter (the language's prompts) and the engine (the voices) travel
+    /// together but change independently. A pre-split `settings.json` still
+    /// loads: `Binding`'s own `Deserialize` carries the shim, so an old
+    /// `{name, hash}` lands as the pack rather than as an empty binding.
     #[serde(default)]
-    pub profile: crate::profile::Pointer,
+    pub profile: crate::profile::Binding,
 }
 
 /// App-wide ssh defaults. The per-machine value in `machines.json` wins;
@@ -354,7 +361,7 @@ impl Default for Settings {
             idle_mins: 5,
             render_batch: DEFAULT_RENDER_BATCH,
             ssh: SshDefaults::default(),
-            profile: crate::profile::Pointer::default(),
+            profile: crate::profile::Binding::default(),
         }
     }
 }

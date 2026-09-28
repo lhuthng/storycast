@@ -135,7 +135,7 @@ pub(crate) struct App {
     ///
     /// Cached rather than read per frame: it is a file open, and the footer is
     /// redrawn on every keystroke.
-    pub(crate) profile: Option<bm_core::profile::Pointer>,
+    pub(crate) profile: Option<bm_core::profile::Binding>,
     /// Shared HTTP client for the inductor API.
     pub(crate) http: reqwest::Client,
     pub(crate) machines: Vec<Machine>,
@@ -721,7 +721,7 @@ impl App {
         }
         let (layout, problem) = bm_core::Layout::resolve_or_root(&self.layout.root);
         self.layout = layout;
-        self.profile = bm_core::profile::read_pointer(&self.layout.root).ok();
+        self.profile = bm_core::profile::read_binding(&self.layout.root).ok();
         // Cached file indexes: all of them belong to the workspace that was.
         self.lines = None;
         self.lines_loading = false;

@@ -1353,9 +1353,12 @@ fn the_footer_names_the_active_workspace_and_the_loaded_profile() {
     // No profile is the state every runner refuses to start in, so it is
     // reported plainly rather than left blank.
     assert_eq!(super::model::profile_label(None), "none");
-    let p = bm_core::profile::Pointer {
-        name: "xianxia".into(),
-        hash: "0123456789abcdef".into(),
+    let p = bm_core::profile::Binding {
+        pack: bm_core::profile::Pointer {
+            name: "xianxia".into(),
+            hash: "0123456789abcdef".into(),
+        },
+        ..Default::default()
     };
     assert_eq!(
         super::model::profile_label(Some(&p)),

@@ -1220,8 +1220,8 @@ pub(crate) fn workspace_cmd(
             // run cannot mix genres. No profile loaded yet is not an error
             // the serve gate names it when it matters.
             let mut settings = Settings::default();
-            match bm_core::profile::read_pointer(root) {
-                Ok(p) => settings.profile = p,
+            match bm_core::profile::read_binding(root) {
+                Ok(b) => settings.profile = b,
                 Err(_) => {
                     out.push(
                         "note: no profile loaded — `:profile` in the dashboard, or `tools/profile.sh fetch/unpack <name>`, first"
@@ -2633,7 +2633,12 @@ mod tests {
             &std::fs::read_to_string(dir.join("workspaces/second/settings.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(settings["profile"]["name"], "xianxia");
+        // A bundle loaded before the split stamps as the pack, and the other
+        // two pieces are declared-and-unnamed rather than invented: the new
+        // workspace is bound to exactly what the pointer named.
+        assert_eq!(settings["profile"]["pack"]["name"], "xianxia");
+        assert_eq!(settings["profile"]["adapter"]["name"], "");
+        assert_eq!(settings["profile"]["engine"]["name"], "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

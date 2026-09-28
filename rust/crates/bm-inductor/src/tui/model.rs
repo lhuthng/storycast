@@ -75,10 +75,25 @@ pub(crate) fn workspace_label(layout: &bm_core::Layout) -> String {
 /// What to call the loaded profile in the footer. `none` is not a placeholder
 /// for "unknown": it is the state every runner refuses to start in, so the
 /// footer says so plainly.
-pub(crate) fn profile_label(profile: Option<&bm_core::profile::Pointer>) -> String {
+/// The pieces this workspace is bound to, and the pack's hash.
+///
+/// All three names, because they change independently and a mismatch is worth
+/// seeing before a run rather than after one: `xianxia · vi-VN · vieneu
+/// (6b8d5fc00761)`. The hash stays the pack's — it is the one the operator
+/// loaded and the one `profile pack` writes back.
+pub(crate) fn profile_label(profile: Option<&bm_core::profile::Binding>) -> String {
     match profile {
-        Some(p) if !p.name.is_empty() => {
-            format!("{} ({})", p.name, &p.hash[..12.min(p.hash.len())])
+        Some(binding) if !binding.is_unset() => {
+            let hash = &binding.pack.hash;
+            if hash.is_empty() {
+                bm_core::profile::label(binding)
+            } else {
+                format!(
+                    "{} ({})",
+                    bm_core::profile::label(binding),
+                    &hash[..12.min(hash.len())]
+                )
+            }
         }
         _ => "none".into(),
     }
