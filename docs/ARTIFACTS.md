@@ -360,7 +360,7 @@ different push:
 
 | digest | covers | gates |
 |---|---|---|
-| `sources_hash` | the bundle's manifest: one sha256 per file, keyed by the path it lands on the worker, plus the stage list the box's policy covers and the agent version | `install_sources` |
+| `sources_hash` | the bundle's manifest: one sha256 per file, keyed by the path it lands on the worker, plus the `(stage, adapter)` slots the box's policy covers and the agent version | `install_sources` |
 | `tts_hash` | the bake **minus `models/voices.json`**, by signature, + `manifest.json` by content | the weights push |
 | `voices_hash` | `models/voices.json` by content | the weights push, alongside `tts_hash` |
 | `tts_bin_hash` | the `bm-tts` bytes | the sidecar push |

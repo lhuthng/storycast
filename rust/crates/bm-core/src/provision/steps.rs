@@ -1112,8 +1112,19 @@ echo stopped"#,
     /// (prompts + assets ride the sources sync), so this is one small JSON
     /// file, but without it the worker cannot tell a complete profile from
     /// a half-rsynced one, which is exactly what `verify` refuses to run on.
-    pub fn write_profile_pointer(&self, pointer: &crate::profile::Pointer) -> Result<()> {
-        let json = serde_json::to_string_pretty(pointer)?;
+    ///
+    /// **The whole binding, not the pack alone.** It used to be the pack
+    /// `Pointer` — the shape from before the split — and the consequence was
+    /// silent: a box that read `{name, hash}` resolves `adapter` and `engine`
+    /// to their defaults, so it keyed `cast-*` and `segments-*` under `default`
+    /// while this inductor keyed them under `vi-VN`. Nothing noticed while
+    /// segment files travelled by name, so the cost was a re-render nobody
+    /// asked for; the day a stage reads a cast on the box, it is a chapter
+    /// spoken from the wrong roster. The offer carries the binding too (it is
+    /// the authority for the task in hand), and this is the same answer for the
+    /// box's *own* runs, which have no offer to read.
+    pub fn write_profile_pointer(&self, binding: &crate::profile::Binding) -> Result<()> {
+        let json = serde_json::to_string_pretty(binding)?;
         let script = format!(
             "mkdir -p $HOME/{d}/.bm && cat > $HOME/{d}/.bm/profile << 'EOF'\n{json}\nEOF\n",
             d = REMOTE_DIR
@@ -1515,13 +1526,13 @@ pub fn provision(
     // carry the profile content, the pointer says what it claims to be.
     // Written every provision (one small file) so a re-pointed inductor
     // cannot leave a worker verifying yesterday's profile.
-    match crate::profile::read_pointer(&layout.root) {
-        Ok(pointer) => match ssh.write_profile_pointer(&pointer) {
+    match crate::profile::read_binding(&layout.root) {
+        Ok(binding) => match ssh.write_profile_pointer(&binding) {
             Ok(()) => log.push(format!(
                 "[{}] profile pointer: {} ({})",
                 m.id,
-                pointer.name,
-                &pointer.hash[..12.min(pointer.hash.len())]
+                crate::profile::label(&binding),
+                &binding.pack.hash[..12.min(binding.pack.hash.len())]
             )),
             Err(e) => log.push(format!("[{}] profile pointer failed: {e}", m.id)),
         },

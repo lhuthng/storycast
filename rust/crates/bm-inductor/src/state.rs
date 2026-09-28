@@ -1022,11 +1022,202 @@ mod tests {
         h
     }
 
-    /// A beat that says which stages the box's sources bundle covers.
+    /// A beat that says which `(stage, adapter)` slots the box's sources bundle
+    /// covers, the adapter being the one this fixture's layout is bound to.
+    ///
+    /// The fixture's caches are keyed by `default` — `Layout::new` reads no
+    /// pointer, so that is the adapter in force — which is also what the offer
+    /// names on its binding.
     fn beat_with_bundle(worker: &str, addr: &str, stages: &[&str]) -> bm_proto::Heartbeat {
+        let slots: Vec<(&str, &str)> = stages.iter().map(|s| (*s, "default")).collect();
+        beat_with_slots(worker, addr, &slots)
+    }
+
+    /// The same, with the adapter spelled out — for the case where the box's
+    /// bundle is the *other* language's.
+    fn beat_with_slots(worker: &str, addr: &str, slots: &[(&str, &str)]) -> bm_proto::Heartbeat {
         let mut h = beat_with_load(worker, addr, None);
-        h.sources_stages = stages.iter().map(|s| s.to_string()).collect();
+        h.sources_stages = slots
+            .iter()
+            .map(|(stage, adapter)| {
+                bm_core::provision::sources::slot(
+                    Stage::parse(stage).expect("a stage name"),
+                    adapter,
+                )
+            })
+            .collect();
         h
+    }
+
+    /// **A chapter written in a language nothing here can voice is never
+    /// cooked.** The fork line says an adapter has one language and it is both
+    /// the source's and the target's, so a digest writes a script in it and a
+    /// render bakes audio in it — and both are cached under a content-addressed
+    /// name, so a wrong-language chapter is forever. VieNeu declares `vi-VN`;
+    /// an `en-US` adapter behind it is a mismatch rather than a setting.
+    ///
+    /// `crawl` and `prepare` are deliberately outside the gate: the crawled
+    /// text and the quote split are properties of the *source*, so the two
+    /// stages that read the source still run while the language is being
+    /// worked out. That half is asserted here too, because a gate that
+    /// refused everything would pass a test that only checked the refusal.
+    #[test]
+    fn a_wrong_language_chapter_is_never_offered_a_digest_or_a_render() {
+        let _g = env_lock();
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::write(layout.chapter_txt(1), "Chương 1: X\n\nbody\n").unwrap();
+        std::fs::write(layout.chapter_txt(2), "Chương 2: Y\n\nbody\n").unwrap();
+
+        // An English adapter that declares itself, on a checkout whose engine
+        // is VieNeu.
+        let home = layout
+            .root
+            .join(bm_core::paths::ADAPTERS_DIR)
+            .join("xianxia-en-US");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            bm_core::adapter::path(&home),
+            r#"{"pack":"xianxia","language":"en-US"}"#,
+        )
+        .unwrap();
+        inner.layout.adapter = "xianxia-en-US".into();
+        inner.settings.profile.pack.name = "xianxia".into();
+        inner.settings.engine = "vieneu".into();
+
+        inner.enqueue_translate(1, 1);
+        inner.workers.insert("w".into(), "192.168.2.2".into());
+
+        // The digest is withheld — and there is nothing else to hand out, so
+        // the box asks and gets nothing. A gate that let it through would
+        // return `digest:1` here.
+        assert!(
+            inner.offer("w").is_none(),
+            "no digest in a language the bound engine cannot voice"
+        );
+        assert_eq!(inner.tasks["digest:1"].state, TaskState::Pending);
+        assert_eq!(
+            inner.tasks["digest:1"].attempts, 0,
+            "withheld is not failed: nothing about the work is wrong"
+        );
+
+        // A crawl still is offered, which is the other half of the fork line:
+        // the source's text and its quote split are not the adapter's language.
+        inner
+            .tasks
+            .insert(Task::new(2, Stage::Crawl).id(), Task::new(2, Stage::Crawl));
+        let offer = inner
+            .offer("w")
+            .expect("a crawl reads the source, not the language");
+        assert_eq!(offer.task_id, "crawl:2");
+        // Finished (or re-provisioned away), so the next ask is about the
+        // digest again rather than about this row.
+        inner.tasks.get_mut("crawl:2").unwrap().state = TaskState::Done;
+        assert!(inner.offer("w").is_none(), "still no digest");
+
+        // The engine that declares the language: the same row is offered, which
+        // is what proves the gate reads the engine and not, say, the pack.
+        inner.settings.engine = "gemini".into();
+        let offer = inner.offer("w").expect("gemini declares en-US");
+        assert_eq!(offer.task_id, "digest:1");
+        assert_eq!(inner.tasks["digest:1"].attempts, 0);
+    }
+
+    /// The manifest is the authority over the id, and the id still refuses when
+    /// there is none: the pre-manifest adapters shipped today keep exactly the
+    /// behaviour they had before this file existed.
+    #[test]
+    fn the_adapter_manifest_is_believed_over_its_folder_name() {
+        let _g = env_lock();
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::write(layout.chapter_txt(1), "Chương 1: X\n\nbody\n").unwrap();
+
+        // The folder says `vi-VN`, the declaration says `en-US`. The
+        // declaration is what decides which of the two is the mismatch, and
+        // this is the whole reason the file exists: a name is a convention
+        // and a language is not.
+        let home = layout
+            .root
+            .join(bm_core::paths::ADAPTERS_DIR)
+            .join("xianxia-vi-VN");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            bm_core::adapter::path(&home),
+            r#"{"pack":"xianxia","language":"en-US"}"#,
+        )
+        .unwrap();
+        inner.layout.adapter = "xianxia-vi-VN".into();
+        inner.settings.profile.pack.name = "xianxia".into();
+        inner.settings.engine = "vieneu".into();
+        inner.enqueue_translate(1, 1);
+        inner.workers.insert("w".into(), "192.168.2.2".into());
+
+        assert!(
+            inner.offer("w").is_none(),
+            "the folder's vi-VN is not believed over the declaration"
+        );
+        // The same folder with no manifest at all: `vi-VN` derived from the
+        // id, VieNeu declares it, offered.
+        std::fs::remove_file(bm_core::adapter::path(&home)).unwrap();
+        assert_eq!(
+            inner.offer("w").expect("vi-VN behind VieNeu").task_id,
+            "digest:1"
+        );
+    }
+
+    /// **A stage is not a slot.** Every adapter on the inductor ships to every
+    /// box, so a box may hold several languages and a bundle that names a stage
+    /// does not say which of them it can run — this box holds the other one's
+    /// prompts, and a digest offered here writes a script in a language none of
+    /// its files are written in.
+    ///
+    /// The pair is the unit, in both directions: the same box is offered the
+    /// work the moment its bundle names the adapter the task is for, which is
+    /// the half that keeps the gate from being a blanket refusal.
+    #[test]
+    fn a_slot_is_a_stage_and_its_language() {
+        let _g = env_lock();
+        let (_d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        std::fs::write(layout.chapter_txt(1), "Chương 1: X\n\nbody\n").unwrap();
+
+        // This checkout cooks `vi-VN`: the layout's adapter is what every cache
+        // path is keyed by, and what the offer's binding will name.
+        inner.layout.adapter = "xianxia-vi-VN".into();
+        inner.settings.profile.pack.name = "xianxia".into();
+        inner.settings.engine = "vieneu".into();
+        inner.enqueue_translate(1, 1);
+        inner.workers.insert("w".into(), "192.168.2.2".into());
+
+        inner.observe(&beat_with_slots(
+            "w",
+            "192.168.2.2",
+            &[("crawl", "xianxia-en-US"), ("digest", "xianxia-en-US")],
+        ));
+        assert!(
+            inner.offer("w").is_none(),
+            "the box holds the English prompts and the task is Vietnamese"
+        );
+        assert_eq!(inner.tasks["digest:1"].state, TaskState::Pending);
+
+        // Provisioned for the language in force: the same row is offerable.
+        inner.observe(&beat_with_slots(
+            "w",
+            "192.168.2.2",
+            &[("crawl", "xianxia-vi-VN"), ("digest", "xianxia-vi-VN")],
+        ));
+        let offer = inner.offer("w").expect("the slot the task is for");
+        assert_eq!(offer.task_id, "digest:1");
+        // …and the offer says which binding those bytes are made under, which
+        // is the other half of this: the box keys its cast and its segments by
+        // it rather than by whatever it resolved for itself.
+        assert_eq!(offer.adapter, "xianxia-vi-VN");
+        assert_eq!(offer.pack, "xianxia");
+        assert_eq!(offer.engine, inner.settings.engine);
     }
 
     /// **The stage a box has no files for is not offered to it.** ch426's

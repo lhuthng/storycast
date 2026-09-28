@@ -5,51 +5,79 @@ the wording here. This file is the contract the work gets built against.
 
 Status legend: `planned` (written down, not started), `in progress`, `done`.
 
-## 1. Any key, any endpoint, any models: de-hardcode the analyzer (`planned`)
+## 1. Any key, any endpoint, any models: de-hardcode the analyzer (`done`)
 
 **Your words:** "change hardcoded gemini key to any key with api link + model
 names."
 
-**My reading, to confirm:** today the analyzer backend is chosen by the
-`analyzer` setting (`opencode | openrouter | gemini | local`), but inside each
-backend the endpoint and credential are baked into the code. The Gemini path
-always calls
-`https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key=`
-with `GEMINI_API_KEY`, the OpenRouter path always calls
-`https://openrouter.ai/api/v1/chat/completions` with `OPENROUTER_API_KEY`, and
-only Ollama takes a configurable URL (`ollama_url` + `local_model`). The goal
-is one generic HTTP provider driven entirely by settings and `.env`:
+**What shipped.** Providers are data, not code. `.bm/llm.json` (machine-global,
+seeded once from the tracked `llm.default.json`) holds an entry per provider —
+`kind`, `base_url`, `api_key`, `model` — and `active` names the one in use. The
+`L` (`:llm`) screen edits it, `f` asks the provider what models it serves, and
+adding a gateway by hand means writing one entry and nothing else: an unknown
+`kind` rides the OpenAI-compatible path.
 
-- `LLM_BASE_URL` ("the api link"): endpoint root, e.g. a Gemini-compatible
-  gateway, an OpenAI-compatible proxy, a self-hosted vLLM, anything that speaks
-  the agreed request/response schema.
-- `LLM_API_KEY` ("any key"): the bearer credential, replacing the per-vendor
-  `*_API_KEY` names.
-- `LLM_MODELS` ("model names"): the chain, comma-separated, keeping today's
-  behavior. Try each in order, skip on 404/quota, abort on 401/403, then fall
-  back to the local option.
+Three `kind`s exist, and they are protocols rather than vendors:
 
-Concretely:
+| `kind` | Wire | Endpoint field |
+| --- | --- | --- |
+| `gemini` | native `:generateContent` REST | `gemini_url` |
+| `openai` | `POST {base}/chat/completions` | `openrouter_url` |
+| `ollama` | `POST {base}/api/chat` | `ollama_url` |
 
-1. Add a provider to `bm-core/src/digest/llm.rs` next to
-   `generate_gemini`/`generate_openrouter`/`generate_ollama`/`generate_opencode`,
-   posting the OpenAI-compatible `chat/completions` body (`response_format:
-   json_object`, `max_tokens`, temperature 0) and reading
-   `choices[0].message.content`. While in there: the OpenRouter path also
-   hardcodes this repo's old name in its `Referer`/`X-Title` headers, and that
-   gets the generic treatment too.
-2. Read endpoint + key + model chain from `Settings` (the workspace's
-   `settings.json`) with `.env` fallbacks, one knob per value, no more vendor
-   names compiled in. Keep the existing `GEMINI_API_KEY` /
-   `OPENROUTER_API_KEY` names working as deprecated aliases for one release so
-   nobody's setup breaks silently.
-3. Keep the fallback semantics the code already has: per-model retries, skip
-   on 404/day-quota, fast abort on 401/403/400, opencode as the last resort.
-4. Test it the way the repo tests everything: a test that pins the request
-   shape against a local fixture server, no real API keys in tests.
+Only the protocol decides routing (`LlmKind::parse`, keyed on `kind`, never on
+the id), so `tokenharbor`, `my-gateway` and `openrouter` are one code path. The
+model, the endpoint and the slot travel to whichever box digests
+(`AnalyzerSettings`), and the key rides `Credentials` narrowed to that one slot
+by `for_stage` — a crawl offer carries no secret at all.
 
-Files likely touched: `rust/crates/bm-core/src/digest/llm.rs`,
-`rust/crates/bm-core/src/config.rs`, `.env.example`.
+**Four places the written plan was wrong and the code went another way.**
+
+- **`.env` was retired rather than extended.** The plan put
+  `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODELS` in it. The file was already the
+  wrong home: a key is this machine's access, not a book's, and the workspace's
+  `settings.json` is per book. `.bm/llm.json` is the one place, and
+  `load_or_seed` reads the old `.env` **once** to carry its keys over so nobody
+  re-types them. Nothing loads it at startup any more.
+- **The credential keeps its two names, and that is the design.**
+  `GEMINI_API_KEY`/`OPENROUTER_API_KEY` are the *wire's* per-slot vocabulary —
+  the names a worker installs from the offer, one key per stage — not names the
+  operator types. A `LLM_API_KEY` would have to be threaded through
+  `Credentials`, the agent's installer and the sidecar to say one fewer word,
+  and the render lane's Gemini key is a different credential for a different
+  purpose. The operator never meets a vendor name unless they go looking.
+- **The endpoint that was actually hardcoded was the Gemini one.** This is the
+  part that was still broken when the rest of the plan was already true:
+  `try_gemini_model` built Google's URL itself and ignored its entry's
+  `base_url`, so the `L` screen listed models off the operator's gateway and
+  every generation then went to a host that had never seen the key. The base is
+  the entry's now, on the wire and in the request.
+- **The key moved out of the URL.** Google's own form is the `x-goog-api-key`
+  header; `?key=` was putting a credential into something that gets logged,
+  echoed in errors and read by any proxy in between. `fetch_models` uses the
+  header too, so a listing and the generation that follows it are the same
+  request against the same host.
+- **`--api` became optional, and that was not cosmetic.** `bm-inductor backup`
+  defaulted it to `https://openrouter.ai/api/v1` and then wrote it over the
+  chosen slot's endpoint, so `--analyzer tokenharbor` (or a gemini gateway)
+  without `--api` called OpenRouter's address with someone else's key. An
+  omitted flag now means the provider's own entry, and `--api` lands on the
+  Gemini slot too — it used to be dropped for anything but `openai`, on the
+  request *and* in the backup's opening line, which printed Google's host while
+  the requests went elsewhere.
+
+The fallback semantics are unchanged: per-model attempts, retry after the
+provider's own delay on 429, skip on 404/day-quota, abort on 401/403/400.
+
+The OpenRouter `Referer`/`X-Title` pair that named this repo is gone — the slot
+serves every gateway, so nothing branded rides a request. Pinned, with the
+endpoint and the key's placement, by three fixture-server tests in
+`digest/llm.rs` plus two wiring tests in `config.rs` (no API keys, no network:
+loopback only).
+
+Files: `rust/crates/bm-core/src/config.rs`,
+`rust/crates/bm-core/src/digest/llm.rs`, `rust/crates/bm-proto/src/lib.rs`,
+`rust/crates/bm-inductor/src/main.rs`, `llm.default.json`.
 
 ## 2. AWS: workers on EC2 (`done`)
 

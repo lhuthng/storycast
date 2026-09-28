@@ -20,6 +20,7 @@
 //! [`eta`], [`provision`] and [`config`] are new: they exist because the
 //! pipeline now runs across a cluster instead of on one box.
 
+pub mod adapter;
 pub mod ambience;
 pub mod artifact;
 pub mod assemble;

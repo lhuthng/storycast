@@ -635,7 +635,7 @@ pub struct Register {
     pub hostname: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
-    /// The stages this box's sources bundle covers — see
+    /// The `(stage, adapter)` slots this box's sources bundle covers — see
     /// [`Heartbeat::sources_stages`], whose gate reads the beat this
     /// registration turns into. Carried here as well so the two routes into
     /// the worker map cannot disagree about what the box can be asked to run.
@@ -704,13 +704,20 @@ pub struct Heartbeat {
     /// parse, the gate then treats it as "no render", which is the safe read.
     #[serde(default)]
     pub capabilities: Vec<String>,
-    /// The stages the sources bundle on this box actually covers, read from
-    /// the `sources-manifest.json` a provision left at its root.
+    /// The `(stage, adapter)` slots the sources bundle on this box actually
+    /// covers, read from the `sources-manifest.json` a provision left at its
+    /// root — `digest@vi-VN`, spelled by `bm_core::provision::sources::slot`.
     ///
     /// The box's **policy** says what the operator wants it to run; this says
     /// what it was handed the files for, and the difference between the two is
     /// a stage that fails on every retry until somebody re-provisions. The
-    /// scheduler offers a stage only when this list names it.
+    /// scheduler offers a stage only when this list names the stage **for the
+    /// adapter the offer is for** — a box may hold several languages, so the
+    /// pair is the unit and the adapter alone is not.
+    ///
+    /// A bare stage name (an agent from before the second dimension) covers it
+    /// for every adapter, which is exactly what it meant when a box held one
+    /// language and could not say which.
     ///
     /// Empty from an agent with no bundle, or one that predates the field, and
     /// empty is "no opinion": the box is offered work as before rather than
@@ -968,6 +975,17 @@ pub struct AnalyzerSettings {
     /// means "explicitly no Gemini models".
     #[serde(default)]
     pub analyze_models: Option<Vec<String>>,
+    /// The Gemini slot's endpoint root, the way [`Self::openrouter_url`] is the
+    /// OpenAI-compatible slot's.
+    ///
+    /// Carried for the same reason the model is: the host is a deployment fact
+    /// the operator set on the inductor (a gateway, a proxy, a compatible
+    /// service), and a box that hardcoded Google's while the inductor listed
+    /// models from the operator's file would send every request somewhere the
+    /// key was never checked. Empty means "the inductor said nothing" and the
+    /// box keeps its own, like every other field here.
+    #[serde(default)]
+    pub gemini_url: String,
     #[serde(default)]
     pub openrouter_model: String,
     /// The model service's base URL, so a box behind a proxy or a gateway
@@ -1129,6 +1147,38 @@ pub struct TaskOffer {
     /// TTS sidecar base URL (render stage).
     #[serde(default)]
     pub tts_url: Option<String>,
+    /// The adapter (language) this task's bytes are made for.
+    ///
+    /// With `pack` below and `engine` beside it, this is the **binding** the
+    /// offer is made under — and it travels because a worker's root is a flat
+    /// mirror with no pointer of its own, so the two ends would otherwise key
+    /// `cast-*` and `segments-*` differently: the inductor under the adapter
+    /// its ledger names, the box under `default`. Nothing noticed while segment
+    /// files travelled by *name* (`RenderUnitSpec.name`), so the cost was a
+    /// re-render nobody asked for rather than wrong audio — until a stage reads
+    /// a cast on the box, and then it is a chapter spoken from the wrong
+    /// roster.
+    ///
+    /// Empty from an inductor that predates the field, which reads as "no
+    /// opinion": the box keeps what it resolved for itself (see
+    /// `Layout::rebind`).
+    #[serde(default)]
+    pub adapter: String,
+    /// The pack this task's assets came from — the third leg of the binding.
+    ///
+    /// The one leg a box can disagree about *silently*: the adapter and the
+    /// engine are in every cache path it writes, so a mismatch there shows up
+    /// in the filenames, while the pack is a property of the `assets/` a
+    /// provision left behind. A box holding another pack's registries is being
+    /// handed prompts that read files this pack never wrote, and this is the
+    /// only place that can be seen, because nothing else reports a box's pack.
+    /// The box warns rather than refuses on a mismatch — the refusal that
+    /// matters is made on the inductor, where all three facts are known.
+    /// Empty means the same as above.
+    #[serde(default)]
+    pub pack: String,
+    /// The engine whose voice speaks these bytes — the third field of the
+    /// binding, and the one that was always on the wire.
     pub engine: String,
     /// Gemini TTS fallback chain, newest first.
     ///
@@ -2164,6 +2214,8 @@ mod tests {
             crawl: None,
             attempt: 1,
             tts_url: Some("http://127.0.0.1:8818".into()),
+            adapter: "vi-VN".into(),
+            pack: "xianxia".into(),
             engine: "vieneu".into(),
             model_order: vec![],
             analyzer: "gemini".into(),
@@ -2258,6 +2310,8 @@ mod tests {
             crawl: None,
             attempt: 1,
             tts_url: None,
+            adapter: "vi-VN".into(),
+            pack: "xianxia".into(),
             engine: "vieneu".into(),
             model_order: vec![],
             analyzer: "gemini".into(),

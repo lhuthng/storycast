@@ -1,4 +1,4 @@
-use crate::config::Settings;
+use crate::config::{Settings, DEFAULT_GEMINI_URL};
 use crate::util::head_chars;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -149,6 +149,24 @@ fn normalize_base(url: &str) -> String {
     u.strip_suffix("/chat/completions").unwrap_or(u).to_string()
 }
 
+/// The endpoint the Gemini slot talks to: the configured base, or the public
+/// service when nothing is set.
+///
+/// Empty is a real state — a hand-written settings file, or an offer from an
+/// inductor that said nothing — and it means "unset", not "the root of this
+/// host": an empty base builds `/v1beta/models/…`, a relative URL `reqwest`
+/// refuses with an error naming neither the provider nor the field.
+fn gemini_base(settings: &Settings) -> String {
+    // `trim` before `normalize_base`, which only strips trailing slashes: a
+    // field holding spaces is unset, not a host called "   ".
+    let base = normalize_base(settings.gemini_url.trim());
+    if base.is_empty() {
+        DEFAULT_GEMINI_URL.to_string()
+    } else {
+        base
+    }
+}
+
 async fn generate_openrouter(
     prompt: &str,
     settings: &Settings,
@@ -181,8 +199,6 @@ async fn generate_openrouter(
     let resp = client
         .post(url)
         .header("Authorization", format!("Bearer {key}"))
-        .header("HTTP-Referer", "https://github.com/lhuthng/storycast")
-        .header("X-Title", "storycast")
         .json(&body)
         .send()
         .await
@@ -228,6 +244,7 @@ async fn generate_openrouter(
 /// day-quotas. An exhausted chain is fatal: there is no fallback backend.
 async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<(String, Backend), GenError> {
     let key = std::env::var("GEMINI_API_KEY").map_err(|_| missing_key("GEMINI_API_KEY"))?;
+    let base = gemini_base(settings);
     let mut last = String::from("no models configured");
     let chain = analyze_chain(settings);
     if chain.is_empty() {
@@ -238,7 +255,7 @@ async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<(String, B
         )));
     }
     for model in &chain {
-        match try_gemini_model(prompt, &key, model).await {
+        match try_gemini_model(prompt, &key, &base, model).await {
             ModelNext::Text(t) => return Ok((t, Backend::Gemini)),
             ModelNext::Abort(e) => return Err(GenError::Fatal(e)),
             ModelNext::Skip(reason) => {
@@ -258,10 +275,14 @@ enum ModelNext {
 }
 
 /// Up to three attempts against one Gemini model.
-async fn try_gemini_model(prompt: &str, key: &str, model: &str) -> ModelNext {
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-    );
+///
+/// `base` is the operator's endpoint, not a constant: `gemini` names the
+/// protocol (`kind`, native `:generateContent` REST), and the host belongs to
+/// whoever set the key up. Hardcoding Google's here meant the `L` screen listed
+/// models off the operator's gateway and then every request went to a service
+/// that had never seen the key — the mismatch this argument closes.
+async fn try_gemini_model(prompt: &str, key: &str, base: &str, model: &str) -> ModelNext {
+    let url = format!("{base}/v1beta/models/{model}:generateContent");
     // `responseSchema` where the pass has one, so Gemini constrains decoding to
     // the staging shape instead of merely promising JSON. The schema is built to
     // Gemini's OpenAPI subset (no `additionalProperties`, no unions).
@@ -289,7 +310,16 @@ async fn try_gemini_model(prompt: &str, key: &str, model: &str) -> ModelNext {
     };
     let mut last = String::from("no attempts ran");
     for attempt in 0..3 {
-        let resp = client.post(&url).json(&body).send().await;
+        let resp = client
+            .post(&url)
+            // The key rides a header, never the query string. A URL is logged,
+            // echoed back in errors and visible in a proxy's access log, and
+            // this one carries a credential; `x-goog-api-key` is the same key
+            // in the form Google documents and the compatible gateways accept.
+            .header("x-goog-api-key", key)
+            .json(&body)
+            .send()
+            .await;
         let (status, text) = match resp {
             Ok(r) => {
                 let status = r.status();
@@ -502,13 +532,17 @@ pub async fn fetch_models(
         .timeout(Duration::from_secs(30))
         .build()?;
     let (url, req): (String, reqwest::RequestBuilder) = if kind == "gemini" {
-        let req = client.get(format!("{base}/v1beta/models"));
+        // The base is the operator's endpoint (see `try_gemini_model`), and the
+        // key goes in the header here too, so the listing and the generation
+        // that follows it are the same request against the same host.
+        let url = format!("{base}/v1beta/models");
+        let req = client.get(&url);
         let req = if key.trim().is_empty() {
             req
         } else {
-            req.query(&[("key", key)])
+            req.header("x-goog-api-key", key)
         };
-        (format!("{base}/v1beta/models"), req)
+        (url, req)
     } else if kind == "ollama" {
         (
             format!("{base}/api/tags"),
@@ -575,6 +609,166 @@ pub async fn fetch_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A one-shot HTTP fixture on loopback: records each request's head *and*
+    /// body, answers 200 with `response_body`. Returns `(base_url, seen)`.
+    ///
+    /// The repo's rule for reaching a network-only arm (ROADMAP §1: "pin the
+    /// request shape against a local fixture server"), and the only way to pin
+    /// *which host* a request went to and *where the key sat*: `generate_gemini`
+    /// has no seam to inject a client through, and it should not grow one just
+    /// to be testable. The head is kept, not only the body, because the two
+    /// facts under test are a path and a header.
+    fn fixture_server(
+        response_body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback bind");
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        std::thread::spawn(move || {
+            // A fixed budget rather than `incoming()`: with the bug present no
+            // request ever arrives, and an accept loop would sit here forever.
+            for stream in listener.incoming().take(4) {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                let mut head = String::new();
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                    head.push_str(&line);
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let mut body = vec![0u8; len];
+                let _ = reader.read_exact(&mut body);
+                sink.lock()
+                    .unwrap()
+                    .push(format!("{head}{}", String::from_utf8_lossy(&body)));
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (url, seen)
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn gemini_generation_uses_the_configured_endpoint() {
+        // The gate the mission was about: `kind: gemini` names the protocol, so
+        // the host is whatever the operator pointed it at. Hardcoded Google's,
+        // the `L` screen listed models off the operator's gateway and every
+        // generation then went somewhere the key had never been seen.
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("GEMINI_API_KEY").ok();
+        std::env::set_var("GEMINI_API_KEY", "k-secret");
+        let (url, seen) =
+            fixture_server(r#"{"candidates":[{"content":{"parts":[{"text":"{}"}]}}]}"#);
+        let settings = Settings {
+            gemini_url: url.clone(),
+            analyze_models: vec!["gemini-3.5-flash".into()],
+            ..Settings::default()
+        };
+        let (text, backend) = runtime()
+            .block_on(generate_gemini("{}", &settings))
+            .expect("the fixture answers");
+        assert_eq!(text, "{}");
+        assert_eq!(backend, Backend::Gemini);
+
+        let seen = seen.lock().unwrap();
+        let req = seen.first().expect("one request arrived");
+        // The operator's host, the protocol's path.
+        assert!(
+            req.starts_with("POST /v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1"),
+            "{req}"
+        );
+        let lower = req.to_ascii_lowercase();
+        assert!(lower.contains("x-goog-api-key: k-secret"), "{req}");
+        // A URL is logged, echoed in errors and read by any proxy in between.
+        let request_line = req.lines().next().unwrap_or_default();
+        assert!(
+            !request_line.contains("k-secret"),
+            "the key must not ride the URL: {request_line}"
+        );
+        assert!(!req.contains("generativelanguage"), "{req}");
+        if let Some(k) = saved {
+            std::env::set_var("GEMINI_API_KEY", k);
+        } else {
+            std::env::remove_var("GEMINI_API_KEY");
+        }
+    }
+
+    #[test]
+    fn an_unset_gemini_endpoint_is_the_public_service() {
+        // Two ways to be unset: a settings file written before the field, and
+        // an offer that said nothing. Neither may build a relative URL.
+        let mut s = Settings::default();
+        assert_eq!(gemini_base(&s), DEFAULT_GEMINI_URL);
+        s.gemini_url = "   ".into();
+        assert_eq!(gemini_base(&s), DEFAULT_GEMINI_URL);
+        // A configured one wins, with the trailing slash this path appends to.
+        s.gemini_url = "https://gw.example/".into();
+        assert_eq!(gemini_base(&s), "https://gw.example");
+    }
+
+    #[test]
+    fn the_openai_compatible_path_carries_nothing_branded() {
+        // One function serves OpenRouter and every custom gateway, so nothing
+        // of this repo's may ride the request: the `Referer`/`X-Title` pair
+        // named the project and was the last vendor hardcode in this file.
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("OPENROUTER_API_KEY").ok();
+        std::env::set_var("OPENROUTER_API_KEY", "or-secret");
+        let (url, seen) = fixture_server(r#"{"choices":[{"message":{"content":"{}"}}]}"#);
+        let settings = Settings {
+            openrouter_url: url.clone(),
+            openrouter_model: "some/model".into(),
+            analyzer: "my-gateway".into(),
+            ..Settings::default()
+        };
+        let (text, backend) = runtime()
+            .block_on(generate_openrouter("{}", &settings))
+            .expect("the fixture answers");
+        assert_eq!(text, "{}");
+        assert_eq!(backend, Backend::Openrouter);
+
+        let seen = seen.lock().unwrap();
+        let req = seen.first().expect("one request arrived");
+        assert!(req.starts_with("POST /chat/completions HTTP/1.1"), "{req}");
+        let lower = req.to_ascii_lowercase();
+        assert!(lower.contains("authorization: bearer or-secret"), "{req}");
+        assert!(!lower.contains("referer"), "{req}");
+        assert!(!lower.contains("x-title"), "{req}");
+        assert!(!lower.contains("storycast"), "{req}");
+        // The model the operator picked is what is asked for, not a default.
+        assert!(req.contains("some/model"), "{req}");
+        if let Some(k) = saved {
+            std::env::set_var("OPENROUTER_API_KEY", k);
+        } else {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+    }
 
     #[test]
     fn analyze_chain_uses_only_configured_models() {

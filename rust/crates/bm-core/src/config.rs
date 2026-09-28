@@ -226,6 +226,14 @@ pub struct Settings {
     pub ollama_url: String,
     /// Gemini fallback chain, first tried first.
     pub analyze_models: Vec<String>,
+    /// The `kind: gemini` slot's endpoint root. Settings for the same reason
+    /// [`Self::openrouter_url`] is: the address a key talks to is a deployment
+    /// fact. `gemini` names the *protocol* (`kind`, native `:generateContent`
+    /// REST), not a host — a compatible gateway is that same slot at a
+    /// different address, which is why this field exists rather than a constant
+    /// at the call site.
+    #[serde(default = "default_gemini_url")]
+    pub gemini_url: String,
     /// Gemini TTS fallback chain, newest first.
     pub model_order: Vec<String>,
     /// Port the inductor's control API listens on.
@@ -318,6 +326,21 @@ fn default_render_batch() -> u32 {
     DEFAULT_RENDER_BATCH
 }
 
+/// The public Gemini endpoint: the `kind: gemini` slot's default base, and the
+/// fallback for a settings file that predates [`Settings::gemini_url`].
+///
+/// `pub` because the one caller that must agree with it is the request builder
+/// in `digest/llm.rs`, which appends the protocol's own path to whichever base
+/// it is handed.
+pub const DEFAULT_GEMINI_URL: &str = "https://generativelanguage.googleapis.com";
+
+/// The serde default for [`Settings::gemini_url`]: an existing `settings.json`
+/// has no such key, and a file that omits it must still reach the public
+/// service rather than an empty string (which would build a relative URL).
+fn default_gemini_url() -> String {
+    DEFAULT_GEMINI_URL.to_string()
+}
+
 impl Default for SshDefaults {
     fn default() -> Self {
         SshDefaults {
@@ -350,6 +373,7 @@ impl Default for Settings {
             local_model: "gemma-4-12b".into(),
             ollama_url: "http://localhost:11434".into(),
             analyze_models: vec!["gemini-3.5-flash".into()],
+            gemini_url: default_gemini_url(),
             models_release: String::new(),
             model_order: vec![
                 "gemini-3.1-flash-tts-preview".into(),
@@ -391,6 +415,7 @@ impl Settings {
     pub fn analyzer_settings(&self) -> bm_proto::AnalyzerSettings {
         bm_proto::AnalyzerSettings {
             analyze_models: Some(self.analyze_models.clone()),
+            gemini_url: self.gemini_url.clone(),
             openrouter_model: self.openrouter_model.clone(),
             openrouter_url: self.openrouter_url.clone(),
             local_model: self.local_model.clone(),
@@ -421,6 +446,9 @@ impl Settings {
         // clear.
         if let Some(models) = &a.analyze_models {
             s.analyze_models = models.clone();
+        }
+        if !a.gemini_url.is_empty() {
+            s.gemini_url = a.gemini_url.clone();
         }
         if !a.openrouter_model.is_empty() {
             s.openrouter_model = a.openrouter_model.clone();
@@ -800,7 +828,10 @@ impl LlmConfig {
                     ..Default::default()
                 };
                 match r.kind {
-                    LlmKind::Gemini => a.analyze_models = Some(vec![r.model.clone()]),
+                    LlmKind::Gemini => {
+                        a.analyze_models = Some(vec![r.model.clone()]);
+                        a.gemini_url = r.base_url.clone();
+                    }
                     LlmKind::Ollama => {
                         a.local_model = r.model.clone();
                         a.ollama_url = r.base_url.clone();
@@ -874,7 +905,12 @@ impl LlmConfig {
         s.analyzer = r.analyzer.clone();
         s.analyzer_backend = r.kind.as_backend().to_string();
         match r.kind {
-            LlmKind::Gemini => s.analyze_models = vec![r.model.clone()],
+            LlmKind::Gemini => {
+                s.analyze_models = vec![r.model.clone()];
+                if !r.base_url.is_empty() {
+                    s.gemini_url = r.base_url.clone();
+                }
+            }
             LlmKind::Ollama => {
                 s.local_model = r.model.clone();
                 if !r.base_url.is_empty() {
@@ -1049,6 +1085,65 @@ mod tests {
         let back = Settings::load(&p);
         assert_eq!(back.engine, "gemini");
         assert_eq!(back.count, 42);
+    }
+
+    #[test]
+    fn a_settings_file_without_an_endpoint_still_names_one() {
+        // The field is newer than every settings file in the wild. A missing
+        // key must mean the public service, not an empty string: an empty base
+        // builds a relative URL, which fails as a transport error naming
+        // neither the provider nor the field.
+        let parsed: Settings = serde_json::from_str(r#"{"engine":"vieneu"}"#).unwrap();
+        assert_eq!(parsed.gemini_url, DEFAULT_GEMINI_URL);
+        assert_eq!(Settings::default().gemini_url, DEFAULT_GEMINI_URL);
+        // A file that names one keeps it, trailing slash and all — trimming is
+        // the request builder's business, and this stays the operator's words.
+        let named: Settings =
+            serde_json::from_str(r#"{"gemini_url":"https://gw.example/"}"#).unwrap();
+        assert_eq!(named.gemini_url, "https://gw.example/");
+    }
+
+    #[test]
+    fn a_gemini_providers_endpoint_travels_with_its_model() {
+        // `kind: gemini` is a protocol slot, not a host. An operator pointing it
+        // at a compatible gateway used to have the endpoint silently dropped —
+        // the offer carried the model alone, so the box listed models off the
+        // operator's endpoint and then generated against Google's. Both halves
+        // are asserted here: the offer carries the base, and the overlay lands
+        // it on the field the request builder reads.
+        let mut cfg = llm_cfg(
+            "google",
+            &[("google", "gemini", "g-key", "gemini-3.5-flash")],
+        );
+        cfg.providers.get_mut("google").unwrap().base_url = "https://gw.example".into();
+        let (analyzer, a) = cfg.offer_analyzer(&Settings::default());
+        assert_eq!(analyzer, "google");
+        assert_eq!(a.backend, "gemini");
+        assert_eq!(
+            a.analyze_models.as_deref(),
+            Some(["gemini-3.5-flash".to_string()].as_slice())
+        );
+        assert_eq!(a.gemini_url, "https://gw.example");
+
+        let boxed = Settings {
+            gemini_url: "https://this-box.example".into(),
+            ..Settings::default()
+        };
+        assert_eq!(
+            boxed.with_analyzer_settings(&a).gemini_url,
+            "https://gw.example"
+        );
+
+        // An older inductor says nothing about the endpoint: the box keeps its
+        // own, exactly as it does for the model and the other two URLs.
+        let older = bm_proto::AnalyzerSettings {
+            analyze_models: Some(vec!["m".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            boxed.with_analyzer_settings(&older).gemini_url,
+            "https://this-box.example"
+        );
     }
 
     #[test]

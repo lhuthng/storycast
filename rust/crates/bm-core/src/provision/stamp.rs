@@ -50,16 +50,24 @@ pub struct ProvisionStamp {
     /// records the real hash.
     #[serde(default)]
     pub tts_bin_hash: String,
-    /// The stages the bundle on this box covers, from the plan it was built
-    /// for.
+    /// The `(stage, adapter)` slots the bundle on this box covers, from the
+    /// plan it was built for — `digest@vi-VN`, in
+    /// [`super::sources::slot`]'s spelling.
     ///
-    /// Not a gate — a policy change drifts `sources_hash`, because the stage
+    /// Not a gate — a policy change drifts `sources_hash`, because the slot
     /// list is part of the manifest — but the one thing that lets a report say
-    /// *which* stages a box holds, and so answer the question a widened policy
-    /// raises: this box is being offered merge work and was handed no clips.
+    /// *which* stages a box holds **and for which language**, and so answer the
+    /// question both a widened policy and a second adapter raise: this box is
+    /// being offered merge work and was handed no clips; this box runs an
+    /// English adapter and its bundle carries only Vietnamese prompts.
     ///
-    /// `#[serde(default)]`: a stamp written before the field existed reads as
-    /// an empty list, which is "unknown", not "nothing shipped".
+    /// The name is history: it was a bare stage list, and a bare stage reads as
+    /// "that stage, whatever adapter" (see [`super::sources::holds`]), so a
+    /// stamp written before the second dimension existed still parses and still
+    /// means what it meant.
+    ///
+    /// `#[serde(default)]`: a stamp written before the field existed at all
+    /// reads as an empty list, which is "unknown", not "nothing shipped".
     #[serde(default)]
     pub sources_stages: Vec<String>,
 }
@@ -235,7 +243,7 @@ pub fn compute_provision_stamp(
 
     Ok(ProvisionStamp {
         agent_version: agent_version.to_string(),
-        sources_stages: sources_manifest.stages.clone(),
+        sources_stages: sources_manifest.slots.clone(),
         sources_hash: hex_digest(sources.finalize()),
         voices_hash: hex_digest(voices.finalize()),
         tts_hash: hex_digest(tts.finalize()),
@@ -561,7 +569,7 @@ mod tests {
         assert!(renamed.tts_in_sync(&added) && renamed.voices_in_sync(&added));
     }
 
-    /// Widening a box's policy is drift, because the stage list is part of the
+    /// Widening a box's policy is drift, because the slot list is part of the
     /// manifest.
     ///
     /// This is the guard the narrowed set rests on. A render-only box is sent
@@ -585,16 +593,46 @@ mod tests {
             !render_only.sources_in_sync(&with_merge),
             "a box given merge must be re-provisioned for the clips it now needs"
         );
-        assert_eq!(render_only.sources_stages, vec!["render".to_string()]);
+        assert_eq!(
+            render_only.sources_stages,
+            vec!["render@default".to_string()]
+        );
         assert_eq!(
             with_merge.sources_stages,
-            vec!["render".to_string(), "merge".to_string()],
-            "the stages travel in canonical order, not the policy's own"
+            vec!["render@default".to_string(), "merge@default".to_string()],
+            "the slots travel in canonical order, not the policy's own"
         );
         // The order the operator happens to list them in is not content.
         let reordered = stamp_for(&root, &[bm_proto::Stage::Merge, bm_proto::Stage::Render]);
         assert_eq!(with_merge.sources_hash, reordered.sources_hash);
         assert_eq!(with_merge.sources_stages, reordered.sources_stages);
+    }
+
+    /// A new adapter home is drift too, and it is the *second* dimension of the
+    /// same argument: the bundle ships every language the inductor carries, so
+    /// a language that arrives after a box was pushed is 21 KB the box does not
+    /// have, and the box has to be told.
+    #[test]
+    fn a_second_adapter_home_is_sources_drift_for_every_box() {
+        let root = stamp_fixture("adapter-drift");
+        let before = stamp_for(&root, &[bm_proto::Stage::Digest]);
+        assert_eq!(before.sources_stages, vec!["digest@default".to_string()]);
+
+        let home = root.join(crate::paths::ADAPTERS_DIR).join("xianxia-en-US");
+        std::fs::create_dir_all(home.join("prompts")).unwrap();
+        std::fs::write(home.join("prompts/analyze.txt"), "english").unwrap();
+        let after = stamp_for(&root, &[bm_proto::Stage::Digest]);
+
+        assert_eq!(
+            after.sources_stages,
+            vec!["digest@xianxia-en-US".to_string()]
+        );
+        assert!(
+            !before.sources_in_sync(&after),
+            "a language nothing has been pushed yet has to reach the boxes"
+        );
+        // …and, as with every source change, the weights are not re-sent.
+        assert!(before.tts_in_sync(&after) && before.voices_in_sync(&after));
     }
 
     /// The store the sidecar loads is its own gate: a newly enrolled voice must
@@ -786,7 +824,7 @@ mod tests {
         );
         // …and a crawl box holds the profile's templates either way: they are
         // what a crawler named by a registry resolves against.
-        assert_eq!(c.sources_stages, vec!["crawl".to_string()]);
+        assert_eq!(c.sources_stages, vec!["crawl@default".to_string()]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -628,6 +628,14 @@ In plain terms, in the order worth trying them. The full guide is
 answer. A site that has started refusing you is the most common cause by a long
 way, and it is the one thing a group of machines cannot tell you on its own.
 
+**Nothing is being offered, and the cluster sits idle.** Run `bm-inductor
+profile check`: it prints the adapter, the binding and the engine, and exits
+non-zero when they disagree. A chapter whose language the bound engine cannot
+voice is withheld rather than failed — the rows stay `Pending`, nothing is
+struck and nothing is shelved — so an idle cluster beside a stalled chapter is
+what a language mismatch looks like. `serve` warns about it once, in the Events
+pane, when it starts.
+
 **The book comes out in one voice.** The chapter had no quote marks in it, so
 there was nothing for the program to tell narration from dialogue. The digest
 prints the split on its first line (`prepared 52 event(s): 21 narration, 31
