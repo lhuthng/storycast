@@ -4,6 +4,7 @@ mod cloud;
 mod confirm;
 mod crawl;
 mod digest;
+mod script;
 mod events;
 mod footer;
 mod graph;
@@ -523,6 +524,7 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Screen::Machine(addr) => machine::draw_machine_info(f, app, &addr),
         Screen::Policy(v) => policy::draw_policy(f, app, &v),
         Screen::Digest(v) => digest::draw_digest(f, app, &v),
+        Screen::Script(v) => script::draw_script(f, app, &v),
         Screen::Jobs { scroll, .. } => jobs::draw_jobs(f, app, scroll),
         Screen::Tasks(v) => tasks::draw_tasks_screen(f, app, &v),
         Screen::TaskDetail(d) => task_detail::draw_task_detail(f, app, &d),
