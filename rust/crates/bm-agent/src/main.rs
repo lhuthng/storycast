@@ -924,14 +924,33 @@ async fn run_render(
         .unwrap_or("");
     let title = bm_core::assemble::title_speech(layout, n, &cast, first);
     let units = bm_core::assemble::plan_render(&planned, &cast, &seg_dir, local, title.as_ref())?;
-    let todo: Vec<_> = units
-        .into_iter()
-        .filter(|u| {
-            !(u.dest.exists() && u.dest.metadata().map(|m| m.len() > 1000).unwrap_or(false))
+    // A take's file is content-addressed, and the chapter's plan is what names
+    // it, so this path owns the plan the way the inductor does when it offers:
+    // build it, reconcile it against the stored one — a first plan adopts an
+    // existing legacy cache, a re-plan trusts the files it recorded — and write
+    // it back. Rendering then covers exactly the takes the diff calls dirty, and
+    // the mixer reads the names this wrote, so a hand-driven render and a
+    // hand-driven merge agree without either recomputing a name.
+    std::fs::create_dir_all(&seg_dir)?;
+    let plan_path = layout.plan(n);
+    let stored = bm_core::assemble::RenderPlan::load(&plan_path);
+    let up = bm_core::assemble::reconcile(
+        stored.as_ref(),
+        bm_core::assemble::RenderPlan::build(n, engine, &units),
+        &seg_dir,
+    );
+    up.plan.save(&plan_path)?;
+    // Unit and plan entry are the same position: `build` maps them in order.
+    let todo: Vec<_> = up
+        .dirty
+        .iter()
+        .filter_map(|i| {
+            let unit = units.get(*i)?;
+            let file = up.plan.takes.get(*i)?.file.clone();
+            Some((unit, file))
         })
         .collect();
     let total = todo.len();
-    std::fs::create_dir_all(&seg_dir)?;
     // No accent gate: any voice the sidecar can synthesize is allowed. If the
     // engine itself rejects a voice, that failure surfaces from /infer.
     // The render audit log belongs with the rest of the state, not in
@@ -939,7 +958,7 @@ async fn run_render(
     // -readable record of TTS calls sitting beside the mp3s is a stray
     // intermediate in the one directory an operator actually looks at.
     let manifest = layout.bm_state().join("render-manifest.jsonl");
-    for (i, u) in todo.iter().enumerate() {
+    for (i, (u, dest)) in todo.iter().enumerate() {
         set_progress(
             shared,
             i as f32 / total.max(1) as f32,
@@ -948,7 +967,7 @@ async fn run_render(
         let wav = tts
             .infer(&u.text, &u.voice, u.temperature, u.silence_p, engine)
             .await?;
-        std::fs::write(&u.dest, &wav)?;
+        std::fs::write(seg_dir.join(dest), &wav)?;
         bm_core::assemble::manifest_append(
             &manifest,
             &json!({"chapter": n, "tag": u.tag, "voice": u.voice,
@@ -2289,6 +2308,17 @@ async fn run(cli: Cli) -> Result<()> {
                     sidecar.stop();
                 }
                 "merge" => {
+                    // A hand-driven merge has no offer to carry the take list,
+                    // but the names are still the plan's: a take file is
+                    // content-addressed, so recomputing it from the script and
+                    // the cast finds nothing. Read the chapter's own recorded
+                    // plan instead — the same names an offer would have
+                    // carried, in the same mix order. Only a chapter with no
+                    // readable plan falls back to `assemble` naming them
+                    // itself, which is the pre-content-addressed behaviour.
+                    let takes = bm_core::assemble::RenderPlan::load(&layout.plan(chapter))
+                        .map(|p| p.files())
+                        .unwrap_or_default();
                     run_merge(
                         &layout,
                         chapter,
@@ -2303,10 +2333,7 @@ async fn run(cli: Cli) -> Result<()> {
                                 settings.music_volume,
                                 settings.inject_volume,
                             ),
-                            // A hand-driven merge: no offer, so no plan's take
-                            // list. `assemble` names them itself, as this path
-                            // always has.
-                            takes: Vec::new(),
+                            takes,
                         },
                         &shared,
                         None,
