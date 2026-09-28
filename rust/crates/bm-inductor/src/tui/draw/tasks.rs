@@ -3,7 +3,7 @@ use crate::tui::{
     app::{App, HitTarget, ListTarget, Panel},
     layout::size_class,
     layout::Size,
-    model::{age_secs, clamp_scroll, filtered_tasks, task_state_counts},
+    model::{abandoned, age_secs, clamp_scroll, filtered_tasks, task_state_counts, Facet},
     screen::TasksView,
     style::{
         cell, centered_padded, empty_body, selection_bg, stage_color, state_color,
@@ -115,8 +115,13 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
     // Clone the compact ledger so hit-region bookkeeping can coexist with the
     // borrowed rows used by the table renderer.
     let all = app.tasks.clone();
-    let shown = filtered_tasks(&all, &view.filter);
+    // Who is still answering, read once: the facet filter, the counts and the
+    // row tint below all have to agree about a silent box, and three reads
+    // could catch a beat landing between them.
+    let live = app.live_worker_ids();
+    let shown = filtered_tasks(&all, &view.filter, view.facet, &live);
     let shelved = all.iter().filter(|t| t.state == TaskState::Shelved).count();
+    let abandoned_rows = all.iter().filter(|t| abandoned(t, &live)).count();
     let block = super::pane_block(
         app,
         if shelved > 0 {
@@ -132,7 +137,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
     }));
     let inner = block.inner(area);
     f.render_widget(block, area);
-    if inner.height < 5 {
+    if inner.height < 6 {
         return;
     }
 
@@ -140,6 +145,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // counts
+            Constraint::Length(1), // facets
             Constraint::Length(1), // filter
             Constraint::Min(1),    // table
             Constraint::Length(2), // hints
@@ -163,22 +169,52 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
             Style::default().fg(Color::DarkGray),
         ));
     }
+    // The one number no state column can give: a row that is *out* with a box
+    // that stopped answering. It is not a state — it is a state plus a fact
+    // about somebody else — so it is appended rather than counted as a state,
+    // and only when there is one.
+    if abandoned_rows > 0 {
+        summary.push(Span::styled(
+            format!("  ·  {abandoned_rows} abandoned"),
+            app.style_bold(Color::Magenta),
+        ));
+    }
     f.render_widget(Paragraph::new(Line::from(summary)), rows[0]);
     app.add_hit_region(
-        rows[2],
+        rows[3],
         HitTarget::List {
             kind: ListTarget::Tasks,
             row_start: view.scroll,
-            row_y: rows[2].y + 2,
+            row_y: rows[3].y + 2,
         },
     );
+
+    // The facet bar: the chips `←/→` steps through, in the order it steps
+    // them *and* drawn in that order, because a bar that showed them
+    // differently would lie about where the next keypress goes. The active
+    // chip is bracketed rather than merely coloured, so it survives a theme
+    // with no colour.
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut facets: Vec<Span> = vec![Span::styled("←→ ", dim)];
+    for f in Facet::ALL {
+        if f == view.facet {
+            facets.push(Span::styled(
+                format!("[{}]", f.label()),
+                app.style_bold(Color::White),
+            ));
+        } else {
+            facets.push(Span::styled(f.label().to_string(), dim));
+        }
+        facets.push(Span::raw(" "));
+    }
+    f.render_widget(Paragraph::new(Line::from(facets)), rows[1]);
 
     // The filter line is always present, like the cast screen's, so an active
     // filter can never be invisible.
     let filter_line = if view.filter.trim().is_empty() {
         Line::from(Span::styled(
-            "filter: (type a stage, state or chapter — e.g. shelved, digest, 42)",
-            Style::default().fg(Color::DarkGray),
+            "filter: (a stage, state or chapter — shelved, digest, 42; combines with the facet)",
+            dim,
         ))
     } else {
         Line::from(vec![
@@ -187,7 +223,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
             Span::styled("_", app.style(Color::Cyan)),
         ])
     };
-    f.render_widget(Paragraph::new(filter_line), rows[1]);
+    f.render_widget(Paragraph::new(filter_line), rows[2]);
 
     if all.is_empty() {
         f.render_widget(
@@ -195,18 +231,29 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
                 "no tasks in the ledger yet".into(),
                 ":t (translate) to enqueue a chapter range".into(),
             ]),
-            rows[2],
+            rows[3],
         );
     } else if shown.is_empty() {
-        f.render_widget(
-            empty_body(vec![
-                format!("no task matches “{}”", view.filter.trim()),
-                "Backspace widens the filter · Ctrl-U clears it".into(),
-            ]),
-            rows[2],
-        );
+        let which = if view.facet == Facet::All {
+            String::new()
+        } else {
+            format!("{} ", view.facet.label())
+        };
+        let mut why = vec![format!(
+            "no {which}task matches “{}”",
+            view.filter.trim()
+        )];
+        // Both halves of the narrowing are named, because either one alone can
+        // be the reason the list is empty and the operator is looking at the
+        // one they set three keypresses ago.
+        if view.facet != Facet::All {
+            why.push("←→ steps the facet · Tab clears both the facet and the filter".into());
+        } else {
+            why.push("Backspace widens the filter · Ctrl-U clears it".into());
+        }
+        f.render_widget(empty_body(why), rows[3]);
     } else {
-        let height = rows[2].height.saturating_sub(2) as usize;
+        let height = rows[3].height.saturating_sub(2) as usize;
         let cursor = view.cursor.min(shown.len() - 1);
         let mut scroll = view.scroll;
         clamp_scroll(cursor, &mut scroll, shown.len(), height);
@@ -265,16 +312,26 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
                     cell(why_label(&t.detail)),
                 ];
                 // Rank by urgency: an actionable failure outranks a running
-                // task, which outranks finished history.
-                let mut row = match t.state {
-                    TaskState::Shelved | TaskState::Failed => {
-                        Row::new(cells).style(style_bold_of(colour, Color::Red))
+                // task, which outranks finished history. A row held by a box
+                // that has gone quiet outranks both — it is the one state that
+                // will not move on its own, and magenta is the only colour on
+                // this table not already spoken for by a severity the ledger
+                // itself chose.
+                let mut row = if abandoned(t, &live) {
+                    Row::new(cells).style(style_bold_of(colour, Color::Magenta))
+                } else {
+                    match t.state {
+                        TaskState::Shelved | TaskState::Failed => {
+                            Row::new(cells).style(style_bold_of(colour, Color::Red))
+                        }
+                        TaskState::Assigned | TaskState::Running => {
+                            Row::new(cells).style(style_of(colour, Color::Yellow))
+                        }
+                        TaskState::Done => {
+                            Row::new(cells).style(Style::default().fg(Color::DarkGray))
+                        }
+                        TaskState::Pending => Row::new(cells),
                     }
-                    TaskState::Assigned | TaskState::Running => {
-                        Row::new(cells).style(style_of(colour, Color::Yellow))
-                    }
-                    TaskState::Done => Row::new(cells).style(Style::default().fg(Color::DarkGray)),
-                    TaskState::Pending => Row::new(cells),
                 };
                 if idx == cursor {
                     // Tint, not REVERSED: reversing wiped the row's severity
@@ -286,41 +343,73 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
             })
             .collect();
 
-        let table = Table::new(table_rows, widths)
-            .header(Row::new(header).style(style_bold_of(colour, Color::Gray)))
-            .block(Block::default().borders(Borders::TOP).title(format!(
-                "Tasks — {} of {} shown",
+        let title = if view.facet == Facet::All {
+            format!("Tasks — {} of {} shown", shown.len(), all.len())
+        } else {
+            format!(
+                "Tasks — {} · {} of {} shown",
+                view.facet.label(),
                 shown.len(),
                 all.len()
-            )));
-        f.render_widget(table, rows[2]);
+            )
+        };
+        let table = Table::new(table_rows, widths)
+            .header(Row::new(header).style(style_bold_of(colour, Color::Gray)))
+            .block(Block::default().borders(Borders::TOP).title(title));
+        f.render_widget(table, rows[3]);
     }
 
     // The hint names the keys that exist, in the order an operator needs them.
-    let dim = Style::default().fg(Color::DarkGray);
     let hint = if shown.is_empty() {
         vec![
             Line::from(Span::styled("Esc or q closes", dim)),
             Line::from(Span::styled(
-                "Backspace widens · Ctrl-U clears the filter",
+                "←→ facet · Backspace widens the filter · Tab clears both",
                 dim,
             )),
         ]
     } else {
         let t = &shown[view.cursor.min(shown.len() - 1)];
+        // Only a row that is *out* with someone has anything to release, and
+        // the holder is what `W` names. Suggesting either key on a pending row
+        // would be advice that no-ops, which is how a hint line teaches an
+        // operator to distrust it.
+        let held = if matches!(t.state, TaskState::Assigned | TaskState::Running) {
+            t.assigned_to
+                .as_deref()
+                .or_else(|| t.racers.first().map(String::as_str))
+        } else {
+            None
+        };
+        let gone = abandoned(t, &live);
+        let release = match held {
+            Some(w) => Span::styled(
+                format!("x release · W all of {w} · "),
+                if gone { app.style(Color::Magenta) } else { dim },
+            ),
+            None => Span::styled("x/W need a task that is out with a box · ", dim),
+        };
         vec![
             Line::from(vec![
                 Span::styled(
                     format!("{}  {}", t.id(), t.state.as_str()),
                     app.style_bold(state_color(t.state.as_str())),
                 ),
-                Span::styled("  ·  Enter details  ·  u retry  ·  F force re-run  ·  R remerge all  ·  E rerender all", dim),
+                Span::styled(
+                    "  ·  Enter details  ·  u retry  ·  F force re-run  ·  R remerge all  ·  E rerender all",
+                    dim,
+                ),
             ]),
-            Line::from(Span::styled(
-                "↑/↓ move · PgUp/PgDn page · type to filter · Backspace widens · Esc/q close",
-                dim,
-            )),
+            // The filter line is one row above and labels itself, so this
+            // line spends its width on the keys instead of repeating it — at
+            // 114 columns `Esc/q close` is the first thing to fall off the
+            // end, and it is the one key on the row nobody can guess.
+            Line::from(vec![
+                Span::styled("↑/↓ move · PgUp/PgDn page · ←→ facet · ", dim),
+                release,
+                Span::styled("A requeue the silent · Esc/q close", dim),
+            ]),
         ]
     };
-    f.render_widget(Paragraph::new(hint), rows[3]);
+    f.render_widget(Paragraph::new(hint), rows[4]);
 }

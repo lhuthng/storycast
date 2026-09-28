@@ -181,7 +181,10 @@ fn list_len(app: &App, kind: ListTarget) -> usize {
             crate::tui::model::filtered_cast_rows(&app.cast_rows(), &v.filter).len()
         }
         (Screen::Tasks(v), ListTarget::Tasks) => {
-            crate::tui::model::filtered_tasks(&app.tasks, &v.filter).len()
+            // The same two narrowings the renderer applies, or a click lands on
+            // the row drawn where the *unfiltered* index says it is.
+            let live = app.live_worker_ids();
+            crate::tui::model::filtered_tasks(&app.tasks, &v.filter, v.facet, &live).len()
         }
         (Screen::Sound(v), ListTarget::Sound) => app
             .sound

@@ -109,15 +109,25 @@ pub(crate) fn dispatch_op(
 /// Keyed by what the op acts on, not just by its name: retrying digest:3 and
 /// digest:4 are two different jobs and must not suppress each other, while a
 /// second press of the same key is still refused as a duplicate.
+///
+/// The two widest fields are in the key for the same reason. A `release` that
+/// names one **worker** is not the release of one row, and two `fix-speaker`
+/// ops on one chapter are two different segments — without them here the second
+/// press of either is refused as a duplicate of the first, which is a lie about
+/// work that was never dispatched.
 pub(crate) fn op_key(req: &OpRequest) -> String {
     format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}",
         req.op.as_str(),
         req.stage.map(Stage::as_str).unwrap_or("-"),
         req.chapter
             .map(|c| c.to_string())
             .unwrap_or_else(|| "-".into()),
         req.force.unwrap_or(false),
+        req.segment
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "-".into()),
+        req.worker.as_deref().unwrap_or("-"),
     )
 }
 

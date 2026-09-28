@@ -608,6 +608,28 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                 _ => Json(OpResult::fail("retry-task requires stage and chapter")),
             }
         }
+        bm_proto::Op::Release => {
+            // Two scopes, exactly one per request, and the refusal keeps them
+            // apart the way `retry`'s stage-without-chapter does: widening a
+            // release to the whole ledger because a field was missing is the
+            // kind of doing-more-than-asked this shape exists to stop. A
+            // worker names every row that box holds; stage + chapter names one
+            // row, which for `render` is every take of it.
+            let force = req.force.unwrap_or(false);
+            match (req.worker.clone(), req.stage, req.chapter) {
+                (Some(worker), ..) => {
+                    let mut inner = st.lock().await;
+                    Json(OpResult::ok(inner.op_release_worker(&worker, force)))
+                }
+                (None, Some(stage), Some(chapter)) => {
+                    let mut inner = st.lock().await;
+                    Json(OpResult::ok(inner.op_release_task(stage, chapter, force)))
+                }
+                _ => Json(OpResult::fail(
+                    "release needs a worker, or a stage and a chapter",
+                )),
+            }
+        }
         bm_proto::Op::Reconcile => {
             // Plan under the lock, think outside it: the LLM call takes
             // seconds and must never block heartbeats and completions.
