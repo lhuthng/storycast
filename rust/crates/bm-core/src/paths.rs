@@ -50,6 +50,14 @@ pub const DEFAULT_ENGINE: &str = "vieneu";
 /// (about a gigabyte live) and gitignored like `models/` always was.
 pub const ENGINES_DIR: &str = "engines";
 
+/// The directory every language's own trees hang off, at the scope root:
+/// `adapters/<name>/`, holding that language's `prompts/` and `crawl/`.
+///
+/// One subdirectory per adapter, so a language is a *thing* rather than a pair
+/// of directory names the checkout happens to carry — which is what lets two
+/// languages of one book exist, and what a language release unpacks into.
+pub const ADAPTERS_DIR: &str = "adapters";
+
 /// The one engine that ever had a *flat* tree at the root.
 ///
 /// History, like [`LEGACY_CACHE_ENGINES`]: before the engine tree, `models/`
@@ -237,21 +245,32 @@ impl Layout {
         self.data().join("crawl-index.json")
     }
 
-    /// The crawl scripts a profile ships: `assets/crawl/`.
+    /// The crawlers the **adapter** ships: `<adapter home>/crawl/`.
     ///
-    /// Under `assets/` because that is what a profile *is* (see
-    /// `profile::LIVE_DIRS`) and what provisioning rsyncs to every worker, so a
-    /// script and the assets it needs travel together.
+    /// The language's, not the pack's. A crawler is one site read in one
+    /// language, and the adapter's language is both the source's and the
+    /// target's — so a Vietnamese site's crawler belongs beside the Vietnamese
+    /// prompts, and the same genre crawled in English is a different site
+    /// rather than a different genre. Keeping them in `assets/` made the pack
+    /// carry a tree that no pack value ever reads and that changes for a
+    /// reason (the site) the art never changes for.
+    ///
+    /// **Pre-split they were the pack's**, at `assets/crawl/`, which is what a
+    /// checkout with no adapter bundle still reads — so nothing on disk changes
+    /// meaning, and the fallback is a tree that is already there.
     pub fn crawl_scripts(&self) -> PathBuf {
-        self.assets().join("crawl")
+        match self.adapter_home() {
+            Some(home) => home.join("crawl"),
+            None => self.assets().join("crawl"),
+        }
     }
 
     /// The active workspace's own crawlers: `workspaces/<name>/crawl/`.
     ///
-    /// Profile crawlers (`assets/crawl/`) are shared by every workspace on this
-    /// root and replaced wholesale by `:profile load`; a book whose site needs
-    /// its own crawler therefore lives here, where `:profile load` cannot reach
-    /// it and a second workspace never sees it. Searched **first** by
+    /// The adapter's crawlers are shared by every workspace on this root and
+    /// replaced wholesale by `:profile load`; a book whose site needs its own
+    /// crawler therefore lives here, where `:profile load` cannot reach it and a
+    /// second workspace never sees it. Searched **first** by
     /// `crawl::resolve_script`, so a same-named file shadows the profile's —
     /// the workspace's answer wins over the profile's.
     ///
@@ -451,11 +470,37 @@ impl Layout {
     /// its base, so `prompts/analyze.txt` travels from either tree to the same
     /// place on a box.
     pub fn prompts_base(&self) -> PathBuf {
+        if let Some(home) = self.adapter_home() {
+            return home;
+        }
         if self.work.join("prompts").is_dir() {
             self.work.clone()
         } else {
             self.root.clone()
         }
+    }
+
+    /// The directory an adapter's own trees hang off, if this checkout carries
+    /// one: `adapters/<adapter>/`, in the nearest scope that has it.
+    ///
+    /// A **scope** is the workspace and then the checkout, and inside a scope
+    /// the bundle wins over the pre-split flat tree (`prompts/` at the scope
+    /// root), because the bundle is the shape a language release unpacks into
+    /// and it is the one that can also carry the language's `crawl/`. `None`
+    /// means this checkout has not been given an adapter bundle at all — which
+    /// is every checkout that predates the split, and what the flat fallbacks
+    /// in [`Layout::prompts_base`] and [`Layout::crawl_scripts`] exist for.
+    ///
+    /// It is a scope *root*, not a tree, so callers that resolve a name
+    /// relative to a scope (the crawler resolver) and callers that want one
+    /// directory (the prompts) both get what they need from it.
+    pub fn adapter_home(&self) -> Option<PathBuf> {
+        [
+            self.work.join(ADAPTERS_DIR).join(&self.adapter),
+            self.root.join(ADAPTERS_DIR).join(&self.adapter),
+        ]
+        .into_iter()
+        .find(|p| p.is_dir())
     }
 
     /// The live `prompts/` tree in force, whole. The fallback is not silence:
@@ -1095,6 +1140,62 @@ mod tests {
         assert_eq!(l.prompt(), book.join("prompts/analyze.txt"));
         assert_eq!(l.script_prompt(), book.join("prompts/script.txt"));
         assert_ne!(l.prompt(), bare.prompt());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The adapter is a *home* now, not a pair of directory names: a checkout
+    /// carrying `adapters/<name>/` reads its prompts **and** its crawlers from
+    /// there, and one carrying no bundle keeps reading the flat trees it always
+    /// read — including the pack's `assets/crawl/`, which is where the crawlers
+    /// were before they were the language's.
+    #[test]
+    fn an_adapter_bundle_owns_both_its_prompts_and_its_crawlers() {
+        let root = fixture_root("adapter-home");
+        std::fs::create_dir_all(root.join("prompts")).unwrap();
+        std::fs::write(root.join("prompts/analyze.txt"), "flat").unwrap();
+
+        let flat = Layout {
+            adapter: "vi-VN".into(),
+            ..Layout::new(&root)
+        };
+        assert_eq!(flat.adapter_home(), None, "no bundle, no home");
+        assert_eq!(
+            flat.prompts_base(),
+            root,
+            "so the prompts are the flat ones"
+        );
+        assert_eq!(
+            flat.crawl_scripts(),
+            root.join("assets/crawl"),
+            "and the crawlers are still the pack's"
+        );
+
+        // With the bundle, both trees answer from one directory.
+        let home = root.join("adapters/vi-VN");
+        std::fs::create_dir_all(home.join("prompts")).unwrap();
+        std::fs::create_dir_all(home.join("crawl")).unwrap();
+        std::fs::write(home.join("prompts/analyze.txt"), "vi-VN").unwrap();
+        let l = Layout {
+            adapter: "vi-VN".into(),
+            ..Layout::new(&root)
+        };
+        assert_eq!(l.adapter_home(), Some(home.clone()));
+        assert_eq!(l.prompts_base(), home);
+        assert_eq!(l.prompt(), home.join("prompts/analyze.txt"));
+        assert_eq!(l.crawl_scripts(), home.join("crawl"));
+
+        // A workspace's own bundle is nearer than the checkout's — the same
+        // rule the flat trees already followed.
+        let book = root.join("workspaces/book");
+        std::fs::create_dir_all(book.join("adapters/vi-VN/crawl")).unwrap();
+        let scoped = Layout {
+            root: root.clone(),
+            work: book.clone(),
+            adapter: "vi-VN".into(),
+            engine: DEFAULT_ENGINE.into(),
+        };
+        assert_eq!(scoped.prompts_base(), book.join("adapters/vi-VN"));
+        assert_eq!(scoped.crawl_scripts(), book.join("adapters/vi-VN/crawl"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
