@@ -3,15 +3,20 @@ use std::io::{Read, Seek};
 use std::path::Path;
 
 /// Gemini returns 24 kHz; VieNeu renders at 48 kHz.
-pub const GEMINI_RATE: u32 = 24_000;
-pub const VIENEU_RATE: u32 = 48_000;
+///
+/// Read off the engine declarations rather than spelled a second time: the
+/// number is the engine's own fact (see `voices::EngineDecl`), and this is the
+/// consumer that used to hold the only copy.
+pub const GEMINI_RATE: u32 = crate::voices::GEMINI.sample_rate;
+pub const VIENEU_RATE: u32 = crate::voices::VIENEU.sample_rate;
 
+/// The rate a chapter rendered by `engine` is assembled at.
+///
+/// A name nobody declared is **not** VieNeu's: `output_format` answers with
+/// Gemini's, which is the historical `else` and the safe direction for an
+/// engine whose audio nobody has measured.
 pub fn sample_rate_for(engine: &str) -> u32 {
-    if engine == "vieneu" {
-        VIENEU_RATE
-    } else {
-        GEMINI_RATE
-    }
+    crate::voices::output_format(engine).0
 }
 
 // ---------------------------------------------------------------------------

@@ -32,7 +32,7 @@ RUST_BIN = ROOT / "rust/target/debug/bm-tts-check"
 WORK = pathlib.Path("/tmp/bm-text-parity")
 
 DICT_CANDIDATES = [
-    ROOT / "models/sea_g2p.bin",
+    ROOT / "engines/vieneu/models/sea_g2p.bin",
     ROOT / "rust/vendor/sea-g2p/python/sea_g2p/sea_g2p.bin",
     ROOT / ".venv/lib/python3.12/site-packages/sea_g2p/sea_g2p.bin",
 ]

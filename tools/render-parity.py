@@ -36,7 +36,7 @@ BACKBONE_GLOB = str(HF / "models--pnnbao-ump--VieNeu-TTS-v3-Turbo/snapshots/*/on
 CODEC_GLOB = str(HF / "models--OpenMOSS-Team--MOSS-Audio-Tokenizer-Nano-ONNX/snapshots/*")
 STORE = ROOT / ".venv/lib/python3.12/site-packages/vieneu/assets/voices_v3_turbo.json"
 DICT_CANDIDATES = [
-    ROOT / "models/sea_g2p.bin",
+    ROOT / "engines/vieneu/models/sea_g2p.bin",
     ROOT / "rust/vendor/sea-g2p/python/sea_g2p/sea_g2p.bin",
     ROOT / ".venv/lib/python3.12/site-packages/sea_g2p/sea_g2p.bin",
 ]

@@ -560,10 +560,10 @@ impl Inner {
         // :prov push it) and refuses what is enrolled nowhere. Presets ship
         // with the sidecar, so only clones gate here — and only where a bake
         // exists to check against.
-        if !declared && self.layout.root.join("models/voices.json").is_file() {
-            bm_core::pool::bake_missing_voices(&self.layout.root);
+        if !declared && self.layout.tts_voices().is_file() {
+            bm_core::pool::bake_missing_voices(&self.layout);
             let want = bm_core::util::fold(&voice);
-            let baked = std::fs::read_to_string(self.layout.root.join("models/voices.json"))
+            let baked = std::fs::read_to_string(self.layout.tts_voices())
                 .ok()
                 .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
                 .and_then(|v| {

@@ -24,12 +24,24 @@ const EXIT_LANDED: i32 = 0;
 const EXIT_CORRUPT: i32 = 20;
 const EXIT_UNREACHABLE: i32 = 21;
 
-fn fetch_script(release: &crate::artifact::ModelsRelease) -> String {
+fn fetch_script(release: &crate::artifact::ModelsRelease, engine: &str) -> String {
     format!(
-        "~/bm-worker/bm-agent fetch-artifact {url} ~/bm-worker/models --expect {hash}",
+        "~/bm-worker/bm-agent fetch-artifact {url} ~/bm-worker/{rel}/models --expect {hash}",
         url = shell_quote(&release.url),
+        rel = engine_rel(engine),
         hash = release.hash,
     )
+}
+
+/// The engine's own tree on a worker, relative to the worker root:
+/// `engines/<name>`.
+///
+/// One spelling, so the push, the release fetch, the checksum list and the
+/// launch script cannot disagree about where the weights landed. It mirrors
+/// `Layout::engine_dir` on the far side of the ssh, where there is no `Layout`
+/// — the worker root is `$HOME/{REMOTE_DIR}` and the engine is a string.
+fn engine_rel(engine: &str) -> String {
+    format!("{}/{}", crate::paths::ENGINES_DIR, engine)
 }
 
 /// Read a fetch's exit code as the contract it is.
@@ -407,7 +419,7 @@ if command -v zstd >/dev/null 2>&1; then echo "ZSTD-OK (installed)"; else echo "
 
 impl Ssh {
     /// Ask a machine what it already has.
-    pub fn probe(&self) -> Probe {
+    pub fn probe(&self, engine: &str) -> Probe {
         let script = format!(
             r#"echo "hostname=$(hostname 2>/dev/null || echo unknown)"
 echo "os=$(uname -s 2>/dev/null || echo unknown)"
@@ -425,17 +437,17 @@ if [ -x "$HOME/{dir}/python/.venv/bin/python" ]; then
 else
   echo "python=absent"
 fi
-if [ -x "$HOME/{dir}/bm-tts" ]; then
+if [ -x "$HOME/{dir}/{rel}/bm-tts" ]; then
   echo "tts_bin=present"
 else
   echo "tts_bin=absent"
 fi
-if [ -f "$HOME/{dir}/libonnxruntime.so.1" ]; then
+if [ -f "$HOME/{dir}/{rel}/libonnxruntime.so.1" ]; then
   echo "tts_lib=present"
 else
   echo "tts_lib=absent"
 fi
-if [ -f "$HOME/{dir}/models/manifest.json" ]; then
+if [ -f "$HOME/{dir}/{rel}/models/manifest.json" ]; then
   echo "models=present"
 else
   echo "models=absent"
@@ -465,6 +477,7 @@ fi
 echo "probe=done"
 "#,
             dir = REMOTE_DIR,
+            rel = engine_rel(engine),
             port = TTS_PORT
         );
 
@@ -521,13 +534,14 @@ echo "probe=done"
         probe
     }
 
-    /// Create the worker root skeleton.
-    pub fn ensure_root(&self) -> Result<()> {
+    /// Create the worker root skeleton, including the bound engine's own tree.
+    pub fn ensure_root(&self, engine: &str) -> Result<()> {
         let script = format!(
-            "mkdir -p $HOME/{d}/models $HOME/{d}/prompts $HOME/{d}/assets/effects \
+            "mkdir -p $HOME/{d}/{rel} $HOME/{d}/prompts $HOME/{d}/assets/effects \
              $HOME/{d}/assets/music $HOME/{d}/assets/injects $HOME/{d}/data/chapters \
              $HOME/{d}/data/audio $HOME/{d}/crawl $HOME/{d}/output && echo READY",
-            d = REMOTE_DIR
+            d = REMOTE_DIR,
+            rel = engine_rel(engine)
         );
         let (code, stdout, stderr) = self.run(&script, 30)?;
         if code != 0 || !stdout.contains("READY") {
@@ -689,11 +703,20 @@ echo "probe=done"
     /// beside it), so only the binary travels.
     pub fn install_tts_runtime(
         &self,
+        engine: &str,
         tts_binary: &Path,
         runtime_dir: Option<&Path>,
         live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<String> {
-        self.rsync_push(tts_binary, "bm-tts", false, progress(live, "bm-tts"))?;
+        // Beside the engine's weights, not at the root: `bm-tts` is VieNeu's
+        // binary, and a second engine ships its own under its own tree.
+        let rel = engine_rel(engine);
+        self.rsync_push(
+            tts_binary,
+            &format!("{rel}/bm-tts"),
+            false,
+            progress(live, "bm-tts"),
+        )?;
         if let Some(runtime_dir) = runtime_dir {
             // Whatever the make target staged, rather than a version hardcoded here:
             // the pin lives in the Makefile, and two copies of it would drift.
@@ -717,20 +740,23 @@ echo "probe=done"
             for lib in &libs {
                 let name = lib.file_name().expect("filtered on a file name");
                 let name = name.to_string_lossy();
-                self.rsync_push(lib, &name, false, progress(live, &name))?;
+                self.rsync_push(lib, &format!("{rel}/{name}"), false, progress(live, &name))?;
             }
         }
 
+        // The SONAME has to be reachable *beside the binary* — the engine's
+        // directory, which is what `LD_LIBRARY_PATH` names.
         let script = format!(
             r#"set -e
-D="$HOME/{d}"
+D="$HOME/{d}/{rel}"
 cd "$D"
 chmod +x bm-tts
 LD_LIBRARY_PATH="$D" ./bm-tts --version >/dev/null 2>&1 || \
   {{ echo "bm-tts would not run, missing libonnxruntime.so.1 beside it?" >&2; exit 7; }}
 echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
 "#,
-            d = REMOTE_DIR
+            d = REMOTE_DIR,
+            rel = rel,
         );
         let (code, stdout, stderr) = self.run(&script, 60)?;
         if code != 0 {
@@ -754,6 +780,7 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
     /// and there is no second cross-built binary to version-gate.
     fn fetch_models(
         &self,
+        engine: &str,
         release: &crate::artifact::ModelsRelease,
         live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> std::result::Result<String, FetchOutcome> {
@@ -767,7 +794,7 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
         // hour, and the timeout is here to catch a wedged ssh rather than to
         // second-guess a slow box.
         let (code, stdout, stderr) = self
-            .run(&fetch_script(release), 3600)
+            .run(&fetch_script(release, engine), 3600)
             .map_err(|e| FetchOutcome::Unreachable(e.to_string()))?;
         classify_fetch(code, &stdout, &stderr, &release.tag)
     }
@@ -799,11 +826,12 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
     /// enrollment rewrites the file after the bake.
     pub fn install_models(
         &self,
-        root: &Path,
+        engine: &str,
+        src: &Path,
         release: Option<&crate::artifact::ModelsRelease>,
         live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<String> {
-        let src = root.join("models");
+        let rel = engine_rel(engine);
         if !src.is_dir() {
             anyhow::bail!(
                 "no {}, run the bake first (`python3 tools/bake-models.py`)",
@@ -811,16 +839,16 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
             );
         }
         if let Some(r) = release {
-            match self.fetch_models(r, live) {
+            match self.fetch_models(engine, r, live) {
                 Ok(line) => {
                     // The checksum list is the box's own statement about its
                     // install, and the fetch has already verified every file
                     // against the same manifest, so it is written either way:
                     // a later push of a *different* bake then has a list to
                     // check against.
-                    let sums = model_checksums(&src);
+                    let sums = model_checksums(src);
                     if !sums.is_empty() {
-                        self.write_model_checksums(&sums)?;
+                        self.write_model_checksums(engine, &sums)?;
                     }
                     return Ok(line);
                 }
@@ -849,24 +877,24 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
         // the same 668 MB. Excluding it also keeps `--delete` from putting one
         // back on a box that fetched a bundle.
         self.rsync_push_excluding(
-            &src,
-            "models",
+            src,
+            &format!("{rel}/models"),
             true,
             progress(live, "models"),
             MODELS_PUSH_EXCLUDES,
         )?;
-        let sums = model_checksums(&src);
+        let sums = model_checksums(src);
         if !sums.is_empty() {
-            self.write_model_checksums(&sums)?;
+            self.write_model_checksums(engine, &sums)?;
         }
         // `sha256sum` is coreutils, so it is present on every platform these
         // workers run, but "present" is assumed rather than proved, and a box
         // without it is reported rather than silently reported as verified.
         let script = format!(
-            r#"D="$HOME/{d}/models"
+            r#"D="$HOME/{d}/{rel}/models"
 [ -f "$D/manifest.json" ] || {{ echo "models/manifest.json missing, incomplete bake" >&2; exit 8; }}
 n=$(ls "$D" | wc -l)
-L="$HOME/{d}/models.sha256"
+L="$HOME/{d}/{rel}/models.sha256"
 if ! command -v sha256sum >/dev/null 2>&1; then
   echo "MODELS-OK ($n files, NOT verified, sha256sum absent)" >&2
   exit 0
@@ -882,7 +910,8 @@ else
   echo "MODELS-OK ($n files, no checksum list)" >&2
 fi
 "#,
-            d = REMOTE_DIR
+            d = REMOTE_DIR,
+            rel = rel,
         );
         let (code, stdout, stderr) = self.run(&script, 600)?;
         if code != 0 {
@@ -903,11 +932,12 @@ fi
     ///
     /// It lives at the worker root, not inside `models/`, because that push
     /// carries `--delete` and would eat it.
-    fn write_model_checksums(&self, sums: &[String]) -> Result<()> {
+    fn write_model_checksums(&self, engine: &str, sums: &[String]) -> Result<()> {
         let body = sums.join("\n");
         let script = format!(
-            "cat > $HOME/{d}/models.sha256 << 'EOF'\n{body}\nEOF\n",
-            d = REMOTE_DIR
+            "cat > $HOME/{d}/{rel}/models.sha256 << 'EOF'\n{body}\nEOF\n",
+            d = REMOTE_DIR,
+            rel = engine_rel(engine),
         );
         let (code, _, stderr) = self.run(&script, 10)?;
         if code != 0 {
@@ -980,15 +1010,27 @@ fi
     /// reports as success unless told otherwise, so the check is on the
     /// *code*. The budget is deliberately under the ssh call's own timeout
     /// (240 s of polling, 300 s allowed).
-    pub fn start_tts(&self) -> Result<String> {
+    pub fn start_tts(&self, engine: &str) -> Result<String> {
+        // The engine's tree holds the binary, its runtime and its weights; the
+        // log and the pid stay at the worker root, where `stop_tts` reads the
+        // pid and where an operator goes looking for the log.
+        //
+        // `--dict` is emitted only when the engine declares a lexicon, so a
+        // second engine is never handed VieNeu's and asked to mispronounce
+        // through it.
+        let dict = match crate::voices::dictionary(engine) {
+            Some(name) => format!("--dict \"$E/models/{name}\" "),
+            None => String::new(),
+        };
         let script = format!(
             r#"D="$HOME/{d}"
+E="$D/{rel}"
 if [ "$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 3 http://127.0.0.1:{port}/health)" = "200" ]; then
   echo "TTS-ALREADY-UP"; exit 0
 fi
-cd "$D" || exit 5
-LD_LIBRARY_PATH="$D" nohup "$D/bm-tts" --models models --codec models \
-  --dict models/sea_g2p.bin --voices models/voices.json \
+cd "$E" || exit 5
+LD_LIBRARY_PATH="$E" nohup "$E/bm-tts" --models "$E/models" --codec "$E/models" \
+  {dict}--voices "$E/models/voices.json" \
   --port {port} --bind 0.0.0.0 > "$D/tts.log" 2>&1 &
 echo $! > "$D/tts.pid"
 for _ in $(seq 1 120); do
@@ -998,6 +1040,8 @@ done
 echo "TTS-STARTING (not ready after 240s, check $D/tts.log)"
 "#,
             d = REMOTE_DIR,
+            rel = engine_rel(engine),
+            dict = dict,
             port = TTS_PORT
         );
         let (code, stdout, stderr) = self.run(&script, 300)?;
@@ -1189,7 +1233,7 @@ pub fn provision(
         }
         None => {
             log.push(format!("[{}] probing {}", m.id, ssh.target));
-            let p = ssh.probe();
+            let p = ssh.probe(&layout.engine);
             log.push(format!("[{}] {}", m.id, p.summary()));
             p
         }
@@ -1206,7 +1250,7 @@ pub fn provision(
     let repo = release_repo
         .map(str::to_string)
         .unwrap_or_else(|| crate::config::Settings::load(&layout.settings()).models_release);
-    let release = crate::artifact::ModelsRelease::resolve(&layout.root, &repo);
+    let release = crate::artifact::ModelsRelease::resolve(&layout.models_dir(), &repo);
     if repo.trim().is_empty() {
         log.push(format!(
             "[{}] no models release configured, the weights travel over the push",
@@ -1230,7 +1274,7 @@ pub fn provision(
     // run, instead of warning forever no matter how often `:prov` runs.
     // Voices enrolled nowhere stay missing; the warning below still names
     // exactly those.
-    let baked = crate::pool::bake_missing_voices(&layout.root);
+    let baked = crate::pool::bake_missing_voices(layout);
     if !baked.is_empty() {
         log.push(format!(
             "[{}] baked {} voice(s) into models/voices.json: {}",
@@ -1327,7 +1371,7 @@ pub fn provision(
             .map(|s| s.tts_bin_in_sync(&local_stamp))
             .unwrap_or(false)
         {
-            match ssh.install_tts_runtime(tts_binary, tts_runtime, live.as_ref()) {
+            match ssh.install_tts_runtime(&layout.engine, tts_binary, tts_runtime, live.as_ref()) {
                 Ok(v) => {
                     tts_pushed = true;
                     log.push(format!("[{}] sidecar drifted, redeployed, {v}", m.id));
@@ -1360,7 +1404,12 @@ pub fn provision(
             log.push(format!("[{}] models in sync (cache match)", m.id));
         } else {
             log.push(format!("[{}] pushing models/voice store", m.id));
-            match ssh.install_models(&layout.root, release.as_ref(), live.as_ref()) {
+            match ssh.install_models(
+                &layout.engine,
+                &layout.models_dir(),
+                release.as_ref(),
+                live.as_ref(),
+            ) {
                 Ok(v) => {
                     models_pushed = true;
                     log.push(format!("[{}] {v}", m.id));
@@ -1372,7 +1421,7 @@ pub fn provision(
             }
         }
     } else {
-        if let Err(e) = ssh.ensure_root() {
+        if let Err(e) = ssh.ensure_root(&layout.engine) {
             log.push(format!("[{}] ensure_root failed: {e}", m.id));
             return (probe, log.lines);
         }
@@ -1404,7 +1453,7 @@ pub fn provision(
                 "[{}] installing the TTS sidecar binary + runtime",
                 m.id
             ));
-            match ssh.install_tts_runtime(tts_binary, tts_runtime, live.as_ref()) {
+            match ssh.install_tts_runtime(&layout.engine, tts_binary, tts_runtime, live.as_ref()) {
                 Ok(v) => log.push(format!("[{}] {v}", m.id)),
                 Err(e) => {
                     log.push(format!("[{}] {e}", m.id));
@@ -1424,7 +1473,12 @@ pub fn provision(
             log.push(format!("[{}] models in sync (cache match)", m.id));
         } else {
             log.push(format!("[{}] pushing models (~668 MB)", m.id));
-            match ssh.install_models(&layout.root, release.as_ref(), live.as_ref()) {
+            match ssh.install_models(
+                &layout.engine,
+                &layout.models_dir(),
+                release.as_ref(),
+                live.as_ref(),
+            ) {
                 Ok(v) => {
                     models_pushed = true;
                     log.push(format!("[{}] {v}", m.id));
@@ -1488,8 +1542,7 @@ pub fn provision(
         .unwrap_or_default();
         if !manifest.is_empty() {
             let store: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(layout.root.join("models/voices.json"))
-                    .unwrap_or_default(),
+                &std::fs::read_to_string(layout.tts_voices()).unwrap_or_default(),
             )
             .unwrap_or(serde_json::Value::Null);
             let presets = store.get("presets").and_then(|v| v.as_object());
@@ -1553,7 +1606,7 @@ pub fn provision(
     // `configured` depend on a live sidecar was considered and rejected: it
     // would deny a registered box over a sidecar restart and drag
     // `may_install` into re-running package installs on a healthy cluster.
-    match ssh.start_tts() {
+    match ssh.start_tts(&layout.engine) {
         Ok(v) if v.starts_with("TTS-STARTING") => log.push(format!(
             "[{}] {v}, the worker will wait for it rather than start a second one; re-run the probe if renders are slow to begin",
             m.id
@@ -1566,7 +1619,7 @@ pub fn provision(
     let _ = ssh.write_provision_stamp(&local_stamp);
 
     // Re-probe so the caller records the post-provision truth.
-    let after = ssh.probe();
+    let after = ssh.probe(&layout.engine);
     log.push(format!("[{}] after provision: {}", m.id, after.summary()));
     // Named on its own line, not just inside the summary: a merge offered to
     // this box fails after a full render lease, and the operator's next stop is
@@ -1833,15 +1886,20 @@ mod tests {
     fn the_fetch_line_asks_for_the_tagged_bundle_and_quotes_the_url() {
         let hash = "dda4efee13df0eb2b30ef45eb548741b5af633f6d55712e30f4da574b357c552";
         let r = crate::artifact::ModelsRelease::for_repo("lhuthng/storycast", hash).unwrap();
-        let script = fetch_script(&r);
+        let script = fetch_script(&r, "vieneu");
         assert!(
             script.contains("~/bm-worker/bm-agent fetch-artifact"),
             "{script}"
         );
         assert!(script.contains(&format!("--expect {hash}")), "{script}");
         assert!(
-            script.contains("~/bm-worker/models"),
-            "the destination is the models dir itself: {script}"
+            script.contains("~/bm-worker/engines/vieneu/models"),
+            "the destination is the engine's own models dir: {script}"
+        );
+        // A second engine fetches into its own tree, never over VieNeu's.
+        assert!(
+            fetch_script(&r, "gemini").contains("~/bm-worker/engines/gemini/models"),
+            "the engine name has to be in the fetch destination"
         );
         // Quoted, because the URL is a string in a `sh -c`. A repo the parser
         // accepts cannot produce a quote today; a helper that only works for

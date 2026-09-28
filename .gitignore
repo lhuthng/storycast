@@ -75,7 +75,13 @@ rust/dist/
 # artifact the bake step fetches, not source — committing it would put 60 MB of
 # binary in every clone for a file that is verifiable by hash instead.
 /rust/vendor/sea-g2p/python/
-/models/
+
+# The engine trees. `engines/<name>/` holds each engine's own files — its
+# `models/` weights (the dictionary included), its `bm-tts` binary, its runtime
+# library, and the reference/audition clips — about a gigabyte live, all of it
+# fetched or built rather than authored. This replaces the flat `/models/` at
+# the root, which was the same thing with the engine's name nowhere in a path.
+/engines/
 
 
 # Operator scratch: assistant memory and session notes. Machine-local,

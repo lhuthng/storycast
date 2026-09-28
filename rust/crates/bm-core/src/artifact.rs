@@ -54,16 +54,20 @@ pub struct ModelsRelease {
 impl ModelsRelease {
     /// The release this bake *would* be published as, if `repo` names one.
     ///
+    /// `models_dir` is the bake itself — `Layout::models_dir()` — rather than
+    /// the repo root: the weights moved under the engine's own tree, and the
+    /// manifest that names the bake travels with them.
+    ///
     /// `None` when no repo is configured — the release path is opt-in, and
     /// "no repo" must keep meaning today's behaviour (the rsync) rather than
     /// an error, because a box that cannot reach a release is still a box that
     /// can be provisioned.
-    pub fn resolve(root: &Path, repo: &str) -> Option<Self> {
+    pub fn resolve(models_dir: &Path, repo: &str) -> Option<Self> {
         let repo = repo.trim();
         if repo.is_empty() {
             return None;
         }
-        let hash = manifest_hash(&read_manifest(&root.join("models")).ok()?).ok()?;
+        let hash = manifest_hash(&read_manifest(models_dir).ok()?).ok()?;
         Self::for_repo(repo, &hash).ok()
     }
 
@@ -586,6 +590,9 @@ mod tests {
     #[test]
     fn no_repo_configured_means_no_release_not_an_error() {
         assert!(ModelsRelease::resolve(Path::new("/nonexistent"), "  ").is_none());
+        // And a repo with no bake beside it resolves to nothing, rather than
+        // erroring: the push is the fallback.
+        assert!(ModelsRelease::resolve(Path::new("/nonexistent"), "o/n").is_none());
     }
 
     /// The tree the box ends up with, and the two ways it can be wrong: a file

@@ -47,9 +47,6 @@ pub struct EngineRoster {
     /// Human-readable description, for the picker header.
     #[serde(default)]
     pub label: String,
-    /// What this engine's audio comes back as, before any resampling.
-    #[serde(default)]
-    pub sample_rate: u32,
     /// Declaration order is meaningful: the offline roster groups by gender in
     /// this order, so male voices come first, then female, then neutral.
     #[serde(default)]

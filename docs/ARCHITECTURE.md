@@ -210,8 +210,8 @@ machine itself, and mixing them up is the source of most bugs in this area.
 flowchart TB
     ROOT["root: the checkout<br/>machine-global, shared by every book"]
     WORK["work: the active workspace<br/>one book's state"]
-    ROOT --> R1["machines.json · roster · voice refs + samples"]
-    ROOT --> R2["assets/ · prompts/ · models/ · profiles/ · tools/"]
+    ROOT --> R1["machines.json · roster"]
+    ROOT --> R2["assets/ · prompts/ · engines/ · profiles/ · tools/"]
     ROOT --> R3[".bm/profile · .bm/aws.json · .bm/aws/"]
     WORK --> W1["settings.json · ledger.json"]
     WORK --> W2["data/ · output/ · scratch/"]
@@ -547,15 +547,15 @@ visible in the TUI log (the machine overlay shows which key won:
      `assets/music/` and left unregistered stops travelling, and widening a
      policy is drift by construction: the new stage is in the list, so the
      digest changes and the box is re-handed what it now needs.
-   * `tts_hash`: the baked `models/` directory **minus**
-     `models/voices.json`, by signature, plus `manifest.json` by content, plus
-     the `bm-tts` binary by content. Excluding the store is what lets a new
-     voice ship without re-sending 668 MB of weights, and including the
-     binary's bytes is what lets a rebuilt sidecar actually redeploy.
-   * `voices_hash`: `models/voices.json` by content — the encoded store the
-     sidecar loads, and the one file the bundle does not carry. `refs/` is in no
-     digest and no push: enrollment runs on the inductor, which is the machine
-     with the encoder, and a reference clip reaches a box as a *bake*.
+   * `tts_hash`: the engine's baked `engines/<name>/models/` directory **minus**
+     `voices.json`, by signature, plus `manifest.json` by content, plus the
+     `bm-tts` binary by content. Excluding the store is what lets a new voice
+     ship without re-sending 668 MB of weights, and including the binary's
+     bytes is what lets a rebuilt sidecar actually redeploy.
+   * `voices_hash`: `engines/<name>/models/voices.json` by content — the encoded
+     store the sidecar loads, and the one file the bundle does not carry. `refs/`
+     is in no digest and no push: enrollment runs on the inductor, which is the
+     machine with the encoder, and a reference clip reaches a box as a *bake*.
 
    A digest being *computed* is not the same as being *consulted*, and the
    difference has bitten this repo twice. `tts_hash` and `sources_hash` each
@@ -568,7 +568,7 @@ visible in the TUI log (the machine overlay shows which key won:
 3. **do only what changed**: sources in sync, skip the bundle push entirely —
    one file, not three trees.
    Models in sync *and* the remote roster already naming every declared voice,
-   skip the push of `models/`. Local copies compare size+mtime per file,
+   skip the push of the engine's `models/`. Local copies compare size+mtime per file,
    exactly like rsync.
 4. **write the stamp**, start the TTS sidecar if it is not answering, and
    re-probe so the TUI shows the post-provision truth.

@@ -52,8 +52,14 @@ pub enum Piece {
 impl Piece {
     pub const ALL: [Piece; 3] = [Piece::Pack, Piece::Adapter, Piece::Engine];
 
-    /// The live trees this piece owns, relative to the root. Empty for the
-    /// engine, whose files `Layout` names one path at a time.
+    /// The live trees this piece owns, relative to the root — and, because the
+    /// two coincide, the set `verify_binding` content-hashes.
+    ///
+    /// Empty for the engine on purpose. It does own a tree now
+    /// (`engines/<name>/`, see `Layout::engine_dir`), but the engine's identity
+    /// is its *declaration* — its name and its roster — and never a digest of
+    /// its bytes: that tree is about a gigabyte of weights, and hashing it on
+    /// every `serve` and `worker` start is the cost the split exists to avoid.
     pub fn trees(self) -> &'static [&'static str] {
         match self {
             Piece::Pack => &["assets"],
@@ -122,6 +128,19 @@ impl Binding {
             crate::paths::DEFAULT_ADAPTER.to_string()
         } else {
             self.adapter.name.clone()
+        }
+    }
+
+    /// The engine name a cache path and an `engines/<name>/` tree are keyed by.
+    ///
+    /// The bound engine, or [`crate::paths::DEFAULT_ENGINE`] when this checkout
+    /// has never been given one — the engine it was already running before the
+    /// split gave the axis a slot in the binding.
+    pub fn cache_engine(&self) -> String {
+        if self.engine.name.is_empty() {
+            crate::paths::DEFAULT_ENGINE.to_string()
+        } else {
+            self.engine.name.clone()
         }
     }
 

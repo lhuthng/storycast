@@ -18,8 +18,9 @@ pub use catalogue::{
     CATALOGUE_JSON,
 };
 pub use consts::{
-    declaration, gemini_policy, nonverbals, policy_for, supports_nonverbal, vieneu_policy,
-    EngineDecl, VoicePolicy, ENGINES, GEMINI_FEMALE, GEMINI_MALE, GEMINI_NEUTRAL, VIENEU_FEMALE,
-    VIENEU_MALE,
+    adapter_language, clones, declaration, dictionary, gemini_policy, languages, nonverbals,
+    output_format, policy_for, supports_nonverbal, vieneu_policy, voices_language, EngineDecl,
+    VoicePolicy, ENGINES, GEMINI, GEMINI_FEMALE, GEMINI_MALE, GEMINI_NEUTRAL, VIENEU,
+    VIENEU_FEMALE, VIENEU_MALE,
 };
 pub use label::{enrolled_voices, offline_voices, voice_name, voices_from_labels};

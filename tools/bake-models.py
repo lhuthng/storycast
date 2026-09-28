@@ -21,9 +21,13 @@ Everything lands in **one** directory, codec included: the codec's filenames do
 not collide with the backbone's, and a single path is one fewer thing for
 provisioning and the server's CLI to get wrong.
 
-    python3 tools/bake-models.py [--out models] [--check]
+    python3 tools/bake-models.py [--out engines/vieneu/models] [--check]
 
 `--check` re-hashes an existing bake and reports drift without writing anything.
+
+The default lands in **VieNeu's own tree**, `engines/vieneu/models/`, which is
+where the sidecar resolves its weights from (`Layout::models_dir`). A second
+engine's bake would go to `engines/<its-name>/models/` by the same rule.
 """
 from __future__ import annotations
 
@@ -120,7 +124,7 @@ def sha256(p: pathlib.Path) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="models")
+    ap.add_argument("--out", default="engines/vieneu/models")
     ap.add_argument("--check", action="store_true")
     args = ap.parse_args()
     out = (ROOT / args.out).resolve()

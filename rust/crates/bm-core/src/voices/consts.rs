@@ -23,10 +23,42 @@ pub struct EngineDecl {
     /// is only what the rendered vocabulary calls the sound. Empty means the
     /// engine voices none, which is a declaration and not a gap.
     pub nonverbal: &'static [(&'static str, &'static str, &'static str)],
+    /// The languages it can voice, as BCP-47 tags (`vi-VN`, `en-US`).
+    ///
+    /// This is a claim about the *engine*, not about the pipeline: an adapter
+    /// whose language is not in this list is a mismatch rather than a setting.
+    /// Deliberately narrow — listing the languages this project actually ships
+    /// an adapter for is more useful than transcribing a model card, because
+    /// the question a caller asks is "can this engine speak what this adapter
+    /// writes", and an over-broad list answers it "yes" when nobody checked.
+    pub languages: &'static [&'static str],
+    /// Whether it can clone a voice from a reference clip.
+    ///
+    /// `:A` / `:N` (add a sample, name a voice) assume this, and a cloud engine
+    /// has no reference clip to enroll — so the capability belongs here rather
+    /// than being assumed by every caller.
+    pub cloning: bool,
+    /// The G2P dictionary's file name inside the engine's own `models/`.
+    ///
+    /// `None` for an engine whose text front end needs no pronunciation
+    /// lexicon. Named per engine on purpose: the path used to hardcode
+    /// VieNeu's `sea_g2p.bin`, so a second engine read the wrong dictionary and
+    /// *mispronounced* instead of failing on a missing file.
+    pub dict: Option<&'static str>,
+    /// What its audio comes back as, before any resampling.
+    pub sample_rate: u32,
+    /// Channel count, same rule as `sample_rate`.
+    pub channels: u16,
 }
 
 /// VieNeu-TTS v3 Turbo — the local engine, and the only one here that voices
 /// tags: its front end turns each into an `<|emotion_N|>` token.
+///
+/// Vietnamese, and only Vietnamese: the model is a Vietnamese TTS, so an
+/// English adapter behind it is the mismatch this list exists to name. It is
+/// the engine that clones (`refs/` and `:A` are its machinery) and the one with
+/// a lexicon, which is why `sea_g2p.bin` is named here and not in a path
+/// function.
 pub const VIENEU: EngineDecl = EngineDecl {
     name: "vieneu",
     nonverbal: &[
@@ -34,14 +66,30 @@ pub const VIENEU: EngineDecl = EngineDecl {
         ("sigh", "sigh", "[thở dài]"),
         ("throat", "throat-clear", "[hắng giọng]"),
     ],
+    languages: &["vi-VN"],
+    cloning: true,
+    dict: Some("sea_g2p.bin"),
+    sample_rate: 48_000,
+    channels: 1,
 };
 
 /// Gemini prebuilt TTS — cloud, and tagless. Every non-verbal sound stays as the
 /// words the chapter wrote, because a bracket this engine does not implement is
 /// read aloud.
+///
+/// Multilingual by nature; the two languages listed are the ones with an
+/// adapter in this project, not the model's whole range — an under-declaration
+/// refuses a language we could voice, which is the safe direction. No local
+/// lexicon (the service does its own front end) and no cloning (a reference
+/// clip is not something a cloud prebuilt voice accepts).
 pub const GEMINI: EngineDecl = EngineDecl {
     name: "gemini",
     nonverbal: &[],
+    languages: &["vi-VN", "en-US"],
+    cloning: false,
+    dict: None,
+    sample_rate: 24_000,
+    channels: 1,
 };
 
 /// Every engine this build declares, in declaration order.
@@ -66,6 +114,77 @@ pub fn nonverbals(engine: &str) -> &'static [(&'static str, &'static str, &'stat
 /// Whether `engine` voices any non-verbal tags, for callers that only branch.
 pub fn supports_nonverbal(engine: &str) -> bool {
     !nonverbals(engine).is_empty()
+}
+
+/// The languages `engine` can voice — empty when nothing declares it.
+pub fn languages(engine: &str) -> &'static [&'static str] {
+    declaration(engine).map(|d| d.languages).unwrap_or(&[])
+}
+
+/// Whether `engine` declares it can voice `language`.
+///
+/// Matched on the exact BCP-47 tag first, then on the primary subtag, so a
+/// declared `vi-VN` answers for `vi` and a declared `en` answers for `en-GB` —
+/// the split nobody wants to maintain a second table for. **Undeclared answers
+/// false**, like every other declaration lookup here: an engine nobody declared
+/// makes no claim, and a claim is what a caller acts on.
+pub fn voices_language(engine: &str, language: &str) -> bool {
+    let want = language.trim();
+    if want.is_empty() {
+        return false;
+    }
+    let primary = |tag: &str| tag.split(['-', '_']).next().unwrap_or(tag).to_lowercase();
+    let want_lower = want.to_lowercase();
+    languages(engine).iter().any(|have| {
+        have.eq_ignore_ascii_case(want)
+            || (primary(have) == primary(&want_lower) && !primary(have).is_empty())
+    })
+}
+
+/// Whether `engine` can clone a voice from a reference clip. An undeclared
+/// engine cannot, because nothing said it could.
+pub fn clones(engine: &str) -> bool {
+    declaration(engine).map(|d| d.cloning).unwrap_or(false)
+}
+
+/// The G2P dictionary file name inside `engine`'s `models/`, if it has one.
+pub fn dictionary(engine: &str) -> Option<&'static str> {
+    declaration(engine).and_then(|d| d.dict)
+}
+
+/// What `engine`'s audio comes back as: `(sample_rate, channels)`.
+///
+/// Falls back to Gemini's rate for an undeclared name, which is the historical
+/// `if engine == "vieneu" … else` behaviour — the one answer that has to be
+/// preserved is that a name nobody declared is *not* VieNeu's 48 kHz.
+pub fn output_format(engine: &str) -> (u32, u16) {
+    declaration(engine)
+        .map(|d| (d.sample_rate, d.channels))
+        .unwrap_or((GEMINI.sample_rate, GEMINI.channels))
+}
+
+/// The language an adapter id names, given the pack it is bound to.
+///
+/// An adapter is `<pack>-<language>` (ids are pack-bound: `xianxia-en-US`, not
+/// `en-US`), so the language is the id with the pack's prefix removed. An id
+/// that does not carry the prefix is its own language.
+///
+/// `None` for an unnamed adapter — `default` is the pre-split checkout, which
+/// makes no claim about a language and so cannot be mismatched.
+pub fn adapter_language<'a>(pack: &str, adapter: &'a str) -> Option<&'a str> {
+    let adapter = adapter.trim();
+    if adapter.is_empty() || adapter == crate::paths::DEFAULT_ADAPTER {
+        return None;
+    }
+    let pack = pack.trim();
+    if !pack.is_empty() {
+        if let Some(rest) = adapter.strip_prefix(pack).and_then(|r| r.strip_prefix('-')) {
+            if !rest.is_empty() {
+                return Some(rest);
+            }
+        }
+    }
+    Some(adapter)
 }
 
 /// Every male VieNeu preset, in the store's declaration order.
@@ -298,6 +417,77 @@ mod tests {
         assert!(declaration("not-an-engine").is_none());
         assert_eq!(declaration("vieneu").map(|d| d.name), Some("vieneu"));
         assert!(ENGINES.iter().any(|d| d.name == "gemini"));
+    }
+
+    /// The engine's other facts are declared here for the same reason the tags
+    /// are: a caller asks the table, and an undeclared name gets the answer that
+    /// refuses rather than the answer that guesses.
+    #[test]
+    fn an_engine_declares_its_languages_and_whether_it_clones() {
+        // VieNeu is the local, Vietnamese, cloning engine with a lexicon.
+        assert_eq!(languages("vieneu"), &["vi-VN"]);
+        assert!(voices_language("vieneu", "vi-VN"));
+        assert!(!voices_language("vieneu", "en-US"));
+        assert!(clones("vieneu"));
+        assert_eq!(dictionary("vieneu"), Some("sea_g2p.bin"));
+
+        // Gemini is cloud and multilingual, and clones nothing.
+        assert!(voices_language("gemini", "en-US"));
+        assert!(voices_language("gemini", "vi-VN"));
+        assert!(!clones("gemini"));
+        assert_eq!(dictionary("gemini"), None);
+
+        // A name nobody declared makes no claim, so every predicate refuses.
+        assert!(languages("not-an-engine").is_empty());
+        assert!(!voices_language("not-an-engine", "vi-VN"));
+        assert!(!clones("not-an-engine"));
+        assert_eq!(dictionary("not-an-engine"), None);
+        // ...and an empty language is never voiced, or `""` would be a match.
+        assert!(!voices_language("gemini", ""));
+    }
+
+    /// The primary subtag answers for its variants: a table of `vi-VN` has to
+    /// answer a crawl tagged `vi`, and `en-US` has to answer `en-GB`, or the
+    /// list would have to be re-typed per region.
+    #[test]
+    fn a_declared_language_answers_for_its_region_variants() {
+        assert!(voices_language("vieneu", "vi"));
+        assert!(voices_language("vieneu", "VI-vn"), "case-insensitive");
+        assert!(!voices_language("vieneu", "en"));
+        assert!(voices_language("gemini", "en-GB"));
+        // A subtag must not swallow its neighbours: `en` is not `eng`, and an
+        // unrelated region of a declared language is still that language.
+        assert!(!voices_language("vieneu", "eng"));
+    }
+
+    /// The two numbers the render path resamples against come from here now, so
+    /// the one behaviour that must not change is that a name nobody declared is
+    /// **not** VieNeu's 48 kHz.
+    #[test]
+    fn the_output_format_is_engine_specific_and_undeclared_is_not_vieneu() {
+        assert_eq!(output_format("vieneu"), (48_000, 1));
+        assert_eq!(output_format("gemini"), (24_000, 1));
+        assert_eq!(output_format("not-an-engine"), (24_000, 1));
+        assert_ne!(output_format("not-an-engine"), output_format("vieneu"));
+    }
+
+    /// The adapter's language is the id with the pack stripped, and an unnamed
+    /// adapter claims nothing — which is what keeps a pre-split checkout from
+    /// tripping the mismatch the (pack-bound) ids make meaningful.
+    #[test]
+    fn an_adapters_language_is_its_id_without_the_pack() {
+        assert_eq!(adapter_language("xianxia", "xianxia-en-US"), Some("en-US"));
+        assert_eq!(adapter_language("xianxia", "xianxia-vi-VN"), Some("vi-VN"));
+        // No prefix: the id *is* the language (the older, unbounded spelling).
+        assert_eq!(adapter_language("xianxia", "vi-VN"), Some("vi-VN"));
+        // An unnamed adapter is the pre-split checkout, not a language.
+        assert_eq!(adapter_language("xianxia", ""), None);
+        assert_eq!(adapter_language("xianxia", "default"), None);
+        // The pack was not a prefix after all, so nothing was stripped.
+        assert_eq!(
+            adapter_language("noir", "xianxia-en-US"),
+            Some("xianxia-en-US")
+        );
     }
 
     /// The two lists must not drift: a catalogue engine with no declaration is

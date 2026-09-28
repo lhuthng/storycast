@@ -34,7 +34,7 @@ BIN = ROOT / "rust/target/debug/bm-tts-g2p"
 # vendored crate's upstream layout, then the installed wheel. All three are the
 # same 62,829,820 bytes (see rust/vendor/sea-g2p/VENDORED.md for the hash).
 DICT_CANDIDATES = [
-    ROOT / "models/sea_g2p.bin",
+    ROOT / "engines/vieneu/models/sea_g2p.bin",
     ROOT / "rust/vendor/sea-g2p/python/sea_g2p/sea_g2p.bin",
     ROOT / ".venv/lib/python3.12/site-packages/sea_g2p/sea_g2p.bin",
 ]

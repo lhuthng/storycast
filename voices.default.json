@@ -3,8 +3,7 @@
   "version": 1,
   "engines": {
     "vieneu": {
-      "label": "VieNeu-TTS v3 Turbo — local, 48 kHz",
-      "sample_rate": 48000,
+      "label": "VieNeu-TTS v3 Turbo — local",
       "voices": [
         { "key": "minh-duc", "name": "Minh Đức", "gender": "male", "accent": "Northern", "style": "tin tức" },
         { "key": "pham-tuyen", "name": "Phạm Tuyên", "gender": "male", "accent": "Northern", "style": "tự nhiên" },
@@ -34,7 +33,6 @@
     },
     "gemini": {
       "label": "Gemini prebuilt TTS — cloud",
-      "sample_rate": 24000,
       "voices": [
         { "key": "orus", "name": "Orus", "gender": "male", "accent": "unknown", "style": "" },
         { "key": "charon", "name": "Charon", "gender": "male", "accent": "unknown", "style": "" },

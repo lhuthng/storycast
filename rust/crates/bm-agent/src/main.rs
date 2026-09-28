@@ -115,7 +115,7 @@ enum Cmd {
     FetchArtifact {
         /// Release download URL of a `models.tar.zst`.
         url: String,
-        /// The models directory itself, e.g. `~/bm-worker/models`.
+        /// The models directory itself, e.g. `~/bm-worker/engines/vieneu/models`.
         dest: PathBuf,
         /// The manifest hash the inductor read, which this must agree with.
         /// Optional: without it the bundle is accepted on its own manifest,
@@ -2966,33 +2966,34 @@ mod tests {
 
     #[test]
     fn the_sidecar_argv_points_at_this_box_s_own_tree() {
-        // Was `sidecar_python_prefers_the_managed_venv`. The venv order is gone
-        //, there is one binary and one model directory now, and both hang off
-        // the root, so the inductor and a worker resolve the same paths.
+        // Was `sidecar_python_prefers_the_managed_venv`. The venv order is gone,
+        // there is one binary and one model directory now, and both hang off the
+        // bound *engine's* tree, so the inductor and a worker resolve the same
+        // paths — and a second engine gets a tree of its own rather than
+        // VieNeu's files.
         let root = std::env::temp_dir().join(format!("bmtts{}", std::process::id()));
         let layout = Layout::new(&root);
+        let engine = layout.engine_dir();
+        let models = engine.join("models");
         let (bin, args) = layout.sidecar_command(8818);
 
-        assert_eq!(bin, root.join("bm-tts"));
+        assert_eq!(bin, engine.join("bm-tts"));
         assert_eq!(args[0], "--models");
-        assert_eq!(args[1], root.join("models").display().to_string());
+        assert_eq!(args[1], models.display().to_string());
 
         let value_of = |flag: &str| -> Option<String> {
             args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
         };
         // The dictionary and the voice store live inside the model directory,
         // and the codec shares it, one directory, not three.
-        assert_eq!(
-            value_of("--codec"),
-            Some(root.join("models").display().to_string())
-        );
+        assert_eq!(value_of("--codec"), Some(models.display().to_string()));
         assert_eq!(
             value_of("--dict"),
-            Some(root.join("models/sea_g2p.bin").display().to_string())
+            Some(models.join("sea_g2p.bin").display().to_string())
         );
         assert_eq!(
             value_of("--voices"),
-            Some(root.join("models/voices.json").display().to_string())
+            Some(models.join("voices.json").display().to_string())
         );
         assert_eq!(value_of("--port"), Some("8818".into()));
         // Loopback: the agent is the only caller, and the port is not

@@ -151,6 +151,17 @@ pub fn compute_provision_stamp(
     agent_binary: &Path,
 ) -> anyhow::Result<ProvisionStamp> {
     let repo_root = layout.root.as_path();
+    // The engine's own tree — `engines/<name>/models` — not `root/models`: the
+    // weights have an identity now, and a stamp that hashed a directory no
+    // longer in use would read as permanent drift.
+    let models = layout.models_dir();
+    // Named in the digest as it reads relative to the root, so the hash both
+    // records which file it read and moves when the engine does.
+    let models_rel = models
+        .strip_prefix(repo_root)
+        .unwrap_or(&models)
+        .display()
+        .to_string();
     // What the push would send, hashed as a set. The plan is the same call the
     // push makes, so the digest and the artifact cannot describe different
     // files — which is the one property this gate exists to have.
@@ -174,13 +185,13 @@ pub fn compute_provision_stamp(
     // folding it in here would make a single new voice re-send every weight in
     // the bake. `voices_hash` covers it instead.
     let mut tts = Sha256::new();
-    if let Ok(bytes) = std::fs::read(repo_root.join("models/manifest.json")) {
-        tts.update(b"models/manifest.json");
+    if let Ok(bytes) = std::fs::read(models.join("manifest.json")) {
+        tts.update(format!("{models_rel}/manifest.json").as_bytes());
         tts.update([0]);
         tts.update(&bytes);
         tts.update([0]);
     }
-    tts.update(signature_of_dir_skipping(&repo_root.join("models"), &[VOICE_STORE]).as_bytes());
+    tts.update(signature_of_dir_skipping(&models, &[VOICE_STORE]).as_bytes());
     tts.update([0]);
 
     // The sidecar *binary*, by content, in a digest of its own.
@@ -214,9 +225,9 @@ pub fn compute_provision_stamp(
     // in `sources_hash` above. Content, not signature: it is 492 KB, and a
     // roster that changed at all has to reach the box, mtime or not.
     let mut voices = Sha256::new();
-    let store = repo_root.join("models").join(VOICE_STORE);
+    let store = models.join(VOICE_STORE);
     if let Ok(bytes) = std::fs::read(&store) {
-        voices.update("models/voices.json".as_bytes());
+        voices.update(format!("{models_rel}/voices.json").as_bytes());
         voices.update([0]);
         voices.update(&bytes);
         voices.update([0]);
@@ -426,6 +437,7 @@ mod tests {
             root: root.to_path_buf(),
             work: root.join("workspaces").join(name),
             adapter: crate::paths::DEFAULT_ADAPTER.into(),
+            engine: crate::paths::DEFAULT_ENGINE.into(),
         }
     }
 
@@ -595,18 +607,15 @@ mod tests {
     #[test]
     fn the_baked_voice_store_is_its_own_gate_and_not_a_model_change() {
         let root = stamp_fixture("store");
-        std::fs::create_dir_all(root.join("models")).unwrap();
-        std::fs::write(root.join("models/manifest.json"), r#"{"files":{}}"#).unwrap();
-        std::fs::write(root.join("models/sea_g2p.bin"), vec![1u8; 64]).unwrap();
-        std::fs::write(root.join("models/voices.json"), r#"{"presets":{"A":{}}}"#).unwrap();
+        let models = crate::Layout::new(&root).models_dir();
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("manifest.json"), r#"{"files":{}}"#).unwrap();
+        std::fs::write(models.join("sea_g2p.bin"), vec![1u8; 64]).unwrap();
+        std::fs::write(models.join("voices.json"), r#"{"presets":{"A":{}}}"#).unwrap();
         let base = stamp(&root);
 
         // Enrolling a voice rewrites the store and nothing else.
-        std::fs::write(
-            root.join("models/voices.json"),
-            r#"{"presets":{"A":{},"B":{}}}"#,
-        )
-        .unwrap();
+        std::fs::write(models.join("voices.json"), r#"{"presets":{"A":{},"B":{}}}"#).unwrap();
         let enrolled = stamp(&root);
         assert!(
             !base.voices_in_sync(&enrolled),
@@ -623,7 +632,7 @@ mod tests {
         // is size+mtime, and a same-size rewrite inside one second is invisible
         // to it — the limit `manifest.json`-by-content and the publish gate
         // (`bake-models.py --check`, `16/16 files match`) exist to cover.
-        std::fs::write(root.join("models/sea_g2p.bin"), vec![2u8; 128]).unwrap();
+        std::fs::write(models.join("sea_g2p.bin"), vec![2u8; 128]).unwrap();
         let swapped = stamp(&root);
         assert!(
             !enrolled.tts_in_sync(&swapped),
@@ -842,8 +851,9 @@ mod tests {
         );
 
         // Baking the models moves only the TTS hash.
-        std::fs::create_dir_all(root.join("models")).unwrap();
-        std::fs::write(root.join("models/manifest.json"), r#"{"files":{}}"#).unwrap();
+        let models = crate::Layout::new(&root).models_dir();
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("manifest.json"), r#"{"files":{}}"#).unwrap();
         let baked = stamp(&root);
         assert!(
             without.sources_in_sync(&baked),
@@ -855,7 +865,7 @@ mod tests {
         );
 
         // …and swapping a model file under an unchanged manifest is drift too.
-        std::fs::write(root.join("models/vieneu_prefill.onnx"), vec![1u8; 64]).unwrap();
+        std::fs::write(models.join("vieneu_prefill.onnx"), vec![1u8; 64]).unwrap();
         let swapped = stamp(&root);
         assert!(!baked.tts_in_sync(&swapped), "a swapped model must resync");
         assert!(

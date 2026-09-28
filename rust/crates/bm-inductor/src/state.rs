@@ -2663,9 +2663,9 @@ mod tests {
         // No bake here: nothing to check against, swap proceeds.
         assert!(inner.op_swap_voice("A", "young-female-1").is_ok());
         // A bake that lacks the clone: refused loudly, before any render.
-        std::fs::create_dir_all(layout.root.join("models")).unwrap();
+        std::fs::create_dir_all(layout.models_dir()).unwrap();
         std::fs::write(
-            layout.root.join("models/voices.json"),
+            layout.tts_voices(),
             r#"{"presets":{"Đức Trí":{"speaker_emb":[1.0],"codes":[]}}}"#,
         )
         .unwrap();
@@ -2677,7 +2677,7 @@ mod tests {
         assert!(err.contains("not enrolled"), "{err}");
         // Enrolled in the bake: admitted again.
         std::fs::write(
-            layout.root.join("models/voices.json"),
+            layout.tts_voices(),
             r#"{"presets":{"Đức Trí":{"speaker_emb":[1.0],"codes":[]},"young-female-1":{"speaker_emb":[2.0],"codes":[]}}}"#,
         )
         .unwrap();

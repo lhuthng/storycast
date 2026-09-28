@@ -751,6 +751,7 @@ mod tests {
             root: root.root.clone(),
             work: book.clone(),
             adapter: "xianxia-en-US".into(),
+            engine: crate::paths::DEFAULT_ENGINE.into(),
         };
 
         let shipped = Sources::plan(&l, &[Stage::Digest]).unwrap();
