@@ -360,7 +360,7 @@ exit `20` stops, and the only way out is a re-pack or a cleared setting.
 
 Two things this found, both of which were true before it existed:
 
-- **The first published bundle carries 17 AppleDouble sidecars.**
+- **The first published bundle carried 17 AppleDouble sidecars.**
   `models-vdda4efee13df` was packed by macOS `tar` (libarchive), which writes a
   `._name` sidecar for every member carrying an extended attribute and *hides
   them from its own `tar -t`*. A Linux box unpacked them as 17 real files, and
@@ -369,16 +369,27 @@ Two things this found, both of which were true before it existed:
   `COPYFILE_DISABLE=1` (the env var, not `--no-mac-metadata`, which GNU tar
   rejects as unknown). The same bug shipped 115 sidecars per push in the sources
   bundle before that was fixed.
+  **That tag is clean now** (re-audited 2026-09-29): a later re-cut of it was
+  clobbered onto the same content-addressed tag, and the published asset is
+  byte-identical — sha256 `22c1ae89…` — to a fresh pack of `engines/vieneu/models`
+  with the variable set. It lists 17 members and carries no sidecars, so a box
+  fetches it without complaint. The four `-pack-v0.1.0` profile releases are the
+  ones still carrying the junk, one per member: `common` 80, `xianxia` 129,
+  `weapons` 35, `magic` 18. Worth recording because the count of the members a
+  dirty bundle had (17) is also the count of the members a clean one has, which
+  is exactly how a stale note goes unnoticed.
 - **The push no longer carries the bundle.** `models.tar.zst` sits inside
   `models/`, so the rsync was shipping 380 MB that stands for the 668 MB
   travelling next to it — to a box that has no use for a second copy of the same
   tree. It is now excluded in both directions, which also stops `--delete` from
   putting one back on a box that fetched a bundle.
 
-Verified on the real artifact over a local HTTP server: the published bundle is
-refused with the 17 names, the re-packed one lands — `FETCH-OK (16 files, 667
-MiB, models-vdda4efee13df)` — and a bundle for another bake leaves the existing
-`models/` untouched.
+Verified on the real artifact over a local HTTP server, at the time the published
+bundle was still the dirty one: it was refused with the 17 names, the re-packed
+one landed — `FETCH-OK (16 files, 667 MiB, models-vdda4efee13df)` — and a bundle
+for another bake left the existing `models/` untouched. The published asset has
+since been replaced by that clean re-cut, so the refusal half of that experiment
+no longer reproduces against the live tag.
 
 Compression is worth doing here, and the measurement is the reason to be
 specific about the level:

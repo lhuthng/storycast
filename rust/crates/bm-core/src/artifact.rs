@@ -1051,12 +1051,18 @@ mod tests {
 
     /// A bundle carrying files its manifest never listed, which is not a
     /// theoretical shape: macOS `tar` writes a `._name` sidecar for every
-    /// member carrying an extended attribute, hides them from its own listing,
-    /// and the published `models-vdda4efee13df` release has 17 of them — a
-    /// Linux box would unpack every one as a real file.
+    /// member carrying an extended attribute and hides them from its own
+    /// listing, and the four published `-pack-v0.1.0` releases each carry one
+    /// per member (audited 2026-09-29: common 80, xianxia 129, weapons 35,
+    /// magic 18) — a Linux box unpacks every one as a real file.
     ///
     /// So "nothing unlisted" is not politeness: it is the check that catches a
     /// packer nobody audited, and it has to name the file it found.
+    ///
+    /// The models release is *not* one of them: `models-vdda4efee13df` lists 17
+    /// members and carries no sidecars, because a re-cut of it was clobbered
+    /// onto the same content-addressed tag. An older note here named it as the
+    /// dirty example, which is how a comment outlives the thing it described.
     #[test]
     fn a_member_nobody_listed_is_refused_by_name() {
         let root = tstdir("sidecar");
@@ -1394,8 +1400,8 @@ mod tests {
     /// `COPYFILE_DISABLE=1` because that is what the script now sets: without
     /// it macOS `tar` writes a `._name` sidecar for every member carrying an
     /// xattr, and `tar -t` hides them, so the junk is invisible from the
-    /// machine that packed it. The published `models-vdda4efee13df` release has
-    /// 17 of them and this module refuses it for exactly that reason.
+    /// machine that packed it. The four published `-pack-v0.1.0` releases were
+    /// cut that way, and this module refuses one for exactly that reason.
     fn pack(bundle: &Path, stage: &Path, doc: &Value, extra: &[&str]) {
         let mut names = vec!["manifest.json".to_string()];
         let mut keys: Vec<&String> = doc["files"].as_object().unwrap().keys().collect();

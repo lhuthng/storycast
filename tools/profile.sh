@@ -298,10 +298,12 @@ EOF
     # sidecar for every member carrying an extended attribute, **hides those
     # sidecars from its own `tar -t`**, and a provisioned box would then unpack
     # each one as a real file and refuse the bundle as carrying a member its
-    # manifest never listed. The published `models-vdda4efee13df` release has 17
-    # of them, and the gate below is what keeps the next one
-    # from being cut — this line is what makes that gate pass, not a substitute
-    # for it.
+    # manifest never listed. These four releases are the live example — audited
+    # 2026-09-29, every one of them carries a sidecar for every member: common
+    # 80, xianxia 129, weapons 35, magic 18. (The models release is *not*: it
+    # has since been re-cut and clobbered onto the same tag, and carries none.)
+    # The gate below is what keeps the next one from being cut — this line is
+    # what makes that gate pass, not a substitute for it.
     COPYFILE_DISABLE=1 tar --exclude=.DS_Store $(piece_excludes "$PIECE") -cf - -C "$stage" \
       $(piece_members "$PIECE" "$name") manifest.json \
       | zstd -"$LEVEL" -o "$out"

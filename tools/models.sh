@@ -158,10 +158,17 @@ case "$cmd" in
     # carrying an extended attribute it writes a `._name` AppleDouble sidecar
     # into the archive. Its own `tar -t` *hides* them, so the packing machine
     # sees a clean 17-member bundle; a Linux box does not, and unpacked them as
-    # 17 junk files. The first published bundle (models-vdda4efee13df) carries
-    # exactly that, and the fetch side refuses it by name — which is the check
-    # working, on a packer that was never audited. The env var, not
-    # `--no-mac-metadata`, which GNU tar would reject as unknown.
+    # 17 junk files.
+    #
+    # The live example is the *profile* releases, not this one. Audited
+    # 2026-09-29: `common-pack-v0.1.0` carries 80 sidecars, `xianxia` 129,
+    # `weapons` 35, `magic` 18 — every member doubled. This bundle's own
+    # release, `models-vdda4efee13df`, carries none: it is byte-identical
+    # (sha256 22c1ae89…) to a fresh pack of this directory with the variable
+    # set, so it has since been re-cut and clobbered onto the same
+    # content-addressed tag. Do not cite it as a dirty bundle — the fetch side
+    # verifies it without complaint. The env var, not `--no-mac-metadata`,
+    # which GNU tar would reject as unknown.
     tmp="$bundle.tmp"
     COPYFILE_DISABLE=1 tar -cf - -C "$models" -T "$members" | zstd -"$LEVEL" -o "$tmp"
     mv "$tmp" "$bundle"

@@ -195,11 +195,12 @@ impl Releases for GitHub {
         let (landing, hash) = match fetched {
             Ok(pair) => pair,
             // *Corrupt* is the one failure with a known remedy, so it gets it:
-            // the published `models-vdda4efee13df` release shipped 17 `._name`
-            // sidecars and the root packs did too, and "a member its manifest
-            // never listed" reads as a mystery until the command is named.
-            // *Unreachable* is a different conversation (no such release, no
-            // route) and gets the plain message.
+            // the four published `-pack-v0.1.0` releases are all full of `._name`
+            // sidecars (audited 2026-09-29: common 80, xianxia 129, weapons 35,
+            // magic 18), and "a member its manifest never listed" reads as a
+            // mystery until the command is named. *Unreachable* is a different
+            // conversation (no such release, no route) and gets the plain
+            // message.
             Err(bm_core::artifact::FetchError::Corrupt(e)) => bail!(
                 "{tag} does not verify and was not unpacked: {e}\n  \
                  nothing was replaced — the tree is as it was. Re-publish it under the \
