@@ -446,11 +446,19 @@ healthy, it is just never given anything to do.
 ### A. Solo, headless
 
 ```bash
-make serve START=1 COUNT=10      # terminal 1: inductor (:8901)
+make serve START=1 COUNT=10 GO=1 # terminal 1: inductor (:8901), distributing
 make agent                       # terminal 2: local worker
 ```
 
 Watch `output/` fill up. `Ctrl-C` loses nothing (§4).
+
+Without `GO=1` the inductor comes up **held**: it loads the ledger, takes
+registrations, answers `/api/state` — and offers nothing. `:go` in the TUI
+starts it (or `--go` at launch, if it should come up that way), and `:go` also
+queues the *remainder* of the range, so a book that is 3 of 100 chapters in
+distributes `ch4..100`. `:hold` stops the **next** offer without disturbing what
+is already in flight. A restart is always held, which is the point: an
+unattended one must never resume a run nobody asked for.
 
 ### B. TUI (recommended, everything is here)
 
@@ -460,7 +468,7 @@ make tui
 
 | Key | Does |
 | --- | --- |
-| `:` | **Command line**: every operator action by word: `:add`, `:prov`, `:drop`/`:remove`, `:translate`, `:voices`, `:swap`, `:speaker`, `:eta`, `:retry`, `:reconcile`, `:backend`, `:up [n]`/`:pool`/`:down` (§3D), `:drain`, `:quit`/`:exit`, `:X` stop. Singles still work (`:m` = `:reconcile`); aliases in `:help`. Input opens after `Enter`. No single key is destructive. |
+| `:` | **Command line**: every operator action by word: `:add`, `:prov`, `:drop`/`:remove`, `:translate`, `:go`/`:hold`, `:voices`, `:swap`, `:speaker`, `:eta`, `:retry`, `:reconcile`, `:backend`, `:up [n]`/`:pool`/`:down` (§3D), `:drain`, `:quit`/`:exit`, `:X` stop. Singles still work (`:m` = `:reconcile`); aliases in `:help`. Input opens after `Enter`. No single key is destructive. |
 | **R** / **K** / **S** | Read-only: overview (`Enter` launches) / **task ledger** / cast |
 | **i** | Inspect selected machine |
 | **arrows / k j**, **PgUp PgDn**, **G** | Move, scroll log, pin newest |

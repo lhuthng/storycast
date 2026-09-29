@@ -88,6 +88,12 @@ pub(crate) enum Command {
     Sound,
     Rerender,
     Remerge,
+    /// Start or stop distributing work (`:go` / `:hold`).
+    ///
+    /// Going also enqueues the remainder of the authored range, so the answer
+    /// to "where was I" does not have to come from counting rows in the task
+    /// table: a book 3 chapters in distributes 4..N.
+    Dispatch { go: bool },
     ShutdownWhenIdle,
     /// Drop the queued exclusive write (`:xdrop`), or the whole line with
     /// a route name.
@@ -168,6 +174,8 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["rerender"], desc: Some("requeue every render + merge — full re-speak, asks first"), cmd: Command::Rerender },
     Word { key: None, names: &["shutdown-when-idle", "drain"], desc: Some("workers exit on their own once the queue drains — restart with :B"), cmd: Command::ShutdownWhenIdle },
     Word { key: None, names: &["xdrop"], desc: Some("drop the queued exclusive write (a swap/merge/remix waiting for the cluster to quiet) — :xdrop swap-voice drops only that kind"), cmd: Command::ExclusiveCancel { route: None } },
+    Word { key: None, names: &["go"], desc: Some("start distributing: armed here and now, and the remainder of the range queued — a process comes up held, so a restart never resumes on its own"), cmd: Command::Dispatch { go: true } },
+    Word { key: None, names: &["hold"], desc: Some("stop distributing: what is in flight finishes, nothing new is offered — `:go` to resume; `:drain` is the other thing (workers exit)"), cmd: Command::Dispatch { go: false } },
     Word { key: None, names: &["workspace", "ws"], desc: Some("list, switch or create a workspace — one per book; only with the cluster stopped"), cmd: Command::Workspace },
     Word { key: None, names: &["profile"], desc: Some("list, load or pack a genre profile — loading replaces assets/ + prompts/, so only with the cluster stopped"), cmd: Command::Profile },
     Word { key: None, names: &["login"], desc: Some("store the IAM user's key from the console's accessKeys.csv — setup, once"), cmd: Command::AwsLogin },
@@ -830,6 +838,29 @@ pub(crate) fn do_command(
                     op: Op::Retry,
                     stage,
                     chapter,
+                    ..Default::default()
+                },
+            );
+        }
+        Command::Dispatch { go } => {
+            // The line the inductor answers with is the report: it names the
+            // span it is distributing and what it queued (see `Op::Dispatch`),
+            // so nothing is predicted here that could disagree with the ledger.
+            app.set_status(
+                Level::Info,
+                if go {
+                    "starting distribution…"
+                } else {
+                    "holding — nothing new will be offered"
+                },
+            );
+            dispatch_op(
+                app,
+                job_tx,
+                http,
+                OpRequest {
+                    op: Op::Dispatch,
+                    go: Some(go),
                     ..Default::default()
                 },
             );

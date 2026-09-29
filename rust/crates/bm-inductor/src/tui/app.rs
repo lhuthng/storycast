@@ -5,7 +5,9 @@ use crate::tui::{
     input::dispatch,
     jobs::{fetch_state, BackgroundJob, DoneKind, Ev, Job},
     model::{beat_backed, live_beats},
-    model::{cast_rows, parse_stats, registry_machines, CastRow, WorkerStats},
+    model::{
+        cast_rows, parse_dispatch, parse_stats, registry_machines, CastRow, Dispatch, WorkerStats,
+    },
     screen::Screen,
     sound::SoundData,
     style::{level_from_str, style_bold_of, style_of, Conn, Level, LogLine, Theme},
@@ -161,6 +163,10 @@ pub(crate) struct App {
     /// Stats pane data: per-worker per-stage completions plus per-stage
     /// task averages, for the matrix and the TUI-side ETA.
     pub(crate) stats: WorkerStats,
+    /// Whether the cluster is distributing, and the range it stands at, from
+    /// `/api/state`. `None` until the first poll, and for an inductor older
+    /// than the gate — see [`crate::tui::model::parse_dispatch`].
+    pub(crate) dispatch: Option<Dispatch>,
     pub(crate) settings: Option<serde_json::Value>,
     pub(crate) events: VecDeque<LogLine>,
     pub(crate) selected: usize,
@@ -352,6 +358,7 @@ impl App {
             tasks: Vec::new(),
             counts: serde_json::Value::Null,
             stats: WorkerStats::default(),
+            dispatch: None,
             settings: None,
             events: VecDeque::with_capacity(EVENT_CAP),
             selected: 0,
@@ -858,6 +865,7 @@ impl App {
         self.tasks = tasks;
         self.counts = v.get("counts").cloned().unwrap_or_default();
         self.stats = parse_stats(v.get("stats"));
+        self.dispatch = parse_dispatch(v.get("dispatch"));
         self.settings = v.get("settings").cloned();
         self.ingest_events(v.get("events"));
         if self.selected >= self.machines.len() {

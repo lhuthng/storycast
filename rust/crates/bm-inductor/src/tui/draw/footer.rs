@@ -58,6 +58,21 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
             app.style_bold(Color::Red),
         ));
     }
+    // **Held is the answer to "why is the cluster quiet"**, and a quiet cluster
+    // looks exactly like a finished one in every pane: same empty queue, same
+    // idle boxes. It is said here for the same reason the shelved count is —
+    // nobody can infer it from the counts — and `:go` rides along because a
+    // hold nobody can lift is how a working cluster reads as broken.
+    //
+    // Distribution itself is the normal state and gets no marker: something
+    // that is always on screen is something nobody reads, and the range it
+    // would repeat is already in the header strip.
+    if let Some(d) = app.dispatch.as_ref().filter(|d| d.held) {
+        spans.push(Span::styled(
+            format!("   held · {} — :go", d.span),
+            app.style_bold(Color::Yellow),
+        ));
+    }
     match &app.conn {
         Conn::Up => {
             let ago = app.refreshed.map(|t| t.elapsed().as_secs()).unwrap_or(0);

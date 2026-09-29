@@ -698,7 +698,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let layout = Layout::new(d.path());
         layout.ensure().unwrap();
-        let st: Shared = Arc::new(Mutex::new(Inner::new(
+        let st: Shared = Arc::new(Mutex::new(Inner::distributing(
             layout,
             bm_core::config::Settings::default(),
         )));

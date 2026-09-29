@@ -439,8 +439,55 @@ async fn drop_machine(State(st): State<Shared>, Query(q): Query<AddrQuery>) -> i
     Json(serde_json::json!({"ok": true}))
 }
 
+/// `dispatch`'s enqueue: the **remainder** of the authored range, and nothing
+/// else.
+///
+/// Deliberately index-free. `translate` fetches the chapter index because a
+/// range it has never seen has to know which chapters are not on the site; the
+/// remainder of a range that is already in the ledger has been through that once
+/// already, and re-walking a listing page would make `:go` — the control an
+/// operator reaches for when they want the cluster moving *now* — a control that
+/// sometimes waits on a network round trip.
+///
+/// A ledger with no rows at all is the one case it refuses to guess at: there is
+/// no range set up, and enqueueing one blind is how a fresh workspace starts
+/// crawling chapters that may not exist. It says what to do instead.
+///
+/// The two callers are the two spellings of the same control — `Op::Dispatch`
+/// and `serve --go` — so both come up doing exactly the same two things. A flag
+/// that flipped the hold and stopped there would put crawl rows in front of a
+/// manual-mode fleet, which is the failure `enqueue_translate` exists to avoid.
+pub(crate) async fn enqueue_remainder(st: &Shared, go: bool) -> Option<String> {
+    if !go {
+        return None;
+    }
+    let mut inner = st.lock().await;
+    let (from, to, _) = inner.remaining()?;
+    if inner.tasks.is_empty() {
+        return Some(
+            "nothing is queued yet — `:translate <start> <count>` sets the range up first"
+                .to_string(),
+        );
+    }
+    let count = to - from + 1;
+    inner.reconcile(from, count);
+    let (crawls, digests) = inner.enqueue_translate(from, count);
+    Some(format!(
+        "{crawls} crawls + {digests} digests queued for ch{from}..{to}"
+    ))
+}
+
 async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResult> {
     match req.op {
+        bm_proto::Op::Dispatch => {
+            let go = req.go.unwrap_or(true);
+            let line = { st.lock().await.set_dispatch(go) };
+            let line = match enqueue_remainder(&st, go).await {
+                Some(more) => format!("{line}; {more}"),
+                None => line,
+            };
+            Json(OpResult::ok(line))
+        }
         bm_proto::Op::Translate => {
             let (start, count) = (req.start.unwrap_or(1), req.count.unwrap_or(1));
             // The chapter index first, and **outside the lock**: building it can
@@ -476,6 +523,10 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             // range whose render/merge tasks went missing (reset ledger, older
             // builds) would digest and then idle with nothing offerable.
             inner.reconcile(start, count);
+            // The operator just named the range, so from here this process works
+            // on it: `:go` measures the remainder of *this*, not of whatever the
+            // saved run config happens to say (see `set_authored_range`).
+            inner.set_authored_range(start, count);
             let absent = index.as_ref().map(|i| inner.apply_index(i)).unwrap_or(0);
             let (crawls, digests) = inner.enqueue_translate(start, count);
             let absent_note = if absent > 0 {
@@ -1094,6 +1145,15 @@ async fn state(State(st): State<Shared>) -> impl IntoResponse {
         // ledger's blocked-by readout and the TUI's queue line both read
         // this. Empty almost always, so it costs one empty array.
         "exclusive": inner.exclusive_snapshot(),
+        // Whether anything is being handed out at all, and where the authored
+        // range stands. The footer says so while held — "held · ch4..100 ·
+        // 3 done, 97 to go — :go" — because neither is visible from the task
+        // table alone, where a held cluster and a finished one look identical.
+        "dispatch": {
+            "held": inner.dispatch_held,
+            "span": inner.remaining_line(),
+            "remaining": inner.remaining(),
+        },
     }))
 }
 
@@ -1764,7 +1824,7 @@ mod tests {
     async fn a_policy_edit_persists_and_leaves_delivery_to_the_dispatcher() {
         let d = scratch();
         let layout = bm_core::Layout::new(d.path());
-        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::distributing(
             layout,
             bm_core::config::Settings::default(),
         )));
@@ -1835,7 +1895,7 @@ mod tests {
     }
 
     fn segment_state(layout: &bm_core::Layout) -> Shared {
-        std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+        std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::distributing(
             layout.clone(),
             bm_core::config::Settings::default(),
         )))
@@ -1891,7 +1951,7 @@ mod tests {
     async fn register_and_heartbeat_flip_a_machine_online() {
         let d = scratch();
         let layout = bm_core::Layout::new(d.path());
-        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::distributing(
             layout,
             bm_core::config::Settings::default(),
         )));
@@ -1966,7 +2026,7 @@ mod tests {
             },
         )
         .unwrap();
-        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::distributing(
             layout,
             bm_core::config::Settings::default(),
         )));
@@ -2000,7 +2060,7 @@ mod tests {
         // live note is left alone.
         let d = scratch();
         let layout = bm_core::Layout::new(d.path());
-        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::distributing(
             layout,
             bm_core::config::Settings::default(),
         )));
@@ -2071,7 +2131,7 @@ mod tests {
         let d = scratch();
         let layout = bm_core::Layout::new(d.path());
         let machines_path = layout.machines();
-        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::distributing(
             layout,
             bm_core::config::Settings::default(),
         )));
@@ -2130,7 +2190,7 @@ mod tests {
     async fn machine_state_route_updates_known_boxes_only() {
         let d = scratch();
         let layout = bm_core::Layout::new(d.path());
-        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::distributing(
             layout,
             bm_core::config::Settings::default(),
         )));
@@ -2476,6 +2536,161 @@ mod tests {
             "force must reach the state layer: {}",
             res.0.message
         );
+    }
+
+    fn dispatch_req(go: bool) -> Json<bm_proto::OpRequest> {
+        Json(bm_proto::OpRequest {
+            op: bm_proto::Op::Dispatch,
+            go: Some(go),
+            ..Default::default()
+        })
+    }
+
+    /// `dispatch` says what it did, in both directions, and refuses to invent a
+    /// range: a ledger with no rows gets told how to set one up instead of
+    /// crawling chapters nobody asked for.
+    #[tokio::test]
+    async fn dispatch_holds_goes_and_refuses_to_invent_a_range() {
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+            layout,
+            bm_core::config::Settings::default(),
+        )));
+
+        let Json(res) = op(State(st.clone()), dispatch_req(false)).await;
+        assert!(res.ok, "{}", res.message);
+        assert!(res.message.starts_with("hold:"), "{}", res.message);
+        assert!(st.lock().await.dispatch_held);
+
+        let Json(res) = op(State(st.clone()), dispatch_req(true)).await;
+        assert!(res.ok, "{}", res.message);
+        assert!(
+            res.message.contains("nothing is queued yet"),
+            "{}",
+            res.message
+        );
+        let inner = st.lock().await;
+        assert!(
+            !inner.dispatch_held,
+            "it did go — the enqueue is the half it could not do"
+        );
+        assert!(inner.tasks.is_empty(), "and nothing was invented");
+    }
+
+    /// Going enqueues the remainder: the range is set up once, three chapters
+    /// are finished, and `go` queues 4..6 out of rows that already exist.
+    #[tokio::test]
+    async fn dispatch_queues_the_remainder_of_the_range() {
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+            layout,
+            bm_core::config::Settings::default(),
+        )));
+        {
+            let mut inner = st.lock().await;
+            inner.settings.start = 1;
+            inner.settings.count = 6;
+            inner.reconcile(1, 6);
+            for n in 1..=3 {
+                inner.tasks.get_mut(&format!("merge:{n}")).unwrap().state =
+                    bm_proto::TaskState::Done;
+            }
+        }
+
+        let Json(res) = op(State(st.clone()), dispatch_req(true)).await;
+        assert!(res.ok, "{}", res.message);
+        assert!(
+            res.message.starts_with("go: distributing ch4..6"),
+            "{}",
+            res.message
+        );
+        assert!(
+            res.message.contains("queued for ch4..6"),
+            "{}",
+            res.message
+        );
+        let inner = st.lock().await;
+        assert!(!inner.dispatch_held);
+        assert!(
+            inner.tasks.contains_key("digest:4"),
+            "the remainder is queued"
+        );
+        assert!(inner.tasks.contains_key("merge:6"));
+    }
+
+    /// `:translate 4 3` authors the range, so the `:go` that follows
+    /// distributes *its* remainder — not the range the saved run config holds.
+    #[tokio::test]
+    async fn translate_authors_the_range_that_go_measures() {
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+            layout,
+            bm_core::config::Settings::default(),
+        )));
+        {
+            // The saved run config says the whole book, and nothing is queued.
+            let mut inner = st.lock().await;
+            inner.settings.start = 1;
+            inner.settings.count = 100;
+        }
+
+        let Json(res) = op(
+            State(st.clone()),
+            Json(bm_proto::OpRequest {
+                op: bm_proto::Op::Translate,
+                start: Some(4),
+                count: Some(3),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert!(res.ok, "{}", res.message);
+        assert!(res.message.contains("translate ch4.."), "{}", res.message);
+
+        let Json(res) = op(State(st.clone()), dispatch_req(true)).await;
+        assert!(res.ok, "{}", res.message);
+        assert!(
+            res.message.starts_with("go: distributing ch4..6"),
+            "the range just authored, not the file's: {}",
+            res.message
+        );
+    }
+
+    /// The dashboard's readout: held-or-going and where the authored range
+    /// stands, in one place, because a held cluster and a finished one look
+    /// identical in the task table.
+    #[tokio::test]
+    async fn state_reports_dispatch_and_the_range() {
+        use axum::response::IntoResponse;
+        let d = scratch();
+        let layout = bm_core::Layout::new(d.path());
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::new(
+            layout,
+            bm_core::config::Settings::default(),
+        )));
+        {
+            let mut inner = st.lock().await;
+            inner.settings.start = 1;
+            inner.settings.count = 100;
+            inner.reconcile(1, 100);
+            for n in 1..=3 {
+                inner.tasks.get_mut(&format!("merge:{n}")).unwrap().state =
+                    bm_proto::TaskState::Done;
+            }
+        }
+
+        let resp = state(State(st.clone())).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 8 << 20)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["dispatch"]["held"], serde_json::json!(true));
+        assert_eq!(v["dispatch"]["span"], "ch4..100 · 3 done, 97 to go");
+        assert_eq!(v["dispatch"]["remaining"], serde_json::json!([4, 100, 3]));
     }
 }
 

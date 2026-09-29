@@ -3937,6 +3937,49 @@ fn two_retries_of_different_chapters_do_not_suppress_each_other() {
         ..a.clone()
     };
     assert_ne!(op_key(&a), op_key(&forced), "force is a different job");
+
+    // `:go` and `:hold` are one op with one flag between them, so the flag has
+    // to be in the key: otherwise a hold pressed while the go is still in
+    // flight is refused as a duplicate — the opposite of what was asked.
+    let dispatch = |go: bool| {
+        op_key(&OpRequest {
+            op: Op::Dispatch,
+            go: Some(go),
+            ..Default::default()
+        })
+    };
+    assert_ne!(dispatch(true), dispatch(false), "a hold is not a duplicate go");
+}
+
+#[tokio::test]
+async fn go_and_hold_both_reach_the_wire_even_back_to_back() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    // `dispatch` wraps every job in a `Tracked` row, so the op is inside it.
+    let op_req = |job: Job| match job {
+        Job::Tracked { job, .. } => match *job {
+            Job::Op { req, .. } => req,
+            other => panic!("expected an op, got {other:?}"),
+        },
+        other => panic!("expected a tracked job, got {other:?}"),
+    };
+
+    do_command(&mut app, Command::Dispatch { go: true }, &http, &job_tx);
+    let req = op_req(job_rx.try_recv().expect("`:go` dispatches"));
+    assert_eq!((req.op, req.go), (Op::Dispatch, Some(true)));
+
+    // The hold follows before the go has answered — the state the in-flight
+    // guard sees on a slow inductor, and the one it must not eat.
+    do_command(&mut app, Command::Dispatch { go: false }, &http, &job_tx);
+    let req = op_req(job_rx.try_recv().expect("`:hold` dispatches too"));
+    assert_eq!((req.op, req.go), (Op::Dispatch, Some(false)));
+
+    // Both directions are spelled in the word list, because a hold nobody can
+    // find is a hold that reads as a broken cluster.
+    for word in ["go", "hold"] {
+        assert!(WORDS.iter().any(|w| w.names.contains(&word)), "{word}");
+    }
 }
 
 #[test]
@@ -8420,4 +8463,39 @@ async fn the_script_window_walks_a_chapter_and_repoints_a_segment() {
         "second Esc closes the window: {:?}",
         app.screen
     );
+}
+
+/// The gate as the operator meets it: a held cluster says so, in the footer,
+/// because a held cluster is otherwise indistinguishable from a finished one —
+/// same empty queue, same idle boxes, same everything.
+#[test]
+fn the_footer_calls_out_a_held_cluster_and_claims_nothing_else() {
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.apply_state(serde_json::json!({
+        "tasks": [],
+        "machines": [],
+        "beats": [],
+        "dispatch": {"held": true, "span": "ch4..100 · 3 done, 97 to go", "remaining": [4, 100, 3]},
+    }));
+    let text = render_text(&mut app, 160, 44);
+    assert!(
+        hint_visible(&text, "held · ch4..100 · 3 done, 97 to go — :go"),
+        "the hold, what is left, and the way out of it:\n{text}"
+    );
+
+    // Distributing: no marker at all. An indicator that is always on is an
+    // indicator nobody reads, and the range it would repeat is in the header.
+    app.apply_state(serde_json::json!({
+        "tasks": [],
+        "machines": [],
+        "beats": [],
+        "dispatch": {"held": false, "span": "ch4..100 · 3 done, 97 to go", "remaining": [4, 100, 3]},
+    }));
+    assert!(!render_text(&mut app, 160, 44).contains("held ·"));
+
+    // An inductor older than the gate sends no `dispatch` key at all, and the
+    // footer must not claim a hold nobody set.
+    let mut older = App::new("http://127.0.0.1:8901");
+    older.apply_state(serde_json::json!({"tasks": [], "machines": [], "beats": []}));
+    assert!(!render_text(&mut older, 160, 44).contains("held ·"));
 }

@@ -1403,6 +1403,23 @@ pub struct Roster {
 pub enum Op {
     /// Enqueue crawl + digest tasks for a chapter range.
     Translate,
+    /// Start or stop **distributing** work, and the only switch that does.
+    ///
+    /// A process starts held: it loads its ledger, answers `/api/state`, takes
+    /// registrations and offers nothing, so a restart — an unattended one
+    /// especially — never resumes handing tasks to a fleet because an earlier
+    /// process was once told to go. Held is in memory and nowhere else, which is
+    /// what makes that true rather than aspirational.
+    ///
+    /// Going also enqueues the **remainder** of the authored range: the first
+    /// chapter of it whose merge is not `Done`, through the last. A book that is
+    /// 3 of 100 chapters in therefore distributes 4..100, and the operator does
+    /// not have to work that out from the task table.
+    ///
+    /// Only *offers* are gated. A one-off op, a hand-driven digest, audition,
+    /// provisioning and every screen keep working while held, because those are
+    /// the operator's own hands rather than distribution.
+    Dispatch,
     /// Persist the URL template and probe one crawl, "set up link crawling".
     CrawlSetup,
     /// Adopt operator-supplied chapter text: the manual half of crawling, and
@@ -1532,6 +1549,7 @@ impl Op {
     pub fn as_str(self) -> &'static str {
         match self {
             Op::Translate => "translate",
+            Op::Dispatch => "dispatch",
             Op::CrawlSetup => "crawl-setup",
             Op::Import => "import",
             Op::Voices => "voices",
@@ -1806,6 +1824,11 @@ impl ExclusiveOp {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OpRequest {
     pub op: Op,
+    /// `dispatch`: go, or hold. `None` is the op's own default, which is *go* —
+    /// the verb is the name, and this field exists so a client can say the other
+    /// direction (`{"op":"dispatch","go":false}`) without a second op.
+    #[serde(default)]
+    pub go: Option<bool>,
     /// Speaker reassignments for `recast`, in any order.
     #[serde(default)]
     pub fixes: Vec<SpeakerFix>,

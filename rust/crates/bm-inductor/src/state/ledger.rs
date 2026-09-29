@@ -22,10 +22,28 @@ impl Inner {
             next_event_id: 0,
             shutdown_requested: false,
             shutdown_when_idle: false,
+            // Held at birth: see `Inner::dispatch_held`. A process has to be
+            // told to distribute, and a restart is a new process.
+            dispatch_held: true,
             stats: super::StatsAgg::default(),
             unreadable_tasks: Vec::new(),
             exclusive: Vec::new(),
         }
+    }
+
+    /// The same state, already distributing: a **fixture**, and it exists
+    /// because the real default is the point of the feature.
+    ///
+    /// A test that expects work to be offered is modelling a cluster an operator
+    /// has started, so it says so here rather than silently depending on the
+    /// default. Production reaches this state exactly two ways — `--go` at
+    /// startup and `:go` at any time, both through [`Inner::set_dispatch`] — and
+    /// nothing else, so a process cannot come up distributing by accident.
+    #[cfg(test)]
+    pub(crate) fn distributing(layout: Layout, settings: Settings) -> Self {
+        let mut inner = Inner::new(layout, settings);
+        inner.dispatch_held = false;
+        inner
     }
 
     pub(crate) fn push_event(&mut self, level: &str, text: String) {
@@ -178,6 +196,78 @@ impl Inner {
         let name = self.box_name(addr, fallback_name);
         let (bxo, _) = split_machine(m, &name);
         let _ = save_box(&self.layout.machines(), &bxo);
+    }
+
+    /// Record the range **this process** was told to work on.
+    ///
+    /// The two callers are the two ways an operator authors a range: `serve
+    /// --start/--count` at startup, and `:translate` at any time. Nothing else
+    /// calls it — and `reconcile` deliberately does not, because the remainder
+    /// path calls `reconcile` with a *narrower* range, and recording there would
+    /// shrink the authored range to the remainder and lose the chapters already
+    /// done.
+    ///
+    /// `settings.start/count` is where the range lives (it is the same "chapter
+    /// range the cluster is currently working on" the run-config prompt saves),
+    /// and this is a **memory-only** write: a process starting on a workspace
+    /// must not silently rewrite the saved run config, so the file keeps saying
+    /// what the operator last saved while this process works on what it was
+    /// actually handed. The two disagree exactly when somebody starts a slice —
+    /// `serve --start 40 --count 10` over a workspace whose file says the whole
+    /// book — and it is the slice that this ledger's rows are about, which is
+    /// why `:go` must measure it.
+    pub fn set_authored_range(&mut self, start: u32, count: u32) {
+        self.settings.start = start;
+        self.settings.count = count;
+    }
+
+    /// Where the authored range has actually got to: the first chapter of it
+    /// whose **merge** is not done, the last chapter in it, and how many are
+    /// finished — `(first, end, done)`. `None` when nothing in the range is
+    /// outstanding, which is the honest answer to "what is left".
+    ///
+    /// Merge is the terminal stage, so "merged" is the only definition of
+    /// finished that agrees with the artifact: a chapter is done when its mp3
+    /// is. A chapter with no row at all counts as unfinished — it has not been
+    /// enqueued yet, which is exactly the state of a fresh range — and so does
+    /// one that is shelved or failed, because both are work still owed.
+    ///
+    /// This is what makes `:go` distribute the *remainder* instead of the
+    /// authored range: a book 3 chapters into 100 reports `(4, 100, 3)`, and
+    /// nobody has to count rows in a task table to find that out. The authored
+    /// range stays authored; this is the effective one.
+    pub fn remaining(&self) -> Option<(u32, u32, u32)> {
+        let (start, count) = (self.settings.start, self.settings.count);
+        if count == 0 {
+            return None;
+        }
+        let end = start.saturating_add(count - 1);
+        let merged: std::collections::BTreeSet<u32> = self
+            .tasks
+            .values()
+            .filter(|t| t.stage == bm_proto::Stage::Merge && t.state == TaskState::Done)
+            .map(|t| t.chapter)
+            .collect();
+        let first = (start..=end).find(|n| !merged.contains(n))?;
+        let done = (start..=end).filter(|n| merged.contains(n)).count() as u32;
+        Some((first, end, done))
+    }
+
+    /// The same answer as one operator-facing line: `ch4..100 · 3 done, 97 to
+    /// go`, or the finished case. Empty range included, because "nothing to do"
+    /// is a state worth spelling rather than an empty string.
+    pub fn remaining_line(&self) -> String {
+        let (start, count) = (self.settings.start, self.settings.count);
+        if count == 0 {
+            return "range is empty".to_string();
+        }
+        match self.remaining() {
+            Some((from, to, done)) => format!(
+                "ch{from}..{to} · {done} done, {} to go",
+                (to - from + 1) as u64
+            ),
+            None => format!("ch{start}..{} · every chapter merged", start + count - 1),
+        }
     }
 
     pub fn save(&self) {

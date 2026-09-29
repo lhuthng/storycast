@@ -166,6 +166,33 @@ impl Inner {
         !in_flight && !self.runnable()
     }
 
+    /// Start or stop distribution, and report it. Returns the line to show.
+    ///
+    /// The whole of the gate's state is one bool the `offer` path reads first,
+    /// so this is the entire control surface: no rows are touched, no lease is
+    /// released, nothing is deleted. Holding a live cluster leaves whatever is
+    /// in flight to finish — the boxes are told nothing — and only stops the
+    /// *next* offer, which is the shape an operator means by "hold": quiet, not
+    /// killed.
+    ///
+    /// Going does not enqueue anything by itself; the caller does that with the
+    /// remainder this reports (see `remaining_line`), because the enqueue needs
+    /// the chapter index and a network round trip, and a control that sometimes
+    /// goes to the network is a control that sometimes stalls the dashboard.
+    pub(crate) fn set_dispatch(&mut self, go: bool) -> String {
+        self.dispatch_held = !go;
+        let line = if go {
+            format!("go: distributing {}", self.remaining_line())
+        } else {
+            format!(
+                "hold: no task will be offered — the range stands at {}",
+                self.remaining_line()
+            )
+        };
+        self.push_event(if go { "info" } else { "warn" }, line.clone());
+        line
+    }
+
     pub(crate) fn maybe_auto_shutdown(&mut self) {
         if !self.shutdown_when_idle {
             return;

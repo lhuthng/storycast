@@ -116,9 +116,16 @@ pub(crate) fn dispatch_op(
 /// ops on one chapter are two different segments — without them here the second
 /// press of either is refused as a duplicate of the first, which is a lie about
 /// work that was never dispatched.
+///
+/// `dispatch`'s direction is in the key for the same reason, and it is the one
+/// where getting it wrong is worst: `:go` and `:hold` share an op and an empty
+/// payload, so without the flag a `:hold` pressed while the `:go` round trip is
+/// still out is refused as "dispatch is already running" — the opposite of what
+/// was asked for, and silent apart from a status line nobody would read as a
+/// refusal to hold.
 pub(crate) fn op_key(req: &OpRequest) -> String {
     format!(
-        "{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}",
         req.op.as_str(),
         req.stage.map(Stage::as_str).unwrap_or("-"),
         req.chapter
@@ -129,6 +136,7 @@ pub(crate) fn op_key(req: &OpRequest) -> String {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "-".into()),
         req.worker.as_deref().unwrap_or("-"),
+        req.go.unwrap_or(true),
     )
 }
 

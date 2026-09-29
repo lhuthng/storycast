@@ -44,6 +44,16 @@ enum Cmd {
         start: u32,
         #[arg(long, default_value = "1")]
         count: u32,
+        /// Start distributing at once instead of holding until `:go`.
+        ///
+        /// A run comes up **held**: the range is reconciled (rows, not offers)
+        /// and nothing is handed to a worker until an operator says go. That is
+        /// what makes a restart stop rather than resume — a box that reboots
+        /// into a pending ledger must not silently begin working. This flag is
+        /// how an unattended run asks for the old behaviour: a script, a test,
+        /// a scheduled job.
+        #[arg(long)]
+        go: bool,
     },
     /// Onboard one machine by address: probe, push what's missing, verify.
     Provision {
@@ -652,6 +662,7 @@ async fn cmd_serve(
     bind: &str,
     start: u32,
     count: u32,
+    go: bool,
 ) -> anyhow::Result<()> {
     // `Inner` takes the layout; the dispatcher needs its own handle on it.
     let drive_layout = layout.clone();
@@ -714,7 +725,41 @@ async fn cmd_serve(
         }
     }
     inner.reconcile(start, count);
+    // The range this process works on is the one it was just told to reconcile.
+    //
+    // `make serve` (and the plain binary) always name a range, so the CLI is
+    // authoritative here — the saved run config is a *prefill* for the
+    // dashboard's `t` prompt, and a process that quietly preferred it would
+    // reconcile 1..10 and then distribute whatever the file happened to hold.
+    // In memory only: the file is the operator's.
+    inner.set_authored_range(start, count);
+    // Held, unless somebody asked for the old behaviour with `--go`.
+    //
+    // `reconcile` above is bookkeeping — it makes sure every stage of the range
+    // has a row — and it is deliberately still run while held: the operator's
+    // first question is always "what is left", which is a question about rows.
+    // What the hold stops is the *offers*, which is the part that spends hours
+    // and money, so a box that reboots and finds the inductor up does not
+    // resume a run nobody asked it to resume.
+    if go {
+        let line = inner.set_dispatch(true);
+        println!("[inductor] {line}");
+    } else {
+        println!(
+            "[inductor] held · {} · `:go` starts distributing, `--go` to come up that way",
+            inner.remaining_line()
+        );
+    }
     let shared = std::sync::Arc::new(tokio::sync::Mutex::new(inner));
+    // `--go` is the *same* control as `:go`, so it does the same two things: the
+    // flag above, and the remainder queued. Anything less would make the
+    // automation path a different feature from the one an operator uses, and the
+    // difference would show up as crawl rows no manual-mode worker can run.
+    if go {
+        if let Some(more) = crate::api::enqueue_remainder(&shared, true).await {
+            println!("[inductor] {more}");
+        }
+    }
     // Lease reaper: expired leases return to the pool, no strike.
     let reaper = shared.clone();
     tokio::spawn(async move {
@@ -2140,7 +2185,8 @@ async fn main() -> anyhow::Result<()> {
             bind,
             start,
             count,
-        } => cmd_serve(layout, settings, port, &bind, start, count).await,
+            go,
+        } => cmd_serve(layout, settings, port, &bind, start, count, go).await,
         Cmd::Provision {
             r#box,
             addr,

@@ -800,8 +800,14 @@ template copied from `truyencom.lua`, and a captured page in
 
 ```
 :translate 1 50     # builds the index for the range, then queues crawl + digest
+:go                 # start distributing (a process boots held, on purpose)
 :crawl              # saves the URL template (if you type one), probes one chapter
 ```
+
+`:translate` queues rows; `:go` hands them out. Neither is implied by the other,
+and the inductor comes up held, so a restart never resumes a run nobody asked
+for — which also means a fresh workspace shows a full queue and an idle cluster
+until somebody says go.
 
 `:crawl` probes through **the same provider a worker uses**, index first, so a
 script's `discover()` has its say, and reports the verdict it reached: bytes and

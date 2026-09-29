@@ -114,6 +114,19 @@ pub struct Inner {
     /// Drain-then-exit arm: when set, the latch above fires on its own the
     /// moment no unfinished task remains. Same memory-only rule.
     pub shutdown_when_idle: bool,
+    /// **The dispatcher is held until an operator says go.**
+    ///
+    /// The broadest gate there is: `offer` returns nothing while held, so a
+    /// process that has just loaded a ledger full of pending rows sits and
+    /// waits instead of immediately spreading a fleet across them. See
+    /// [`Op::Dispatch`](bm_proto::Op::Dispatch) for why that is the default.
+    ///
+    /// In memory only, like the two shutdown latches above and for the same
+    /// reason: `save()` writes an explicit document and this is not in it, so a
+    /// restart always comes up held. Persisting it would turn "the fleet was
+    /// running last night" into "start automatically on boot", which is the
+    /// wrong default for something that spends money and hours.
+    pub dispatch_held: bool,
     /// Completed-task ledger behind the Stats pane: per-worker per-stage
     /// counts plus recent per-stage durations for the TUI-side ETA.
     /// In-memory like the beats, a fresh window beats stale history,
@@ -199,6 +212,22 @@ mod tests {
         let layout = Layout::new(d.path());
         layout.ensure().unwrap();
         std::fs::write(layout.bible(), r#"{"characters":[]}"#).unwrap();
+        let inner = Inner::distributing(layout, Settings::default());
+        (d, inner)
+    }
+
+    /// The same fixture, born the way a real process is: **held**.
+    ///
+    /// [`fixture`] deliberately hands back a cluster somebody has started,
+    /// because most of the tests below are about work being handed out. The
+    /// gate's own tests need the other state, and they ask for it here rather
+    /// than reaching into the field, so a change to the default lands in one
+    /// place.
+    fn held_fixture() -> (tempfile::TempDir, Inner) {
+        let d = tempfile::tempdir().unwrap();
+        let layout = Layout::new(d.path());
+        layout.ensure().unwrap();
+        std::fs::write(layout.bible(), r#"{\"characters\":[]}"#).unwrap();
         let inner = Inner::new(layout, Settings::default());
         (d, inner)
     }
@@ -304,7 +333,7 @@ mod tests {
         );
 
         // Idempotent: a second load over the migrated file changes nothing.
-        let mut again = Inner::new(layout.clone(), Settings::default());
+        let mut again = Inner::distributing(layout.clone(), Settings::default());
         again.load_ledger();
         assert_eq!(again.machines.len(), 2);
         assert_eq!(
@@ -463,7 +492,7 @@ mod tests {
 
         // Reloading must not duplicate it: the preserved set is re-derived from
         // the file on each load, not accumulated across them.
-        let mut again = Inner::new(inner.layout.clone(), Settings::default());
+        let mut again = Inner::distributing(inner.layout.clone(), Settings::default());
         again.load_ledger();
         assert_eq!(
             again.unreadable_tasks.len(),
@@ -554,7 +583,7 @@ mod tests {
         std::fs::write(layout.bible(), r#"{"characters":[]}"#).unwrap();
         std::fs::copy(&src, layout.ledger()).unwrap();
 
-        let mut inner = Inner::new(layout.clone(), Settings::default());
+        let mut inner = Inner::distributing(layout.clone(), Settings::default());
         inner.load_ledger();
         let read = inner.tasks.len();
         let held = inner.unreadable_tasks.len();
@@ -574,7 +603,7 @@ mod tests {
         );
 
         // A second cycle must be stable: no growth, no loss.
-        let mut again = Inner::new(layout.clone(), Settings::default());
+        let mut again = Inner::distributing(layout.clone(), Settings::default());
         again.load_ledger();
         again.save();
         let after2: Value = bm_core::read_json(&layout.ledger()).unwrap();
@@ -664,7 +693,7 @@ mod tests {
         let layout = Layout::new(dir.path());
         std::fs::create_dir_all(layout.bm_state()).unwrap();
         std::fs::write(layout.bm_state().join("ledger.json"), &raw).unwrap();
-        let mut inner = Inner::new(layout, Settings::default());
+        let mut inner = Inner::distributing(layout, Settings::default());
         inner.load_ledger();
 
         assert_eq!(inner.tasks.len(), tasks_n, "no task lost");
@@ -3464,7 +3493,7 @@ mod tests {
         inner.save();
 
         // A fresh Inner over the same files: the operator's ask survived.
-        let mut reborn = Inner::new(inner.layout.clone(), inner.settings.clone());
+        let mut reborn = Inner::distributing(inner.layout.clone(), inner.settings.clone());
         reborn.load_ledger();
         assert_eq!(reborn.exclusive.len(), 1, "the ask is still there");
         assert_eq!(reborn.exclusive[0].label, "swap-voice");
@@ -4327,7 +4356,7 @@ mod tests {
         layout.ensure().unwrap();
         let mut settings = Settings::default();
         settings.crawl.mode = "manual".into();
-        let mut inner = Inner::new(layout, settings);
+        let mut inner = Inner::distributing(layout, settings);
 
         let (crawls, digests) = inner.enqueue_translate(1, 3);
         assert_eq!(crawls, 0, "manual mode fetches nothing");
@@ -4358,7 +4387,7 @@ mod tests {
         let mut scripted = Settings::default();
         scripted.crawl.mode = "script".into();
         scripted.url_template = "https://site.example/chuong-{n}".into();
-        let mut inner2 = Inner::new(layout2, scripted);
+        let mut inner2 = Inner::distributing(layout2, scripted);
         let (crawls2, _) = inner2.enqueue_translate(1, 3);
         assert_eq!(crawls2, 3);
         // …and the out-of-the-box default is manual, which is the first half
@@ -7141,6 +7170,141 @@ mod tests {
             offer.render_units.as_deref().map(<[_]>::len),
             Some(0),
             "no unit to speak — and `Some([])`, not `None`, which would read as an old inductor"
+        );
+    }
+
+    /// The gate in the shape an operator meets it: a process comes up holding,
+    /// an ask gets nothing, and the rows are *withheld, not failed* — nothing
+    /// about the work is wrong — until somebody says go.
+    #[test]
+    fn a_process_born_held_offers_nothing_until_go() {
+        let (_d, mut inner) = held_fixture();
+        inner.settings.start = 1;
+        inner.settings.count = 3;
+        inner.reconcile(1, 3);
+        inner.workers.insert("w".into(), "192.168.2.2".into());
+
+        assert!(inner.dispatch_held, "the default a real process boots with");
+        assert!(
+            inner.offer("w").is_none(),
+            "not even the crawl is handed out while held"
+        );
+        let crawl = &inner.tasks["crawl:1"];
+        assert_eq!(crawl.state, TaskState::Pending);
+        assert_eq!(crawl.attempts, 0, "withheld is not failed");
+
+        let line = inner.set_dispatch(true);
+        assert!(line.starts_with("go: distributing ch1..3"), "{line}");
+        assert_eq!(
+            inner
+                .offer("w")
+                .expect("now the crawl is offerable")
+                .task_id,
+            "crawl:1"
+        );
+
+        // A second worker asks while held. `crawl:2` is still `Pending`, so
+        // the `None` below is the gate rather than an empty queue.
+        let line = inner.set_dispatch(false);
+        assert!(line.starts_with("hold: no task will be offered"), "{line}");
+        assert_eq!(inner.tasks["crawl:2"].state, TaskState::Pending);
+        assert!(inner.offer("w2").is_none(), "holding is immediate");
+    }
+
+    /// The remainder, which is the whole reason the gate has a `go`: a book
+    /// three chapters into a hundred reports 4..100, and the operator never has
+    /// to read that off a task table.
+    #[test]
+    fn the_remainder_starts_at_the_first_unmerged_chapter() {
+        let (_d, mut inner) = held_fixture();
+        inner.settings.start = 1;
+        inner.settings.count = 100;
+        inner.reconcile(1, 100);
+
+        assert_eq!(inner.remaining(), Some((1, 100, 0)), "nothing merged yet");
+        assert_eq!(inner.remaining_line(), "ch1..100 · 0 done, 100 to go");
+
+        for n in 1..=3 {
+            inner.tasks.get_mut(&format!("merge:{n}")).unwrap().state = TaskState::Done;
+        }
+        assert_eq!(inner.remaining(), Some((4, 100, 3)));
+        assert_eq!(inner.remaining_line(), "ch4..100 · 3 done, 97 to go");
+    }
+
+    /// The range a process is handed beats the one saved on disk.
+    ///
+    /// `serve --start 40 --count 10` over a workspace whose run config says the
+    /// whole book is a slice run: this ledger's rows are the slice's, so `:go`
+    /// has to measure the slice — and the operator's saved config is not
+    /// rewritten on the way past.
+    #[test]
+    fn the_range_a_process_is_handed_beats_the_saved_one() {
+        let (_d, mut inner) = held_fixture();
+        let saved = inner.layout.settings();
+        let before = std::fs::read(&saved).ok();
+        // What the workspace's saved run config would have loaded as.
+        inner.settings.start = 1;
+        inner.settings.count = 100;
+        assert_eq!(inner.remaining_line(), "ch1..100 · 0 done, 100 to go");
+
+        inner.reconcile(40, 10);
+        inner.set_authored_range(40, 10);
+        assert_eq!(inner.remaining_line(), "ch40..49 · 0 done, 10 to go");
+        assert_eq!(
+            std::fs::read(&saved).ok(),
+            before,
+            "a process records its range in memory, never over the saved config"
+        );
+    }
+
+    /// The three answers that keep `:go` from being a guess: a finished range
+    /// says so, a range with a hole names the hole, and a parked or failed
+    /// chapter is work still owed rather than work that is done.
+    #[test]
+    fn remaining_counts_merged_chapters_only() {
+        let (_d, mut inner) = held_fixture();
+        inner.settings.start = 1;
+        inner.settings.count = 5;
+        inner.reconcile(1, 5);
+        for n in 1..=5 {
+            inner.tasks.get_mut(&format!("merge:{n}")).unwrap().state = TaskState::Done;
+        }
+        assert_eq!(inner.remaining(), None);
+        assert_eq!(inner.remaining_line(), "ch1..5 · every chapter merged");
+
+        // Shelved is parked for an operator, not finished — the same reasoning
+        // that keeps a shelved crawl from satisfying `runnable()`.
+        inner.tasks.get_mut("merge:3").unwrap().state = TaskState::Shelved;
+        assert_eq!(inner.remaining(), Some((3, 5, 4)));
+        assert_eq!(inner.remaining_line(), "ch3..5 · 4 done, 3 to go");
+
+        // Nothing authored is not the same as nothing left: it is not a range.
+        inner.settings.count = 0;
+        assert_eq!(inner.remaining(), None);
+        assert_eq!(inner.remaining_line(), "range is empty");
+    }
+
+    /// Held means held for *offers*. The reaper still takes a dead worker's row
+    /// back — that is bookkeeping, not distribution — so a held cluster's task
+    /// table still reads true while it waits for an operator.
+    #[test]
+    fn a_held_cluster_still_reaps_an_expired_lease() {
+        let (_d, mut inner) = held_fixture();
+        inner.settings.start = 1;
+        inner.settings.count = 1;
+        inner.reconcile(1, 1);
+        {
+            let t = inner.tasks.get_mut("crawl:1").unwrap();
+            t.state = TaskState::Assigned;
+            t.assigned_to = Some("ghost".into());
+            t.lease_until = Some(now_secs().saturating_sub(1));
+        }
+
+        assert!(inner.offer("w").is_none(), "still nothing is handed out");
+        assert_eq!(
+            inner.tasks["crawl:1"].state,
+            TaskState::Pending,
+            "but the row came home"
         );
     }
 }

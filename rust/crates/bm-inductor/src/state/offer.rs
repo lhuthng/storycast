@@ -100,6 +100,23 @@ impl Inner {
     /// so one bad chapter never idles the worker.
     pub fn offer(&mut self, worker_id: &str) -> Option<TaskOffer> {
         self.reap();
+        // The operator's global answer, and it is deliberately the *first*
+        // question asked: every gate below is about *which* box should get a
+        // task, and this is whether any task should be handed out at all. A
+        // process starts held (see `Inner::dispatch_held`), so a fleet is never
+        // set loose by the mere act of a restart.
+        //
+        // Withheld, not failed: the worker gets the same nothing-to-do it gets
+        // from an empty queue, so it keeps beating and its leases stay clean,
+        // and the reason is on `/api/state` for whoever is looking at the
+        // dashboard wondering why the cluster is quiet.
+        //
+        // After `reap` on purpose: taking rows back off dead workers is
+        // bookkeeping, not distribution, and a held cluster still wants its
+        // orphaned rows released so the task table reads true.
+        if self.dispatch_held {
+            return None;
+        }
         let machine = self.workers.get(worker_id).cloned().unwrap_or_default();
         // The readiness gate, and it is deliberately the *first* thing after
         // the worker lookup: a task handed to a box that is booting, being

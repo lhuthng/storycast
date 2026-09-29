@@ -3,7 +3,8 @@
 #   make build                  compile the workspace
 #   make tts                    cross-build the linux TTS sidecar + stage its runtime
 #   make tui                    live cluster dashboard (needs the inductor up)
-#   make serve                  run the inductor (START=1 COUNT=100 by default)
+#   make serve                  run the inductor, held (START=1 COUNT=100 by default)
+#                               — GO=1 to start distributing as soon as it is up
 #   make agent                  run a local worker (needs the inductor up)
 #   make digest-assistant API=… KEY=… MODEL=…   be the digestor yourself
 #   make provision ADDR=<ip>    onboard a machine by address (one-shot)
@@ -18,6 +19,7 @@
 #                is this machine's own control port from settings.
 #   START      first chapter for serve  (default 1)
 #   COUNT      how many chapters        (default 100)
+#   GO         1 to distribute on start (default: held, `:go` in the TUI)
 #   BOX        linked box name for provision (default box-1 when linked)
 #   KEY        API key for `digest-assistant` (required there; never written to .env)
 #   MODEL      the model to answer with  (required there)
@@ -38,6 +40,9 @@ API ?= http://127.0.0.1:8901
 MODEL_API ?= https://openrouter.ai/api/v1
 START ?= 1
 COUNT ?= 100
+# Deliberately empty: a process boots **held**, so a restart never resumes a run
+# nobody asked for. `make serve GO=1` is the automation escape hatch.
+GO ?=
 
 .PHONY: build build-inductor tui serve agent digest-assistant provision link test
 
@@ -56,7 +61,7 @@ tui: build-inductor
 	$(BIN)/bm-inductor tui --api $(API)
 
 serve: build-inductor
-	$(BIN)/bm-inductor serve --bind 0.0.0.0 --port 8901 --start $(START) --count $(COUNT)
+	$(BIN)/bm-inductor serve --bind 0.0.0.0 --port 8901 --start $(START) --count $(COUNT) $(if $(GO),--go,)
 
 agent: build-inductor
 	$(BIN)/bm-agent worker --inductor $(API)

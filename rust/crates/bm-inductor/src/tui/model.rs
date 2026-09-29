@@ -1101,6 +1101,31 @@ pub(crate) fn parse_stats(v: Option<&serde_json::Value>) -> WorkerStats {
     out
 }
 
+/// Whether the inductor is handing work out at all, and where the authored
+/// range stands — `/api/state`'s `dispatch` key.
+///
+/// `None` means the payload carried no `dispatch` at all, which is an inductor
+/// older than the gate; the footer then says nothing about distribution rather
+/// than inventing a hold nobody set.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Dispatch {
+    pub held: bool,
+    /// The inductor's own wording: `ch4..100 · 3 done, 97 to go`.
+    pub span: String,
+}
+
+pub(crate) fn parse_dispatch(v: Option<&serde_json::Value>) -> Option<Dispatch> {
+    let obj = v?.as_object()?;
+    Some(Dispatch {
+        held: obj.get("held").and_then(|h| h.as_bool()).unwrap_or(false),
+        span: obj
+            .get("span")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
 /// Seconds left on one task, measured TUI-side: the stage's median task
 /// duration scaled by the unworked fraction. `None` means print a dash —
 /// no history for the stage yet, or nothing running on the worker.
