@@ -162,14 +162,34 @@ the asset ending in `.tar.zst`, and curls its `browser_download_url`, with
 `tools/models.sh`, a sibling of `tools/profile.sh` with the same four verbs:
 
 ```
-tools/models.sh pack [--level N]              verify the bake -> models/models.tar.zst
-tools/models.sh verify                        bundle manifest vs. bundle contents
-tools/models.sh publish [--notes "…"]         gh release create models-v<hash>
-tools/models.sh list                          the local bundle, its hash and size
+tools/models.sh pack     [--level N] [--engine <name>]
+                         verify the bake -> engines/<engine>/models/models.tar.zst
+tools/models.sh verify   [--engine <name>]
+                         bundle manifest vs. bundle contents
+tools/models.sh publish  [--notes "…"] [--engine <name>]
+                         gh release create models-v<hash> with the bundle
+tools/models.sh list     [--engine <name>]
+                         the local bundle, its hash and size
 ```
 
-`pack` runs `python3 tools/bake-models.py --check` first and **refuses on
-anything but `16/16 files match`**. That gate is the whole safety story, and it
+`--engine` defaults to `vieneu`, or to `$BM_ENGINE` when that is set, and every
+path is derived from it — so a second engine is `--engine pocket` and its own
+`engines/pocket/models/`, beside its own binary and runtime. The name is checked
+rather than trusted, because it lands in a path: letters, digits, dot, dash and
+underscore only, and an `engines/<name>/` that does not exist is an error naming
+the ones that do. An engine that ships its own bake (`engines/<name>/bake.py`)
+has that bake used instead of `tools/bake-models.py`, so what a second engine's
+weights *are* stays that engine's business.
+
+**The tag is deliberately not per engine.** It stays `models-v<first 12 of the
+manifest hash>`, a function of the contents alone, and the `name` field of the
+pointer is what says which engine a release is for — which is the same job the
+pack pointer's `version` does for a pack. A content address needs no help
+naming its bytes, and adding a free-text component to one only makes it easier
+to get wrong. One engine pointer per workspace is the limit this scheme has.
+
+`pack` runs the engine's bake with `--check` first and **refuses unless every
+file matches**. That gate is the whole safety story, and it
 could not be used as a gate until the roster left the record, before that, it
 reported a `CHANGED` that no re-bake could clear. It also selects members from
 the manifest rather than globbing `models/`, which is the same content-addressing
@@ -230,7 +250,7 @@ What is set, and where:
 | thing | value |
 |---|---|
 | release repo | `settings.json`'s `models_release` (`owner/name`), the TUI's `:release`, or `--release-repo` on a one-shot `bm-inductor provision` |
-| the tag | `models-v<first 12 of the manifest hash>`, computed on the inductor from its own `models/manifest.json` |
+| the tag | `models-v<first 12 of the manifest hash>`, computed on the inductor from its own `engines/<engine>/models/manifest.json`. One tag per bundle, whatever the engine — the pointer's `name` says which engine a tag is for |
 | the URL | `https://github.com/<owner>/<name>/releases/download/<tag>/models.tar.zst` |
 | the hash check | `--expect <full manifest hash>`, the one the inductor read — *not* the one that arrived |
 | exit `0` | landed and verified; the push is skipped |
@@ -523,7 +543,7 @@ pushed, and nothing on a box reads it.
 | GitHub unreachable | falls back to rsync, slowly, and says so |
 | `packs_release` set, pointer has no version | the push, and the log names the re-publish command that fixes it |
 | pack release is a different profile | the box refuses it and the provision stops naming the tag — never pushed over the top |
-| pack release carries an AppleDouble `._` member | the box refuses it by name; `COPYFILE_DISABLE=1` in `profile.sh` is the gate |
+| pack release carries an AppleDouble `._` member | the box refuses it by name, and `tools/profile.sh pack`/`verify` now refuse to cut or bless one — `COPYFILE_DISABLE=1` is what makes them pass rather than a substitute for checking |
 
 Every one of these is *slower* or *louder* than today's behavior. None is silent,
 and that is the requirement: a box that is quietly holding the wrong weights is

@@ -90,7 +90,11 @@ impl ModelsRelease {
 /// A release URL is built by string concatenation, so this is the boundary
 /// that keeps a mistyped setting from fetching something that is not a GitHub
 /// release asset — and, on a box, from writing outside the destination.
-fn parse_repo(repo: &str) -> Result<(&str, &str)> {
+///
+/// `pub` because the two callers that need it are not both releases: the pack
+/// update path validates a repo it is about to *list*, before any URL exists,
+/// and a second copy of this rule is a second answer to "is that a repo".
+pub fn parse_repo(repo: &str) -> Result<(&str, &str)> {
     let mut parts = repo.split('/');
     let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
         bail!("models release repo must be `owner/name`, got `{repo}`");
@@ -483,10 +487,39 @@ pub fn fetch_pack(
     tag: &str,
     mut on_progress: impl FnMut(u64, Option<u64>),
 ) -> Result<Landing, FetchError> {
+    fetch_pack_with(url, dest, Some(expect_hash), tag, &mut on_progress).map(|(landing, _)| landing)
+}
+
+/// [`fetch_pack`] for a caller that has no outside expectation to offer, which
+/// also gets back the hash the bytes fold to.
+///
+/// The one caller is the *update* path, and why it has nothing to check against
+/// is exact: it asked for "the latest release", so the release **is** the thing
+/// wanted and there is no older, fixed number to hold it to. What remains is the
+/// check that needs nothing external — the bundle verifies against its own
+/// manifest, in both directions, so a truncated download or a member nobody
+/// listed is still a refusal. A box never uses this: it is told which profile it
+/// must end up running, and "whatever is newest" is the opposite of that.
+pub fn fetch_pack_unpinned(
+    url: &str,
+    dest: &Path,
+    tag: &str,
+    mut on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<(Landing, String), FetchError> {
+    fetch_pack_with(url, dest, None, tag, &mut on_progress)
+}
+
+fn fetch_pack_with(
+    url: &str,
+    dest: &Path,
+    expect: Option<&str>,
+    tag: &str,
+    on_progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<(Landing, String), FetchError> {
     // The scratch file's name never leaves the box — the URL already names the
     // asset — so it is the one place a pack needs no name of its own.
-    let (scratch, archive) = download_beside(url, dest, "pack", "pack.tar.zst", &mut on_progress)?;
-    let r = land_pack(&archive, dest, expect_hash, tag);
+    let (scratch, archive) = download_beside(url, dest, "pack", "pack.tar.zst", on_progress)?;
+    let r = land_pack_with(&archive, dest, expect, tag);
     let _ = std::fs::remove_dir_all(&scratch);
     r
 }
@@ -502,13 +535,34 @@ pub fn land_pack(
     expect_hash: &str,
     tag: &str,
 ) -> Result<Landing, FetchError> {
+    land_pack_with(archive, dest, Some(expect_hash), tag).map(|(landing, _)| landing)
+}
+
+/// [`land_pack`] with no expectation: the bundle's own manifest is the check.
+/// Answers the hash the landed tree folds to, so a caller that wants to *record*
+/// which release arrived — the update path's `_extends.json` — has the number
+/// without hashing the tree a second time.
+pub fn land_pack_unpinned(
+    archive: &Path,
+    dest: &Path,
+    tag: &str,
+) -> Result<(Landing, String), FetchError> {
+    land_pack_with(archive, dest, None, tag)
+}
+
+fn land_pack_with(
+    archive: &Path,
+    dest: &Path,
+    expect: Option<&str>,
+    tag: &str,
+) -> Result<(Landing, String), FetchError> {
     let parent = dest.parent().unwrap_or(Path::new("."));
     let stage = scratch_dir(parent, "pack-stage");
     std::fs::create_dir_all(&stage)
         .map_err(|e| FetchError::Corrupt(format!("{}: {e}", stage.display())))?;
-    let result = (|| -> Result<Landing, FetchError> {
+    let result = (|| -> Result<(Landing, String), FetchError> {
         unpack_to_stage(archive, &stage)?;
-        let files = verify_pack(&stage, expect_hash).map_err(FetchError::Corrupt)?;
+        let (files, hash) = verify_pack(&stage, expect).map_err(FetchError::Corrupt)?;
         // The landed tree is the subtree, and it is swapped rather than merged
         // for the same reason the weights are: a box running the previous pack
         // must not be able to serve half of it while a new one arrives.
@@ -518,13 +572,15 @@ pub fn land_pack(
                 "the bundle carries no {PACK_DIR}/ to land"
             )));
         }
-        swap(&tree, dest)
-            .map_err(|e| FetchError::Corrupt(format!("{}: {e:#}", dest.display())))?;
-        Ok(Landing {
-            files,
-            bytes: dir_bytes(dest),
-            tag: tag.to_string(),
-        })
+        swap(&tree, dest).map_err(|e| FetchError::Corrupt(format!("{}: {e:#}", dest.display())))?;
+        Ok((
+            Landing {
+                files,
+                bytes: dir_bytes(dest),
+                tag: tag.to_string(),
+            },
+            hash,
+        ))
     })();
     let _ = std::fs::remove_dir_all(&stage);
     result
@@ -543,7 +599,7 @@ pub fn land_pack(
 /// still land a tree no stage can read, so a member outside `assets/` — or a
 /// manifest key that is not under it — is refused by name rather than quietly
 /// moved.
-fn verify_pack(stage: &Path, expect_hash: &str) -> std::result::Result<usize, String> {
+fn verify_pack(stage: &Path, expect: Option<&str>) -> std::result::Result<(usize, String), String> {
     let m = crate::profile::read_manifest_at(&stage.join(PACK_MANIFEST))
         .map_err(|e| format!("{}: {e:#}", stage.join(PACK_MANIFEST).display()))?;
     if m.piece != "pack" {
@@ -557,10 +613,12 @@ fn verify_pack(stage: &Path, expect_hash: &str) -> std::result::Result<usize, St
         ));
     }
     let found = crate::profile::manifest_hash(&m.files);
-    if found != expect_hash {
-        return Err(format!(
-            "the bundle is a different pack: manifest hash {found}, expected {expect_hash}"
-        ));
+    if let Some(expect) = expect {
+        if found != expect {
+            return Err(format!(
+                "the bundle is a different pack: manifest hash {found}, expected {expect}"
+            ));
+        }
     }
     // The whole stage, not the subtree: a bundle carrying a `prompts/` or a
     // stray top-level file would otherwise land a tree the manifest never
@@ -606,7 +664,7 @@ fn verify_pack(stage: &Path, expect_hash: &str) -> std::result::Result<usize, St
             return Err(format!("{name}: sha256 {got} does not match the manifest"));
         }
     }
-    Ok(m.files.len())
+    Ok((m.files.len(), found))
 }
 
 fn unpack_to_stage(archive: &Path, stage: &Path) -> Result<(), FetchError> {
@@ -717,7 +775,7 @@ pub fn verify_dir(dir: &Path, expect_hash: &str) -> std::result::Result<usize, S
 /// in place. A crash between them leaves `dest` absent and the old tree
 /// beside it, which the next provision overwrites; it never leaves a *mixed*
 /// tree, which is the failure this design exists to remove.
-fn swap(stage: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn swap(stage: &Path, dest: &Path) -> Result<()> {
     let old = dest.with_extension(format!("old-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&old);
     if dest.exists() {
@@ -1155,6 +1213,88 @@ mod tests {
             .filter(|n| n.contains("stage") || n.contains("fetch") || n.contains("old-"))
             .collect();
         assert!(leftovers.is_empty(), "left {leftovers:?} behind");
+    }
+
+    /// **The update path's landing: the bundle is its own witness.**
+    ///
+    /// A box is handed the hash it must end up at; an update asked for "the
+    /// newest release" and has no such number, so the check is the one that
+    /// needs nothing outside the bundle — its manifest against its own members,
+    /// in both directions — and the hash it folds to comes back, because that is
+    /// the number the composition record ends up naming.
+    #[test]
+    fn an_unpinned_pack_landing_verifies_against_the_bundle_and_answers_its_hash() {
+        let root = tstdir("pack-unpinned");
+        std::fs::create_dir_all(&root).unwrap();
+        let names = ["assets/effect-pool.json", "assets/effects/wind-1.mp3"];
+        let (stage, files) =
+            pack_stage(&root, &[(names[0], &b"{}"[..]), (names[1], &b"a clip"[..])]);
+        let expect = crate::profile::manifest_hash(&files);
+        write_pack_manifest(&stage, &pack_manifest("common", "0.1.0", &files));
+        let bundle = root.join("common.tar.zst");
+        let owned: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        tar_bundle(&bundle, &stage, &owned);
+
+        let dest = root.join("extends-common");
+        let (landed, hash) = land_pack_unpinned(&bundle, &dest, "common-pack-v0.1.0").unwrap();
+        assert_eq!(landed.files, 2);
+        assert_eq!(hash, expect, "the record gets the number the bytes fold to");
+        assert_eq!(landed.tag, "common-pack-v0.1.0");
+        assert_eq!(std::fs::read(dest.join("effect-pool.json")).unwrap(), b"{}");
+
+        // And the check is real, not skipped for want of an expectation: a
+        // manifest that disagrees with its own members lands nothing at all.
+        let bad_root = tstdir("pack-unpinned-bad");
+        std::fs::create_dir_all(&bad_root).unwrap();
+        let (stage2, mut files2) = pack_stage(&bad_root, &[(names[0], &b"{}"[..])]);
+        files2.insert(names[0].to_string(), "0".repeat(64));
+        write_pack_manifest(&stage2, &pack_manifest("common", "0.1.0", &files2));
+        let bad = bad_root.join("common.tar.zst");
+        tar_bundle(&bad, &stage2, &[names[0].to_string()]);
+        let refused = bad_root.join("extends-common");
+        let err = land_pack_unpinned(&bad, &refused, "common-pack-v0.1.0").unwrap_err();
+        assert!(format!("{err}").contains("sha256"), "{err}");
+        assert!(
+            !refused.exists(),
+            "a bundle that does not verify lands nothing"
+        );
+    }
+
+    /// The failure the update path hit on a **real published release**: a bundle
+    /// packed by macOS `tar` carries a `._name` sidecar for every member with an
+    /// extended attribute, hides those from its own listing, and a box unpacks
+    /// each as a real file.
+    ///
+    /// It is refused *by name*, which is the whole difference between a refusal
+    /// an operator can act on and one that reads as a mystery: the answer is
+    /// re-pack and re-upload under the same tag, and the message has to name a
+    /// member the manifest never listed rather than say "hash mismatch".
+    #[test]
+    fn a_bundle_carrying_appledouble_members_is_refused_by_name() {
+        let root = tstdir("pack-appledouble");
+        std::fs::create_dir_all(&root).unwrap();
+        let sidecar = "assets/._effect-pool.json";
+        let (stage, mut files) = pack_stage(
+            &root,
+            &[
+                ("assets/effect-pool.json", &b"{}"[..]),
+                (sidecar, &b"x"[..]),
+            ],
+        );
+        // The manifest is written without the sidecar, which is exactly how a
+        // bundle macOS `tar` produced differs from the record beside it.
+        files.remove(sidecar);
+        write_pack_manifest(&stage, &pack_manifest("common", "0.1.0", &files));
+        let bundle = root.join("common.tar.zst");
+        let owned = vec![sidecar.to_string(), "assets/effect-pool.json".to_string()];
+        tar_bundle(&bundle, &stage, &owned);
+
+        let dest = root.join("extends-common");
+        let err = land_pack_unpinned(&bundle, &dest, "common-pack-v0.1.0").unwrap_err();
+        let text = format!("{err}");
+        assert!(text.contains("absent from its manifest"), "{text}");
+        assert!(text.contains("._effect-pool.json"), "{text}");
+        assert!(!dest.exists(), "and nothing was unpacked");
     }
 
     /// A release that verifies against *its own* manifest and is a different

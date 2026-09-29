@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use super::ssh::{RsyncProgress, Ssh};
-use super::stamp::{compute_provision_stamp, parse_stamp, ProvisionStamp};
+use super::stamp::{compute_provision_stamp, parse_stamp, stamp_from, ProvisionStamp};
 use super::{REMOTE_DIR, TTS_PORT};
 
 /// The line the box is asked to run, and the exit codes it answers with.
@@ -1226,9 +1226,11 @@ echo stopped"#,
     /// behaviour): a truncated or absent file reads as `None`, never as an error.
     pub fn read_provision_stamp(&self) -> Option<ProvisionStamp> {
         let script = format!("cat \"$HOME/{d}/.provision_stamp.json\"", d = REMOTE_DIR);
+        // A failed `cat` is a cache miss, not a stamp: `stamp_from` is what says
+        // so, because it is also what the probe's own payload goes through.
         match self.run(&script, 10) {
-            Ok((0, stdout, _)) => parse_stamp(&stdout),
-            _ => None,
+            Ok((code, stdout, _)) => stamp_from(code, &stdout),
+            Err(_) => None,
         }
     }
 

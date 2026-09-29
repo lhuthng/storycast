@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 # Models: the baked TTS weights as a single transfer file.
 #
-#   tools/models.sh pack [--level N]
-#                      verify the bake -> engines/vieneu/models/models.tar.zst
-#   tools/models.sh verify            bundle manifest vs. bundle contents
-#   tools/models.sh publish [--notes "..."]
-#                                     gh release create models-v<hash> with the bundle
-#   tools/models.sh list              the local bundle, its hash and size
+#   tools/models.sh pack     [--level N] [--engine <name>]
+#                           verify the bake -> engines/<engine>/models/models.tar.zst
+#   tools/models.sh verify   [--engine <name>]
+#                           bundle manifest vs. bundle contents
+#   tools/models.sh publish  [--notes "..."] [--engine <name>]
+#                           gh release create models-v<hash> with the bundle
+#   tools/models.sh list     [--engine <name>]
+#                           the local bundle, its hash and size
+#
+# `--engine` defaults to `vieneu`, or to $BM_ENGINE when that is set. Every path
+# is derived from it, so a second engine is `--engine pocket` and its own
+# `engines/<name>/models/` — alongside its own binary, its own runtime, and its
+# own bake if it ships one. Nothing else changes: the tag is still a function of
+# the contents, so the release is immutable and self-naming, and the pointer's
+# `name` is what says which engine a tag is for. The tag deliberately does *not*
+# carry the engine, because a hash already names its bytes and adding a
+# free-text component to a content address only makes it easier to get wrong.
 #
 # The bundle is transfer and archive only: provisioning falls back to rsyncing
 # the directory, and the unpacked tree is what the sidecar reads. This exists so
@@ -38,12 +49,14 @@
 set -euo pipefail
 
 LEVEL=3
-cmd=${1:?usage: models.sh 'pack|verify|publish|list'}; shift || true
+cmd=${1:?usage: models.sh 'pack|verify|publish|list' [--engine <name>]}; shift || true
 NOTES=""
+ENGINE=${BM_ENGINE:-vieneu}
 while [ $# -gt 0 ]; do
   case "$1" in
     --level) LEVEL=${2:?--level needs a value}; shift 2;;
     --notes) NOTES=${2:?--notes needs a value}; shift 2;;
+    --engine) ENGINE=${2:?--engine needs a value}; shift 2;;
     *) echo "unknown flag $1" >&2; exit 1;;
   esac
 done
@@ -53,11 +66,33 @@ command -v zstd >/dev/null || { echo "zstd not on PATH (brew install zstd)" >&2;
 command -v python3 >/dev/null || { echo "python3 not on PATH" >&2; exit 1; }
 
 root=$(dirname "$0")/..; root=$(cd "$root" && pwd)
-# The bake lives in VieNeu's own tree. A second engine's would be
-# `engines/<its-name>/models/`, alongside its own binary and runtime.
-models="$root/engines/vieneu/models"
+# The name lands in a path, so it is checked rather than trusted: a slash or a
+# `..` here would pack some other engine's tree and call it this one's. The set
+# is the one an engine name can be made of — the same shape `pack_update::safe_name`
+# accepts on the Rust side.
+case "$ENGINE" in
+  ''|*/*|*[!A-Za-z0-9._-]*)
+    echo "--engine '$ENGINE' is not an engine name: letters, digits, dot, dash and underscore only" >&2
+    exit 1;;
+esac
+engine_dir="$root/engines/$ENGINE"
+[ -d "$engine_dir" ] || {
+  echo "no such engine: $engine_dir" >&2
+  echo "known: $(ls "$root/engines" 2>/dev/null | tr '\n' ' ')" >&2
+  exit 1
+}
+models="$engine_dir/models"
 bundle="$models/models.tar.zst"
 manifest="$models/manifest.json"
+# The bake. An engine that ships its own (`engines/<name>/bake.py`) owns its
+# weight list, because what a second engine's weights *are* is that engine's
+# business and not this script's; everything else falls back to the one bake
+# that exists. Both take `--out` and `--check`.
+if [ -f "$engine_dir/bake.py" ]; then
+  bake="$engine_dir/bake.py"
+else
+  bake="$root/tools/bake-models.py"
+fi
 
 # The manifest hash. Same rule as profile.sh::manifest_hash, but the models
 # manifest stores `{bytes, sha256}` per entry rather than a bare hash string,
@@ -94,6 +129,7 @@ case "$cmd" in
   list)
     if [ ! -f "$bundle" ]; then echo "no bundle at $bundle (run: models.sh pack)" >&2; exit 1; fi
     hash=$(manifest_hash "$manifest")
+    printf 'engine  %s\n' "$ENGINE"
     printf 'bundle  %s\n' "$bundle"
     printf 'size    %s\n' "$(du -h "$bundle" | cut -f1)"
     printf 'hash    %s\n' "$hash"
@@ -105,9 +141,9 @@ case "$cmd" in
     # weights to what the bake recorded, and a bundle cut while it is failing
     # ships bytes that disagree with the manifest inside it — which the box
     # would then reject, having spent 363 MB finding out.
-    if ! python3 "$root/tools/bake-models.py" --check; then
+    if ! python3 "$bake" --out "$models" --check; then
       echo "refusing to pack: the bake does not match its manifest (above)" >&2
-      echo "re-bake with: python3 tools/bake-models.py" >&2
+      echo "re-bake with: python3 ${bake#"$root"/} --out ${models#"$root"/}" >&2
       exit 1
     fi
     members=$(mktemp "${TMPDIR:-/tmp}/bm-models-members.XXXXXX")
@@ -133,10 +169,11 @@ case "$cmd" in
     printf 'packed %s  (%s at level %s)\n' "$bundle" "$(du -h "$bundle" | cut -f1)" "$LEVEL"
     # Members are the manifest plus every weight, so the weight count is one
     # less — said precisely because "17 files" reads as 17 weights.
+    printf 'engine %s\n' "$ENGINE"
     printf 'files  %s weights + manifest.json\n' "$(( $(grep -c . "$members") - 1 ))"
     printf 'hash   %s\n' "$hash"
     printf 'tag    models-v%s\n' "$(short "$hash")"
-    printf 'publish: tools/models.sh publish\n'
+    printf 'publish: tools/models.sh publish --engine %s\n' "$ENGINE"
     ;;
 
   verify)
@@ -206,16 +243,34 @@ PY
     # public models and hold nothing secret, and saying so here is cheaper than
     # someone rediscovering it from the release page.
     weights=$(( $(bundle_members "$manifest" | grep -c .) - 1 ))
-    notes=${NOTES:-"Baked TTS weights for Storycast: $weights weight files + their manifest, $(du -h "$bundle" | cut -f1) compressed.
-
-manifest hash \`$hash\`
-backbone \`$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backbone_rev"])' "$manifest")\`
-codec \`$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["codec_rev"])' "$manifest")\`
-
-The tag is the first 12 hex of the manifest hash, which is a function of the
-file contents alone — so this tag names exactly these bytes and can never name
-others. This repository is public and so is this asset; it contains nothing but
-public model weights and the manifest that describes them."}
+    # The manifest's own provenance, minus the two keys that are plumbing: the
+    # file record, and a note for whoever opens the JSON. *Which* keys those are
+    # is the bake's business — VieNeu records `backbone_rev` and `codec_rev`, and
+    # another engine will record whatever it actually pinned. Reading them by
+    # name would have made this script refuse every manifest it had not seen
+    # before, which is the opposite of what a second engine needs from it.
+    meta=$(python3 -c '
+import json, sys
+m = json.load(open(sys.argv[1]))
+for k in sorted(m):
+    if k not in ("files", "_note"):
+        print(f"{k} `{m[k]}`")' "$manifest")
+    # printf and not a heredoc: a heredoc inside `$( )` holding an apostrophe
+    # is mis-parsed by the bash 3.2 that macOS still ships, and this script's
+    # shebang does not promise a newer one. Every line is a quoted argument, so
+    # the only thing bash has to find is a closing quote.
+    notes=${NOTES:-$(printf '%s\n' \
+      "Baked TTS weights for Storycast, engine \`$ENGINE\`: $weights weight files + their manifest, $(du -h "$bundle" | cut -f1) compressed." \
+      "" \
+      "manifest hash \`$hash\`" \
+      "$meta" \
+      "" \
+      "The tag is the first 12 hex of the manifest hash, which is a function of" \
+      "the file contents alone — so this tag names exactly these bytes and can" \
+      "never name others. The engine is not in the tag: a content address needs" \
+      "no help naming its bytes, and the \`name\` field of the pointer is what says" \
+      "which engine a release is for. This repository is public and so is this" \
+      "asset; it holds nothing but public model weights and their manifest.")}
     gh release create "$tag" "$bundle" --title "$tag" --notes "$notes"
     printf 'published %s\n' "$tag"
     ;;

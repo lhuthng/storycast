@@ -11,6 +11,9 @@
 #   tools/profile.sh list                releases, with their piece and version
 #   tools/profile.sh verify <name> [--piece p]
 #                                        release manifest vs. release contents
+#   tools/profile.sh update [--repo owner/name] [--dry-run] [--force]
+#                                        pull the newest release of every dependency the
+#                                        live composition names -- the closure, not the list
 #
 # **One release per piece.** A pack is the genre's art; a language is its prompts
 # and its crawlers. They used to travel as one file, which meant a second
@@ -32,6 +35,14 @@
 # Level defaults to 3. Higher levels buy almost nothing here — the tree is
 # nearly all mp3, which no level compresses further — and cost ~10x the pack
 # time. Decompression speed is level-independent.
+#
+# `update` is a thin verb over `bm-inductor profile update`, and it is thin on
+# purpose: the decision needs the composition record (`assets/_extends.json`) to
+# tell a dependency that *moved* from one that has been edited here, and it needs
+# the closure to know a dependency's own `pack.json` names dependencies too. It
+# also stages, verifies and swaps as one operation, so the tree is never half of
+# two releases — which is why the transfer is Rust's here and `curl`'s in
+# `fetch`, where the bundle is a file the operator then unpacks by hand.
 
 set -euo pipefail
 
@@ -39,7 +50,10 @@ LEVEL=3
 VERSION=
 PIECE=pack
 DEP=
-cmd=${1:?usage: profile.sh 'pack|fetch|unpack|list|verify' ...}; shift || true
+REPO=
+DRY=
+FORCE=
+cmd=${1:?usage: profile.sh 'pack|fetch|unpack|list|verify|update' ...}; shift || true
 case "$cmd" in
   pack|unpack|verify) name=${1:?usage: profile.sh "$cmd" <name>}; shift || true;;
   fetch) name=${1:?usage: profile.sh fetch <name> [@version]}; shift || true;
@@ -51,6 +65,9 @@ while [ $# -gt 0 ]; do
     --version) VERSION=${2:?--version needs a value}; shift 2;;
     --piece) PIECE=${2:?--piece needs a value}; shift 2;;
     --dep) DEP=1; shift;;
+    --repo) REPO=${2:?--repo needs a value}; shift 2;;
+    --dry-run) DRY=1; shift;;
+    --force) FORCE=1; shift;;
     *) echo "unknown flag $1" >&2; exit 1;;
   esac
 done
@@ -116,6 +133,44 @@ for path in sorted(m["files"]):
     h.update(path.encode()); h.update(b"\0")
     h.update(m["files"][path].encode()); h.update(b"\0")
 print(h.hexdigest())' "$1"
+}
+
+# Refuse a bundle carrying AppleDouble members.
+#
+# macOS `tar` writes a `._name` sidecar for every member that carries an extended
+# attribute, and the trap underneath is that **bsdtar hides those sidecars from
+# its own `tar -t`**: the listing an operator checks with is exactly the listing
+# that cannot see them. `COPYFILE_DISABLE=1` (set on every pack below) suppresses
+# them, but the four published `-pack-v0.1.0` releases were cut before that line
+# existed and are full of them — and a fetcher refuses any member its manifest
+# never listed (`bm_core::artifact::verify_pack`), so those bundles stop every box
+# and every `profile update` with exit 20 and no fallback.
+#
+# So the check reads the bytes through a reader that hides nothing, which is the
+# whole point: a gate that asked `tar -t` would answer "clean" for a bundle that
+# breaks a box. It runs *before* the pointer is stamped, because a release nobody
+# can fetch is not a release.
+#
+# $1 = bundle. 0 clean, 1 with the members on stderr.
+no_appledouble() { # $1 = bundle
+  local bad
+  bad=$(zstd -dc "$1" 2>/dev/null | python3 -c '
+import sys, tarfile
+t = tarfile.open(fileobj=sys.stdin.buffer, mode="r|")
+print("\n".join(m.name for m in t if m.name.startswith("._") or "/._" in m.name))' || true)
+  if [ -z "$bad" ]; then
+    return 0
+  fi
+  printf 'REFUSED: %s carries %s AppleDouble member(s), which no reader lists:\n' \
+    "$1" "$(printf '%s\n' "$bad" | wc -l | tr -d ' ')" >&2
+  printf '%s\n' "$bad" | head -5 | sed 's/^/  /' >&2
+  printf '%s\n' \
+    "  A fetcher rejects a bundle holding a member its manifest never listed, so" \
+    '  publishing this stops every box and every `profile update` at exit 20.' \
+    "  Either the members are content in the tree being packed — a previous extract" \
+    "  wrote them, so delete them there and re-pack — or the packing tar ignored" \
+    "  COPYFILE_DISABLE=1, and bsdtar's own --no-mac-metadata is the switch." >&2
+  return 1
 }
 
 # Verify an extracted stage against its manifest, before anything moves: a
@@ -244,13 +299,26 @@ EOF
     # sidecars from its own `tar -t`**, and a provisioned box would then unpack
     # each one as a real file and refuse the bundle as carrying a member its
     # manifest never listed. The published `models-vdda4efee13df` release has 17
-    # of them; this pack is clean today, but only because no member happened to
-    # carry one.
+    # of them, and the gate below is what keeps the next one
+    # from being cut — this line is what makes that gate pass, not a substitute
+    # for it.
     COPYFILE_DISABLE=1 tar --exclude=.DS_Store $(piece_excludes "$PIECE") -cf - -C "$stage" \
       $(piece_members "$PIECE" "$name") manifest.json \
       | zstd -"$LEVEL" -o "$out"
     mv "$out" "$bundle"
     trap - EXIT; rm -rf "$stage"
+    # Before anything claims success and before the pointer is stamped, because
+    # the two failures are different: a dirty bundle is refused here, and a run
+    # that died later would have re-stamped the pointer toward a release nobody
+    # can fetch. The bundle itself goes, too — it is the file the printed publish
+    # command would upload, it is one command to regenerate, and leaving it where
+    # `list`/`unpack` and a hand-run `gh release upload` can find it is how a
+    # refusal becomes a published artifact anyway.
+    if ! no_appledouble "$bundle"; then
+      rm -f "$bundle"
+      echo "  removed $bundle — fix the tree above and pack again" >&2
+      exit 1
+    fi
     printf 'packed %s %s  (%s at level %s, manifest %s)\n' \
       "$PIECE" "$bundle" "$(du -h "$bundle" | cut -f1)" "$LEVEL" \
       "$(tar --use-compress-program=unzstd -xOf "$bundle" manifest.json | manifest_hash /dev/stdin)"
@@ -349,10 +417,23 @@ EOF
   verify)
     bundle="$root/profiles/$PIECE/$name.tar.zst"
     [ -f "$bundle" ] || { echo "no such release: $bundle" >&2; exit 1; }
+    # The same gate, here because it is the third thing a release has to be true
+    # of and `verify_stage` cannot see it: its manifest check passes for a bundle
+    # carrying sidecars, since a member nobody listed is not a member it looks
+    # for. A `verify` that answered OK for a bundle every fetcher refuses would
+    # be worse than no `verify` at all.
+    no_appledouble "$bundle" || exit 1
     stage=$(mktemp -d "${TMPDIR:-/tmp}/bm-profile.XXXXXX")
     trap 'rm -rf "$stage"' EXIT
     tar --use-compress-program=unzstd -xf "$bundle" -C "$stage"
     verify_stage "$stage" && echo "OK $PIECE $name"
     ;;
-  *) echo "unknown command $cmd (pack|fetch|unpack|list|verify)" >&2; exit 1;;
+  update)
+    # The dependency update path: walk the closure and pull the newest release
+    # of each, then fold (`asset resolve`) and record what arrived. The decision
+    # is Rust's — see the header — and this is here so every pack operation is
+    # reachable from one place and reads like its neighbours.
+    inductor profile update ${REPO:+--repo "$REPO"} ${DRY:+--dry-run} ${FORCE:+--force}
+    ;;
+  *) echo "unknown command $cmd (pack|fetch|unpack|list|verify|update)" >&2; exit 1;;
 esac

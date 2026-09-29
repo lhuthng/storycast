@@ -349,6 +349,8 @@ rule:
 * `asset pack` refuses a stale tree unless asked to rebuild, and a sweep
   (`asset rebuild-deps`, or a flag) re-packs the children of a changed asset.
   That is the "editing a parent triggering the rebuilding of the children".
+  (The other direction — a re-cut parent reaching the checkout that depends on
+  it — is `profile update`; see *Updating: the closure, not the list* above.)
 
 The binding's pack pointer already holds `{name, hash}`, and the hash stays what
 it is today — a content hash over the live `assets/` — so a stale child is also
@@ -412,6 +414,89 @@ it: macOS writes a `._name` sidecar for any member carrying an extended
 attribute, hides those from its own listing, and a box would then unpack each as
 a real file and refuse the bundle as carrying a member its manifest never
 listed. `tools/models.sh` already did this for the same reason.
+
+**And the packer checks rather than trusts.** `profile.sh pack` reads the
+finished bundle's members through a reader that hides nothing — bsdtar *hides*
+`._` members from its own `tar -t`, so the listing an operator checks with is
+exactly the one that cannot see them — prints no publish command and stamps no
+pointer if any are there, and then **deletes the bundle**, because that file is
+what the printed publish line would upload and it is one command to regenerate.
+`profile.sh verify <name>` applies the same gate, since `verify_stage` cannot see
+them either: its manifest check *passes* for a member nobody listed, a member
+nobody listed not being a member it looks for. That distinction is why the gate
+reads the bytes rather than asking tar.
+
+This is not hypothetical. The four published `-pack-v0.1.0` releases were cut
+the day before `COPYFILE_DISABLE=1` landed and are full of them — `common` 80
+members, `xianxia` 129, `weapons` 35, `magic` 18 — which is why a box fetch and
+a `profile update` both stop on them, and why the remedy is a re-pack and a
+clobber on the same tag rather than a new version: the manifest hash does not
+move, so the release is still the profile it says it is.
+
+### Updating: the closure, not the list
+
+A composed checkout has to be brought forward when a dependency is re-cut, and
+doing that by hand is a loop with three ways to go wrong: you forget a
+dependency, you forget that a dependency's own `pack.json` names dependencies
+too, and you unpack a bundle over a tree you had edited.
+
+`profile update` is that loop, closed:
+
+```
+bm-inductor profile update --dry-run      what would move, and what has been edited here
+bm-inductor profile update                pull it
+tools/profile.sh update [--dry-run] [--force] [--repo owner/name]   the same, from the toolbox
+```
+
+What it reads is the **closure**: the live `assets/pack.json` names the direct
+dependencies, and each dependency's tree names its own, so the walk follows the
+graph rather than a list. A shared parent is one node, folded once — the fact
+`_extends.json`'s `tree` has carried since the composition went flat. In practice
+a released dependency is a **leaf** (`profile manifest --dep` refuses to release a
+composed tree, above), so the walk usually stops at the direct list; it is written
+for the graph because a hand-built `_extends/` nests, and because the walk is not
+the place to encode that today's releases happen to be flat.
+
+Three comparisons decide everything, and each is cheap on purpose:
+
+| question | answer | cost |
+| --- | --- | --- |
+| has this dependency moved? | `_extends.json`'s `versions[name]` vs the newest `<name>-pack-v*` tag | one release list |
+| is the tree here still ours? | `_extends.json`'s `tree[].hash` vs `tree_hash` over `_extends/<name>/` | a hash |
+| is the release good? | the bundle's own manifest, checked in both directions | the download |
+
+**"Has it moved" is the version**, which is the release plane's existing
+immutability assumption rather than a new one: `gh release create` refuses a tag
+that exists, so a version that did not change is content that did not change. The
+`versions` map is what makes a three-dependency no-op update cost three API calls
+and zero bytes instead of 180 MB of downloads to compare — and it is written by
+the update and **carried through every `asset resolve` after it**, because a fold
+hashes a tree and cannot know which tag produced it. Dropping it there would make
+every update re-download the world.
+
+**Nothing is replaced until every fetch has verified.** The walk stages into
+`assets/_extends/.update.<pid>/` and `bm_core::artifact` verifies each bundle
+against the manifest that travelled inside it before anything is renamed — which
+is the one tree the profile hash deliberately skips, so a staging directory there
+cannot drift the pack. A corrupt release on the third dependency therefore leaves
+the first two un-installed; the failure this removes is the one that renders as
+"the tree is fine and one sound is wrong". A dependency whose tree has been
+**edited here** since the last fold is refused for the same reason, and `--force`
+replaces it and says so in the report. A dependency with no release at all, or a
+loop in the graph, is a refusal rather than a partial install — the loop is
+checked as soon as the walk has discovered the edges, which is the last moment
+before it would matter.
+
+After the swap it runs the fold and then records the releases it unpacked, so the
+report ends where `asset resolve`'s does. A run that dies between the two loses
+only the record, in the safe direction: the next update sees no version for that
+pack and pulls it again.
+
+One direction is still manual, and deliberately: a *child* whose parent moved is
+the staleness the release gate already refuses to pack (`stale_dependencies`),
+and the answer there is `asset resolve` then re-`pack` — not this. An update
+brings the parents forward; publishing the child afterwards is a decision about
+what to release, and it keeps a version somebody chose.
 
 ## What this breaks, honestly
 

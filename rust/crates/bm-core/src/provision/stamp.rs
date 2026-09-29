@@ -396,9 +396,24 @@ pub(crate) fn parse_stamp(text: &str) -> Option<ProvisionStamp> {
     serde_json::from_str(text).ok()
 }
 
+/// [`parse_stamp`], plus the exit code the command that produced the text returned.
+///
+/// One place, because the two readers hold different evidence and only one of
+/// them can be wrong in a way that matters: the probe parsed a payload out of
+/// its own output, while `read_provision_stamp` holds whatever a `cat` on the box
+/// left in stdout — and **the stdout of a failed command is whatever the failure
+/// printed**, which must never read as a stamp. A non-zero code is a cache miss
+/// by definition, and saying so here rather than at a call site is what stops a
+/// third reader from forgetting it.
+pub(crate) fn stamp_from(code: i32, stdout: &str) -> Option<ProvisionStamp> {
+    if code != 0 {
+        return None;
+    }
+    parse_stamp(stdout)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::ssh::Ssh;
     use super::*;
 
     /// A throwaway repo root holding only the files the stamp looks at.
@@ -1030,13 +1045,22 @@ mod tests {
             parse_stamp("not json").is_none(),
             "a truncated file is a cache miss, never a crash"
         );
-        // TEST-NET-1: any attempt to connect fails, so this box has no stamp.
-        let ssh = Ssh {
-            target: "nobody@192.0.2.1".into(),
-            port: 22,
-            key: None,
-            local: false,
-        };
-        assert!(ssh.read_provision_stamp().is_none());
+        // The failed-round-trip half, through the function both readers use
+        // rather than by dialling an address that does not answer. That dial
+        // used to cost this test **57 seconds** — TEST-NET-1 is a blackhole, and
+        // a blackhole is indistinguishable from a blip to the retry policy, so it
+        // paid 4 attempts x a 10 s connect timeout plus 17 s of backoff. A unit
+        // test that reaches for the network measures the network, not the code,
+        // and the number moves with the machine it runs on.
+        assert_eq!(
+            stamp_from(0, &text).unwrap(),
+            s,
+            "exit 0 and a real payload is a stamp"
+        );
+        assert!(
+            stamp_from(1, &text).is_none(),
+            "a failed `cat` is a cache miss even when it printed a valid payload: \
+             stdout of a non-zero exit is whatever the failure wrote"
+        );
     }
 }

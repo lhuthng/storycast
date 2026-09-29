@@ -5,6 +5,7 @@ mod aws_ops;
 mod backend;
 mod dispatch;
 mod manual;
+mod releases;
 mod roster;
 mod segments;
 mod state;
@@ -317,6 +318,41 @@ enum ProfileCmd {
     /// fails with the consequence. Read-only — nothing is re-stamped and no
     /// file is written, so it is safe to run with the cluster up.
     Check,
+    /// Bring every dependency of the live composition up to its newest release.
+    ///
+    /// What it reads is the **closure**, not the list: the live
+    /// `assets/pack.json` names the dependencies, and each dependency's own
+    /// `pack.json` names its parents, which are walked too. Doing that by hand
+    /// is what leaves a checkout running a parent nobody remembered to re-fetch,
+    /// and a parent of a parent is one nobody notices at all.
+    ///
+    /// Two comparisons decide everything, and neither of them is a guess. A
+    /// dependency already at the newest release is **not downloaded** — the
+    /// composition record says which release each tree came from, and a version
+    /// that has not changed is content that has not changed, because a tag is cut
+    /// once. A dependency whose tree has been edited here since the last resolve
+    /// is **refused** rather than overwritten: `--force` is the operator saying
+    /// they meant it.
+    ///
+    /// Nothing is replaced until every fetch has verified, so a corrupt release
+    /// leaves the tree exactly as it was rather than half-updated; a dependency
+    /// with no release at all, or a loop in the graph, is a refusal for the same
+    /// reason. `--dry-run` asks the release list and writes nothing.
+    Update {
+        /// Report the plan and write nothing. Reads the release list, so it
+        /// needs the network; it downloads no bundle.
+        #[arg(long)]
+        dry_run: bool,
+        /// Replace a dependency whose tree has been edited here since the last
+        /// resolve, instead of refusing.
+        #[arg(long)]
+        force: bool,
+        /// The repo hosting the releases (`owner/name`). Defaults to
+        /// `settings.json`'s `packs_release`, the same setting a provisioned box
+        /// resolves its URL from.
+        #[arg(long)]
+        repo: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2359,6 +2395,26 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Cmd::Profile { cmd } => match cmd {
+            ProfileCmd::Update {
+                dry_run,
+                force,
+                repo,
+            } => {
+                // `reqwest::blocking` builds a runtime of its own, and dropping
+                // one from inside this one panics, so the update runs on a thread
+                // that is not a runtime worker. It is synchronous, socket-bound
+                // work either way, and the alternative — an async release source —
+                // would be a second implementation of the verified unpack.
+                let layout = layout.clone();
+                let settings = settings.clone();
+                let task = tokio::task::spawn_blocking(move || {
+                    releases::cmd_update(&layout, &settings, repo.as_deref(), dry_run, force)
+                });
+                match task.await {
+                    Ok(result) => result,
+                    Err(e) => Err(anyhow::anyhow!("the update did not finish: {e}")),
+                }
+            }
             ProfileCmd::Check => {
                 let (lines, ok) = profile_check(&layout, &settings)?;
                 for line in &lines {

@@ -676,6 +676,16 @@ it is resolved again. `asset resolve --dry-run` reports what a resolve would
 change and writes nothing; running it twice says `up to date` the second time.
 See [the assets guide](docs/ASSETS.md).
 
+**A dependency has been re-cut and this checkout is behind it.** `bm-inductor
+profile update` pulls the newest release of every dependency the live
+`assets/pack.json` names — and of everything *those* name, so a parent of a
+parent is not missed — then folds the result and records what arrived.
+`--dry-run` prints the plan and downloads nothing. A dependency already at the
+newest release is not re-fetched, and one you have edited under
+`assets/_extends/` is refused until you pass `--force`. Nothing is replaced until
+every fetch has verified, so a corrupt release leaves the tree exactly as it was.
+See [the assets guide](docs/ASSETS.md#updating-the-closure-not-the-list).
+
 **The book comes out in one voice.** The chapter had no quote marks in it, so
 there was nothing for the program to tell narration from dialogue. The digest
 prints the split on its first line (`prepared 52 event(s): 21 narration, 31

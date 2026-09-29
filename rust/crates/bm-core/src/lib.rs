@@ -32,6 +32,7 @@ pub mod crawl;
 pub mod design;
 pub mod digest;
 pub mod eta;
+pub mod pack_update;
 pub mod paths;
 pub mod pool;
 pub mod profile;

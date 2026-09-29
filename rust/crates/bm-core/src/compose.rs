@@ -113,6 +113,16 @@ pub struct Inherited {
     /// with the hash it was folded in at. This is the map — see [`PackNode`].
     #[serde(default)]
     pub tree: Vec<PackNode>,
+    /// Which **release** each unpacked dependency came from, by pack name.
+    ///
+    /// The fold cannot fill this in and is right not to try: it hashes the tree
+    /// in front of it, and a hash does not name the tag that produced it. The
+    /// update path knows, so [`set_release_versions`] writes it after the fold,
+    /// and what it buys is the cheapest question in the whole release plane —
+    /// "has this moved?" answered from the release *list*, without downloading
+    /// a 60 MB bundle to compare it against content that is identical.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub versions: BTreeMap<String, String>,
     /// Per registry filename, `key -> hash of the value inserted`.
     #[serde(default)]
     pub keys: BTreeMap<String, BTreeMap<String, String>>,
@@ -252,6 +262,29 @@ pub fn read_pack(assets: &Path) -> Pack {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default()
+}
+
+/// Record which release each unpacked dependency came from.
+///
+/// The update path's one write into the composition record, and it is a write
+/// *after* the fold on purpose: what a fold can see is a tree, and the version
+/// is a fact about where the tree was downloaded from. Emptying a version
+/// removes the entry, which is how a dependency that stopped coming from a
+/// release stops claiming one.
+///
+/// An update that swaps trees and dies before this call loses only the record,
+/// and it loses it in the safe direction: the next update sees no version for
+/// that pack and pulls its release again.
+pub fn set_release_versions(assets: &Path, versions: &BTreeMap<String, String>) -> Result<()> {
+    let mut marker = read_marker(assets);
+    for (name, version) in versions {
+        if version.is_empty() {
+            marker.versions.remove(name);
+        } else {
+            marker.versions.insert(name.clone(), version.clone());
+        }
+    }
+    write_marker(assets, &marker)
 }
 
 /// Read `assets/_extends.json`. A missing or broken record degrades to "nothing
@@ -1082,6 +1115,11 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
     report.tree = tree.len();
     let mut marker = Inherited {
         tree: tree.clone(),
+        // Carried forward, because a fold does not discover release versions
+        // and must not be the step that forgets them — `asset resolve` runs
+        // after every pack edit, and losing the record every time would make
+        // the next update re-download the world.
+        versions: old.versions.clone(),
         ..Inherited::default()
     };
     let mut filled_keys: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
@@ -1184,6 +1222,14 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
             marker.files.insert(rel, profile::content_hash(&bytes));
         }
     }
+
+    // A record of a pack the closure no longer reaches is a record of nothing:
+    // pruning against the tree that was just folded is what keeps the map and
+    // the tree the same set, so a dropped-and-re-added dependency cannot be
+    // mistaken for one that never moved.
+    marker
+        .versions
+        .retain(|name, _| tree.iter().any(|n| n.name == *name));
 
     // And now the files a dependency no longer provides: marked withdrawable
     // before the fill, still unclaimed after it. Deleting them here rather than
@@ -2088,5 +2134,49 @@ mod tests {
             "the stronger dependency's knob: {text}"
         );
         assert!(!text.contains("1.0"), "and not the weaker one's: {text}");
+    }
+
+    /// **The release record is a record, not a fold output.** A fold hashes the
+    /// tree in front of it and cannot know which tag produced it, so `versions`
+    /// arrives from `profile update` and has to survive every resolve after it —
+    /// losing it would make each update re-download the world. It is pruned
+    /// against the tree as well, so a pack that left the closure stops claiming a
+    /// release: the map and the tree stay the same set, and a dropped-and-re-added
+    /// dependency cannot read as one that never moved.
+    #[test]
+    fn a_resolve_keeps_the_release_record_and_drops_what_left_the_tree() {
+        let assets = scratch("versions");
+        std::fs::write(pack_path(&assets), r#"{"deps":["common"]}"#).unwrap();
+        write_pool(
+            &dep_tree(&assets, "common"),
+            "effect-pool.json",
+            &[("wind", "common-wind")],
+        );
+        resolve(&assets, false).unwrap();
+
+        let mut versions = BTreeMap::new();
+        versions.insert("common".to_string(), "0.1.0".to_string());
+        versions.insert("ghost".to_string(), "9.9.9".to_string());
+        set_release_versions(&assets, &versions).unwrap();
+        assert_eq!(read_marker(&assets).versions.len(), 2, "written as asked");
+
+        let r = resolve(&assets, false).unwrap();
+        assert_eq!(r.tree, 1);
+        let marker = read_marker(&assets);
+        assert_eq!(
+            marker.versions.get("common").map(String::as_str),
+            Some("0.1.0"),
+            "a fold does not forget which release it is holding"
+        );
+        assert!(
+            !marker.versions.contains_key("ghost"),
+            "and a name the closure no longer reaches is not a record of anything"
+        );
+
+        // Emptying a version is how a dependency stops claiming a release.
+        let mut cleared = BTreeMap::new();
+        cleared.insert("common".to_string(), String::new());
+        set_release_versions(&assets, &cleared).unwrap();
+        assert!(read_marker(&assets).versions.is_empty());
     }
 }
