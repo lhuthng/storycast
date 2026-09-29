@@ -114,6 +114,7 @@ pub(crate) async fn key_text(
                     | TextKind::SshPort
                     | TextKind::Advertise
                     | TextKind::ModelsRelease
+                    | TextKind::PacksRelease
             ) {
                 match save_app_setting(app, p.kind.clone(), &p.buf) {
                     Ok(msg) => {

@@ -610,7 +610,7 @@ at top).
 | `data/bible.json`, `data/cast-vieneu.json` | Character bible, speaker-to-voice (one per engine) |
 | `data/audio/segments-vieneu-NN/` | Cached segment audio, resumable renders |
 | `voices.json`, `voice-pool.json`, `refs/` | Clone mapping, sample pool, clips. **This machine only** — `refs/` is never pushed to a worker (enrollment happens here, and a box is sent the encoded voice store in `engines/<name>/models/voices.json`) |
-| `workspaces/<name>/settings.json` | Run config **per book**: url_template, engine, range, speed, gap_ms, ambience, music, volumes, analyzer, models, render_batch (`:mix`, `:batch`). No workspace: the same file is `.bm/settings.json` |
+| `workspaces/<name>/settings.json` | Run config **per book**: url_template, engine, range, speed, gap_ms, ambience, music, volumes, analyzer, models, render_batch (`:mix`, `:batch`), digest (how a chapter too long for one answer is staged in parts). No workspace: the same file is `.bm/settings.json` |
 | `workspaces/<name>/ledger.json` | Task states, survive restarts. Root form: `.bm/ledger.json` |
 | `.bm/machines.json` | Linked machines (addr, ssh user/port/key), machine-global |
 | `.bm/digest-suspend.json` | `:off` only: each box's policy as-was, so `:on` restores what each had. File, not latch: a restart cannot leave digest off with no way back. Deleted after restore |

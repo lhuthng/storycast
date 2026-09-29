@@ -28,6 +28,11 @@ pub(crate) enum TextKind {
     /// Empty means the weights are pushed to each box instead of fetched from
     /// a release, which is what every box did before the setting existed.
     ModelsRelease,
+    /// GitHub `owner/name` hosting the profile pack (`:packrelease`): save-only.
+    /// Empty means `assets/` is pushed to each box instead of fetched, which is
+    /// what every box did before the setting existed. The *tag* is not asked for
+    /// here — it comes from the loaded profile's version.
+    PacksRelease,
     /// Render batch size (`:batch`): how many of one chapter's takes a single
     /// offer carries. Save-only, like the ssh defaults — it is read by the
     /// scheduler when it builds the next offer, so nothing is dispatched.
@@ -829,6 +834,11 @@ pub(crate) struct DigestChapter {
     /// The prompt for `round` — already on the clipboard when it was built.
     pub(crate) prompt: String,
     pub(crate) cast: Option<serde_json::Value>,
+    /// The part of the chapter this round is for, when a chapter is longer than
+    /// one answer carries: `None` on every chapter that fits one call. Shown in
+    /// the note, because an operator pasting into a long chapter has to know how
+    /// many rounds it still owes.
+    pub(crate) part: Option<bm_core::digest::ManualPart>,
     /// The last thing that happened: a copy, a validator's complaint, or the
     /// outcome. Drawn on the screen, because a complaint *is* the instruction.
     pub(crate) note: String,

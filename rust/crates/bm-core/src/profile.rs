@@ -258,10 +258,25 @@ fn default_piece() -> String {
 
 /// The load pointer: which profile the live tree claims to be. Empty
 /// (`Default`) means unset — a workspace that never named one.
+///
+/// [`version`](Self::version) is the **release** version, not a build counter:
+/// the third half of what a release is named by, and the reason a box can be
+/// told which artifact to download instead of only which bytes it must end up
+/// with. `tools/profile.sh pack <name> --version 0.1.0` writes it, and the tag
+/// it produces is the tag the release is cut under — so the pointer and the URL
+/// a box fetches are two readings of one string, never two things to keep in
+/// step.
+///
+/// Empty on a pointer written before this field existed, and empty is the *safe*
+/// direction: [`crate::artifact::PackRelease::resolve`] reads it as "no release",
+/// and a box with no release is pushed the profile exactly as it was before any
+/// of this existed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pointer {
     pub name: String,
     pub hash: String,
+    #[serde(default)]
+    pub version: String,
 }
 
 /// The pre-split bundle: one file holding every piece.
@@ -614,6 +629,25 @@ pub fn manifest_hash(files: &BTreeMap<String, String>) -> String {
     hex_digest(h.finalize())
 }
 
+/// Read a release bundle's `manifest.json` back, and fold it to the one number
+/// that release is named by.
+///
+/// A function rather than a `serde_json` call at each site because the hash is
+/// the *identity* of a release, and every consumer — the box that downloads it,
+/// the publish gate, the provisioner deciding whether a release exists at all —
+/// has to arrive at it by the same route, or a "verified" bundle is only
+/// verified against a differently-computed number.
+pub fn read_manifest_at(path: &Path) -> Result<Manifest> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let m: Manifest =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    if m.files.is_empty() {
+        anyhow::bail!("{} lists no files", path.display());
+    }
+    Ok(m)
+}
+
 /// The stored `.bm/profile`, in either shape.
 ///
 /// `Legacy` is the pre-split document — `{name, hash}`, one hash over `assets/`
@@ -820,7 +854,8 @@ mod tests {
             &Pointer {
                 name: "fixture".into(),
                 hash,
-            },
+    version: String::new(),
+},
         )
         .unwrap();
         assert_eq!(verify(&dir).unwrap().name, "fixture");
@@ -889,15 +924,18 @@ mod tests {
             pack: Pointer {
                 name: "xianxia".into(),
                 hash: "p".into(),
-            },
+    version: String::new(),
+},
             adapter: Pointer {
                 name: "vi-VN".into(),
                 hash: "a".into(),
-            },
+    version: String::new(),
+},
             engine: Pointer {
                 name: "vieneu".into(),
                 hash: "e".into(),
-            },
+    version: String::new(),
+},
         };
         write_binding(&dir, &b).unwrap();
         assert_eq!(read_binding(&dir).unwrap(), b);
@@ -909,7 +947,8 @@ mod tests {
             &Pointer {
                 name: "xianxia".into(),
                 hash: "p2".into(),
-            },
+    version: String::new(),
+},
         )
         .unwrap();
         let after = read_binding(&dir).unwrap();
@@ -928,11 +967,13 @@ mod tests {
                 pack: Pointer {
                     name: "xianxia".into(),
                     hash: String::new(),
-                },
+    version: String::new(),
+},
                 adapter: Pointer {
                     name: "vi-VN".into(),
                     hash: String::new(),
-                },
+    version: String::new(),
+},
                 engine: Pointer::default(),
             },
         )
@@ -967,11 +1008,13 @@ mod tests {
                 pack: Pointer {
                     name: "xianxia".into(),
                     hash: String::new(),
-                },
+    version: String::new(),
+},
                 adapter: Pointer {
                     name: "vi-VN".into(),
                     hash: String::new(),
-                },
+    version: String::new(),
+},
                 engine: Pointer::default(),
             },
         )

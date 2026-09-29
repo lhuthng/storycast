@@ -398,6 +398,51 @@ pub(crate) fn save_app_setting(
                 format!("boxes will fetch the weights from {repo} releases")
             }
         }
+        TextKind::PacksRelease => {
+            // Same validation as the models repo, for the same reason — a repo
+            // that does not parse is a setting that silently sends every box
+            // down the push.
+            //
+            // The **version is not asked for here**, and that is the point: it
+            // is read off the load pointer, so the tag this produces is the tag
+            // `tools/profile.sh pack --version` published under. Asking for it
+            // too would be a second place for the two to disagree.
+            let repo = buf.trim();
+            if repo.is_empty() {
+                settings.packs_release = String::new();
+                "pack release cleared — the profile travels over the push again".to_string()
+            } else {
+                let pointer = bm_core::profile::read_pointer(&app.layout.root).ok();
+                bm_core::artifact::PackRelease::for_repo(
+                    repo,
+                    pointer.as_ref().map(|p| p.name.as_str()).unwrap_or("pack"),
+                    pointer
+                        .as_ref()
+                        .filter(|p| !p.version.is_empty())
+                        .map(|p| p.version.as_str())
+                        // An unversioned pointer cannot build a tag, and the
+                        // honest thing to say is which stamp is missing rather
+                        // than to accept a repo that would never fetch.
+                        .unwrap_or("0.0.0"),
+                    pointer.as_ref().map(|p| p.hash.as_str()).unwrap_or(""),
+                )
+                .map_err(|e| e.to_string())?;
+                settings.packs_release = repo.to_string();
+                match pointer.filter(|p| !p.version.is_empty()) {
+                    Some(p) => format!(
+                        "boxes will fetch the profile pack {} v{} from {repo} releases",
+                        p.name, p.version
+                    ),
+                    None => {
+                        String::from(
+                            "saved — but the loaded profile names no version, so nothing is \
+                             fetched yet: re-publish it with `tools/profile.sh pack <name> \
+                             --version <v>`",
+                        )
+                    }
+                }
+            }
+        }
         TextKind::Advertise => {
             // Empty clears it back to the sentinel, which is the only way to
             // undo a wrong address without hand-editing settings.json.

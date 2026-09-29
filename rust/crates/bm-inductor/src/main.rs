@@ -112,8 +112,8 @@ enum Cmd {
     },
     /// Rewrite written-out non-verbal sounds into engine tags across every
     /// script (`Ha ha ha!` → `[cười]`), and requeue the chapters it touches.
-    /// Posts to a running inductor (refused while workers are mid-play).
-    /// Report-only with `--dry-run`.
+    /// Posts to a running inductor, which queues it behind the digests and
+    /// renders the rewrite would disturb. Report-only with `--dry-run`.
     Retag {
         /// Inductor API base URL.
         #[arg(long, default_value = "http://127.0.0.1:8901")]
@@ -2837,8 +2837,16 @@ async fn cmd_backup(
                 cast = Some(c.clone());
             }
 
+            // The part is in the line, not just the round: a chapter staged in
+            // four parts asks four round 1s, and the log has to say which one is
+            // waiting — otherwise a backup run through a long chapter reads like
+            // the same prompt four times.
+            let part = match next.part() {
+                Some(part) if part.total > 1 => format!(" (part {}/{})", part.index, part.total),
+                _ => String::new(),
+            };
             eprintln!(
-                "ch{n}: {} prompt ready ({} bytes) via {analyzer}",
+                "ch{n}: {}{part} prompt ready ({} bytes) via {analyzer}",
                 round.as_str(),
                 prompt.len()
             );
@@ -2854,7 +2862,7 @@ async fn cmd_backup(
                     prompt.clone()
                 } else {
                     eprintln!(
-                        "ch{n}: {} answer refused ({complaint}) — repair {attempt}/{retries}",
+                        "ch{n}: {}{part} answer refused ({complaint}) — repair {attempt}/{retries}",
                         round.as_str()
                     );
                     manual::repair_prompt(&prompt, &complaint)

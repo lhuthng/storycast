@@ -147,21 +147,30 @@ h = hashlib.sha256()
 for path in sorted(m["files"]):
     h.update(path.encode()); h.update(b"\0")
     h.update(m["files"][path].encode()); h.update(b"\0")
-binding = {p: {"name": "", "hash": ""} for p in ("pack", "adapter", "engine")}
+# `version` is the *release* version, and it is the third half of a release's
+# identity: the tag is `<name>-<piece>-v<version>` and a provisioned box
+# resolves the URL from exactly this field (see bm_core::artifact::PackRelease).
+# A pointer without one resolves to no release, so the push — which is why the
+# default is "" rather than a guess.
+empty = {"name": "", "hash": "", "version": ""}
+binding = {p: dict(empty) for p in ("pack", "adapter", "engine")}
 if os.path.exists(pointer_path):
     old = json.load(open(pointer_path))
     if "name" in old or "hash" in old:
-        binding["pack"] = {"name": old.get("name", ""), "hash": old.get("hash", "")}
+        binding["pack"] = {"name": old.get("name", ""), "hash": old.get("hash", ""),
+                           "version": old.get("version", "")}
     else:
         for p in binding:
             if isinstance(old.get(p), dict):
-                binding[p] = {"name": old[p].get("name", ""), "hash": old[p].get("hash", "")}
-binding[piece] = {"name": m["name"], "hash": h.hexdigest()}
+                binding[p] = {"name": old[p].get("name", ""), "hash": old[p].get("hash", ""),
+                              "version": old[p].get("version", "")}
+binding[piece] = {"name": m["name"], "hash": h.hexdigest(), "version": m.get("version", "")}
 os.makedirs(os.path.dirname(pointer_path), exist_ok=True)
 with open(pointer_path, "w") as fh:
     json.dump(binding, fh, indent=2)
     fh.write("\n")
-print("loaded " + piece + " " + m["name"] + " (" + h.hexdigest()[:12] + ")")
+print("loaded " + piece + " " + m["name"] + " v" + m.get("version", "?")
+      + " (" + h.hexdigest()[:12] + ")")
 EOF
 }
 
@@ -228,7 +237,16 @@ EOF
     out="$root/profiles/.pack.$name.tar.zst"
     # OS noise never enters a bundle: a .DS_Store would hash-drift every
     # unpack on a different machine for zero content.
-    tar --exclude=.DS_Store $(piece_excludes "$PIECE") -cf - -C "$stage" \
+    #
+    # `COPYFILE_DISABLE=1` for the same reason `tools/models.sh` sets it, and it
+    # is not belt-and-braces: macOS `bsdtar` writes a `._name` AppleDouble
+    # sidecar for every member carrying an extended attribute, **hides those
+    # sidecars from its own `tar -t`**, and a provisioned box would then unpack
+    # each one as a real file and refuse the bundle as carrying a member its
+    # manifest never listed. The published `models-vdda4efee13df` release has 17
+    # of them; this pack is clean today, but only because no member happened to
+    # carry one.
+    COPYFILE_DISABLE=1 tar --exclude=.DS_Store $(piece_excludes "$PIECE") -cf - -C "$stage" \
       $(piece_members "$PIECE" "$name") manifest.json \
       | zstd -"$LEVEL" -o "$out"
     mv "$out" "$bundle"
@@ -236,8 +254,39 @@ EOF
     printf 'packed %s %s  (%s at level %s, manifest %s)\n' \
       "$PIECE" "$bundle" "$(du -h "$bundle" | cut -f1)" "$LEVEL" \
       "$(tar --use-compress-program=unzstd -xOf "$bundle" manifest.json | manifest_hash /dev/stdin)"
+    # The tag reads the *manifest's* version, not `$VERSION`: the manifest is
+    # what the pointer records and what a box resolves the URL from, so printing
+    # the flag would let the hint name a release the pack is not.
+    stamped=$(tar --use-compress-program=unzstd -xOf "$bundle" manifest.json \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))')
+    # The version also belongs on the **load pointer**, and packing is the only
+    # moment it is decided: `--version` is the operator saying "this is release
+    # V", and a provisioned box resolves the download URL from exactly this
+    # field (`bm_core::artifact::PackRelease`). Without it the release exists
+    # and no box can be told about it.
+    #
+    # Safe to write here because `profile manifest` has already refused unless
+    # the live tree still hashes to what the pointer says — so the only field
+    # that changes is the version, on the same content. A `--dep` release is
+    # skipped: it publishes a *dependency* of the live pack, and stamping the
+    # pack pointer to the dependency's name would point the cluster at a
+    # different profile.
+    #
+    # Read out of the **bundle**, not the staging directory: the stage is
+    # already gone by here, and the bundle is the better answer anyway — it is
+    # what was published, so the pointer names the release that exists rather
+    # than the one that was about to be written.
+    if [ -z "$DEP" ] && [ -n "$stamped" ]; then
+      kept=$(mktemp "${TMPDIR:-/tmp}/bm-profile-manifest.XXXXXX")
+      tar --use-compress-program=unzstd -xOf "$bundle" manifest.json > "$kept"
+      stamp_piece "$kept" "$root/.bm/profile" | sed 's/^/  /'
+      rm -f "$kept"
+    fi
     printf 'publish: gh release create %s-%s-v%s %s --title "%s %s v%s" --notes "profile %s"\n' \
-      "$name" "$PIECE" "$VERSION" "$bundle" "$name" "$PIECE" "$VERSION" "$PIECE"
+      "$name" "$PIECE" "$stamped" "$bundle" "$name" "$PIECE" "$stamped" "$PIECE"
+    if [ "$PIECE" = pack ] && [ -n "$stamped" ] && [ -z "$DEP" ]; then
+      printf 'then, to have boxes fetch it instead of receiving assets/ over your uplink:\n  :packrelease owner/name   (or set "packs_release" in settings.json)\n'
+    fi
     tar --use-compress-program=unzstd -tf "$bundle" | head -5
     ;;
   fetch)

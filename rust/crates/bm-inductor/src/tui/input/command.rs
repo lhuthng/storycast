@@ -79,6 +79,8 @@ pub(crate) enum Command {
     /// GitHub `owner/name` hosting the baked model artifact: save-only, like
     /// the ssh defaults. Empty restores the push.
     ModelsRelease,
+    /// Set `packs_release`: the repo a box fetches the profile pack from.
+    PacksRelease,
     /// How many of one chapter's takes a single render offer carries. Saved to
     /// this workspace's settings; applies to offers made from then on.
     RenderBatch,
@@ -165,7 +167,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["remerge"], desc: Some("requeue every merge — render cache kept, no confirm"), cmd: Command::Remerge },
     Word { key: None, names: &["rerender"], desc: Some("requeue every render + merge — full re-speak, asks first"), cmd: Command::Rerender },
     Word { key: None, names: &["shutdown-when-idle", "drain"], desc: Some("workers exit on their own once the queue drains — restart with :B"), cmd: Command::ShutdownWhenIdle },
-    Word { key: None, names: &["xdrop"], desc: Some("drop the queued exclusive write (swap/remix waiting for the cluster to quiet) — :xdrop swap-voice drops only that kind"), cmd: Command::ExclusiveCancel { route: None } },
+    Word { key: None, names: &["xdrop"], desc: Some("drop the queued exclusive write (a swap/merge/remix waiting for the cluster to quiet) — :xdrop swap-voice drops only that kind"), cmd: Command::ExclusiveCancel { route: None } },
     Word { key: None, names: &["workspace", "ws"], desc: Some("list, switch or create a workspace — one per book; only with the cluster stopped"), cmd: Command::Workspace },
     Word { key: None, names: &["profile"], desc: Some("list, load or pack a genre profile — loading replaces assets/ + prompts/, so only with the cluster stopped"), cmd: Command::Profile },
     Word { key: None, names: &["login"], desc: Some("store the IAM user's key from the console's accessKeys.csv — setup, once"), cmd: Command::AwsLogin },
@@ -180,6 +182,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["sshport"], desc: None, cmd: Command::SshPort },
     Word { key: None, names: &["advertise", "adv"], desc: Some("the address workers dial back on — set it when they are off the LAN"), cmd: Command::Advertise },
     Word { key: None, names: &["release", "modelsrelease"], desc: Some("GitHub owner/name whose releases hold the model artifact, so a box fetches the weights from a CDN instead of your uplink (empty = push)"), cmd: Command::ModelsRelease },
+    Word { key: None, names: &["packrelease", "packsrelease"], desc: Some("GitHub owner/name whose releases hold the profile pack, so a box fetches assets/ from a CDN instead of your uplink — the tag comes from the loaded profile's version (empty = push)"), cmd: Command::PacksRelease },
     Word { key: None, names: &["batch", "renderbatch"], desc: Some("how many of one chapter's takes one render offer carries (default 5)"), cmd: Command::RenderBatch },
     Word { key: Some('q'), names: &["quit", "exit", "q"], desc: None, cmd: Command::Key(KeyCode::Char('q')) },
     Word { key: None, names: &["inspect"], desc: None, cmd: Command::Key(KeyCode::Char('i')) },
@@ -658,6 +661,36 @@ pub(crate) fn do_command(
                 &cur,
             ));
         }
+        Command::PacksRelease => {
+            let cur = app.setting_str("packs_release", "");
+            // The prompt says where the *tag* comes from, because the obvious
+            // question is "which release of which pack?" and the answer is the
+            // loaded profile — not a field the operator could get wrong here.
+            let which = match bm_core::profile::read_pointer(&app.layout.root) {
+                Ok(p) if !p.version.is_empty() => {
+                    format!("The loaded profile is {} v{}, so boxes ask for {}.", p.name, p.version, bm_core::artifact::pack_tag_for(&p.name, &p.version))
+                }
+                Ok(p) => format!(
+                    "The loaded profile '{}' names no version, so nothing would be fetched yet — \
+                     re-publish it with `tools/profile.sh pack {} --version <v>` first.",
+                    p.name, p.name
+                ),
+                Err(_) => "No profile is loaded, so there is no pack to fetch.".to_string(),
+            };
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::PacksRelease,
+                "Profile pack release",
+                &format!(
+                    "GitHub owner/name holding the profile pack as a release (tools/profile.sh \
+                     pack <name> --version <v>, then `gh release create`). A provisioned box \
+                     fetches that ~60 MB of assets/ and verifies it itself, instead of \
+                     receiving it over this machine's uplink once per box. {} Empty restores \
+                     the push.",
+                    which
+                ),
+                &cur,
+            ));
+        }
         Command::RenderBatch => {
             // Prefilled from `run_preview` — the *same* precedence the run
             // screen displays: the live settings while the backend answers, the
@@ -1041,7 +1074,8 @@ pub(crate) fn do_command(
             }
             // Same bargain as reconcile: worth one Enter. The op itself
             // validates (survivor in the bible, absorbed known, no
-            // Narrator), refuses mid-play, and snapshots before writing.
+            // Narrator), queues behind the chapters it rewrites when the
+            // cluster is busy, and snapshots before writing.
             let body = vec![
                 format!(
                     "{} keeps its voice; {} join{} its proper_aliases.",

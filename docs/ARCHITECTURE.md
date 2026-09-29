@@ -578,6 +578,51 @@ of a pipeline where it is expensive to notice.
   therefore the same fixed speaker. Each call gets **one chance to fix its own
   answer**. Anonymous speakers are given stable voices from the pool but never
   become part of the character bible.
+
+  **A chapter too long for one answer is staged in parts** (`digest/window.rs`).
+  This is not a preference: the staging answer carries the chapter's own words,
+  and every backend caps one answer at **16384 tokens** (`max_tokens` on the
+  OpenAI-compatible slot, `maxOutputTokens` on Gemini, and on Ollama the prompt
+  shares that same 16384). A real novel chapter three times the length of the
+  longest one in the sample corpus therefore cannot be answered at all — the
+  reply is cut mid-JSON, the parse fails, and the one repair call fails the same
+  way. So the program cuts the chapter into **windows**: contiguous runs of the
+  same prepared events, the two rounds run on each one unchanged, and the parts
+  are merged back into one script and one bible delta.
+
+  Where the cuts fall is a setting (`digest` in `settings.json`), and the
+  default is derived rather than fixed: `answer_tokens` (12000, deliberately
+  under the hard cap) is spent as an average over the chapter's estimated answer
+  size, and a window closes at the first **sentence-final event** at or after
+  its share, so a window never ends mid-sentence and never cuts an event in
+  half — a `source_id` names a whole event, and the source gate would refuse it.
+  `chunk_sentences` and `chunk_chars` are ceilings for an operator who wants
+  windows smaller than the budget makes them. **`answer_tokens: 0` never
+  splits**, which is the escape hatch back to the single-call digest — usable as
+  a bisect, because one number is the difference.
+
+  Two things make the parts *one* digest rather than several:
+
+  * **`summary`.** Each part's attribution answer ends with 2–4 sentences on
+    what that part established, and part *k* is handed the summaries of 1..k as
+    a `PLOT SO FAR` block. Without it, a later part would be staged by a model
+    that has never been told what the earlier ones established — which on a real
+    chapter means the second half voiced against a cast list that no longer
+    matches who is speaking. A part that omits its summary is refused, and the
+    complaint goes back as the ordinary one repair.
+  * **the checkpoint** (`data/.digest-parts-chNN.json`). A part is written only
+    once both its rounds parsed and validated, so what a restart resumes from is
+    work that would have been *accepted* — and a 40 KB chapter is six calls, so
+    losing the last one to a rate limit would otherwise cost the five before it.
+    It is honoured only while the chapter text, the bible and
+    the plan still say what they said when the part was staged, and it is
+    deleted when the chapter is written.
+
+  **A chapter that fits one call is asked exactly the prompt it was always
+  asked** — no part note, no plot, no `summary` field — so a short chapter
+  cannot digest differently because this exists. The whole feature is a block
+  appended after the output contract, which is also why no adapter template had
+  to change for it.
   The inductor is the **single writer** of `data/bible.json` and the cast
   files: workers send the finished script and their bible delta back in the
   report, which removes any read-modify-write race between machines. A digest
@@ -591,17 +636,18 @@ of a pipeline where it is expensive to notice.
   when every AI service is unavailable, rate-limited, returning errors, or
   simply when you would rather use a model you already have open in a browser.
   The program puts round one's prompt on your clipboard; you paste the answer
-  back; same for round two.
-  One honest limitation: **the by-hand route does not yet enforce the same
-  rules.** The manual manager still renders the legacy two-pass templates and
-  checks answers with `parse_script`, so it runs neither `prepare_chapter` nor
-  `validate_source_alignment`: a chapter you finish by hand can still end up
-  with the attribution the automatic route would have rejected. Until it is
-  pointed at `build_attribution_prompt` / `parse_attribution` and
-  `build_staging_prompt` / `parse_staged_script`, the automatic path and
-  `bm-inductor digest` are the ones that hold the line. The two paths do share
-  `assemble_outcome`, so the finished file is built the same way either way,
-  and a refusal is still the validator's own complaint.
+  back; same for round two. **The by-hand route is the same digest with a person
+  standing in for the analyzer**: the prompts come from `build_attribution_prompt`
+  and `build_staging_prompt` — the functions the automatic path renders — and the
+  answers are checked by `parse_attribution` and `parse_staged_script`, the same
+  validators, so a chapter finished by hand cannot land in the library the
+  automatic route would have refused. A long chapter is asked **one part at a
+  time** from the same plan, the note on screen says which part (`part 2/5`), and
+  the parts already staged are read from the same checkpoint the worker writes —
+  a chapter the cluster half-finished can be continued by hand (and the other way
+  round) rather than started over. A refusal is the validator's own complaint,
+  with the part's own number when there is one, which is the instruction: paste a
+  better answer for the round you are on.
   Hand-finished work is reported over `/api/complete` under the reserved
   `operator` id, which is also what makes finishing by hand win a race: the row
   goes `Done`, and a machine still grinding on it finds a row it no longer

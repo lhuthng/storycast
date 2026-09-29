@@ -242,6 +242,77 @@ error, and an unrecognised subcommand is exactly what an agent predating this
 one answers. Read as corruption that would stop a provision which should have
 fallen back to the push, and say the one thing that is not true.
 
+## Fetching the profile pack, **done**
+
+A profile **pack** is `assets/` — the registries, the clips they register, the
+attribution, the language's bundled crawlers: ~60 MB that is byte-identical on
+every box and changes only when the operator publishes a profile. It is the
+second payload with that shape, so it is published and fetched the same way, and
+the box pays the uplink zero times for it.
+
+Publishing it is [`tools/profile.sh pack`](ASSETS.md) plus a `gh release create`
+under the tag it prints. What provision does with it is the new half:
+
+| thing | value |
+|---|---|
+| release repo | `settings.json`'s `packs_release` (`owner/name`), or the TUI's `:packrelease` |
+| the tag | `<name>-pack-v<version>`, read off the **load pointer** |
+| the URL | `https://github.com/<owner>/<name>/releases/download/<tag>/<name>.tar.zst` |
+| the hash check | `--expect <the pointer's hash>` — the hash of the *live* tree on the inductor |
+| exit `0` | landed and verified; `assets/` stays out of the bundle |
+| exit `20` | the bundle is not the profile this cluster is running — **no fallback**, the provision stops |
+| exit `21` | unreachable, or an agent predating `--strip-prefix` — the log says so and `assets/` is rsynced instead |
+
+**The tag comes from the pointer, not from the setting.** `models_release` can
+name only a repo, because `models-v<hash>` is derived from the content. A pack
+is not content-addressed — `tools/profile.sh pack xianxia --version 0.1.0` is an
+operator choosing a version — so the tag needs one, and the place it lives is
+`Pointer::version`, written by `pack`/`unpack` from the manifest they just
+produced. That makes the pointer and the URL a box fetches two readings of one
+string rather than two strings to keep in step. **A pointer with no version
+resolves to no release**, which is the push: every checkout from before this
+existed keeps working with no edit, and `packs_release` is safe to set before
+re-publishing.
+
+**The hash check is the pointer's, which is the stronger of the two.** The
+weights check themselves: a different bake is a different manifest hash. A pack
+checks the *live* tree, so a release that is perfectly self-consistent and is a
+different profile anyway is still refused — and a box cannot be talked into
+running a profile the cluster is not.
+
+**`assets/` leaves the bundle entirely, not partly.** A pack release is
+`assets/` minus `assets/_extends/`, which is a **superset** of every
+`assets/`-rooted member the sources plan selects (the registries, the clips they
+register, the attribution). `Sources::plan_for` therefore drops the whole
+subtree when a release is configured, and `compute_provision_stamp` plans with
+the *same* argument — otherwise the stamp would be hashing an artifact that was
+never sent. On this checkout that is 124 files, 63 MB, off every push.
+
+**And the pack is its own stamp field.** With `assets/` gone from the bundle,
+two different packs produce the **same** `sources.tar.zst`; the bundle cannot
+see the difference. So `pack_release` records the pointer hash, `pack_in_sync`
+gates on it, and a re-pointed profile reaches the boxes whose bundle is
+otherwise byte-identical — instead of every log saying "in sync" while the merge
+quietly runs the old one.
+
+**The pack lands *after* the sources extract.** The bundle's delivery is a
+*replacement*: it prunes `$D/assets` before it extracts. A pack landing first
+would be deleted by the step that follows, and the box would come up with a
+profile and no assets — the one combination nothing downstream reports.
+
+**One subcommand, two shapes.** A pack bundle is a manifest *beside* an
+`assets/` subtree, because that is the path system a pack is keyed by and the
+hash of the live tree folds over. `--strip-prefix assets` is the only difference,
+so the part that has to be right — verify against the manifest that travelled in
+the archive, then swap in two renames — stays one implementation. A second verb
+would be a second `match` on exit codes, and the day one of them read `2` as
+corruption the cluster would stop provisioning.
+
+**Separate settings, on purpose.** A checkout with a released pack and an
+unreleased bake of the weights is the ordinary case, and one setting that could
+only say both or neither would make the operator choose a 668 MB push to save a
+60 MB one.
+
 Three decisions inside that, and they are still the right ones:
 
 **The agent does the decompression, not a shipped `zstd` binary.** The `tar`
@@ -450,6 +521,9 @@ pushed, and nothing on a box reads it.
 | Artifact published with `voices.json` inside | the box rejects it; `bake --check` is the gate meant to prevent it |
 | `bm-agent` too old to have `fetch-artifact` | falls back to rsync |
 | GitHub unreachable | falls back to rsync, slowly, and says so |
+| `packs_release` set, pointer has no version | the push, and the log names the re-publish command that fixes it |
+| pack release is a different profile | the box refuses it and the provision stops naming the tag — never pushed over the top |
+| pack release carries an AppleDouble `._` member | the box refuses it by name; `COPYFILE_DISABLE=1` in `profile.sh` is the gate |
 
 Every one of these is *slower* or *louder* than today's behavior. None is silent,
 and that is the requirement: a box that is quietly holding the wrong weights is

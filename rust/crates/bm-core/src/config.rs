@@ -259,6 +259,24 @@ pub struct Settings {
     /// still gets. Not a secret and not per-box: it names a public release.
     #[serde(default)]
     pub models_release: String,
+    /// `owner/name` of the GitHub Releases that hold the **profile pack** — the
+    /// registries, the clips they register, the attribution, ~60 MB of `assets/`
+    /// that is byte-identical on every box.
+    ///
+    /// Separate from [`models_release`](Self::models_release) on purpose, and
+    /// for the reason the two artifacts are published separately: a checkout
+    /// with a released pack and an unreleased bake of the weights is the
+    /// ordinary case, and a single setting that could only say both or neither
+    /// would make the operator choose a 668 MB push to save a 60 MB one.
+    ///
+    /// Which release is meant is **not** configured here. It is read off the
+    /// load pointer's `version` — the one `tools/profile.sh pack <name>
+    /// --version 0.1.0` stamps — so the tag is a fact about the profile rather
+    /// than a string that can drift from it. A pointer with no version (every
+    /// checkout from before versions existed) resolves to no release, which is
+    /// the push: the behaviour every box already has.
+    #[serde(default)]
+    pub packs_release: String,
     /// Minutes with nothing left to do before the cluster shuts itself down.
     ///
     /// The inductor arms it once the queue has been empty this long, and then
@@ -289,6 +307,18 @@ pub struct Settings {
     /// what once put every worker on a different chapter.
     #[serde(default = "default_render_batch")]
     pub render_batch: u32,
+    /// How a chapter too long for one digest answer is split. See
+    /// [`DigestSettings`].
+    ///
+    /// `#[serde(default)]` for the usual reason: a `settings.json` written
+    /// before this block existed has to keep loading, and what it means is
+    /// "the default", which is the question of whether a chapter splits at all.
+    /// A chapter under the budget is one window, and a one-window chapter is
+    /// the pre-window digest byte for byte — so an old workspace that never
+    /// touches this block behaves exactly as it did, right up to the point
+    /// where the alternative was a truncated answer.
+    #[serde(default)]
+    pub digest: DigestSettings,
     /// App-wide ssh defaults for binding machines: user, port, key path.
     /// `None` key means ssh decides (agent, `~/.ssh/config`, default keys).
     /// `#[serde(default)]` keeps every existing `settings.json` parsing —
@@ -308,6 +338,84 @@ pub struct Settings {
     #[serde(default)]
     pub profile: crate::profile::Binding,
 }
+
+/// How the digest splits a chapter that cannot be answered in one call.
+///
+/// The digest is two rounds — attribution, then staging — and the staging answer
+/// carries the chapter's own words (every segment echoes the `source_id` it
+/// answers, and any segment that splits or fixes a line also carries its `text`).
+/// Every backend caps that answer at **16384 tokens** (`max_tokens` on the
+/// OpenAI-compatible slot, `maxOutputTokens` on Gemini, `num_ctx` on Ollama,
+/// where the prompt shares the same 16384), and a truncated answer is not a
+/// smaller answer: it is JSON that fails to parse, then a repair call that fails
+/// the same way, then a chapter shelved. A real novel chapter three times the
+/// length of this corpus's longest therefore cannot be digested at all today.
+///
+/// So the digest runs in **windows** — contiguous runs of the chapter's prepared
+/// events, each with its own attribution and staging round, folded back into one
+/// script and one bible delta. `plan_windows` decides where they fall; this block
+/// is the budget that decides whether they fall at all, plus the two explicit
+/// knobs for an operator who wants them smaller for their own reasons.
+///
+/// The one field that is *not* a budget is the tie between windows: each
+/// attribution answer returns a `summary` of its own window, and window *k* is
+/// handed the summaries of 1..k as a `PLOT SO FAR` block. Without it a later
+/// window is staged by a model that has never been told what the earlier ones
+/// established, which on ch1 of a real chapter means the second half is voiced
+/// against a cast list that no longer matches who is speaking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DigestSettings {
+    /// Sentences per window. `0` means "decide from the budget alone".
+    ///
+    /// A window closes at the first sentence-final event at or after this many
+    /// sentences, so it never ends mid-sentence — and never inside an event,
+    /// because a segment's `source_id` names a whole event and the source gate
+    /// would refuse a window that cut one in half.
+    pub chunk_sentences: u32,
+    /// Characters of chapter text per window. `0` means "decide from the budget".
+    ///
+    /// Characters of *chapter text*, in the currency `window::weight` counts:
+    /// an event's own text plus the JSON overhead a segment answering it costs.
+    /// It is a ceiling, not a target — where this and the answer budget disagree
+    /// the smaller one wins, so a `chunk_chars` set to make windows small is not
+    /// undone by a budget that would have allowed one large one.
+    pub chunk_chars: u32,
+    /// The answer budget for one call, in tokens. **`0` means never split.**
+    ///
+    /// A soft ceiling under the hard 16384 every backend imposes, because the
+    /// estimate that plans a window is an estimate: it assumes the worst case
+    /// (a model that echoes every event's text) and converts characters to
+    /// tokens at `window::CHARS_PER_TOKEN`. `0` is the escape hatch back to
+    /// single-call behaviour — the exact digest of every release before this
+    /// existed — which is what makes it usable as a bisect: a chapter that
+    /// behaves differently windowed and unwindowed can be compared by changing
+    /// one number rather than by editing code.
+    pub answer_tokens: u32,
+}
+
+impl Default for DigestSettings {
+    fn default() -> Self {
+        DigestSettings {
+            chunk_sentences: 0,
+            chunk_chars: 0,
+            // Under the 16384 every backend enforces, with room for a model
+            // that writes more than it was asked to. Deliberately not the cap:
+            // the failure this whole block exists to prevent is the answer that
+            // runs off the end, and headroom is cheaper than a repair round.
+            answer_tokens: DEFAULT_ANSWER_TOKENS,
+        }
+    }
+}
+
+/// The answer budget a workspace that has not said otherwise gets, in tokens.
+///
+/// A named constant because three places have to agree about it: this default,
+/// the docs that quote it, and the tests that pin a chapter's split. Chosen as
+/// ~73% of the 16384 output cap every backend imposes — the estimate below it
+/// is conservative, but headroom on a 16384 ceiling is cheap and a truncated
+/// answer costs a repair round and then shelves the chapter.
+pub const DEFAULT_ANSWER_TOKENS: u32 = 12000;
 
 /// App-wide ssh defaults. The per-machine value in `machines.json` wins;
 /// this saves retyping the same key across boxes.
@@ -375,6 +483,7 @@ impl Default for Settings {
             analyze_models: vec!["gemini-3.5-flash".into()],
             gemini_url: default_gemini_url(),
             models_release: String::new(),
+            packs_release: String::new(),
             model_order: vec![
                 "gemini-3.1-flash-tts-preview".into(),
                 "gemini-2.5-pro-preview-tts".into(),
@@ -384,6 +493,7 @@ impl Default for Settings {
             advertise: "127.0.0.1".into(),
             idle_mins: 5,
             render_batch: DEFAULT_RENDER_BATCH,
+            digest: DigestSettings::default(),
             ssh: SshDefaults::default(),
             profile: crate::profile::Binding::default(),
         }

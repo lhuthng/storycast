@@ -1358,6 +1358,7 @@ fn the_footer_names_the_active_workspace_and_the_loaded_profile() {
         pack: bm_core::profile::Pointer {
             name: "xianxia".into(),
             hash: "0123456789abcdef".into(),
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -5017,6 +5018,66 @@ fn the_models_release_setting_saves_a_repo_and_refuses_one_that_is_not() {
     assert_eq!(load().models_release, "");
 }
 
+/// The pack release setting, and the one thing it deliberately does **not** ask
+/// for: the version. That comes off the load pointer, so the tag a box
+/// resolves and the tag `tools/profile.sh` published are one string rather
+/// than two that have to be kept in step.
+#[test]
+fn the_pack_release_setting_takes_a_repo_and_reads_the_tag_from_the_pointer() {
+    let dir = std::env::temp_dir().join(format!("bm-tui-packrelease-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut app = App::new("http://x");
+    app.layout = bm_core::Layout::new(&dir);
+    let load = || bm_core::config::Settings::load(&bm_core::Layout::new(&dir).settings());
+
+    // No profile loaded: the repo is still saved, and the message says why
+    // nothing would be fetched yet rather than claiming success.
+    let msg = save_app_setting(&app, TextKind::PacksRelease, "lhuthng/storycast").unwrap();
+    assert!(!msg.is_empty());
+    assert_eq!(load().packs_release, "lhuthng/storycast");
+
+    // A pointer with no version — every checkout from before versions existed.
+    bm_core::profile::write_pointer(
+        &dir,
+        &bm_core::profile::Pointer {
+            name: "xianxia".into(),
+            hash: "aa".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let msg = save_app_setting(&app, TextKind::PacksRelease, "lhuthng/storycast").unwrap();
+    assert!(msg.contains("no version"), "{msg}");
+
+    // Versioned: the message names the tag, which is the thing an operator
+    // wants to check against what they published.
+    bm_core::profile::write_pointer(
+        &dir,
+        &bm_core::profile::Pointer {
+            name: "xianxia".into(),
+            hash: "aa".into(),
+            version: "0.1.0".into(),
+        },
+    )
+    .unwrap();
+    let msg = save_app_setting(&app, TextKind::PacksRelease, "lhuthng/storycast").unwrap();
+    assert!(msg.contains("xianxia v0.1.0"), "{msg}");
+    assert!(msg.contains("lhuthng/storycast"), "{msg}");
+
+    // The repo is validated the same way the models one is.
+    for bad in ["storycast", "a/b/c", "own er/name"] {
+        let err = save_app_setting(&app, TextKind::PacksRelease, bad).unwrap_err();
+        assert!(err.contains("owner/name"), "`{bad}`: {err}");
+    }
+    assert_eq!(load().packs_release, "lhuthng/storycast", "a refused value never lands");
+
+    // Empty is the push, which is what every box did before the setting.
+    let msg = save_app_setting(&app, TextKind::PacksRelease, "  ").unwrap();
+    assert!(msg.contains("push"), "{msg}");
+    assert_eq!(load().packs_release, "");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn render_batch_parses_its_bounds_and_saves_to_this_workspaces_settings() {
     // The knob's own rules in one place. `0` is the value that would deadlock
@@ -7313,6 +7374,7 @@ fn the_digest_chapter_page_names_the_round_and_the_last_thing_that_happened() {
         round: bm_core::digest::Round::Cast,
         prompt: "You are a Vietnamese web-novel dramaturg.".into(),
         cast: None,
+        part: None,
         note: "cast pass invalid (roster: unknown speaker \"Lão Tam\"); raw saved".into(),
         done: false,
     });
@@ -7353,6 +7415,7 @@ fn a_long_validator_complaint_does_not_push_the_chapter_page_off_its_own_box() {
         round: bm_core::digest::Round::Script,
         prompt: "You are a Vietnamese web-novel dramaturg.".into(),
         cast: Some(serde_json::json!({"roster": ["Narrator"]})),
+        part: None,
         note: "script pass invalid (segment 12: unknown speaker \"Kẻ Không Có Trong \
                Cast\"; segment 19: music \"buồn\" is not in the palette (quiet, battle, \
                birds, calm); segment 27: missing `music` — when any segment declares \
@@ -7489,6 +7552,7 @@ async fn the_digest_manager_arrows_follow_the_grid_and_esc_steps_back_from_a_cha
             round: bm_core::digest::Round::Cast,
             prompt: "a prompt".into(),
             cast: None,
+            part: None,
             note: String::new(),
             done: false,
         });

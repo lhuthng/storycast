@@ -591,6 +591,7 @@ mod tests {
             pack: bm_core::profile::Pointer {
                 name: name.into(),
                 hash: hash.into(),
+                ..Default::default()
             },
             ..Default::default()
         }
@@ -1853,8 +1854,17 @@ mod tests {
         d.state = TaskState::Done;
         inner.tasks.insert(d.id(), d);
 
-        let msg = inner.op_rerender_all().expect("idle rerender");
+        // Through `exclusive_request`, which is the only way the API reaches
+        // it now: an idle cluster runs it at once, so this still asserts the
+        // surgery itself rather than the queue.
+        let msg = inner
+            .exclusive_request(ExclusiveOp::Rerender)
+            .expect("idle rerender");
         assert!(msg.contains("2 render(s)"), "{msg}");
+        assert!(
+            inner.exclusive.is_empty(),
+            "a clear cluster runs it rather than parking it"
+        );
         for n in [1u32, 2] {
             for stage in [Stage::Render, Stage::Merge] {
                 let t = &inner.tasks[&format!("{stage}:{n}")];
@@ -1883,7 +1893,9 @@ mod tests {
             std::fs::write(inner.layout.final_mp3(n), vec![0u8; 2000]).unwrap();
         }
 
-        let msg = inner.op_remerge_all().expect("idle remerge");
+        let msg = inner
+            .exclusive_request(ExclusiveOp::Remerge)
+            .expect("idle remerge");
         assert!(msg.contains("2 merge(s)"), "{msg}");
         for n in [1u32, 2] {
             let m = &inner.tasks[&format!("merge:{n}")];
@@ -2930,6 +2942,355 @@ mod tests {
             "{err}"
         );
         assert!(err.contains('X'), "names the way out: {err}");
+    }
+
+    /// **No surgery refuses a busy cluster any more.** It parks, and the
+    /// scheduler stops offering the work it would disturb.
+    ///
+    /// This is the regression guard for the whole feature, and it exists
+    /// because the queue shipped without its only caller: the queue, the
+    /// delivery gate and the `Op::Exclusive` arm were all built, and every
+    /// operator entry point still posted the *old immediate* op — so
+    /// `:swap` answered `workers mid-play (render:12:35 …)` and the operator's
+    /// only move was still `X`, which is the thing the queue was meant to
+    /// replace. A test that only exercised `exclusive_request` would have kept
+    /// passing throughout, because the queue was never broken.
+    ///
+    /// So this drives the **entry point** and asserts the two things that were
+    /// separately true before: nothing errors, and something is parked. The
+    /// direct `op_*` guards above stay for the offline paths, which have no
+    /// scheduler to wait on and must keep refusing rather than queueing into a
+    /// void.
+    #[test]
+    fn no_surgery_refuses_a_busy_cluster_and_every_one_of_them_parks() {
+        use bm_proto::ExclusiveOp;
+        // Each arm the API dispatches. If a new surgery is added to the API
+        // and not listed here, it is free to reintroduce the refusal.
+        let surgeries: Vec<(&str, ExclusiveOp)> = vec![
+            (
+                "swap-voice",
+                ExclusiveOp::SwapVoice {
+                    character: "A".into(),
+                    voice: "Quang Sơn".into(),
+                    chapters: Vec::new(),
+                },
+            ),
+            (
+                "remix",
+                ExclusiveOp::Remix {
+                    speed: 1.0,
+                    effect_volume: 1.0,
+                    music_volume: 1.0,
+                    inject_volume: 1.0,
+                },
+            ),
+            ("remerge", ExclusiveOp::Remerge),
+            ("rerender", ExclusiveOp::Rerender),
+            (
+                "retag",
+                ExclusiveOp::Retag {
+                    chapters: Vec::new(),
+                },
+            ),
+            (
+                "recast",
+                ExclusiveOp::Recast {
+                    chapter: 1,
+                    fixes: vec![bm_proto::SpeakerFix {
+                        index: 0,
+                        speaker: "Narrator".into(),
+                    }],
+                    remove: Vec::new(),
+                },
+            ),
+            (
+                "fix-speaker",
+                ExclusiveOp::FixSpeaker {
+                    chapter: 1,
+                    segment: 1,
+                    expect: "A".into(),
+                    speaker: "Narrator".into(),
+                },
+            ),
+            (
+                "merge",
+                ExclusiveOp::Merge {
+                    survivor: "A".into(),
+                    absorbed: vec!["B".into()],
+                    chapters: Vec::new(),
+                },
+            ),
+            (
+                "reconcile",
+                ExclusiveOp::Reconcile {
+                    merges: vec![("A".into(), vec!["B".into()])],
+                    chapters: Vec::new(),
+                },
+            ),
+        ];
+        for (name, op) in surgeries {
+            // A live `render:1` on a beating box — the exact shape that used to
+            // produce `workers mid-play (render:12:35 …)` — **and** a live
+            // `merge:2` on a second one, because the two scopes differ: a remix
+            // and a remerge wait on merges and cannot be reached by a render, and
+            // a test that only made render busy would let them run and call it
+            // a pass.
+            let (_d, mut inner) = busy_inner();
+            let beat = inner.beats.get("w1").cloned().expect("busy_inner beats w1");
+            let mut merge = Task::new(2, Stage::Merge);
+            merge.state = TaskState::Running;
+            merge.assigned_to = Some("w2".into());
+            merge.lease_until = Some(now_secs() + 600);
+            inner.tasks.insert("merge:2".into(), merge);
+            inner
+                .beats
+                .insert("w2".into(), bm_proto::Heartbeat { worker_id: "w2".into(), ..beat });
+            // …and a script, so a chapter-scoped write (swap, retag) has a
+            // scope at all: without one, chapter 1 hears nobody and the write
+            // correctly finds nothing to wait for.
+            std::fs::create_dir_all(inner.layout.script_dir()).unwrap();
+            std::fs::write(
+                inner.layout.script(1),
+                r#"{"segments":[{"speaker":"A","text":"Xin chào."}]}"#,
+            )
+            .unwrap();
+            // A bible both names live in, so the merge's ask-time validation
+            // (survivor at home, absorbed known) is not what this test measures.
+            std::fs::write(
+                inner.layout.bible(),
+                r#"{"characters":[{"name":"A"},{"name":"B"}]}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                inner.layout.cast("vieneu"),
+                r#"{"A":"Đức Trí","B":"Quang Sơn"}"#,
+            )
+            .unwrap();
+
+            let msg = inner
+                .exclusive_request(op)
+                .unwrap_or_else(|e| panic!("{name} refused a busy cluster: {e:#}"));
+            assert_eq!(
+                inner.exclusive.len(),
+                1,
+                "{name} did not park: {msg}"
+            );
+            assert_eq!(inner.exclusive[0].label, name, "{name} under the wrong label");
+        }
+    }
+
+    /// A parked write stops the scheduler drawing *new* work onto the ground it
+    /// is about to rewrite — the second half of "queue it and stop offering".
+    ///
+    /// Without this the queue starves: the write waits for chapter 12 to settle,
+    /// the offer path hands chapter 12 straight back out, and the operator has a
+    /// write that is parked for ever behind work that never stops arriving.
+    #[test]
+    fn a_parked_write_is_not_offered_more_of_the_work_it_would_rewrite() {
+        let (_d, mut inner) = busy_inner();
+        assert!(inner.exclusive.is_empty());
+        // Park a rerender: the widest scope there is (every chapter, render +
+        // merge). Asking for it is what puts it in the queue.
+        inner
+            .exclusive_request(ExclusiveOp::Rerender)
+            .expect("parked");
+        assert_eq!(inner.exclusive.len(), 1);
+
+        // The gate the offer path reads, with the predicate it reads it through.
+        let op = inner.exclusive.first().unwrap().op.clone();
+        assert!(
+            op.blocks(Stage::Render, 12),
+            "chapter 12 is render:12:35 — the row in the operator's log"
+        );
+        assert!(op.blocks(Stage::Merge, 12), "a re-speak invalidates its merge too");
+        // …and the scope is bounded by *what it blocks*, not by the cluster: a
+        // swap is chapter-scoped, so unrelated work keeps flowing.
+        let swap = ExclusiveOp::SwapVoice {
+            character: "A".into(),
+            voice: "Quang Sơn".into(),
+            chapters: vec![12],
+        };
+        assert!(swap.blocks(Stage::Render, 12));
+        assert!(!swap.blocks(Stage::Render, 13), "chapter 13 keeps rendering");
+    }
+
+    /// **The gate must never be weaker than the surgery's own last line**, or a
+    /// parked write answers "queued" and then dies at run time — the exact
+    /// shape this feature exists to remove.
+    ///
+    /// `merge` wears it worst: its guard refuses a **digest** on a chapter
+    /// whose raw text still names the absorbed, and a digest is not a render,
+    /// so a scope built only from "chapters hearing the name" says nothing
+    /// about it. The guard is kept as the surgery's last line; these tests are
+    /// what stop the two halves drifting apart again.
+    fn merge_inner(beating: bool) -> (tempfile::TempDir, Inner) {
+        let (d, mut inner) = fixture();
+        let layout = inner.layout.clone();
+        std::fs::write(
+            layout.bible(),
+            r#"{"characters":[{"name":"A"},{"name":"B"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            layout.cast("vieneu"),
+            r#"{"A":"Đức Trí","B":"Quang Sơn"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        // Chapter 3's *text* still says B, and it has no script: the
+        // "chapters hearing the name" half of the scope is empty, so the text
+        // half is the only thing standing between the fold and a lost name.
+        std::fs::write(layout.chapter_txt(3), "B gật đầu.").unwrap();
+        let mut digest = Task::new(3, Stage::Digest);
+        digest.state = TaskState::Assigned;
+        digest.assigned_to = Some("w2".into());
+        digest.lease_until = Some(now_secs() + 5000);
+        inner.tasks.insert("digest:3".into(), digest);
+        if beating {
+            inner
+                .beats
+                .insert("w2".into(), beat_on("w2", "digest:3", 3));
+        }
+        (d, inner)
+    }
+
+    /// A live beat for `worker`, naming one row.
+    fn beat_on(worker: &str, task_id: &str, chapter: u32) -> bm_proto::Heartbeat {
+        bm_proto::Heartbeat {
+            worker_id: worker.into(),
+            addr: "127.0.0.1".into(),
+            task_id: Some(task_id.into()),
+            stage: None,
+            chapter: Some(chapter),
+            progress: 0.5,
+            activity: "work".into(),
+            eta_secs: None,
+            ts: now_secs(),
+            hostname: "box".into(),
+            alias: String::new(),
+            cpu_pct: None,
+            mem_pct: None,
+            mem_gb: None,
+            sidecars: None,
+            sidecar_gb: None,
+            capabilities: Vec::new(),
+            sources_stages: Vec::new(),
+            sidecar_keep: None,
+        }
+    }
+
+    #[test]
+    fn a_merge_parks_on_the_digest_that_would_resurrect_the_absorbed() {
+        let (_d, mut inner) = merge_inner(true);
+        let msg = inner
+            .exclusive_request(ExclusiveOp::Merge {
+                survivor: "A".into(),
+                absorbed: vec!["B".into()],
+                chapters: Vec::new(),
+            })
+            .unwrap_or_else(|e| panic!("merge refused instead of parking: {e:#}"));
+        assert!(msg.contains("queued"), "{msg}");
+        assert_eq!(inner.exclusive.len(), 1, "parked, not run");
+        assert!(
+            inner.exclusive[0].op.blocks(Stage::Digest, 3),
+            "the gate has to see the digest that would land a pre-fold delta"
+        );
+    }
+
+    /// The other half of that asymmetry: a digest assigned seconds ago has no
+    /// beat yet, so a live-holders-only scan sees nothing while
+    /// `ensure_mergeable` counts it as in flight. Bounded at 120s, so a wedged
+    /// assignment still cannot hold the queue for ever.
+    #[test]
+    fn a_digest_that_has_not_beaten_yet_still_parks_a_merge() {
+        let (_d, mut inner) = merge_inner(false);
+        let msg = inner
+            .exclusive_request(ExclusiveOp::Merge {
+                survivor: "A".into(),
+                absorbed: vec!["B".into()],
+                chapters: Vec::new(),
+            })
+            .unwrap_or_else(|e| panic!("merge refused instead of parking: {e:#}"));
+        assert!(msg.contains("queued"), "{msg}");
+        assert_eq!(inner.exclusive.len(), 1);
+    }
+
+    /// A recast rewrites the script a **digest** is about to read, so its scope
+    /// is every stage of its chapter, not just render and merge.
+    /// The `m` key's fold is a surgery like any other: it queues behind the
+    /// chapters it rewrites rather than telling the operator to try again when
+    /// the cluster happens to be quiet.
+    #[test]
+    fn the_reconcile_fold_parks_and_then_folds_when_the_way_clears() {
+        let (_d, mut inner) = merge_inner(false);
+        let msg = inner
+            .exclusive_request(ExclusiveOp::Reconcile {
+                merges: vec![("A".into(), vec!["B".into()])],
+                chapters: Vec::new(),
+            })
+            .unwrap_or_else(|e| panic!("reconcile refused instead of parking: {e:#}"));
+        assert!(msg.contains("queued"), "{msg}");
+        assert_eq!(inner.exclusive.len(), 1, "parked, not run");
+        assert_eq!(inner.exclusive[0].label, "reconcile");
+
+        // The digest settles: nothing the fold rewrites is in flight any more.
+        let t = inner.tasks.get_mut("digest:3").unwrap();
+        t.state = TaskState::Done;
+        t.clear_holders();
+        inner.run_exclusive();
+        assert!(inner.exclusive.is_empty(), "the fold ran once the way cleared");
+
+        // …and it really folded: B is gone from the cast of characters and
+        // lives on as one of A's aliases, which is what makes a future digest
+        // resolve through him.
+        let bible: serde_json::Value = bm_core::read_json(&inner.layout.bible()).unwrap();
+        let chars = bible["characters"].as_array().expect("characters");
+        assert_eq!(chars.len(), 1, "B folded away: {bible}");
+        assert_eq!(chars[0]["name"].as_str(), Some("A"));
+        assert!(
+            chars[0]["proper_aliases"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|x| x.as_str() == Some("B"))),
+            "B survives as an alias: {bible}"
+        );
+    }
+
+    #[test]
+    fn a_recast_waits_for_every_stage_of_its_chapter() {
+        let (_d, mut inner) = merge_inner(true);
+        let msg = inner
+            .exclusive_request(ExclusiveOp::Recast {
+                chapter: 3,
+                fixes: vec![bm_proto::SpeakerFix {
+                    index: 0,
+                    speaker: "Narrator".into(),
+                }],
+                remove: Vec::new(),
+            })
+            .unwrap_or_else(|e| panic!("recast refused instead of parking: {e:#}"));
+        assert!(msg.contains("queued"), "{msg}");
+        assert_eq!(inner.exclusive.len(), 1);
+    }
+
+    /// A worker's last beat can name a chapter after its row has settled (the
+    /// completion lands between two beats). The chapter-scoped surgeries refuse
+    /// on that beat, so the gate has to see it too — and here there is no live
+    /// row for it to find.
+    #[test]
+    fn a_beat_with_no_live_row_still_parks_a_chapter_scoped_write() {
+        let (_d, mut inner) = fixture();
+        inner.beats.insert("w9".into(), beat_on("w9", "merge:7", 7));
+        let msg = inner
+            .exclusive_request(ExclusiveOp::FixSpeaker {
+                chapter: 7,
+                segment: 1,
+                expect: "A".into(),
+                speaker: "Narrator".into(),
+            })
+            .unwrap_or_else(|e| panic!("fix-speaker refused instead of parking: {e:#}"));
+        assert!(msg.contains("queued"), "{msg}");
+        assert!(msg.contains("ch7"), "names the chapter a box is on: {msg}");
+        assert_eq!(inner.exclusive.len(), 1);
     }
 
     #[test]

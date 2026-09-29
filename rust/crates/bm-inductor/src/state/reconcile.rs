@@ -260,8 +260,16 @@ impl Inner {
     /// ([`Self::invalidate_character`]) and the exclusive-write gate — the
     /// blast radius of one voice move, computed once, read by both.
     pub(crate) fn chapters_hearing_speaker(&self, character: &str) -> Vec<u32> {
+        self.chapters_hearing_names(&[character.to_string()])
+    }
+
+    /// The same predicate for a whole plan at once. `chapters_hearing` walks
+    /// every script and every render plan, so asking it once per name would
+    /// re-read the book once per name — and a reconcile folds dozens of pairs
+    /// at once.
+    pub(crate) fn chapters_hearing_names(&self, names: &[String]) -> Vec<u32> {
         let bible = bm_core::digest::load_bible(&self.layout.bible());
-        self.chapters_hearing(&bible, &[character.to_string()])
+        self.chapters_hearing(&bible, names)
     }
 
     /// Chapters that would hear these names: a script speaking them
@@ -296,6 +304,44 @@ impl Inner {
         out
     }
 
+    /// Chapters whose raw text still names any of these (fold-insensitive):
+    /// the digest half of a merge's blast radius. A digest on one of these
+    /// builds its prompt from the pre-fold bible and lands its delta after the
+    /// fold, resurrecting the absorbed name. Shared by
+    /// [`Self::ensure_mergeable`] and the exclusive-write gate — computed once,
+    /// read by both, so the two can never disagree about which chapter is
+    /// risky.
+    ///
+    /// Scanned over the ledger's chapters, the same universe that guard scans:
+    /// a chapter no row mentions is not text anyone is reading.
+    pub(crate) fn chapters_naming_in_text(&self, names: &[String]) -> Vec<u32> {
+        let folds: Vec<String> = names
+            .iter()
+            .map(|n| bm_core::util::fold(n))
+            .filter(|f| !f.is_empty())
+            .collect();
+        if folds.is_empty() {
+            return Vec::new();
+        }
+        let mut out: Vec<u32> = Vec::new();
+        for t in self.tasks.values() {
+            if out.contains(&t.chapter) {
+                continue;
+            }
+            let named = std::fs::read_to_string(self.layout.chapter_txt(t.chapter))
+                .map(|text| {
+                    let f = bm_core::util::fold(&text);
+                    folds.iter().any(|n| f.contains(n.as_str()))
+                })
+                .unwrap_or(false);
+            if named {
+                out.push(t.chapter);
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
     /// Refuse the merge only where it collides — never cluster-wide.
     ///
     /// A live render/merge on a chapter the merge rewrites would complete
@@ -306,9 +352,19 @@ impl Inner {
     /// ones. Pending digests are harmless — their prompts are built from the
     /// post-merge bible — but a just-assigned one has no beat yet, so recent
     /// assignment counts as live for them.
+    ///
+    /// **Nothing live calls this any more.** Every fold — the `m` key's, and
+    /// `:merge` — goes to the exclusive queue, whose gate names the same two
+    /// predicates ([`Self::chapters_hearing`] and
+    /// [`Self::chapters_naming_in_text`]) and waits instead of refusing. What
+    /// keeps this honest is that the tests drive it: the queue's coverage is
+    /// asserted against this refusal, so the two cannot drift apart again.
+    #[cfg(test)]
     fn ensure_mergeable(&self, absorbs: &[String], affected: &[u32]) -> anyhow::Result<()> {
         let now = now_secs();
         let fresh = |ts: u64| now.saturating_sub(ts) < 30;
+        // The digest half, from the one predicate the gate reads too.
+        let naming = self.chapters_naming_in_text(absorbs);
         let live_holders = |t: &Task| -> Vec<String> {
             t.holders()
                 .into_iter()
@@ -345,16 +401,7 @@ impl Inner {
             if !live && now.saturating_sub(t.updated) >= 120 {
                 continue;
             }
-            let folds: Vec<String> = absorbs.iter().map(|a| bm_core::util::fold(a)).collect();
-            let risky = std::fs::read_to_string(self.layout.chapter_txt(t.chapter))
-                .map(|text| {
-                    let f = bm_core::util::fold(&text);
-                    folds
-                        .iter()
-                        .any(|a| !a.is_empty() && f.contains(a.as_str()))
-                })
-                .unwrap_or(false);
-            if risky {
+            if naming.contains(&t.chapter) {
                 let who = if holders.is_empty() {
                     "unstarted".to_string()
                 } else {
@@ -382,14 +429,13 @@ impl Inner {
         }
         busy.sort();
         anyhow::bail!(
-            "merge waits on {} — its chapters are mid-play (or a digest names the absorbed); X, B, then merge before they resume",
+            "merge waits on {} — its chapters are mid-play (or a digest names the absorbed)",
             busy.iter().take(4).cloned().collect::<Vec<_>>().join(", "),
         )
     }
 
     /// Fold duplicate characters into one: bible entries, cast keys, every
-    /// persisted script, then the losers' cached audio. Same mid-play refusal
-    /// as a voice swap — it performs the same surgery, once per absorbed name.
+    /// persisted script, then the losers' cached audio.
     ///
     /// Invalidation runs BEFORE the script rewrite: the stale-file scan
     /// matches variant speakers, which the rewrite then erases.
@@ -400,22 +446,39 @@ impl Inner {
     /// Narrator on either side) rather than silently folding nothing; and a
     /// cast-only absorbed name folds regardless of its canon key, because an
     /// explicit instruction beats a spelling heuristic.
+    ///
+    /// **Compiled for the tests.** Every live fold — the `m` key's and
+    /// `:merge`'s — queues [`bm_proto::ExclusiveOp::Merge`] or
+    /// [`bm_proto::ExclusiveOp::Reconcile`] and runs
+    /// [`Self::reconcile_apply`], because the exclusive gate has already
+    /// waited for every chapter the fold rewrites (its scope is every stage of
+    /// those chapters). This guarded pair is what the tests use to pin down
+    /// what that gate has to cover. See [`Self::swap_apply`].
+    #[cfg(test)]
     pub fn apply_reconcile(
+        &mut self,
+        merges: &[bm_core::digest::BibleMerge],
+        manual: bool,
+    ) -> anyhow::Result<String> {
+        // No cluster-wide quiet: only the chapters this merge rewrites (plus
+        // digests naming the absorbed) must be still. The rest of the book
+        // keeps rendering.
+        let scan: Value =
+            bm_core::read_json(&self.layout.bible()).unwrap_or(json!({"characters": []}));
+        let absorbs: Vec<String> = merges.iter().flat_map(|(_, a)| a.iter().cloned()).collect();
+        let affected = self.chapters_hearing(&scan, &absorbs);
+        self.ensure_mergeable(&absorbs, &affected)?;
+        self.reconcile_apply(merges, manual)
+    }
+
+    /// The fold body, guardless — see [`Self::apply_reconcile`].
+    pub(crate) fn reconcile_apply(
         &mut self,
         merges: &[bm_core::digest::BibleMerge],
         manual: bool,
     ) -> anyhow::Result<String> {
         let engine = self.settings.engine.clone();
         let path = self.layout.bible();
-        // No cluster-wide quiet: only the chapters this merge rewrites (plus
-        // digests naming the absorbed) must be still. The rest of the book
-        // keeps rendering.
-        {
-            let scan: Value = bm_core::read_json(&path).unwrap_or(json!({"characters": []}));
-            let absorbs: Vec<String> = merges.iter().flat_map(|(_, a)| a.iter().cloned()).collect();
-            let affected = self.chapters_hearing(&scan, &absorbs);
-            self.ensure_mergeable(&absorbs, &affected)?;
-        }
         if manual {
             // A named pair that folds nothing must refuse, not silently pass:
             // "nothing to fold" after rewriting nothing is how a typo becomes

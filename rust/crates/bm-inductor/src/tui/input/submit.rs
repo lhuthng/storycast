@@ -25,7 +25,8 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
         | TextKind::SshUser
         | TextKind::SshPort
         | TextKind::Advertise
-        | TextKind::ModelsRelease => {
+        | TextKind::ModelsRelease
+        | TextKind::PacksRelease => {
             Err("app-wide settings save from the prompt, not submit".into())
         }
         TextKind::Mix => Err("mix saves from the prompt, not submit".into()),

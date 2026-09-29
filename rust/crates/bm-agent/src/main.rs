@@ -122,6 +122,18 @@ enum Cmd {
         /// which proves the archive is self-consistent and nothing more.
         #[arg(long)]
         expect: Option<String>,
+        /// Keep only the members under this directory, and land *it* at
+        /// `dest` — for a bundle that is a subtree beside its manifest.
+        ///
+        /// A profile pack is published as `assets/…` with its `manifest.json`
+        /// beside it, because that is the path system a pack is keyed by and the
+        /// hash of the live tree folds over. The weights have no such prefix,
+        /// so this is the only difference between the two deliveries, and it is
+        /// a flag rather than a second subcommand: the part that has to be
+        /// right — verify against the manifest that travelled in the archive,
+        /// then swap in two renames — stays one implementation.
+        #[arg(long, value_name = "DIR")]
+        strip_prefix: Option<String>,
     },
 }
 
@@ -188,11 +200,22 @@ mod fetch_exit {
 /// `Content-Length` is used when the host sends one and nothing is invented
 /// when it does not: a progress line that guesses its denominator is worse than
 /// one that admits it has none.
-fn fetch_artifact(url: &str, dest: &Path, expect: Option<&str>) -> i32 {
+fn fetch_artifact(
+    url: &str,
+    dest: &Path,
+    expect: Option<&str>,
+    strip_prefix: Option<&str>,
+) -> i32 {
     use std::time::Instant;
     let started = Instant::now();
     let mut last = Instant::now();
-    let tag = expect.map(bm_core::artifact::tag_for);
+    // With a prefix the artifact is a pack, and the models tag rule would name
+    // it `models-v…` — a name that means nothing here and would be the one
+    // wrong line in the whole feature. So it says what it is being asked for.
+    let tag = match strip_prefix {
+        Some(dir) => Some(dir.to_string()),
+        None => expect.map(bm_core::artifact::tag_for),
+    };
     let mut say = |done: u64, total: Option<u64>| {
         if last.elapsed() < std::time::Duration::from_secs(2) {
             return;
@@ -213,19 +236,38 @@ fn fetch_artifact(url: &str, dest: &Path, expect: Option<&str>) -> i32 {
             ),
         }
     };
-    let r = match expect {
-        Some(hash) => bm_core::artifact::fetch(url, dest, hash, &mut say),
+    // A pack is only ever fetched with an expectation — the hash of the live
+    // tree is the whole reason the release can be trusted to replace it — so an
+    // unprefixed destination with no hash keeps the older, weaker contract
+    // rather than inventing a second one.
+    let r = match (strip_prefix, expect) {
+        (Some(_), Some(hash)) => {
+            bm_core::artifact::fetch_pack(url, dest, hash, "", &mut say)
+        }
+        (Some(dir), None) => {
+            eprintln!("FETCH-CORRUPT (--strip-prefix {dir} needs --expect: a pack release is only accepted against the profile hash it is replacing)");
+            return fetch_exit::CORRUPT;
+        }
         // No expectation from the caller: land it, then report the tag the
         // bundle's own manifest names, which is the only claim available.
-        None => bm_core::artifact::fetch_unpinned(url, dest, &mut say),
+        (None, Some(hash)) => bm_core::artifact::fetch(url, dest, hash, &mut say),
+        (None, None) => bm_core::artifact::fetch_unpinned(url, dest, &mut say),
     };
     match r {
         Ok(landed) => {
+            // The tag is the *models* bundle's identity and this box was not
+            // told the pack's — the provisioner is, and it names the release in
+            // its own line. An empty tag therefore prints nothing rather than a
+            // trailing comma and a blank.
+            let tag = match landed.tag.is_empty() {
+                true => String::new(),
+                false => format!(", {}", landed.tag),
+            };
             println!(
-                "FETCH-OK ({} files, {:.0} MiB, {})",
+                "FETCH-OK ({} files, {:.0} MiB{})",
                 landed.files,
                 landed.bytes as f64 / (1024.0 * 1024.0),
-                landed.tag
+                tag
             );
             fetch_exit::LANDED
         }
@@ -2234,8 +2276,19 @@ fn main() -> Result<()> {
     // Handled before the layout is resolved, too: the box this runs on has
     // `~/bm-worker` and no book, and a fetch refused for want of a workspace
     // would fail for a reason that has nothing to do with the fetch.
-    if let Cmd::FetchArtifact { url, dest, expect } = &cli.cmd {
-        std::process::exit(fetch_artifact(url, dest, expect.as_deref()));
+    if let Cmd::FetchArtifact {
+        url,
+        dest,
+        expect,
+        strip_prefix,
+    } = &cli.cmd
+    {
+        std::process::exit(fetch_artifact(
+            url,
+            dest,
+            expect.as_deref(),
+            strip_prefix.as_deref(),
+        ));
     }
     tokio::runtime::Runtime::new()?.block_on(run(cli))
 }

@@ -32,7 +32,7 @@
 //!   list to drift.
 
 use super::Inner;
-use bm_proto::{now_secs, ExclusiveOp, TaskState};
+use bm_proto::{now_secs, ExclusiveOp, Stage, TaskState};
 
 /// One queued surgery.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -70,10 +70,15 @@ impl Inner {
                     anyhow::bail!("merge requires a survivor and at least one absorbed name");
                 }
                 self.validate_merge(survivor, absorbed)?;
-                scope = self.chapters_hearing_speaker(survivor);
-                for a in absorbed {
-                    scope.extend(self.chapters_hearing_speaker(a));
-                }
+                let mut names: Vec<String> = vec![survivor.clone()];
+                names.extend(absorbed.iter().cloned());
+                scope = self.chapters_hearing_names(&names);
+                // Plus the digest half of the blast radius: a chapter whose
+                // raw text still names an absorbed name gets a digest whose
+                // prompt was built from the pre-fold bible, so its delta
+                // would resurrect them. The surgery's own guard refuses on
+                // that set; the gate has to see it too.
+                scope.extend(self.chapters_naming_in_text(absorbed));
                 scope.sort_unstable();
                 scope.dedup();
             }
@@ -113,12 +118,52 @@ impl Inner {
                     }
                 }
             }
-            ExclusiveOp::Remerge | ExclusiveOp::Rerender | ExclusiveOp::Retag { .. } => {}
+            ExclusiveOp::Reconcile { merges, .. } => {
+                // No ask-time name validation: these pairs came from the canon
+                // keys and the cast itself, not from a person typing a name, so
+                // a pair that has since gone is "nothing left to fold" rather
+                // than a typo. The scope is computed the same way `merge`'s is.
+                if merges.is_empty() {
+                    anyhow::bail!("reconcile has nothing to fold");
+                }
+                // One walk for every name in the plan, not one per pair.
+                let mut names: Vec<String> = Vec::new();
+                for (survivor, absorbed) in merges {
+                    names.push(survivor.clone());
+                    names.extend(absorbed.iter().cloned());
+                }
+                names.sort();
+                names.dedup();
+                scope = self.chapters_hearing_names(&names);
+                let absorbs: Vec<String> =
+                    merges.iter().flat_map(|(_, a)| a.iter().cloned()).collect();
+                scope.extend(self.chapters_naming_in_text(&absorbs));
+                scope.sort_unstable();
+                scope.dedup();
+            }
+            ExclusiveOp::Remerge | ExclusiveOp::Rerender => {}
+            ExclusiveOp::Retag { .. } => {
+                // A retag rewrites **scripts**, so its scope is the chapters it
+                // might touch: every chapter with one on disk. Narrowing to the
+                // chapters that actually hold a retaggable sound means running
+                // the same scan the surgery runs, and that runs at apply time by
+                // design (a chapter that gains a sound between ask and run must
+                // be caught by the apply, not missed by the gate). A superset
+                // here is the safe direction; the apply is what decides the real
+                // list.
+                //
+                // Without this the arm carried an empty `chapters`, and an empty
+                // scope blocks *nothing* — so a retag was never queued at all,
+                // it just ran, and a script rewrite landed under a live render
+                // exactly like the refusal it was meant to replace.
+                scope = self.script_paths().into_iter().map(|(n, _)| n).collect();
+            }
         }
         // Carry the scope on the arms that use one.
         if let Some(chapters) = match &mut op {
-            ExclusiveOp::SwapVoice { chapters, .. }
-            | ExclusiveOp::Merge { chapters, .. } => Some(chapters),
+            ExclusiveOp::SwapVoice { chapters, .. }                | ExclusiveOp::Merge { chapters, .. }
+            | ExclusiveOp::Reconcile { chapters, .. }
+            | ExclusiveOp::Retag { chapters } => Some(chapters),
             _ => None,
         } {
             *chapters = scope;
@@ -152,22 +197,54 @@ impl Inner {
         Ok(msg)
     }
 
+    /// Whether `op` blocks **every** stage of `chapter` — which is exactly
+    /// the chapter-scoped surgeries' scope (`recast`, `fix-speaker`,
+    /// `merge`). Only there is a bare beat a blocker: see
+    /// [`Self::exclusive_clear`].
+    fn op_owns_whole_chapter(op: &ExclusiveOp, chapter: u32) -> bool {
+        Stage::ALL.iter().all(|s| op.blocks(*s, chapter))
+    }
+
     /// Whether nothing in the ledger would race `op` right now.
     ///
     /// Waits on **live holders only** — the same 30-second beat rule
     /// `ensure_idle` used — because a wedged box that stopped beating is
     /// not going to finish, and the queue must never be hostage to it.
     /// `x` / `X` / `A` on the ledger are how a stuck row is taken back.
+    ///
+    /// Two things a pure "live rows" scan would miss, both of which the
+    /// surgeries' own last line does refuse on, so the gate must see them:
+    ///
+    /// * **A beat with no live row.** A worker's last beat can name the
+    ///   chapter after its row settled (the completion lands between two
+    ///   beats), and the write would edit a chapter a box is still finishing
+    ///   on. Only counted for a chapter-scoped write, where the whole
+    ///   chapter is the scope; a swap's `blocks` says no to a crawl, so a
+    ///   crawl beat never delays one.
+    /// * **A digest assigned within the last two minutes.** Its prompt was
+    ///   built from the pre-fold bible, so the delta it lands resurrects the
+    ///   names a merge just folded — and it has no beat yet to prove it is
+    ///   live. The window is bounded at 120s, like `ensure_mergeable`'s, so
+    ///   a wedged assignment still cannot hold the queue.
     pub(crate) fn exclusive_clear(&self, op: &ExclusiveOp) -> bool {
         let now = now_secs();
         let fresh = |ts: u64| now.saturating_sub(ts) < 30;
-        !self.tasks.values().any(|t| {
+        let row_in_the_way = self.tasks.values().any(|t| {
             op.blocks(t.stage, t.chapter)
                 && matches!(t.state, TaskState::Assigned | TaskState::Running)
-                && t.holders()
+                && (t
+                    .holders()
                     .iter()
                     .any(|w| self.beats.get(*w).map(|b| fresh(b.ts)).unwrap_or(false))
-        })
+                    || (matches!(t.stage, Stage::Digest)
+                        && now.saturating_sub(t.updated) < 120))
+        });
+        let beat_in_the_way = self.beats.values().any(|b| {
+            fresh(b.ts)
+                && b.chapter
+                    .is_some_and(|ch| Self::op_owns_whole_chapter(op, ch))
+        });
+        !row_in_the_way && !beat_in_the_way
     }
 
     /// What the gate is waiting on, for the operator's message: the live
@@ -194,7 +271,19 @@ impl Inner {
             .collect();
         rows.sort();
         match rows.len() {
-            0 => "waiting for a beat".into(),
+            0 => match self.beats.values().find(|b| {
+                fresh(b.ts)
+                    && b.chapter
+                        .is_some_and(|ch| Self::op_owns_whole_chapter(op, ch))
+            }) {
+                Some(b) => format!(
+                    "a worker is still on ch{} ({} at {})",
+                    b.chapter.unwrap_or_default(),
+                    b.worker_id,
+                    b.activity
+                ),
+                None => "waiting for a beat".into(),
+            },
             n if n > 4 => format!("{} row(s) in the way, e.g. {}", n, rows[..4].join(", ")),
             n => format!("{n} row(s) in the way: {}", rows.join(", ")),
         }
@@ -255,18 +344,19 @@ impl Inner {
                 chapter,
                 fixes,
                 remove,
-            } => self.op_recast(chapter, &fixes, &remove),
+            } => self.recast_apply(chapter, &fixes, &remove),
             ExclusiveOp::FixSpeaker {
                 chapter,
                 segment,
                 expect,
                 speaker,
-            } => self.op_fix_speaker(chapter, segment, &expect, &speaker),
+            } => self.fix_speaker_apply(chapter, segment, &expect, &speaker),
             ExclusiveOp::Merge {
                 survivor,
                 absorbed,
                 ..
-            } => self.apply_reconcile(&[(survivor, absorbed)], true),
+            } => self.reconcile_apply(&[(survivor, absorbed)], true),
+            ExclusiveOp::Reconcile { merges, .. } => self.reconcile_apply(&merges, false),
         }
     }
 

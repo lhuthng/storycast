@@ -66,6 +66,37 @@ Common causes per stage:
     (`:drain`, workers exit once the queue empties) or `X`, then `B` to relaunch
     them onto the new binary. The local node is never provisioned at all, so there
     the relaunch is the whole job.
+  * **a digest that says `part 3 of 5` is not a failure.** A chapter longer
+    than one answer can carry (16384 tokens on every backend, and the staging
+    answer repeats the chapter's words) is staged in parts: six calls for a
+    40 KB chapter instead of the two the one-call digest would have spent — and
+    then lost, because the second one comes back cut in half. Each part has its
+    own attribution and staging round, and the parts merge back into one
+    script. The log says so before the first call (`digest ch51 via google: 3
+    parts — 399 events, 55632 chars ≈ 27k tokens of answer against a
+    12000-token budget`), lists each part's event span, and the checkpoint
+    keeps the finished ones so a rate-limited run resumes at the part it
+    reached instead of re-spending the calls before it. Two things about it are
+    worth knowing:
+    * **`attribution has no \`summary\``** is the part-level contract working:
+      each part has to say what happened in it, because that summary is the
+      whole of what the parts after it know. The repair round is asked for the
+      same part, so nothing else is lost. If it keeps failing, the analyzer is
+      ignoring a field it was asked for — `:llm` to a stronger model is the
+      fix, not a retry.
+    * **Windows too small or too large**: `digest.answer_tokens` in
+      `workspaces/<name>/settings.json` is the budget a window is planned
+      from, and `chunk_sentences` / `chunk_chars` are ceilings for wanting
+      them smaller than the budget makes them. **`answer_tokens: 0` turns the
+      split off entirely** and digests the chapter in one call, which is the
+      right bisect when a chapter behaves differently part by part and the
+      wrong setting for a chapter that needs parts at all: that is the
+      truncation the split exists to prevent.
+    * `data/.digest-parts-chNN.json` is that checkpoint. Deleting it is always
+      safe — the chapter re-stages from the part it is on — and it is deleted
+      by the digest itself once the script lands. A stale one is discarded on
+      sight: it is honoured only while the chapter text, the bible and the plan
+      still match.
   * **`GEMINI_API_KEY missing` (or `OPENROUTER_API_KEY`)**, the key is set on
     the **inductor** with `L` (`:llm`, stored in `.bm/llm.json`), and only
     there. It rides the task offer to whichever worker runs the digest, so a
@@ -116,7 +147,10 @@ Common causes per stage:
   description variants (`Huyền Vũ lão tổ`, `Sở Cuồng sư`) became separate
   entries. Press `:m` (reconcile): certain folds apply immediately, ambiguous
   pairs go to the analyzer once, the cast is rewritten and only the losers'
-  chapters re-render. Refused mid-play, `:X` first, like a voice swap.
+  chapters re-render. **Queued, not refused**: when the chapters it rewrites are
+  mid-play the fold parks and runs the moment they settle, and the status line
+  names what it is waiting on (`:xdrop reconcile` drops it). `:merge` queues one
+  pair by name the same way.
 
 ## Uplink blips and the completion hook
 
@@ -160,6 +194,10 @@ that hole. What each symptom means:
 | `the release artifact does not verify and was not put in place: … absent from its manifest: ._vieneu_…` | the published bundle carries **AppleDouble sidecars**, because it was packed by macOS `tar` before `tools/models.sh pack` learned `COPYFILE_DISABLE=1`. Nothing on the box was changed. Re-pack and clobber the asset — same tag, because the tag names the *contents* and those have not changed: `tools/models.sh pack && gh release upload models-v<hash> models/models.tar.zst --clobber` |
 | `the release artifact does not verify …: <file>: sha256 … does not match` | the bytes that arrived are not the ones the operator's bake declares. **Never** a fallback trigger, so the provision stops here rather than pushing the same wrong bytes. Re-pack from a clean `models/` (`python3 tools/bake-models.py`, then `tools/models.sh pack && tools/models.sh verify`) and re-publish |
 | every box still receives the engine's `models/` over the push | nothing is configured: `models_release` is empty in `settings.json`. Set it with the TUI's `:release` (or `bm-inductor provision --release-repo owner/name` for one run) — the release has to exist first, via `tools/models.sh publish` |
+| every box still receives `assets/` inside `sources.tar.zst` | `packs_release` is empty. Set it with `:packrelease owner/name`. The bundle loses `assets/` only when the tag can be resolved, so check the log first: `packs_release is set but … names no versioned pack` means the **pointer** has no `version` — re-publish with `tools/profile.sh pack <name> --version <v>`, which stamps it. Until then the push is correct and deliberate |
+| `release xianxia-pack-v0.1.0 unreachable (…), pushing assets/ instead` | the artifact was not there, GitHub is down, or the box's `bm-agent` predates `--strip-prefix` (exit 2, read as absence by design). **Not an error** — the push is the fallback and the line says which path ran. The stamp still records the pack hash, so a box that took the push is *not* re-fetched every run |
+| `the xianxia-pack-v0.1.0 release artifact does not verify …: the bundle is a different pack` | the asset is a pack that is not the one this cluster is running. **Never** a fallback trigger, so the provision stops rather than pushing the local tree over the disagreement. Check the published asset's manifest against `cat .bm/profile \| grep -A2 '"pack"'` — the release and the pointer's `hash` have to be the same number |
+| `… absent from its manifest: ._effect-pool.json` | the published bundle carries **AppleDouble sidecars**, packed by macOS `tar`. Nothing on the box was changed. `tools/profile.sh` sets `COPYFILE_DISABLE=1` now, so re-packing and re-uploading is enough: `tools/profile.sh pack <name> --version <v> && gh release upload <name>-pack-v<v> profiles/pack/<name>.tar.zst --clobber`. Same tag — the tag names the profile, and its manifest hash is unchanged |
 | a box **keeps OOMing** during renders | the model is ~2.85 GB and the box is 8 GiB, so one sidecar fits and two do not. Two is what a race used to produce: provisioning started one detached and the worker, unable to tell "not up yet" from "not there", started its own. That race is closed (`bm-tts` binds before loading and answers 503 until ready; the worker waits instead of spawning), so a box doing it now is running an older agent/inductor, or holding an orphan. Check the Workers pane's `tts` column (or `pgrep -c bm-tts` on the box): `2×` raises an error event and the scheduler stops feeding that box. `X` sweeps it |
 | a stage **frozen at a percentage with no error anywhere** | the signature of a **child process with no deadline**, the worker is waiting on something that will never return, so it prints nothing and the only thing that happens is the lease expiring, silently. It happened on 2026-09-22: a Gemini 503 sent the digest to its `opencode` fallback, which hung for 26 minutes (it hangs on `opencode run … "say hi"` too, so the fallback itself was broken). Read the worker's log tail, the last line names the step, then `pgrep -fl opencode` for the child. The events pane now says `expired while <worker> was still beating` on the first expiry and escalates on the second; the analyzer's own logs name the backend that actually ran, which is not always the one in the activity column. Fixed by deadlines on both the child and the Gemini client |
 | the log is **full of** `tunnel: <addr> client exited (255), respawning` | one unreachable box, and on an older build one line per five seconds for ever, 1339 lines was 16% of the inductor log and 198 of its last 200, which buries every real event. The supervisor is now edge-triggered like the duplicate-sidecar alarm: the first failure, then one line every ~5 minutes, plus a line when the box comes back. Seeing it in bulk means the build predates that, or the box has been down a long time, `ssh <addr>` to check |

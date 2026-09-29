@@ -33,6 +33,26 @@ fn fetch_script(release: &crate::artifact::ModelsRelease, engine: &str) -> Strin
     )
 }
 
+/// The same call for a profile pack, which differs in exactly two things: it
+/// lands `assets/` rather than the engine's tree, and it says which prefix of
+/// the bundle to keep — because a pack bundle is a manifest **beside** an
+/// `assets/` subtree, and swapping the worker root in to hold both would take
+/// the prompts and the casts with it.
+///
+/// `--strip-prefix` rather than a second subcommand, because the delivery is
+/// identical work: download beside the destination, verify against the manifest
+/// that travelled in the same archive, swap in two renames. Only the shape of
+/// the archive differs, and a second verb would be a second copy of the check
+/// that has to be right.
+fn pack_fetch_script(release: &crate::artifact::PackRelease) -> String {
+    format!(
+        "~/bm-worker/bm-agent fetch-artifact {url} ~/bm-worker/{dir} --expect {hash} --strip-prefix {dir}",
+        url = shell_quote(&release.url),
+        dir = crate::artifact::PACK_DIR,
+        hash = release.hash,
+    )
+}
+
 /// The engine's own tree on a worker, relative to the worker root:
 /// `engines/<name>`.
 ///
@@ -56,6 +76,7 @@ fn classify_fetch(
     stdout: &str,
     stderr: &str,
     tag: &str,
+    what: &str,
 ) -> std::result::Result<String, FetchOutcome> {
     let said = |fallback: &str| {
         let t = if stderr.trim().is_empty() {
@@ -67,7 +88,7 @@ fn classify_fetch(
     };
     match code {
         EXIT_LANDED => Ok(format!(
-            "models from the release {tag} ({})",
+            "{what} from the release {tag} ({})",
             crate::util::head_chars(stdout.trim(), 120)
         )),
         EXIT_CORRUPT => Err(FetchOutcome::Corrupt(said("no detail"))),
@@ -591,9 +612,10 @@ echo "probe=done"
         &self,
         layout: &crate::Layout,
         stages: &[bm_proto::Stage],
+        pack: Option<&crate::artifact::PackRelease>,
         live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<Vec<String>> {
-        let plan = super::sources::Sources::plan(layout, stages)?;
+        let plan = super::sources::Sources::plan_for(layout, stages, pack)?;
         let manifest = plan.manifest()?;
         let hash = super::sources::Sources::hash(&manifest);
         let dir = layout.root.join(".bm").join("sources");
@@ -613,10 +635,19 @@ echo "probe=done"
         // operator reading a provision log is the last person who can still fix
         // it cheaply. Bounded, because a pool with a moved directory would
         // otherwise fill the pane.
+        //
+        // With a fetched pack the warning is about **this** tree, not the box's,
+        // and the box may well have the clip — so it says so rather than
+        // sending the operator to re-push a bundle that no longer carries it.
         for missing in plan.missing.iter().take(5) {
-            lines.push(format!(
-                "registry names a clip that is not here (the merge goes silent for it): {missing}"
-            ));
+            lines.push(match pack {
+                Some(_) => format!(
+                    "registry names a clip this checkout has lost (the release pack may still have it): {missing}"
+                ),
+                None => format!(
+                    "registry names a clip that is not here (the merge goes silent for it): {missing}"
+                ),
+            });
         }
         if plan.missing.len() > 5 {
             lines.push(format!(
@@ -662,6 +693,16 @@ echo "probe=done"
             }
         ));
 
+        // **After** the extract, never before. The bundle's own delivery is a
+        // *replacement* — it prunes every tree it owns, `assets/` among them,
+        // and that is the right thing for it to do. A pack landing in front of
+        // it would be deleted by the step that follows, and the box would come
+        // up with a profile and no assets, which is the one combination nothing
+        // downstream reports as an error.
+        if let Some(r) = pack {
+            lines.push(self.install_pack(layout, r, live)?);
+        }
+
         // One bundle per policy, kept as a cache; anything a day old goes. Age
         // rather than "everything but mine": provisions run one per machine and
         // several can be in flight, so a sweep by name could delete the artifact
@@ -686,6 +727,68 @@ echo "probe=done"
             }
         }
         Ok(lines)
+    }
+
+    /// Get the profile pack onto the box: from its release, or over the push.
+    ///
+    /// **Why a pack is worth publishing at all.** It is 60-odd MB of mp3 and
+    /// JSON that is byte-identical on every machine and changes only when the
+    /// operator publishes a new profile — the same argument that took the
+    /// weights off the uplink. Before this, a fresh box paid for the whole
+    /// profile over the operator's connection, once per box, for content that
+    /// was already on a CDN at a hash it could check.
+    ///
+    /// **The split of failures is the models one, and for the same reason.**
+    /// *Unreachable* — no such release, no route, a GitHub incident, an agent
+    /// too old to have the verb — falls back to the push and says so in the
+    /// log. *Corrupt* stops: bytes arrived and disagree with the hash of the
+    /// profile this cluster is running, and pushing the local tree over the top
+    /// would paper over a disagreement that is exactly what the check is for.
+    ///
+    /// What the box ends up with is the same either way. The release is
+    /// verified against the *live* tree's hash, so a pushed `assets/` and a
+    /// fetched one are the same bytes — which is why the stamp records the
+    /// release hash on a box that took the push, and why the next provision
+    /// does not try to fetch what is already there.
+    pub fn install_pack(
+        &self,
+        layout: &crate::Layout,
+        release: &crate::artifact::PackRelease,
+        live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Result<String> {
+        match self.fetch_pack(release, live) {
+            Ok(line) => Ok(line),
+            Err(FetchOutcome::Corrupt(e)) => {
+                anyhow::bail!(
+                    "the {} release artifact does not verify and was not put in place: {e} \
+                     (nothing was changed on this box; this checkout's assets/ is still the live \
+                     pack '{}', so re-publish it under the same tag with \
+                     `tools/profile.sh pack {name} --version {version}` then \
+                     `gh release upload {tag} profiles/pack/{name}.tar.zst --clobber`, \
+                     or clear `packs_release` to push the directory)",
+                    release.tag,
+                    release.name,
+                    name = release.name,
+                    version = release.version,
+                    tag = release.tag,
+                )
+            }
+            Err(FetchOutcome::Unreachable(e)) => {
+                if let Some(l) = live {
+                    let _ = l.send(format!(
+                        "[{}] release {} unreachable ({}), pushing assets/ instead",
+                        self.target, release.tag, e
+                    ));
+                }
+                self.push_pack(layout)?;
+                Ok(format!(
+                    "pack {} v{} over the push ({})",
+                    release.name,
+                    release.version,
+                    crate::util::head_chars(&e, 80)
+                ))
+            }
+        }
     }
 
     /// Push the TTS sidecar binary and the shared ONNX Runtime it links.
@@ -796,7 +899,54 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
         let (code, stdout, stderr) = self
             .run(&fetch_script(release, engine), 3600)
             .map_err(|e| FetchOutcome::Unreachable(e.to_string()))?;
-        classify_fetch(code, &stdout, &stderr, &release.tag)
+        classify_fetch(code, &stdout, &stderr, &release.tag, "models")
+    }
+
+    /// Ask the box to fetch the profile pack, and read the answer the same way
+    /// as the weights: `0` landed, `21` fall back to the push, `20` stop.
+    ///
+    /// The timeout is the models one for the same reason, and a pack is the
+    /// *smaller* of the two artifacts, so it is not the transfer that is at
+    /// risk here — it is an agent predating `fetch-artifact`, which answers
+    /// with a usage error and has to read as absence.
+    fn fetch_pack(
+        &self,
+        release: &crate::artifact::PackRelease,
+        live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> std::result::Result<String, FetchOutcome> {
+        if let Some(l) = live {
+            let _ = l.send(format!(
+                "[{}] pack: fetching {} v{} from the release (a CDN, not this machine's uplink)",
+                self.target, release.name, release.version
+            ));
+        }
+        let (code, stdout, stderr) = self
+            .run(&pack_fetch_script(release), 1800)
+            .map_err(|e| FetchOutcome::Unreachable(e.to_string()))?;
+        classify_fetch(code, &stdout, &stderr, &release.tag, "pack")
+    }
+
+    /// Put the live `assets/` on the box, for a box that could not fetch the
+    /// release.
+    ///
+    /// The push half of the same decision, and deliberately a **directory**
+    /// push rather than more bundle members: a box whose fetch failed has to
+    /// end up with the profile either way, and re-adding those files to
+    /// `sources.tar.zst` would mean the operator's uplink pays for them on
+    /// every box even when the release works for all the others.
+    ///
+    /// Excludes `assets/_extends/` for the same reason the release does: those
+    /// are composition *inputs*, and a worker resolves a composed pack from the
+    /// flattened tree — shipping them would re-fold into a bundle that is
+    /// supposed to be content.
+    pub fn push_pack(&self, layout: &crate::Layout) -> Result<()> {
+        self.rsync_push_excluding(
+            &layout.assets(),
+            crate::artifact::PACK_DIR,
+            true,
+            None,
+            &["/assets/_extends"],
+        )
     }
 
     /// Put the baked `models/` directory on the box: from the release when one
@@ -1269,6 +1419,32 @@ pub fn provision(
         ));
     }
 
+    // And the profile pack, from the same shape of setting and for the same
+    // reason. **Separate** on purpose: the two artifacts are published
+    // independently and one is far more often absent — a checkout with a
+    // released pack and an unreleased bake of the weights is the ordinary
+    // case, and a setting that could only say both or neither would make the
+    // operator choose a 668 MB push to save a 60 MB one.
+    //
+    // Resolved against the **load pointer**, not a hash of the tree, so a
+    // release is only used when this checkout says which one it is running. A
+    // pointer with no version resolves to nothing, which is the push: every
+    // box provisioned before this existed keeps working.
+    let settings = crate::config::Settings::load(&layout.settings());
+    let pack = crate::artifact::PackRelease::resolve(&layout.root, &settings.packs_release);
+    if !settings.packs_release.trim().is_empty() && pack.is_none() {
+        let pointer = crate::profile::read_pointer(&layout.root)
+            .map(|p| format!("{} (version {:?})", p.name, p.version))
+            .unwrap_or_else(|e| format!("no profile pointer: {e}"));
+        log.push(format!(
+            "[{}] packs_release is set but {} names no versioned pack, so assets/ travels over the push \
+             (re-publish it: tools/profile.sh pack <name> --version <v> && gh release create {}-pack-v<v> …)",
+            m.id,
+            pointer,
+            crate::profile::read_pointer(&layout.root).map(|p| p.name).unwrap_or_default(),
+        ));
+    }
+
     // Before anything is pushed: the sources bundle is `tar` + `zstd`, so the
     // tool that opens it has to be here first. This is the one install attempted
     // on an already-configured box (see `zstd_script`); a box that cannot get it
@@ -1299,7 +1475,9 @@ pub fn provision(
     // box with no stored policy enables all four, so the ordinary case is the
     // full set and only an explicitly narrowed panel goes lean.
     let stages = super::sources::stages_of(&m.effective_task_policy());
-    let local_stamp = match compute_provision_stamp(layout, &stages, agent_version, agent_binary) {
+    let local_stamp =
+        match compute_provision_stamp(layout, &stages, agent_version, agent_binary, pack.as_ref())
+        {
         Ok(s) => s,
         Err(e) => {
             probe.note = format!("cannot read the sources it would push: {e:#}");
@@ -1309,9 +1487,14 @@ pub fn provision(
     };
     let remote_stamp = probe.stamp.as_ref();
 
+    // **And** the pack. With a release configured the bundle carries no
+    // `assets/`, so two different packs produce the *same* `sources.tar.zst` —
+    // the bundle cannot see the difference, and a gate that read only the
+    // bundle would call a re-pointed profile "in sync" on every box and never
+    // send it. The pack has its own stamp field for exactly this.
     let sources_match = !force
         && remote_stamp
-            .map(|s| s.sources_in_sync(&local_stamp))
+            .map(|s| s.sources_in_sync(&local_stamp) && s.pack_in_sync(&local_stamp))
             .unwrap_or(false);
     // The voice store now travels inside `models/`, so `tts_hash` covers it and
     // there is no separate voices check. Also verify the remote names: a stamp
@@ -1396,7 +1579,7 @@ pub fn provision(
             // One artifact, pushed whole. The hash in the bundle's name is the
             // same digest `sources_match` just compared, so a box that reaches
             // this branch is one whose set really differs.
-            match ssh.install_sources(layout, &stages, live.as_ref()) {
+            match ssh.install_sources(layout, &stages, pack.as_ref(), live.as_ref()) {
                 Ok(lines) => {
                     for l in lines {
                         log.push(format!("[{}] {l}", m.id));
@@ -1449,7 +1632,7 @@ pub fn provision(
         if sources_match {
             log.push(format!("[{}] sources in sync (cache match)", m.id));
         } else {
-            match ssh.install_sources(layout, &stages, live.as_ref()) {
+            match ssh.install_sources(layout, &stages, pack.as_ref(), live.as_ref()) {
                 Ok(lines) => {
                     for l in lines {
                         log.push(format!("[{}] {l}", m.id));
@@ -1863,17 +2046,29 @@ mod tests {
     #[test]
     fn a_fetch_exit_code_says_whether_the_push_may_try_again() {
         let tag = "models-vdda4efee13df";
-        let ok = classify_fetch(EXIT_LANDED, "FETCH-OK (16 files, 667 MiB)", "", tag);
+        let ok = classify_fetch(EXIT_LANDED, "FETCH-OK (16 files, 667 MiB)", "", tag, "models");
         assert!(ok.unwrap().contains("models-vdda4efee13df"));
 
         // Absence: the artifact is not published, the network is down, the URL
         // 404s. The push is a real answer to any of those.
-        let absent = classify_fetch(EXIT_UNREACHABLE, "", "FETCH-UNREACHABLE (HTTP 404)", tag);
+        let absent = classify_fetch(
+            EXIT_UNREACHABLE,
+            "",
+            "FETCH-UNREACHABLE (HTTP 404)",
+            tag,
+            "models",
+        );
         assert!(matches!(absent, Err(FetchOutcome::Unreachable(_))));
 
         // Wrong bytes: the one answer that must stop, because pushing the same
         // bytes again would only hide the disagreement.
-        let wrong = classify_fetch(EXIT_CORRUPT, "", "FETCH-CORRUPT (tts.onnx: sha256 …)", tag);
+        let wrong = classify_fetch(
+            EXIT_CORRUPT,
+            "",
+            "FETCH-CORRUPT (tts.onnx: sha256 …)",
+            tag,
+            "models",
+        );
         match wrong {
             Err(FetchOutcome::Corrupt(m)) => assert!(m.contains("tts.onnx"), "{m}"),
             other => panic!("corruption must not be a fallback: {other:?}"),
@@ -1884,11 +2079,123 @@ mod tests {
         // deliberately — that is what `clap` exits with on an unrecognised
         // subcommand, so it is the exact shape of "the agent predates this".
         for code in [1_i32, 2, 126, 127, 255] {
-            match classify_fetch(code, "", "", tag) {
+            match classify_fetch(code, "", "", tag, "models") {
                 Err(FetchOutcome::Unreachable(m)) => assert!(m.contains(&code.to_string()), "{m}"),
                 other => panic!("exit {code} must be absence: {other:?}"),
             }
         }
+    }
+
+    /// A pack fetch is the same contract as a models fetch, and the reason it
+    /// shares the codes is that a box answers them with **one** subcommand: a
+    /// second verb would be a second `match` on exit codes, and the day one of
+    /// them read `2` as corruption the cluster would stop provisioning.
+    #[test]
+    fn a_pack_is_fetched_the_same_way_and_read_the_same_way() {
+        let release = crate::artifact::PackRelease::for_repo(
+            "lhuthng/storycast",
+            "xianxia",
+            "0.1.0",
+            "25e7ed5b07955cd15c97897b41bc4353cea2aa344da514f51ec585ac81897821",
+        )
+        .unwrap();
+        assert_eq!(release.tag, "xianxia-pack-v0.1.0");
+        let script = pack_fetch_script(&release);
+        // The prefix and the destination are the same word on purpose: the
+        // bundle holds `assets/…` and it lands at `assets/`, and a spelling
+        // that let those two drift is a tree nothing can read.
+        assert!(script.contains("--strip-prefix assets"), "{script}");
+        assert!(script.contains("~/bm-worker/assets"), "{script}");
+        assert!(script.contains(&release.hash), "{script}");
+        assert!(script.contains(&shell_quote(&release.url)), "{script}");
+
+        let ok = classify_fetch(
+            EXIT_LANDED,
+            "FETCH-OK (41 files, 62 MiB)",
+            "",
+            &release.tag,
+            "pack",
+        );
+        let line = ok.unwrap();
+        assert!(line.starts_with("pack from the release xianxia-pack-v0.1.0"), "{line}");
+
+        // A pack that does not verify is still a stop, not a push.
+        assert!(matches!(
+            classify_fetch(
+                EXIT_CORRUPT,
+                "",
+                "FETCH-CORRUPT (the bundle is a different pack)",
+                &release.tag,
+                "pack",
+            ),
+            Err(FetchOutcome::Corrupt(_))
+        ));
+        // …and an unreachable one is still a push.
+        assert!(matches!(
+            classify_fetch(
+                EXIT_UNREACHABLE,
+                "",
+                "FETCH-UNREACHABLE (HTTP 404)",
+                &release.tag,
+                "pack",
+            ),
+            Err(FetchOutcome::Unreachable(_))
+        ));
+    }
+
+    /// A pointer stamped before versions existed must not fetch anything, and
+    /// a name that is not URL- and tag-safe must not build a URL at all.
+    #[test]
+    fn a_pack_release_only_resolves_from_a_versioned_pointer() {
+        let root = std::env::temp_dir().join("bm-packrelease-pointer");
+        let _ = std::fs::remove_dir_all(&root);
+
+        // No pointer at all.
+        assert!(crate::artifact::PackRelease::resolve(&root, "lhuthng/storycast").is_none());
+        // No repo: the push, which is what every box has today.
+        crate::profile::write_pointer(
+            &root,
+            &crate::profile::Pointer {
+                name: "xianxia".into(),
+                hash: "aa".into(),
+                version: "0.1.0".into(),
+            },
+        )
+        .unwrap();
+        assert!(crate::artifact::PackRelease::resolve(&root, "  ").is_none());
+
+        let resolved = crate::artifact::PackRelease::resolve(&root, "lhuthng/storycast").unwrap();
+        assert_eq!(resolved.tag, "xianxia-pack-v0.1.0");
+        assert_eq!(
+            resolved.url,
+            "https://github.com/lhuthng/storycast/releases/download/xianxia-pack-v0.1.0/xianxia.tar.zst"
+        );
+
+        // The pointer written before this field existed: no version, so no
+        // release, so the push. This is every checkout in existence.
+        crate::profile::write_pointer(
+            &root,
+            &crate::profile::Pointer {
+                name: "xianxia".into(),
+                hash: "aa".into(),
+                version: String::new(),
+            },
+        )
+        .unwrap();
+        assert!(
+            crate::artifact::PackRelease::resolve(&root, "lhuthng/storycast").is_none(),
+            "an unversioned pointer must fall back to the push, not guess a tag"
+        );
+
+        // The name and the version go into a URL and a git tag, so they are
+        // validated like the repo is.
+        for (name, version) in [("", "0.1.0"), ("xianxia", ""), ("../etc", "0.1.0"), ("a/b", "0.1.0")] {
+            assert!(
+                crate::artifact::PackRelease::for_repo("o/n", name, version, "aa").is_err(),
+                "`{name}`/`{version}` was accepted"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The line the box runs, and the one thing that could make it do something

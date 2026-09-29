@@ -341,6 +341,31 @@ Two hashes, both in the release notes:
   the sync proof: the released bytes, unpacked and stripped of the generated
   `pack.json`, hash to exactly the value the live tree was resolved against.
 
+### A released pack is what a box *fetches*
+
+Publishing is only half of it. A provisioned box no longer receives
+`assets/` over the operator's uplink: set `packs_release` (`owner/name`, or the
+TUI's `:packrelease`) and every box downloads the pack from the release and
+verifies it against **the hash of the live tree on the inductor** — which is the
+pack pointer's, the same number the release is named by.
+
+```bash
+tools/profile.sh pack xianxia --version 0.1.0   # prints the tag, stamps the pointer
+gh release create xianxia-pack-v0.1.0 profiles/pack/xianxia.tar.zst --notes-file …
+```
+
+`pack` now also writes `version` into `.bm/profile`, because the tag cannot be
+derived from a hash the way `models-v<hash>` is — a pack is versioned, not
+content-addressed. A pointer with no `version` resolves to no release, which is
+the push, so `packs_release` is safe to set before the first re-publish. The
+design and the failure split are in [ARTIFACTS.md](ARTIFACTS.md#fetching-the-profile-pack-done).
+
+`COPYFILE_DISABLE=1` on the packer's `tar`, for the reason documented next to
+it: macOS writes a `._name` sidecar for any member carrying an extended
+attribute, hides those from its own listing, and a box would then unpack each as
+a real file and refuse the bundle as carrying a member its manifest never
+listed. `tools/models.sh` already did this for the same reason.
+
 ## What this breaks, honestly
 
 This is not a small edit, and two items are structural:

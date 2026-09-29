@@ -641,10 +641,14 @@ impl Inner {
 
     /// Repoint one character's voice and invalidate only its cached segments.
     /// Other characters keep their cache; affected chapters re-render + merge.
-    /// Refused while workers are mid-play: swapping then mixes voices and
-    /// marks stale mp3s done. Only *fresh* evidence counts (30s) — stale
-    /// beats and ghost assignments are the reaper's job, and an offline Inner
-    /// (empty beats, e.g. swapping while the inductor is down) always passes.
+    ///
+    /// **The offline path, and tests.** The live API never calls this: it posts
+    /// [`bm_proto::ExclusiveOp::SwapVoice`], which parks the swap on exactly the
+    /// chapters it invalidates instead of refusing. Here there is no scheduler
+    /// to wait on — `offline_swap` runs this against a throwaway Inner with the
+    /// API down and no local worker alive — so the cluster-wide guard stands.
+    /// Only *fresh* evidence counts (30s) — stale beats and ghost assignments
+    /// are the reaper's job, and an empty ledger (offline) always passes.
     pub fn op_swap_voice(&mut self, character: &str, voice: &str) -> anyhow::Result<String> {
         self.ensure_idle()?;
         self.swap_apply(character, voice)
@@ -737,8 +741,11 @@ impl Inner {
 
     /// Save a new mix and requeue every merge: the finished mp3s were mixed
     /// with the old one. Render cache is kept — tempo and layer volumes apply
-    /// at merge time, so no segment needs re-speaking. Refused while workers
-    /// are mid-play, like every other cache surgery.
+    /// at merge time, so no segment needs re-speaking.
+    ///
+    /// **The offline path, and tests** — the live API posts
+    /// [`bm_proto::ExclusiveOp::Remix`] and parks the mix behind the merges it
+    /// rewrites (see `offline_remix`, the one live caller here).
     pub fn op_remix(
         &mut self,
         speed: Option<f64>,
@@ -829,13 +836,11 @@ impl Inner {
 
     /// Requeue every merge without touching the mix or the render cache:
     /// effect clips, the scene map and the pools all apply at merge time.
-    /// Refused while workers are mid-play, like every other cache surgery.
-    pub fn op_remerge_all(&mut self) -> anyhow::Result<String> {
-        self.ensure_idle()?;
-        self.remerge_apply()
-    }
-
-    /// The remerge body, guardless — see [`Self::swap_apply`].
+    ///
+    /// **Queued rather than refused**, like every other cache surgery — the
+    /// `Op::Remerge` API arm routes here through `exclusive_request`, so the
+    /// guarded `op_remerge_all` wrapper this replaced had no callers left. What
+    /// waits is the *whole cluster*; nothing waits on a chapter.
     pub(crate) fn remerge_apply(&mut self) -> anyhow::Result<String> {
         let n = self.requeue_stage(Stage::Merge, "requeued: remerge", now_secs());
         self.save();
@@ -843,16 +848,13 @@ impl Inner {
     }
 
     /// Requeue every render task and its merge, deleting cached segments and
-    /// finished mp3s: a full re-speak. Refused while workers are mid-play,
-    /// like every other cache surgery. This is the expensive path — mix-only
-    /// changes (speed, volumes, effect clips) requeue merges via `op_remix`
-    /// and keep the render cache instead.
-    pub fn op_rerender_all(&mut self) -> anyhow::Result<String> {
-        self.ensure_idle()?;
-        self.rerender_apply()
-    }
-
-    /// The rerender body, guardless — see [`Self::swap_apply`].
+    /// finished mp3s: a full re-speak.
+    ///
+    /// This is the expensive path — mix-only changes (speed, volumes, effect
+    /// clips) requeue merges via [`Self::remix_apply`] and keep the render cache
+    /// instead. Queued like every other cache surgery: the `Op::Rerender` API
+    /// arm goes through `exclusive_request`, so the guarded wrapper that used to
+    /// sit in front of this had no callers left.
     pub(crate) fn rerender_apply(&mut self) -> anyhow::Result<String> {
         let engine = self.settings.engine.clone();
         let store = bm_core::segments::LocalStore::new(self.layout.clone());
@@ -1055,9 +1057,10 @@ impl Inner {
     /// Deterministic — no LLM, same mapping as the prompt's rule 9 — so a
     /// re-run is a no-op once every script is clean.
     ///
-    /// Refused while workers are mid-play (same hazard as a swap): text edits
-    /// plus file deletes under a running render mix voices. `dry_run` reports
-    /// every `(chapter#index: before → after)` and writes nothing.
+    /// The live API only ever calls this with `dry_run = true` (a read-only
+    /// report of what would change), and queues
+    /// [`bm_proto::ExclusiveOp::Retag`] for the write, so the cluster-wide
+    /// guard stands only for a direct caller: a test, or the offline path.
     pub fn op_retag(&mut self, dry_run: bool) -> anyhow::Result<String> {
         if !dry_run {
             self.ensure_idle()?;
@@ -1186,8 +1189,7 @@ impl Inner {
     /// Chapter-scoped busy guard rather than the cluster-global `ensure_idle`:
     /// every file this touches belongs to the chapter (its script, its plan,
     /// its segments, its mp3), so unrelated chapters rendering alongside are
-    /// unaffected. Refused while the chapter itself has work in flight or a
-    /// live beat on it.
+    /// unaffected. See [`Self::ensure_chapter_idle`].
     ///
     /// A new speaker must already hold a voice (`Narrator` always does), or
     /// the chapter would requeue into a row no box can speak. The plan's diff
@@ -1210,7 +1212,27 @@ impl Inner {
     /// is the difference between one take and several: the local engine groups
     /// consecutive same-speaker segments into a single take, so re-pointing the
     /// middle of a run splits that run and re-speaks the two halves.
+    ///
+    /// The live API queues this ([`bm_proto::ExclusiveOp::FixSpeaker`]) and
+    /// runs [`Self::fix_speaker_apply`], so this guarded entry is compiled for
+    /// the tests that cover the refusal itself.
+    #[cfg(test)]
     pub fn op_fix_speaker(
+        &mut self,
+        chapter: u32,
+        segment: usize,
+        expect: &str,
+        speaker: &str,
+    ) -> anyhow::Result<String> {
+        self.ensure_chapter_idle(chapter, "fix the speaker")?;
+        self.fix_speaker_apply(chapter, segment, expect, speaker)
+    }
+
+    /// The fix-speaker body, guardless — see [`Self::swap_apply`]. The
+    /// exclusive gate already held this chapter still, and its scope is every
+    /// stage of it, so the chapter guard must not re-run here and refuse a
+    /// write the gate picked the moment for.
+    pub(crate) fn fix_speaker_apply(
         &mut self,
         chapter: u32,
         segment: usize,
@@ -1224,23 +1246,6 @@ impl Inner {
         }
         if to == expect.trim() {
             anyhow::bail!("segment {segment} already speaks as {to:?} — nothing to change");
-        }
-        for t in self.tasks.values() {
-            if t.chapter == chapter && matches!(t.state, TaskState::Assigned | TaskState::Running) {
-                anyhow::bail!(
-                    "ch{chapter} has {} in flight — wait for it to settle, then fix the speaker",
-                    t.id()
-                );
-            }
-        }
-        let now = now_secs();
-        for b in self.beats.values() {
-            if now.saturating_sub(b.ts) < 30 && b.chapter == Some(chapter) {
-                anyhow::bail!(
-                    "a worker is on ch{chapter} right now ({} at {}) — wait a beat, then fix the speaker",
-                    b.worker_id, b.activity,
-                );
-            }
         }
         let engine = self.settings.engine.clone();
         let cast = bm_core::cast::read_cast(&engine, &self.layout.cast(&engine));
@@ -1367,16 +1372,23 @@ impl Inner {
             .unwrap_or_default()
     }
 
-    pub fn op_recast(
-        &mut self,
-        chapter: u32,
-        fixes: &[bm_proto::SpeakerFix],
-        remove: &[usize],
-    ) -> anyhow::Result<String> {
+    /// Refuse the chapter-scoped surgeries while that chapter has work in
+    /// flight: every file they touch belongs to the chapter (its script, its
+    /// plan, its segments, its mp3), so unrelated chapters rendering alongside
+    /// are unaffected. Only this chapter's rows and its beats count — a crawl
+    /// somewhere else is not a reason to refuse.
+    ///
+    /// The guarded entries below still run this, so the refusal itself stays
+    /// covered; the queued path does not, because the exclusive gate has
+    /// already waited for exactly these rows and more
+    /// ([`bm_proto::ExclusiveOp::stages`] is every stage of the chapter). See
+    /// [`Self::swap_apply`] for why the queued body must not re-check.
+    #[cfg(test)]
+    fn ensure_chapter_idle(&self, chapter: u32, verb: &str) -> anyhow::Result<()> {
         for t in self.tasks.values() {
             if t.chapter == chapter && matches!(t.state, TaskState::Assigned | TaskState::Running) {
                 anyhow::bail!(
-                    "ch{chapter} has {} in flight — wait for it to settle, then recast",
+                    "ch{chapter} has {} in flight — wait for it to settle, then {verb}",
                     t.id()
                 );
             }
@@ -1385,12 +1397,46 @@ impl Inner {
         for b in self.beats.values() {
             if now.saturating_sub(b.ts) < 30 && b.chapter == Some(chapter) {
                 anyhow::bail!(
-                    "a worker is on ch{chapter} right now ({} at {}) — wait a beat, then recast",
+                    "a worker is on ch{chapter} right now ({} at {}) — wait a beat, then {verb}",
                     b.worker_id,
                     b.activity,
                 );
             }
         }
+        Ok(())
+    }
+
+    /// Re-attribute speakers on one chapter's script, then requeue exactly
+    /// what the edit reached.
+    ///
+    /// The digest's recurring misattribution, confirmed against chapter text:
+    /// third-person narration given to the character it describes, and a quote
+    /// with no dialogue tag defaulted to Narrator instead of whoever the
+    /// surrounding action introduces. The prompt's rule 3 already forbids the
+    /// first half word for word — the small model disobeyed it — so
+    /// re-digesting rolls the same dice; the correction is surgical.
+    ///
+    /// The live API queues this ([`bm_proto::ExclusiveOp::Recast`]) and runs
+    /// [`Self::recast_apply`], so this guarded entry is compiled for the tests
+    /// that cover the refusal itself.
+    #[cfg(test)]
+    pub fn op_recast(
+        &mut self,
+        chapter: u32,
+        fixes: &[bm_proto::SpeakerFix],
+        remove: &[usize],
+    ) -> anyhow::Result<String> {
+        self.ensure_chapter_idle(chapter, "recast")?;
+        self.recast_apply(chapter, fixes, remove)
+    }
+
+    /// The recast body, guardless — see [`Self::swap_apply`].
+    pub(crate) fn recast_apply(
+        &mut self,
+        chapter: u32,
+        fixes: &[bm_proto::SpeakerFix],
+        remove: &[usize],
+    ) -> anyhow::Result<String> {
         if fixes.is_empty() && remove.is_empty() {
             anyhow::bail!(
                 "nothing to fix — pass segment indexes with their speakers, or indexes to delete"

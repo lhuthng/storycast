@@ -538,7 +538,15 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                 return Json(OpResult::fail("swap needs character + voice"));
             }
             let mut inner = st.lock().await;
-            match inner.op_swap_voice(&character, &voice) {
+            // **Queued, not refused.** The op is unchanged for the caller and
+            // what it does is not: `exclusive_request` runs the surgery at once
+            // when the way is clear and parks it when it is not, where the old
+            // `op_swap_voice` refused outright. See the note on the helper.
+            match inner.exclusive_request(bm_proto::ExclusiveOp::SwapVoice {
+                character,
+                voice,
+                chapters: Vec::new(),
+            }) {
                 Ok(msg) => Json(OpResult::ok(msg)),
                 Err(e) => Json(OpResult::fail(format!("swap failed: {e:#}"))),
             }
@@ -642,7 +650,16 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
         bm_proto::Op::Retag => {
             let dry_run = req.dry_run.unwrap_or(false);
             let mut inner = st.lock().await;
-            match inner.op_retag(dry_run) {
+            // A dry run reads scripts and writes nothing, so it must never park
+            // a write — the operator asked what *would* change, and answering
+            // "queued" would be a lie about work that has not been asked for.
+            let outcome = match dry_run {
+                true => inner.op_retag(true),
+                false => inner.exclusive_request(bm_proto::ExclusiveOp::Retag {
+                    chapters: Vec::new(),
+                }),
+            };
+            match outcome {
                 Ok(msg) => Json(OpResult::ok(msg)),
                 Err(e) => Json(OpResult::fail(format!("retag failed: {e:#}"))),
             }
@@ -652,7 +669,12 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             match chapter {
                 Some(chapter) => {
                     let mut inner = st.lock().await;
-                    match inner.op_recast(chapter, &fixes, &remove) {
+                    let outcome = inner.exclusive_request(bm_proto::ExclusiveOp::Recast {
+                        chapter,
+                        fixes,
+                        remove,
+                    });
+                    match outcome {
                         Ok(msg) => Json(OpResult::ok(msg)),
                         Err(e) => Json(OpResult::fail(format!("recast failed: {e:#}"))),
                     }
@@ -676,7 +698,13 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                     if chapter > 0 && segment > 0 =>
                 {
                     let mut inner = st.lock().await;
-                    match inner.op_fix_speaker(chapter, segment, &expect, &speaker) {
+                    let outcome = inner.exclusive_request(bm_proto::ExclusiveOp::FixSpeaker {
+                        chapter,
+                        segment,
+                        expect,
+                        speaker,
+                    });
+                    match outcome {
                         Ok(msg) => Json(OpResult::ok(msg)),
                         Err(e) => Json(OpResult::fail(format!("fix-speaker failed: {e:#}"))),
                     }
@@ -696,7 +724,12 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             match survivor {
                 Some(survivor) if !survivor.trim().is_empty() && !absorbed.is_empty() => {
                     let mut inner = st.lock().await;
-                    match inner.apply_reconcile(&[(survivor, absorbed)], true) {
+                    let outcome = inner.exclusive_request(bm_proto::ExclusiveOp::Merge {
+                        survivor,
+                        absorbed,
+                        chapters: Vec::new(),
+                    });
+                    match outcome {
                         Ok(msg) => Json(OpResult::ok(msg)),
                         Err(e) => Json(OpResult::fail(format!("merge failed: {e:#}"))),
                     }
@@ -708,12 +741,30 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
         }
         bm_proto::Op::Remix => {
             let mut inner = st.lock().await;
-            match inner.op_remix(
-                req.speed,
-                req.effect_volume,
-                req.music_volume,
-                req.inject_volume,
-            ) {
+            // The `None` semantics are the direct op's, unchanged. Speed, fx
+            // and music stay **required** — a missing one is still an error, and
+            // defaulting it to 1.0 would quietly reset a book that is mid-mix.
+            // `inject` still defaults to the mix in force rather than to unity.
+            // Resolved here because `ExclusiveOp::Remix` carries final numbers:
+            // that is what lets a parked remix keep the values the operator
+            // asked for rather than a draft they have since edited.
+            for (what, v) in [
+                ("speed", req.speed),
+                ("fx volume", req.effect_volume),
+                ("music volume", req.music_volume),
+            ] {
+                if v.is_none() {
+                    return Json(OpResult::fail(format!("remix needs {what}")));
+                }
+            }
+            let inject = req.inject_volume.unwrap_or(inner.settings.inject_volume);
+            let outcome = inner.exclusive_request(bm_proto::ExclusiveOp::Remix {
+                speed: req.speed.unwrap_or(1.0),
+                effect_volume: req.effect_volume.unwrap_or(1.0),
+                music_volume: req.music_volume.unwrap_or(1.0),
+                inject_volume: inject,
+            });
+            match outcome {
                 Ok(msg) => Json(OpResult::ok(msg)),
                 Err(e) => Json(OpResult::fail(format!("remix failed: {e:#}"))),
             }
@@ -727,14 +778,14 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
         }
         bm_proto::Op::Rerender => {
             let mut inner = st.lock().await;
-            match inner.op_rerender_all() {
+            match inner.exclusive_request(bm_proto::ExclusiveOp::Rerender) {
                 Ok(msg) => Json(OpResult::ok(msg)),
                 Err(e) => Json(OpResult::fail(format!("rerender failed: {e:#}"))),
             }
         }
         bm_proto::Op::Remerge => {
             let mut inner = st.lock().await;
-            match inner.op_remerge_all() {
+            match inner.exclusive_request(bm_proto::ExclusiveOp::Remerge) {
                 Ok(msg) => Json(OpResult::ok(msg)),
                 Err(e) => Json(OpResult::fail(format!("remerge failed: {e:#}"))),
             }
@@ -874,7 +925,14 @@ async fn op_reconcile(
     }
     if !merges.is_empty() {
         let mut inner = st.lock().await;
-        return match inner.apply_reconcile(&merges, false) {
+        // **Queued, not refused**, like every other surgery: the fold waits for
+        // the chapters it rewrites instead of telling the operator to come back
+        // when the cluster happens to be quiet. When the way is already clear
+        // this runs at once and returns the fold's own message, unchanged.
+        return match inner.exclusive_request(bm_proto::ExclusiveOp::Reconcile {
+            merges,
+            chapters: Vec::new(),
+        }) {
             Ok(msg) => OpResult::ok(format!(
                 "{scrub_note}{msg}{}",
                 if plan.candidates.is_empty() {

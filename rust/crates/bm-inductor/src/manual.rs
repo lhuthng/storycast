@@ -38,6 +38,10 @@ pub(crate) enum Next {
         /// else — it is what round 2 was rendered against and what its answer
         /// must be checked against, so the caller has to carry it forward.
         cast: Option<Value>,
+        /// The part of the chapter this round is for, when the chapter is
+        /// longer than one answer carries. Shown, never computed with: the
+        /// round is already labelled, and this only says which of how many.
+        part: Option<bm_core::digest::ManualPart>,
     },
     /// Both rounds are in and accepted: this is the finished chapter.
     Done(bm_core::digest::DigestOutcome),
@@ -64,6 +68,14 @@ impl Next {
     pub(crate) fn cast(&self) -> Option<&Value> {
         match self {
             Next::Prompt { cast, .. } => cast.as_ref(),
+            Next::Done(_) => None,
+        }
+    }
+
+    /// Which part of the chapter this round is for, when it is one of several.
+    pub(crate) fn part(&self) -> Option<bm_core::digest::ManualPart> {
+        match self {
+            Next::Prompt { part, .. } => *part,
             Next::Done(_) => None,
         }
     }
@@ -96,6 +108,7 @@ pub(crate) fn open(
         round: step.round,
         text: step.text,
         cast: None,
+        part: step.part,
     })
 }
 
@@ -125,12 +138,25 @@ pub(crate) fn advance(
             round: step.round,
             text: step.text,
             cast: Some(context),
+            part: step.part,
         });
     }
 
     match answer.outcome {
         Some(outcome) => Ok(Next::Done(outcome)),
-        None => Err("the answer carried neither a cast nor a script".into()),
+        // A part's script was accepted and the chapter has more parts: the next
+        // thing to do is round 1 of the next one, which `manual_accept` has
+        // already built — the part boundary is a second hand-off, and it is the
+        // same shape as the first.
+        None => match answer.prompt {
+            Some(step) => Ok(Next::Prompt {
+                round: step.round,
+                text: step.text,
+                cast: None,
+                part: step.part,
+            }),
+            None => Err("the answer carried neither a prompt nor a finished chapter".into()),
+        },
     }
 }
 

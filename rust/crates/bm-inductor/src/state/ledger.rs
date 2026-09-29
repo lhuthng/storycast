@@ -622,6 +622,13 @@ impl Inner {
     /// mixes voices and marks stale mp3s done. Only *fresh* evidence counts
     /// (30s) — stale beats and ghost assignments are the reaper's job, and an
     /// offline Inner (empty beats) always passes.
+    ///
+    /// **The direct paths only.** The live API posts a surgery to the
+    /// exclusive queue instead (`bm_proto::ExclusiveOp`, run by
+    /// `state/exclusive.rs`), which waits for the rows the write can actually
+    /// reach rather than refusing. What still calls this is the offline
+    /// fallback — `offline_swap` / `offline_remix`, the TUI's route while the
+    /// API is down — where there is no scheduler to wait on at all.
     pub(crate) fn ensure_idle(&self) -> anyhow::Result<()> {
         let now = now_secs();
         let fresh = |ts: u64| now.saturating_sub(ts) < 30;
@@ -652,7 +659,7 @@ impl Inner {
         if !busy.is_empty() {
             busy.sort();
             anyhow::bail!(
-                "workers mid-play ({}) — X stops everything, then swap",
+                "workers mid-play ({}) — X stops everything, then retry (the live API queues this instead)",
                 busy.iter().take(4).cloned().collect::<Vec<_>>().join(", ")
             );
         }

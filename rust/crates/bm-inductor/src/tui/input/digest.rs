@@ -235,7 +235,8 @@ fn open_chapter(
         .round()
         .ok_or_else(|| format!("ch{n} opened on a finished digest"))?;
     let mut note = format!(
-        "{} prompt copied — paste it into your model",
+        "{}{} prompt copied — paste it into your model",
+        part_note(step.part()),
         round.as_str()
     );
     if digested(n) {
@@ -249,9 +250,23 @@ fn open_chapter(
         round,
         prompt: step.text().to_string(),
         cast: None,
+        part: step.part(),
         note,
         done: false,
     })
+}
+
+/// `part 2/3 · ` in front of a note, and nothing when the chapter fits one
+/// answer.
+///
+/// The operator has to know which round they are pasting into: a forty-thousand
+/// character chapter is sixteen rounds, and a prompt that is round 1 of part 4
+/// looks exactly like round 1 of part 1 without this.
+fn part_note(part: Option<bm_core::digest::ManualPart>) -> String {
+    match part {
+        Some(part) if part.total > 1 => format!("part {}/{} · ", part.index, part.total),
+        _ => String::new(),
+    }
 }
 
 /// Take one pasted answer: validate it, and either ask for round 2 or finish.
@@ -269,18 +284,32 @@ fn accept(
     let step = crate::manual::advance(layout, engine, ch.n, ch.round, pasted, ch.cast.as_ref())?;
 
     let outcome = match step {
-        Next::Prompt { round, text, cast } => {
-            // Round 1 done. Round 2's prompt is rendered *against this cast*,
-            // which is why the context is carried rather than re-derived — the
-            // worker makes exactly this hand-off between its two calls.
+        Next::Prompt {
+            round,
+            text,
+            cast,
+            part,
+        } => {
+            // A round was accepted and the next one is ready. That is either
+            // round 2 against the cast just validated, or round 1 of the part
+            // after the one whose script just validated — the same hand-off the
+            // worker makes between its own calls, one part boundary further on.
             let copied = match clipboard::copy(&text) {
-                Ok(()) => "script prompt copied".to_string(),
-                Err(e) => format!("script prompt ready, but the copy failed: {e}"),
+                Ok(()) => "prompt copied".to_string(),
+                Err(e) => format!("prompt ready, but the copy failed: {e}"),
             };
             ch.cast = cast;
             ch.round = round;
             ch.prompt = text;
-            ch.note = format!("cast accepted — {copied}");
+            ch.part = part;
+            ch.note = format!(
+                "{}{} accepted — {copied}",
+                part_note(part),
+                match round {
+                    bm_core::digest::Round::Script => "cast",
+                    bm_core::digest::Round::Cast => "script",
+                }
+            );
             return Ok(None);
         }
         Next::Done(outcome) => outcome,

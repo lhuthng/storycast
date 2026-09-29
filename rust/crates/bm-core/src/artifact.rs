@@ -117,6 +117,113 @@ pub fn release_url(repo: &str, tag: &str) -> String {
     format!("https://github.com/{repo}/releases/download/{tag}/{BUNDLE_NAME}")
 }
 
+// ---------------------------------------------------------------------------
+// The other half of the same idea: a profile **pack** as a published artifact.
+//
+// The weights are content-addressed and so carry their own name. A pack is not:
+// `tools/profile.sh pack xianxia --version 0.1.0` cuts the tag
+// `xianxia-pack-v0.1.0`, because a pack is a thing an operator *versions* and
+// an operator picks the version. So the version travels in the load pointer
+// ([`crate::profile::Pointer::version`]) rather than being derivable from the
+// hash, and this type joins the three halves the box needs — repo, tag, and the
+// hash the bytes must fold to — so nothing downstream can name one without the
+// other two.
+//
+// The hash is not decoration. It is the pointer's, which is the hash of the
+// *live* tree on the inductor, so `--expect` binds the box to the profile this
+// cluster is actually running: a release that verified against itself but is a
+// different pack is refused, exactly as a different model bake is.
+// ---------------------------------------------------------------------------
+
+/// The manifest a pack bundle carries at its top level, beside the tree.
+pub const PACK_MANIFEST: &str = "manifest.json";
+
+/// The one directory a pack bundle holds, and the one a worker resolves its
+/// profile from.
+///
+/// A pack is `assets/` — the registries, the clips they register, the
+/// attribution, the language's bundled crawlers. Naming it here rather than
+/// hard-coding it into the fetch is what lets the same code check the bundle and
+/// the tree it lands, and what makes a bundle carrying anything *else* a
+/// refusal instead of a surprise on the box.
+pub const PACK_DIR: &str = "assets";
+
+/// A published profile pack: the repo hosting it, the tag it was cut under, and
+/// the content hash the bytes must fold to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackRelease {
+    pub repo: String,
+    pub name: String,
+    pub version: String,
+    pub hash: String,
+    pub tag: String,
+    pub url: String,
+}
+
+impl PackRelease {
+    /// The pack release this checkout *is*, if a repo is configured and the
+    /// pointer names one.
+    ///
+    /// `None` for every "no release" case rather than an error, for the reason
+    /// [`ModelsRelease::resolve`] is: a box that cannot reach a release is still
+    /// a box that can be provisioned, so the push has to remain a real answer
+    /// rather than an error path. That covers no repo configured, no profile
+    /// loaded, and — the one that will bite first — a pointer stamped before
+    /// versions existed, whose empty `version` is read here as "not released".
+    pub fn resolve(root: &Path, repo: &str) -> Option<Self> {
+        let repo = repo.trim();
+        if repo.is_empty() {
+            return None;
+        }
+        let p = crate::profile::read_pointer(root).ok()?;
+        Self::for_repo(repo, &p.name, &p.version, &p.hash).ok()
+    }
+
+    /// The same, from the three parts a caller already has.
+    ///
+    /// The name and the version are validated as well as the repo, because both
+    /// end up in a URL and a git tag: this is the boundary that keeps a
+    /// hand-edited pointer from fetching something that is not a release asset.
+    pub fn for_repo(repo: &str, name: &str, version: &str, hash: &str) -> Result<Self> {
+        let (owner, repo_name) = parse_repo(repo)?;
+        for (what, value) in [("name", name), ("version", version)] {
+            if !url_safe(value) {
+                bail!(
+                    "pack {what} must be non-empty and limited to letters, digits, `-`, `_` and `.`, got `{value}`"
+                );
+            }
+        }
+        let tag = pack_tag_for(name, version);
+        Ok(Self {
+            repo: format!("{owner}/{repo_name}"),
+            name: name.to_string(),
+            version: version.to_string(),
+            hash: hash.to_string(),
+            tag: tag.clone(),
+            url: pack_release_url(&format!("{owner}/{repo_name}"), &tag, name),
+        })
+    }
+}
+
+fn url_safe(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// `<name>-pack-v<version>` — the tag `tools/profile.sh` cuts, and the one the
+/// published `xianxia-pack-v0.1.0` release is under.
+pub fn pack_tag_for(name: &str, version: &str) -> String {
+    format!("{name}-pack-v{version}")
+}
+
+/// Where a pack release's `<name>.tar.zst` lives. The asset keeps the plain
+/// local name, so a release and `profiles/pack/<name>.tar.zst` on the machine
+/// that cut it are the same file.
+pub fn pack_release_url(repo: &str, tag: &str, name: &str) -> String {
+    format!("https://github.com/{repo}/releases/download/{tag}/{name}.tar.zst")
+}
+
 /// sha256 over sorted `name + NUL + content-sha256 + NUL` lines.
 ///
 /// The rule `tools/profile.sh::manifest_hash` already uses, read one level
@@ -196,23 +303,42 @@ pub fn fetch(
     expect_hash: &str,
     mut on_progress: impl FnMut(u64, Option<u64>),
 ) -> Result<Landing, FetchError> {
+    let (scratch, archive) = download_beside(url, dest, "models", BUNDLE_NAME, &mut on_progress)?;
+    let r = land(&archive, dest, expect_hash);
+    // The download is the big allocation and the failure is the common one, so
+    // it goes whether the landing worked or not; the stage directory is
+    // `land`'s to clean up, because only `land` knows whether it is mid-swap.
+    let _ = std::fs::remove_dir_all(&scratch);
+    r
+}
+
+/// Download a bundle into a scratch directory beside `dest`.
+///
+/// One definition because there is one job: get the bytes to a path that is
+/// **beside** the destination rather than inside it, on a filesystem with room
+/// for a second copy. Both the weights and the pack go through it, so a change
+/// to how a transfer is staged cannot reach one artifact and not the other.
+fn download_beside(
+    url: &str,
+    dest: &Path,
+    what: &str,
+    file_name: &str,
+    on_progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<(PathBuf, PathBuf), FetchError> {
     let parent = dest.parent().unwrap_or(Path::new("."));
-    let scratch = scratch_dir(parent, "models-fetch");
+    let scratch = scratch_dir(parent, &format!("{what}-fetch"));
     // The download lands here, so the scratch has to exist before it —
     // `dest.parent()` is the worker root, which does, and the scratch does not.
     std::fs::create_dir_all(&scratch)
         .map_err(|e| FetchError::Unreachable(format!("{}: {e}", scratch.display())))?;
-    let archive = scratch.join(BUNDLE_NAME);
-    let r = (|| -> Result<Landing, FetchError> {
-        download(url, &archive, &mut on_progress)?;
-        land(&archive, dest, expect_hash)
-    })();
-    // The download is the big allocation and the failure is the common one, so
-    // it goes whether the landing worked or not; the stage directory is
-    // `land`'s to clean up, because only `land` knows whether it is mid-swap.
-    let _ = std::fs::remove_file(&archive);
-    let _ = std::fs::remove_dir(&scratch);
-    r
+    let archive = scratch.join(file_name);
+    match download(url, &archive, on_progress) {
+        Ok(_) => Ok((scratch, archive)),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&scratch);
+            Err(e)
+        }
+    }
 }
 
 /// Download and land, with no expectation to check the result against.
@@ -221,17 +347,9 @@ pub fn fetch_unpinned(
     dest: &Path,
     mut on_progress: impl FnMut(u64, Option<u64>),
 ) -> Result<Landing, FetchError> {
-    let parent = dest.parent().unwrap_or(Path::new("."));
-    let scratch = scratch_dir(parent, "models-fetch");
-    std::fs::create_dir_all(&scratch)
-        .map_err(|e| FetchError::Unreachable(format!("{}: {e}", scratch.display())))?;
-    let archive = scratch.join(BUNDLE_NAME);
-    let r = (|| -> Result<Landing, FetchError> {
-        download(url, &archive, &mut on_progress)?;
-        land_unpinned(&archive, dest)
-    })();
-    let _ = std::fs::remove_file(&archive);
-    let _ = std::fs::remove_dir(&scratch);
+    let (scratch, archive) = download_beside(url, dest, "models", BUNDLE_NAME, &mut on_progress)?;
+    let r = land_unpinned(&archive, dest);
+    let _ = std::fs::remove_dir_all(&scratch);
     r
 }
 
@@ -336,6 +454,159 @@ fn land_with(archive: &Path, dest: &Path, expect: Option<&str>) -> Result<Landin
     // successful path has already renamed it away, so this is a no-op there.
     let _ = std::fs::remove_dir_all(&stage);
     result
+}
+
+// ---------------------------------------------------------------------------
+// A pack bundle: the same delivery, one directory inside.
+// ---------------------------------------------------------------------------
+
+/// Download a published pack and land its `assets/` tree at `dest`, which is
+/// the worker's own `assets/` (`~/bm-worker/assets`).
+///
+/// The bundle is not a bare tree the way the weights are: it carries a
+/// `manifest.json` **and** an `assets/` subtree, because a pack is released the
+/// way it is read — keyed by the paths it unpacks to, `assets/effect-pool.json`
+/// — and those keys are what fold to the hash the load pointer holds. So the
+/// manifest is the thing that is verified, the `assets/` directory is the thing
+/// that is swapped into place, and the two are kept distinct on purpose: the
+/// first says the bytes are right, the second says where they go.
+///
+/// The failure split is [`ModelsRelease`]'s, unchanged and for the same reason:
+/// *unreachable* is the push's cue, *corrupt* is a stop. A pack that does not
+/// verify is not a pack to push over the top of — it is a disagreement about
+/// which profile this cluster is running, and papering it over with the uplink
+/// is how it becomes permanent.
+pub fn fetch_pack(
+    url: &str,
+    dest: &Path,
+    expect_hash: &str,
+    tag: &str,
+    mut on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<Landing, FetchError> {
+    // The scratch file's name never leaves the box — the URL already names the
+    // asset — so it is the one place a pack needs no name of its own.
+    let (scratch, archive) = download_beside(url, dest, "pack", "pack.tar.zst", &mut on_progress)?;
+    let r = land_pack(&archive, dest, expect_hash, tag);
+    let _ = std::fs::remove_dir_all(&scratch);
+    r
+}
+
+/// Open a pack bundle, check it against `expect_hash`, and swap its `assets/`
+/// into `dest`.
+///
+/// `tag` is only the log line's noun — it does not participate in the check,
+/// which is the content and nothing else. A tag can be mistyped; bytes cannot.
+pub fn land_pack(
+    archive: &Path,
+    dest: &Path,
+    expect_hash: &str,
+    tag: &str,
+) -> Result<Landing, FetchError> {
+    let parent = dest.parent().unwrap_or(Path::new("."));
+    let stage = scratch_dir(parent, "pack-stage");
+    std::fs::create_dir_all(&stage)
+        .map_err(|e| FetchError::Corrupt(format!("{}: {e}", stage.display())))?;
+    let result = (|| -> Result<Landing, FetchError> {
+        unpack_to_stage(archive, &stage)?;
+        let files = verify_pack(&stage, expect_hash).map_err(FetchError::Corrupt)?;
+        // The landed tree is the subtree, and it is swapped rather than merged
+        // for the same reason the weights are: a box running the previous pack
+        // must not be able to serve half of it while a new one arrives.
+        let tree = stage.join(PACK_DIR);
+        if !tree.is_dir() {
+            return Err(FetchError::Corrupt(format!(
+                "the bundle carries no {PACK_DIR}/ to land"
+            )));
+        }
+        swap(&tree, dest)
+            .map_err(|e| FetchError::Corrupt(format!("{}: {e:#}", dest.display())))?;
+        Ok(Landing {
+            files,
+            bytes: dir_bytes(dest),
+            tag: tag.to_string(),
+        })
+    })();
+    let _ = std::fs::remove_dir_all(&stage);
+    result
+}
+
+/// Check a pack bundle against its own manifest **and** against the hash the
+/// operator's live tree folds to, in both directions.
+///
+/// Both directions because both are failures, and the second direction is the
+/// one a self-consistent bundle gets wrong: a release built from a *different*
+/// pack verifies against its own manifest perfectly, and landing it would
+/// replace the profile this cluster is running with the profile it is not.
+///
+/// The key shape is checked too. A manifest keyed by `assets/…` beside an
+/// archive holding `xianxia/effect-pool.json` would verify file-by-file and
+/// still land a tree no stage can read, so a member outside `assets/` — or a
+/// manifest key that is not under it — is refused by name rather than quietly
+/// moved.
+fn verify_pack(stage: &Path, expect_hash: &str) -> std::result::Result<usize, String> {
+    let m = crate::profile::read_manifest_at(&stage.join(PACK_MANIFEST))
+        .map_err(|e| format!("{}: {e:#}", stage.join(PACK_MANIFEST).display()))?;
+    if m.piece != "pack" {
+        return Err(format!(
+            "this is a `{}` release, not a pack — a box cannot run a language as its profile",
+            if m.piece.is_empty() {
+                "piece"
+            } else {
+                &m.piece
+            }
+        ));
+    }
+    let found = crate::profile::manifest_hash(&m.files);
+    if found != expect_hash {
+        return Err(format!(
+            "the bundle is a different pack: manifest hash {found}, expected {expect_hash}"
+        ));
+    }
+    // The whole stage, not the subtree: a bundle carrying a `prompts/` or a
+    // stray top-level file would otherwise land a tree the manifest never
+    // described, and the check that exists is "the tree is exactly what was
+    // published". Keys are `assets/…`, which is why the pack is checked this
+    // way and the weights, whose keys are bare, are not.
+    let mut present: Vec<String> = walk(stage)
+        .into_iter()
+        .map(|p| {
+            p.strip_prefix(stage)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    present.sort();
+    let unlisted: Vec<&String> = present
+        .iter()
+        .filter(|p| p.as_str() != PACK_MANIFEST && !m.files.contains_key(p.as_str()))
+        .collect();
+    if !unlisted.is_empty() {
+        return Err(format!(
+            "{} file(s) in the bundle are absent from its manifest: {}",
+            unlisted.len(),
+            crate::util::head_chars(
+                &unlisted
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                120,
+            )
+        ));
+    }
+    for (name, want) in &m.files {
+        if !name.starts_with(&format!("{PACK_DIR}/")) {
+            return Err(format!(
+                "manifest key `{name}` is not under {PACK_DIR}/ — a pack is unpacked there, and this would land it elsewhere"
+            ));
+        }
+        let got = sha256_file(&stage.join(name)).map_err(|e| format!("{name}: {e}"))?;
+        if got != *want {
+            return Err(format!("{name}: sha256 {got} does not match the manifest"));
+        }
+    }
+    Ok(m.files.len())
 }
 
 fn unpack_to_stage(archive: &Path, stage: &Path) -> Result<(), FetchError> {
@@ -517,6 +788,7 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     /// Pinned against the *other* implementation: this is the value
     /// `tools/models.sh::manifest_hash` prints for this exact manifest, so the
@@ -766,6 +1038,214 @@ mod tests {
         h.update(bytes);
         hex(&h.finalize())
     }
+
+    // -----------------------------------------------------------------------
+    // A profile pack: a manifest beside an `assets/` subtree, verified against
+    // the hash of the *live* tree it replaces.
+    // -----------------------------------------------------------------------
+
+    /// A stage holding the two-file shape every small pack has: a registry and
+    /// a clip it names, keyed by where they land (`assets/…`).
+    fn pack_stage(root: &Path, files: &[(&str, &[u8])]) -> (PathBuf, BTreeMap<String, String>) {
+        // Named `src`, not `stage`: the leftovers assertions below look for
+        // anything a landing left behind, and the test's own staging directory
+        // would be caught by a substring match on "stage".
+        let stage = root.join("src");
+        std::fs::create_dir_all(&stage).unwrap();
+        let mut map = BTreeMap::new();
+        for (rel, bytes) in files {
+            let at = stage.join(rel);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(&at, bytes).unwrap();
+            map.insert((*rel).to_string(), sha_of(bytes));
+        }
+        (stage, map)
+    }
+
+    /// A pack's `manifest.json`, in the shape `bm-inductor profile manifest`
+    /// writes — which is the shape that makes the hash equal the pointer's.
+    fn pack_manifest(name: &str, version: &str, files: &BTreeMap<String, String>) -> Value {
+        serde_json::json!({
+            "name": name, "version": version, "piece": "pack", "deps": [],
+            "files": files,
+        })
+    }
+
+    fn write_pack_manifest(stage: &Path, doc: &Value) {
+        std::fs::write(
+            stage.join(PACK_MANIFEST),
+            serde_json::to_vec_pretty(doc).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Tar a pack bundle the way `tools/profile.sh pack` does: the manifest
+    /// beside the tree, both under their own names, `COPYFILE_DISABLE` for the
+    /// same reason the models helper sets it.
+    fn tar_bundle(bundle: &Path, stage: &Path, names: &[String]) {
+        let mut all = vec![PACK_MANIFEST.to_string()];
+        all.extend(names.iter().cloned());
+        let list = bundle.with_extension("members");
+        std::fs::write(&list, all.join("\n")).unwrap();
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "COPYFILE_DISABLE=1 tar -cf - -C {} -T {} | zstd -q -3 -o {}",
+                stage.display(),
+                list.display(),
+                bundle.display()
+            ))
+            .status()
+            .expect("tar and zstd on PATH (brew install zstd)");
+        assert!(status.success(), "packing the test pack failed");
+        let _ = std::fs::remove_file(&list);
+    }
+
+    /// The whole path, end to end and offline: a pack is packed the way
+    /// `tools/profile.sh` packs one, lands over a directory a box was already
+    /// using, and the tree it leaves is the tree that was published.
+    ///
+    /// The assertion that matters is the first one. The hash the box is given
+    /// comes from the **load pointer**, which is the hash of the live tree on the
+    /// inductor — so `manifest_hash` over the bundle's own `files` has to fold
+    /// to that number, and it does only because the manifest is keyed by the
+    /// paths a pack unpacks to. Change the keying to bare names and this is
+    /// where it stops agreeing.
+    #[test]
+    fn a_pack_bundle_lands_its_assets_subtree_and_agrees_with_the_pointer() {
+        let root = tstdir("pack-land");
+        std::fs::create_dir_all(&root).unwrap();
+        let names = ["assets/effect-pool.json", "assets/effects/wind-1.mp3"];
+        let (stage, files) =
+            pack_stage(&root, &[(names[0], &b"{}"[..]), (names[1], &b"a clip"[..])]);
+        let doc = pack_manifest("xianxia", "0.1.0", &files);
+        write_pack_manifest(&stage, &doc);
+        // What the pointer holds: the same rule, over the same keys.
+        let expect = crate::profile::manifest_hash(&files);
+        let bundle = root.join("xianxia.tar.zst");
+        let owned: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        tar_bundle(&bundle, &stage, &owned);
+
+        // A box already running a different profile.
+        let dest = root.join("assets");
+        std::fs::create_dir_all(dest.join("effects")).unwrap();
+        std::fs::write(dest.join("effect-pool.json"), b"the old one").unwrap();
+        std::fs::write(dest.join("effects/gone-1.mp3"), b"a clip the new pack drops").unwrap();
+
+        let landed = land_pack(&bundle, &dest, &expect, "xianxia-pack-v0.1.0").unwrap();
+        assert_eq!(landed.files, 2);
+        assert_eq!(landed.tag, "xianxia-pack-v0.1.0");
+        assert_eq!(std::fs::read(dest.join("effect-pool.json")).unwrap(), b"{}");
+        assert_eq!(std::fs::read(dest.join("effects/wind-1.mp3")).unwrap(), b"a clip");
+        // **Replaced, not merged**: the clip the new pack does not carry is
+        // gone. A half-old profile is the failure a box cannot report, because
+        // every file it does hold is one a registry still names.
+        assert!(!dest.join("effects/gone-1.mp3").exists());
+        // The manifest does not land inside `assets/`: it is the bundle's own
+        // bookkeeping, and a worker resolving its profile must not find one.
+        assert!(!dest.join(PACK_MANIFEST).exists());
+        assert!(
+            !root.join("manifest.json").exists(),
+            "the worker root is not where a pack is unpacked"
+        );
+        let leftovers: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("stage") || n.contains("fetch") || n.contains("old-"))
+            .collect();
+        assert!(leftovers.is_empty(), "left {leftovers:?} behind");
+    }
+
+    /// A release that verifies against *its own* manifest and is a different
+    /// pack anyway must be refused, and must leave the box's tree alone.
+    ///
+    /// This is the case a content-addressed check cannot see: `xianxia` and
+    /// `a different profile` are both internally consistent, and only the
+    /// pointer knows which one this cluster is running.
+    #[test]
+    fn a_self_consistent_pack_for_another_profile_is_still_refused() {
+        let root = tstdir("pack-other");
+        std::fs::create_dir_all(&root).unwrap();
+        let names = ["assets/effect-pool.json"];
+        let (stage, files) = pack_stage(&root, &[(names[0], &b"{}"[..])]);
+        write_pack_manifest(&stage, &pack_manifest("xianxia", "0.1.0", &files));
+        let its_own = crate::profile::manifest_hash(&files);
+        let bundle = root.join("xianxia.tar.zst");
+        let owned: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        tar_bundle(&bundle, &stage, &owned);
+
+        let dest = root.join("assets");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("effect-pool.json"), b"the install already here").unwrap();
+
+        let err = land_pack(&bundle, &dest, &sha_of(b"another profile"), "xianxia-pack-v0.1.0")
+            .unwrap_err();
+        assert!(matches!(err, FetchError::Corrupt(_)), "{err:?}");
+        assert!(err.to_string().contains("a different pack"), "{err}");
+        assert_eq!(
+            std::fs::read(dest.join("effect-pool.json")).unwrap(),
+            b"the install already here",
+            "nothing was put in place"
+        );
+        // …and the same bundle is accepted against its own hash, so the refusal
+        // is the expectation and not a broken archive.
+        assert!(land_pack(&bundle, &dest, &its_own, "xianxia-pack-v0.1.0").is_ok());
+    }
+
+    /// A bundle carrying something outside `assets/` — and a macOS `._name`
+    /// sidecar is the shape that actually happens — is refused by name rather
+    /// than landed into a profile nobody hashed.
+    #[test]
+    fn a_member_outside_the_pack_directory_is_refused_by_name() {
+        let root = tstdir("pack-stray");
+        std::fs::create_dir_all(&root).unwrap();
+        let (stage, mut files) =
+            pack_stage(&root, &[("assets/effect-pool.json", &b"{}"[..])]);
+        // A prompt smuggled in beside the profile, and a Finder sidecar for it.
+        std::fs::write(stage.join("prompts.txt"), b"not part of the pack").unwrap();
+        std::fs::write(stage.join("._effect-pool.json"), b"\x00\x05\x16\x07").unwrap();
+        files.insert("assets/._effect-pool.json".to_string(), sha_of(b"\x00\x05\x16\x07"));
+        write_pack_manifest(&stage, &pack_manifest("xianxia", "0.1.0", &files));
+        let expect = crate::profile::manifest_hash(&files);
+        let bundle = root.join("xianxia.tar.zst");
+        tar_bundle(
+            &bundle,
+            &stage,
+            &["assets/effect-pool.json".into(), "prompts.txt".into()],
+        );
+
+        let dest = root.join("assets");
+        let err = land_pack(&bundle, &dest, &expect, "xianxia-pack-v0.1.0").unwrap_err();
+        assert!(matches!(err, FetchError::Corrupt(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("prompts.txt"), "{msg}");
+        assert!(!dest.exists(), "nothing was put in place");
+    }
+
+    /// A language release offered where a pack is expected is refused, because
+    /// the two unpack to different places and a box that got one would have a
+    /// profile and no `assets/`.
+    #[test]
+    fn a_language_release_is_not_a_profile_pack() {
+        let root = tstdir("pack-piece");
+        std::fs::create_dir_all(&root).unwrap();
+        let (stage, mut files) = pack_stage(&root, &[("assets/prompts.txt", b"vi")]);
+        files.remove("assets/prompts.txt");
+        let mut doc = pack_manifest("vi-VN", "1", &files);
+        doc["piece"] = serde_json::json!("adapter");
+        write_pack_manifest(&stage, &doc);
+        let bundle = root.join("vi.tar.zst");
+        tar_bundle(&bundle, &stage, &[]);
+        let err = land_pack(
+            &bundle,
+            &root.join("assets"),
+            &crate::profile::manifest_hash(&files),
+            "vi-VN-adapter-v1",
+        );
+        assert!(err.is_err(), "a language is not a profile");
+    }
+
 
     /// The pack half of `tools/models.sh`, through the same two binaries the
     /// script uses — `ruzstd` decodes but does not encode, and a hand-rolled

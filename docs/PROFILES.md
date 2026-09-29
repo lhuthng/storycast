@@ -237,15 +237,29 @@ problem   adapter 'xianxia-en-US' writes en-US and engine 'vieneu' cannot voice 
 
 ## The binding
 
-`profile::Binding` is three pieces, each a `Pointer { name, hash }`:
+`profile::Binding` is three pieces, each a `Pointer { name, hash, version }`:
 
 ```json
 {
-  "pack":    { "name": "xianxia", "hash": "6b8d5fc00761…" },
-  "adapter": { "name": "vi-VN",   "hash": "…" },
-  "engine":  { "name": "vieneu",  "hash": "" }
+  "pack":    { "name": "xianxia", "hash": "6b8d5fc00761…", "version": "0.1.0" },
+  "adapter": { "name": "vi-VN",   "hash": "…", "version": "" },
+  "engine":  { "name": "vieneu",  "hash": "", "version": "" }
 }
 ```
+
+`version` is the **release** version — the third half of a release's identity,
+and the reason a box can be told *which* artifact to download rather than only
+which bytes it must end up with. `hash` is content-addressed and cannot say that
+(`models-v<hash>` is derived from it), but a pack is versioned by an operator:
+the tag is `xianxia-pack-v0.1.0`. `tools/profile.sh pack`/`unpack` write the
+field from the manifest they just produced, so the pointer and the URL a box
+fetches are two readings of one string.
+
+`version` is `#[serde(default)]` and empty on every pointer written before the
+field existed, which is the **safe** direction: an empty version resolves to no
+release, so those checkouts are pushed the profile exactly as they always were.
+The engine's is always empty — `engines/<name>/` comes from the models release,
+not from `profiles/`.
 
 It is stored in three places, and they must agree:
 

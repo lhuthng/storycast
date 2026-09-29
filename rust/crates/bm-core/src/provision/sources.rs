@@ -191,6 +191,30 @@ pub struct Sources {
 impl Sources {
     /// Select the set for `stages`.
     pub fn plan(layout: &crate::Layout, stages: &[Stage]) -> Result<Self> {
+        Self::plan_for(layout, stages, None)
+    }
+
+    /// The same, for a box whose profile arrives from a release.
+    ///
+    /// `pack` is not a hint that some `assets/` files are already elsewhere —
+    /// it *replaces the whole subtree*, and that is the point. A pack release is
+    /// `assets/` minus `assets/_extends/`, which is a **superset** of every
+    /// `assets/`-rooted member this plan would otherwise select: the registries
+    /// a stage opens, the clips they register, the attribution, the language's
+    /// bundled crawlers. So when the box is fetching it, keeping those members
+    /// would push the same bytes twice over the operator's uplink and then
+    /// write them again on top — the one outcome the two halves are supposed to
+    /// make impossible.
+    ///
+    /// The reduction is not optional-by-flag, it is a property of the plan, and
+    /// that is what keeps the stamp honest: `compute_provision_stamp` and the
+    /// push both call *this* function with the same `pack`, so the digest names
+    /// the artifact that was actually sent rather than one that could have been.
+    pub fn plan_for(
+        layout: &crate::Layout,
+        stages: &[Stage],
+        pack: Option<&crate::artifact::PackRelease>,
+    ) -> Result<Self> {
         let stages: Vec<Stage> = Stage::ALL
             .into_iter()
             .filter(|s| stages.contains(s))
@@ -314,6 +338,10 @@ impl Sources {
         // second one, which is how this surfaced.
         out.members.sort_by(|a, b| a.to.cmp(&b.to));
         out.members.dedup_by(|a, b| a.to == b.to);
+        if pack.is_some() {
+            out.members
+                .retain(|m| !m.to.starts_with(&format!("{}/", crate::artifact::PACK_DIR)));
+        }
         Ok(out)
     }
 
@@ -1097,6 +1125,85 @@ mod tests {
         );
         assert!(s.contains("zstd -dc"), "{s}");
         assert!(s.contains("SOURCES-OK"), "{s}");
+    }
+
+    /// A fetched pack takes the **whole** `assets/` subtree out of the bundle,
+    /// and nothing else.
+    ///
+    /// The claim being pinned is that a release is a superset: a pack is
+    /// `assets/` minus `assets/_extends/`, so every `assets/`-rooted member the
+    /// plan would select is already inside it. If that were ever false the box
+    /// would come up missing a registry a stage opens, and the only symptom
+    /// would be a merge that degrades one sound to silence — so the two sets
+    /// are compared, not assumed equal.
+    ///
+    /// The second assertion is the ordering constraint, and it is not a style
+    /// choice: the extract script prunes `$D/assets` before it extracts, so a
+    /// pack landing *before* the sources step is deleted by the step that
+    /// follows. `install_sources` therefore runs the pack last, and this says
+    /// why that is not negotiable.
+    #[test]
+    fn a_fetched_pack_takes_the_whole_assets_subtree_out_of_the_bundle() {
+        let l = fixture("pack-split");
+        let stages = [Stage::Digest, Stage::Merge, Stage::Crawl];
+        let pushed = Sources::plan(&l, &stages).unwrap();
+        let release = crate::artifact::PackRelease::for_repo("o/n", "xianxia", "0.1.0", "aa").unwrap();
+        let fetched = Sources::plan_for(&l, &stages, Some(&release)).unwrap();
+
+        let under = |s: &Sources, prefix: &str| {
+            s.members
+                .iter()
+                .filter(|m| m.to.starts_with(prefix))
+                .map(|m| m.to.clone())
+                .collect::<Vec<_>>()
+        };
+        let had_assets = under(&pushed, "assets/");
+        assert!(
+            !had_assets.is_empty(),
+            "the fixture must have assets to make this a real reduction"
+        );
+        assert!(
+            under(&fetched, "assets/").is_empty(),
+            "a fetched pack owns the whole subtree"
+        );
+        // Everything else is untouched: the prompts, the casts, the workspace's
+        // own crawlers. A pack is the genre's art, not the book's.
+        assert_eq!(under(&fetched, "prompts/"), under(&pushed, "prompts/"));
+        assert_eq!(under(&fetched, "crawl/"), under(&pushed, "crawl/"));
+        assert_eq!(fetched.slots(), pushed.slots(), "the policy is unchanged");
+        assert!(
+            fetched.bytes() < pushed.bytes(),
+            "…and the point of it is fewer bytes over the uplink"
+        );
+
+        // The delivery is a replacement of the trees it owns, `assets/` among
+        // them, so the pack has to land after it.
+        let s = extract_script();
+        assert!(s.contains(r#""$D/assets""#), "{s}");
+    }
+
+    /// The bundle and the stamp must describe the same files, and the pack is
+    /// half of why: with it, `sources_hash` is the digest of a bundle that
+    /// carries no profile at all, which is only true because the stamp plans
+    /// with the same `pack` the push does.
+    #[test]
+    fn a_pack_digest_moves_only_the_pack() {
+        let l = fixture("pack-digest");
+        let stages = [Stage::Digest, Stage::Merge];
+        let release = crate::artifact::PackRelease::for_repo("o/n", "xianxia", "0.1.0", "aa").unwrap();
+        let a = Sources::plan_for(&l, &stages, Some(&release)).unwrap();
+        let b = Sources::plan_for(&l, &stages, Some(&release)).unwrap();
+        assert_eq!(
+            Sources::hash(&a.manifest().unwrap()),
+            Sources::hash(&b.manifest().unwrap()),
+            "the same pack and the same policy are the same bundle"
+        );
+        let pushed = Sources::plan(&l, &stages).unwrap();
+        assert_ne!(
+            Sources::hash(&pushed.manifest().unwrap()),
+            Sources::hash(&a.manifest().unwrap()),
+            "taking the profile out of the bundle changes the bundle"
+        );
     }
 
     #[test]

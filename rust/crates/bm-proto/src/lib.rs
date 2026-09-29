@@ -1640,8 +1640,8 @@ pub enum ExclusiveOp {
     Retag {
         chapters: Vec<u32>,
     },
-    /// Re-attribute one chapter's speakers: waits on that chapter's
-    /// digest, render and merge rows.
+    /// Re-attribute one chapter's speakers: waits on every row of that
+    /// chapter — a recast rewrites the script a digest is about to read.
     Recast {
         chapter: u32,
         fixes: Vec<SpeakerFix>,
@@ -1654,11 +1654,23 @@ pub enum ExclusiveOp {
         expect: String,
         speaker: String,
     },
-    /// Fold names into one: waits on the chapters the fold rewrites (the
-    /// ones hearing the absorbed names), on render and merge.
+    /// Fold names into one: waits on every row of the chapters the fold
+    /// rewrites — the ones hearing the absorbed names, and the ones whose
+    /// raw text still names them (a digest there would land its delta after
+    /// the fold and resurrect them).
     Merge {
         survivor: String,
         absorbed: Vec<String>,
+        #[serde(default)]
+        chapters: Vec<u32>,
+    },
+    /// Fold every duplicate the canon keys already name beyond doubt: the `m`
+    /// key's write, which is `merge` run once per pair with no human in the
+    /// loop. Same wait as `merge` — every row of every chapter it rewrites.
+    /// The pairs were computed from a bible read when the key was pressed; a
+    /// pair whose names have since gone is simply nothing left to fold.
+    Reconcile {
+        merges: Vec<(String, Vec<String>)>,
         #[serde(default)]
         chapters: Vec<u32>,
     },
@@ -1677,6 +1689,7 @@ impl ExclusiveOp {
             ExclusiveOp::Recast { .. } => "recast",
             ExclusiveOp::FixSpeaker { .. } => "fix-speaker",
             ExclusiveOp::Merge { .. } => "merge",
+            ExclusiveOp::Reconcile { .. } => "reconcile",
         }
     }
 
@@ -1684,16 +1697,20 @@ impl ExclusiveOp {
     /// exactly those stages pauses. A swap touches audio only: crawl and
     /// digest keep flowing while it waits — a crawl finishing under a
     /// parked swap is work the swap cannot reach.
+    ///
+    /// The chapter-scoped surgeries take **every** stage of their chapter.
+    /// Their own guard refuses while anything at all is in flight there — a
+    /// recast rewrites the script a digest is about to read, a merge
+    /// rewrites the bible a digest's delta would land after — and the gate
+    /// must never be weaker than the surgery's last line.
     pub fn stages(&self) -> &'static [Stage] {
         match self {
-            ExclusiveOp::SwapVoice { .. }
-            | ExclusiveOp::Recast { .. }
+            ExclusiveOp::Recast { .. }
             | ExclusiveOp::FixSpeaker { .. }
             | ExclusiveOp::Merge { .. }
-                => &[Stage::Render, Stage::Merge],
-            ExclusiveOp::Remix { .. }
-            | ExclusiveOp::Remerge
-                => &[Stage::Merge],
+            | ExclusiveOp::Reconcile { .. } => &Stage::ALL,
+            ExclusiveOp::SwapVoice { .. } => &[Stage::Render, Stage::Merge],
+            ExclusiveOp::Remix { .. } | ExclusiveOp::Remerge => &[Stage::Merge],
             ExclusiveOp::Rerender => &[Stage::Render, Stage::Merge],
             ExclusiveOp::Retag { .. } => &[Stage::Digest, Stage::Render, Stage::Merge],
         }
@@ -1707,6 +1724,7 @@ impl ExclusiveOp {
             && match self {
                 ExclusiveOp::SwapVoice { chapters, .. }
                 | ExclusiveOp::Merge { chapters, .. }
+                | ExclusiveOp::Reconcile { chapters, .. }
                 | ExclusiveOp::Retag { chapters }
                     => chapters.contains(&chapter),
                 ExclusiveOp::Recast { chapter: c, .. }
@@ -1732,6 +1750,9 @@ impl ExclusiveOp {
             } => format!("ch{chapter} seg{segment} → {speaker}"),
             ExclusiveOp::Merge { survivor, absorbed, .. } => {
                 format!("merge {} into {survivor}", absorbed.join(", "))
+            }
+            ExclusiveOp::Reconcile { merges, .. } => {
+                format!("reconcile {} duplicate name(s)", merges.len())
             }
         }
     }
@@ -1771,6 +1792,10 @@ impl ExclusiveOp {
             "merge" => Some(ExclusiveOp::Merge {
                 survivor: String::new(),
                 absorbed: Vec::new(),
+                chapters: Vec::new(),
+            }),
+            "reconcile" => Some(ExclusiveOp::Reconcile {
+                merges: Vec::new(),
                 chapters: Vec::new(),
             }),
             _ => None,

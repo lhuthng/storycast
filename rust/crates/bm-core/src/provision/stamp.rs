@@ -70,6 +70,21 @@ pub struct ProvisionStamp {
     /// reads as an empty list, which is "unknown", not "nothing shipped".
     #[serde(default)]
     pub sources_stages: Vec<String>,
+    /// The profile pack's release identity, when the box takes it from one:
+    /// its content hash, which is the load pointer's.
+    ///
+    /// Its own field rather than a change to `sources_hash`, for the same
+    /// reason `tts_hash` is its own: when the pack is fetched its files are
+    /// **not** in the bundle, so the bundle's manifest is byte-identical whether
+    /// the pack is `xianxia` or `a different profile entirely`. Folding the hash
+    /// into `sources_hash` would have worked and then made every sources push
+    /// pay for a pack re-point — which is the exact coupling the split exists
+    /// to remove, in the other direction.
+    ///
+    /// Empty means the pack travels in the bundle, or that nothing has ever
+    /// named one — the safe direction, and the one every existing box is in.
+    #[serde(default)]
+    pub pack_release: String,
 }
 
 impl ProvisionStamp {
@@ -111,6 +126,18 @@ impl ProvisionStamp {
     /// has no opinion — never drift on that, or every provision would reinstall.
     pub fn agent_in_sync(&self, want: &ProvisionStamp) -> bool {
         want.agent_hash.is_empty() || self.agent_hash == want.agent_hash
+    }
+
+    /// Whether the box's profile pack is the one we would hand it.
+    ///
+    /// **Consulted before the sources push, and only meaningful with a
+    /// release** — but an empty `want` on *either* side reads as "in sync", so a
+    /// box that was never handed a released pack is not re-pushed every run to
+    /// learn that. Which is the only safe direction for the alternative: this
+    /// gate is what stops a re-pointed pack from being a silent no-op on boxes
+    /// whose bundle happens to be identical.
+    pub fn pack_in_sync(&self, want: &ProvisionStamp) -> bool {
+        self.pack_release == want.pack_release
     }
 
     /// Whether the worker's `bm-tts` binary still matches ours.
@@ -157,6 +184,7 @@ pub fn compute_provision_stamp(
     stages: &[bm_proto::Stage],
     agent_version: &str,
     agent_binary: &Path,
+    pack: Option<&crate::artifact::PackRelease>,
 ) -> anyhow::Result<ProvisionStamp> {
     let repo_root = layout.root.as_path();
     // The engine's own tree — `engines/<name>/models` — not `root/models`: the
@@ -171,9 +199,11 @@ pub fn compute_provision_stamp(
         .display()
         .to_string();
     // What the push would send, hashed as a set. The plan is the same call the
-    // push makes, so the digest and the artifact cannot describe different
-    // files — which is the one property this gate exists to have.
-    let plan = super::sources::Sources::plan(layout, stages)?;
+    // push makes — with the same `pack`, which is what makes "the bundle does
+    // not carry `assets/`" true of the digest as well as of the tar — so the
+    // digest and the artifact cannot describe different files, which is the one
+    // property this gate exists to have.
+    let plan = super::sources::Sources::plan_for(layout, stages, pack)?;
     let sources_manifest = plan.manifest()?;
     let mut sources = Sha256::new();
     sources.update(agent_version.as_bytes());
@@ -244,6 +274,7 @@ pub fn compute_provision_stamp(
     Ok(ProvisionStamp {
         agent_version: agent_version.to_string(),
         sources_stages: sources_manifest.slots.clone(),
+        pack_release: pack.map(|p| p.hash.clone()).unwrap_or_default(),
         sources_hash: hex_digest(sources.finalize()),
         voices_hash: hex_digest(voices.finalize()),
         tts_hash: hex_digest(tts.finalize()),
@@ -410,6 +441,7 @@ mod tests {
             &STAGES,
             "0.2.0",
             &agent_bin(root),
+            None,
         )
         .expect("the fixture plan must build")
     }
@@ -420,6 +452,7 @@ mod tests {
             &STAGES,
             version,
             &agent_bin(root),
+            None,
         )
         .expect("the fixture plan must build")
     }
@@ -427,12 +460,12 @@ mod tests {
     /// The stamp with an explicit agent binary, for the rebuild cases that swap
     /// the bytes under it.
     fn stamp_bin(root: &std::path::Path, bin: &std::path::Path) -> ProvisionStamp {
-        compute_provision_stamp(&crate::Layout::new(root), &STAGES, "0.2.0", bin)
+        compute_provision_stamp(&crate::Layout::new(root), &STAGES, "0.2.0", bin, None)
             .expect("the fixture plan must build")
     }
 
     fn stamp_for(root: &std::path::Path, stages: &[bm_proto::Stage]) -> ProvisionStamp {
-        compute_provision_stamp(&crate::Layout::new(root), stages, "0.2.0", &agent_bin(root))
+        compute_provision_stamp(&crate::Layout::new(root), stages, "0.2.0", &agent_bin(root), None)
             .expect("the fixture plan must build")
     }
 
@@ -503,6 +536,7 @@ mod tests {
             &STAGES,
             "0.2.0",
             &agent_bin(&root),
+            None,
         )
         .unwrap();
         std::fs::write(
@@ -515,6 +549,7 @@ mod tests {
             &STAGES,
             "0.2.0",
             &agent_bin(&root),
+            None,
         )
         .unwrap();
         assert_ne!(
@@ -725,6 +760,7 @@ mod tests {
             &STAGES,
             "0.2.0",
             &root.join("a"),
+            None,
         )
         .unwrap();
         assert!(base.tts_bin_in_sync(&none));
@@ -797,6 +833,7 @@ mod tests {
                 &crawl,
                 "0.2.0",
                 &agent_bin(&root),
+                None,
             )
             .unwrap()
         };
@@ -912,6 +949,68 @@ mod tests {
         );
     }
 
+    /// A released pack is its own gate, and the sources push is *not* dragged
+    /// along by it.
+    ///
+    /// The shape that makes this a real question: when the pack is fetched its
+    /// files are not in the bundle, so two different packs produce the **same**
+    /// `sources.tar.zst`. The bundle cannot see the difference; the stamp has to,
+    /// or a re-pointed pack is a silent no-op on every box — the merge runs
+    /// against the old profile and every log says "in sync".
+    ///
+    /// And the other direction matters just as much: re-pointing the pack must
+    /// not cost a sources re-push, or the split that just saved 60 MB of uplink
+    /// gives half of it back on every release.
+    #[test]
+    fn a_released_pack_is_its_own_gate() {
+        let root = stamp_fixture("pack-gate");
+        std::fs::create_dir_all(root.join("assets/effects")).unwrap();
+        std::fs::write(
+            root.join("assets/effect-pool.json"),
+            r#"{"wind":{"tags":["wind"],"files":["effects/wind-1.mp3"]}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("assets/effects/wind-1.mp3"), vec![1u8; 32]).unwrap();
+        let release = |hash: &str| {
+            crate::artifact::PackRelease::for_repo("lhuthng/storycast", "xianxia", "0.1.0", hash)
+                .unwrap()
+        };
+        let at = |pack: Option<&crate::artifact::PackRelease>| {
+            compute_provision_stamp(
+                &crate::Layout::new(&root),
+                &STAGES,
+                "0.2.0",
+                &agent_bin(&root),
+                pack,
+            )
+            .unwrap()
+        };
+
+        let pushed = at(None);
+        assert_eq!(pushed.pack_release, "", "no release means the pack is in the push");
+        let first = at(Some(&release("a".repeat(64).as_str())));
+        let other = at(Some(&release("b".repeat(64).as_str())));
+
+        assert!(first.pack_in_sync(&first));
+        assert!(
+            !first.pack_in_sync(&other),
+            "a re-pointed pack must be visible, since the bundle is identical either way"
+        );
+        assert_eq!(
+            first.sources_hash, other.sources_hash,
+            "…and the pack must not be in the bundle, which is the whole saving"
+        );
+        assert!(
+            !pushed.pack_in_sync(&first),
+            "a box pushed the profile in the bundle is not in sync with a released one"
+        );
+        // …and the other direction: nothing about a pack re-point may re-push
+        // the prompts, the casts or the clips.
+        assert!(first.sources_in_sync(&other));
+        assert!(first.voices_in_sync(&other) && first.tts_in_sync(&other));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_stamp_payload_parses_and_garbage_does_not() {
         let s = ProvisionStamp {
@@ -922,6 +1021,7 @@ mod tests {
             agent_hash: "d".repeat(64),
             tts_bin_hash: "e".repeat(64),
             sources_stages: vec!["digest".into(), "merge".into()],
+            pack_release: "f".repeat(64),
         };
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(parse_stamp(&text).unwrap(), s, "a real payload round-trips");

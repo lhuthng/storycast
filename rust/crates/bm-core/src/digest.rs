@@ -14,15 +14,19 @@ use crate::config::Settings;
 use crate::paths::Layout;
 use crate::util::{atomic_write, head_chars, squeeze_ws};
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use window::{plan_windows, tokens, weight, Window};
 
 mod canon;
 mod llm;
 mod reconcile;
 mod tags;
+mod window;
 
 pub use canon::{
     apply_merges, canon_key, canonicalize_script, merge_bible, resolve_speaker,
@@ -740,6 +744,106 @@ fn warn_missing_sections(which: &str, missed: &[String]) {
     );
 }
 
+/// Which of the two rounds a continuity block is written for.
+///
+/// The part is the same fact told twice, because the two rounds answer different
+/// questions about it — and the one that only matters for staging is that a
+/// looping bed may be left open for the part after this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Attribution,
+    Staging,
+}
+
+/// The part a prompt is being built for, when a chapter is staged in windows.
+///
+/// **A one-window chapter passes `None` everywhere this appears, and that is a
+/// guarantee rather than a convenience.** With no continuity block the two
+/// prompts are byte-for-byte the ones the pre-window digest built, so a chapter
+/// under the budget cannot digest differently because windows exist — not
+/// "usually produces the same answer", the same prompt. Everything the feature
+/// adds to a prompt is therefore here, in one block, appended after the output
+/// contract: no adapter template had to change, and a workspace whose profile
+/// predates this feature still gets the part note and the plot.
+///
+/// The block, not a placeholder, for the same reason the contracts are built in
+/// code: a feature that needed a prompt template re-release would be one a pack
+/// could not ship, and the templates are the adapter's, shared by every
+/// workspace on that language.
+struct Continuity<'a> {
+    /// 0-based window index.
+    index: usize,
+    total: usize,
+    /// Every earlier part's summary, oldest first. Empty for the first part,
+    /// which is the only part with nothing behind it.
+    plot: &'a [String],
+}
+
+impl Continuity<'_> {
+    /// `---PART 2 OF 5---`, and what it means for the round being asked for.
+    fn note(&self, pass: Pass) -> String {
+        let (index, total) = (self.index + 1, self.total);
+        match pass {
+            Pass::Attribution => format!(
+                "---PART {index} OF {total}---\n\
+                 This chapter is longer than one pass can carry, so it is staged in {total} parts \
+                 and you are seeing part {index}. A later pass sees the events after yours, and the \
+                 finished script is assembled from every part's answer. Answer for the events in \
+                 front of you and nothing else: do not summarise the chapter, do not round it off, \
+                 and do not write an ending, because the prose in front of you continues past your \
+                 last event.\n\
+                 Return one more field beside the contract above:\n\
+                 \x20 \"summary\": \"2-4 sentences on what this part establishes — who speaks, where \
+                 it happens, what changes — written for the pass after yours, which has not seen \
+                 these events and cannot look them up\"\n"
+            ),
+            Pass::Staging => format!(
+                "---PART {index} OF {total}---\n\
+                 This is part {index} of {total} of one chapter, and the events in front of you are \
+                 all you stage. Two rules change, and only these two:\n\
+                 - Do not round the prose off. The story continues past your last event, so write \
+                 no ending and no closing beat.\n\
+                 - A `loop`ed bed may run past the end of your part and be closed by a later one. \
+                 Close it here if the scene moves on inside your part; leave it open if it does \
+                 not, and the gate reads the chapter whole before it complains.\n\
+                 `scene` and `music` are carried forward within this part only, so name the place \
+                 and the bed again on your first event where they continue what came before.\n"
+            ),
+        }
+    }
+
+    /// The summaries of every part before this one.
+    fn plot_so_far(&self) -> String {
+        if self.plot.is_empty() {
+            return String::new();
+        }
+        let mut out = format!(
+            "\n---PLOT SO FAR--- (parts 1..{}, for reference only — the events above are what you \
+             answer for)\n",
+            self.index
+        );
+        for (i, summary) in self.plot.iter().enumerate() {
+            out.push_str(&format!("PART {}: {}\n", i + 1, squeeze_ws(summary)));
+        }
+        out
+    }
+
+    /// The whole block, for a prompt that has no placeholder to put it in.
+    fn block(&self, pass: Pass) -> String {
+        format!("\n{}{}", self.note(pass), self.plot_so_far())
+    }
+}
+
+/// Append the continuity block to a finished prompt body, or nothing when the
+/// chapter was not split.
+fn apply_continuity(body: &mut String, continuity: Option<&Continuity>, pass: Pass) {
+    // A one-window chapter adds nothing, and has nothing to remove either: a part
+    // note only ever arrives with a `Continuity`.
+    if let Some(c) = continuity {
+        body.push_str(&c.block(pass));
+    }
+}
+
 /// Build the constrained attribution pass.
 ///
 /// Dialogue detection is not a model decision: `prepare_chapter` has already
@@ -748,10 +852,14 @@ fn warn_missing_sections(which: &str, missed: &[String]) {
 /// nearest source narration, plus `narration_ids` the model must not answer. The
 /// answer map stays small while the tags that actually identify speakers remain
 /// visible. The remaining identity fields are the chapter's own.
+///
+/// `continuity` is the part this prompt is for when the chapter was split, and
+/// `None` for a chapter that fits one call — see [`Continuity`].
 fn build_attribution_prompt(
     layout: &Layout,
     bible: &Value,
     prepared: &PreparedChapter,
+    continuity: Option<&Continuity>,
 ) -> Result<String> {
     let path = layout.prompt();
     let template = std::fs::read_to_string(&path)
@@ -901,17 +1009,22 @@ no invented ids, no dropped line.
   a nameless character object. `mentions` is optional evidence; omit uncertain
   rows rather than inventing an owner. Free-form `voice_hint` text is accepted.
 "#;
+    apply_continuity(&mut body, continuity, Pass::Attribution);
     Ok(format!("{body}\n{contract}"))
 }
 
 /// Build the audio-staging pass. Speaker assignment is supplied as immutable
 /// data and the model never returns it; code attaches it after generation.
+///
+/// `continuity` is the part this prompt is for when the chapter was split, and
+/// `None` for a chapter that fits one call — see [`Continuity`].
 fn build_staging_prompt(
     layout: &Layout,
     engine: &str,
     bible: &Value,
     context: &Value,
     prepared: &PreparedChapter,
+    continuity: Option<&Continuity>,
 ) -> Result<String> {
     let path = layout.script_prompt();
     let template = std::fs::read_to_string(&path)
@@ -1033,15 +1146,675 @@ duplicate — answer each, and never merge them.
 Follow every audio, grammar, TTS, music and sound rule in this prompt.
 "#;
     let contract = contract.replace("{mood_palette}", &mood_palette);
+    apply_continuity(&mut body, continuity, Pass::Staging);
     Ok(format!("{body}\n{contract}"))
 }
 
-/// Ask the analyzer for one chapter through two constrained passes.
+// ---------------------------------------------------------------------------
+// parts: a chapter staged in more than one call
+// ---------------------------------------------------------------------------
+
+/// One part of a chapter, staged.
+///
+/// `from`/`to` are the window's event bounds, kept so a stored part can be
+/// checked against the plan it would be resumed into: a part is reusable only
+/// where the current plan puts the same events in it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Part {
+    from: usize,
+    to: usize,
+    /// What this part established, in the attribution answer's own words. It is
+    /// the whole of what the parts after it know about it.
+    summary: String,
+    context: Value,
+    script: Value,
+}
+
+/// The on-disk shape of a half-staged chapter.
+#[derive(Serialize, Deserialize)]
+struct StoredParts {
+    key: String,
+    parts: Vec<Part>,
+}
+
+/// The parts of one chapter that are already staged, and the file that survives
+/// a restart.
+///
+/// A long chapter is up to sixteen calls, so losing the last one to a rate limit
+/// or a closed laptop costs the fifteen before it. The parts *are* the answer:
+/// each one is written only after both its rounds parsed and validated, so what a
+/// restart resumes from is work that would have been accepted — never work in
+/// progress, which is why a resumed part is never re-validated.
+struct Parts {
+    done: Vec<Part>,
+    path: PathBuf,
+    key: String,
+    /// Whether there is a boundary to resume from at all. A one-window chapter
+    /// has none — its two rounds are one part, and a part is stored when it is
+    /// *finished* — so it never writes the file.
+    store: bool,
+}
+
+impl Parts {
+    /// Open the checkpoint for one chapter, keeping the leading run of stored
+    /// parts that still match the plan.
+    fn open(
+        layout: &Layout,
+        n: u32,
+        text: &str,
+        bible: &Value,
+        windows: &[Window],
+        settings: &Settings,
+    ) -> Parts {
+        let path = layout.data().join(format!(".digest-parts-ch{n}.json"));
+        let key = parts_key(text, bible, windows, settings);
+        let store = windows.len() > 1;
+        let done = if store {
+            load_parts(&path, &key, windows)
+        } else {
+            Vec::new()
+        };
+        Parts {
+            done,
+            path,
+            key,
+            store,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.done.len()
+    }
+
+    /// Every finished part's summary, oldest first: the `PLOT SO FAR` the next
+    /// part is handed.
+    fn summaries(&self) -> Vec<String> {
+        self.done.iter().map(|p| p.summary.clone()).collect()
+    }
+
+    fn push(&mut self, part: Part) -> Result<()> {
+        self.done.push(part);
+        self.save()
+    }
+
+    fn save(&self) -> Result<()> {
+        if !self.store {
+            return Ok(());
+        }
+        let stored = StoredParts {
+            key: self.key.clone(),
+            parts: self.done.clone(),
+        };
+        atomic_write(&self.path, &serde_json::to_string_pretty(&stored)?)
+    }
+
+    /// Forget the checkpoint. Called when the chapter is finished, so a
+    /// re-digest — or the operator taking the chapter over by hand — starts
+    /// clean instead of resuming into parts of a script that already exists.
+    fn clear(&self) {
+        if self.store {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// The leading run of stored parts the current plan still answers for.
+fn load_parts(path: &Path, key: &str, windows: &[Window]) -> Vec<Part> {
+    let stored = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<StoredParts>(&text).ok());
+    let Some(stored) = stored else {
+        return Vec::new();
+    };
+    if stored.key != key {
+        return Vec::new();
+    }
+    let mut kept = Vec::new();
+    for (i, part) in stored.parts.into_iter().enumerate() {
+        match windows.get(i) {
+            Some(w) if w.from == part.from && w.to == part.to => kept.push(part),
+            // A part that does not line up with the plan at its own index means
+            // the plan moved, and everything after it answers for a chapter that
+            // is no longer this one.
+            _ => break,
+        }
+    }
+    kept
+}
+
+/// What a stored part has to match to be reusable: the chapter text, the bible
+/// it was staged against, and the plan of windows it belongs to.
+///
+/// Not a security boundary — a **stale-work check**. A chapter edited under a
+/// half-finished digest, another chapter's bible merge, or a `chunk_sentences`
+/// change all leave stored parts answering a question nobody is asking any more,
+/// and the cost of finding that out at the end is every call it was meant to
+/// save.
+fn parts_key(text: &str, bible: &Value, windows: &[Window], settings: &Settings) -> String {
+    let mut h = Sha256::new();
+    h.update(b"bm-digest-parts-v1");
+    h.update([0]);
+    h.update(text.as_bytes());
+    h.update([0]);
+    h.update(serde_json::to_string(bible).unwrap_or_default().as_bytes());
+    h.update([0]);
+    for w in windows {
+        h.update(format!("{}..{}", w.from, w.to).as_bytes());
+        h.update([0]);
+    }
+    h.update(
+        format!(
+            "{}-{}-{}",
+            settings.digest.chunk_sentences, settings.digest.chunk_chars, settings.digest.answer_tokens
+        )
+        .as_bytes(),
+    );
+    format!("{:x}", h.finalize())
+}
+
+/// The part a round belongs to, as `(1-based index, total)`, or `None` for a
+/// chapter that did not split.
+///
+/// One place decides, so every label, dump file name, progress line and gate
+/// message agrees about whether there are parts at all — and so a one-window
+/// chapter's log reads exactly as it did before windows existed.
+fn part_of(index: usize, total: usize) -> Option<(usize, usize)> {
+    (total > 1).then_some((index + 1, total))
+}
+
+/// `part 2/5: ` when a message is about one part of a split chapter, and nothing
+/// when it is about the chapter itself.
+fn part_prefix(part: Option<(usize, usize)>) -> String {
+    match part {
+        None => String::new(),
+        Some((index, total)) => format!("part {index}/{total}: "),
+    }
+}
+
+/// `-part2of5` for a dump file's name, and nothing when the chapter did not
+/// split. Debug dumps are read by eye next to each other, so the part is in the
+/// name rather than only in the file.
+fn part_suffix(part: Option<(usize, usize)>) -> String {
+    match part {
+        None => String::new(),
+        Some((index, total)) => format!("-part{index}of{total}"),
+    }
+}
+
+/// The progress line for one round of one part. A one-window chapter's line is
+/// the string it has always been.
+fn round_label(n: u32, analyzer: &str, round: &str, part: Option<(usize, usize)>) -> String {
+    match part {
+        None => format!("digest ch{n} via {analyzer}: {round}"),
+        Some((index, total)) => {
+            format!("digest ch{n} via {analyzer}: {round} (part {index}/{total})")
+        }
+    }
+}
+
+/// The events a part answers for, as `e0001–e0241`.
+fn part_span(prepared: &PreparedChapter, w: &Window) -> String {
+    if w.to <= w.from {
+        return "no events".into();
+    }
+    let first = &prepared.events[w.from].id;
+    let last = &prepared.events[w.to - 1].id;
+    if first == last {
+        first.clone()
+    } else {
+        format!("{first}–{last}")
+    }
+}
+
+/// One part's prose as a single string, for rule 2's cue scan.
+///
+/// The part's own events, so a cue can only fail a part that contains it — which
+/// is the whole reason rule 2 is checked per part once a chapter has split.
+fn window_text(prepared: &PreparedChapter, w: &Window) -> String {
+    prepared.events[w.from..w.to]
+        .iter()
+        .map(|e| e.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The plan as one line: what this chapter costs, and why.
+fn plan_line(
+    n: u32,
+    analyzer: &str,
+    windows: &[Window],
+    prepared: &PreparedChapter,
+    settings: &Settings,
+) -> String {
+    let chars = weight(&prepared.events);
+    format!(
+        "digest ch{n} via {analyzer}: {} parts — {} events, {chars} chars ≈ {}k tokens of answer \
+         against a {}-token budget",
+        windows.len(),
+        prepared.events.len(),
+        tokens(chars) / 1000,
+        settings.digest.answer_tokens
+    )
+}
+
+/// Where the cuts fall, as one line, before any call is made.
+fn plan_detail(windows: &[Window], prepared: &PreparedChapter) -> String {
+    let spans: Vec<String> = windows.iter().map(|w| part_span(prepared, w)).collect();
+    format!("parts: {}", spans.join(", "))
+}
+
+/// The plan as the ledger sees it: one line for the chapter and one per part.
+///
+/// The only place a long chapter's cost is visible. Five parts and sixteen calls
+/// produce the same script as one call, and only these lines say which happened
+/// — which is what an operator looking at "the digest is slow today" needs.
+fn part_lines(windows: &[Window], prepared: &PreparedChapter, settings: &Settings) -> Vec<String> {
+    let chars = weight(&prepared.events);
+    let mut out = vec![format!(
+        "   staged in {} parts: {} events, {chars} chars ≈ {}k tokens of answer against a \
+         {}-token budget",
+        windows.len(),
+        prepared.events.len(),
+        tokens(chars) / 1000,
+        settings.digest.answer_tokens
+    )];
+    let total = windows.len();
+    for (i, w) in windows.iter().enumerate() {
+        out.push(format!(
+            "   part {}/{}: {} ({} events, {} chars)",
+            i + 1,
+            total,
+            part_span(prepared, w),
+            w.events,
+            w.chars
+        ));
+    }
+    out
+}
+
+/// The one script a chapter is, out of the parts that made it.
+///
+/// `segments` and `fixes` concatenate and nothing else does: speakers are
+/// attached per part by code, and a fix is a `before`/`after` pair applied to the
+/// chapter's text as a whole — which is exactly what a single-call answer's
+/// fixes were. Part order is source order, so the merged array is the array one
+/// staging answer would have returned.
+fn merge_scripts<'a>(scripts: impl IntoIterator<Item = &'a Value>) -> Value {
+    let mut segments = Vec::new();
+    let mut fixes = Vec::new();
+    for script in scripts {
+        if let Some(list) = script.get("segments").and_then(Value::as_array) {
+            segments.extend(list.iter().cloned());
+        }
+        if let Some(list) = script.get("fixes").and_then(Value::as_array) {
+            fixes.extend(list.iter().cloned());
+        }
+    }
+    json!({"segments": segments, "fixes": fixes})
+}
+
+/// What the sound-design gates complain about, for the parts staged so far —
+/// with a not-yet-stored answer standing in as a part of its own.
+///
+/// One function for the worker's final check and the operator's, so the two
+/// cannot disagree about whether a chapter is finished. Rule 1 runs on the
+/// merged script (a bed opened in one part and closed in the next is closed);
+/// then rule 2 runs part by part against that part's own prose. The index that
+/// comes back is the part whose prompt answers for the complaint: the part that
+/// placed the surviving bed, or the part whose own text stages a cue and whose
+/// own segments place none.
+///
+/// `what` names the subject in rule 2's message — `chapter` when there is one
+/// part, `part` when there are more — the same way `classify_fetch` is told the
+/// noun it is describing.
+fn sound_gap(
+    scripts: &[&Value],
+    texts: &[&str],
+    pool: &crate::audio_pool::ClipPool,
+    what: &str,
+) -> Option<(String, usize)> {
+    // A chapter that did not split goes through [`sound_design_gap`] itself, in
+    // its own order, so the single-call digest's gate is the same code it always
+    // was rather than a re-implementation that agrees with it today.
+    if scripts.len() <= 1 {
+        let script = scripts.first().copied().unwrap_or(&Value::Null);
+        let text = texts.first().copied().unwrap_or("");
+        return sound_design_gap(script, text, pool).map(|gap| (gap, 0));
+    }
+    let merged = merge_scripts(scripts.iter().copied());
+    if let Some(bed) = open_beds(&merged, pool).into_iter().next() {
+        let owner = bed_owner(&bed, scripts);
+        return Some((unclosed_beds(&merged, pool).unwrap_or_default(), owner));
+    }
+    for (i, script) in scripts.iter().enumerate() {
+        let text = texts.get(i).copied().unwrap_or("");
+        if let Some(gap) = silent_design(script, text, what) {
+            return Some((gap, i));
+        }
+    }
+    None
+}
+
+/// The identity half of a chapter staged in parts: what the parts' attribution
+/// answers together say about who is in it.
+///
+/// `title` and `atmosphere` are the **first** part's, because a chapter's title
+/// and its opening mood are set by its opening; the summaries carry the rest.
+/// Everything else is a union — `roster` in first-seen order, `mentions`,
+/// `new_aliases` and `speakers` by key, `new_characters` by canonical name with a
+/// later part filling only the fields an earlier one left blank. A one-window
+/// chapter goes through this too and comes out with exactly what its single
+/// answer said.
+///
+/// Disagreements are returned rather than silently resolved. Two parts naming
+/// different owners for one surface form is the one thing a union cannot fix
+/// (`mentions` is a map, and a map holds one value per key), and it is a real
+/// signal: the alias table owes somebody a decision. The earlier part wins, and
+/// the operator is told.
+fn merge_contexts(parts: &[Part]) -> (Value, Vec<String>) {
+    let mut title = String::new();
+    let mut atmosphere = String::new();
+    let mut roster: Vec<String> = Vec::new();
+    let mut characters: Vec<Value> = Vec::new();
+    let mut mentions = serde_json::Map::new();
+    let mut aliases = serde_json::Map::new();
+    let mut speakers = serde_json::Map::new();
+    let mut conflicts = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let c = &part.context;
+        if title.is_empty() {
+            title = c
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+        }
+        if atmosphere.is_empty() {
+            atmosphere = c
+                .get("atmosphere")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+        }
+        union_names(&mut roster, c.get("roster"));
+        union_map(
+            &mut mentions,
+            c.get("mentions"),
+            "mention",
+            i + 1,
+            &mut conflicts,
+        );
+        union_map(
+            &mut aliases,
+            c.get("new_aliases"),
+            "alias",
+            i + 1,
+            &mut conflicts,
+        );
+        if let Some(map) = c.get("speakers").and_then(Value::as_object) {
+            for (id, who) in map {
+                speakers.insert(id.clone(), who.clone());
+            }
+        }
+        union_characters(&mut characters, c.get("new_characters"));
+    }
+    let merged = json!({
+        "title": title,
+        "atmosphere": atmosphere,
+        "roster": roster,
+        "mentions": Value::Object(mentions),
+        "new_characters": characters,
+        "new_aliases": Value::Object(aliases),
+        "speakers": Value::Object(speakers),
+    });
+    (merged, conflicts)
+}
+
+/// Union of a name list: first-seen order, no duplicates.
+fn union_names(into: &mut Vec<String>, from: Option<&Value>) {
+    for name in from
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !into.iter().any(|seen| seen == name) {
+            into.push(name.to_string());
+        }
+    }
+}
+
+/// Union of a surface-form map: the first part's owner wins, and the
+/// disagreement is named.
+fn union_map(
+    into: &mut serde_json::Map<String, Value>,
+    from: Option<&Value>,
+    what: &str,
+    part: usize,
+    conflicts: &mut Vec<String>,
+) {
+    for (form, owner) in from.and_then(Value::as_object).into_iter().flatten() {
+        match into.get(form) {
+            None => {
+                into.insert(form.clone(), owner.clone());
+            }
+            Some(previous) if previous == owner => {}
+            Some(previous) => conflicts.push(format!(
+                "{what} {form:?} is {previous} here and {owner} in part {part} — the earlier part \
+                 wins, and the alias table owes one of them a decision"
+            )),
+        }
+    }
+}
+
+/// Union of the declared new characters, by canonical name.
+///
+/// A later part fills fields an earlier one left blank and never overwrites one
+/// it stated: two parts describing the same new character is the ordinary case,
+/// and the earlier description is the one written closest to meeting them.
+fn union_characters(into: &mut Vec<Value>, from: Option<&Value>) {
+    for candidate in from.and_then(Value::as_array).into_iter().flatten() {
+        let Some(name) = candidate.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let existing = into
+            .iter_mut()
+            .find(|c| c.get("name").and_then(Value::as_str) == Some(name));
+        let Some(existing) = existing else {
+            into.push(candidate.clone());
+            continue;
+        };
+        let (Some(target), Some(source)) = (existing.as_object_mut(), candidate.as_object()) else {
+            continue;
+        };
+        for (key, value) in source {
+            if field_is_blank(target, key) {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+/// Which part to re-ask when a looping bed is still open at the end of a
+/// chapter: the part that placed the last `sound` for it.
+///
+/// The last, not the first, because a bed can be closed and opened again — the
+/// surviving copy is the one nobody stopped, and a repair aimed at an earlier
+/// copy would go to a model whose own part is already correct.
+fn bed_owner(bed: &str, scripts: &[&Value]) -> usize {
+    let mut owner = 0;
+    for (i, script) in scripts.iter().enumerate() {
+        let placed = script
+            .get("segments")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.get("sound").and_then(Value::as_str) == Some(bed))
+            });
+        if placed {
+            owner = i;
+        }
+    }
+    owner
+}
+
+/// One part's two rounds: attribution, then staging against that map.
+///
+/// **The rounds do not change because a chapter was split.** Same prompt
+/// builders, same validators, same one-repair rule, same retry policy — only the
+/// events in front of the model differ, plus the continuity block that tells it
+/// there are other parts. A part is therefore staged to exactly the standard a
+/// whole chapter was, which is what makes the merged script indistinguishable
+/// from one the single-call digest would have written.
+#[allow(clippy::too_many_arguments)]
+async fn stage_part(
+    layout: &Layout,
+    n: u32,
+    analyzer: &str,
+    settings: &Settings,
+    bible: &Value,
+    vocab: &Vocabulary,
+    slice: &PreparedChapter,
+    continuity: Option<&Continuity<'_>>,
+    part: Option<(usize, usize)>,
+    progress: &mut (dyn FnMut(f32, String) + Send),
+    from: f32,
+    mid: f32,
+    to: f32,
+) -> Result<(Value, Value)> {
+    let suffix = part_suffix(part);
+    progress(from, round_label(n, analyzer, "attribution", part));
+    let attribution_prompt = build_attribution_prompt(layout, bible, slice, continuity)?;
+    let raw = generate_retrying(&attribution_prompt, analyzer, settings, progress, from, mid).await?;
+    dump_raw(layout, &format!("digest-attribution{suffix}"), &raw);
+    let context = match parse_attribution(&raw, bible, slice, continuity.is_some()) {
+        Ok(context) => context,
+        Err(e) => {
+            progress(
+                mid,
+                format!(
+                    "{}invalid attribution, asking for one repair: {e}",
+                    part_prefix(part)
+                ),
+            );
+            let again = repair_once(&attribution_prompt, &e, analyzer, settings).await?;
+            dump_raw(layout, &format!("digest-attribution{suffix}-retry"), &again);
+            parse_attribution(&again, bible, slice, continuity.is_some()).map_err(|e2| {
+                let dump = layout.data().join(".last-analyze-raw.json");
+                let _ = atomic_write(&dump, &again);
+                anyhow::anyhow!(
+                    "digest attribution invalid ({e2}); raw saved to {}",
+                    dump.display()
+                )
+            })?
+        }
+    };
+
+    progress(mid, round_label(n, analyzer, "staging", part));
+    let staging_prompt = build_staging_prompt(
+        layout,
+        &settings.engine,
+        bible,
+        &context,
+        slice,
+        continuity,
+    )?;
+    let raw = generate_retrying(&staging_prompt, analyzer, settings, progress, mid, to).await?;
+    dump_raw(layout, &format!("digest-staging{suffix}"), &raw);
+    let parse = |raw: &str| parse_staged_script(raw, bible, &context, slice, vocab);
+    let script = match parse(&raw) {
+        Ok(script) => script,
+        Err(e) => {
+            progress(
+                to,
+                format!(
+                    "{}invalid staging, asking for one repair: {e}",
+                    part_prefix(part)
+                ),
+            );
+            let again = repair_once(&staging_prompt, &e, analyzer, settings).await?;
+            dump_raw(layout, &format!("digest-staging{suffix}-retry"), &again);
+            parse(&again).map_err(|e2| {
+                let dump = layout.data().join(".last-analyze-raw.json");
+                let _ = atomic_write(&dump, &again);
+                anyhow::anyhow!(
+                    "digest staging invalid ({e2}); raw saved to {}",
+                    dump.display()
+                )
+            })?
+        }
+    };
+    Ok((context, script))
+}
+
+/// Re-ask one part's staging round with a gate's complaint appended.
+///
+/// The prompt is re-rendered rather than carried: a part's prompt is a few
+/// hundred KB of string, and two `read_to_string`s cost less than holding every
+/// part's prompt for the length of a chapter. It is rendered from **that part's
+/// own slice and cast**, so a repair can only ever answer for events it was
+/// shown, and its answer goes through the same validators every other answer
+/// does.
+#[allow(clippy::too_many_arguments)]
+async fn reask_staging(
+    layout: &Layout,
+    analyzer: &str,
+    settings: &Settings,
+    bible: &Value,
+    vocab: &Vocabulary,
+    slice: &PreparedChapter,
+    context: &Value,
+    index: usize,
+    total: usize,
+    plot: &[String],
+    part: Option<(usize, usize)>,
+    complaint: &str,
+) -> Result<Value> {
+    let continuity = (total > 1).then_some(Continuity {
+        index,
+        total,
+        plot,
+    });
+    let prompt = build_staging_prompt(
+        layout,
+        &settings.engine,
+        bible,
+        context,
+        slice,
+        continuity.as_ref(),
+    )?;
+    let again = repair_once(
+        &prompt,
+        &anyhow::anyhow!(complaint.to_string()),
+        analyzer,
+        settings,
+    )
+    .await?;
+    dump_raw(layout, &format!("digest-staging-retry{}", part_suffix(part)), &again);
+    parse_staged_script(&again, bible, context, slice, vocab).map_err(|e| {
+        let dump = layout.data().join(".last-analyze-raw.json");
+        let _ = atomic_write(&dump, &again);
+        anyhow::anyhow!(
+            "digest {complaint} not fixed by one repair ({e}); raw saved to {}",
+            dump.display()
+        )
+    })
+}
+
+/// Ask the analyzer for one chapter through two constrained passes, once per
+/// window when the chapter is too long for one answer to carry.
 ///
 /// Attribution is generated and validated first. The staging pass receives that
 /// map as data and never emits speakers, so a small model cannot regress a
 /// mechanically separated dialogue event back to Narrator while it is choosing
 /// scenes and sounds.
+///
+/// That is the whole contract, and splitting the chapter does not weaken it: a
+/// window is a contiguous run of the same prepared events, the two rounds run on
+/// it unchanged, and the parts are merged back into one script and one bible
+/// delta. See [`window`] for where the cuts fall and [`Parts`] for what survives
+/// a restart.
 pub async fn analyze_chapter(
     layout: &Layout,
     n: u32,
@@ -1055,108 +1828,172 @@ pub async fn analyze_chapter(
         .with_context(|| format!("reading {}", chapter_path.display()))?;
     let prepared = prepare_chapter(&text);
     let vocab = vocabulary(layout)?;
-
-    progress(0.08, format!("digest ch{n} via {analyzer}: attribution"));
-    let attribution_prompt = build_attribution_prompt(layout, bible, &prepared)?;
-    let raw = generate_retrying(
-        &attribution_prompt,
-        analyzer,
-        settings,
-        progress,
-        0.08,
-        0.36,
-    )
-    .await?;
-    dump_raw(layout, "digest-attribution", &raw);
-    let context = match parse_attribution(&raw, bible, &prepared) {
-        Ok(context) => context,
-        Err(e) => {
-            progress(
-                0.38,
-                format!("invalid attribution, asking for one repair: {e}"),
-            );
-            let again = repair_once(&attribution_prompt, &e, analyzer, settings).await?;
-            dump_raw(layout, "digest-attribution-retry", &again);
-            parse_attribution(&again, bible, &prepared).map_err(|e2| {
-                let dump = layout.data().join(".last-analyze-raw.json");
-                let _ = atomic_write(&dump, &again);
-                anyhow::anyhow!(
-                    "digest attribution invalid ({e2}); raw saved to {}",
-                    dump.display()
-                )
-            })?
-        }
-    };
-
-    progress(0.42, format!("digest ch{n} via {analyzer}: staging"));
-    let staging_prompt =
-        build_staging_prompt(layout, &settings.engine, bible, &context, &prepared)?;
-    let raw = generate_retrying(&staging_prompt, analyzer, settings, progress, 0.42, 0.82).await?;
-    dump_raw(layout, "digest-staging", &raw);
-    let parse_staging = |raw: &str| parse_staged_script(raw, bible, &context, &prepared, &vocab);
-    let mut script = match parse_staging(&raw) {
-        Ok(script) => script,
-        Err(e) => {
-            progress(0.84, format!("invalid staging, asking for one repair: {e}"));
-            let again = repair_once(&staging_prompt, &e, analyzer, settings).await?;
-            dump_raw(layout, "digest-staging-retry", &again);
-            parse_staging(&again).map_err(|e2| {
-                let dump = layout.data().join(".last-analyze-raw.json");
-                let _ = atomic_write(&dump, &again);
-                anyhow::anyhow!(
-                    "digest staging invalid ({e2}); raw saved to {}",
-                    dump.display()
-                )
-            })?
-        }
-    };
-
-    let mut soft_released: Option<String> = None;
-    if let Some(gap) = sound_design_gap(&script, &text, &vocab.injects) {
+    let windows = plan_windows(&prepared, &settings.digest);
+    let total = windows.len();
+    let mut parts = Parts::open(layout, n, &text, bible, &windows, settings);
+    if total > 1 {
+        // Before any call, because the number of calls is the operator's
+        // business: a 40 KB chapter is sixteen of them, not two, and a digest
+        // that looks stuck is only diagnosable once the plan said so.
         progress(
-            0.88,
-            format!("sound design incomplete, asking for repairs: {gap}"),
+            0.05,
+            plan_line(n, analyzer, &windows, &prepared, settings),
         );
-        // The cue scan is a heuristic about prose, not a contradiction: an
-        // idiom trips it with nothing staged, and a gate that can never be
-        // satisfied is a deadlock — every repair burns an LLM call and the
-        // chapter refuses 100% of correct answers. So the block decays: 90%,
-        // then -25% per consecutive failure, and below a coin flip the script
-        // is accepted with a loud warning instead of refused. Deterministic
-        // (no dice): the same chapter always takes the same path, and the loop
-        // always terminates within four evaluations. Check #1 in
-        // `sound_design_gap` stays hard — an unclosed loop bed is corruption,
-        // not judgment.
-        let mut attempt = 0u32;
-        let mut gap = gap;
-        loop {
-            // 0.90, 0.68, 0.51, then 0.38: below a coin flip, accept.
-            if gap_block_p(attempt) < 0.5 {
-                let msg = format!("ch{n} sound-design gate soft-released ({gap})");
-                progress(0.88, format!("WARN: {msg}"));
-                eprintln!("WARN: {msg}");
-                soft_released = Some(msg);
-                break;
-            }
-            let again = repair_once(
-                &staging_prompt,
-                &anyhow::anyhow!(gap.clone()),
-                analyzer,
-                settings,
-            )
-            .await?;
-            dump_raw(layout, "digest-staging-retry", &again);
-            script = parse_staging(&again)?;
-            attempt += 1;
-            match sound_design_gap(&script, &text, &vocab.injects) {
-                Some(g) => gap = g,
-                None => break,
-            }
+        progress(0.06, plan_detail(&windows, &prepared));
+        if parts.len() > 0 {
+            progress(
+                0.07,
+                format!(
+                    "resuming at part {} of {total} from the checkpoint",
+                    parts.len() + 1
+                ),
+            );
         }
     }
 
-    let data = merge_rounds(&context, &script);
-    let mut outcome = assemble_outcome(bible, &data, &data, &text)?;
+    // 0.08..0.82, spent evenly across the parts, so the bar moves at the same
+    // rate whether this chapter is one part or sixteen. Within a part the two
+    // rounds split the band: attribution first, and staging — the longer and
+    // more expensive of the two — the rest of it.
+    let per = 0.74 / total as f32;
+    for (i, window) in windows.iter().enumerate().skip(parts.len()) {
+        let at = part_of(i, total);
+        let from = 0.08 + i as f32 * per;
+        let mid = from + per * 0.45;
+        let to = from + per;
+        let summaries = parts.summaries();
+        let continuity = (total > 1).then_some(Continuity {
+            index: i,
+            total,
+            plot: &summaries,
+        });
+        let slice = window.prepared(&prepared);
+        let (context, script) = stage_part(
+            layout,
+            n,
+            analyzer,
+            settings,
+            bible,
+            &vocab,
+            &slice,
+            continuity.as_ref(),
+            at,
+            progress,
+            from,
+            mid,
+            to,
+        )
+        .await?;
+        // Stored only once both rounds parsed and validated, so what a restart
+        // resumes from is work that would have been accepted — not work in
+        // progress, which is why a resume never has to re-validate a part.
+        let summary = context
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        parts.push(Part {
+            from: window.from,
+            to: window.to,
+            summary,
+            context,
+            script,
+        })?;
+    }
+
+    // ---- the sound-design gates, once every part is staged -----------------
+    //
+    // Rule 1 (a looping bed opened and never stopped) is a fact about the
+    // **whole chapter**, so it is checked on the merged segments: a bed opened
+    // at the end of one part and closed at the start of the next is closed, and
+    // a per-part check would refuse exactly the long scene this feature exists
+    // for. Its repair goes to the part that placed the surviving `sound`.
+    //
+    // Rule 2 (the text stages sounds and the script places none) is a fact about
+    // one **part**, so it is checked part by part against that part's own prose —
+    // a cue can only fail the text that contains it. For a chapter that did not
+    // split, this is `sound_design_gap`'s two rules in their original order
+    // against the whole chapter, which is what keeps the single-call digest's
+    // behaviour intact.
+    //
+    // The cue scan is a heuristic about prose, not a contradiction: an idiom
+    // trips it with nothing staged, and a gate that can never be satisfied is a
+    // deadlock — every repair burns an LLM call and the chapter refuses 100% of
+    // correct answers. So the block decays: 90%, then -25% per consecutive
+    // failure, and below a coin flip the script is accepted with a loud warning
+    // instead of refused. Deterministic (no dice): the same chapter always takes
+    // the same path, and the loop always terminates within four evaluations.
+    // An unclosed bed is still corruption rather than judgment — but the decay
+    // covers its repair too, because a model that cannot close a bed after four
+    // asks is not going to on the fifth, and a refused chapter helps nobody.
+    let what = if total == 1 { "chapter" } else { "part" };
+    // Each part's own prose, for rule 2 — or the chapter's own text when it did
+    // not split, which is the text the single-call digest has always scanned.
+    let texts: Vec<String> = if total == 1 {
+        vec![text.clone()]
+    } else {
+        windows.iter().map(|w| window_text(&prepared, w)).collect()
+    };
+    let mut soft_released: Option<String> = None;
+    let mut attempt = 0u32;
+    loop {
+        let scripts: Vec<&Value> = parts.done.iter().map(|p| &p.script).collect();
+        let scopes: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let Some((gap, owner)) = sound_gap(&scripts, &scopes, &vocab.injects, what) else {
+            break;
+        };
+        let at = part_of(owner, total);
+        progress(
+            0.88,
+            format!(
+                "{}sound design incomplete, asking for repairs: {gap}",
+                part_prefix(at)
+            ),
+        );
+        // 0.90, 0.68, 0.51, then 0.38: below a coin flip, accept.
+        if gap_block_p(attempt) < 0.5 {
+            let msg = format!(
+                "ch{n} {}sound-design gate soft-released ({gap})",
+                part_prefix(at)
+            );
+            progress(0.88, format!("WARN: {msg}"));
+            eprintln!("WARN: {msg}");
+            soft_released = Some(msg);
+            break;
+        }
+        let summaries = parts.summaries();
+        let slice = windows[owner].prepared(&prepared);
+        let script = reask_staging(
+            layout,
+            analyzer,
+            settings,
+            bible,
+            &vocab,
+            &slice,
+            &parts.done[owner].context,
+            owner,
+            total,
+            &summaries,
+            at,
+            &gap,
+        )
+        .await?;
+        parts.done[owner].script = script;
+        attempt += 1;
+    }
+
+    let (context, conflicts) = merge_contexts(&parts.done);
+    let script = merge_scripts(parts.done.iter().map(|p| &p.script));
+    let mut outcome = assemble_outcome(bible, &context, &script, &text)?;
+    // A disagreement between parts is the operator's to settle, so it is said
+    // out loud rather than resolved quietly: `mentions` is a map, a map holds one
+    // value per key, and two parts naming different owners for one surface form
+    // is a decision the alias table owes somebody.
+    for w in conflicts {
+        outcome.log.push(format!("   WARN: {w}"));
+        outcome.warnings.push(w);
+    }
     // `warnings` is dropped by the agent today; `log` is what the worker
     // prints, so the release lands in both — one for future readers, one
     // for the operator watching now.
@@ -1164,6 +2001,22 @@ pub async fn analyze_chapter(
         outcome.log.push(format!("   WARN: {w}"));
         outcome.warnings.push(w);
     }
+    if total > 1 {
+        // The plan, in the log the worker prints: the only place the cost of a
+        // long chapter is visible. Five parts and sixteen calls are the same
+        // script as one call, and only these lines say which one happened.
+        for (i, line) in part_lines(&windows, &prepared, settings)
+            .into_iter()
+            .enumerate()
+        {
+            outcome.log.insert(1 + i, line);
+        }
+    }
+    // From here the chapter is a finished script and `digest_chapter` writes it,
+    // so the checkpoint has done its job. Cleared rather than left: a re-digest,
+    // or the operator taking the chapter over by hand, has to start clean
+    // instead of resuming into parts of a script that already exists.
+    parts.clear();
     progress(1.0, format!("digest ch{n} done"));
     Ok(outcome)
 }
@@ -1321,19 +2174,41 @@ impl Round {
     }
 }
 
+/// Which part of a chapter a manual round is for.
+///
+/// `None` on every chapter that fits one answer, which is what the prompt's
+/// `part` field holds for a short chapter — so a manual digest of a chapter that
+/// did not split is the two-round gesture it has always been.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManualPart {
+    /// 1-based.
+    pub index: usize,
+    pub total: usize,
+}
+
 /// The prompt for one manual round, ready to be carried to any model.
 #[derive(Debug, Clone)]
 pub struct ManualPrompt {
     pub round: Round,
     pub text: String,
+    /// The part this round is for, when the chapter is staged in parts. The
+    /// front end shows it (`part 2/3`), because an operator pasting into a long
+    /// chapter has to know how many rounds it still owes.
+    pub part: Option<ManualPart>,
 }
 
-/// What a pasted answer produced. Exactly one field is set.
+/// What a pasted answer produced.
 #[derive(Debug, Clone)]
 pub struct ManualAnswer {
-    /// Round 1: the cast, to be handed back when asking for round 2.
+    /// The next prompt to ask, when there is one: round 2 after a cast answer,
+    /// or round 1 of the next part after a part's script.
+    pub prompt: Option<ManualPrompt>,
+    /// Round 1's validated cast, set exactly when `prompt` is round 2: it is
+    /// what round 2 was rendered against and what its answer is checked
+    /// against, so the caller has to carry it forward.
     pub cast: Option<Value>,
-    /// Round 2: the finished outcome, script assembled, delta ready.
+    /// Every part staged and merged: the finished chapter. Never set together
+    /// with `prompt`.
     pub outcome: Option<DigestOutcome>,
 }
 
@@ -1386,23 +2261,105 @@ fn manual_inputs(layout: &Layout, n: u32) -> Result<(Value, String)> {
 /// staging prompt is rendered *against that immutable speaker map*, exactly as
 /// the worker's is, so an operator who skipped round 1 gets an error rather than
 /// a prompt that quietly asks for the wrong thing.
+///
+/// A chapter too long for one answer is asked for **one part at a time**, from
+/// the same plan the worker's digest uses. The parts already staged are read
+/// from the worker's own checkpoint, so an operator picking up a chapter the
+/// cluster half-finished continues at the same boundary instead of starting
+/// over — and a chapter the cluster could not finish is one the operator can.
 pub fn manual_prompt(
     layout: &Layout,
     engine: &str,
     n: u32,
     cast: Option<&Value>,
 ) -> Result<ManualPrompt> {
-    let (bible, text) = manual_inputs(layout, n)?;
-    let prepared = prepare_chapter(&text);
-    match cast {
-        None => Ok(ManualPrompt {
-            round: Round::Cast,
-            text: build_attribution_prompt(layout, &bible, &prepared)?,
-        }),
-        Some(context) => Ok(ManualPrompt {
-            round: Round::Script,
-            text: build_staging_prompt(layout, engine, &bible, context, &prepared)?,
-        }),
+    let session = ManualSession::open(layout, n)?;
+    let index = session.parts.len();
+    let slice = session.slice(index).ok_or_else(|| {
+        anyhow::anyhow!(
+            "ch{n} is already staged in full — re-digest it instead of asking for another round"
+        )
+    })?;
+    let summaries = session.parts.summaries();
+    let continuity = session.continuity(index, &summaries);
+    let text = match cast {
+        None => build_attribution_prompt(layout, &session.bible, &slice, continuity.as_ref())?,
+        Some(context) => build_staging_prompt(
+            layout,
+            engine,
+            &session.bible,
+            context,
+            &slice,
+            continuity.as_ref(),
+        )?,
+    };
+    Ok(ManualPrompt {
+        round: match cast {
+            None => Round::Cast,
+            Some(_) => Round::Script,
+        },
+        text,
+        part: session.part(index),
+    })
+}
+
+/// One chapter as the manual flow needs it: the text, the bible, and the plan —
+/// including the parts the worker's digest may already have staged.
+///
+/// The plan is read from the workspace's `settings.json` rather than handed in,
+/// and that is deliberate: the cuts have to fall where the *worker's* digest put
+/// them, or an operator picking up a half-staged chapter would continue a
+/// different plan from the one the checkpoint was written for. Every front end —
+/// the TUI, the headless backup runner — would otherwise have to thread a knob
+/// that only changes the shape of a prompt.
+struct ManualSession {
+    bible: Value,
+    text: String,
+    prepared: PreparedChapter,
+    windows: Vec<Window>,
+    parts: Parts,
+    settings: Settings,
+}
+
+impl ManualSession {
+    fn open(layout: &Layout, n: u32) -> Result<ManualSession> {
+        let (bible, text) = manual_inputs(layout, n)?;
+        let prepared = prepare_chapter(&text);
+        let settings = Settings::load(&layout.settings());
+        let windows = plan_windows(&prepared, &settings.digest);
+        let parts = Parts::open(layout, n, &text, &bible, &windows, &settings);
+        Ok(ManualSession {
+            bible,
+            text,
+            prepared,
+            windows,
+            parts,
+            settings,
+        })
+    }
+
+    fn total(&self) -> usize {
+        self.windows.len()
+    }
+
+    /// The events of the part a round belongs to.
+    fn slice(&self, index: usize) -> Option<PreparedChapter> {
+        self.windows.get(index).map(|w| w.prepared(&self.prepared))
+    }
+
+    fn part(&self, index: usize) -> Option<ManualPart> {
+        part_of(index, self.total()).map(|(index, total)| ManualPart { index, total })
+    }
+
+    /// The continuity block for a part, or `None` for a chapter that fits one
+    /// answer — which is what keeps a short chapter's prompts the ones the
+    /// single-call digest builds.
+    fn continuity<'a>(&self, index: usize, plot: &'a [String]) -> Option<Continuity<'a>> {
+        (self.total() > 1).then_some(Continuity {
+            index,
+            total: self.total(),
+            plot,
+        })
     }
 }
 
@@ -1414,8 +2371,12 @@ pub fn manual_prompt(
 /// too, with the validator's own complaint as the message, because the operator
 /// is the one who can act on it.
 ///
-/// Nothing is written. Committing is [`write_script`], called by the caller, so
-/// what lands is one write site rather than two that could differ.
+/// Nothing is written to the chapter itself. Committing is [`write_script`],
+/// called by the caller, so what lands is one write site rather than two that
+/// could differ. The one file this does write is the **parts checkpoint**, the
+/// same one the worker's digest uses: a part is stored when it is accepted, so a
+/// chapter handed from the cluster to an operator — or the other way round —
+/// continues instead of restarting.
 pub fn manual_accept(
     layout: &Layout,
     n: u32,
@@ -1423,11 +2384,30 @@ pub fn manual_accept(
     pasted: &str,
     cast: Option<&Value>,
 ) -> Result<ManualAnswer> {
-    let (bible, text) = manual_inputs(layout, n)?;
-    let prepared = prepare_chapter(&text);
+    let mut session = ManualSession::open(layout, n)?;
+    let index = session.parts.len();
+    let slice = session.slice(index).ok_or_else(|| {
+        anyhow::anyhow!(
+            "ch{n} is already staged in full — re-digest it instead of pasting another round"
+        )
+    })?;
+    let summaries = session.parts.summaries();
+    let continuity = session.continuity(index, &summaries);
     match round {
         Round::Cast => Ok(ManualAnswer {
-            cast: Some(parse_attribution(pasted, &bible, &prepared)?),
+            // Round 2's prompt is **not** built here: it carries the engine's
+            // non-verbal vocabulary, and the engine is the caller's to name (the
+            // TUI's manual digest runs against the engine the run screen shows).
+            // The cast comes back instead, and the caller asks for round 2 with
+            // it — which is the hand-off the worker makes between its own two
+            // calls.
+            prompt: None,
+            cast: Some(parse_attribution(
+                pasted,
+                &session.bible,
+                &slice,
+                continuity.is_some(),
+            )?),
             outcome: None,
         }),
         Round::Script => {
@@ -1435,16 +2415,95 @@ pub fn manual_accept(
                 anyhow::anyhow!("round 2 needs round 1's cast — paste the cast answer first")
             })?;
             let vocab = vocabulary(layout)?;
-            let script = parse_staged_script(pasted, &bible, context, &prepared, &vocab)?;
-            // The worker asks the model again at this point; the operator is
-            // simply told, so they can paste an answer that places the sounds it
-            // staged. Same rule, different remedy.
-            if let Some(gap) = sound_design_gap(&script, &text, &vocab.injects) {
-                anyhow::bail!("{gap}");
+            let script = parse_staged_script(pasted, &session.bible, context, &slice, &vocab)?;
+            // Every part's own prose, for rule 2 — or the chapter's own text when
+            // it did not split, which is the text the single-call digest has
+            // always scanned.
+            let texts: Vec<String> = if session.total() == 1 {
+                vec![session.text.clone()]
+            } else {
+                session
+                    .windows
+                    .iter()
+                    .map(|w| window_text(&session.prepared, w))
+                    .collect()
+            };
+            let what = if session.total() == 1 { "chapter" } else { "part" };
+            // The gates run **before** the part is stored, with the pasted answer
+            // standing in as a part of its own. That ordering is the whole reason
+            // the operator can act on a refusal: the checkpoint has not moved on,
+            // so the complaint is about the answer in their clipboard and they can
+            // paste a better one for the same round.
+            let scripts: Vec<&Value> = session
+                .parts
+                .done
+                .iter()
+                .map(|p| &p.script)
+                .chain(std::iter::once(&script))
+                .collect();
+            let scopes: Vec<&str> = texts.iter().map(String::as_str).collect();
+            if let Some((gap, owner)) = sound_gap(&scripts, &scopes, &vocab.injects, what) {
+                match session.part(owner) {
+                    Some(part) => anyhow::bail!("part {}/{}: {gap}", part.index, part.total),
+                    None => anyhow::bail!("{gap}"),
+                }
             }
+            let summary = context
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            session.parts.push(Part {
+                from: session.windows[index].from,
+                to: session.windows[index].to,
+                summary,
+                context: context.clone(),
+                script,
+            })?;
+            if session.parts.len() < session.total() {
+                let next = session.parts.len();
+                let next_slice = session.slice(next).ok_or_else(|| {
+                    anyhow::anyhow!("ch{n} has no part {}", next + 1)
+                })?;
+                let next_summaries = session.parts.summaries();
+                let next_continuity = session.continuity(next, &next_summaries);
+                return Ok(ManualAnswer {
+                    prompt: Some(ManualPrompt {
+                        round: Round::Cast,
+                        text: build_attribution_prompt(
+                            layout,
+                            &session.bible,
+                            &next_slice,
+                            next_continuity.as_ref(),
+                        )?,
+                        part: session.part(next),
+                    }),
+                    cast: None,
+                    outcome: None,
+                });
+            }
+            let (merged, conflicts) = merge_contexts(&session.parts.done);
+            let merged_script = merge_scripts(session.parts.done.iter().map(|p| &p.script));
+            let mut outcome =
+                assemble_outcome(&session.bible, &merged, &merged_script, &session.text)?;
+            for w in conflicts {
+                outcome.log.push(format!("   WARN: {w}"));
+                outcome.warnings.push(w);
+            }
+            if session.total() > 1 {
+                for (i, line) in part_lines(&session.windows, &session.prepared, &session.settings)
+                    .into_iter()
+                    .enumerate()
+                {
+                    outcome.log.insert(1 + i, line);
+                }
+            }
+            session.parts.clear();
             Ok(ManualAnswer {
+                prompt: None,
                 cast: None,
-                outcome: Some(assemble_outcome(&bible, context, &script, &text)?),
+                outcome: Some(outcome),
             })
         }
     }
@@ -1743,8 +2802,41 @@ fn sound_design_gap(
     chapter_text: &str,
     pool: &crate::audio_pool::ClipPool,
 ) -> Option<String> {
-    let segments = script.get("segments").and_then(|s| s.as_array())?;
+    unclosed_beds(script, pool).or_else(|| silent_design(script, chapter_text, "chapter"))
+}
 
+/// Rule 1 alone: looping beds a script opened and never stopped, **in the order
+/// they opened**.
+///
+/// Split out of [`sound_design_gap`] for the windowed digest, and the split is
+/// load-bearing rather than tidiness. This rule is a fact about the *whole
+/// chapter*: a bed started at the end of one part and stopped at the start of
+/// the next is closed, and a check that ran per part would refuse a chapter
+/// whose long scene is simply wider than one prompt. The repair it asks for goes
+/// to the part that placed the surviving `sound` — the only repair that does not
+/// re-stage prose nobody complained about.
+fn unclosed_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> Option<String> {
+    let open = open_beds(script, pool);
+    if open.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} is a looping bed started with no `stop_after` — it plays once and stops dead. \
+         Close it on the line where the scene moves on",
+        open.join(", ")
+    ))
+}
+
+/// Rule 1's finding on its own: the looping beds still open when the script
+/// ends, in the order they opened.
+///
+/// Separated from the sentence it becomes because a windowed digest needs the
+/// **name**, not the complaint: the part to re-ask is the part that placed the
+/// surviving `sound`, and only the name finds it.
+fn open_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> Vec<String> {
+    let Some(segments) = script.get("segments").and_then(|s| s.as_array()) else {
+        return Vec::new();
+    };
     let mut open: Vec<&str> = Vec::new();
     for item in segments {
         if let Some(sound) = item.get("sound").and_then(|v| v.as_str()) {
@@ -1758,14 +2850,19 @@ fn sound_design_gap(
             }
         }
     }
-    if !open.is_empty() {
-        return Some(format!(
-            "{} is a looping bed started with no `stop_after` — it plays once and stops dead. \
-             Close it on the line where the scene moves on",
-            open.join(", ")
-        ));
-    }
+    open.into_iter().map(str::to_string).collect()
+}
 
+/// Rule 2 alone: the text stages sounds and this script places none.
+///
+/// A fact about one **part** of a chapter, which is why it is the half a
+/// windowed digest checks window by window: `chapter_text` here is the text that
+/// window's staging answer was actually answering, so the complaint it produces
+/// is about prose the model saw rather than prose it was never shown. `what`
+/// names the subject in the message — `chapter`, or `part` for a window — the
+/// same way `classify_fetch` is told the noun it is describing.
+fn silent_design(script: &Value, chapter_text: &str, what: &str) -> Option<String> {
+    let segments = script.get("segments").and_then(|s| s.as_array())?;
     let placed = segments
         .iter()
         .filter(|i| crate::util::is_sound_item(i))
@@ -1782,8 +2879,8 @@ fn sound_design_gap(
         return None;
     }
     Some(format!(
-        "this chapter stages sounds ({}) and this script places none — the last check in rule 10 \
-         was skipped. Place a sound for each moment the text stages",
+        "this {what} stages sounds ({}) and this {what}'s script places none — the last check in \
+         rule 10 was skipped. Place a sound for each moment the text stages",
         hit.join(", ")
     ))
 }
@@ -2241,18 +3338,57 @@ fn normalize_attribution_metadata(data: &mut Value, bible: &Value, prepared: &Pr
     data["new_characters"] = Value::Array(new_characters);
 }
 
-fn parse_attribution(raw: &str, bible: &Value, prepared: &PreparedChapter) -> Result<Value> {
+/// `split` says the answer is for one part of a chapter staged in windows,
+/// which is the only thing it changes: a part's answer must carry a `summary`,
+/// because that summary is what the next part is handed. A one-window chapter
+/// is validated exactly as before — the field is neither asked for nor
+/// required, which is what keeps a short chapter's answer identical to the
+/// pre-window digest's.
+fn parse_attribution(
+    raw: &str,
+    bible: &Value,
+    prepared: &PreparedChapter,
+    split: bool,
+) -> Result<Value> {
     let cleaned = strip_fences(raw);
     let mut data = parse_json_repaired(cleaned)
         .with_context(|| "attribution is not valid JSON".to_string())?;
     normalize_attribution_metadata(&mut data, bible, prepared);
     validate_context(&data, bible)?;
     validate_title(&data)?;
+    if split {
+        take_summary(&data)?;
+    }
     // The validated map is written back with the narration rows the preparer
     // owns, because staging reads `speakers` from this same object.
     let speakers = validate_attributions(&data, bible, prepared)?;
     data["speakers"] = json!(speakers);
     Ok(data)
+}
+
+/// The `summary` a part's attribution answer must carry: what the parts after it
+/// need to know and cannot look up.
+///
+/// Refused rather than defaulted when blank, the same way every other required
+/// field here is, and for a stronger reason than most: the summary is the whole
+/// of what a later part knows about this one, so a part that omits it leaves
+/// the rest of the chapter staged against nothing — which is the failure the
+/// field exists to remove, and it would be silent. The complaint reaches the
+/// model as the ordinary one repair, so a model that skipped the field gets a
+/// second chance in the same round.
+fn take_summary(data: &Value) -> Result<String> {
+    data.get("summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "attribution has no `summary` — this chapter is longer than one pass, so each \
+                 part's answer must say what happened in it; the parts after this one are handed \
+                 that summary and never see these events"
+            )
+        })
 }
 
 /// Attach the already validated speaker map to staging output. A speaker emitted
@@ -3102,7 +4238,7 @@ mod tests {
 
         // The automatic contracts keep dialogue identity separate from staging.
         let prepared = prepare_chapter("Chương 1: Một chuyến gặp\n\n\"Ừm!\"");
-        let attribution = build_attribution_prompt(&layout, &bible, &prepared).unwrap();
+        let attribution = build_attribution_prompt(&layout, &bible, &prepared, None).unwrap();
         assert!(attribution.contains("---ATTRIBUTION OUTPUT CONTRACT---"));
         assert!(attribution.contains("Dialogue must NEVER map to Narrator"));
         assert!(attribution.contains("Anonymous"));
@@ -3121,7 +4257,8 @@ mod tests {
             "mentions": {},
             "speakers": {"e0001": "anonymous:anon-1"}
         });
-        let staging = build_staging_prompt(&layout, "vieneu", &bible, &fixed, &prepared).unwrap();
+        let staging =
+            build_staging_prompt(&layout, "vieneu", &bible, &fixed, &prepared, None).unwrap();
         assert!(staging.contains("---STAGING OUTPUT CONTRACT---"));
         assert!(staging.contains("fixed_speakers"));
         assert!(staging.contains("Do not return `speaker`"));
@@ -3227,7 +4364,7 @@ mod tests {
         })
         .to_string();
 
-        let data = parse_attribution(&raw, &json!({"characters": []}), &prepared).unwrap();
+        let data = parse_attribution(&raw, &json!({"characters": []}), &prepared, false).unwrap();
         let names = data["new_characters"]
             .as_array()
             .unwrap()
@@ -3864,7 +5001,7 @@ mod tests {
         let root = crate::paths::Layout::find_root().unwrap();
         let layout = crate::paths::Layout::resolve(root).unwrap();
         let prepared = prepare_chapter("Hắn lật ra cuốn sách \"Khải hoàn\" bên trong.");
-        let prompt = build_attribution_prompt(&layout, &json!({}), &prepared).unwrap();
+        let prompt = build_attribution_prompt(&layout, &json!({}), &prepared, None).unwrap();
         assert!(
             prompt.contains("not_speech"),
             "the schema block must show the field, or a model returning the \
@@ -4611,5 +5748,608 @@ mod tests {
             .await
             .unwrap();
         println!("{}", serde_json::to_string_pretty(&out.script).unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // windows: one chapter staged in more than one call
+    // -----------------------------------------------------------------------
+
+    /// A chapter long enough to need parts, **built rather than committed**.
+    ///
+    /// The shape is what the tests are about — one paragraph per event, a quoted
+    /// line every third paragraph, and no cue word from rule 10's list, so the
+    /// sound-design gates stay quiet — and a 40 KB blob in the repository would
+    /// only pin the bytes. What it models is the real case: a novel chapter about
+    /// three times the length of the longest chapter in the sample corpus.
+    fn long_chapter(paragraphs: usize) -> String {
+        let mut text = String::new();
+        for i in 0..paragraphs {
+            text.push_str(&format!(
+                "Đoạn {i} kể rằng buổi chiều hôm ấy trời trở gió, và người trong sân vẫn đứng im \
+                 như tượng đá trước hiên nhà, chẳng ai dám lên tiếng trước.\n"
+            ));
+            if i % 3 == 1 {
+                text.push_str("\"Ngươi có nghe thấy tiếng gì không?\" người ấy hỏi.\n");
+            }
+        }
+        text
+    }
+
+    /// A fixture workspace with one long chapter in it.
+    fn long_layout(tag: &str, paragraphs: usize) -> (std::path::PathBuf, Layout, String) {
+        let dir = std::env::temp_dir().join(format!("bm-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::profile::install_fixture(&dir).expect("fixture profile");
+        let layout = Layout::new(&dir);
+        std::fs::create_dir_all(layout.chapters()).unwrap();
+        let text = long_chapter(paragraphs);
+        std::fs::write(layout.chapter_txt(51), &text).unwrap();
+        (dir, layout, text)
+    }
+
+    /// A part's attribution answer as a model would write it: one speaker per
+    /// *dialogue* event in the part, a roster naming only who speaks, and the
+    /// `summary` a later part is handed.
+    fn cast_answer(slice: &PreparedChapter) -> String {
+        let speakers: serde_json::Map<String, Value> = slice
+            .events
+            .iter()
+            .filter(|e| e.kind == "dialogue")
+            .map(|e| (e.id.clone(), json!("Anonymous")))
+            .collect();
+        let roster = if speakers.is_empty() {
+            json!(["Narrator"])
+        } else {
+            json!(["Narrator", "Anonymous"])
+        };
+        json!({
+            "title": "Tiếng Hỏi Trong Sân",
+            "atmosphere": "An empty courtyard at dusk.",
+            "roster": roster,
+            "mentions": {},
+            "new_characters": [],
+            "new_aliases": {},
+            "not_speech": [],
+            "speakers": speakers,
+            "summary": "The courtyard falls quiet and someone asks a question.",
+        })
+        .to_string()
+    }
+
+    /// A part's staging answer: every event of the part, once, in source order,
+    /// with its own text and no speaker — which is what the contract asks for and
+    /// what the source gate proves.
+    fn script_answer(slice: &PreparedChapter) -> String {
+        let segments: Vec<Value> = slice
+            .events
+            .iter()
+            .map(|e| json!({"source_id": e.id, "text": e.text}))
+            .collect();
+        json!({"segments": segments, "fixes": []}).to_string()
+    }
+
+    fn staged_part(from: usize, to: usize, context: Value, segments: Value) -> Part {
+        Part {
+            from,
+            to,
+            summary: format!("part {from}..{to}"),
+            context,
+            script: json!({"segments": segments, "fixes": []}),
+        }
+    }
+
+    /// **The parity promise, in bytes.** A chapter that fits one call is asked
+    /// the prompt it was always asked — no part note, no plot, and no `summary`
+    /// field — so it cannot digest differently because windows exist. The same
+    /// chapter asked as a part *does* carry the block, and part 2 is handed what
+    /// part 1 said.
+    #[test]
+    fn a_chapter_that_fits_one_call_is_asked_the_prompt_it_always_was() {
+        let (_dir, layout, text) = long_layout("one-call-prompt", 3);
+        let prepared = prepare_chapter(&text);
+        let bible = json!({"characters": []});
+        let one = build_attribution_prompt(&layout, &bible, &prepared, None).unwrap();
+        for absent in ["PART 1 OF", "PLOT SO FAR", "\"summary\""] {
+            assert!(!one.contains(absent), "{absent} reached a one-call prompt");
+        }
+
+        let first = Continuity {
+            index: 0,
+            total: 2,
+            plot: &[],
+        };
+        let part_one = build_attribution_prompt(&layout, &bible, &prepared, Some(&first)).unwrap();
+        assert!(part_one.contains("PART 1 OF 2"), "{}", head_chars(&part_one, 40));
+        assert!(part_one.contains("\"summary\""), "the field a part must return");
+        assert!(
+            !part_one.contains("PLOT SO FAR"),
+            "the first part has nothing behind it"
+        );
+
+        let plot = vec!["They reach the courtyard and nobody speaks.".to_string()];
+        let second = Continuity {
+            index: 1,
+            total: 2,
+            plot: &plot,
+        };
+        let part_two = build_attribution_prompt(&layout, &bible, &prepared, Some(&second)).unwrap();
+        assert!(part_two.contains("PART 2 OF 2"));
+        assert!(
+            part_two.contains("They reach the courtyard"),
+            "part 2 is handed part 1's own words"
+        );
+
+        // Staging has its own note, and the rule that matters for it is the bed
+        // that may be closed by the part after this one.
+        let cast = json!({"roster": ["Narrator"], "speakers": {"e0001": "Narrator"}});
+        let quiet = build_staging_prompt(&layout, "vieneu", &bible, &cast, &prepared, None).unwrap();
+        assert!(!quiet.contains("PART 1 OF"), "no part note when there is one part");
+        let split = build_staging_prompt(
+            &layout,
+            "vieneu",
+            &bible,
+            &cast,
+            &prepared,
+            Some(&second),
+        )
+        .unwrap();
+        assert!(split.contains("PART 2 OF 2"));
+        assert!(
+            split.contains("`loop`ed bed may run past the end of your part"),
+            "the bed rule, told to the round that places beds"
+        );
+        assert!(split.contains("write no ending"), "and no rounding off");
+    }
+
+    /// A part has to say what happened in it, because that summary is the whole
+    /// of what the parts after it know. A chapter that did not split is validated
+    /// exactly as before, which is the other half of the parity promise.
+    #[test]
+    fn a_part_of_a_chapter_has_to_say_what_happened_in_it() {
+        let prepared = prepare_chapter("Hắn gật đầu.\n\n\"Ừm!\"\n");
+        let bible = json!({"characters": []});
+        let answer = |extra: &str| {
+            format!(
+                "{{\"title\": \"Tiếng Hỏi Trong Sân\", \"atmosphere\": \"Quiet.\", \"roster\": \
+                 [\"Narrator\", \"Anonymous\"], \"mentions\": {{}}, \"new_characters\": [], \
+                 \"new_aliases\": {{}}, \"speakers\": {{\"e0002\": \"Anonymous\"}}{extra}}}"
+            )
+        };
+        parse_attribution(&answer(""), &bible, &prepared, false)
+            .expect("a one-call chapter is asked for no summary");
+        let err = parse_attribution(&answer(""), &bible, &prepared, true)
+            .expect_err("a part without a summary is a part the rest continues blind");
+        assert!(err.to_string().contains("summary"), "{err:#}");
+        let ok = parse_attribution(
+            &answer(", \"summary\": \"Hắn đồng ý.\""),
+            &bible,
+            &prepared,
+            true,
+        )
+        .unwrap();
+        assert_eq!(ok["summary"], json!("Hắn đồng ý."));
+    }
+
+    /// The merge: source order, one identity per person, and every speaker from
+    /// every part in one map.
+    #[test]
+    fn merging_parts_keeps_the_source_order_and_every_identity() {
+        let a = staged_part(
+            0,
+            2,
+            json!({
+                "title": "Tiếng Hỏi Trong Sân",
+                "atmosphere": "A courtyard at dusk.",
+                "roster": ["Narrator"],
+                "mentions": {"hắn": "Dịch Phong"},
+                "new_characters": [{"name": "Dịch Phong", "personality": "wry"}],
+                "new_aliases": {"Lão Phong": "Dịch Phong"},
+                "speakers": {"e0001": "Narrator"},
+            }),
+            json!([{"source_id": "e0001", "text": "Hắn gật đầu."}]),
+        );
+        let b = staged_part(
+            2,
+            3,
+            json!({
+                "title": "Something Else",
+                "atmosphere": "A hall at noon.",
+                "roster": ["Narrator", "Anonymous"],
+                "mentions": {"hắn": "Dịch Phong"},
+                "new_characters": [{"name": "Dịch Phong", "voice_hint": "low"}],
+                "new_aliases": {},
+                "speakers": {"e0003": "Anonymous"},
+            }),
+            json!([{"source_id": "e0003", "text": "Ừm!"}]),
+        );
+        let script = merge_scripts([&a.script, &b.script]);
+        let (merged, conflicts) = merge_contexts(&[a, b]);
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+
+        // The script is the parts in order, which is source order.
+        let segments = script["segments"].as_array().unwrap();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0]["source_id"], json!("e0001"));
+        assert_eq!(segments[1]["source_id"], json!("e0003"));
+
+        // The opening part names the chapter and sets its mood; the rest is the
+        // union of what the parts knew.
+        assert_eq!(merged["title"], json!("Tiếng Hỏi Trong Sân"));
+        assert_eq!(merged["atmosphere"], json!("A courtyard at dusk."));
+        assert_eq!(merged["roster"], json!(["Narrator", "Anonymous"]));
+        assert_eq!(merged["speakers"]["e0001"], json!("Narrator"));
+        assert_eq!(merged["speakers"]["e0003"], json!("Anonymous"));
+        assert_eq!(merged["mentions"]["hắn"], json!("Dịch Phong"));
+        assert_eq!(merged["new_aliases"]["Lão Phong"], json!("Dịch Phong"));
+
+        // One character declared twice is one character, and the later part fills
+        // the field the earlier one left blank without overwriting what it said.
+        let characters = merged["new_characters"].as_array().unwrap();
+        assert_eq!(characters.len(), 1, "{characters:?}");
+        assert_eq!(characters[0]["personality"], json!("wry"));
+        assert_eq!(characters[0]["voice_hint"], json!("low"));
+    }
+
+    /// Two parts owning one surface form differently is the one thing a union
+    /// cannot fix, so it is named rather than swallowed.
+    #[test]
+    fn two_parts_owning_one_form_differently_is_reported() {
+        let part = |owner: &str| {
+            staged_part(
+                0,
+                1,
+                json!({"mentions": {"hắn": owner}}),
+                json!([{"source_id": "e0001", "text": "x"}]),
+            )
+        };
+        let (merged, conflicts) = merge_contexts(&[part("Dịch Phong"), part("Vũ Kiệt")]);
+        assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+        assert!(conflicts[0].contains("Dịch Phong") && conflicts[0].contains("Vũ Kiệt"));
+        assert_eq!(
+            merged["mentions"]["hắn"],
+            json!("Dịch Phong"),
+            "the earlier part wins"
+        );
+        // Agreement is not a conflict, however many parts say the same thing.
+        let (_, conflicts) = merge_contexts(&[part("Dịch Phong"), part("Dịch Phong")]);
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+    }
+
+    /// The checkpoint is what makes a sixteen-call chapter survivable: a part is
+    /// only in it once it is finished, and it is only honoured while the chapter
+    /// text, the bible and the plan still say what they said when it was staged.
+    #[test]
+    fn the_parts_checkpoint_resumes_what_matches_and_forgets_what_does_not() {
+        let (_dir, layout, text) = long_layout("parts-checkpoint", 300);
+        let settings = Settings::load(&layout.settings());
+        let bible = json!({"characters": []});
+        let prepared = prepare_chapter(&text);
+        let windows = plan_windows(&prepared, &settings.digest);
+        assert!(windows.len() > 1, "{}", windows.len());
+
+        let mut parts = Parts::open(&layout, 51, &text, &bible, &windows, &settings);
+        assert_eq!(parts.len(), 0, "nothing is staged before the first call");
+        let first = staged_part(
+            windows[0].from,
+            windows[0].to,
+            json!({"title": "T", "summary": "câu chuyện mở ra"}),
+            json!([{"source_id": prepared.events[windows[0].from].id, "text": "x"}]),
+        );
+        parts.push(first.clone()).unwrap();
+        assert!(!parts.path.exists() || parts.path.metadata().is_ok());
+
+        let reopened = Parts::open(&layout, 51, &text, &bible, &windows, &settings);
+        assert_eq!(reopened.len(), 1, "the finished part is resumed, not re-asked");
+        assert_eq!(reopened.summaries().len(), 1);
+
+        // A different plan is a different chapter's work: the stored parts are
+        // answers to a question nobody is asking any more.
+        let chunkier = crate::config::DigestSettings {
+            chunk_sentences: 4,
+            chunk_chars: 0,
+            answer_tokens: 0,
+        };
+        let other = plan_windows(&prepared, &chunkier);
+        assert_ne!(other.len(), windows.len());
+        assert_eq!(
+            Parts::open(&layout, 51, &text, &bible, &other, &settings).len(),
+            0
+        );
+        // As is an edited chapter, even under the same plan.
+        assert_eq!(
+            Parts::open(&layout, 51, &format!("{text} x"), &bible, &windows, &settings).len(),
+            0
+        );
+        // As is another bible, which is what makes later parts' casts safe.
+        assert_eq!(
+            Parts::open(
+                &layout,
+                51,
+                &text,
+                &json!({"characters": [{"name": "Dịch Phong"}]}),
+                &windows,
+                &settings,
+            )
+            .len(),
+            0
+        );
+        // And the plan moving under a stored part drops it, rather than staging
+        // a script against events the part never saw.
+        let shifted: Vec<Window> = windows
+            .iter()
+            .skip(1)
+            .map(|w| Window {
+                from: w.from - windows[0].events,
+                to: w.to - windows[0].events,
+                ..*w
+            })
+            .collect();
+        assert_eq!(
+            Parts::open(&layout, 51, &text, &bible, &shifted, &settings).len(),
+            0
+        );
+    }
+
+    /// The gates name the part that owes an answer: the one that opened the
+    /// surviving bed, or the one whose own prose stages a cue and whose own
+    /// segments place none.
+    #[test]
+    fn the_gate_names_the_part_that_owes_an_answer() {
+        use crate::audio_pool::{ClipPool, Sound};
+        let mk = |looped: bool| Sound {
+            tags: vec![],
+            files: vec!["injects/x.mp3".into()],
+            looped,
+            dur_s: Some(25.2),
+            mode: Some("overlap".into()),
+            hold: None,
+            level: None,
+        };
+        let pool: ClipPool = [("food-prep", mk(true)), ("coin", mk(false))]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let line = |t: &str| json!({"speaker": "Narrator", "text": t});
+
+        // Rule 1 across a part boundary: opened in part 2, never closed. The
+        // part that opened it is the part to re-ask, and the merged check is what
+        // knows the chapter as a whole.
+        let quiet = json!({"segments": [line("Trời tối."), {"sound": "coin"}]});
+        let opens = json!({"segments": [line("Hai người đến phòng bếp."), {"sound": "food-prep"}, line("Rồi đi ra.")]});
+        let scripts = [&quiet, &opens];
+        let (gap, owner) = sound_gap(&scripts, &["Trời tối.", "Hai người."], &pool, "part")
+            .expect("an open bed");
+        assert_eq!(owner, 1, "the part that opened it");
+        assert!(gap.contains("food-prep") && gap.contains("stops dead"), "{gap}");
+
+        // Rule 2 is per part, and this is why: part 1's prose stages a kitchen
+        // and part 1's segments place nothing, while part 2 did place a sound.
+        // A merged check would have seen a placement and passed the chapter.
+        let silent = json!({"segments": [line("Hắn đi đến phòng bếp.")]});
+        let placed = json!({"segments": [line("Trời tối."), {"sound": "coin"}]});
+        let scripts = [&silent, &placed];
+        let (gap, owner) = sound_gap(
+            &scripts,
+            &["Hắn đi đến phòng bếp.", "Trời tối."],
+            &pool,
+            "part",
+        )
+        .expect("a part that staged a cue and placed none");
+        assert_eq!(owner, 0);
+        assert!(gap.contains("phòng bếp"), "{gap}");
+        assert!(gap.contains("part"), "the message names what it is about");
+
+        // A chapter that did not split goes through `sound_design_gap` itself, so
+        // its message still says `chapter`.
+        let scripts = [&silent];
+        let gap = sound_gap(&scripts, &["Hắn đi đến phòng bếp."], &pool, "chapter")
+            .expect("a staged chapter with none");
+        assert!(gap.0.contains("chapter"), "{}", gap.0);
+    }
+
+    /// **The end-to-end proof, without a model.** A 40 KB chapter — three times
+    /// the longest chapter in the sample corpus — is planned into parts, and the
+    /// whole manual flow is driven over it part by part: round 1, round 2, on to
+    /// the next part, until the chapter finishes. What it establishes that the
+    /// per-unit tests cannot:
+    ///
+    /// 1. the answer to one call would not have fit (so the split is the reason a
+    ///    long chapter is digestible at all, not a preference), while every part
+    ///    fits under the budget with room to spare;
+    /// 2. every part's prompt is a fraction of the one the whole chapter would
+    ///    have needed;
+    /// 3. the merged script is the script the single-call digest would have
+    ///    written: one segment per source event, in source order, nothing dropped
+    ///    at a part boundary;
+    /// 4. the checkpoint exists while the chapter is half-staged and is gone
+    ///    once it is written.
+    #[test]
+    fn a_long_chapter_is_staged_in_parts_and_merges_into_one_script() {
+        let (_dir, layout, text) = long_layout("manual-parts", 220);
+        let prepared = prepare_chapter(&text);
+        let settings = Settings::load(&layout.settings());
+        let windows = plan_windows(&prepared, &settings.digest);
+        assert!(
+            windows.len() > 1,
+            "a {}-char chapter has to need parts: {} windows",
+            text.chars().count(),
+            windows.len()
+        );
+
+        // (1) Why parts exist, in the numbers the backends impose: the answer to
+        // one call is over the hard cap every backend sets, so today it would be
+        // truncated mid-JSON and refused after a repair that fails the same way.
+        let whole_chars = weight(&prepared.events);
+        assert!(
+            tokens(whole_chars) > 16_384,
+            "the fixture must be over the hard cap in one call: {} tokens",
+            tokens(whole_chars)
+        );
+        for (i, w) in windows.iter().enumerate() {
+            assert!(
+                tokens(w.chars) < settings.digest.answer_tokens as usize,
+                "part {} does not fit the budget either: {} tokens",
+                i + 1,
+                tokens(w.chars)
+            );
+        }
+
+        // (2) The prompt shrinks with the part, which is the truncation being
+        // prevented on the *input* side as well — one backend shares the context
+        // between prompt and answer.
+        let bible = load_bible(&layout.bible());
+        let whole_prompt = build_attribution_prompt(&layout, &bible, &prepared, None).unwrap();
+        let checkpoint = layout.data().join(".digest-parts-ch51.json");
+
+        // (3) The flow, part by part, exactly as the TUI and the backup runner
+        // drive it.
+        let mut cast: Option<Value> = None;
+        let mut outcome = None;
+        let mut prompts: Vec<ManualPrompt> = Vec::new();
+        let mut part_prompts: Vec<String> = Vec::new();
+        for i in 0..windows.len() {
+            let slice = windows[i].prepared(&prepared);
+
+            let step = manual_prompt(&layout, "vieneu", 51, cast.as_ref()).unwrap();
+            assert_eq!(step.round, Round::Cast, "every part opens on its cast");
+            let part = ManualPart {
+                index: i + 1,
+                total: windows.len(),
+            };
+            assert_eq!(step.part, Some(part), "the round knows which part it is");
+            part_prompts.push(step.text.clone());
+            prompts.push(step);
+
+            let accepted =
+                manual_accept(&layout, 51, Round::Cast, &cast_answer(&slice), None).unwrap();
+            assert!(accepted.prompt.is_none(), "round 2 is asked for by the caller");
+            cast = accepted.cast;
+            assert!(cast.is_some(), "a part's cast is validated and handed back");
+
+            let second = manual_prompt(&layout, "vieneu", 51, cast.as_ref()).unwrap();
+            assert_eq!(second.round, Round::Script);
+            assert_eq!(second.part, Some(part));
+            part_prompts.push(second.text.clone());
+            if i > 0 {
+                assert!(
+                    second.text.contains("PLOT SO FAR"),
+                    "part {} is told what the parts before it established",
+                    i + 1
+                );
+            }
+
+            let accepted = manual_accept(
+                &layout,
+                51,
+                Round::Script,
+                &script_answer(&slice),
+                cast.as_ref(),
+            )
+            .unwrap();
+            cast = None;
+            if i + 1 < windows.len() {
+                assert!(
+                    checkpoint.exists(),
+                    "part {} is on disk the moment it is accepted",
+                    i + 1
+                );
+                let next = accepted.prompt.expect("the next part's cast prompt");
+                assert_eq!(next.round, Round::Cast);
+                assert_eq!(
+                    next.part,
+                    Some(ManualPart {
+                        index: i + 2,
+                        total: windows.len()
+                    })
+                );
+                assert!(accepted.outcome.is_none(), "the chapter is not finished yet");
+            } else {
+                assert!(accepted.prompt.is_none());
+                outcome = accepted.outcome;
+            }
+        }
+        let outcome = outcome.expect("the last part finishes the chapter");
+
+        // Every part's prompt is a fraction of the one the whole chapter would
+        // have needed, and none of them is the whole chapter.
+        for (i, prompt) in part_prompts.iter().enumerate() {
+            assert!(
+                prompt.len() < whole_prompt.len(),
+                "part prompt {i} is not smaller than the whole chapter's"
+            );
+        }
+
+        // (4) The chapter is written, so the parts it was built from are gone.
+        assert!(!checkpoint.exists(), "the checkpoint is cleared at the end");
+
+        // (3) The merged script: one segment per source event, in source order,
+        // with the text of the event it answers. Nothing was dropped or reordered
+        // at a part boundary — which is what makes this the single-call digest.
+        let segments = outcome.script["segments"].as_array().unwrap();
+        assert_eq!(segments.len(), prepared.events.len());
+        for (segment, event) in segments.iter().zip(&prepared.events) {
+            assert_eq!(segment["source_id"], json!(event.id));
+            assert_eq!(segment["text"], json!(event.text));
+        }
+        assert_eq!(outcome.segments, prepared.events.len());
+        assert_eq!(
+            outcome.delta["segments"].as_array().unwrap().len(),
+            prepared.events.len(),
+            "the delta the inductor merges carries the whole chapter"
+        );
+        assert_eq!(outcome.script["roster"], json!(["Narrator", "Anonymous"]));
+
+        // The ledger line says what the chapter cost, part by part — the only
+        // place a sixteen-call chapter is visible as sixteen calls.
+        assert!(
+            outcome.log.iter().any(|l| l.contains("staged in")),
+            "{:?}",
+            outcome.log
+        );
+        assert_eq!(
+            outcome.log.iter().filter(|l| l.contains("   part ")).count(),
+            windows.len()
+        );
+    }
+
+    /// A part that leaves a looping bed open is refused **before** the checkpoint
+    /// advances, so the operator can paste a better answer for the round they are
+    /// on instead of being stuck one part further on.
+    #[test]
+    fn a_part_that_leaves_a_bed_open_is_refused_without_moving_on() {
+        let (_dir, layout, _text) = long_layout("manual-gate", 300);
+        let settings = Settings::load(&layout.settings());
+        let text = std::fs::read_to_string(layout.chapter_txt(51)).unwrap();
+        let prepared = prepare_chapter(&text);
+        let windows = plan_windows(&prepared, &settings.digest);
+        assert!(windows.len() > 1);
+        for (i, w) in windows.iter().enumerate() {
+            let slice = w.prepared(&prepared);
+            let accepted =
+                manual_accept(&layout, 51, Round::Cast, &cast_answer(&slice), None).unwrap();
+            let cast = accepted.cast.unwrap();
+            // The last part's staging answer opens a bed and never closes it.
+            let mut answer: Value = serde_json::from_str(&script_answer(&slice)).unwrap();
+            if i == windows.len() - 1 {
+                answer["segments"][0]["sound_after"] = json!("food-prep");
+            }
+            let result = manual_accept(
+                &layout,
+                51,
+                Round::Script,
+                &answer.to_string(),
+                Some(&cast),
+            );
+            if i == windows.len() - 1 {
+                let err = result.expect_err("an unclosed bed is refused").to_string();
+                assert!(err.contains("food-prep"), "{err}");
+                assert!(
+                    err.starts_with(&format!("part {}/{}", i + 1, windows.len())),
+                    "the complaint names the part to fix: {err}"
+                );
+            } else {
+                result.expect("the earlier parts are fine");
+            }
+        }
     }
 }
