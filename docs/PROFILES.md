@@ -75,8 +75,10 @@ What each actually holds:
   pause, reverb, duck), `tag-aliases.json`, `LICENSES.json`. What is **gone** is
   `crawl/` (the adapter's now) and what is **new** is `pack.json`, the ordered
   list of assets this one builds on, `_extends/<name>/` (each dependency
-  unpacked — an input that is never shipped) and `_extends.json`, the generated
-  record of what a resolve inherited — see [ASSETS.md](ASSETS.md). The three pool
+  unpacked once, **flat** — an input that is never shipped) and
+  `_extends.json`, the generated record of what a resolve inherited, including
+  the closure's own map (`tree`: every pack reached, its hash, whether `deps`
+  names it, and which packs reached it) — see [ASSETS.md](ASSETS.md). The three pool
   registries, `scene-map.json`'s `rules`/`music_palette`/`reverb_presets`,
   `tag-aliases.json` and `LICENSES.json` all layer by name, so the live tree is
   its own content with its dependencies' filled in behind it: `deps` is

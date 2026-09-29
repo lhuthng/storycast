@@ -104,9 +104,15 @@ pub struct DepRecord {
 /// against.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inherited {
-    /// Every dependency folded in, in `pack.json` order.
+    /// The **direct** dependencies folded in, in `pack.json` order — what a
+    /// release names, and what a staleness check was written against before the
+    /// closure was recorded at all.
     #[serde(default)]
     pub deps: Vec<DepRecord>,
+    /// The whole **closure**, weakest first: every pack the graph reaches, once,
+    /// with the hash it was folded in at. This is the map — see [`PackNode`].
+    #[serde(default)]
+    pub tree: Vec<PackNode>,
     /// Per registry filename, `key -> hash of the value inserted`.
     #[serde(default)]
     pub keys: BTreeMap<String, BTreeMap<String, String>>,
@@ -115,10 +121,127 @@ pub struct Inherited {
     pub files: BTreeMap<String, String>,
 }
 
+/// One pack in the composition's **closure**, weakest first, and how the graph
+/// reached it.
+///
+/// `pack.json` is what an asset *declares*; this is what its tree contains once
+/// the walk has followed every dependency's own `pack.json`. The difference is
+/// the diamond: two dependencies that both name `E` are **one** `E`, folded once
+/// at the weakest position that keeps every parent behind it, and [`via`] is the
+/// only place that fact survives — a tree that folded per direct dependency
+/// would hold `E` twice and name neither.
+///
+/// It is also the map a provisioning step flattens from: one directory per
+/// `name` under `_extends/`, and `order` (this vector's order) is the order to
+/// fold them in.
+///
+/// [`via`]: PackNode::via
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackNode {
+    pub name: String,
+    /// A content hash of the pack's own tree — the number a release, a child's
+    /// `deps` and the staleness check all name.
+    pub hash: String,
+    /// Whether the live `pack.json` names it directly.
+    #[serde(default)]
+    pub direct: bool,
+    /// The packs that name it, in the order they were visited. Empty when it is
+    /// only a direct dependency.
+    #[serde(default)]
+    pub via: Vec<String>,
+}
+
 impl Inherited {
     pub fn is_empty(&self) -> bool {
         self.deps.is_empty() && self.keys.is_empty() && self.files.is_empty()
     }
+}
+
+/// The composition graph: every pack the live tree reaches, **weakest first**,
+/// each exactly once.
+///
+/// Depth-first over each pack's own `pack.json`: a pack's parents are visited
+/// before it, and the direct list's order is kept at every level. That is the
+/// flat weakest-first rule (a later name wins a shared key) carried into a
+/// graph, and it is what makes a diamond fold once — `A` naming `B` and `C`,
+/// both of which name `E`, resolves to `[E, F, B, G, C]` for `B = [E, F]` and
+/// `C = [E, G]`: `E` is folded at its weakest position, `F` still overrides it,
+/// `B` still beats both, and `C` still beats `B`. Folding per *direct*
+/// dependency instead is how one pack ends up inside two trees at once, with no
+/// record of either copy.
+///
+/// A pack's own `pack.json` **is** the edge, which is what lets a release be a
+/// node with edges instead of a copy of everything underneath it: a dependency
+/// carrying no `deps` is a leaf.
+///
+/// The closure is the **map**: [`PackNode::via`] remembers a pack reached from
+/// two parents (the only place that fact exists), and [`Inherited::tree`] stores
+/// the whole of it, so whoever provisions a checkout can place one directory per
+/// name under `_extends/` and fold them in this order.
+pub fn closure(assets: &Path) -> Result<Vec<PackNode>> {
+    let mut order: Vec<String> = Vec::new();
+    let mut nodes: BTreeMap<String, PackNode> = BTreeMap::new();
+    let mut path: Vec<String> = Vec::new();
+    for dep in read_pack(assets).deps {
+        visit(assets, &dep, true, None, &mut order, &mut nodes, &mut path)?;
+    }
+    Ok(order
+        .into_iter()
+        .filter_map(|name| nodes.remove(&name))
+        .collect())
+}
+
+/// One step of [`closure`]: a pack's parents first, then the pack, and a name
+/// already placed is only annotated — which is what keeps a diamond one node.
+#[allow(clippy::too_many_arguments)]
+fn visit(
+    assets: &Path,
+    name: &str,
+    direct: bool,
+    via: Option<&str>,
+    order: &mut Vec<String>,
+    nodes: &mut BTreeMap<String, PackNode>,
+    path: &mut Vec<String>,
+) -> Result<()> {
+    if let Some(node) = nodes.get_mut(name) {
+        node.direct |= direct;
+        if let Some(via) = via {
+            if !node.via.iter().any(|seen| seen == via) {
+                node.via.push(via.to_string());
+            }
+        }
+        return Ok(());
+    }
+    if path.iter().any(|seen| seen == name) {
+        bail!(
+            "pack '{name}' depends on itself: {} -> {name} — a composition is a graph, not a loop",
+            path.join(" -> ")
+        );
+    }
+    let dir = extends_dir(assets).join(name);
+    if !dir.is_dir() {
+        bail!(
+            "asset '{name}' is not unpacked: {} is missing — unpack its release under {}/ before resolving",
+            dir.display(),
+            extends_dir(assets).display(),
+        );
+    }
+    path.push(name.to_string());
+    for parent in read_pack(&dir).deps {
+        visit(assets, &parent, false, Some(name), order, nodes, path)?;
+    }
+    path.pop();
+    nodes.insert(
+        name.to_string(),
+        PackNode {
+            name: name.to_string(),
+            hash: tree_hash(&dir)?,
+            direct,
+            via: via.map(|v| vec![v.to_string()]).unwrap_or_default(),
+        },
+    );
+    order.push(name.to_string());
+    Ok(())
 }
 
 /// Read `assets/pack.json`. Absent or unreadable is *no dependencies*, not an
@@ -152,8 +275,12 @@ pub fn write_marker(assets: &Path, marker: &Inherited) -> Result<()> {
 /// What a resolve did — or, in a dry run, would do.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
-    /// Every dependency folded in, in order, with the hash it was folded in at.
+    /// Every **direct** dependency folded in, in order, with the hash it was
+    /// folded in at.
     pub deps: Vec<DepRecord>,
+    /// How many packs the closure held — the same count `deps` gives when the
+    /// graph is flat, and more when a dependency has dependencies.
+    pub tree: usize,
     /// Dependencies whose tree has moved since the last resolve. Empty is the
     /// steady state; non-empty is the child being stale, which is a
     /// comparison and never a guess.
@@ -185,6 +312,9 @@ impl Report {
             self.withdrawn,
             self.added
         )];
+        if self.tree > self.deps.len() {
+            parts.push(format!("{} packs in the tree", self.tree));
+        }
         if self.adopted > 0 {
             parts.push(format!("{} kept (edited here)", self.adopted));
         }
@@ -859,7 +989,6 @@ impl Layer {
 /// deletions and copies, so it can be run on a live tree by anyone asking
 /// "what would this do".
 pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
-    let pack = read_pack(assets);
     let old = read_marker(assets);
     let mut report = Report {
         dry_run,
@@ -946,36 +1075,47 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
     //    an earlier one on a shared key, but never the asset's own — which is
     //    why "already present" has to be told apart from "filled in by a
     //    dependency", and not simply tested with `contains_key`.
-    let mut marker = Inherited::default();
+    // The **closure**, weakest first, each pack once: the graph is what is folded
+    // in, not the direct list, so a pack two dependencies share is one tree here
+    // and one fold — see [`closure`].
+    let tree = closure(assets)?;
+    report.tree = tree.len();
+    let mut marker = Inherited {
+        tree: tree.clone(),
+        ..Inherited::default()
+    };
     let mut filled_keys: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
     let mut filled_files: BTreeSet<String> = BTreeSet::new();
-    let previous: BTreeMap<&str, &str> = old
+    // What the last resolve folded, to compare against. The closure when the
+    // record has one, the direct list otherwise — a marker written before the
+    // tree was recorded still says what the child was built against.
+    let mut previous: BTreeMap<&str, &str> = old
         .deps
         .iter()
         .map(|d| (d.name.as_str(), d.hash.as_str()))
         .collect();
+    for node in &old.tree {
+        previous.insert(node.name.as_str(), node.hash.as_str());
+    }
 
-    for dep in &pack.deps {
+    for node in &tree {
+        let dep = &node.name;
         let dir = extends_dir(assets).join(dep);
-        if !dir.is_dir() {
-            bail!(
-                "asset '{dep}' is not unpacked: {} is missing — unpack its release under {}/ before resolving",
-                dir.display(),
-                extends_dir(assets).display(),
-            );
-        }
         let record = DepRecord {
             name: dep.clone(),
-            hash: tree_hash(&dir)?,
+            hash: node.hash.clone(),
         };
-        if previous
-            .get(dep.as_str())
-            .is_some_and(|was| *was != record.hash)
-        {
+        // Every pack in the closure is compared, so a parent that moved under a
+        // dependency the child never named directly is caught here too.
+        if previous.get(dep.as_str()).is_some_and(|was| *was != record.hash) {
             report.stale.push(dep.clone());
         }
-        marker.deps.push(record.clone());
-        report.deps.push(record);
+        // Only the direct ones are "the dependencies" — what a release of this
+        // asset names, and what the flat fold used to mean.
+        if node.direct {
+            marker.deps.push(record.clone());
+            report.deps.push(record);
+        }
 
         for kind in PoolKind::ALL {
             let parent = load_pool(&dir.join(kind.registry()));
@@ -1061,11 +1201,14 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
         }
     }
 
-    // The lists last, strongest dependency first: see `Layer::fill_lists`.
-    for dep in pack.deps.iter().rev() {
-        let dir = extends_dir(assets).join(dep);
+    // The lists last, strongest pack first, over the whole closure: a diamond's
+    // shared parent has one entry here, so its rules are appended once, at its
+    // own (weakest) position — and the record names the pack that shipped them
+    // rather than whichever dependency happened to contain a copy.
+    for node in tree.iter().rev() {
+        let dir = extends_dir(assets).join(&node.name);
         for layer in layers.iter_mut() {
-            layer.fill_lists(&dir, dep);
+            layer.fill_lists(&dir, &node.name);
         }
     }
 
@@ -1225,6 +1368,155 @@ mod tests {
             format!("{{\n{}\n}}\n", body.join(",\n")),
         )
         .unwrap();
+    }
+
+    /// **The diamond, folded once.** `B` and `C` both name `E`, which is the
+    /// shape a preset reaches the moment two of its libraries share a parent:
+    /// folding per *direct* dependency puts a copy of `E` inside each of them and
+    /// records neither, so a fix to `E` is a fix in two places and the tree has
+    /// no way to say so.
+    ///
+    /// The closure is the answer: `E` is one node at its weakest position, every
+    /// parent still sits behind it, and `via` is where the shared reach is
+    /// written down — which is the map a provisioning step flattens from.
+    #[test]
+    fn a_shared_parent_is_folded_once_and_the_map_says_how_it_was_reached() {
+        let assets = scratch("diamond");
+        std::fs::write(pack_path(&assets), r#"{"deps":["B","C"]}"#).unwrap();
+        // E is the shared parent; F overrides one of its keys (the "some" case).
+        write_pool(
+            &dep_tree(&assets, "E"),
+            "effect-pool.json",
+            &[("wind", "E-wind"), ("rain", "E-rain")],
+        );
+        write_pool(
+            &dep_tree(&assets, "F"),
+            "effect-pool.json",
+            &[("wind", "F-wind")],
+        );
+        let b = dep_tree(&assets, "B");
+        std::fs::write(pack_path(&b), r#"{"deps":["E","F"]}"#).unwrap();
+        write_pool(&b, "effect-pool.json", &[("night", "B-night")]);
+        write_pool(
+            &dep_tree(&assets, "G"),
+            "effect-pool.json",
+            &[("snow", "G-snow")],
+        );
+        let c = dep_tree(&assets, "C");
+        std::fs::write(pack_path(&c), r#"{"deps":["E","G"]}"#).unwrap();
+        // C's own rain, so the strongest dependency visibly wins a shared key.
+        write_pool(&c, "effect-pool.json", &[("rain", "C-rain")]);
+
+        let tree = closure(&assets).unwrap();
+        let names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["E", "F", "B", "G", "C"],
+            "weakest first, parents before children, each pack once"
+        );
+        assert_eq!(
+            tree.iter().filter(|n| n.name == "E").count(),
+            1,
+            "E is one node, not one per parent"
+        );
+        let shared = tree.iter().find(|n| n.name == "E").unwrap();
+        assert!(!shared.direct, "E is reached through its children");
+        assert_eq!(shared.via, ["B", "C"], "and the map remembers both paths");
+        assert_eq!(shared.hash.len(), 64, "a node carries the hash it folded at");
+        let direct = tree.iter().find(|n| n.name == "B").unwrap();
+        assert!(direct.direct && direct.via.is_empty(), "B is named here");
+
+        let r = resolve(&assets, false).unwrap();
+        assert_eq!(r.tree, 5, "the report counts the closure: {r:?}");
+        assert_eq!(r.deps.len(), 2, "but `deps` stays the direct list");
+
+        // The record is the map, and it says which node is a dependency and
+        // which was only reached through one.
+        let marker = read_marker(&assets);
+        let recorded: Vec<&str> = marker.tree.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(recorded, names, "the record is the closure, in fold order");
+        let deps: Vec<&str> = marker.deps.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(deps, ["B", "C"], "a release names the direct ones");
+        assert_eq!(
+            marker.tree.iter().find(|n| n.name == "E").unwrap().via,
+            ["B", "C"],
+            "the shared parent survives a re-resolve with both paths"
+        );
+
+        // And the order is the precedence: E first, F overrides it, C beats B.
+        let pool = load_pool(&assets.join("effect-pool.json"));
+        assert_eq!(pool["wind"].tags, vec!["F-wind"], "F overrides E");
+        assert_eq!(pool["rain"].tags, vec!["C-rain"], "C beats B and E");
+        assert_eq!(pool["night"].tags, vec!["B-night"]);
+        assert_eq!(pool["snow"].tags, vec!["G-snow"]);
+        assert!(marker.keys["effect-pool.json"].contains_key("snow"), "G's own key is recorded as inherited");
+
+        // A second resolve reaches the same answer, E still once.
+        let again = resolve(&assets, false).unwrap();
+        assert!(!again.changed(), "{again:?}");
+        assert_eq!(
+            read_marker(&assets).tree.iter().filter(|n| n.name == "E").count(),
+            1
+        );
+    }
+
+    /// A parent that moves *under* a dependency the child never named directly
+    /// is the staleness a flat fold could not see: the child's own `deps` list
+    /// does not mention it, so comparing that list alone reads as up to date.
+    #[test]
+    fn a_parent_that_moves_below_a_dependency_makes_the_child_stale() {
+        let assets = scratch("deep-stale");
+        std::fs::write(pack_path(&assets), r#"{"deps":["B"]}"#).unwrap();
+        let b = dep_tree(&assets, "B");
+        std::fs::write(pack_path(&b), r#"{"deps":["E"]}"#).unwrap();
+        let e = dep_tree(&assets, "E");
+        write_pool(&e, "effect-pool.json", &[("wind", "E-wind")]);
+
+        assert!(resolve(&assets, false).unwrap().stale.is_empty());
+
+        // E moves — one more clip — and only the closure can say so.
+        std::fs::create_dir_all(e.join("effects")).unwrap();
+        std::fs::write(e.join("effects/wind-2.mp3"), b"clip").unwrap();
+        let r = resolve(&assets, false).unwrap();
+        assert_eq!(r.stale, ["E"], "the grandparent moved: {r:?}");
+        assert!(
+            assets.join("effects/wind-2.mp3").is_file(),
+            "and its content still arrives"
+        );
+        assert!(resolve(&assets, false).unwrap().stale.is_empty());
+    }
+
+    /// A graph that loops is a mistake to name, not to follow: the walk says
+    /// which packs form the loop rather than spinning or blowing the stack.
+    #[test]
+    fn a_graph_that_loops_is_refused_with_the_path() {
+        let assets = scratch("cycle");
+        std::fs::write(pack_path(&assets), r#"{"deps":["B"]}"#).unwrap();
+        let b = dep_tree(&assets, "B");
+        std::fs::write(pack_path(&b), r#"{"deps":["B2"]}"#).unwrap();
+        let b2 = dep_tree(&assets, "B2");
+        std::fs::write(pack_path(&b2), r#"{"deps":["B"]}"#).unwrap();
+
+        let err = closure(&assets).unwrap_err().to_string();
+        assert!(err.contains("depends on itself"), "{err}");
+        assert!(err.contains("B -> B2 -> B"), "it names the loop: {err}");
+    }
+
+    /// A dependency that is not on disk is named before anything is folded in,
+    /// so a half-unpacked closure never half-resolves.
+    #[test]
+    fn a_missing_pack_in_the_closure_is_refused_by_name() {
+        let assets = scratch("missing-in-closure");
+        std::fs::write(pack_path(&assets), r#"{"deps":["B"]}"#).unwrap();
+        let b = dep_tree(&assets, "B");
+        std::fs::write(pack_path(&b), r#"{"deps":["E"]}"#).unwrap();
+
+        let err = resolve(&assets, false).unwrap_err().to_string();
+        assert!(err.contains("'E' is not unpacked"), "{err}");
+        assert!(
+            !marker_path(&assets).exists(),
+            "nothing was recorded for a tree that never resolved"
+        );
     }
 
     #[test]

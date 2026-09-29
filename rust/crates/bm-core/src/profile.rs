@@ -367,10 +367,17 @@ pub fn compute_manifest(
 /// The dependency's own `pack.json` and `_extends.json`, where it had them, are
 /// bookkeeping and are replaced or refused rather than inherited.
 ///
-/// The tree is refused when it *is* composed: a dependency of a dependency
-/// re-folds into its child at resolve time, so its tree is that child's inputs
-/// rather than an asset in its own right, and `"deps": []` in its manifest
-/// would be a false claim.
+/// **A composed tree is not a dependency release.** `deps` are unpacked flat —
+/// one directory per pack under `assets/_extends/`, each folded once — so a
+/// dependent that named a *composition* would put a second copy of that
+/// composition's own parents inside the tree, which is the duplication the flat
+/// shape exists to avoid; and `"deps": []` in its manifest would be a false
+/// claim about what it is. The route is to name the composition's **roots** in
+/// the dependent's own `deps`, at the position each should fold at, and let
+/// [`crate::compose::closure`] order them (`assets/_extends.json`'s `tree`
+/// records what it reached and through which pack). A composition is released as
+/// *itself* — the composed pack bundle — and a checkout that extends it names its
+/// roots rather than unpacking it as a dependency.
 ///
 /// `Piece::Adapter` is refused: a language is not composed, so it has no
 /// dependency tree to release.
@@ -386,9 +393,11 @@ pub fn compute_dep_manifest(
             dir.display()
         );
     }
-    if !crate::compose::read_pack(&dir).deps.is_empty() {
+    let names = crate::compose::read_pack(&dir).deps;
+    if !names.is_empty() {
         anyhow::bail!(
-            "'{dep}' is itself composed — its content lives in whatever inherits it; release the composed pack instead"
+            "'{dep}' is itself composed (deps: {}) — a dependency release is flat, one pack per directory: name its roots in the depending pack's own deps instead, or release the composition itself",
+            names.join(", ")
         );
     }
     let files = files_under(&dir, &[""]);
@@ -1194,8 +1203,8 @@ mod tests {
         // it, so the two numbers must differ.
         assert_ne!(released, from_disk, "bookkeeping changes the tree's hash");
 
-        // A tree that is itself composed is refused: its content lives in
-        // whatever inherits it.
+        // A tree that is itself composed is refused: a dependency release is
+        // one pack, and a dependent names a composition's roots itself.
         std::fs::write(
             dep_dir.join("pack.json"),
             r#"{ "_note": "a preset, not a root", "deps": ["weapons"] }"#,

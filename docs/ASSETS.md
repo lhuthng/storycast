@@ -198,6 +198,49 @@ Four rules fall out of it, and each is load-bearing:
   `LICENSES.json`'s members are strings, so a category is the unit; a palette
   entry is an object, so a mood is.
 
+### The tree is flat, and `_extends.json` is the map of it
+
+The dependencies are a **graph**, and what a resolve folds is its **closure**:
+`assets/_extends/` holds one directory per pack name, each folded **once**, in an
+order that is weakest-first carried into a graph. Depth-first over each pack's own
+`pack.json`, parents before the pack that names them, dependency order kept at
+every level. So `A` naming `B` and `C`, with `B = [E, F]` and `C = [E, G]`, folds
+as **`E, F, B, G, C`**: `E` is one node rather than a copy inside `B` and another
+inside `C`, `F` still overrides it, `B` still beats both, and `C` still beats
+`B`. The flat case is the same rule with one level, which is why nothing about
+`deps: ["common", "weapons", "magic"]` changed meaning.
+
+The record is the map. `_extends.json`'s `deps` stays the **direct** list — what a
+release names — and gains a `tree`: every pack the closure reached, with the hash
+it folded at, whether the live `pack.json` names it (`direct`), and `via`, the
+packs that reached it from below. **`via` is the only place a shared parent's
+second path exists**: a tree that folded per direct dependency would hold `E`
+twice and name neither. So it is the thing a provisioning step flattens from —
+one directory per `name` under `_extends/`, folded in the order `tree` is in —
+and the thing that makes a diamond visible instead of mysterious.
+
+Three consequences:
+
+* **A pack's own `pack.json` is the edge, not a formality.** A dependency whose
+tree carries `deps` is walked through; one with none is a leaf. That is what a
+release states about itself (and `--dep`'s generated `pack.json` states the empty
+one).
+* **Staleness covers the closure.** A parent that moves *under* a dependency the
+child never named directly is named in `Report::stale` too, because every node's
+hash is compared, not just the direct list — a grandparent edit is not allowed to
+read as up to date.
+* **A missing or looping pack is refused before anything is folded.** The walk
+names the pack that is not unpacked, and names the loop (`B -> B2 -> B`) rather
+than following it, so a half-unpacked composition never half-resolves.
+
+And one consequence that is deliberately *not* handled by putting a composed tree
+under `_extends/`: a composition that is unpacked as a dependency carries its own
+parents' content inside itself unless it was released sanitized, which is the
+duplication the flat shape exists to avoid. So a dependent names the closure's
+**roots** itself, in the order they should fold at — the map says what that
+closure is — and a composition is released as itself rather than as somebody's
+dependency.
+
 One consequence is worth stating because it is a decision rather than an
 accident: **the score is the genre's, so no root pack holds any.** `common`
 carries an empty `music-pool.json` whose note says where the tracks are, and the
@@ -327,9 +370,13 @@ bookkeeping (`pack.json`, `_extends.json`) inside — and a generated
 consumer fills in with their own. The plain `profile.sh pack` gained the same
 rule in reverse: a pack bundle never carries the live tree's `_extends/`,
 which is composition *input*, not content. `bm-inductor profile manifest
-<name> --dep` computes that manifest and refuses a tree that is itself
-composed — a dependency of a dependency re-folds into its child at resolve
-time, so it is not an asset in its own right.
+<name> --dep` computes that manifest and **refuses a tree that is itself
+composed**. That refusal is the flat rule, not a limitation of the walker:
+`deps` are one directory per pack, each folded once, so a dependent naming a
+*composition* would put a second copy of that composition's parents inside the
+tree — and `"deps": []` would be a false claim about what it is. Name the
+composition's roots in the dependent's own `deps`, in the order they should
+fold at; `_extends.json`'s `tree` is what that closure is.
 
 Two hashes, both in the release notes:
 
