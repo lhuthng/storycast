@@ -8499,3 +8499,180 @@ fn the_footer_calls_out_a_held_cluster_and_claims_nothing_else() {
     older.apply_state(serde_json::json!({"tasks": [], "machines": [], "beats": []}));
     assert!(!render_text(&mut older, 160, 44).contains("held ·"));
 }
+
+/// The one thing the main loop does with every event, verbatim from `tui.rs`:
+/// apply it, and on `Relayout` re-resolve before the next frame.
+///
+/// A workspace switch has to move the *dashboard*, not just the pointer on
+/// disk. Nothing tested this. `workspace_cmd` had a roundtrip test and
+/// `submit_text` had a parsing test, so the pointer was proved written and the
+/// job was proved built — and the re-resolve that makes a switch visible in a
+/// running dashboard was never exercised at all.
+async fn pump_like_the_main_loop(app: &mut App, rx: &mut tokio::sync::mpsc::UnboundedReceiver<Ev>) {
+    // `relayout` re-requests the caches it just dropped, and a receiver that
+    // is already dropped is a legal no-op for that — so this deliberately
+    // passes a dead sender rather than standing up a second channel.
+    let (dead_tx, _dead_rx) = tokio::sync::mpsc::unbounded_channel();
+    while let Ok(ev) = rx.try_recv() {
+        let relayout = matches!(ev, Ev::Done(DoneKind::Relayout));
+        app.apply(ev);
+        if relayout {
+            app.relayout(&dead_tx, &reqwest::Client::new());
+        }
+    }
+}
+
+/// The workspace job, with its `cluster_busy` guard left out and everything
+/// else verbatim.
+///
+/// The guard is the one piece of the job a test cannot carry: it asks *this
+/// machine's* own cluster whether a switch would move a live ledger — the
+/// inductor answering on the api port, local workers found by pgrep — and a
+/// test controls neither. On the very box this suite is written on, with the
+/// real cluster up, the real `run_job` refuses every switch and this test
+/// would report a dashboard bug that does not exist. What the pump has to
+/// honor is kept: the switch runs through `workspace_cmd` in a blocking task,
+/// the output travels as log lines, and a landed switch sends exactly one
+/// `Done`, a `Relayout` — the contract `pump_like_the_main_loop` exists to
+/// follow. Every other job still goes through the real `run_job`.
+async fn the_workspace_job_without_its_cluster_guard(
+    job: Job,
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+) {
+    match job {
+        Job::Workspace { layout, req, .. } => {
+            let root = layout.root.clone();
+            let listing = matches!(req, WorkspaceReq::List);
+            let cmd = match req {
+                WorkspaceReq::List => crate::WorkspaceCmd::List,
+                WorkspaceReq::Use(name) => crate::WorkspaceCmd::Use { name },
+                WorkspaceReq::New(name) => crate::WorkspaceCmd::New { name },
+            };
+            let out = tokio::task::spawn_blocking(move || crate::workspace_cmd(&root, cmd))
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("workspace task failed: {e}")));
+            let switched = out.is_ok() && !listing;
+            let (level, lines) = match out {
+                Ok(lines) => (Level::Info, lines),
+                Err(e) => (Level::Error, vec![format!("workspace: {e:#}")]),
+            };
+            for text in lines {
+                let _ = tx.send(Ev::Log(LogLine {
+                    level,
+                    wall: 0,
+                    text,
+                }));
+            }
+            let _ = tx.send(Ev::Done(if switched {
+                DoneKind::Relayout
+            } else {
+                DoneKind::Other
+            }));
+        }
+        other => run_job(other, tx).await,
+    }
+}
+
+#[tokio::test]
+async fn creating_and_switching_a_workspace_moves_the_dashboard_with_it() {
+    use super::input::dispatch;
+    use super::jobs::run_jobs_with;
+    let root = std::env::temp_dir().join(format!("bm-ws-move-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.layout = bm_core::Layout::new(&root);
+    // Loaded the way the dashboard would have it: lines and a roster already
+    // in memory. A switch that kept these would show the book we just left,
+    // under the name of the one we joined.
+    app.lines = Some(std::collections::HashMap::from([(
+        "Narrator".to_string(),
+        vec![audition_line("một")],
+    )]));
+    app.roster = Some(roster_fixture());
+    assert_eq!(app.layout.work, root, "it starts on the implicit default");
+
+    // One real job at a time, because each run consumes the job channel.
+    // `new` switches as it creates, so the first step is both halves at once.
+    {
+        let layout = app.layout.clone();
+        let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(
+            dispatch(
+                &mut app,
+                &job_tx,
+                Job::Workspace {
+                    layout,
+                    api: "http://127.0.0.1:8901".into(),
+                    req: WorkspaceReq::New("book-a".into()),
+                }
+            ),
+            "a workspace request must be dispatchable"
+        );
+        drop(job_tx);
+        run_jobs_with(job_rx, tx, the_workspace_job_without_its_cluster_guard).await;
+        pump_like_the_main_loop(&mut app, &mut rx).await;
+    }
+
+    assert_eq!(
+        app.layout.work,
+        root.join("workspaces/book-a"),
+        "creating a workspace selects it, and the dashboard follows it"
+    );
+    assert!(
+        app.lines.is_none() && app.roster.is_none(),
+        "the previous book's caches are dropped, not carried across the switch"
+    );
+
+    // A second workspace, then a switch back — the pair the first test cannot
+    // reach, because `new` always leaves the pointer on the new one.
+    std::fs::create_dir_all(root.join("workspaces/book-b")).unwrap();
+    {
+        let layout = app.layout.clone();
+        let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(dispatch(
+            &mut app,
+            &job_tx,
+            Job::Workspace {
+                layout,
+                api: "http://127.0.0.1:8901".into(),
+                req: WorkspaceReq::Use("book-b".into()),
+            }
+        ));
+
+        drop(job_tx);
+        run_jobs_with(job_rx, tx, the_workspace_job_without_its_cluster_guard).await;
+        pump_like_the_main_loop(&mut app, &mut rx).await;
+    }
+    assert_eq!(
+        app.layout.work,
+        root.join("workspaces/book-b"),
+        "selecting an existing workspace moves the dashboard onto it"
+    );
+    {
+        let layout = app.layout.clone();
+        let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(dispatch(
+            &mut app,
+            &job_tx,
+            Job::Workspace {
+                layout,
+                api: "http://127.0.0.1:8901".into(),
+                req: WorkspaceReq::Use("book-a".into()),
+            }
+        ));
+        drop(job_tx);
+        run_jobs_with(job_rx, tx, the_workspace_job_without_its_cluster_guard).await;
+        pump_like_the_main_loop(&mut app, &mut rx).await;
+    }
+    assert_eq!(
+        app.layout.work,
+        root.join("workspaces/book-a"),
+        "and switching back lands where it was asked to"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
