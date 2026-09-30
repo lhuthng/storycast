@@ -661,7 +661,15 @@ echo "probe=done"
             super::sources::BUNDLE_NAME,
             progress(live, "sources"),
         )?;
-        let (code, stdout, stderr) = self.run(&super::sources::extract_script(), 600)?;
+        let extract = if pack.is_some() {
+            // The bundle carries no `assets/` members when a pack is
+            // configured, so the pruning extract would delete a tree it
+            // cannot restore. Spare it; the pack step owns that tree.
+            super::sources::extract_script_keep_assets()
+        } else {
+            super::sources::extract_script()
+        };
+        let (code, stdout, stderr) = self.run(&extract, 600)?;
         if code != 0 {
             let hint = if stderr.contains("zstd") || stdout.contains("zstd-missing") {
                 " — install zstd on the box (apt install -y zstd)"
@@ -693,12 +701,9 @@ echo "probe=done"
             }
         ));
 
-        // **After** the extract, never before. The bundle's own delivery is a
-        // *replacement* — it prunes every tree it owns, `assets/` among them,
-        // and that is the right thing for it to do. A pack landing in front of
-        // it would be deleted by the step that follows, and the box would come
-        // up with a profile and no assets, which is the one combination nothing
-        // downstream reports as an error.
+        // **After** the extract, so the log reads in delivery order. Either
+        // order is safe now — the pack-configured extract spares `$D/assets`
+        // — but the pack is the bigger story and belongs last in the report.
         if let Some(r) = pack {
             lines.push(self.install_pack(layout, r, live)?);
         }
@@ -754,14 +759,29 @@ echo "probe=done"
     /// fetched one are the same bytes — which is why the stamp records the
     /// release hash on a box that took the push, and why the next provision
     /// does not try to fetch what is already there.
+    ///
+    /// Before any of that, the delta: a box whose receipt names this same
+    /// release version gets only what moved — changed files over rsync,
+    /// removed paths deleted, receipt rewritten — and the preset it holds is
+    /// never pruned, re-pushed or re-fetched. See [`Self::install_pack_delta`].
     pub fn install_pack(
         &self,
         layout: &crate::Layout,
         release: &crate::artifact::PackRelease,
         live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<String> {
+        if let Some(line) = self.install_pack_delta(layout, release, live)? {
+            return Ok(line);
+        }
         match self.fetch_pack(release, live) {
-            Ok(line) => Ok(line),
+            Ok(line) => {
+                // The box records its own receipt on landing, but only on a
+                // new agent — so the inductor records it too, best-effort. A
+                // box that cannot record is diffed as unknown next time, never
+                // refused now.
+                let _ = self.write_pack_receipt(layout, release);
+                Ok(line)
+            }
             Err(FetchOutcome::Corrupt(e)) => {
                 if let Some(l) = live {
                     let _ = l.send(format!(
@@ -770,6 +790,7 @@ echo "probe=done"
                     ));
                 }
                 self.push_pack(layout)?;
+                self.write_pack_receipt(layout, release)?;
                 Ok(format!(
                     "pack {} v{} over the push (release disagreed: {})",
                     release.name,
@@ -785,6 +806,7 @@ echo "probe=done"
                     ));
                 }
                 self.push_pack(layout)?;
+                self.write_pack_receipt(layout, release)?;
                 Ok(format!(
                     "pack {} v{} over the push ({})",
                     release.name,
@@ -793,6 +815,147 @@ echo "probe=done"
                 ))
             }
         }
+    }
+
+    /// Sync the pack by receipt: only what moved travels.
+    ///
+    /// Returns `Ok(None)` when there is no receipt to diff against — missing,
+    /// unparseable, or naming another version — and the caller takes the whole
+    /// tree exactly as before. A receipt is a claim about bytes, so the land
+    /// is verified the same way a fetch is: the receipt is re-read afterwards
+    /// and its hash compared, and anything but a match falls through to the
+    /// whole tree rather than recording a lie.
+    ///
+    /// The delta is capped: more than half the manifest moved means the tree
+    /// was re-cut rather than edited, and a whole fetch is fewer round trips
+    /// than a file list longer than the tree. Same `Ok(None)` fall-through.
+    fn install_pack_delta(
+        &self,
+        layout: &crate::Layout,
+        release: &crate::artifact::PackRelease,
+        live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Result<Option<String>> {
+        let say = |m: String| {
+            if let Some(l) = live {
+                let _ = l.send(format!("[{}] {m}", self.target));
+            }
+        };
+        let receipt_path = format!("$HOME/{}/{}", super::REMOTE_DIR, crate::artifact::PACK_RECEIPT);
+        let (code, stdout, _) = self.run(&format!("cat {receipt_path}"), 10)?;
+        if code != 0 {
+            return Ok(None);
+        }
+        let receipt: crate::profile::Manifest = match serde_json::from_str(&stdout) {
+            Ok(m) => m,
+            Err(_) => return Ok(None),
+        };
+        if receipt.version != release.version {
+            return Ok(None);
+        }
+        let live_manifest = crate::profile::compute_manifest(
+            layout,
+            crate::profile::Piece::Pack,
+            &release.name,
+            &release.version,
+        )?;
+        let delta =
+            crate::artifact::diff_manifests(&receipt.files, &live_manifest.files);
+        if delta.changed.is_empty() && delta.removed.is_empty() {
+            return Ok(Some(format!(
+                "pack {} v{} already exact (receipt match, {} files)",
+                release.name,
+                release.version,
+                live_manifest.files.len()
+            )));
+        }
+        if delta.changed.len() + delta.removed.len() > live_manifest.files.len() / 2 {
+            say(format!(
+                "pack {} delta is most of the tree ({}/{} paths) — taking the whole tree instead",
+                release.name,
+                delta.changed.len() + delta.removed.len(),
+                live_manifest.files.len()
+            ));
+            return Ok(None);
+        }
+        let bytes: u64 = delta
+            .changed
+            .iter()
+            .map(|p| std::fs::metadata(layout.root.join(p)).map(|m| m.len()).unwrap_or(0))
+            .sum();
+        if let Err(e) = self.apply_pack_delta(layout, &delta) {
+            say(format!("pack {} delta failed ({e:#}) — taking the whole tree instead", release.name));
+            return Ok(None);
+        }
+        let text = crate::artifact::receipt_text(&live_manifest)?;
+        if let Err(e) = self.write_remote_file(crate::artifact::PACK_RECEIPT, &text) {
+            say(format!("pack {} delta landed but the receipt was not rewritten ({e:#}) — taking the whole tree instead", release.name));
+            return Ok(None);
+        }
+        // The receipt is a claim: re-read it and check the hash, or the next
+        // provision diffs garbage against a good tree.
+        let (code, stdout, _) = self.run(&format!("cat {receipt_path}"), 10)?;
+        let verified = code == 0
+            && serde_json::from_str::<crate::profile::Manifest>(&stdout)
+                .map(|m| crate::profile::manifest_hash(&m.files))
+                .unwrap_or_default()
+                == crate::profile::manifest_hash(&live_manifest.files);
+        if !verified {
+            say(format!("pack {} delta landed but did not verify — taking the whole tree instead", release.name));
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "pack {} v{} delta: {} file(s) in, {} out ({:.1} MB over the uplink)",
+            release.name,
+            release.version,
+            delta.changed.len(),
+            delta.removed.len(),
+            bytes as f64 / 1e6
+        )))
+    }
+
+    /// Push the changed paths and delete the removed ones, worker-relative.
+    fn apply_pack_delta(
+        &self,
+        layout: &crate::Layout,
+        delta: &crate::artifact::PackDelta,
+    ) -> Result<()> {
+        if !delta.changed.is_empty() {
+            self.rsync_push_files(&layout.root, &delta.changed)?;
+        }
+        if !delta.removed.is_empty() {
+            let mut script = String::from("set -e\n");
+            for p in &delta.removed {
+                script.push_str(&format!(
+                    "rm -f \"$HOME/{}/{}\"\n",
+                    super::REMOTE_DIR,
+                    p.replace('\'', "'\\''")
+                ));
+            }
+            let (code, _, stderr) = self.run(&script, 60)?;
+            if code != 0 {
+                anyhow::bail!("removing {} stale path(s): {}", delta.removed.len(), stderr.trim());
+            }
+        }
+        Ok(())
+    }
+
+    /// Record what a pushed pack holds: the live manifest as the box receipt,
+    /// so the next provision diffs instead of refetching. The fetch path is
+    /// recorded by the box itself on landing; a box that cannot record is
+    /// diffed as unknown next time, never refused now.
+    fn write_pack_receipt(
+        &self,
+        layout: &crate::Layout,
+        release: &crate::artifact::PackRelease,
+    ) -> Result<()> {
+        let manifest = crate::profile::compute_manifest(
+            layout,
+            crate::profile::Piece::Pack,
+            &release.name,
+            &release.version,
+        )?;
+        let text = crate::artifact::receipt_text(&manifest)?;
+        self.write_remote_file(crate::artifact::PACK_RECEIPT, &text)
     }
 
     /// Push the TTS sidecar binary and the shared ONNX Runtime it links.

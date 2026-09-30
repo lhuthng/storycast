@@ -669,11 +669,30 @@ pub struct SourcesManifest {
 /// `--delete` was there to prevent — and `refs/` (144 MB of the inductor's own
 /// material on every box that predates this) would never leave.
 ///
+/// `keep_assets` spares `$D/assets`: with a pack release configured the bundle
+/// carries no `assets/` members, so pruning it deletes a tree the archive
+/// cannot restore — and the pack step that follows owns that tree, by fetch,
+/// by push, or by delta. Pruning only what the archive owns is what keeps the
+/// two deliveries from deleting each other's work.
+///
 /// `unzstd` is not assumed present by name: `zstd -dc` is the same binary the
 /// box needs anyway, and a box without it is told so in one line rather than
 /// failing with a shell error naming nothing.
 pub fn extract_script() -> String {
-    let owned: Vec<String> = OWNED.iter().map(|o| format!("\"$D/{o}\"")).collect();
+    extract_script_with(false)
+}
+
+/// [`extract_script`], sparing `$D/assets` for the pack step that follows.
+pub fn extract_script_keep_assets() -> String {
+    extract_script_with(true)
+}
+
+fn extract_script_with(keep_assets: bool) -> String {
+    let owned: Vec<String> = OWNED
+        .iter()
+        .filter(|o| !keep_assets || **o != crate::artifact::PACK_DIR)
+        .map(|o| format!("\"$D/{o}\""))
+        .collect();
     format!(
         r#"set -e
 D="$HOME/{d}"
@@ -1127,6 +1146,25 @@ mod tests {
         assert!(s.contains("SOURCES-OK"), "{s}");
     }
 
+    /// With a pack release configured the bundle step spares `$D/assets`: the
+    /// bundle carries no `assets/` members, so pruning it would delete a tree
+    /// the archive cannot restore, and the pack step owns that tree by fetch,
+    /// push or delta. Everything else still prunes.
+    #[test]
+    fn the_pack_extract_spares_assets_and_prunes_the_rest() {
+        let s = extract_script_keep_assets();
+        assert!(
+            s.contains(r#"rm -rf "$D/prompts" "$D/crawl" "$D/adapters""#),
+            "{s}"
+        );
+        assert!(!s.contains(r#""$D/assets""#), "assets/ must survive: {s}");
+        assert!(
+            s.contains(r#""$D/refs""#),
+            "the inductor's own material must still leave: {s}"
+        );
+        assert!(s.contains("SOURCES-OK"), "{s}");
+    }
+
     /// A fetched pack takes the **whole** `assets/` subtree out of the bundle,
     /// and nothing else.
     ///
@@ -1137,11 +1175,11 @@ mod tests {
     /// would be a merge that degrades one sound to silence — so the two sets
     /// are compared, not assumed equal.
     ///
-    /// The second assertion is the ordering constraint, and it is not a style
-    /// choice: the extract script prunes `$D/assets` before it extracts, so a
-    /// pack landing *before* the sources step is deleted by the step that
-    /// follows. `install_sources` therefore runs the pack last, and this says
-    /// why that is not negotiable.
+    /// The second assertion is the ownership constraint: the bundle step runs
+    /// the assets-sparing extract when a pack is configured, so neither order
+    /// deletes the other's tree — the bundle owns every tree it carries and
+    /// the pack owns `assets/`. `install_sources` still runs the pack last so
+    /// the log reads in delivery order.
     #[test]
     fn a_fetched_pack_takes_the_whole_assets_subtree_out_of_the_bundle() {
         let l = fixture("pack-split");

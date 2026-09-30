@@ -445,6 +445,97 @@ impl Ssh {
         Ok(())
     }
 
+    /// Push exactly the named root-relative paths into the worker root.
+    ///
+    /// The delta half of pack sync: a manifest diff says which `assets/…`
+    /// paths moved, and only those travel — no tree walk, no `--delete`, so
+    /// the preset the box holds is never touched outside the delta. Paths
+    /// come from a manifest diff and are refused unless they stay under the
+    /// root (`..` or absolute), because rsync `--files-from` would otherwise
+    /// follow them off it.
+    pub fn rsync_push_files(&self, root: &Path, files: &[String]) -> Result<()> {
+        for f in files {
+            if f.starts_with('/') || f.split('/').any(|p| p == "..") {
+                anyhow::bail!("refusing to push {f:?}: manifest paths stay under the root");
+            }
+        }
+        if self.local {
+            let home = std::env::var("HOME").context("HOME not set")?;
+            for f in files {
+                let dst = Path::new(&home).join(REMOTE_DIR).join(f);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(root.join(f), &dst)
+                    .with_context(|| format!("copying {} -> {}", root.join(f).display(), dst.display()))?;
+            }
+            return Ok(());
+        }
+        let list = std::env::temp_dir().join(format!("bm-delta-{}.list", std::process::id()));
+        std::fs::write(&list, files.join("\n"))
+            .with_context(|| format!("writing {}", list.display()))?;
+        let r = self.rsync_push_files_from(root, &list);
+        let _ = std::fs::remove_file(&list);
+        r
+    }
+
+    fn rsync_push_files_from(&self, root: &Path, list: &Path) -> Result<()> {
+        let dst = format!("{}:{}/", self.target, REMOTE_DIR);
+        let src_s = format!("{}/", root.to_string_lossy());
+        let (code, _, stderr) = with_transport_retries(|| {
+            run_bounded(
+                Command::new("rsync").args([
+                    "-a",
+                    "--no-perms",
+                    RSYNC_IO_TIMEOUT,
+                    "--files-from",
+                    &list.to_string_lossy(),
+                    "-e",
+                    &self.rsync_e(),
+                    &src_s,
+                    &dst,
+                ]),
+                RSYNC_TIMEOUT_SECS,
+                &format!("rsync delta push to {}", self.target),
+            )
+        })?;
+        if code != 0 {
+            anyhow::bail!(
+                "rsync delta push failed: {} (to {}, exit {code})",
+                crate::util::head_chars(&stderr, 300),
+                self.target
+            );
+        }
+        Ok(())
+    }
+
+    /// Write text to a worker-root-relative path: receipts and checksum lists,
+    /// the files no push owns. Quoted heredoc, so JSON bodies travel byte for
+    /// byte with no shell re-parse.
+    pub fn write_remote_file(&self, remote_rel: &str, text: &str) -> Result<()> {
+        if remote_rel.starts_with('/') || remote_rel.split('/').any(|p| p == "..") {
+            anyhow::bail!("refusing to write {remote_rel:?}: worker paths stay under the root");
+        }
+        if self.local {
+            let home = std::env::var("HOME").context("HOME not set")?;
+            let dst = Path::new(&home).join(REMOTE_DIR).join(remote_rel);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            crate::atomic_write(&dst, text)?;
+            return Ok(());
+        }
+        let script = format!(
+            "cat > $HOME/{d}/{remote_rel} << 'EOF'\n{text}\nEOF\n",
+            d = REMOTE_DIR,
+        );
+        let (code, _, stderr) = self.run(&script, 30)?;
+        if code != 0 {
+            anyhow::bail!("failed to write {remote_rel}: {}", stderr.trim());
+        }
+        Ok(())
+    }
+
     /// Local shortcut: copy inside the inductor's own `~/{REMOTE_DIR}`.
     fn rsync_push_local(&self, src: &Path, remote_rel: &str) -> Result<()> {
         let home = std::env::var("HOME").context("HOME not set")?;

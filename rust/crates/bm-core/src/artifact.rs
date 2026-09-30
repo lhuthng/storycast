@@ -142,6 +142,17 @@ pub fn release_url(repo: &str, tag: &str) -> String {
 /// The manifest a pack bundle carries at its top level, beside the tree.
 pub const PACK_MANIFEST: &str = "manifest.json";
 
+/// The receipt a box keeps of the pack it runs: the verified manifest,
+/// written beside the tree it describes, at the worker root.
+///
+/// A stamp hash says *whether* the box drifted; the receipt says *what* moved,
+/// path by path — which is what turns the next provision from a 70 MB refetch
+/// into a file list. Written on every land (fetch) and every push, so either
+/// delivery leaves the same record; read back and diffed before anything is
+/// sent, so a box whose receipt is missing or names another version takes the
+/// whole tree exactly as before.
+pub const PACK_RECEIPT: &str = "pack-manifest.json";
+
 /// The one directory a pack bundle holds, and the one a worker resolves its
 /// profile from.
 ///
@@ -524,6 +535,71 @@ fn fetch_pack_with(
     r
 }
 
+/// A pack diff: worker-relative paths to send, and paths to delete.
+///
+/// Both sorted, so the rsync file list and the `rm` line are stable for the
+/// same pair of manifests — a provision log that jitters is a log nobody can
+/// diff against the last one.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PackDelta {
+    /// In the new manifest with a different (or no) entry in the old one.
+    pub changed: Vec<String>,
+    /// In the old manifest and gone from the new one.
+    pub removed: Vec<String>,
+}
+
+/// Diff two pack manifests by path, as the receipt makes possible.
+///
+/// Pure, so the whole sync decision is testable without a box: same files,
+/// same decision, whatever the transport. Hashes compare as strings — both
+/// sides fold with [`crate::profile::manifest_hash`], so equal content is
+/// equal text and there is no second canonicalization to drift.
+pub fn diff_manifests(
+    old: &std::collections::BTreeMap<String, String>,
+    new: &std::collections::BTreeMap<String, String>,
+) -> PackDelta {
+    let mut changed: Vec<String> = new
+        .iter()
+        .filter(|(path, sum)| old.get(*path) != Some(*sum))
+        .map(|(path, _)| path.clone())
+        .collect();
+    changed.sort();
+    let mut removed: Vec<String> = old
+        .keys()
+        .filter(|path| !new.contains_key(*path))
+        .cloned()
+        .collect();
+    removed.sort();
+    PackDelta { changed, removed }
+}
+
+/// Render a pack manifest as receipt text: pretty JSON and a trailing
+/// newline, the one spelling both writers use so a receipt is comparable
+/// byte for byte no matter which side wrote it.
+pub fn receipt_text(manifest: &crate::profile::Manifest) -> Result<String> {
+    let mut text = serde_json::to_string_pretty(manifest)?;
+    text.push('\n');
+    Ok(text)
+}
+
+/// Write a pack manifest as a box receipt: the record the next provision
+/// diffs against.
+///
+/// Atomic, like every other manifest write here: a half-written receipt is
+/// worse than none, because the next provision would diff garbage against a
+/// good tree and push it. Callers treat a failure as "unknown box", never as
+/// a failed land.
+pub fn write_receipt(path: &Path, manifest: &crate::profile::Manifest) -> Result<()> {
+    crate::atomic_write(path, &receipt_text(manifest)?)
+}
+
+/// Read a receipt back. `None` for absent or unparseable — both mean the box
+/// takes the whole tree, exactly as a box that never had a receipt did.
+pub fn read_receipt(path: &Path) -> Option<crate::profile::Manifest> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 /// Open a pack bundle, check it against `expect_hash`, and swap its `assets/`
 /// into `dest`.
 ///
@@ -573,6 +649,26 @@ fn land_pack_with(
             )));
         }
         swap(&tree, dest).map_err(|e| FetchError::Corrupt(format!("{}: {e:#}", dest.display())))?;
+        // The receipt is the manifest this land verified, so a later diff
+        // compares against attested bytes rather than a directory walk. Beside
+        // the tree, not in it: the tree is swapped, the record survives.
+        // A box that cannot record what it holds is a box the next provision
+        // must treat as unknown — but landing verified bytes is never refused
+        // over bookkeeping, so this stays a warning-shaped failure.
+        let receipt = dest
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(PACK_RECEIPT);
+        match crate::profile::read_manifest_at(&stage.join(PACK_MANIFEST)) {
+            Ok(m) => {
+                if let Err(e) = write_receipt(&receipt, &m) {
+                    eprintln!("warning: pack landed but the receipt was not written ({}: {e:#})", receipt.display());
+                }
+            }
+            Err(e) => eprintln!(
+                "warning: pack landed but its manifest could not be re-read for the receipt ({e:#})"
+            ),
+        }
         Ok((
             Landing {
                 files,
@@ -1431,5 +1527,56 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bm-artifact-{what}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    fn files(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The delta is the whole sync decision: changed paths travel, removed
+    /// paths are deleted, untouched paths are never named. Identical maps
+    /// diff to nothing, which is the "already exact" short-circuit.
+    #[test]
+    fn a_manifest_diff_names_only_what_moved() {
+        let old = files(&[
+            ("assets/scene-map.json", "aa"),
+            ("assets/music/a.mp3", "bb"),
+            ("assets/music/gone.mp3", "cc"),
+        ]);
+        let new = files(&[
+            ("assets/scene-map.json", "aa"),
+            ("assets/music/a.mp3", "BB"),
+            ("assets/music/b.mp3", "dd"),
+        ]);
+        let d = diff_manifests(&old, &new);
+        assert_eq!(d.changed, vec!["assets/music/a.mp3", "assets/music/b.mp3"]);
+        assert_eq!(d.removed, vec!["assets/music/gone.mp3"]);
+        let same = diff_manifests(&new, &new);
+        assert!(same.changed.is_empty() && same.removed.is_empty());
+    }
+
+    /// The receipt round-trips through its one spelling: what the fetch path
+    /// writes, the provision path reads back, byte for byte.
+    #[test]
+    fn a_receipt_survives_its_own_spelling() {
+        let dir = tstdir("receipt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let m = crate::profile::Manifest {
+            name: "xianxia".into(),
+            version: "0.2.0".into(),
+            piece: "pack".into(),
+            files: files(&[("assets/scene-map.json", "aa")]),
+            deps: vec![],
+        };
+        let at = dir.join(PACK_RECEIPT);
+        write_receipt(&at, &m).unwrap();
+        let back = read_receipt(&at).expect("a receipt just written must parse");
+        assert_eq!(back.version, "0.2.0");
+        assert_eq!(back.files, m.files);
+        assert!(read_receipt(&dir.join("absent.json")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
