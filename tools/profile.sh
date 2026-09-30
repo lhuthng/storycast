@@ -282,6 +282,18 @@ open(sys.argv[1], "w").write(json.dumps({
     "deps": [],
 }, indent=2) + "\n")
 EOF
+      # The bundle is verified against its own manifest, file for file — so the
+      # generated pack.json this step just wrote has to be *in* that manifest,
+      # or every fetch refuses the bundle as carrying a member it never listed.
+      # (The manifest was computed before this file existed, because it
+      # describes the live tree, which must not contain generated bookkeeping.)
+      python3 - "$stage/assets/pack.json" "$stage/manifest.json" <<'EOF'
+import hashlib, json, sys
+data = open(sys.argv[1], "rb").read()
+m = json.load(open(sys.argv[2]))
+m["files"]["assets/pack.json"] = hashlib.sha256(data).hexdigest()
+json.dump(m, open(sys.argv[2], "w"), indent=2)
+EOF
     else
       for member in $(piece_members "$PIECE" "$name"); do
         [ -d "$root/$member" ] || { echo "no live $member/ to pack" >&2; exit 1; }

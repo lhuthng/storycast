@@ -405,7 +405,18 @@ the voice:
   `music_palette` (the prompt is rendered from it) or reorder place rules.
   Layers off via `"ambience": false` / `"music": false` in settings (merge
   time; the TUI run screen does not expose them yet). Normalize with
-  `tools/normalize-audio.sh` first; `level` is gain over −23 LUFS.
+  `tools/normalize-audio.sh` first; `level` is gain over **−26 LUFS** for a bed
+  and **−20** for a foreground inject. The two **vocabularies** are different
+  lists — a `scene` label is matched against the scene map's *place* words and a
+  rule's effect *tags* are matched against the pool's *bed* words — and both are
+  injected into the prompt, because a rule whose match words the analyzer has
+  never seen is a rule that never fires. The whole layer, with the eight knobs,
+  the house spec and how to record or generate a clip, is
+  [docs/SOUND.md](docs/SOUND.md); building the art as a pack is
+  [docs/ASSET-PACKS.md](docs/ASSET-PACKS.md). **What a book needs from the
+  packs, which pack holds which kind of sound, and what is still missing, is
+  [docs/AUDIO-NEEDS.md](docs/AUDIO-NEEDS.md)** — places, moments and background
+  music, with the two rules that decide whether a sound is ever heard.
 - **Legacy**: scripts without `music` still merge via `legacy_scene_music` in
   `scene-map.json` (migration shim; delete once every script has the field).
 
@@ -674,7 +685,8 @@ included. A dependency that is not unpacked is named along with the path it was
 looked for in, and a parent that has since moved makes this asset **stale** until
 it is resolved again. `asset resolve --dry-run` reports what a resolve would
 change and writes nothing; running it twice says `up to date` the second time.
-See [the assets guide](docs/ASSETS.md).
+See [the assets guide](docs/ASSETS.md), and [the sound guide](docs/SOUND.md) for
+the three layers under the voice.
 
 **A dependency has been re-cut and this checkout is behind it.** `bm-inductor
 profile update` pulls the newest release of every dependency the live

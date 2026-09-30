@@ -88,7 +88,13 @@ What each actually holds:
   table live, which is why a pack with no `common` in its chain is not runnable.
   `tag-aliases.json` is the prompt-side synonym table for the closed sound
   vocabularies, and its values must be canonical palette names — which is why it
-  is pack-side and stays in English.
+  is pack-side and stays in English. A **second** pack is not developed by
+  editing this tree: it is authored under `assets/_extends/<name>/` and released
+  as itself with `profile manifest <name> --piece pack --dep`, so the 58 MB above
+  is the size of one *composition*, not of one pack — a pack's own content is the
+  few files its registries and `scene-map.json` name. See
+  [ASSET-PACKS.md](ASSET-PACKS.md) for the recipe and
+  [SOUND.md](SOUND.md) for the art.
 - **Adapter** — the two prompt templates, plus the crawler templates the source
   language is read with (`crawl/`, 72 KB, one file per site), plus
   `adapter.json`, which is where the language stops being a guess about a

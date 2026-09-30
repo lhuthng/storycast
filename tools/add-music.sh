@@ -66,7 +66,9 @@ for f in "${inputs[@]}"; do
   else
     stem=$(basename "${f%.*}")
   fi
-  ffmpeg -y -hide_banner -loglevel error -i "$f" -vn -map_metadata -1 \
+  # -nostdin: ffmpeg otherwise reads stdin for keyboard control, which is the
+  # caller's list when this runs inside a `while read` loop (see normalize-audio.sh)
+  ffmpeg -nostdin -y -hide_banner -loglevel error -i "$f" -vn -map_metadata -1 \
     -ac 1 -ar 48000 -c:a pcm_s16le "$stage/$stem.wav"
   i=$((i + 1))
 done

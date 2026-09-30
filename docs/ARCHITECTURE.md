@@ -1126,7 +1126,10 @@ tui/jobs.rs   background jobs: the `Job` enum, the resource scheduler
 tui/audio.rs  the speaker: one reused temp file, played by afplay
 tui/audition.rs the line index and the chooser behind "hear a real line"
 tui/sound.rs  the three clip pools, what each entry is used for, and the
-              prompt/registry edits: pure, so the guard is testable
+              prompt/registry edits: pure, so the guard is testable.
+              The art itself is in docs/SOUND.md; the pack model in
+              docs/ASSET-PACKS.md, and every pack under assets/_extends/ is
+              checked by `cargo test -p bm-core --test pack_gates`
 tui/input.rs  the modal key chain, in order, then normal::normal_key
 tui/input/    one file per modal block; `audition.rs` is the shared
               four-key audition decision both voice screens call, and
@@ -1321,6 +1324,45 @@ different answer. `save_pool` rewrites only the entry that changed: the
 registries are hand-formatted and their `_note` is the only written record of
 why a pool is shaped the way it is, so an untouched pool round-trips byte for
 byte.
+
+**The merge half of that screen's world is `ambience.rs`, and the two do not
+overlap.** The editor is a *registry* problem — what a pool contains and what may
+be removed from it. The merge is a *signal path* problem, and it is worth
+stating in one place because the numbers are only meaningful in this order:
+
+```
+voice ──▶ per-scene reverb (speakers only) ──▶ voice + effects
+                                                   │
+                     effect ──▶ trim ───────────────┤
+                     music  ──▶ level ──────────────┤──▶ one sidechain ──▶ mix ──▶ limiter
+                     inject ──▶ level ──────────────┘     (keyed on the voice)
+```
+
+Three properties that are decisions rather than plumbing, and that the code
+does not restate anywhere else:
+
+* **One sidechain, on the voice bus**, applied to both layers as a single bus —
+  so "every layer drops whenever anyone speaks" is a property of the signal path
+  and not a rule each layer has to remember. The key is the whole voice track,
+  which is why the narrator ducks them exactly as a character does. `head_key` is
+  the one exception: while the chapter's headline is spoken the key is held, so
+  the opening cue comes up under the title instead of being ducked under the one
+  line it was written for.
+* **Everything is placed on the delivered clock, and the merge tempos the SPEECH
+  only** — so no clip is ever heard at `atempo`, and a layer can be retuned in
+  delivered seconds without anything else moving.
+* **A music run longer than its track is a crossfaded loop**, built from the
+  same `loop_copies` / `loop_filter` the inject layer uses for its looped beds.
+  It used to be `-stream_loop -1`, a hard butt-join, which put a short dip at
+  the seam once every couple of minutes — measured at −44.0 dB against −43.5 dB
+  either side of it. Both the gain expression for the pause lift and the crossfade
+  now live in one graph, in that order, from one builder.
+
+The whole layer is written up as a studio reference in [SOUND.md](SOUND.md): the
+eight knobs, the house audio spec, how to record a clip, and the two
+vocabularies — **place** words (the scene map's rule matches) and **bed** words
+(the effect pool's tags) — whose confusion is what kept 46 of 61 rule match words
+from ever reaching the analyzer.
 
 **Auditioning a voice is the one place the TUI makes a sound.** The split is
 deliberate and worth keeping: the *inductor* renders (`Op::PreviewVoice` calls

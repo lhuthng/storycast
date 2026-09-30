@@ -527,10 +527,16 @@ idempotent, the way the engine tree's move was.
 ## What is not decided here
 
 * **Where an asset's own art is edited** once it has dependencies and a release.
-  The live tree is the working tree, so editing it edits the resolved result; the
-  marker is what still distinguishes the two, and it is enough — but a screen
-  that shows "inherited from `common`" next to "yours" is the honest UI and is
-  not built.
+  **Answered, by practice rather than by mechanism:** develop a new pack under
+  `assets/_extends/<name>/` and release it as itself with
+  `profile manifest <name> --piece pack --dep`. The live tree is *already
+  resolved* — it holds your files and everything inherited side by side, and the
+  composition record is the only thing that tells them apart — so a hand edit
+  there is one `asset resolve` from being overwritten silently, because the
+  record still says that entry is the dependency's. A dependency directory is the
+  honest unit of authorship. The screen that would show "inherited from
+  `common`" next to "yours" is still not built; see
+  [ASSET-PACKS.md](ASSET-PACKS.md#where-the-art-is-edited).
 * **A genre cannot remove an inherited rule, only shadow it.** Restating the
   match set in the genre's own list puts its copy first and the world's never
   runs, but the world's entry stays in the tree: it is the dependency's, not
@@ -547,17 +553,26 @@ idempotent, the way the engine tree's move was.
   and every book shares it. A workspace's pack **extends its profile's pack**,
   one-to-one, and adds the book's own taste and presets on top; that tree is
   sketched in [ARCHITECTURE.md](ARCHITECTURE.md#the-map-the-book-the-machine-and-what-each-one-borrows)
-  and is not built. The second is smaller and was hit during the split: what
-  marks an inherited file as the dependency's is the **record**, so a tree that
-  decides to own a file it inherited without editing it — the score moving from
-  `common` to the genre — has to prune the marker by hand. An `asset adopt <rel>`
-  is the honest command, and is not built, as is the `asset import <file>` that
-  would make the External Library box real.
+  and is not built. **What has changed is that the gap is smaller than it was:** a
+  pack under `assets/_extends/` is now a workable authoring unit that two packs
+  in this repo use, so what remains is only the *selection* of one per book — and
+  the two packs were built and gated first so the shape the layout change has to
+  carry is a known one. Deliberately deferred to
+  [ROADMAP.md](ROADMAP.md). The second is smaller and was hit during the split:
+  what marks an inherited file as the dependency's is the **record**, so a tree
+  that decides to own a file it inherited without editing it — the score moving
+  from `common` to the genre — has to prune the marker by hand. An `asset adopt
+  <rel>` is the honest command, and is not built, as is the `asset import <file>`
+  that would make the External Library box real.
 * **Whether a language release also carries the tag vocabulary**, which is
   currently pack-side (`tag-aliases.json`) and stays in English by policy.
 
 ## See also
 
+* [ASSET-PACKS.md](ASSET-PACKS.md) — how to build a pack, with `craft` worked
+  through, and the gate that checks every one under `assets/_extends/`.
+* [SOUND.md](SOUND.md) — the three layers, the eight knobs, the house audio
+  spec, and how to record or generate a clip.
 * [PROFILES.md](PROFILES.md) — the three pieces, the binding, and where a book
   becomes a language.
 * [ARTIFACTS.md](ARTIFACTS.md) — what a publish candidate is; the stamp table.

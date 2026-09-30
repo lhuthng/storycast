@@ -138,7 +138,95 @@ Where the cloud plane lives, kept as a map now that the work is done:
 | `bm-inductor/src/tui/{draw,input}/{cloud,policy}.rs` | the Cloud view and the policy view |
 | `aws.default.json`, `aws-policy.json` | the tracked pool shape, and the policy to paste |
 
-## 3. … (more to add)
+## 3. A workspace pack: one live pack per book (`planned`, deferred)
+
+**Your words:** "no need to do a workspace until the settings are completed."
+
+**What it is.** There is exactly **one live pack** and every book shares it.
+`Layout::assets()` is the *checkout's*, unlike `prompts/` — which is
+work-scoped, so each book can already have its own. [ARCHITECTURE.md §The
+map](ARCHITECTURE.md#the-map-the-book-the-machine-and-what-each-one-borrows)
+already names this as the box that changes what a book sounds. The target: a
+workspace's pack **extends its profile's pack one-to-one** and adds the book's
+own taste and presets on top, so two books do not share a score.
+
+**What I did first, and why it was the right order.** The two packs
+(`craft`, `court-mystery`) were built and gated *before* this, so the shape a
+layout change has to carry is a known one rather than a sketch. That turned out
+to matter more than expected: the gate found on its first run that **a preset
+must answer the entire palette it inherits**, because the mood vocabulary lives
+in a root and no root holds a score. That is a property of the data model, not
+of the workspace question, and it is now written down in
+[SOUND.md §8](SOUND.md#8-the-mood-vocabulary-and-how-it-grows).
+
+**What I'd do first.** Make `Layout::assets()` work-scoped the way `prompts/`
+already is, reading the workspace's own `pack.json` and falling back to the
+profile's. Everything else — a workspace releasing its own composition, the
+binding pointing at it — follows from that one line.
+
+**Not now.** It is a layout change, and the two packs are the thing it has to
+carry.
+
+## 4. The music loop seam becomes a property, not a fix (`planned`)
+
+**Your words:** part of the Apothecary sound-design plan, §8.1.
+
+**What shipped.** A music run longer than its track was rendered with
+`-stream_loop -1` — a hard butt-join — while the inject layer already had
+`loop_copies` / `loop_filter` for exactly this. The seam is not theory: a test
+clip with a 50 ms end fade measured **−44.0 dB at the seam against −43.5 dB
+either side of it**, once every couple of minutes, for the length of a chapter.
+The music path now uses the same crossfade, with the pause-lift gain expression
+on the loop's tail so a looping track still lifts inside a beat.
+
+**What is left.** The *fix* is in; the **property** is not. State it — "a music
+track is always rendered as a crossfaded loop, never butt-joined" — in
+[SOUND.md](SOUND.md), and assert it with the test that already exists, so a
+future edit to the music path cannot quietly reintroduce `-stream_loop`. A
+`grep` in CI would be cruder and would rot; the test is the honest version.
+
+## 5. CI that can see a real pack (`planned`)
+
+**Your words:** part of the Apothecary sound-design plan, §8.2.
+
+**What shipped.** `cargo test -p bm-core --test pack_gates` walks every pack
+under `assets/_extends/`, resolves each in a scratch root, and checks that every
+palette value but `none` is answered by a track, every rule's effect tags are
+answered by a bed, and every named file is present or not-yet-recorded. It found
+two real defects in a real pack on its first run — a palette value inherited
+without an answer, and two effect tags with no bed, both of which are silent
+failures with no error anywhere.
+
+**What is left.** That gate only runs on a machine that *has* the tree, and
+`/assets/*` is git-ignored — so a fresh clone gets the fixture and nothing else.
+The durable version is a **fixture profile that mirrors the real palette
+vocabulary**, so `cargo test` on a clean checkout catches a mood with no track
+with no `assets/` present at all. That is the difference between a convention and
+a gate, and it is the same class of change as item 3: worth doing, not worth
+rushing.
+
+## 6. Carried forward from ASSETS.md's own list (`planned`)
+
+Four things that file already names as undecided and that **sound design hits
+first**, because a pack is mostly sound design. All in
+[ASSETS.md §What is not decided here](ASSETS.md#what-is-not-decided-here), restated
+here so they are not lost:
+
+* **`asset adopt <rel>`** — what marks an inherited file as the dependency's is
+  the composition record, so a tree that decides to *own* a file it inherited
+  without editing it has to prune the marker by hand. This is what happens the
+  day a preset wants a track `common` shipped.
+* **`asset import <file>`** — what would make the External Library box real.
+* **An explicit `shadowed` list** — a genre can shadow an inherited rule by
+  restating its match set, but the world's entry stays in the tree. A way to say
+  "not here" rather than restating it forever.
+* **A screen showing "inherited from `common`" beside "yours"** — so editing the
+  resolved tree is visible before it is overwritten. The authoring answer is
+  already decided ([ASSET-PACKS.md](ASSET-PACKS.md#where-the-art-is-edited): never
+  edit the resolved tree), and this is the UI that would make the mistake
+  impossible rather than merely discouraged.
+
+## 7. … (more to add)
 
 Reserved. Tell me the next item and it goes here with the same treatment:
 your words first, my reading to confirm, then the concrete steps.
