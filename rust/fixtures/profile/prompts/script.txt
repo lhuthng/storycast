@@ -12,6 +12,9 @@ CHARACTERS
 MOODS
 {music_palette}
 
+PLACES
+{scene_words}
+
 EFFECTS
 {effect_tags}
 

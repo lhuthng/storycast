@@ -534,9 +534,43 @@ pub fn palette_prompt(map: &SceneMap) -> String {
         .join("; ")
 }
 
-/// Every tag any effect-pool sound answers to, sorted and deduped: the effect
+/// The scene map's rule vocabulary rendered for the digest prompt: every match
+/// word the resolved rules can match, sorted and deduped.
+///
+/// **The place vocabulary, which is not the bed vocabulary.** A `scene` label
+/// is matched against [`Rule::matches`], so those words are what the analyzer
+/// has to write for a rule to fire at all; [`effect_tags`] is the pool's answer
+/// to the tag sets the rules hand it. The two were being conflated: the prompt
+/// injected the effect tags, called them "the vocabulary it answers to", and
+/// warned that a label built from anything else "gets silence" — so a rule
+/// whose match word is not an effect tag (`palace`, `hall`, `garden`, `gate`,
+/// `morning`, `dusk`) matched a word the model had been told not to use. On the
+/// shipped map 15 of 61 match words are effect tags, so the rules were running
+/// on the intersection.
+///
+/// This is the same arrangement as [`palette_prompt`]: the vocabulary is
+/// rendered from the map rather than written into a prompt, so a pack that adds
+/// a rule reaches the analyzer without a pack being able to edit a prompt —
+/// which is the whole reason the music palette lives pack-side. Without it a
+/// rule is decoration the operator cannot see.
+///
+/// Every rule contributes, `default` does not: it has no match set, it is what
+/// a label matches when nothing else did.
+pub fn scene_prompt(map: &SceneMap) -> String {
+    let mut words: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for rule in &map.rules {
+        words.extend(rule.matches.iter().filter(|w| !w.trim().is_empty()).cloned());
+    }
+    words.into_iter().collect::<Vec<String>>().join(", ")
+}
+
+/// Every tag any effect-pool sound answers to, sorted and deduped: the **bed**
 /// vocabulary the digest prompt offers the analyzer. A scene built from these
 /// words resolves to a pooled sound by tag overlap instead of by keyword luck.
+///
+/// The *place* vocabulary is [`scene_prompt`], and the two are not the same
+/// list. A place word that is no bed word is still the right thing to write:
+/// the rules route it, and the bed is chosen by tag overlap, not by the label.
 pub fn effect_tags(pool: &ClipPool) -> Vec<String> {
     let mut out = std::collections::BTreeSet::new();
     for sound in pool.values() {
@@ -1468,8 +1502,6 @@ pub fn probe_inject_durs(
     takes: &[Vec<Option<audio_pool::Picked>>],
     assets: &Path,
 ) -> BTreeMap<String, f64> {
-    let mut out = BTreeMap::new();
-    let mut missing: Vec<String> = Vec::new();
     let mut files: Vec<String> = Vec::new();
     for slot in takes {
         for take in slot.iter().flatten() {
@@ -1478,8 +1510,25 @@ pub fn probe_inject_durs(
             }
         }
     }
+    probe_durs(&files, assets, "inject")
+}
+
+/// Duration in seconds of each named pool file, keyed by the same `assets/`-
+/// relative path the registry writes. One ffprobe per file, and a file that
+/// cannot be read is simply absent — every caller reads absence as zero and
+/// degrades, which is what a renamed clip should do rather than kill a merge.
+///
+/// `what` names the layer in the warning, because the two layers do not fail
+/// the same way: an unprobeable inject is a skipped spot effect, an
+/// unprobeable track is a run that cannot be told from one that fits.
+pub fn probe_durs(files: &[String], assets: &Path, what: &str) -> BTreeMap<String, f64> {
+    let mut out = BTreeMap::new();
+    let mut missing: Vec<String> = Vec::new();
     for file in files {
-        let p = clip_path(assets, &file);
+        if out.contains_key(file) {
+            continue;
+        }
+        let p = clip_path(assets, file);
         let dur = Command::new("ffprobe")
             .args([
                 "-v",
@@ -1501,12 +1550,12 @@ pub fn probe_inject_durs(
             .filter(|d| *d > 0.0);
         match dur {
             Some(d) => {
-                out.insert(file, d);
+                out.insert(file.clone(), d);
             }
             None => {
-                if !missing.contains(&file) {
+                if !missing.contains(file) {
                     missing.push(file.clone());
-                    eprintln!("inject: cannot probe {file} -> its holds are zero");
+                    eprintln!("{what}: cannot probe {file} -> treated as a single pass");
                 }
             }
         }
@@ -1642,6 +1691,16 @@ pub fn loop_copies(window: f64, clip: f64, xfade: f64) -> Option<usize> {
 /// truncates with an output `-t`, so the loop is allowed to run past the window
 /// and no `atrim` is needed here.
 pub fn loop_filter(copies: usize, xfade: f64, volume: f64) -> String {
+    loop_filter_with_tail(copies, xfade, &format!("volume={volume:.4}"))
+}
+
+/// [`loop_filter`] with the post-crossfade chain supplied, which is what lets the
+/// two callers share one graph builder: the inject layer wants a scalar gain
+/// and the music layer wants a time-varying `volume` expression for its pause
+/// lift, and both want the same `aformat` and the same `[out]` label. A
+/// hand-spliced string is how a graph ends up with the gain filter *before* the
+/// fade, which ducks the crossfade instead of the loop.
+pub fn loop_filter_with_tail(copies: usize, xfade: f64, tail: &str) -> String {
     let ins: String = (0..copies).map(|i| format!("[c{i}]")).collect();
     let mut f = format!("[0:a]asplit={copies}{ins}");
     let mut prev = "c0".to_string();
@@ -1652,7 +1711,7 @@ pub fn loop_filter(copies: usize, xfade: f64, volume: f64) -> String {
         ));
         prev = out;
     }
-    format!("{f};[{prev}]volume={volume:.4},aformat=sample_rates=48000:channel_layouts=mono[out]")
+    format!("{f};[{prev}]{tail},aformat=sample_rates=48000:channel_layouts=mono[out]")
 }
 
 /// End every still-sounding instance of `sound` at `at + fade`, eased rather
@@ -2194,6 +2253,15 @@ pub fn apply_layers(
     };
     let mut mu_slices: Vec<Slice> = Vec::new();
     let starts = music_starts(&runs, cfg.layers.music.xfade_s);
+    // How long each take is, so a run longer than its track can be rendered as
+    // a crossfaded loop rather than a butt-jointed repeat. Probed once for the
+    // chapter, not once per run: the same track usually runs twice, and a
+    // second ffprobe is a second answer to a question already asked.
+    let mu_durs = probe_durs(
+        &runs.iter().map(|r| r.file.clone()).collect::<Vec<String>>(),
+        assets,
+        "music",
+    );
     for (n, run) in runs.iter().enumerate() {
         // The take was chosen once, in `plan_music`, and travels on the run:
         // re-picking here would be a second answer to a question already
@@ -2224,23 +2292,57 @@ pub fn apply_layers(
             start,
             &run.pauses,
         );
-        ffmpeg(&[
-            "-y".into(),
-            "-loglevel".into(),
-            "error".into(),
-            "-stream_loop".into(),
-            "-1".into(),
-            "-i".into(),
-            s(src.display()),
-            "-t".into(),
-            format!("{dur:.3}"),
-            "-af".into(),
-            format!(
-                "volume=volume='{expr}':eval=frame,\
-                 aformat=sample_rates=48000:channel_layouts=mono"
-            ),
-            s(p.display()),
-        ])?;
+        // A run longer than its track is the common case — a 2-minute bed under
+        // a 20-minute chapter — and the seam is the whole point of the choice.
+        // `-stream_loop -1` butt-joins the tail onto the head, and every clip
+        // entering a pool is trimmed with a short fade at each end (see
+        // `tools/normalize-audio.sh`), so that seam is a small hole once every
+        // couple of minutes for the length of the chapter. `loop_filter` is the
+        // same crossfade the inject layer already uses for its looped beds, and
+        // the gain expression rides on it rather than replacing it, so a track
+        // that loops still lifts inside a pause.
+        //
+        // Below one clip length this is `-stream_loop` exactly as before, so a
+        // run that fits never moves.
+        let copies = loop_copies(dur, mu_durs.get(&run.file).copied().unwrap_or(0.0), 2.0);
+        match copies {
+            Some(k) => {
+                let graph = loop_filter_with_tail(k, 2.0, &format!("volume=volume='{expr}':eval=frame"));
+                ffmpeg(&[
+                    "-y".into(),
+                    "-loglevel".into(),
+                    "error".into(),
+                    "-i".into(),
+                    s(src.display()),
+                    "-filter_complex".into(),
+                    graph,
+                    "-map".into(),
+                    "[out]".into(),
+                    "-t".into(),
+                    format!("{dur:.3}"),
+                    s(p.display()),
+                ])?;
+            }
+            None => {
+                ffmpeg(&[
+                    "-y".into(),
+                    "-loglevel".into(),
+                    "error".into(),
+                    "-stream_loop".into(),
+                    "-1".into(),
+                    "-i".into(),
+                    s(src.display()),
+                    "-t".into(),
+                    format!("{dur:.3}"),
+                    "-af".into(),
+                    format!(
+                        "volume=volume='{expr}':eval=frame,\
+                         aformat=sample_rates=48000:channel_layouts=mono"
+                    ),
+                    s(p.display()),
+                ])?;
+            }
+        }
         let (fade_in, fade_out) = music_fades(n, last, &cfg.layers.music);
         mu_slices.push(Slice {
             path: p,
@@ -3647,6 +3749,67 @@ mod tests {
         assert!(!rendered.contains("_note"), "{rendered}");
     }
 
+    /// The place vocabulary, and the whole point of adding it: a rule whose
+    /// match words the analyzer has never been shown is a rule that does not
+    /// fire, and nothing downstream can see that.
+    ///
+    /// Pinned against the real shape rather than the fixture's, because the
+    /// fixture's rules all happen to match on words that are also bed tags —
+    /// which is exactly why the conflation survived. These three rules use
+    /// `palace`, `hall` and `garden`, none of which is a bed tag on the shipped
+    /// pool, and all three must reach the prompt anyway.
+    #[test]
+    fn the_place_vocabulary_is_every_rule_match_word_sorted_and_deduped() {
+        let cfg: SceneMap = serde_json::from_value(json!({
+            "rules": [
+                {"match": ["palace", "jade pavilion"], "effect": [], "level": 0.0},
+                {"match": ["hall", "palace"], "effect": [], "level": 0.0},
+                {"match": ["garden", "  "], "effect": ["garden"], "level": 0.1}
+            ],
+            "default": {"effect": ["night"], "level": 0.1}
+        }))
+        .unwrap();
+        assert_eq!(
+            scene_prompt(&cfg),
+            "garden, hall, jade pavilion, palace",
+            "sorted, deduped across rules, blank words dropped"
+        );
+        // `default` has no match set, so it contributes nothing: it is what a
+        // label matches when nothing else did, not a word to write.
+        assert!(!scene_prompt(&cfg).contains("night"), "{:?}", scene_prompt(&cfg));
+    }
+
+    /// The conflation itself, stated as a test: the place words and the bed
+    /// words are different lists, and a place word off the bed list is still
+    /// correct to write. On the shipped map 15 of 61 match words are bed tags,
+    /// so 46 rule words reached nothing while the prompt called the bed list
+    /// "the vocabulary it answers to".
+    #[test]
+    fn the_place_words_and_the_bed_words_are_different_lists() {
+        let map = shipped_map();
+        let places: std::collections::BTreeSet<String> =
+            scene_prompt(&map).split(", ").map(str::to_string).collect();
+        let pool = audio_pool::load_pool(&fixture_live("vocab").join("assets/effect-pool.json"));
+        let beds: std::collections::BTreeSet<String> =
+            effect_tags(&pool).into_iter().collect();
+
+        let place_only: Vec<&String> = places.difference(&beds).collect();
+        assert!(
+            !place_only.is_empty(),
+            "the shipped map's rules and pool must not be in lockstep, or this \\
+             test is no longer testing anything"
+        );
+        // The words this was actually about. If a future edit made the scene
+        // map match only bed tags, these four would go, and the prompt's
+        // conflation would have become harmless by accident.
+        for word in ["palace", "hall", "garden", "gate"] {
+            assert!(
+                places.contains(word),
+                "{word:?} is a rule match word and must reach the prompt"
+            );
+        }
+    }
+
     #[test]
     fn the_effect_vocabulary_is_the_sorted_union_of_pool_tags() {
         let pool: ClipPool = serde_json::from_value(json!({
@@ -4388,6 +4551,37 @@ mod tests {
         for i in 0..3 {
             assert_eq!(g.matches(&format!("[c{i}]")).count(), 2, "copy {i} in {g}");
         }
+    }
+
+    /// The music layer loops too, and for the same reason — a 2-minute bed
+    /// under a 20-minute chapter is ten seams. Pinned here because the music
+    /// path is the one place that used to butt-join, and a butt-join is
+    /// invisible in a test and audible every two minutes.
+    #[test]
+    fn the_music_loop_crossfades_and_keeps_the_pause_lift() {
+        // Under one clip length: no loop at all, which is the path that must
+        // not change for a run that already fits.
+        assert_eq!(loop_copies(140.0, 150.0, 2.0), None);
+        // Over it: a crossfaded loop, and the number of copies is what the
+        // same solver the inject layer already used gives.
+        let k = loop_copies(600.0, 150.0, 2.0).unwrap();
+        assert!(k >= 4, "{k} copies for 600s out of a 150s track");
+
+        // The gain rides on the loop's tail, not before the crossfades: a
+        // `volume` placed ahead of the fade would duck the seam instead of the
+        // track, and a time-varying expression is the only way a run lifts
+        // inside a planned pause.
+        let expr = "0.160000 + 0.040000*clip((t-1.000)/0.600,0,1)";
+        let g = loop_filter_with_tail(k, 2.0, &format!("volume=volume='{expr}':eval=frame"));
+        assert_eq!(g.matches("acrossfade=").count(), k - 1, "{g}");
+        assert!(
+            g.ends_with(&format!(
+                "volume=volume='{expr}':eval=frame,\
+                 aformat=sample_rates=48000:channel_layouts=mono[out]"
+            )),
+            "the lift must be the last filter before aformat: {g}"
+        );
+        assert!(!g.contains("stream_loop"), "the loop is a filter, not a flag: {g}");
     }
 
     /// The inject pool must state `looped` on every entry.
