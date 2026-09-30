@@ -460,6 +460,25 @@ fn scan_sentences(text: &str, quote_aware: bool) -> (Vec<String>, bool) {
             while j < n && is_sentence_end(chars[j]) {
                 j += 1; // swallow "?!", "..."
             }
+            // A spaced ellipsis (". . .", "? ?") is one trailing mark, not a
+            // run of one-word sentences: fold whitespace-separated end marks
+            // into the same run, so a lone "." never becomes a synthesis chunk
+            // of its own — the model fills ~1.5s of babble for it, and
+            // "Vậy thì. . ." rendered 3.5s of noise for two words.
+            loop {
+                let mut k = j;
+                while k < n && chars[k].is_whitespace() {
+                    k += 1;
+                }
+                if k < n && is_sentence_end(chars[k]) {
+                    j = k + 1;
+                    while j < n && is_sentence_end(chars[j]) {
+                        j += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
             while j < n && is_trailing_close(chars[j]) {
                 j += 1; // and a closing mark stuck to it
             }
@@ -479,10 +498,15 @@ fn scan_sentences(text: &str, quote_aware: bool) -> (Vec<String>, bool) {
     if start < n {
         sentences.push(chars[start..].iter().collect());
     }
+    // A punctuation-only fragment (".", "...", ". . .") is not a sentence:
+    // handed to synthesis it becomes ~1s of filler babble with no words in
+    // it. Same check the merge uses before a line may hold audio
+    // (`has_speakable_content`), so the two halves cannot disagree about
+    // what is speakable.
     let cleaned: Vec<String> = sentences
         .into_iter()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && bm_core::util::has_speakable_content(s))
         .collect();
     (cleaned, depth == 0 && !in_quote)
 }
@@ -897,6 +921,36 @@ mod tests {
     fn a_trailing_closing_mark_is_absorbed() {
         let s = split_sentences("Anh ấy hỏi: bao giờ?\" Rồi im.");
         assert_eq!(s[0], "Anh ấy hỏi: bao giờ?\"", "{s:?}");
+    }
+
+    /// A spaced ellipsis is one trailing mark, not three sentences: each lone
+    /// "." used to become a synthesis chunk of its own, which the model reads
+    /// as ~1.5s of filler babble ("Vậy thì. . ." rendered 3.5s of noise).
+    #[test]
+    fn a_spaced_ellipsis_stays_with_its_sentence() {
+        let s = split_sentences("Vậy thì. . .");
+        assert_eq!(s, vec!["Vậy thì. . ."], "{s:?}");
+        let s = split_sentences("Xong. . . Rồi đi.");
+        assert_eq!(s, vec!["Xong. . .", "Rồi đi."], "{s:?}");
+        // Ordinary boundaries are untouched.
+        let s = split_sentences("Xong. Rồi đi.");
+        assert_eq!(s, vec!["Xong.", "Rồi đi."], "{s:?}");
+    }
+
+    /// A punctuation-only fragment is not a sentence at all: synthesized
+    /// alone it is ~1s of babble, so leading ("... Cứu mạng...") and
+    /// whole-text ("...") marks fall away and the words keep their pause.
+    #[test]
+    fn a_punctuation_only_fragment_is_not_a_sentence() {
+        let s = split_sentences("...");
+        assert!(s.is_empty(), "{s:?}");
+        let s = split_sentences(". . .");
+        assert!(s.is_empty(), "{s:?}");
+        let s = split_sentences("... Cứu mạng, cứu mạng...");
+        assert_eq!(s, vec!["Cứu mạng, cứu mạng..."], "{s:?}");
+        // A cue in brackets still counts as content.
+        let s = split_sentences("[cười]. Rồi đi.");
+        assert_eq!(s, vec!["[cười].", "Rồi đi."], "{s:?}");
     }
 
     #[test]

@@ -365,10 +365,12 @@ fn cast_context(context: &Value) -> String {
 /// The script pass's prompt: the bible, the cast the context pass resolved, and
 /// the chapter.
 ///
-/// The palettes are rendered from the pools rather than written into the
-/// template, so adding a mood (and the clip that answers it) is one edit to one
-/// file. A prompt that listed its own vocabulary would drift the moment the pool
-/// changed, and the drift would be silent.
+/// The vocabularies are rendered from the map and the pools rather than written
+/// into the template, so adding a mood (and the clip that answers it), or a
+/// scene rule (and the words it matches), is one edit to one file. A prompt that
+/// listed its own vocabulary would drift the moment the pool changed, and the
+/// drift would be silent — and a pack cannot edit a prompt at all, so a rule
+/// whose match words the analyzer never sees is a rule that never fires.
 pub fn build_script_prompt(
     layout: &Layout,
     engine: &str,
@@ -381,6 +383,7 @@ pub fn build_script_prompt(
         .with_context(|| format!("reading prompt template {}", path.display()))?;
     let map = load_map(layout)?;
     let palette = crate::ambience::palette_prompt(&map);
+    let scene_words = crate::ambience::scene_prompt(&map);
     let pool = crate::audio_pool::load_pool(&layout.assets().join("effect-pool.json"));
     let effects = crate::ambience::effect_tags(&pool).join(", ");
     let injects = crate::ambience::inject_prompt(&crate::audio_pool::load_pool(
@@ -390,6 +393,7 @@ pub fn build_script_prompt(
         .replace("{bible_json}", &bible_context(bible))
         .replace("{cast_json}", &cast_context(context))
         .replace("{music_palette}", &palette)
+        .replace("{scene_words}", &scene_words)
         .replace("{effect_tags}", &effects)
         .replace("{inject_sounds}", &injects)
         .replace("{chapter_text}", chapter_text);
@@ -1031,6 +1035,7 @@ fn build_staging_prompt(
         .with_context(|| format!("reading prompt template {}", path.display()))?;
     let map = load_map(layout)?;
     let palette = crate::ambience::palette_prompt(&map);
+    let scene_words = crate::ambience::scene_prompt(&map);
     let pool = crate::audio_pool::load_pool(&layout.assets().join("effect-pool.json"));
     let effects = crate::ambience::effect_tags(&pool).join(", ");
     let injects = crate::ambience::inject_prompt(&crate::audio_pool::load_pool(
@@ -1076,6 +1081,10 @@ fn build_staging_prompt(
     // rule 9 that used this placeholder is gone. Profiles written before that
     // still carry it, so it is replaced outright rather than reported as a miss.
     body = body.replace("{effect_tags}", &effects);
+    // Same for `{scene_words}`, and for the same reason plus a second: this path
+    // shares its template with the script pass, so a placeholder only the other
+    // one replaced would survive into the prompt as a literal the model copies.
+    body = body.replace("{scene_words}", &scene_words);
     replace_or_miss(&mut body, "{inject_sounds}", &injects, &mut missed);
     replace_or_miss(
         &mut body,
@@ -4200,12 +4209,16 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("prompts/script.txt"),
-            "{music_palette}|{effect_tags}|{inject_sounds}|{cast_json}|{bible_json}|{chapter_text}",
+            "{music_palette}|{scene_words}|{effect_tags}|{inject_sounds}|{cast_json}|{bible_json}|{chapter_text}",
         )
         .unwrap();
         std::fs::write(
             dir.join("assets/scene-map.json"),
-            r#"{"music_palette": {"quiet": {"tags": ["soft"], "note": "low"}}}"#,
+            // A rule whose match word is deliberately NOT a bed tag, because
+            // that is the case the place vocabulary exists for: `palace` is in
+            // no pool, and it still has to reach the prompt.
+            r#"{"rules": [{"match": ["palace", "jade pavilion"], "effect": [], "level": 0.0}],
+                "music_palette": {"quiet": {"tags": ["soft"], "note": "low"}}}"#,
         )
         .unwrap();
         std::fs::write(
@@ -4262,11 +4275,20 @@ mod tests {
         assert!(staging.contains("---STAGING OUTPUT CONTRACT---"));
         assert!(staging.contains("fixed_speakers"));
         assert!(staging.contains("Do not return `speaker`"));
+        // The staging path shares its template with the script path, so a
+        // placeholder only one of them replaced would reach the model intact.
+        assert!(
+            !staging.contains("{scene_words}") && !staging.contains("{effect_tags}"),
+            "placeholder leaked into the staging prompt: {staging}"
+        );
 
-        // The script prompt: the three vocabularies and the resolved cast.
+        // The script prompt: the four vocabularies and the resolved cast.
         let p = build_script_prompt(&layout, "vieneu", &bible, &context, "text").unwrap();
         assert!(p.contains("quiet (soft; low)"), "{p}");
         assert!(p.contains("night"), "{p}");
+        // The PLACE vocabulary reaches the prompt, and `palace` is in no pool,
+        // so it can only have come from the rules.
+        assert!(p.contains("jade pavilion, palace"), "{p}");
         // the inject vocabulary renders the clip's own mode first
         assert!(p.contains("coin (hit; coin, metal; 0.6s)"), "{p}");
         assert!(p.contains("\"roster\""), "{p}");
@@ -4274,6 +4296,7 @@ mod tests {
         assert!(p.contains("hắn"), "{p}");
         for ph in [
             "{effect_tags}",
+            "{scene_words}",
             "{music_palette}",
             "{inject_sounds}",
             "{cast_json}",
@@ -4543,6 +4566,38 @@ mod tests {
         ], "fixes": []});
         let err = validate_source_alignment_no_retractions(&merged, &prepared).unwrap_err();
         assert!(err.to_string().contains("changed"), "{err}");
+    }
+
+    /// Chapter 99's rotated script, as the regression case: three consecutive
+    /// events came back with their speakers shifted one step — the order's
+    /// dialogue on Narrator, the narration on a bystander, the prisoners'
+    /// plea on Narrator. Every row of that shape must refuse, so a future
+    /// rotation fails the chapter instead of shipping voices on wrong lines.
+    #[test]
+    fn source_gate_refuses_a_rotated_speaker_row() {
+        let prepared = prepare_chapter(
+            "\"Người đâu, mang ba tên hỗn xược kia lên đây cho ta!\" Diệp Bắc khoát tay nói.\n\nRất nhanh, ba tên Võ Linh kia liền bị dẫn lên, vừa nhìn thấy Diệp Bắc liền lớn tiếng kêu: \"Bang chủ, ngươi làm vậy là có ý gì?\"",
+        );
+        assert_eq!(prepared.events.len(), 4, "{:?}", prepared.events);
+        assert_eq!(prepared.events[0].kind, "dialogue");
+        assert_eq!(prepared.events[1].kind, "narration");
+        assert_eq!(prepared.events[2].kind, "narration");
+        assert_eq!(prepared.events[3].kind, "dialogue");
+        let line =
+            |id: &str, speaker: &str, text: &str| json!({"source_id": id, "speaker": speaker, "text": text});
+        // The rotation, verbatim in shape: dialogue on Narrator, narration on
+        // a character, dialogue on Narrator again.
+        let rotated = json!({"segments": [
+            line("e0001", "Narrator", "Người đâu, mang ba tên hỗn xược kia lên đây cho ta!"),
+            line("e0002", "Narrator", "Diệp Bắc khoát tay nói."),
+            line("e0003", "Diệp Bắc", "Rất nhanh, ba tên Võ Linh kia liền bị dẫn lên, vừa nhìn thấy Diệp Bắc liền lớn tiếng kêu:"),
+            line("e0004", "Narrator", "Bang chủ, ngươi làm vậy là có ý gì?"),
+        ], "fixes": []});
+        let err = validate_source_alignment_no_retractions(&rotated, &prepared).unwrap_err();
+        assert!(
+            err.to_string().contains("Narrator"),
+            "a rotated row must name the Narrator violation, got: {err}"
+        );
     }
 
     #[test]

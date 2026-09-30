@@ -741,9 +741,13 @@ echo "probe=done"
     /// **The split of failures is the models one, and for the same reason.**
     /// *Unreachable* — no such release, no route, a GitHub incident, an agent
     /// too old to have the verb — falls back to the push and says so in the
-    /// log. *Corrupt* stops: bytes arrived and disagree with the hash of the
-    /// profile this cluster is running, and pushing the local tree over the top
-    /// would paper over a disagreement that is exactly what the check is for.
+    /// log. *Corrupt* also falls back to the push, unlike the weights: the
+    /// live tree *is* the expectation the fetch checked against, so pushing it
+    /// lands exactly the bytes the box was asked for. Stopping instead used to
+    /// leave the box with no `assets/` at all — the bundle extract prunes that
+    /// tree before this runs — which is worse than any disagreement the check
+    /// exists to surface. Either way the log names the stale release and how
+    /// to re-publish it, so falling back does not hide it.
     ///
     /// What the box ends up with is the same either way. The release is
     /// verified against the *live* tree's hash, so a pushed `assets/` and a
@@ -759,19 +763,19 @@ echo "probe=done"
         match self.fetch_pack(release, live) {
             Ok(line) => Ok(line),
             Err(FetchOutcome::Corrupt(e)) => {
-                anyhow::bail!(
-                    "the {} release artifact does not verify and was not put in place: {e} \
-                     (nothing was changed on this box; this checkout's assets/ is still the live \
-                     pack '{}', so re-publish it under the same tag with \
-                     `tools/profile.sh pack {name} --version {version}` then \
-                     `gh release upload {tag} profiles/pack/{name}.tar.zst --clobber`, \
-                     or clear `packs_release` to push the directory)",
-                    release.tag,
+                if let Some(l) = live {
+                    let _ = l.send(format!(
+                        "[{}] release {} disagrees with this checkout ({}), pushing assets/ instead — re-publish it (`tools/profile.sh pack {} --version {}` then `gh release upload {} {}.tar.zst --clobber`) to stop paying the uplink",
+                        self.target, release.tag, e, release.name, release.version, release.tag, release.name,
+                    ));
+                }
+                self.push_pack(layout)?;
+                Ok(format!(
+                    "pack {} v{} over the push (release disagreed: {})",
                     release.name,
-                    name = release.name,
-                    version = release.version,
-                    tag = release.tag,
-                )
+                    release.version,
+                    crate::util::head_chars(&e, 80)
+                ))
             }
             Err(FetchOutcome::Unreachable(e)) => {
                 if let Some(l) = live {
@@ -2121,7 +2125,8 @@ mod tests {
         let line = ok.unwrap();
         assert!(line.starts_with("pack from the release xianxia-pack-v0.1.0"), "{line}");
 
-        // A pack that does not verify is still a stop, not a push.
+        // A pack that does not verify still classifies as corrupt — the caller
+        // answers it with the push, which carries the very tree it checked.
         assert!(matches!(
             classify_fetch(
                 EXIT_CORRUPT,
