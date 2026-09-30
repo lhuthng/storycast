@@ -337,6 +337,19 @@ pub struct Settings {
     /// `{name, hash}` lands as the pack rather than as an empty binding.
     #[serde(default)]
     pub profile: crate::profile::Binding,
+    /// How many previous chapters' excerpts the attribution pass sees as
+    /// `---PREVIOUSLY---` context. 1 (the default) is chapter *n−1* only;
+    /// 0 turns the excerpt chain off entirely, and the prompt is then the
+    /// pre-excerpt prompt byte for byte. Larger values concatenate older
+    /// chapters at their weight — depth 1 is the design; the knob exists so
+    /// an operator can zero it or widen it, not so the prompt grows by
+    /// default.
+    #[serde(default = "default_excerpt_window")]
+    pub excerpt_window: u32,
+}
+
+fn default_excerpt_window() -> u32 {
+    1
 }
 
 /// How the digest splits a chapter that cannot be answered in one call.
@@ -496,6 +509,7 @@ impl Default for Settings {
             digest: DigestSettings::default(),
             ssh: SshDefaults::default(),
             profile: crate::profile::Binding::default(),
+            excerpt_window: default_excerpt_window(),
         }
     }
 }

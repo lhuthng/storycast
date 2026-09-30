@@ -864,6 +864,7 @@ fn build_attribution_prompt(
     bible: &Value,
     prepared: &PreparedChapter,
     continuity: Option<&Continuity>,
+    previously: Option<&str>,
 ) -> Result<String> {
     let path = layout.prompt();
     let template = std::fs::read_to_string(&path)
@@ -937,6 +938,7 @@ Return ONE strict JSON object, never markdown or commentary:
 {
   "title": "3-8 word Vietnamese chapter title; do not start it with `Chương`",
   "atmosphere": "1-2 English sentences",
+  "excerpt": "2-4 English sentences on the state this chapter ENDS in: who is present, identity reveals (X is Y), disguises, deaths, and any stranger the prose still has not named — written for the NEXT chapter's analyzer, who has not seen this chapter and resolves its cast against it. State, not plot.",
   "roster": ["Narrator", "canonical character name", "Anonymous"],
   "mentions": {"exact name-bearing source form": "canonical character name"},
   "new_characters": [{
@@ -1014,7 +1016,54 @@ no invented ids, no dropped line.
   rows rather than inventing an owner. Free-form `voice_hint` text is accepted.
 "#;
     apply_continuity(&mut body, continuity, Pass::Attribution);
+    // The one cross-chapter memory the attribution pass gets. Identity is the
+    // bible's business (names, aliases), but the bible holds no *events*: a
+    // stranger the prose has not named yet, a reveal, a disguise still on —
+    // that is what the previous excerpt carries, and what an analyzer
+    // without it resolves by guessing. Absent means the block is not
+    // appended at all, so a first chapter or an out-of-order one is the
+    // pre-excerpt prompt byte for byte.
+    if let Some(previously) = previously {
+        body.push_str(&format!(
+            "\n---PREVIOUSLY--- (the chapter before this one; identity context only — resolve \
+             names and strangers against it, but answer only for the events in front of you)\n\
+             {previously}\n"
+        ));
+    }
     Ok(format!("{body}\n{contract}"))
+}
+
+/// The previous chapters' excerpts, as the attribution prompt's memory.
+///
+/// Depth is `excerpt_window` from settings — 1 is chapter *n−1* only, 0 is
+/// off — and each excerpt is read from the stored script of the chapter it
+/// summarizes. A chapter with no stored predecessor (the first one, an
+/// out-of-order one, a book digested before the field existed) contributes
+/// nothing: fewer lines, not a failure, the same "if any" the bible's own
+/// partial order has always had.
+fn previous_excerpts(layout: &Layout, n: u32) -> Option<String> {
+    let window = Settings::load(&layout.settings()).excerpt_window;
+    if window == 0 {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for d in 1..=window {
+        let m = n.saturating_sub(d);
+        if m == 0 {
+            break;
+        }
+        let Ok(script) = crate::read_json::<Value>(&layout.script(m)) else {
+            continue;
+        };
+        let Some(excerpt) = script.get("excerpt").and_then(Value::as_str) else {
+            continue;
+        };
+        if excerpt.trim().is_empty() {
+            continue;
+        }
+        lines.push(format!("CH {m}: {excerpt}"));
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// Build the audio-staging pass. Speaker assignment is supplied as immutable
@@ -1509,11 +1558,14 @@ fn sound_gap(
 ///
 /// `title` and `atmosphere` are the **first** part's, because a chapter's title
 /// and its opening mood are set by its opening; the summaries carry the rest.
-/// Everything else is a union — `roster` in first-seen order, `mentions`,
-/// `new_aliases` and `speakers` by key, `new_characters` by canonical name with a
-/// later part filling only the fields an earlier one left blank. A one-window
-/// chapter goes through this too and comes out with exactly what its single
-/// answer said.
+/// The **excerpt is the last** non-empty part's, for the opposite reason: it
+/// is a statement of the state the chapter *ends* in, and the last part is
+/// the only author that has seen the whole arc — its own slice plus the plot
+/// the earlier parts handed it. Everything else is a union — `roster` in
+/// first-seen order, `mentions`, `new_aliases` and `speakers` by key,
+/// `new_characters` by canonical name with a later part filling only the
+/// fields an earlier one left blank. A one-window chapter goes through this
+/// too and comes out with exactly what its single answer said.
 ///
 /// Disagreements are returned rather than silently resolved. Two parts naming
 /// different owners for one surface form is the one thing a union cannot fix
@@ -1523,6 +1575,7 @@ fn sound_gap(
 fn merge_contexts(parts: &[Part]) -> (Value, Vec<String>) {
     let mut title = String::new();
     let mut atmosphere = String::new();
+    let mut excerpt = String::new();
     let mut roster: Vec<String> = Vec::new();
     let mut characters: Vec<Value> = Vec::new();
     let mut mentions = serde_json::Map::new();
@@ -1544,6 +1597,13 @@ fn merge_contexts(parts: &[Part]) -> (Value, Vec<String>) {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+        }
+        // Last non-empty wins: the excerpt describes the chapter's end
+        // state, and only the last part has seen the whole arc.
+        if let Some(e) = c.get("excerpt").and_then(Value::as_str) {
+            if !e.trim().is_empty() {
+                excerpt = e.to_string();
+            }
         }
         union_names(&mut roster, c.get("roster"));
         union_map(
@@ -1570,6 +1630,7 @@ fn merge_contexts(parts: &[Part]) -> (Value, Vec<String>) {
     let merged = json!({
         "title": title,
         "atmosphere": atmosphere,
+        "excerpt": excerpt,
         "roster": roster,
         "mentions": Value::Object(mentions),
         "new_characters": characters,
@@ -1694,7 +1755,9 @@ async fn stage_part(
 ) -> Result<(Value, Value)> {
     let suffix = part_suffix(part);
     progress(from, round_label(n, analyzer, "attribution", part));
-    let attribution_prompt = build_attribution_prompt(layout, bible, slice, continuity)?;
+    let previously = previous_excerpts(layout, n);
+    let attribution_prompt =
+        build_attribution_prompt(layout, bible, slice, continuity, previously.as_deref())?;
     let raw = generate_retrying(&attribution_prompt, analyzer, settings, progress, from, mid).await?;
     dump_raw(layout, &format!("digest-attribution{suffix}"), &raw);
     let context = match parse_attribution(&raw, bible, slice, continuity.is_some()) {
@@ -2094,6 +2157,11 @@ fn assemble_outcome(
         // value, two consumers, no chance of them disagreeing.
         "title": data.get("title").cloned().unwrap_or(json!("")),
         "atmosphere": data.get("atmosphere").cloned().unwrap_or(json!("")),
+        // The chapter's end-state summary, the next chapter's attribution
+        // prompt reads back as ---PREVIOUSLY---. Lives in the script root
+        // beside title and atmosphere: no new file, and a re-digest of this
+        // chapter rewrites it where the next one reads it.
+        "excerpt": data.get("excerpt").cloned().unwrap_or(json!("")),
         "roster": data.get("roster").cloned().unwrap_or(json!([])),
         "mentions": data.get("mentions").cloned().unwrap_or(json!({})),
         "speakers": data.get("speakers").cloned().unwrap_or(json!({})),
@@ -2292,7 +2360,13 @@ pub fn manual_prompt(
     let summaries = session.parts.summaries();
     let continuity = session.continuity(index, &summaries);
     let text = match cast {
-        None => build_attribution_prompt(layout, &session.bible, &slice, continuity.as_ref())?,
+        None => build_attribution_prompt(
+            layout,
+            &session.bible,
+            &slice,
+            continuity.as_ref(),
+            previous_excerpts(layout, n).as_deref(),
+        )?,
         Some(context) => build_staging_prompt(
             layout,
             engine,
@@ -2485,6 +2559,7 @@ pub fn manual_accept(
                             &session.bible,
                             &next_slice,
                             next_continuity.as_ref(),
+                            previous_excerpts(layout, n).as_deref(),
                         )?,
                         part: session.part(next),
                     }),
@@ -3353,6 +3428,11 @@ fn normalize_attribution_metadata(data: &mut Value, bible: &Value, prepared: &Pr
 /// is validated exactly as before — the field is neither asked for nor
 /// required, which is what keeps a short chapter's answer identical to the
 /// pre-window digest's.
+/// The excerpt's cap, in characters. Two to four sentences of state is the
+/// contract; the cap is what a runaway answer costs when the model ignores
+/// it — a paragraph, not a second chapter riding into every future prompt.
+const EXCERPT_CHARS: usize = 600;
+
 fn parse_attribution(
     raw: &str,
     bible: &Value,
@@ -3363,6 +3443,17 @@ fn parse_attribution(
     let mut data = parse_json_repaired(cleaned)
         .with_context(|| "attribution is not valid JSON".to_string())?;
     normalize_attribution_metadata(&mut data, bible, prepared);
+    // The excerpt is a **soft** field: absent, blank, or over-long is
+    // squeezed and capped, never a refusal. `speakers` is the product and is
+    // hard-validated; a missing excerpt only means the next chapter runs
+    // with one less memory, which is the ordinary degradation and the same
+    // "if any" the prompt side already accepts.
+    let excerpt = data
+        .get("excerpt")
+        .and_then(Value::as_str)
+        .map(|s| head_chars(&squeeze_ws(s), EXCERPT_CHARS))
+        .unwrap_or_default();
+    data["excerpt"] = json!(excerpt);
     validate_context(&data, bible)?;
     validate_title(&data)?;
     if split {
@@ -4251,7 +4342,7 @@ mod tests {
 
         // The automatic contracts keep dialogue identity separate from staging.
         let prepared = prepare_chapter("Chương 1: Một chuyến gặp\n\n\"Ừm!\"");
-        let attribution = build_attribution_prompt(&layout, &bible, &prepared, None).unwrap();
+        let attribution = build_attribution_prompt(&layout, &bible, &prepared, None, None).unwrap();
         assert!(attribution.contains("---ATTRIBUTION OUTPUT CONTRACT---"));
         assert!(attribution.contains("Dialogue must NEVER map to Narrator"));
         assert!(attribution.contains("Anonymous"));
@@ -4416,6 +4507,72 @@ mod tests {
             "an unused anonymous placeholder is metadata, not a cast decision"
         );
         assert_eq!(data["speakers"]["e0003"], json!("Hệ thống"));
+    }
+
+    /// The excerpt is **soft**: whitespace and length are cleaned, never
+    /// refused — it is memory for the next chapter, not the product — and on
+    /// the merge it is the **last** non-empty part's, because the excerpt
+    /// describes the state the chapter *ends* in and only the last part has
+    /// seen the whole arc.
+    #[test]
+    fn the_excerpt_is_soft_on_parse_and_last_part_wins_on_merge() {
+        let prepared = prepare_chapter(
+            "Chương 1: Làm cái một đời tông sư\n\nĐồ nhi Dịch Phong đứng trước Huyền Vũ tông.\n\n\"Ừm!\"",
+        );
+        let mut raw = json!({
+            "title": "Võ Quán Phàm Nhân",
+            "atmosphere": "A quiet martial shop at dawn.",
+            "excerpt": "  The  chapter  ends   with the stranger\n\n still unnamed, traveling with the party. ",
+            "roster": ["Narrator", "Dịch Phong"],
+            "speakers": {"e0001": "Narrator", "e0002": "Dịch Phong"}
+        });
+        let data =
+            parse_attribution(&raw.to_string(), &json!({"characters": []}), &prepared, false)
+                .unwrap();
+        let excerpt = data["excerpt"].as_str().unwrap();
+        assert!(excerpt.starts_with("The chapter ends"), "{excerpt}");
+        assert!(!excerpt.contains('\n'), "squeezed: {excerpt}");
+        assert!(excerpt.ends_with("party."), "{excerpt}");
+
+        // A runaway answer is capped, not chattered at.
+        raw["excerpt"] = json!("dạ ".repeat(EXCERPT_CHARS));
+        let data =
+            parse_attribution(&raw.to_string(), &json!({"characters": []}), &prepared, false)
+                .unwrap();
+        assert_eq!(
+            data["excerpt"].as_str().unwrap().chars().count(),
+            EXCERPT_CHARS
+        );
+
+        // Absent is as good as blank: the field simply comes back empty.
+        raw.as_object_mut().unwrap().remove("excerpt");
+        let data =
+            parse_attribution(&raw.to_string(), &json!({"characters": []}), &prepared, false)
+                .unwrap();
+        assert_eq!(data["excerpt"], json!(""));
+
+        // Last non-empty wins, and an empty tail part does not erase it.
+        let base = json!({
+            "title": "Tiếng Hỏi Trong Sân",
+            "atmosphere": "An empty courtyard at dusk.",
+            "roster": [],
+            "mentions": {},
+            "new_characters": [],
+            "new_aliases": {},
+            "speakers": {}
+        });
+        let mut first = base.clone();
+        first["excerpt"] = json!("part one ends quietly");
+        let mut second = base.clone();
+        second["excerpt"] = json!("part two: the reveal lands");
+        let third = base;
+        let parts = vec![
+            staged_part(0, 4, first, json!([])),
+            staged_part(4, 8, second, json!([])),
+            staged_part(8, 12, third, json!([])),
+        ];
+        let (merged, _) = merge_contexts(&parts);
+        assert_eq!(merged["excerpt"], json!("part two: the reveal lands"));
     }
 
     #[test]
@@ -5056,7 +5213,7 @@ mod tests {
         let root = crate::paths::Layout::find_root().unwrap();
         let layout = crate::paths::Layout::resolve(root).unwrap();
         let prepared = prepare_chapter("Hắn lật ra cuốn sách \"Khải hoàn\" bên trong.");
-        let prompt = build_attribution_prompt(&layout, &json!({}), &prepared, None).unwrap();
+        let prompt = build_attribution_prompt(&layout, &json!({}), &prepared, None, None).unwrap();
         assert!(
             prompt.contains("not_speech"),
             "the schema block must show the field, or a model returning the \
@@ -5903,7 +6060,7 @@ mod tests {
         let (_dir, layout, text) = long_layout("one-call-prompt", 3);
         let prepared = prepare_chapter(&text);
         let bible = json!({"characters": []});
-        let one = build_attribution_prompt(&layout, &bible, &prepared, None).unwrap();
+        let one = build_attribution_prompt(&layout, &bible, &prepared, None, None).unwrap();
         for absent in ["PART 1 OF", "PLOT SO FAR", "\"summary\""] {
             assert!(!one.contains(absent), "{absent} reached a one-call prompt");
         }
@@ -5913,7 +6070,7 @@ mod tests {
             total: 2,
             plot: &[],
         };
-        let part_one = build_attribution_prompt(&layout, &bible, &prepared, Some(&first)).unwrap();
+        let part_one = build_attribution_prompt(&layout, &bible, &prepared, Some(&first), None).unwrap();
         assert!(part_one.contains("PART 1 OF 2"), "{}", head_chars(&part_one, 40));
         assert!(part_one.contains("\"summary\""), "the field a part must return");
         assert!(
@@ -5927,7 +6084,7 @@ mod tests {
             total: 2,
             plot: &plot,
         };
-        let part_two = build_attribution_prompt(&layout, &bible, &prepared, Some(&second)).unwrap();
+        let part_two = build_attribution_prompt(&layout, &bible, &prepared, Some(&second), None).unwrap();
         assert!(part_two.contains("PART 2 OF 2"));
         assert!(
             part_two.contains("They reach the courtyard"),
@@ -5954,6 +6111,65 @@ mod tests {
             "the bed rule, told to the round that places beds"
         );
         assert!(split.contains("write no ending"), "and no rounding off");
+    }
+
+    /// The one cross-chapter memory: a stored predecessor's excerpt rides
+    /// into the attribution prompt as `---PREVIOUSLY---`, and no predecessor
+    /// means no block at all — the ordinary first chapter is the pre-excerpt
+    /// prompt byte for byte.
+    #[test]
+    fn the_previous_excerpt_rides_as_a_previously_block() {
+        let (_dir, layout, text) = long_layout("excerpt-prompt", 3);
+        let prepared = prepare_chapter(&text);
+        let bible = json!({"characters": []});
+
+        let bare = build_attribution_prompt(&layout, &bible, &prepared, None, None).unwrap();
+        assert!(
+            !bare.contains("PREVIOUSLY"),
+            "no block without a predecessor: {}",
+            head_chars(&bare, 40)
+        );
+
+        let with = build_attribution_prompt(
+            &layout,
+            &bible,
+            &prepared,
+            None,
+            Some("CH 41: The white-robed swordswoman is still unnamed; she left with the party."),
+        )
+        .unwrap();
+        assert!(with.contains("---PREVIOUSLY---"), "{}", head_chars(&with, 40));
+        assert!(with.contains("still unnamed"), "the memory itself");
+        assert!(
+            with.contains("identity context only"),
+            "the block names what it is for: resolve, not answer"
+        );
+    }
+
+    /// The chain reads the stored scripts: an excerpt is picked up from
+    /// `script(n-1)` the moment it exists, gaps are skipped, and the window
+    /// is honored — the default depth of 1 never reaches past the previous
+    /// chapter.
+    #[test]
+    fn previous_excerpts_read_stored_scripts_and_skip_gaps() {
+        let (_dir, layout, _text) = long_layout("excerpt-store", 3);
+        std::fs::create_dir_all(layout.script(41).parent().unwrap()).unwrap();
+        std::fs::write(
+            layout.script(41),
+            r#"{"excerpt": "The stranger is still unnamed."}"#,
+        )
+        .unwrap();
+
+        let got = previous_excerpts(&layout, 42).unwrap();
+        assert_eq!(got, "CH 41: The stranger is still unnamed.");
+
+        // The default window is 1: chapter 43 asks for script(42), which was
+        // never written, and gets nothing — a gap is silence, not an error.
+        assert!(previous_excerpts(&layout, 43).is_none());
+        assert!(
+            previous_excerpts(&layout, 41).is_none(),
+            "the first chapter has no predecessor by definition"
+        );
     }
 
     /// A part has to say what happened in it, because that summary is the whole
@@ -6253,7 +6469,7 @@ mod tests {
         // prevented on the *input* side as well — one backend shares the context
         // between prompt and answer.
         let bible = load_bible(&layout.bible());
-        let whole_prompt = build_attribution_prompt(&layout, &bible, &prepared, None).unwrap();
+        let whole_prompt = build_attribution_prompt(&layout, &bible, &prepared, None, None).unwrap();
         let checkpoint = layout.data().join(".digest-parts-ch51.json");
 
         // (3) The flow, part by part, exactly as the TUI and the backup runner
