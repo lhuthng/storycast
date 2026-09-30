@@ -294,23 +294,95 @@ pub(crate) fn decode_entities(s: &str) -> String {
 ///
 /// What is left is what cannot be wrong whatever the site: entities decoded so a
 /// chapter reads the same as it was crawled, carriage returns gone, one line per
-/// paragraph with blank lines between, and a trailing newline. The length guard
-/// then refuses a body too short to be a chapter, so a miss fails at the crawl
-/// rather than three stages downstream.
+/// paragraph with blank lines between, and a trailing newline. Whitespace-
+/// separated end-mark runs (`Vậy thì. . .`, `! ! ! ?`) fold into one compact
+/// mark, and a paragraph made only of such marks (`…` standing where a scene
+/// break was meant) is dropped — both are machine-translation spacing, not any
+/// site's typography, and the same equivalence the TTS layer already applies
+/// before synthesis. The length guard then refuses a body too short to be a
+/// chapter, so a miss fails at the crawl rather than three stages downstream.
 pub(crate) fn sanitize_chapter_text(text: &str) -> String {
     let decoded = decode_entities(text);
-    let mut paragraphs = Vec::new();
+    let mut paragraphs: Vec<String> = Vec::new();
     for line in decoded.lines() {
+        let line = fold_end_mark_runs(line.trim());
         let line = line.trim();
-        if line.is_empty() {
+        // A paragraph whose only content is end marks is spacing, not prose —
+        // but anything else on the line (a `───` divider, the site's words)
+        // survives, because the boundary deletes what it can name and nothing
+        // it cannot.
+        if line.is_empty() || line.chars().all(|c| is_end_mark(c) || c.is_whitespace()) {
             continue;
         }
-        paragraphs.push(line);
+        paragraphs.push(line.to_string());
     }
     if paragraphs.is_empty() {
         return String::new();
     }
     format!("{}\n", paragraphs.join("\n\n"))
+}
+
+/// `.`, `!`, `?` and the typographic ellipsis — the marks a spaced run is built
+/// from. Adjacent runs of these (`...`, `?!`, `!!!`) are a writer's style; only
+/// whitespace *between* marks is an artifact.
+fn is_end_mark(c: char) -> bool {
+    matches!(c, '.' | '!' | '?' | '…')
+}
+
+/// Whitespace-separated end-mark runs fold into one compact mark: dots render
+/// as `…`, each other kind once, in first-appearance order — `. . . ?` → `…?`,
+/// `! ! ! ?` → `!?`, `. .` → `…`. Adjacent marks and lone marks pass through
+/// verbatim, so `3.5 triệu`, `...` and `?!` are never touched, and the fold is
+/// idempotent: `sanitize` twice lands where `sanitize` once did.
+fn fold_end_mark_runs(line: &str) -> String {
+    fn kind(c: char) -> char {
+        if c == '.' { '…' } else { c }
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0usize;
+    while i < n {
+        if !is_end_mark(chars[i]) {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let mut kinds = vec![kind(chars[i])];
+        let mut marks = 1usize;
+        let mut spaced = false;
+        let mut j = i + 1;
+        loop {
+            let mut k = j;
+            let mut saw_ws = false;
+            while k < n && chars[k].is_whitespace() {
+                saw_ws = true;
+                k += 1;
+            }
+            if k < n && is_end_mark(chars[k]) {
+                if saw_ws {
+                    spaced = true;
+                }
+                let kd = kind(chars[k]);
+                if !kinds.contains(&kd) {
+                    kinds.push(kd);
+                }
+                marks += 1;
+                j = k + 1;
+            } else {
+                break;
+            }
+        }
+        if marks >= 2 && spaced {
+            for kd in &kinds {
+                out.push(*kd);
+            }
+        } else {
+            out.extend(chars[i..j].iter());
+        }
+        i = j;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -380,5 +452,53 @@ mod tests {
                 "the host must not know site words: {line:?} was dropped from {out:?}"
             );
         }
+    }
+
+    /// Machine-translated prose separates its trailing punctuation with
+    /// spaces, and no style writes that on purpose. The fold is the same
+    /// equivalence the TTS layer applies before synthesis, moved to the one
+    /// boundary every consumer shares — so the prepared events, the staging
+    /// gate's baseline and the delivered script all agree on `…`.
+    #[test]
+    fn a_spaced_end_mark_run_folds_into_one_mark() {
+        let out = sanitize_chapter_text("Vậy thì. . .");
+        assert_eq!(out, "Vậy thì…\n", "{out}");
+        // Dots render as the ellipsis; a question mark in the run survives as
+        // the question it is — hesitation plus interrogative, not one blur.
+        let out = sanitize_chapter_text("ngươi đây là. . . ?");
+        assert_eq!(out, "ngươi đây là…?\n", "{out}");
+        // Each non-dot kind once, first-appearance order: `! ! ! ?` is one
+        // boundary, not four.
+        let out = sanitize_chapter_text("Rắn. . . Xà Vương! ! ! ?");
+        assert_eq!(out, "Rắn… Xà Vương!?\n", "{out}");
+        // Two dots are already an artifact run.
+        assert_eq!(sanitize_chapter_text("hắn đảo mắt. . ."), "hắn đảo mắt…\n");
+    }
+
+    /// Adjacent marks are a writer's style and a decimal point is a number:
+    /// the fold moves whitespace-separated runs and nothing else, so the
+    /// corpus's own `...`, `?!` and `3.5 triệu` pass byte for byte — and the
+    /// fold applied twice lands where it applied once.
+    #[test]
+    fn adjacent_marks_and_lone_marks_pass_through_untouched() {
+        let text = "Hắn dừng... thật?! 3.5 triệu đồng. Xong!";
+        assert_eq!(sanitize_chapter_text(text), format!("{text}\n"), "{text}");
+        let twice = sanitize_chapter_text(&sanitize_chapter_text("là. . . ?"));
+        assert_eq!(twice, "là…?\n", "the fold must be idempotent");
+    }
+
+    /// A paragraph made only of end marks is spacing standing where a scene
+    /// break was meant. It is not speakable, it carries no words to delete,
+    /// and left alone it becomes a narration event the analyzer must answer
+    /// and ~1.5s of synthesized babble. Any other divider (`───`) stays: the
+    /// boundary drops only what it can name.
+    #[test]
+    fn a_paragraph_of_only_end_marks_is_not_prose() {
+        let out = sanitize_chapter_text("Câu một.\n\n. . .\n\nCâu hai.");
+        assert_eq!(out, "Câu một.\n\nCâu hai.\n", "{out}");
+        let out = sanitize_chapter_text("Câu một.\n\n...\n\nCâu hai.");
+        assert_eq!(out, "Câu một.\n\nCâu hai.\n", "{out}");
+        let out = sanitize_chapter_text("Câu một.\n\n───\n\nCâu hai.");
+        assert_eq!(out, "Câu một.\n\n───\n\nCâu hai.\n", "{out}");
     }
 }
