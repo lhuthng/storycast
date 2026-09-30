@@ -21,6 +21,7 @@ use anyhow::{anyhow, Context, Result};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::pacing;
@@ -108,6 +109,14 @@ pub struct Host {
     /// The script's own log lines, surfaced in the ledger so a walk can say
     /// what it did without a debugger.
     pub log: Vec<String>,
+    /// The one directory a script may read a local book from.
+    ///
+    /// Empty means it may read nothing — the default, and what every caller
+    /// that is not crawling a book gets. `fetch` stays the only way out
+    /// otherwise: `io` and `os` are gone from the sandbox, and this is the
+    /// narrow, checked replacement for the one file-shaped thing a crawl
+    /// legitimately needs.
+    read_root: PathBuf,
 }
 
 impl Host {
@@ -143,7 +152,28 @@ impl Host {
             limits,
             fetches: 0,
             log: Vec::new(),
+            read_root: PathBuf::new(),
         })
+    }
+
+    /// The one directory a script may read a local book from.
+    ///
+    /// A builder rather than a constructor argument so every existing caller
+    /// keeps compiling and gets the empty (refuse everything) default: a
+    /// crawler that was not written for a book has no business reading one.
+    pub fn with_read_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.read_root = root.into();
+        self
+    }
+
+    /// The read root, or the refusal a script sees when there is none.
+    pub(crate) fn read_root(&self) -> Result<&std::path::Path> {
+        if self.read_root.as_os_str().is_empty() {
+            anyhow::bail!(
+                "this crawl may not read a local book — no workspace was given to read from"
+            );
+        }
+        Ok(&self.read_root)
     }
 
     /// Log one line, for the ledger. Capped: a script that logs inside a walk

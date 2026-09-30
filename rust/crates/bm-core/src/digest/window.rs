@@ -283,6 +283,9 @@ pub(crate) fn plan_windows(chapter: &PreparedChapter, settings: &DigestSettings)
 mod tests {
     use super::*;
     use crate::config::DEFAULT_ANSWER_TOKENS;
+    use crate::crawl::{CrawlOutcome, Provider};
+    use bm_proto::CrawlSpec;
+    use std::path::Path;
 
     /// A chapter of `lines` paragraphs, each three sentences. `prepare_chapter`
     /// splits narration on newlines, so this is one event per line, each ending
@@ -308,6 +311,43 @@ mod tests {
             })
             .collect();
         super::super::prepare_chapter(&text)
+    }
+
+    /// What the default budget does to a chapter of a given size, printed.
+    ///
+    /// Not a claim about any one chapter — a table, because "will my chapter
+    /// split?" is the question the whole windowing module exists to answer and
+    /// the answer is a step function in the chapter's length. `lines` are
+    /// paragraphs of the `prose` shape, which is what the corpus has.
+    #[test]
+    fn what_the_default_budget_does_to_a_chapter_of_each_size() {
+        let budget_chars = DEFAULT_ANSWER_TOKENS as usize * CHARS_PER_TOKEN;
+        println!("\nbudget: {DEFAULT_ANSWER_TOKENS} tokens = {budget_chars} weighted chars\n");
+        println!(
+            "{:>6}  {:>7}  {:>8}  {:>8}  {:>8}  {:>4}  events per window",
+            "lines", "events", "chars", "weight", "tokens", "wins"
+        );
+        for lines in [10usize, 20, 50, 100, 150, 213, 300, 500] {
+            let chapter = prose(lines);
+            let text: usize = chapter.events.iter().map(|e| e.text.chars().count()).sum();
+            let w = weight(&chapter.events);
+            let windows = plan_windows(&chapter, &DigestSettings::default());
+            assert_partitions(&chapter, &windows);
+            for win in &windows {
+                assert!(
+                    tokens(win.chars) <= DEFAULT_ANSWER_TOKENS as usize,
+                    "a window would overrun the answer budget: {win:?}"
+                );
+            }
+            println!(
+                "{lines:>6}  {:>7}  {text:>8}  {w:>8}  {:>8}  {:>4}  {:?}",
+                chapter.events.len(),
+                tokens(w),
+                windows.len(),
+                windows.iter().map(|x| x.events).collect::<Vec<_>>(),
+            );
+        }
+        println!();
     }
 
     fn settings(sentences: u32, chars: u32, tokens: u32) -> DigestSettings {
@@ -492,6 +532,387 @@ mod tests {
         assert_eq!(sentence_ends("Hắn nói \"Được thôi\""), (0, false));
         // An ellipsis is one sentence end, however it is spelled.
         assert_eq!(sentence_ends("Hắn ngập ngừng…"), (1, true));
+    }
+
+    // ───────────────────────── a real book, end to end ─────────────────────────
+
+    /// A real chapter of the corpus: a live page's capture, shipped beside the
+    /// page as its golden.
+    ///
+    /// Used as the *publisher's* text rather than as a comparison. The question
+    /// this module exists for is "will my chapter split?", and synthetic
+    /// paragraphs of a convenient length answer a question nobody asked — the
+    /// real shape of a chapter is short paragraphs with dialogue in them, and
+    /// that is what decides how many segments it produces.
+    const REAL_CHAPTER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/crawl/truyencom-chapter.txt"
+    ));
+
+    /// The sample EPUB crawler, read from `samples/crawl/` rather than inlined:
+    /// this test is a gate for that file as much as for the budget. Outside
+    /// `adapters/`, because an EPUB is a format and no adapter's sites own it.
+    fn epub_crawler() -> String {
+        std::fs::read_to_string(format!(
+            "{}/../../../samples/crawl/epub.lua",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap_or_else(|e| panic!("reading samples/crawl/epub.lua: {e}"))
+    }
+
+    /// A book, written as a real ZIP: container, manifest, spine, XHTML.
+    ///
+    /// **Not** shared with `crawl::epub`'s own builder, for the reason
+    /// `crawl::script_tests` gives about its copy: a builder two suites share
+    /// can hold a bug both suites agree with. Here this one is the only thing
+    /// between the test and a claim about books on disk.
+    fn book(path: &Path, chapters: &[(&str, String)]) {
+        use std::io::Write;
+        let file = std::fs::File::create(path).unwrap();
+        let mut w = zip::ZipWriter::new(file);
+        let o: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("mimetype", o).unwrap();
+        w.write_all(b"application/epub+zip").unwrap();
+        w.start_file("META-INF/container.xml", o).unwrap();
+        w.write_all(
+            br#"<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"#,
+        )
+        .unwrap();
+        let mut items = String::new();
+        let mut refs = String::new();
+        for (i, (name, body)) in chapters.iter().enumerate() {
+            let id = format!("c{i}");
+            items.push_str(&format!(r#"<item id="{id}" href="text/{name}.xhtml"/>"#));
+            refs.push_str(&format!(r#"<itemref idref="{id}"/>"#));
+            w.start_file(format!("OEBPS/text/{name}.xhtml"), o).unwrap();
+            w.write_all(
+                format!("<html><head><title>{name}</title></head><body>{body}</body></html>")
+                    .as_bytes(),
+            )
+            .unwrap();
+        }
+        w.start_file("OEBPS/content.opf", o).unwrap();
+        w.write_all(
+            format!(
+                r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest>{items}</manifest><spine>{refs}</spine></package>"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        w.finish().unwrap();
+    }
+
+    /// A chapter's paragraphs as the XHTML a publisher writes: one `<p>` each.
+    fn xhtml(text: &str) -> String {
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                // Ampersand first, or the ampersands this introduces are
+                // escaped a second time.
+                format!("<p>{}</p>", l.trim().replace('&', "&amp;").replace('<', "&lt;"))
+            })
+            .collect()
+    }
+
+    /// **The whole path, on a real book, with nothing stubbed.** A ZIP on disk,
+    /// the shipped Lua crawler, the real Lua engine, the shared crawl boundary,
+    /// the digest's own preparer, and the default budget — in that order.
+    ///
+    /// The question an operator asking for EPUB support actually has is "what
+    /// will this do to my chapters?", and no unit test on either side answers
+    /// it: the crawl tests stop at the text, and the budget tests start at
+    /// prose that never went through a book. The seam between them is exactly
+    /// where a book would be mishandled — a paragraph that survives the ZIP
+    /// walk and then splits differently from a crawled page, or a chapter that
+    /// turns out to need four calls because a book's paragraphs are shorter
+    /// than the fixture's.
+    #[test]
+    fn what_the_default_budget_does_to_a_chapter_read_out_of_an_epub() {
+        let dir = std::env::temp_dir().join(format!("bm-epub-budget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Chapter one is a real chapter. Chapters two and three are several of
+        // them welded together, which is what a "chapter" becomes in the books
+        // this pipeline is pointed at when the publisher merged several — and
+        // three copies is deliberately *not* a whole number of windows, so the
+        // cut lands inside a chapter rather than on the seam between copies.
+        let one = xhtml(REAL_CHAPTER);
+        let copies = |k: usize| (0..k).map(|_| one.clone()).collect::<String>();
+        let three = copies(3);
+        let eight = copies(8);
+        book(
+            &dir.join("book.epub"),
+            &[("mot", one), ("hai", three), ("ba", eight)],
+        );
+
+        let mut spec = CrawlSpec {
+            engine: "lua".into(),
+            script: "epub.lua".into(),
+            source: epub_crawler(),
+            params: serde_json::Map::new(),
+            ..Default::default()
+        };
+        spec.read_root = dir.clone();
+        spec.params
+            .insert("epub".into(), serde_json::json!("book.epub"));
+        let provider = Provider::new(&spec);
+        // The book knows its own length, so a range can be trimmed before it is
+        // enqueued — the first thing a range this long would get wrong.
+        let found = provider.discover(1, 9).unwrap().expect("a book");
+        assert_eq!(found.total, Some(3));
+        assert_eq!(found.chapters.len(), 3);
+
+        let settings = DigestSettings::default();
+        let budget_chars = DEFAULT_ANSWER_TOKENS as usize * CHARS_PER_TOKEN;
+        println!("\nbudget: {DEFAULT_ANSWER_TOKENS} tokens = {budget_chars} weighted chars");
+        println!(
+            "{:>8}  {:>6}  {:>7}  {:>8}  {:>7}  {:>5}  windows",
+            "chapter", "chars", "events", "weight", "tokens", "calls"
+        );
+        let mut plans: Vec<(u32, PreparedChapter, Vec<Window>)> = Vec::new();
+        for n in 1..=3 {
+            let text = match provider.crawl(n, None, 1).unwrap().outcome {
+                CrawlOutcome::Text { text, .. } => text,
+                other => panic!("chapter {n} did not crawl: {other:?}"),
+            };
+            let prepared = super::super::prepare_chapter(&text);
+            let windows = plan_windows(&prepared, &settings);
+            assert_partitions(&prepared, &windows);
+            for w in &windows {
+                assert!(
+                    tokens(w.chars) <= DEFAULT_ANSWER_TOKENS as usize,
+                    "a window would overrun the answer budget: {w:?}"
+                );
+            }
+            let chars: usize = prepared.events.iter().map(|e| e.text.chars().count()).sum();
+            let w = weight(&prepared.events);
+            println!(
+                "{n:>8}  {chars:>6}  {:>7}  {w:>8}  {:>7}  {:>5}  {:?}",
+                prepared.events.len(),
+                tokens(w),
+                windows.len(),
+                windows.iter().map(|x| x.events).collect::<Vec<_>>(),
+            );
+            plans.push((n, prepared, windows));
+        }
+
+        // (1) The headline, and the reason an EPUB does not need a setting of
+        // its own: a real chapter of this corpus is **one** digest call, at
+        // well under half the budget. A book's chapters are no longer than a
+        // site's, because they are the same prose from the same author.
+        let (_, real, real_windows) = &plans[0];
+        assert_eq!(real_windows.len(), 1, "{real_windows:?}");
+        assert!(
+            tokens(real_windows[0].chars) * 2 < DEFAULT_ANSWER_TOKENS as usize,
+            "a real chapter should sit under half the budget, not at its edge: {}",
+            tokens(real_windows[0].chars)
+        );
+        // And it is not a chapter of three paragraphs: the prose arrives whole,
+        // and the dialogue inside it is split out as its own events.
+        assert!(real.events.len() > 50, "{}", real.events.len());
+        assert!(
+            real.events.iter().any(|e| e.kind == "dialogue"),
+            "a chapter with quoted speech splits it out"
+        );
+        // And it is text, not markup: the tag stripper ran, or every event would
+        // be one `<p>`-wrapped blob and the digest would be asked to speak it.
+        assert!(
+            !real
+                .events
+                .iter()
+                .any(|e| e.text.contains('<') || e.text.contains("&amp;")),
+            "a chapter read out of a book is text, not markup"
+        );
+
+        // (2) The cut, on chapters long enough to need one. Every window ends on
+        // a sentence, which is the property that makes a seam between two
+        // windows a seam between two sentences rather than mid-clause.
+        for (n, long, windows) in &plans[1..] {
+            assert!(windows.len() > 1, "chapter {n} should need a cut");
+            println!("\n  chapter {n}: {} events, {} windows", long.events.len(), windows.len());
+            println!("  window  events  weight  tokens    first    last  it ends on");
+            for (i, w) in windows.iter().enumerate() {
+                let first = &long.events[w.from];
+                let last = &long.events[w.to - 1];
+                assert!(
+                    sentence_ends(&last.text).1,
+                    "window {} of chapter {n} ends mid-sentence: {:?}",
+                    i + 1,
+                    last.text
+                );
+                println!(
+                    "  {:>5}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}  {}",
+                    i + 1,
+                    w.events,
+                    w.chars,
+                    tokens(w.chars),
+                    first.id,
+                    last.id,
+                    crate::util::head_chars(&last.text, 44)
+                );
+            }
+        }
+        let (_, long, _) = &plans[1];
+        // (3) What a segment is, since "how many segments" is the operator's
+        // actual question: one per event, keyed by the chapter's own ids.
+        println!("\n  the first segments of the long chapter:");
+        for e in long.events.iter().take(6) {
+            println!(
+                "  {} {:>9}  {}",
+                e.id,
+                e.kind,
+                crate::util::head_chars(&e.text, 56)
+            );
+        }
+        assert_eq!(
+            long.events.len(),
+            real.events.len() * 3,
+            "three copies of a chapter make three copies of its events"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A real book, all the way to its segments, when there is one to point
+    /// at.** Skipped unless `BM_BOOK` names an `.epub`, because a test that
+    /// needs a 7 MB file nobody else has is not a test.
+    ///
+    /// Every other test here builds its own prose, which is right for testing
+    /// and useless for looking at: the question an operator has about a book
+    /// is "what will the narrator actually be asked to say", and that is ten
+    /// lines of output on a real chapter and not a number in an assert.
+    ///
+    ///   BM_BOOK=/abs/path/book.epub cargo test -p bm-core --lib \
+    ///     what_the_segments_of_a_real_book_look_like -- --nocapture
+    #[test]
+    fn what_the_segments_of_a_real_book_look_like() {
+        let Ok(book) = std::env::var("BM_BOOK") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("the workspace root");
+        let book = std::path::PathBuf::from(&book)
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from(&book));
+        let mut spec = CrawlSpec {
+            engine: "lua".into(),
+            script: "epub.lua".into(),
+            source: epub_crawler(),
+            params: serde_json::Map::new(),
+            ..Default::default()
+        };
+        spec.read_root = root.clone();
+        spec.params.insert(
+            "epub".into(),
+            serde_json::json!(book.to_string_lossy()),
+        );
+        let provider = Provider::new(&spec);
+        let total = provider
+            .discover(1, 999)
+            .unwrap()
+            .and_then(|d| d.total)
+            .unwrap_or(0);
+        println!("\n\x1b[1m{}\x1b[0m", book.display());
+        println!("\x1b[1m{total} chapters, budget {DEFAULT_ANSWER_TOKENS} tokens = {} weighted chars\x1b[0m",
+            DEFAULT_ANSWER_TOKENS as usize * CHARS_PER_TOKEN);
+
+        for n in 1..=3u32 {
+            if n > total {
+                break;
+            }
+            let CrawlOutcome::Text { text, .. } = provider.crawl(n, None, 1).unwrap().outcome else {
+                continue;
+            };
+            let prepared = super::super::prepare_chapter(&text);
+            let windows = plan_windows(&prepared, &DigestSettings::default());
+            let chars: usize = prepared.events.iter().map(|e| e.text.chars().count()).sum();
+            let w = weight(&prepared.events);
+            let sentences: u32 = prepared
+                .events
+                .iter()
+                .map(|e| sentence_ends(&e.text).0)
+                .sum();
+            println!(
+                "\n\x1b[1m=== chapter {n} ===\x1b[0m {chars} chars, {} events, {sentences} sentences, \
+                 weight {w}, ~{} tokens, {} window(s)\n",
+                prepared.events.len(),
+                tokens(w),
+                windows.len(),
+            );
+            println!(
+                "  {:>5}  {:>9}  {:>6}  {:>4}  text",
+                "id", "kind", "chars", "sent"
+            );
+            for e in &prepared.events {
+                let head: String = e.text.chars().take(120).collect();
+                println!(
+                    "  {:>5}  {:>9}  {:>6}  {:>4}  {}",
+                    e.id,
+                    e.kind,
+                    e.text.chars().count(),
+                    sentence_ends(&e.text).0,
+                    head
+                );
+            }
+            for (i, win) in windows.iter().enumerate() {
+                println!(
+                    "  window {}: events {}..{}, {} weighted chars, ~{} tokens",
+                    i + 1,
+                    prepared.events[win.from].id,
+                    prepared.events[win.to - 1].id,
+                    win.chars,
+                    tokens(win.chars)
+                );
+            }
+            // The number that decides whether this book can be narrated at all:
+            // how long one segment is, in the only unit a listener has.
+            let longest = prepared
+                .events
+                .iter()
+                .map(|e| e.text.chars().count())
+                .max()
+                .unwrap_or(0);
+            println!(
+                "  longest segment: {longest} chars (~{:.0}s of narration at 15 chars/s)",
+                longest as f64 / 15.0
+            );
+        }
+
+        // Every chapter, checked for the scanner's furniture and for a heading
+        // that is still glued to its first sentence. Three chapters showing
+        // clean is a sample; thirty-one is the book.
+        if total > 0 {
+            let mut dirty = 0usize;
+            let mut split = 0usize;
+            let mut chars = 0usize;
+            for n in 1..=total {
+                let CrawlOutcome::Text { text, .. } = provider.crawl(n, None, 1).unwrap().outcome
+                else {
+                    continue;
+                };
+                chars += text.chars().count();
+                if text.contains("Goldenagato") || text.contains("mp4directs") {
+                    dirty += 1;
+                }
+                // A heading on its own line is a first line of a few dozen
+                // characters; one still glued to prose runs on into the chapter.
+                let first = text.lines().next().unwrap_or_default();
+                if first.len() <= 80 && first.to_lowercase().contains("chapter") {
+                    split += 1;
+                }
+            }
+            println!(
+                "\n  all {total} chapters: {chars} chars, {dirty} still carrying the scan watermark, \
+                 {split} with the heading split off"
+            );
+            assert_eq!(dirty, 0, "{dirty} chapters still narrate the scanner's watermark");
+        }
     }
 
     #[test]

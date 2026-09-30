@@ -55,6 +55,15 @@ crossterm = "0.28"
 # gamble, for the sake of one megabyte.
 tar = "0.4"
 ruzstd = "0.9"
+# EPUB is a ZIP container, so reading one needs the ZIP reader and its DEFLATE
+# decoder. Both are pure Rust, on the same argument as the line above: a
+# cross-built agent must not need a system `unzip` to read a book.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# A package document and a container are XML, and the difference matters: html5ever
+# reads `<item/>` as an *open* tag, which silently nests every manifest entry
+# inside the first one. One chapter where there were three is exactly the bug
+# that would ship. Pure Rust, no C, nothing to cross-build.
+quick-xml = "0.37"
 chrono = "0.4"
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 

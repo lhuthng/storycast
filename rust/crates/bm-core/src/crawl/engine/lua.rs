@@ -261,6 +261,54 @@ fn install_fns(lua: &Lua, host: SharedHost) -> mlua::Result<()> {
 
     let h = host.clone();
     g.set(
+        "epub_chapter",
+        lua.create_function(move |lua, (path, n): (String, u32)| {
+            let out = fns::epub_chapter(&mut *held(&h)?, &path, n).map_err(ext)?;
+            // `nil` by hand, as with `challenge`: a JSON null would arrive as a
+            // truthy userdata, and a book shorter than the range asked for is
+            // the ordinary case rather than a failure.
+            match out {
+                Some(v) => lua.to_value(&v),
+                None => Ok(LuaValue::Nil),
+            }
+        })?,
+    )?;
+
+    let h = host.clone();
+    g.set(
+        "epub_total",
+        lua.create_function(move |lua, path: String| {
+            let out = fns::epub_total(&mut *held(&h)?, &path).map_err(ext)?;
+            match out {
+                Some(v) => lua.to_value(&v),
+                None => Ok(LuaValue::Nil),
+            }
+        })?,
+    )?;
+
+    let h = host.clone();
+    g.set(
+        "epub_index",
+        lua.create_function(move |lua, path: String| {
+            let out = fns::epub_index(&mut *held(&h)?, &path).map_err(ext)?;
+            match out {
+                Some(v) => lua.to_value(&v),
+                None => Ok(LuaValue::Nil),
+            }
+        })?,
+    )?;
+
+    let h = host.clone();
+    g.set(
+        "epub_text",
+        lua.create_function(move |lua, (path, from, to): (String, u32, u32)| {
+            let out = fns::epub_text(&mut *held(&h)?, &path, from, to).map_err(ext)?;
+            lua.to_value(&out)
+        })?,
+    )?;
+
+    let h = host.clone();
+    g.set(
         "log",
         lua.create_function(move |_, msg: String| {
             fns::log(&mut *held(&h)?, &msg);

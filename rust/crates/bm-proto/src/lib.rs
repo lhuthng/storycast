@@ -1050,6 +1050,14 @@ pub struct CrawlSpec {
     pub max_seconds: u64,
     #[serde(default)]
     pub max_fetches: u32,
+    /// The directory a script may read a local book from, and the only one.
+    ///
+    /// Set from the **local** layout wherever the spec is built — which is
+    /// where the crawl runs, so a path is never carried from another machine.
+    /// Empty means no local reading at all, so a spec that crossed a wire
+    /// without this fails loudly rather than reading wherever it lands.
+    #[serde(default)]
+    pub read_root: std::path::PathBuf,
 }
 
 /// Redacted on purpose: a spec carries whatever headers the operator set, and

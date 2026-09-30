@@ -8,6 +8,8 @@
 //!
 //! ```text
 //! fetch(url, opts?)        -> { status, body, url }     the only way out
+//! epub_chapter(path, n)    -> { text, title } | nil      a local book, one chapter
+//! epub_total(path)         -> number | nil              how many it has
 //! select(html, sel)        -> string                    first match, one line
 //! select_all(html, sel)    -> [ { text, html, attrs } ]
 //! select_text(html, sel)   -> string                    first match, as prose
@@ -274,6 +276,78 @@ pub mod fns {
 
     pub fn log(host: &mut Host, msg: &str) {
         host.note(msg.to_string());
+    }
+
+    /// `epub_chapter(path, n)` — chapter `n` of a local `.epub`, or `nil`.
+    ///
+    /// The one local-file read in the ABI, and it is narrow on purpose: the
+    /// path is resolved against the workspace the crawl is running in and
+    /// refused if it lands anywhere else, so a script gains one book rather
+    /// than a filesystem. `nil` is a real `nil` for the same reason
+    /// [`challenge`]'s is — a JSON null would arrive as a truthy userdata, and
+    /// a book that has fewer chapters than the range asked for is the ordinary
+    /// case, not an error to raise.
+    pub fn epub_chapter(host: &mut Host, path: &str, n: u32) -> Result<Option<Value>> {
+        host.check_budget()?;
+        let real = super::super::epub::confined(host.read_root()?, path)?;
+        let mut book = super::super::epub::open(&real)?;
+        Ok(book.chapter(n)?.map(|c| {
+            json!({
+                "n": c.n,
+                "text": c.text,
+                "title": c.title,
+                "chapters": book_chapters(&mut book),
+            })
+        }))
+    }
+
+    /// `epub_total(path)` — how many chapters the spine declares, or `nil`.
+    ///
+    /// Separate from the chapter read because a `discover` wants the count
+    /// once for a range, and paying a ZIP open for it is the only cost.
+    pub fn epub_total(host: &mut Host, path: &str) -> Result<Option<u32>> {
+        host.check_budget()?;
+        let real = super::super::epub::confined(host.read_root()?, path)?;
+        Ok(Some(super::super::epub::open(&real)?.chapters() as u32))
+    }
+
+    /// `epub_index(path)` — every spine entry as `{n, title, chars, head}`.
+    ///
+    /// The half of the ABI that makes chapter detection possible at all. A
+    /// scanned book has one spine entry per **page** and its chapters start
+    /// wherever the prose says `Chapter 4`, which is a fact about that book and
+    /// not about EPUB — so the host reports the sizes and the opening words
+    /// and the *script* decides which of them are chapters. See
+    /// [`super::super::epub`] for why that boundary is where it is.
+    ///
+    /// Costs a full decompression pass. A script calls it once per crawl.
+    pub fn epub_index(host: &mut Host, path: &str) -> Result<Option<Value>> {
+        host.check_budget()?;
+        let real = super::super::epub::confined(host.read_root()?, path)?;
+        let mut book = super::super::epub::open(&real)?;
+        let items = book.index()?;
+        Ok(Some(Value::Array(
+            items
+                .into_iter()
+                .map(|i| json!({"n": i.n, "title": i.title, "chars": i.chars, "head": i.head}))
+                .collect(),
+        )))
+    }
+
+    /// `epub_text(path, from, to)` — spine entries `from..=to` as one chapter.
+    ///
+    /// The other half, and the reason [`epub_index`] reports entry *numbers*:
+    /// a script that has worked out that chapter 4 runs from entry 63 to entry
+    /// 74 asks for that range and gets the whole chapter, through the same
+    /// crawl boundary a single entry gets.
+    pub fn epub_text(host: &mut Host, path: &str, from: u32, to: u32) -> Result<String> {
+        host.check_budget()?;
+        let real = super::super::epub::confined(host.read_root()?, path)?;
+        super::super::epub::open(&real)?.text(from, to)
+    }
+
+    fn book_chapters(book: &mut super::super::epub::Epub) -> u32 {
+        book.chapters() as u32
     }
 }
 

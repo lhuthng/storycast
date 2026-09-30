@@ -161,6 +161,18 @@ const PRELUDE: &str = r#"
   globalThis.challenge = function (page) {
     return unwrap(__bm_challenge(JSON.stringify(page)));
   };
+  globalThis.epub_chapter = function (path, n) {
+    return unwrap(__bm_epub_chapter(String(path), String(n)));
+  };
+  globalThis.epub_total = function (path) {
+    return unwrap(__bm_epub_total(String(path)));
+  };
+  globalThis.epub_index = function (path) {
+    return unwrap(__bm_epub_index(String(path)));
+  };
+  globalThis.epub_text = function (path, from, to) {
+    return String(unwrap(__bm_epub_text(String(path), from, to)));
+  };
   globalThis.log = function (m) {
     __bm_log(typeof m === "string" ? m : JSON.stringify(m));
   };
@@ -293,6 +305,47 @@ fn bind<'js>(ctx: &rquickjs::Ctx<'js>, g: &rquickjs::Object<'js>, host: &SharedH
         })
     });
     one_arg!("__bm_strip_tags", |_host, html| Ok(fns::strip_tags(html)));
+    // `None` becomes a real JS `null`, which is falsy — the shape a script
+    // written as `if (!epub_chapter(p, n)) { … }` needs, and the same
+    // reasoning as `challenge` above.
+    two_arg!("__bm_epub_chapter", |host, path, n: &String| {
+        let n: u32 = n
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("epub_chapter: {n:?} is not a chapter number"))?;
+        Ok(fns::epub_chapter(host, path, n)?.unwrap_or(Value::Null))
+    });
+    one_arg!("__bm_epub_total", |host, path| {
+        Ok(fns::epub_total(host, path)?
+            .map(|n| json!(n))
+            .unwrap_or(Value::Null))
+    });
+    // The index and the range read, so a JavaScript crawler can find chapter
+    // starts in the prose the same way the Lua one does. See `engine::fns`.
+    one_arg!("__bm_epub_index", |host, path| {
+        Ok(fns::epub_index(host, path)?.unwrap_or(Value::Null))
+    });
+    // Three arguments, which the two- and one-argument macros cannot spell, so
+    // the closure is written out. Still `String`-in/`String`-out: the third
+    // argument crosses as text and is parsed here, because the envelope is a
+    // string and a JSON number inside it would need a converter on this side.
+    {
+        let h = host.clone();
+        let f = move |a: String, b: String, c: String| -> String {
+            envelope(with_host(&h, |host| {
+                let from: u32 = b
+                    .trim()
+                    .parse()
+                    .map_err(|_| anyhow!("epub_text: {b:?} is not a spine position"))?;
+                let to: u32 = c
+                    .trim()
+                    .parse()
+                    .map_err(|_| anyhow!("epub_text: {c:?} is not a spine position"))?;
+                fns::epub_text(host, &a, from, to).map(Value::from)
+            }))
+        };
+        g.set("__bm_epub_text", Function::new(ctx.clone(), f)?)?;
+    }
     one_arg!("__bm_decode_entities", |_host, s| Ok(fns::decode_entities(
         s
     )));

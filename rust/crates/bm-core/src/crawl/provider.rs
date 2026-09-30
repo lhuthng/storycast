@@ -117,7 +117,8 @@ impl Provider {
     }
 
     fn host(&self) -> Result<SharedHost> {
-        let host = Host::new(&self.spec.user_agent, &self.spec.headers, self.limits())?;
+        let host = Host::new(&self.spec.user_agent, &self.spec.headers, self.limits())?
+            .with_read_root(self.spec.read_root.clone());
         Ok(Rc::new(RefCell::new(host)))
     }
 
@@ -401,6 +402,10 @@ pub fn spec_from_settings(layout: &Layout, s: &Settings) -> CrawlSpec {
         engine: String::new(),
         script: String::new(),
         source: String::new(),
+        // The workspace a book would be read from, and the only one. Taken
+        // from *this* machine's layout, because the spec is built where the
+        // crawl runs — a path must never travel from another box.
+        read_root: layout.work.clone(),
         params: crawl.params.clone(),
         url_template: s.url_template.clone(),
         headers: crawl.headers.clone(),

@@ -20,6 +20,7 @@
 
 pub mod contract;
 pub mod engine;
+pub mod epub;
 pub mod host;
 pub mod html;
 pub mod import;

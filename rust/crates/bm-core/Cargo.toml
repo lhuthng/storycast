@@ -24,3 +24,5 @@ scraper = { workspace = true }
 # version-gate — the failure mode bm-tts already taught us about.
 tar = { workspace = true }
 ruzstd = { workspace = true }
+zip = { workspace = true }
+quick-xml = { workspace = true }
