@@ -6058,6 +6058,10 @@ mod tests {
         let (_d, mut inner) = fixture();
         let layout = inner.layout.clone();
         let engine = inner.settings.engine.clone();
+        // The storage tier is pinned here so the extension assertion below
+        // says something: this test is about the voice freeze, not about
+        // which format the default tier stores.
+        inner.settings.take_quality = "raw".into();
         std::fs::write(
             layout.script(187),
             r#"{"roster":["Narrator","Hám Thiên Khuyết"],

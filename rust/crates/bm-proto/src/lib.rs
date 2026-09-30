@@ -1336,6 +1336,14 @@ pub struct RenderUnitSpec {
     /// without trusting a filename. Empty from an old inductor.
     #[serde(default)]
     pub take_key: String,
+    /// The storage tier's mp3 bitrate, when the name ends `.mp3`: the
+    /// sidecar speaks wav and the rendering box owns the encode, so the
+    /// rate travels with the work rather than being guessed from a
+    /// settings file that may have drifted. 0 (the default, from an old
+    /// inductor) means "store the wav the sidecar produced, whatever the
+    /// name says".
+    #[serde(default)]
+    pub mp3_kbps: u32,
 }
 
 fn default_speed() -> f64 {

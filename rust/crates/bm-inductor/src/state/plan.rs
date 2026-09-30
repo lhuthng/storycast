@@ -133,7 +133,12 @@ impl Inner {
     pub(crate) fn refresh_render_plan(&mut self, chapter: u32, adopt: bool) -> Option<RenderPlan> {
         let engine = self.settings.engine.clone();
         let units = self.plan_units(chapter)?;
-        let new = RenderPlan::build(chapter, &engine, &units);
+        // The tier is the plan's business because the extension is part of
+        // the take name: a tier change re-plans, names new files, and the
+        // reconcile names the old ones stale.
+        let quality =
+            bm_core::assemble::TakeQuality::parse(&self.settings.take_quality);
+        let new = RenderPlan::build(chapter, &engine, &units, quality);
         let path = self.layout.plan(chapter);
         let stored = RenderPlan::load(&path);
         let seg_dir = self.layout.seg_dir(&engine, chapter);
@@ -272,6 +277,10 @@ impl Inner {
         } else {
             Vec::new()
         };
+        // The bitrate rides the offer: the sidecar speaks wav, the box that
+        // renders owns the encode, and a settings file on that box may have
+        // drifted from the plan this take was named under.
+        let quality = bm_core::assemble::TakeQuality::parse(&self.settings.take_quality);
         Some((
             RenderUnitSpec {
                 tag: take.tag.clone(),
@@ -282,6 +291,7 @@ impl Inner {
                 temperature: take.temperature,
                 silence_p: take.silence_p,
                 take_key: take.take_key.clone(),
+                mp3_kbps: quality.mp3_kbps().unwrap_or(0),
             },
             plan.cast_hash.clone(),
             force,

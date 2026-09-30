@@ -922,10 +922,37 @@ async fn render_offered_units(
         let wav = tts
             .infer(&u.text, &u.voice, u.temperature, u.silence_p, engine)
             .await?;
-        std::fs::write(seg_dir.join(&u.name), &wav)?;
+        // The storage tier rides the offer: an `.mp3` name with a bitrate is
+        // stored encoded, everything else is the sidecar's wav under whatever
+        // name it was given. The encode is this box's job because the
+        // sidecar speaks wav, and the name is checked rather than trusted —
+        // a `.mp3` name holding wav bytes would be a lie every reader after
+        // the store pays for.
+        let bytes: std::borrow::Cow<[u8]> = if u.name.ends_with(".mp3") && u.mp3_kbps > 0 {
+            let kbps = u.mp3_kbps;
+            let src = std::env::temp_dir()
+                .join(format!("bm-encode-{}-{}", std::process::id(), u.take_key))
+                .with_extension("wav");
+            let dst = src.with_extension("mp3");
+            std::fs::write(&src, &wav)?;
+            let (src_in, dst_in) = (src.clone(), dst.clone());
+            tokio::task::spawn_blocking(move || {
+                bm_core::assemble::encode_mp3(&src_in, &dst_in, kbps)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("encode task failed: {e}"))?
+            .with_context(|| format!("encoding {} at {kbps}k", u.name))?;
+            let _ = std::fs::remove_file(&src);
+            let encoded = std::fs::read(&dst)?;
+            let _ = std::fs::remove_file(&dst);
+            std::borrow::Cow::Owned(encoded)
+        } else {
+            std::borrow::Cow::Borrowed(&wav[..])
+        };
+        std::fs::write(seg_dir.join(&u.name), &bytes)?;
         files.push(bm_proto::UnitFile {
             name: u.name.clone(),
-            b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &wav),
+            b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes),
         });
     }
     set_progress(
@@ -976,9 +1003,15 @@ async fn run_render(
     std::fs::create_dir_all(&seg_dir)?;
     let plan_path = layout.plan(n);
     let stored = bm_core::assemble::RenderPlan::load(&plan_path);
+    // The same setting the inductor plans from, read here because this path
+    // owns the plan on this box: the tier decides the extension the take
+    // names carry.
+    let quality = bm_core::assemble::TakeQuality::parse(
+        &Settings::load(&layout.settings()).take_quality,
+    );
     let up = bm_core::assemble::reconcile(
         stored.as_ref(),
-        bm_core::assemble::RenderPlan::build(n, engine, &units),
+        bm_core::assemble::RenderPlan::build(n, engine, &units, quality),
         &seg_dir,
     );
     up.plan.save(&plan_path)?;
@@ -2825,6 +2858,7 @@ mod tests {
             temperature: 0.8,
             silence_p: 0.15,
             take_key: "0123456789abcdef".into(),
+            mp3_kbps: 0,
         }];
         assert_eq!(render_action(Some(&one)), RenderAction::Units);
 
@@ -2853,6 +2887,7 @@ mod tests {
             temperature: 0.8,
             silence_p: 0.15,
             take_key: String::new(),
+            mp3_kbps: 0,
         };
         // Held, held but truncated, absent.
         std::fs::write(root.join("0000_Adam.wav"), vec![0u8; 2000]).unwrap();
@@ -2953,6 +2988,7 @@ mod tests {
                 temperature: 0.8,
                 silence_p: 0.15,
                 take_key: format!("{i:016}"),
+                mp3_kbps: 0,
             })
             .collect();
 

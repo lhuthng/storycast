@@ -346,10 +346,23 @@ pub struct Settings {
     /// default.
     #[serde(default = "default_excerpt_window")]
     pub excerpt_window: u32,
+    /// How a rendered take is stored: `raw` keeps the sidecar's PCM wav
+    /// (~5.8 MB a minute), the mp3 tiers trade bytes for a re-encode the
+    /// final 64k mp3 makes inaudible. `balanced` (96k mono) is the default —
+    /// a casual listener cannot hear it against raw, and the store shrinks
+    /// about tenfold. A tier change re-speaks: the extension rides the
+    /// content-addressed take name, so the plan names new files and the old
+    /// ones go stale.
+    #[serde(default = "default_take_quality")]
+    pub take_quality: String,
 }
 
 fn default_excerpt_window() -> u32 {
     1
+}
+
+fn default_take_quality() -> String {
+    "balanced".into()
 }
 
 /// How the digest splits a chapter that cannot be answered in one call.
@@ -510,6 +523,7 @@ impl Default for Settings {
             ssh: SshDefaults::default(),
             profile: crate::profile::Binding::default(),
             excerpt_window: default_excerpt_window(),
+            take_quality: default_take_quality(),
         }
     }
 }

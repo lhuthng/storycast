@@ -16,7 +16,8 @@ pub use self::plan::{
     title_speech_for_script, Planned, RenderUnit, RenderedSegment, Run, MAX_SEGMENT_BYTES,
 };
 pub use self::renderplan::{
-    reconcile, reconcile_with, take_file, take_key, PlanUpdate, RenderPlan, Take, PLAN_VERSION,
+    reconcile, reconcile_with, take_file, take_key, PlanUpdate, RenderPlan, Take, TakeQuality,
+    PLAN_VERSION,
 };
 pub use self::wav::{
     read_wav, sample_rate_for, silent_wav, wav_info, wav_seconds, GEMINI_RATE, VIENEU_RATE,
@@ -157,6 +158,45 @@ fn run_ffmpeg(args: &[&str]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Encode one take's wav to the storage tier's mp3.
+///
+/// The tier is a stored-representation choice, and the re-encode it buys is
+/// inaudible by construction: the published mix is a 64k mono mp3, so an
+/// intermediate at or above that rate loses nothing a listener could hear —
+/// while the store shrinks roughly tenfold. The house audio shape (`-ac 1
+/// -ar 48000`, metadata stripped) is the pool's, so a take and a pool clip
+/// behave identically in every graph that reads them. `-nostdin` because
+/// ffmpeg otherwise reads standard input for keyboard control, and inside a
+/// render loop that input is the caller's own list.
+pub fn encode_mp3(wav: &Path, mp3: &Path, kbps: u32) -> Result<()> {
+    let kbps_arg = format!("{kbps}k");
+    let src = wav.to_string_lossy().into_owned();
+    let dst = mp3.to_string_lossy().into_owned();
+    run_ffmpeg(&[
+        "-nostdin",
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        &src,
+        "-ac",
+        "1",
+        "-ar",
+        "48000",
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        &kbps_arg,
+        "-write_xing",
+        "0",
+        "-id3v2_version",
+        "0",
+        "-map_metadata",
+        "-1",
+        &dst,
+    ])
 }
 
 /// Pair every wav the renderer produced with the scene, mood and speaker the

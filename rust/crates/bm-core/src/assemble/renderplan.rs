@@ -38,8 +38,64 @@ use std::path::Path;
 
 /// Bump when an input stops being included in [`take_key`] or the file-naming
 /// scheme changes. Persisted, so a plan written by an older build is rebuilt
-/// rather than mis-trusted.
-pub const PLAN_VERSION: u32 = 1;
+/// rather than mis-trusted. v2 puts the storage tier's extension on the take
+/// name — a plan naming `.wav` takes must not be trusted by a build storing
+/// `.mp3`, and vice versa.
+pub const PLAN_VERSION: u32 = 2;
+
+/// How a take is stored, from `settings.take_quality`.
+///
+/// The tier decides the *stored representation* of the sidecar's wav, and so
+/// the extension on the content-addressed name: the name is a claim about its
+/// inputs, and the tier is one of them — a store answering `t-x.wav` with mp3
+/// bytes would be a lie every reader pays for. `Raw` keeps the PCM; the mp3
+/// tiers are one re-encode the final 64k mono mp3 output makes inaudible, at
+/// roughly a tenfold cut in store size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TakeQuality {
+    /// The sidecar's own PCM wav, untouched.
+    Raw,
+    /// 64k mono mp3 — the published output's own rate.
+    Small,
+    /// 96k mono mp3 — the default. A casual listener cannot hear it against
+    /// raw through a 64k output.
+    Balanced,
+    /// 128k mono mp3, for an operator who re-masters from takes.
+    High,
+}
+
+impl TakeQuality {
+    /// Parse the setting. An unknown name takes the default rather than
+    /// failing a run over a typo — the tier is cosmetic to everything but
+    /// weight, and the choice is visible in the store's extensions.
+    pub fn parse(setting: &str) -> Self {
+        match setting.trim().to_ascii_lowercase().as_str() {
+            "raw" => Self::Raw,
+            "small" => Self::Small,
+            "high" => Self::High,
+            _ => Self::Balanced,
+        }
+    }
+
+    /// The stored file's extension, and so the tier's half of the take name.
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Self::Raw => "wav",
+            Self::Small | Self::Balanced | Self::High => "mp3",
+        }
+    }
+
+    /// The mp3 bitrate in kbps, or `None` for [`TakeQuality::Raw`]. This is
+    /// what travels to the rendering box, which owns the encode.
+    pub fn mp3_kbps(&self) -> Option<u32> {
+        match self {
+            Self::Raw => None,
+            Self::Small => Some(64),
+            Self::Balanced => Some(96),
+            Self::High => Some(128),
+        }
+    }
+}
 
 /// Hex characters kept from the SHA-256 take hash. Eight bytes is far past
 /// collision for one book and keeps filenames short.
@@ -124,7 +180,12 @@ impl RenderPlan {
     /// can never disagree about order, grouping or voices. `file` is
     /// content-addressed by default; [`reconcile`] rewrites it to the legacy
     /// name when it adopts an existing wav.
-    pub fn build(chapter: u32, engine: &str, units: &[super::plan::RenderUnit]) -> RenderPlan {
+    pub fn build(
+        chapter: u32,
+        engine: &str,
+        units: &[super::plan::RenderUnit],
+        quality: TakeQuality,
+    ) -> RenderPlan {
         let takes: Vec<Take> = units
             .iter()
             .enumerate()
@@ -142,7 +203,7 @@ impl RenderPlan {
                     temperature: u.temperature,
                     silence_p: u.silence_p,
                     take_key: key.clone(),
-                    file: take_file(&key),
+                    file: take_file(&key, quality),
                     legacy: u
                         .dest
                         .file_name()
@@ -341,9 +402,11 @@ pub fn take_key(
 }
 
 /// The store name for a take: content-addressed, so the name is a claim about
-/// the inputs that can be checked without trusting the plan.
-pub fn take_file(take_key: &str) -> String {
-    format!("t-{take_key}.wav")
+/// the inputs that can be checked without trusting the plan. The tier's
+/// extension rides the name, so a tier change is a new name and a re-speak —
+/// never a `.wav` name holding mp3 bytes.
+pub fn take_file(take_key: &str, quality: TakeQuality) -> String {
+    format!("t-{}.{}", take_key, quality.extension())
 }
 
 /// A hash of the voice collection this plan uses: sorted unique
@@ -424,7 +487,12 @@ mod tests {
     }
 
     fn plan_of(segs: &[serde_json::Value], cast: &Cast, seg_dir: &Path) -> RenderPlan {
-        RenderPlan::build(1, "vieneu", &units(segs, cast, seg_dir))
+        RenderPlan::build(
+            1,
+            "vieneu",
+            &units(segs, cast, seg_dir),
+            TakeQuality::Raw,
+        )
     }
 
     fn write_take(seg_dir: &Path, name: &str) {
@@ -466,7 +534,14 @@ mod tests {
             "engine"
         );
         assert_eq!(base.len(), TAKE_KEY_CHARS);
-        assert_eq!(take_file(&base), format!("t-{base}.wav"));
+        // The tier rides the name: raw stays `.wav`, every mp3 tier names
+        // `.mp3`, and a tier change is therefore a new file and a re-speak —
+        // never a `.wav` name holding mp3 bytes.
+        assert_eq!(take_file(&base, TakeQuality::Raw), format!("t-{base}.wav"));
+        assert_eq!(
+            take_file(&base, TakeQuality::Balanced),
+            format!("t-{base}.mp3")
+        );
     }
 
     #[test]
