@@ -56,11 +56,11 @@ voice ──▶ per-scene SoX treatment (room + character) ──▶ voice + eff
                      inject ──▶ level ──────────────┘     (keyed on the voice)
 ```
 
-**The treatment touches the Narrator too, at a fraction of its depth.** Every
+**The treatment touches the Narrator too, at a tenth of its depth.** Every
 spoken slot is run through its scene's treatment — a room, a tone, a character —
-and the Narrator takes the *same* treatment at the preset's `narrator` fraction
-(default 0.35): in the scene, never standing with a character's full wet. So a
-chapter of narration is read inside the place rather than dry in front of it,
+and the Narrator takes the *same* treatment at 0.1 wet: in the scene, never
+standing with a character's full wet. So a chapter of narration is read inside
+the place rather than dry in front of it,
 which is a real change from the old "the reverb never touches the Narrator".
 
 The chain is SoX's (`reverb`, `overdrive`, `chorus`, `echos`, `treble`, …), not

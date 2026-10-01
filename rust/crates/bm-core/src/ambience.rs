@@ -498,6 +498,10 @@ pub struct SceneMap {
     pub pause: PausePlan,
 }
 
+/// How much of a scene's treatment the Narrator takes: a tenth of a
+/// character's depth — in the room, never standing in it.
+pub const NARRATOR_DEPTH: f64 = 0.1;
+
 /// Which engine runs a voice treatment's chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -506,20 +510,23 @@ pub enum FxEngine {
     Sox,
 }
 
-/// One voice treatment: what a slot's voice is run through, how much decay to
-/// **reserve** after it so a reverb is not cut mid-tail, and how much of it the
-/// Narrator takes.
+/// One voice treatment: what a slot's voice is run through, and how much decay
+/// to **reserve** after it so a reverb is not cut mid-tail.
 ///
 /// Two shapes, so a pack migrates at its own pace:
 ///
-/// * a bare string — a legacy ffmpeg `-af` chain, no reserved tail, Narrator dry;
-/// * an object — `{"sox": "reverb 45 45 80", "tail_s": 1.2, "narrator": 0.35}`.
+/// * a bare string — a legacy ffmpeg `-af` chain, no reserved tail;
+/// * an object — `{"sox": "reverb 45 45 80", "tail_s": 1.2}`.
 ///
 /// A `sox` chain is a SoX effect list (`reverb 45 45 80`, `overdrive gain -3`),
 /// run on the slot's piece by the `sox` binary; an `ffmpeg` chain is the same
 /// `-af` string the presets used to be. The engine is chosen by which key is
 /// set, never inferred from the text: the two grammars overlap but are not the
 /// same, and guessing is how one gets run by the other.
+///
+/// A `narrator` key still parses where an older map carries one, and is
+/// ignored: the Narrator takes a tenth of every treatment (see
+/// [`NARRATOR_DEPTH`]).
 #[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum VoiceFx {
@@ -539,16 +546,6 @@ pub struct VoiceFxSpec {
     /// instead of being cut at the next line. Zero is "no tail".
     #[serde(default)]
     pub tail_s: f64,
-    /// How much of the treatment the Narrator takes, as a fraction of the
-    /// speakers' depth: `1.0` is in the room with everyone, `0.0` is dry. The
-    /// default is a low, adaptive fraction — the narrator reads *in* the room
-    /// but always further from its walls than a character standing in it.
-    #[serde(default = "d_narrator_wet")]
-    pub narrator: f64,
-}
-
-fn d_narrator_wet() -> f64 {
-    0.35
 }
 
 impl VoiceFx {
@@ -569,14 +566,6 @@ impl VoiceFx {
         match self {
             VoiceFx::Chain(_) => 0.0,
             VoiceFx::Spec(s) => s.tail_s.clamp(0.0, 10.0),
-        }
-    }
-
-    /// The Narrator's fraction of this treatment's depth.
-    pub fn narrator(&self) -> f64 {
-        match self {
-            VoiceFx::Chain(_) => 1.0,
-            VoiceFx::Spec(s) => s.narrator.clamp(0.0, 1.0),
         }
     }
 }
@@ -2063,7 +2052,7 @@ fn build_voice_track(
         let p = work.join(format!("v{n}.wav"));
         match fx {
             Some((f, narrator)) => {
-                let depth = if narrator { f.narrator() } else { 1.0 };
+                let depth = if narrator { NARRATOR_DEPTH } else { 1.0 };
                 apply_voice_fx(f, depth, &raw, &p, span_len, work)?;
             }
             None => fade_edges(&raw, &p, span_len)?,
@@ -2076,11 +2065,11 @@ fn build_voice_track(
 }
 
 /// Run one slot's treatment: the effect, the reserved tail, the edge fades, and
-/// (for the Narrator) a fraction of the depth by blending back toward dry.
+/// (for the Narrator) a tenth of the depth by blending back toward dry.
 ///
-/// `depth` is 1.0 for a character and the preset's `narrator` fraction for the
-/// Narrator: a blend against the dry piece, because "in the room but not
-/// standing in it" is a mix of two signals rather than a knob the effect has.
+/// `depth` is 1.0 for a character and [`NARRATOR_DEPTH`] for the Narrator: a
+/// blend against the dry piece, because "in the room but not standing in it"
+/// is a mix of two signals rather than a knob the effect has.
 fn apply_voice_fx(
     fx: &VoiceFx,
     depth: f64,
@@ -2432,7 +2421,7 @@ fn music_fades(n: usize, last: bool, cfg: &MusicLayer) -> (f64, f64) {
 /// pass needs. It is created on demand and never cleaned up here, so pass a
 /// throwaway path, the merge passes its per-chapter scratch directory.
 /// The voice treatment for one slot, and whether the slot is the Narrator —
-/// who takes the same room at a fraction of its depth, never as a full wet.
+/// who takes the same room at a tenth of its depth, never as a full wet.
 fn slot_effect<'a>(
     slot: &Slot,
     spans: &[Span],
@@ -3583,11 +3572,11 @@ mod tests {
         assert!((merged[0].end - 2.0).abs() < 0.01);
     }
 
-    /// The Narrator now takes the room at a **fraction** of its depth — in the
-    /// scene, never with a character's full wet — and the preset says how much.
+    /// The Narrator takes the room at a tenth of its depth — in the scene,
+    /// never with a character's full wet — and no preset says otherwise.
     #[test]
-    fn the_narrator_takes_a_fraction_of_the_room() {
-        let d = tmpdir("narrator-fraction");
+    fn the_narrator_takes_a_tenth_of_the_room() {
+        let d = tmpdir("narrator-tenth");
         let a = d.join("a.wav");
         let b = d.join("b.wav");
         silent_wav(&a, 1.0, 48_000).unwrap();
@@ -3604,7 +3593,7 @@ mod tests {
         assert_eq!(spans[0].reverb.as_deref(), Some("hall"));
 
         // Both slots reach the same preset; only the Narrator flag differs, and
-        // the preset's own `narrator` fraction decides the depth.
+        // the depth is a tenth for the Narrator and whole for the character.
         let mut presets = cfg.reverb_presets.clone();
         presets.insert(
             "hall".into(),
@@ -3612,7 +3601,6 @@ mod tests {
                 sox: Some("reverb 45 45 80".into()),
                 ffmpeg: None,
                 tail_s: 1.2,
-                narrator: 0.35,
             }),
         );
         let (narr_fx, narr) = slot_effect(&slots[0], &spans, &presets).unwrap();
@@ -3621,7 +3609,7 @@ mod tests {
         assert_eq!(narr_fx, char_fx, "one preset, two depths");
         assert_eq!(narr_fx.engine_and_chain(), (FxEngine::Sox, "reverb 45 45 80"));
         assert_eq!(narr_fx.tail_s(), 1.2);
-        assert!((narr_fx.narrator() - 0.35).abs() < 1e-9);
+        assert_eq!(NARRATOR_DEPTH, 0.1);
 
         // Where the scene names no reverb, nobody gets any.
         let turns = vec![turn(&a, "street-day", "Lỗ Đạt Sênh")];
@@ -3630,21 +3618,20 @@ mod tests {
         assert!(slot_effect(&slots[0], &spans, &cfg.reverb_presets).is_none());
     }
 
-    /// A bare string is the legacy shape: ffmpeg, no reserved tail, and a
-    /// Narrator that takes it whole — the pack migrates at its own pace.
+    /// A bare string is the legacy shape: ffmpeg with no reserved tail. An old
+    /// map's `narrator` key still parses, and is ignored.
     #[test]
     fn a_legacy_preset_is_ffmpeg_with_no_tail() {
         let fx = VoiceFx::Chain("aecho=0.8:0.9:80|170:0.08|0.05".into());
         assert_eq!(fx.engine_and_chain().0, FxEngine::Ffmpeg);
         assert_eq!(fx.tail_s(), 0.0);
-        assert_eq!(fx.narrator(), 1.0);
     }
 
     /// The reserve is the longest decay any span in the chapter reaches, and
     /// it is what keeps a reverb from being chopped at the chapter's end. An
-    /// object preset deserializes to its engine, its tail, and a Narrator
-    /// fraction; a string preset (and a span that names no room) reserves
-    /// nothing, so a chapter with no tails is exactly as long as the voice.
+    /// object preset deserializes to its engine and its tail; a string preset
+    /// (and a span that names no room) reserves nothing, so a chapter with no
+    /// tails is exactly as long as the voice.
     #[test]
     fn the_longest_reached_decay_is_the_reserve() {
         let presets: BTreeMap<String, VoiceFx> = serde_json::from_str(
@@ -3656,14 +3643,13 @@ mod tests {
         )
         .unwrap();
 
-        // The object shape is read as SoX, with a reserved tail and a Narrator
-        // fraction that defaults when the field is absent.
+        // The object shape is read as SoX, with a reserved tail; an old map's
+        // `narrator` key still parses, and is ignored.
         assert_eq!(
             presets["cave"].engine_and_chain(),
             (FxEngine::Sox, "reverb 78 35 95")
         );
         assert_eq!(presets["cave"].tail_s(), 2.8);
-        assert!((presets["cave"].narrator() - 0.35).abs() < 1e-9);
 
         let mut a = span(0.0, 5.0, &[], 0.0);
         a.reverb = Some("hall".into());
