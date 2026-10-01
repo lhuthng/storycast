@@ -421,6 +421,36 @@ mod tests {
     }
 
     #[test]
+    fn audition_finds_takes_whatever_tier_stored_them() {
+        // The mp3 tier changed the default take extension; the audition pool
+        // read only `.wav` and went deaf on every chapter stored since.
+        let d = tmpdir("audition-tiers");
+        let l = crate::Layout::new(&d);
+        std::fs::create_dir_all(l.script_dir()).unwrap();
+        std::fs::create_dir_all(l.render_dir()).unwrap();
+        std::fs::create_dir_all(l.seg_dir("vieneu", 7)).unwrap();
+        std::fs::write(
+            l.script(7),
+            json!({"segments": [{"speaker": "A", "text": "hello"}]}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            l.plan(7),
+            json!({"takes": [
+                {"take_key": "aa", "speaker": "A", "voice": "V", "voice_key": "V", "text": "hello"},
+                {"take_key": "bb", "speaker": "A", "voice": "V", "voice_key": "V", "text": "hello"},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(l.seg_dir("vieneu", 7).join("t-aa.mp3"), b"fake-mp3").unwrap();
+        std::fs::write(l.seg_dir("vieneu", 7).join("t-bb.wav"), b"fake-wav").unwrap();
+        std::fs::write(l.seg_dir("vieneu", 7).join("note.txt"), b"not a take").unwrap();
+        let found = rendered_segments(&l, "vieneu", "V");
+        assert_eq!(found.len(), 2, "one take per tier, no strays");
+    }
+
+    #[test]
     fn runs_group_consecutive_speakers() {
         let segs = vec![
             json!({"speaker": "A", "text": "1"}),
@@ -989,7 +1019,12 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
             .unwrap_or_default();
         for e in rd.flatten() {
             let fname = e.file_name().to_string_lossy().to_string();
-            let stem = match fname.strip_suffix(".wav") {
+            // Whatever the storage tier stores: the take name's extension is
+            // the tier's, so only these suffixes are takes at all.
+            let stem = match super::renderplan::TAKE_EXTENSIONS
+                .iter()
+                .find_map(|ext| fname.strip_suffix(&format!(".{ext}")))
+            {
                 Some(s) => s,
                 None => continue,
             };
