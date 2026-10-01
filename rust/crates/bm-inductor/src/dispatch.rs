@@ -899,6 +899,7 @@ mod tests {
             sources_stages: Vec::new(),
             sidecar_keep,
             tts_threads: None,
+            cores: None,
         }
     }
 

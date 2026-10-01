@@ -1439,6 +1439,7 @@ fn heartbeat_now(
         sources_stages: bundle_slots(&who.root),
         sidecar_keep: Some(sidecar_keep),
         tts_threads,
+        cores: std::thread::available_parallelism().ok().map(|n| n.get() as u32),
     }
 }
 

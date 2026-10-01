@@ -84,9 +84,9 @@ pub(crate) enum Command {
     /// How many of one chapter's takes a single render offer carries. Saved to
     /// this workspace's settings; applies to offers made from then on.
     RenderBatch,
-    /// The selected box's TTS sidecar thread count. Saved to `machines.json` and
-    /// pushed to the worker, so the box's sidecar is relaunched with it.
-    TtsThreads,
+    /// The selected box's TTS sidecar thread count (`None` opens the prompt,
+    /// `Some` is `:threads <n>` dispatched directly).
+    TtsThreads { threads: Option<Option<u16>> },
     Mix,
     Sound,
     Rerender,
@@ -195,7 +195,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["release", "modelsrelease"], desc: Some("GitHub owner/name whose releases hold the model artifact, so a box fetches the weights from a CDN instead of your uplink (empty = push)"), cmd: Command::ModelsRelease },
     Word { key: None, names: &["packrelease", "packsrelease"], desc: Some("GitHub owner/name whose releases hold the profile pack, so a box fetches assets/ from a CDN instead of your uplink — the tag comes from the loaded profile's version (empty = push)"), cmd: Command::PacksRelease },
     Word { key: None, names: &["batch", "renderbatch"], desc: Some("how many of one chapter's takes one render offer carries (default 5)"), cmd: Command::RenderBatch },
-    Word { key: None, names: &["threads", "ttsthreads"], desc: Some("the selected box's TTS sidecar threads — a number 1-64, or empty for the sidecar's own default; the box's sidecar restarts on its next render"), cmd: Command::TtsThreads },
+    Word { key: None, names: &["threads", "ttsthreads"], desc: Some("the selected box's TTS sidecar threads — `:threads 8` sets 1-64 directly, `:threads clear` restores the sidecar's own default, bare opens the prompt; the box's sidecar restarts on its next render"), cmd: Command::TtsThreads { threads: None } },
     Word { key: Some('q'), names: &["quit", "exit", "q"], desc: None, cmd: Command::Key(KeyCode::Char('q')) },
     Word { key: None, names: &["inspect"], desc: None, cmd: Command::Key(KeyCode::Char('i')) },
     Word { key: None, names: &["policy"], desc: Some("per-machine work policy: which stages the selected box may run, in priority order"), cmd: Command::Key(KeyCode::Char('P')) },
@@ -251,6 +251,11 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
                     .then_some(Command::AwsDown { force: true });
             }
             "retry" | "u" if !rest.is_empty() => return retry_scope(&rest),
+            "threads" | "ttsthreads" if !rest.is_empty() => {
+                return Some(Command::TtsThreads {
+                    threads: Some(parse_threads_arg(rest[0])?),
+                });
+            }
             // Its own splitter, because a speaker name is almost always two or
             // three words and `:speaker 18 67 Dịch Phong` has no way to say
             // where the name ends. Quoted, like a shell.
@@ -357,6 +362,16 @@ fn retry_scope(rest: &[&str]) -> Option<Command> {
     })
 }
 
+/// `:threads <n>` / `:threads clear` → the count it names, if valid.
+fn parse_threads_arg(s: &str) -> Option<Option<u16>> {
+    match s.to_ascii_lowercase().as_str() {
+        "clear" | "default" | "auto" | "none" | "-" => Some(None),
+        n => {
+            let v: u16 = n.parse().ok()?;
+            (1..=64).contains(&v).then_some(Some(v))
+        }
+    }
+}
 /// A stage name as the task ledger spells it (`crawl`, `digest`, `render`,
 /// `merge`). Single letters are deliberately not accepted: they are live keys
 /// on other screens, so `:u r 24` reads as a typo rather than as a scope.
@@ -723,12 +738,38 @@ pub(crate) fn do_command(
                 &cur.to_string(),
             ));
         }
-        Command::TtsThreads => match app.selected_machine() {
+        Command::TtsThreads { threads } => match app.selected_machine() {
             None => app.set_status(
                 Level::Warn,
                 "no machine selected — the sidecar thread count is one box's",
             ),
             Some(m) => {
+                if let Some(v) = threads {
+                    let addr = m.addr.clone();
+                    let label = crate::tui::model::machine_label(&m);
+                    dispatch(
+                        app,
+                        job_tx,
+                        Job::SetTtsThreads {
+                            api: app.api.clone(),
+                            http: http.clone(),
+                            addr,
+                            threads: v,
+                        },
+                    );
+                    app.set_status(
+                        Level::Info,
+                        match v {
+                            Some(n) => format!(
+                                "threads {label}: {n} — the sidecar restarts on the next render"
+                            ),
+                            None => format!(
+                                "threads {label}: back to the sidecar default — it restarts on the next render"
+                            ),
+                        },
+                    );
+                    return;
+                }
                 // Prefilled with the box's own override, empty when it has
                 // none — so the prompt's starting point is what is in force,
                 // and clearing the line is the visible way back to the default.

@@ -4,7 +4,8 @@ use crate::tui::{
     app::{App, Panel},
     layout::COMPACT_MACHINE_COLS,
     model::{
-        addr_label, clamp_scroll, machine_kind, machine_label, policy_summary, work_label,
+        addr_label, clamp_scroll, machine_kind, machine_label, policy_summary, threads_label,
+        work_label,
     },
     style::{
         cell, empty_body, seen_label, selection_bg, state_glyph_cell, style_bold_of, style_of,
@@ -93,16 +94,8 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
                 cell(format!("{cursor}{}", machine_label(m))),
                 cell(machine_kind(m).to_string()),
                 cell(addr_label(m)),
-                // The sidecar thread count this box was told to run, which is
-                // the number the operator tunes per box (`:threads`). It was a
-                // live-worker count, which answered a question nobody asked:
-                // one worker per box by construction, so the column always read
-                // `1`. `—` is no override: the sidecar picks its own default.
-                cell(
-                    m.tts_threads
-                        .map(|t| t.to_string())
-                        .unwrap_or_else(|| "—".into()),
-                ),
+                // `eff/cores` (`?` unknown): `:threads` sets the top.
+                cell(threads_label(m, &app.beats)),
                 cell(policy_summary(m)),
                 state_glyph_cell(colour, &work_label(m)),
             ];

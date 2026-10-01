@@ -2601,6 +2601,7 @@ fn beat(id: &str, addr: &str, age_secs: u64, alias: &str) -> Heartbeat {
         sources_stages: Vec::new(),
         sidecar_keep: None,
         tts_threads: None,
+        cores: None,
     }
 }
 
@@ -2795,25 +2796,37 @@ fn task_eta_scales_history_by_the_unworked_fraction() {
 
 #[test]
 fn machines_pane_shows_each_boxs_sidecar_threads_instead_of_the_worker_count() {
-    // The old column counted live workers, but a box runs exactly one by
-    // construction, so it always read `1` — a number nobody could act on. The
-    // sidecar thread count is the per-box knob the operator actually tunes, so
-    // the column carries that instead: the override where one is set, `—` for
-    // the sidecar's own default.
+    // The column carries `eff/cores`: the `:threads` override (else the
+    // sidecar default) over the beat's cores, `?` where either is unknown.
     let mut app = App::new("http://127.0.0.1:8901");
     let mut local = Machine::new("127.0.0.1", "local", 22, None, "worker");
     local.tts_threads = None;
     let mut remote = Machine::new("192.168.2.2", "thang", 22, None, "worker");
     remote.tts_threads = Some(14);
-    app.machines = vec![local, remote];
+    let mut ghost = Machine::new("192.168.2.9", "ghost", 22, None, "worker");
+    ghost.tts_threads = None;
+    app.machines = vec![local, remote, ghost];
+    let mut beat_local = beat("w-local", "127.0.0.1", 2, "quokka");
+    beat_local.cores = Some(16);
+    let mut beat_remote = beat("w-remote", "192.168.2.2", 2, "marmot");
+    beat_remote.cores = Some(8);
+    app.beats = vec![beat_local, beat_remote];
     let text = render_text(&mut app, 140, 44);
     assert!(
         text.contains("threads"),
         "the count column is headed:\n{text}"
     );
     assert!(
-        text.contains("14"),
-        "the box's override shows in its row:\n{text}"
+        text.contains("8/16"),
+        "no override reads the sidecar default over the cores:\n{text}"
+    );
+    assert!(
+        text.contains("14/8"),
+        "the box's override shows over its cores:\n{text}"
+    );
+    assert!(
+        text.contains("?/?"),
+        "no beat and no override reads unknown:\n{text}"
     );
     assert_eq!(
         text.matches("192.168.2.2").count(),
@@ -5240,22 +5253,71 @@ async fn the_batch_command_opens_a_prefilled_prompt_and_enter_saves_it() {
 
 #[tokio::test]
 async fn threads_word_edits_the_selected_boxs_sidecar_threads() {
-    // `:threads` is per-box config: the prompt opens prefilled with the
-    // selected box's override, Enter dispatches a `SetTtsThreads` at the API,
-    // and a bad number keeps the prompt open rather than queuing a job.
+    // `:threads` opens the prompt prefilled; `:threads <n>` dispatches at once.
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://x");
-    assert_eq!(command_key("threads"), Some(Command::TtsThreads));
+    assert_eq!(
+        command_key("threads"),
+        Some(Command::TtsThreads { threads: None })
+    );
+    assert_eq!(
+        command_key("threads 8"),
+        Some(Command::TtsThreads {
+            threads: Some(Some(8))
+        })
+    );
+    assert_eq!(
+        command_key("threads clear"),
+        Some(Command::TtsThreads {
+            threads: Some(None)
+        })
+    );
+    assert_eq!(command_key("threads 0"), None, "0 is not a count — clear instead");
+    assert_eq!(command_key("threads 99"), None, "over the 64 cap");
+    assert_eq!(command_key("threads abc"), None);
 
     // No machine selected: the command says so instead of opening a prompt.
-    do_command(&mut app, Command::TtsThreads, &http, &job_tx);
+    do_command(
+        &mut app,
+        Command::TtsThreads { threads: None },
+        &http,
+        &job_tx,
+    );
     assert!(matches!(app.screen, Screen::Normal));
 
     let mut m = Machine::new("192.168.2.2", "thang", 22, None, "worker");
     m.tts_threads = Some(3);
     app.machines = vec![m];
-    do_command(&mut app, Command::TtsThreads, &http, &job_tx);
+    do_command(
+        &mut app,
+        Command::TtsThreads {
+            threads: Some(Some(8)),
+        },
+        &http,
+        &job_tx,
+    );
+    assert!(
+        matches!(app.screen, Screen::Normal),
+        "inline sets it at once: {:?}",
+        app.screen
+    );
+    match job_rx.try_recv() {
+        Ok(job) => match job.bare() {
+            Job::SetTtsThreads { addr, threads, .. } => {
+                assert_eq!(addr, "192.168.2.2");
+                assert_eq!(*threads, Some(8));
+            }
+            other => panic!("expected SetTtsThreads, got {other:?}"),
+        },
+        Err(e) => panic!("no job dispatched: {e}"),
+    }
+    do_command(
+        &mut app,
+        Command::TtsThreads { threads: None },
+        &http,
+        &job_tx,
+    );
     match &app.screen {
         Screen::Text(p) => {
             assert_eq!(p.kind, TextKind::TtsThreads);

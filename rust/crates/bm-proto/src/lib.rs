@@ -760,6 +760,10 @@ pub struct Heartbeat {
     /// answer says what it actually holds.
     #[serde(default)]
     pub tts_threads: Option<u32>,
+    /// Logical cores on the worker box, as the worker measured. `None` from an
+    /// older agent; the Machines pane reads `eff/cores` off this plus `tts_threads`.
+    #[serde(default)]
+    pub cores: Option<u32>,
 }
 
 /// The heartbeat's answer: the only inductor→worker command channel.

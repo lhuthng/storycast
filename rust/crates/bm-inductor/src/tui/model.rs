@@ -758,6 +758,21 @@ pub(crate) fn machine_name<'a>(machines: &'a [Machine], beat: &'a Heartbeat) -> 
         })
 }
 
+/// The `threads` column: `{eff}/{cores}` (`?` where either is unknown).
+pub(crate) fn threads_label(m: &Machine, beats: &[Heartbeat]) -> String {
+    let cores = beats
+        .iter()
+        .filter(|b| b.addr == m.addr && b.cores.filter(|c| *c > 0).is_some())
+        .max_by_key(|b| b.ts)
+        .and_then(|b| b.cores);
+    match (m.tts_threads.map(u32::from), cores) {
+        (Some(eff), Some(c)) => format!("{eff}/{c}"),
+        (Some(eff), None) => format!("{eff}/?"),
+        (None, Some(c)) => format!("{}/{c}", (c / 2).clamp(1, 8)),
+        (None, None) => "?/?".into(),
+    }
+}
+
 /// The `ip` column, which is not always an address.
 ///
 /// A launched box whose public address the account has not assigned yet is keyed

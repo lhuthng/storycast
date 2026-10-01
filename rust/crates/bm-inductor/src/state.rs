@@ -2955,6 +2955,7 @@ mod tests {
                 sources_stages: Vec::new(),
                 sidecar_keep: None,
                 tts_threads: None,
+                cores: None,
             },
         );
         (d, inner)
@@ -3207,6 +3208,7 @@ mod tests {
             sources_stages: Vec::new(),
             sidecar_keep: None,
             tts_threads: None,
+            cores: None,
         }
     }
 
@@ -3723,6 +3725,7 @@ mod tests {
                 sources_stages: Vec::new(),
                 sidecar_keep: None,
                 tts_threads: None,
+                cores: None,
             },
         );
         assert!(inner.reap().is_empty(), "live worker untouched");
@@ -3911,6 +3914,7 @@ mod tests {
                 sources_stages: Vec::new(),
                 sidecar_keep: None,
                 tts_threads: None,
+                cores: None,
             },
         );
         let msg = inner.op_requeue_orphans();
@@ -3951,6 +3955,7 @@ mod tests {
             sources_stages: Vec::new(),
             sidecar_keep: None,
             tts_threads: None,
+            cores: None,
         }
     }
 

@@ -59,6 +59,7 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
         // A registration carries no sidecar belief; the next beat does.
         sidecar_keep: None,
         tts_threads: None,
+        cores: None,
     };
     inner.observe(&beat);
     inner.save();
@@ -2030,6 +2031,7 @@ mod tests {
                 sources_stages: Vec::new(),
                 sidecar_keep: None,
                 tts_threads: None,
+                cores: None,
             }),
         )
         .await;
@@ -2131,6 +2133,7 @@ mod tests {
             sources_stages: Vec::new(),
             sidecar_keep: None,
             tts_threads: None,
+            cores: None,
         };
         heartbeat(State(st.clone()), Json(beat())).await;
         {
