@@ -2459,7 +2459,7 @@ fn log_lines_use_reported_aliases_when_beats_carry_them() {
     // asking the beats.
     let mut app = App::new("http://127.0.0.1:8901");
     app.beats = vec![beat("thang-29486", "192.168.2.2", 2, "marmot")];
-    app.log_at(Level::Ok, "[thang-29486] render:23 done in 255.3s");
+    app.log_at(Level::Info, "[thang-29486] heartbeat slow");
     let text = render_text(&mut app, 140, 44);
     assert!(
         text.contains("[marmot]"),
@@ -2474,6 +2474,53 @@ fn log_lines_use_reported_aliases_when_beats_carry_them() {
         text.contains("[ghost-1]"),
         "unknown ids stay verbatim:\n{text}"
     );
+}
+
+#[test]
+fn task_lines_render_compact_with_their_own_colors() {
+    use super::model::task_event;
+    // Completions: tag, outcome, duration; remote workers read retrieved.
+    assert!(matches!(
+        task_event("[w1] merge:23 done in 14.6s — merge ch23 -> /x/y.mp3"),
+        Some(super::model::TaskEvent::Done { task, secs, .. })
+            if task == "merge:23" && secs == "14.6s"
+    ));
+    assert!(task_event("[w1] render:24 done").is_none(), "no duration, no shape");
+    assert!(task_event("reconcile done in 2s").is_none(), "no head, no shape");
+    // Failures keep the note and the reason.
+    assert!(matches!(
+        task_event("[w1] render:7 FAILED (will retry): boom"),
+        Some(super::model::TaskEvent::Failed { note: Some("will retry"), reason: "boom", .. })
+    ));
+    assert!(matches!(
+        task_event("render:5 SHELVED without retry: kaput (press u to requeue)"),
+        Some(super::model::TaskEvent::Shelved { reason: "kaput", .. })
+    ));
+
+    let mut app = App::new("http://127.0.0.1:8901");
+    let mut remote = beat("thang-29486", "192.168.2.2", 2, "marmot");
+    remote.cores = Some(8);
+    app.beats = vec![remote, beat("w-local", "127.0.0.1", 2, "")];
+    app.log_at(Level::Ok, "[thang-29486] render:23 done in 255.3s");
+    app.log_at(Level::Ok, "[w-local] crawl:4 done in 1.2s");
+    app.log_at(Level::Warn, "[thang-29486] render:7 FAILED (will retry): boom");
+    let text = render_text(&mut app, 140, 44);
+    assert!(text.contains("[T:render:23]"), "task tag:\n{text}");
+    assert!(text.contains("Complete in"), "outcome:\n{text}");
+    assert!(text.contains("255.3s"), "duration:\n{text}");
+    assert_eq!(
+        text.matches("(retrieved)").count(),
+        1,
+        "only the remote worker's product rode home:\n{text}"
+    );
+    assert!(
+        !text.contains("255.3s —"),
+        "the detail tail is dropped:\n{text}"
+    );
+    assert!(text.contains("[T:crawl:4]"), "local tag too:\n{text}");
+    assert!(text.contains("[T:render:7]"), "failure tag:\n{text}");
+    assert!(text.contains("Failed"), "failure outcome:\n{text}");
+    assert!(text.contains("(will retry): boom"), "note and reason kept:\n{text}");
 }
 
 #[test]

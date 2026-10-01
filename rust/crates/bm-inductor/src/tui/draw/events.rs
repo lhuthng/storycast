@@ -2,8 +2,10 @@
 use crate::tui::style::Level;
 use crate::tui::{
     app::{App, Panel},
-    model::reported_alias,
-    style::{empty_body, log_head, style_of, wall_hms, worker_alias},
+    model::{reported_alias, task_event, TaskEvent},
+    style::{
+        empty_body, log_head, stage_color, style_bold_of, style_of, wall_hms, worker_alias,
+    },
 };
 use ratatui::{
     layout::Rect,
@@ -11,6 +13,73 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
+
+/// A task line, compact: `[T:merge:23] Complete in 14.6s (retrieved)`. The tag
+/// carries the stage hue, the outcome its state hue, the duration its own, and
+/// a remote worker reads `(retrieved)` — the artifact rode home in the report.
+/// The `— detail` tail never renders: on a completion it repeats the stage and
+/// chapter or dumps a path, while a failure keeps its reason (that is news).
+fn push_task_event(
+    spans: &mut Vec<Span<'static>>,
+    colour: bool,
+    ev: &TaskEvent,
+    beats: &[bm_proto::Heartbeat],
+    reason_style: Style,
+) {
+    let dim = style_of(colour, Color::DarkGray);
+    let (stage, task) = match ev {
+        TaskEvent::Done { stage, task, .. }
+        | TaskEvent::Failed { stage, task, .. }
+        | TaskEvent::Shelved { stage, task, .. } => (*stage, *task),
+    };
+    spans.push(Span::styled(
+        format!("[T:{task}] "),
+        style_bold_of(colour, stage_color(stage)),
+    ));
+    match ev {
+        TaskEvent::Done { secs, worker, .. } => {
+            spans.push(Span::styled(
+                "Complete ",
+                style_bold_of(colour, Color::Green),
+            ));
+            spans.push(Span::raw("in ".to_string()));
+            spans.push(Span::styled(
+                (*secs).to_string(),
+                style_of(colour, Color::Cyan),
+            ));
+            let remote = beats
+                .iter()
+                .any(|b| b.worker_id == *worker && !bm_core::is_local_node(&b.addr));
+            if remote {
+                spans.push(Span::styled(" (retrieved)".to_string(), dim));
+            }
+        }
+        TaskEvent::Failed { note, reason, .. } => {
+            spans.push(Span::styled(
+                "Failed",
+                style_bold_of(colour, Color::Red),
+            ));
+            if let Some(n) = note {
+                spans.push(Span::styled(format!(" ({n})"), dim));
+            }
+            if !reason.is_empty() {
+                spans.push(Span::raw(": ".to_string()));
+                spans.push(Span::styled((*reason).to_string(), reason_style));
+            }
+        }
+        TaskEvent::Shelved { reason, .. } => {
+            spans.push(Span::styled(
+                "Shelved",
+                style_bold_of(colour, Color::Red),
+            ));
+            spans.push(Span::styled(" (press u)".to_string(), dim));
+            if !reason.is_empty() {
+                spans.push(Span::raw(": ".to_string()));
+                spans.push(Span::styled((*reason).to_string(), reason_style));
+            }
+        }
+    }
+}
 
 pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let wrap_w = area.width.saturating_sub(2) as usize;
@@ -87,6 +156,12 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                     style_of(colour, l.level.color()),
                 ),
             ];
+            // A task line renders compact (tag, outcome, duration) instead of
+            // the stored sentence; everything else keeps its head and text.
+            if let Some(ev) = task_event(&l.text) {
+                push_task_event(&mut spans, colour, &ev, &app.beats, body_style);
+                return Line::from(spans);
+            }
             match log_head(&l.text) {
                 Some(id) => {
                     // The reported alias when a beat carries one for this

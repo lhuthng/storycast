@@ -880,6 +880,100 @@ impl LogFilter {
     }
 }
 ///
+/// A log line about one task, when it names one: `[worker] stage:ch …`.
+/// Borrowed slices of the line, so the Logs pane can recolor it without the
+/// backend changing what it stores.
+pub(crate) enum TaskEvent<'a> {
+    Done {
+        worker: &'a str,
+        stage: &'a str,
+        task: &'a str,
+        secs: &'a str,
+    },
+    Failed {
+        stage: &'a str,
+        task: &'a str,
+        note: Option<&'a str>,
+        reason: &'a str,
+    },
+    Shelved {
+        task: &'a str,
+        stage: &'a str,
+        reason: &'a str,
+    },
+}
+
+/// Split `stage:chapter[:take]` off a task word, with the stage validated.
+fn task_stage(task: &str) -> Option<&str> {
+    let (stage, rest) = task.split_once(':')?;
+    if rest.is_empty() || rest.contains(' ') || rest.contains(']') {
+        return None;
+    }
+    Stage::parse(stage).map(|_| stage)
+}
+
+fn bracket_head(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix('[')?;
+    let end = rest.find("] ")?;
+    let head = rest[..end].trim();
+    if head.is_empty() {
+        return None;
+    }
+    Some((head, &rest[end + 2..]))
+}
+
+/// `[worker] stage:ch done in 14.6s — detail` → [`TaskEvent::Done`], and the
+/// same head with `FAILED[(note)]: reason` → [`TaskEvent::Failed`]. Anything
+/// else is `None` and renders as it always did.
+pub(crate) fn task_event(text: &str) -> Option<TaskEvent<'_>> {
+    if let Some((worker, rest)) = bracket_head(text) {
+        if let Some((task, tail)) = rest.split_once(" done in ") {
+            let stage = task_stage(task)?;
+            let secs = tail.split_whitespace().next()?;
+            if secs.strip_suffix('s').map(|n| n.parse::<f64>().is_ok()) != Some(true) {
+                return None;
+            }
+            return Some(TaskEvent::Done {
+                worker,
+                stage,
+                task,
+                secs,
+            });
+        }
+        if let Some((task, tail)) = rest.split_once(" FAILED") {
+            let stage = task_stage(task)?;
+            let (note, reason) = if let Some(after) = tail.strip_prefix(' ') {
+                if let Some(n) = after.strip_prefix('(') {
+                    let (note, reason) = n.split_once("): ")?;
+                    (Some(note), reason)
+                } else {
+                    (None, after.strip_prefix(": ")?)
+                }
+            } else {
+                return None;
+            };
+            return Some(TaskEvent::Failed {
+                stage,
+                task,
+                note,
+                reason,
+            });
+        }
+        return None;
+    }
+    // No worker head: `{task} SHELVED without retry: {reason} (press u …)`.
+    if let Some((task, tail)) = text.split_once(" SHELVED without retry: ") {
+        let stage = task_stage(task)?;
+        let reason = tail.strip_suffix(" (press u to requeue)")?;
+        return Some(TaskEvent::Shelved {
+            task,
+            stage,
+            reason,
+        });
+    }
+    None
+}
+///
 /// The `ip` column, which is not always an address.
 ///
 /// A launched box whose public address the account has not assigned yet is keyed
