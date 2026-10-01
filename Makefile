@@ -3,6 +3,7 @@
 #   make build                  compile the workspace
 #   make tts                    cross-build the linux TTS sidecar + stage its runtime
 #   make tui                    live cluster dashboard (needs the inductor up)
+#   make tui-release            same dashboard, release binaries throughout
 #   make serve                  run the inductor, held (START=1 COUNT=100 by default)
 #                               — GO=1 to start distributing as soon as it is up
 #   make agent                  run a local worker (needs the inductor up)
@@ -26,6 +27,7 @@
 
 RUST_DIR := rust
 BIN := $(RUST_DIR)/target/debug
+RELEASE_BIN := $(RUST_DIR)/target/release
 # `cargo` is not always on PATH — a rustup shim lives in ~/.cargo/bin, which a
 # non-login shell may not have. Fall back to it rather than failing obscurely.
 CARGO := $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
@@ -44,7 +46,7 @@ COUNT ?= 100
 # nobody asked for. `make serve GO=1` is the automation escape hatch.
 GO ?=
 
-.PHONY: build build-inductor tui serve agent digest-assistant provision link test
+.PHONY: build build-inductor build-inductor-release tui tui-release serve agent digest-assistant provision link test
 
 build:
 	$(CARGO) build --workspace --manifest-path $(RUST_DIR)/Cargo.toml
@@ -59,6 +61,15 @@ build-inductor:
 
 tui: build-inductor
 	$(BIN)/bm-inductor tui --api $(API)
+
+# Pure release: the dashboard plus the local worker it drives. A debug
+# sidecar decodes an order of magnitude slower per step, so a machine that
+# both renders and merges must run release throughout, not just the TUI.
+build-inductor-release:
+	$(CARGO) build --release -p bm-inductor -p bm-agent --manifest-path $(RUST_DIR)/Cargo.toml
+
+tui-release: build-inductor-release
+	$(RELEASE_BIN)/bm-inductor tui --api $(API)
 
 serve: build-inductor
 	$(BIN)/bm-inductor serve --bind 0.0.0.0 --port 8901 --start $(START) --count $(COUNT) $(if $(GO),--go,)
