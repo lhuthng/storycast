@@ -123,12 +123,12 @@ pub(crate) const KEYS_COMPACT: [&str; 2] = [
 /// inline; these are the ones that must fit inside `MIN_W`, so they are named
 /// and checked while compiling.
 ///
-/// `machine, kind, ip, workers, policy, state, seen` — the `tts` column is
+/// `machine, kind, ip, threads, policy, state, seen` — the `tts` column is
 /// dropped. Seven short columns now, so `machine`/`ip` stay narrow enough that
 /// the whole identity of a box reads in the width of one address.
 ///
-/// `workers` carries 8: the header word is seven columns and a Length that
-/// cannot hold its own header clips to `work`, which read as a column that
+/// `threads` carries 8: the header word is seven columns and a Length that
+/// cannot hold its own header clips to `thread`, which read as a column that
 /// was never meant to be there.
 pub(crate) const COMPACT_MACHINE_COLS: [u16; 7] = [11, 5, 14, 8, 9, 13, 5];
 

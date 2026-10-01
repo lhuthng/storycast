@@ -63,6 +63,10 @@ use std::sync::{
 };
 use std::time::Duration;
 
+/// Sentinel for [`Push::tts_threads`]: no inductor instruction, so the
+/// sidecar's own default (or `BM_TTS_THREADS`) stands.
+pub(crate) const THREADS_UNSET: u64 = u64::MAX;
+
 /// What the server needs to answer: who this worker is, what it is doing, and
 /// everything a pushed task needs in order to run.
 pub(crate) struct Push {
@@ -113,6 +117,11 @@ pub(crate) struct Push {
     /// way. `AtomicBool` rather than inside the sidecar's mutex so the reaper
     /// and the endpoint can read it without contending on that lock.
     pub(crate) keep_sidecar: AtomicBool,
+    /// The ONNX thread count the inductor pushed for this box's sidecar, as
+    /// [`THREADS_UNSET`] when it has no opinion. An atomic for the same reason
+    /// `keep_sidecar` is one: `POST /sidecar-policy` must answer without
+    /// waiting on the sidecar's mutex, which a running render holds.
+    pub(crate) tts_threads: AtomicU64,
     /// Data-plane dial-out, and only that: the reverse tunnel's worker-side
     /// end (`http://127.0.0.1:{hook port}`), which *is* the inductor's control
     /// API while the inductor holds the tunnel open. A merge pulls the take
@@ -159,6 +168,19 @@ impl Push {
         self.keep_sidecar.store(keep, Ordering::SeqCst);
     }
 
+    /// The thread count the inductor asked for, or `None` for "no opinion".
+    pub(crate) fn tts_threads_desired(&self) -> Option<u32> {
+        let v = self.tts_threads.load(Ordering::SeqCst);
+        (v != THREADS_UNSET).then_some(v as u32)
+    }
+
+    /// Record the inductor's thread instruction. `None` clears it, restoring
+    /// the sidecar's own default.
+    pub(crate) fn set_tts_threads(&self, threads: Option<u32>) {
+        self.tts_threads
+            .store(threads.map(u64::from).unwrap_or(THREADS_UNSET), Ordering::SeqCst);
+    }
+
     pub(crate) fn is_busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
     }
@@ -200,7 +222,16 @@ async fn status(
     // convergence knows what it *told* this box, but only this answer says
     // what the box actually believes — which is what a reboot resets.
     let keep = push.keep_sidecar();
-    Ok(Json(heartbeat_now(&p, &push.who, &mut probe, keep)))
+    // Told the same way, and read back by the dispatcher's convergence: the
+    // thread count is the second half of the sidecar instruction.
+    let threads = push.tts_threads_desired();
+    Ok(Json(heartbeat_now(
+        &p,
+        &push.who,
+        &mut probe,
+        keep,
+        threads,
+    )))
 }
 
 /// `Authorization: Bearer <token>`, compared without short-circuiting.
@@ -282,6 +313,7 @@ async fn task(
     // with a typed error that becomes a 403 below, strike-free on the
     // inductor's side, instead of re-warming the model against the policy.
     let keep_sidecar = push.keep_sidecar();
+    let tts_threads = push.tts_threads_desired();
     let result = run_offer(
         &push.layout,
         &push.settings,
@@ -290,6 +322,7 @@ async fn task(
         &mut sidecar,
         Some((&push.fetch_http, push.fetch_base.as_str())),
         keep_sidecar,
+        tts_threads,
     )
     .await;
     // Deliberately **no** `sidecar.stop()` here: the sidecar is worker-owned
@@ -459,6 +492,10 @@ async fn unit(
 #[derive(Deserialize)]
 struct SidecarPolicyUpdate {
     keep: bool,
+    /// The ONNX thread count to open the sidecar with; omitted/`null` means
+    /// "no opinion" (the sidecar's own default). Older agents ignore it.
+    #[serde(default)]
+    threads: Option<u32>,
 }
 
 /// `POST /sidecar-policy` — a policy consequence, not a policy.
@@ -477,6 +514,7 @@ async fn sidecar_policy(
     }
     push.touch();
     push.set_keep_sidecar(u.keep);
+    push.set_tts_threads(u.threads);
     if u.keep {
         println!("sidecar policy: keep — the next render may ensure it again");
     } else {
@@ -596,15 +634,26 @@ pub(crate) async fn sidecar_reaper(push: Arc<Push>) {
     }
 }
 
-/// A unit name is one `.wav` filename and nothing else.
+/// A unit name is one stored take's filename and nothing else.
 ///
-/// The renderer names them `0007_Voice.wav` and `0007-0012_Voice.wav`, so the
-/// shape is known; anything with a separator, a parent reference or an absolute
-/// prefix is not one of ours and must never reach `Path::join`.
+/// The renderer names takes `t-<take_key>.wav` or `t-<take_key>.mp3` — the
+/// extension is the storage tier's ([`bm_core::assemble::TAKE_EXTENSIONS`]), so
+/// both are ours; an adopted take keeps its legacy `0007_Voice.wav` shape.
+/// Anything with a separator, a parent reference or an absolute prefix is not
+/// one of ours and must never reach `Path::join`.
+///
+/// **The extension check reads the shared list, not a literal.** A `.wav`-only
+/// guard here refused every `.mp3` take the moment the default tier stopped
+/// being raw PCM, so `GET /unit` answered 400 and a remote render's takes never
+/// came home — the chapter failed its completion gate while the audio sat on
+/// the worker's disk.
 fn safe_unit_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() < 256
-        && name.ends_with(".wav")
+        && std::path::Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| bm_core::assemble::TAKE_EXTENSIONS.contains(&e))
         && !name.contains('/')
         && !name.contains('\\')
         && !name.contains('\0')
@@ -651,6 +700,7 @@ mod tests {
             // holds in tests: a test that wants the *refusing* state flips it
             // itself, so nothing else in this file drifts.
             keep_sidecar: AtomicBool::new(true),
+            tts_threads: AtomicU64::new(THREADS_UNSET),
             fetch_http: reqwest::Client::builder().no_proxy().build().unwrap(),
             fetch_base: "http://127.0.0.1:1".into(),
         })
@@ -711,6 +761,10 @@ mod tests {
             "0007_Voice.wav",
             "0007-0012_Voice.wav",
             "title_Narrator.wav",
+            // The storage tier's encoded takes: the default names these, and a
+            // guard that refused them broke every remote render.
+            "t-7a5fee039840532e.mp3",
+            "0007_Voice.mp3",
         ] {
             assert!(safe_unit_name(good), "{good} is a real unit name");
         }
@@ -723,7 +777,7 @@ mod tests {
             "a\\b.wav",
             ".hidden.wav",
             "",
-            "0007_Voice.mp3",
+            "0007_Voice.ogg",
             "0007_Voice.wav\0",
         ] {
             assert!(!safe_unit_name(bad), "{bad:?} must not reach Path::join");

@@ -2340,6 +2340,7 @@ async fn main() -> anyhow::Result<()> {
                 role: "worker".into(),
                 task_policy: None,
                 accepting_work: true,
+                tts_threads: None,
             };
             bm_core::provision::save_box(&layout.machines(), &bxo)?;
             println!("linked {name} -> {}", layout.machines().display());
@@ -3209,6 +3210,7 @@ mod tests {
                 role: "worker".into(),
                 task_policy: Some(policy.clone()),
                 accepting_work: true,
+                tts_threads: None,
             },
         )
         .unwrap();

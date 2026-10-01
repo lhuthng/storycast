@@ -2954,6 +2954,7 @@ mod tests {
                 capabilities: vec![],
                 sources_stages: Vec::new(),
                 sidecar_keep: None,
+                tts_threads: None,
             },
         );
         (d, inner)
@@ -3205,6 +3206,7 @@ mod tests {
             capabilities: Vec::new(),
             sources_stages: Vec::new(),
             sidecar_keep: None,
+            tts_threads: None,
         }
     }
 
@@ -3720,6 +3722,7 @@ mod tests {
                 capabilities: vec![],
                 sources_stages: Vec::new(),
                 sidecar_keep: None,
+                tts_threads: None,
             },
         );
         assert!(inner.reap().is_empty(), "live worker untouched");
@@ -3907,6 +3910,7 @@ mod tests {
                 capabilities: vec![],
                 sources_stages: Vec::new(),
                 sidecar_keep: None,
+                tts_threads: None,
             },
         );
         let msg = inner.op_requeue_orphans();
@@ -3946,6 +3950,7 @@ mod tests {
             capabilities: vec![],
             sources_stages: Vec::new(),
             sidecar_keep: None,
+            tts_threads: None,
         }
     }
 

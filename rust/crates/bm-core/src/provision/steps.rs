@@ -1339,6 +1339,15 @@ fi
             Some(name) => format!("--dict \"$E/models/{name}\" "),
             None => String::new(),
         };
+        // The per-box ONNX thread override rides the launch too, so a
+        // provision-started sidecar opens with the same count the worker's own
+        // `ensure` would have used — otherwise the next render would adopt a
+        // half-core sidecar and the setting would look ignored. Empty means
+        // the sidecar's own default (half the cores, capped at 8).
+        let threads = match crate::config::tts_threads() {
+            0 => String::new(),
+            n => format!("--threads {n} "),
+        };
         let script = format!(
             r#"D="$HOME/{d}"
 E="$D/{rel}"
@@ -1347,7 +1356,7 @@ if [ "$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 3 http://127.0.0.1:{
 fi
 cd "$E" || exit 5
 LD_LIBRARY_PATH="$E" nohup "$E/bm-tts" --models "$E/models" --codec "$E/models" \
-  {dict}--voices "$E/models/voices.json" \
+  {dict}{threads}--voices "$E/models/voices.json" \
   --port {port} --bind 0.0.0.0 > "$D/tts.log" 2>&1 &
 echo $! > "$D/tts.pid"
 for _ in $(seq 1 120); do
@@ -1359,6 +1368,7 @@ echo "TTS-STARTING (not ready after 240s, check $D/tts.log)"
             d = REMOTE_DIR,
             rel = engine_rel(engine),
             dict = dict,
+            threads = threads,
             port = TTS_PORT
         );
         let (code, stdout, stderr) = self.run(&script, 300)?;

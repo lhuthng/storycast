@@ -43,6 +43,15 @@ use std::path::Path;
 /// `.mp3`, and vice versa.
 pub const PLAN_VERSION: u32 = 2;
 
+/// The extensions a stored take may carry — the one list the namer, the store's
+/// HTTP guard and the planner all read.
+///
+/// The scheme puts the storage tier's extension on the content-addressed take
+/// name (`raw` → `.wav`, every mp3 tier → `.mp3`), so a guard that hardcoded a
+/// single extension silently refused the other the moment the default tier
+/// changed. A new tier adds its extension here and nowhere else.
+pub const TAKE_EXTENSIONS: [&str; 2] = ["wav", "mp3"];
+
 /// How a take is stored, from `settings.take_quality`.
 ///
 /// The tier decides the *stored representation* of the sidecar's wav, and so

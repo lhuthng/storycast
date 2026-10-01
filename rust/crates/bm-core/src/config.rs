@@ -46,6 +46,26 @@ pub const DEFAULT_RENDER_BATCH: u32 = 5;
 /// one that runs slower than it asked.
 pub const MAX_RENDER_BATCH: u32 = 64;
 
+/// ONNX intra-op threads the TTS sidecar should open its sessions with.
+///
+/// A property of the **box**, not of the book, and it rides the environment for
+/// the same reason `bm-agent`'s `BM_TTS_*` memory guard does: a provisioned
+/// worker has no `settings.json` at all. `BM_TTS_THREADS=0` (or unset) keeps the
+/// sidecar's own default — **half the cores, capped at 8**, the reference's
+/// choice — and a positive value is the count it opens with.
+///
+/// Raising it is the one lever that makes a *single* render use more of a box's
+/// cores; it cannot buy parallelism on one model, because the sidecar serialises
+/// inferences behind its `synth` mutex. Set it to `nproc` on a render box whose
+/// cores sit idle, and leave it alone where the box also merges (a merge stops
+/// the sidecar before ffmpeg, so there is no overlap to arbitrate).
+pub fn tts_threads() -> usize {
+    std::env::var("BM_TTS_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
 /// How this workspace crawls, and what a crawl script may spend.
 ///
 /// `mode` is the only switch that changes *where the text comes from*:
@@ -1644,6 +1664,22 @@ mod tests {
             MAX_RENDER_BATCH as usize,
             "an absurd batch is a lease held on one box for hours"
         );
+    }
+
+    #[test]
+    fn the_sidecar_thread_override_is_opt_in_and_a_typo_never_fails_a_run() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("BM_TTS_THREADS").ok();
+        std::env::remove_var("BM_TTS_THREADS");
+        assert_eq!(tts_threads(), 0, "unset means the sidecar picks its own");
+        std::env::set_var("BM_TTS_THREADS", " 8 ");
+        assert_eq!(tts_threads(), 8, "surrounding space is forgiven");
+        std::env::set_var("BM_TTS_THREADS", "half");
+        assert_eq!(tts_threads(), 0, "a typo falls back, never fails a run");
+        match saved {
+            Some(v) => std::env::set_var("BM_TTS_THREADS", v),
+            None => std::env::remove_var("BM_TTS_THREADS"),
+        }
     }
 
     #[test]

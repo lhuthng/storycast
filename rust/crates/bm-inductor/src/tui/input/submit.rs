@@ -34,6 +34,40 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
         // and dispatches nothing, because the scheduler reads the value when it
         // builds its next offer.
         TextKind::RenderBatch => Err("render batch saves from the prompt, not submit".into()),
+        // One box's sidecar thread count. Dispatched rather than written here:
+        // the value lives in `machines.json` beside the box's login and is
+        // converged onto the box by the dispatcher, so it must go through the
+        // API even when the operator is editing a box that is currently down.
+        TextKind::TtsThreads => {
+            let m = app
+                .selected_machine()
+                .ok_or_else(|| "no machine selected — the thread count is one box's".to_string())?;
+            let t = prompt.buf.trim();
+            let threads = if t.is_empty() {
+                None
+            } else {
+                let n: u16 = t
+                    .parse()
+                    .map_err(|_| format!("“{t}” is not a thread count"))?;
+                if n == 0 {
+                    return Err("at least 1 — clear the line to restore the sidecar default".into());
+                }
+                if n > 64 {
+                    return Err(
+                        "at most 64 — the sidecar clamps to what the box has, but a number \
+                         this large is a typo"
+                            .into(),
+                    );
+                }
+                Some(n)
+            };
+            Ok(Job::SetTtsThreads {
+                api: app.api.clone(),
+                http: app.http.clone(),
+                addr: m.addr,
+                threads,
+            })
+        }
         // The sound-design prompts write a registry and launch nothing, so
         // reaching dispatch means a bug — same as the two above.
         TextKind::SoundAdd(_) | TextKind::SoundEdit(..) | TextKind::SoundLevel(..) => {

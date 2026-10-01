@@ -1973,7 +1973,7 @@ fn every_dashboard_header_reads_in_full_at_the_100_column_floor() {
     // exact terminal where they broke.
     let mut app = stats_app();
     let text = render_text(&mut app, 100, 32);
-    for header in ["box cpu", "box ram", "workers", "activity", "seen"] {
+    for header in ["box cpu", "box ram", "threads", "activity", "seen"] {
         assert!(text.contains(header), "{header} clipped:\n{text}");
     }
 }
@@ -2600,6 +2600,7 @@ fn beat(id: &str, addr: &str, age_secs: u64, alias: &str) -> Heartbeat {
         capabilities: vec![],
         sources_stages: Vec::new(),
         sidecar_keep: None,
+        tts_threads: None,
     }
 }
 
@@ -2793,37 +2794,32 @@ fn task_eta_scales_history_by_the_unworked_fraction() {
 }
 
 #[test]
-fn machines_pane_counts_live_workers_instead_of_repeating_the_addr() {
-    // `id` was the addr by construction, so the column only echoed its
-    // neighbour. The useful number is how many live workers each box has.
+fn machines_pane_shows_each_boxs_sidecar_threads_instead_of_the_worker_count() {
+    // The old column counted live workers, but a box runs exactly one by
+    // construction, so it always read `1` — a number nobody could act on. The
+    // sidecar thread count is the per-box knob the operator actually tunes, so
+    // the column carries that instead: the override where one is set, `—` for
+    // the sidecar's own default.
     let mut app = App::new("http://127.0.0.1:8901");
-    app.machines = vec![
-        Machine::new("127.0.0.1", "local", 22, None, "worker"),
-        Machine::new("192.168.2.2", "thang", 22, None, "worker"),
-    ];
-    app.beats = vec![
-        beat("localhost-9", "127.0.0.1", 2, "quokka"),
-        beat("thang-1", "192.168.2.2", 3, "wombat"),
-        beat("thang-0", "192.168.2.2", 900, "wombat"),
-    ];
+    let mut local = Machine::new("127.0.0.1", "local", 22, None, "worker");
+    local.tts_threads = None;
+    let mut remote = Machine::new("192.168.2.2", "thang", 22, None, "worker");
+    remote.tts_threads = Some(14);
+    app.machines = vec![local, remote];
     let text = render_text(&mut app, 140, 44);
     assert!(
-        text.contains("workers"),
+        text.contains("threads"),
         "the count column is headed:\n{text}"
+    );
+    assert!(
+        text.contains("14"),
+        "the box's override shows in its row:\n{text}"
     );
     assert_eq!(
         text.matches("192.168.2.2").count(),
         1,
         "the addr appears once, never echoed:\n{text}"
     );
-    let now = bm_proto::now_secs();
-    assert_eq!(
-        live_workers(&app.beats, "192.168.2.2", now),
-        1,
-        "stale excluded"
-    );
-    assert_eq!(live_workers(&app.beats, "127.0.0.1", now), 1);
-    assert_eq!(live_workers(&app.beats, "10.0.0.9", now), 0, "unknown box");
 }
 
 #[test]
@@ -5242,6 +5238,61 @@ async fn the_batch_command_opens_a_prefilled_prompt_and_enter_saves_it() {
     }
 }
 
+#[tokio::test]
+async fn threads_word_edits_the_selected_boxs_sidecar_threads() {
+    // `:threads` is per-box config: the prompt opens prefilled with the
+    // selected box's override, Enter dispatches a `SetTtsThreads` at the API,
+    // and a bad number keeps the prompt open rather than queuing a job.
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://x");
+    assert_eq!(command_key("threads"), Some(Command::TtsThreads));
+
+    // No machine selected: the command says so instead of opening a prompt.
+    do_command(&mut app, Command::TtsThreads, &http, &job_tx);
+    assert!(matches!(app.screen, Screen::Normal));
+
+    let mut m = Machine::new("192.168.2.2", "thang", 22, None, "worker");
+    m.tts_threads = Some(3);
+    app.machines = vec![m];
+    do_command(&mut app, Command::TtsThreads, &http, &job_tx);
+    match &app.screen {
+        Screen::Text(p) => {
+            assert_eq!(p.kind, TextKind::TtsThreads);
+            assert_eq!(p.buf, "3", "prefilled with the box's override");
+        }
+        other => panic!("expected the threads prompt, got {other:?}"),
+    }
+
+    // A bad value keeps the prompt open with the operator's typing still in it.
+    if let Screen::Text(p) = &mut app.screen {
+        p.buf = "0".into();
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Text(_)),
+        "the prompt stays open: {:?}",
+        app.screen
+    );
+
+    // A good one closes and dispatches the per-box API edit.
+    if let Screen::Text(p) = &mut app.screen {
+        p.buf = "6".into();
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+    match job_rx.try_recv() {
+        Ok(job) => match job.bare() {
+            Job::SetTtsThreads { addr, threads, .. } => {
+                assert_eq!(addr, "192.168.2.2");
+                assert_eq!(*threads, Some(6));
+            }
+            other => panic!("expected SetTtsThreads, got {other:?}"),
+        },
+        Err(e) => panic!("no job dispatched: {e}"),
+    }
+}
+
 #[test]
 fn ssh_default_words_route_to_their_commands() {
     assert_eq!(command_key("sshkey"), Some(Command::SshKey));
@@ -6739,6 +6790,7 @@ fn the_state_column_leads_with_a_glyph_and_the_word_stays() {
         task_policy: None,
         note: String::new(),
         accepting_work: true,
+        tts_threads: None,
     });
     let text = render_text(&mut app, 140, 44);
     assert!(

@@ -730,16 +730,6 @@ pub(crate) fn busy_on(
     busy
 }
 
-/// Live workers on one box, by the addr their heartbeats carry. Powers the
-/// Machines pane's `workers` column — the answer to "is this box actually
-/// doing anything".
-pub(crate) fn live_workers(beats: &[Heartbeat], addr: &str, now: u64) -> usize {
-    live_beats(beats, now)
-        .iter()
-        .filter(|b| b.addr == addr)
-        .count()
-}
-
 /// Display name for a beat's box: the registry handle the provision log
 /// used (`hawk`), so the workers pane agrees with the events pane. Falls
 /// back to the reported OS hostname, then the address — a box the registry

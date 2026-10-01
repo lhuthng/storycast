@@ -913,7 +913,11 @@ impl Layout {
     /// Everything is derived from `Layout`, so the inductor and a worker
     /// resolve the same tree — `root` is the repo locally and `~/bm-worker`
     /// remotely.
-    pub fn sidecar_command(&self, port: u16) -> (PathBuf, Vec<String>) {
+    ///
+    /// `threads` is the ONNX intra-op count the sessions open with; `0` is
+    /// omitted so the sidecar keeps its own default (half the cores, capped at
+    /// 8). See [`crate::config::tts_threads`] for the per-box source.
+    pub fn sidecar_command(&self, port: u16, threads: usize) -> (PathBuf, Vec<String>) {
         let models = self.models_dir();
         let mut args: Vec<String> = vec![
             "--models".into(),
@@ -937,6 +941,13 @@ impl Layout {
             "--bind".into(),
             "127.0.0.1".into(),
         ]);
+        // Only when the box asked: `0` is the sidecar's own default, and
+        // spelling it out would freeze the reference's half-core heuristic
+        // out of future `bm-tts` builds.
+        if threads > 0 {
+            args.push("--threads".into());
+            args.push(threads.to_string());
+        }
         (self.sidecar_binary(), args)
     }
 
@@ -1234,7 +1245,7 @@ mod tests {
         std::fs::create_dir_all(provisioned.parent().unwrap()).unwrap();
         std::fs::write(&provisioned, b"fake").unwrap();
         assert_eq!(layout.sidecar_binary(), provisioned);
-        let (bin, args) = layout.sidecar_command(8818);
+        let (bin, args) = layout.sidecar_command(8818, 0);
         assert_eq!(bin, provisioned);
         assert!(args.windows(2).any(|w| w[0] == "--port" && w[1] == "8818"));
         // VieNeu declares a lexicon, so it is handed one — from its own tree.

@@ -299,6 +299,12 @@ struct SidecarBook {
     desired: Option<bool>,
     delivered: Option<bool>,
     reported: Option<bool>,
+    /// The thread half of the same instruction: what the box's record asks for
+    /// (`None` = no override), what this process last delivered, and what the
+    /// box last reported. Converged exactly like `keep`.
+    desired_threads: Option<u32>,
+    delivered_threads: Option<u32>,
+    reported_threads: Option<u32>,
     /// Edge-triggered logging: the first mismatch (or first failure) says so,
     /// a persistent one does not — the trap the tunnel supervisor's 1339
     /// lines documented. Reset when the mismatch clears or is resolved.
@@ -311,22 +317,37 @@ struct SidecarBook {
 }
 
 impl SidecarBook {
-    /// True when the dispatcher should (re-)tell the box.
+    /// True when the dispatcher should (re-)tell the box: either half of the
+    /// instruction has drifted from what the box believes.
     fn drifted(&self) -> bool {
-        let Some(desired) = self.desired else {
-            return false; // no policy stored: default is keep, nothing to say
-        };
-        // A refusal past the retry budget holds until the policy changes.
+        // No opinion at all: the default needs no instruction.
+        if self.desired.is_none() && self.desired_threads.is_none() {
+            return false;
+        }
+        // A refusal past the retry budget holds until the value changes.
         if self.failures >= SIDECAR_PUSH_TRIES {
             return false;
         }
-        // Delivered-and-acknowledged for this value is enough **only** while
-        // the box still reports it. After a reboot the box reports the
-        // default, and the mismatch below re-drives the push.
-        if self.delivered == Some(desired) && self.reported != Some(!desired) {
+        self.keep_drifted() || self.threads_drifted()
+    }
+
+    /// Delivered-and-acknowledged for this value is enough **only** while the
+    /// box still reports it. After a reboot the box reports the default, and
+    /// the mismatch re-drives the push.
+    fn keep_drifted(&self) -> bool {
+        let Some(desired) = self.desired else {
             return false;
-        }
-        true
+        };
+        !(self.delivered == Some(desired) && self.reported != Some(!desired))
+    }
+
+    /// The thread half: delivered-and-acknowledged is enough only while the
+    /// box reports the same value — a reboot resets it to "no opinion".
+    fn threads_drifted(&self) -> bool {
+        let Some(desired) = self.desired_threads else {
+            return false;
+        };
+        !(self.delivered_threads == Some(desired) && self.reported_threads == Some(desired))
     }
 }
 
@@ -344,12 +365,13 @@ async fn tell_sidecar_policy(
     http: &reqwest::Client,
     peer: &Peer,
     keep: bool,
+    threads: Option<u32>,
 ) -> Result<(), String> {
     let url = format!("{}/sidecar-policy", peer.base());
     let resp = http
         .post(&url)
         .bearer_auth(&peer.token)
-        .json(&serde_json::json!({"keep": keep}))
+        .json(&serde_json::json!({"keep": keep, "threads": threads}))
         .send()
         .await
         .map_err(|e| format!("no answer ({e:#})"))?;
@@ -384,6 +406,14 @@ fn desired_sidecar_keep(m: &bm_proto::Machine) -> Option<bool> {
         .map(|p| p.iter().any(|t| t.stage == Stage::Render && t.enabled))
 }
 
+/// The ONNX thread count this box's sidecar should open with, or `None` for
+/// "no opinion" (the sidecar's own default). Unlike `keep`, this is never a
+/// consequence of the policy: it is exactly what the operator typed in the
+/// TUI, so a box that has never had it edited sends nothing.
+fn desired_sidecar_threads(m: &bm_proto::Machine) -> Option<u32> {
+    m.tts_threads.map(u32::from)
+}
+
 /// The converge step, run once per poll inside `drive`. Updates the book
 /// from the beat, pushes on drift, and logs edge-triggered.
 async fn converge_sidecar_policy(
@@ -394,15 +424,16 @@ async fn converge_sidecar_policy(
     beat: &Heartbeat,
 ) {
     // Desired, from the ledger; reported, from the beat.
-    let desired = {
+    let (desired, desired_threads) = {
         let inner = state.lock().await;
-        inner
-            .machines
-            .get(&peer.addr)
-            .and_then(desired_sidecar_keep)
+        match inner.machines.get(&peer.addr) {
+            Some(m) => (desired_sidecar_keep(m), desired_sidecar_threads(m)),
+            None => (None, None),
+        }
     };
     book.reported = beat.sidecar_keep;
-    if book.desired != desired {
+    book.reported_threads = beat.tts_threads;
+    if book.desired != desired || book.desired_threads != desired_threads {
         // A new value forgets the old value's failure count: the budget is
         // per value, so a policy that flips back and forth gets fresh tries
         // each way.
@@ -410,6 +441,7 @@ async fn converge_sidecar_policy(
         book.logged = false;
     }
     book.desired = desired;
+    book.desired_threads = desired_threads;
     if !book.drifted() {
         if book.logged {
             book.logged = false;
@@ -417,20 +449,38 @@ async fn converge_sidecar_policy(
         }
         return;
     }
-    let Some(keep) = book.desired else {
-        return; // no stored policy: the default needs no instruction
-    };
-    match tell_sidecar_policy(http, peer, keep).await {
+    // Nothing stored on either half: the defaults need no instruction, and the
+    // body would otherwise carry a `keep=true` nobody asked for.
+    if book.desired.is_none() && book.desired_threads.is_none() {
+        return;
+    }
+    // `keep` with no opinion rides as `true`, the worker's own default: it is
+    // only sent while the *thread* half is converging, and a no-op there.
+    let keep = book.desired.unwrap_or(true);
+    let threads = book.desired_threads;
+    match tell_sidecar_policy(http, peer, keep, threads).await {
         Ok(()) => {
-            if book.delivered != Some(keep) || book.logged {
+            if book.delivered != Some(keep)
+                || book.delivered_threads != threads
+                || book.logged
+            {
                 println!(
-                    "dispatch: {} told to {} its TTS sidecar (policy: render {})",
+                    "dispatch: {} told to {} its TTS sidecar{}{}",
                     peer.addr,
                     if keep { "keep" } else { "drop" },
-                    if keep { "on" } else { "off" }
+                    if book.desired.is_some() {
+                        format!(" (policy: render {})", if keep { "on" } else { "off" })
+                    } else {
+                        String::new()
+                    },
+                    match threads {
+                        Some(n) => format!(", threads {n}"),
+                        None => String::new(),
+                    }
                 );
             }
             book.delivered = Some(keep);
+            book.delivered_threads = threads;
             book.failures = 0;
             book.logged = false;
         }
@@ -440,6 +490,7 @@ async fn converge_sidecar_policy(
             // later must be told again even though this process once
             // succeeded.
             book.delivered = None;
+            book.delivered_threads = None;
             if !book.logged {
                 book.logged = true;
                 println!(
@@ -847,6 +898,7 @@ mod tests {
             capabilities: vec![],
             sources_stages: Vec::new(),
             sidecar_keep,
+            tts_threads: None,
         }
     }
 

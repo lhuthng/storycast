@@ -37,6 +37,12 @@ pub(crate) enum TextKind {
     /// offer carries. Save-only, like the ssh defaults — it is read by the
     /// scheduler when it builds the next offer, so nothing is dispatched.
     RenderBatch,
+    /// One box's TTS sidecar thread count (`:threads`): the ONNX threads its
+    /// sidecar is launched with. A number sets it, empty clears the override
+    /// back to the sidecar's own default. Dispatched to the API — config, so it
+    /// persists in `machines.json` and converges on the box. One model behind a
+    /// mutex, so more threads do not run two lines at once.
+    TtsThreads,
     /// Mix levels (`:mix`): story speed plus the two layer volumes, saved to
     /// the settings file like the run config. Launches nothing.
     Mix,

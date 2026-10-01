@@ -242,6 +242,18 @@ pub(crate) enum Job {
         addr: String,
         accepting_work: bool,
     },
+    /// Set one box's TTS sidecar thread count (`:threads`).
+    ///
+    /// Config, like `task_policy`: written to `machines.json` and pushed to the
+    /// worker by the dispatcher's convergent sidecar-policy channel, so a box
+    /// that is down at edit time still converges when it comes back. `threads:
+    /// None` clears the override, restoring the sidecar's own default.
+    SetTtsThreads {
+        api: String,
+        http: reqwest::Client,
+        addr: String,
+        threads: Option<u16>,
+    },
     /// Report a digest the operator performed by hand.
     ///
     /// **It posts the same `Complete` a worker posts, to the same endpoint.** The
@@ -368,6 +380,7 @@ impl Job {
                 ..
             } => "park machine",
             Job::SetAccepting { .. } => "wake machine",
+            Job::SetTtsThreads { .. } => "set tts threads",
             Job::ManualDigest { .. } => "report manual digest",
             Job::DigestPolicy { restore, .. } => {
                 if *restore {
@@ -1426,6 +1439,47 @@ pub(crate) async fn job_save_task_policy(
 /// a park that silently did not stick is a box that keeps taking work the
 /// operator believes it has stopped, which is worse than one that refuses
 /// loudly.
+/// Set one box's TTS sidecar thread count, through the API so the live
+/// inductor and the on-disk `machines.json` agree, and so the dispatcher's
+/// convergence loop carries it to a box that is down right now.
+///
+/// The pane is the feedback once a poll has come back; the line says what was
+/// asked for, because the box restarts its sidecar on its *next* render and the
+/// new count is not in force until then. A rejection is named for the same
+/// reason a failed park is: a thread count that silently did not stick is a box
+/// the operator believes they tuned.
+pub(crate) async fn job_set_tts_threads(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    api: String,
+    http: reqwest::Client,
+    addr: String,
+    threads: Option<u16>,
+) {
+    let url = format!("{}/api/machines/tts-threads", api.trim_end_matches('/'));
+    let body = serde_json::json!({"addr": addr, "threads": threads});
+    match http.post(&url).json(&body).send().await {
+        Ok(r) if r.status().is_success() => send(
+            &tx,
+            Level::Ok,
+            match threads {
+                Some(n) => format!(
+                    "{addr}: tts sidecar set to {n} thread(s) — it restarts on the next render"
+                ),
+                None => format!(
+                    "{addr}: tts threads back to the sidecar default — it restarts on the next render"
+                ),
+            },
+        ),
+        Ok(r) => send(
+            &tx,
+            Level::Error,
+            format!("threads {addr}: the inductor answered HTTP {}", r.status()),
+        ),
+        Err(e) => send(&tx, Level::Error, format!("threads {addr} failed: {e}")),
+    }
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
 pub(crate) async fn job_set_accepting(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     api: String,
@@ -2734,6 +2788,12 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
             addr,
             accepting_work,
         } => job_set_accepting(tx, api, http, addr, accepting_work).await,
+        Job::SetTtsThreads {
+            api,
+            http,
+            addr,
+            threads,
+        } => job_set_tts_threads(tx, api, http, addr, threads).await,
         Job::ManualDigest {
             api,
             http,

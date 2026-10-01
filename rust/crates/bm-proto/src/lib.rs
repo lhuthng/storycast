@@ -552,6 +552,19 @@ pub struct Machine {
     /// silently park every one of them.
     #[serde(default = "default_true")]
     pub accepting_work: bool,
+    /// ONNX intra-op threads this box's TTS sidecar should open with.
+    ///
+    /// **Operator intent, per box**, persisted in `machines.json` beside
+    /// `task_policy` for the same reason: it is a decision about how the box
+    /// should work, not a fact about it, and it must survive a ledger clear and
+    /// an inductor restart. `None` (the default) is "no opinion" and the
+    /// sidecar's own heuristic stands (half the cores, capped at 8).
+    ///
+    /// It travels to the worker over the same convergent sidecar-policy
+    /// channel as `keep`, so a box that is down at edit time still converges
+    /// when it comes back.
+    #[serde(default)]
+    pub tts_threads: Option<u16>,
     /// Human-readable note: probe output, error, provision result.
     pub note: String,
 }
@@ -580,6 +593,7 @@ impl Machine {
             task_port: default_task_port(),
             task_policy: None,
             accepting_work: true,
+            tts_threads: None,
             note: String::new(),
         }
     }
@@ -735,6 +749,17 @@ pub struct Heartbeat {
     /// the policy is re-converged; one that agrees costs nothing.
     #[serde(default)]
     pub sidecar_keep: Option<bool>,
+    /// The ONNX intra-op thread count this worker's sidecar is asked to open
+    /// with, as the worker currently believes it.
+    ///
+    /// `None` from an older agent, and `None`/`0` from a current one means
+    /// "the sidecar's own default" (half the cores, capped at 8). The
+    /// dispatcher's sidecar-policy convergence reads this back the same way it
+    /// reads `sidecar_keep`: the inductor knows what it *told* the box, but a
+    /// reboot resets the worker to its default and only the worker's own
+    /// answer says what it actually holds.
+    #[serde(default)]
+    pub tts_threads: Option<u32>,
 }
 
 /// The heartbeat's answer: the only inductor→worker command channel.
@@ -2487,6 +2512,7 @@ mod tests {
                 temperature: 0.8,
                 silence_p: 0.15,
                 take_key: format!("{i:016}"),
+                mp3_kbps: 192,
             })
             .collect();
         let offer = TaskOffer {

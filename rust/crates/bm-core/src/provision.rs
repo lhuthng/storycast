@@ -85,6 +85,11 @@ pub struct LinkedBox {
     /// park every box.
     #[serde(default = "default_true")]
     pub accepting_work: bool,
+    /// ONNX intra-op threads this box's sidecar should open with. Config, like
+    /// `task_policy`: `None` is "no opinion" (the sidecar's own default), and a
+    /// value is pushed to the worker over the sidecar-policy channel.
+    #[serde(default)]
+    pub tts_threads: Option<u16>,
 }
 
 fn default_true() -> bool {
@@ -116,6 +121,7 @@ impl LinkedBox {
         m.tts_url = Some(format!("http://127.0.0.1:{TTS_PORT}"));
         m.task_policy = self.task_policy.clone();
         m.accepting_work = self.accepting_work;
+        m.tts_threads = self.tts_threads;
         m
     }
 }
@@ -188,6 +194,7 @@ pub fn split_machine(m: &Machine, name: &str) -> (LinkedBox, MachineRuntime) {
         role: m.role.clone(),
         task_policy: m.task_policy.clone(),
         accepting_work: m.accepting_work,
+        tts_threads: m.tts_threads,
     };
     let rt = MachineRuntime {
         state: m.state,
@@ -216,6 +223,7 @@ pub fn join_machine(bxo: &LinkedBox, rt: Option<&MachineRuntime>) -> Machine {
     m.tts_url = rt.tts_url;
     m.task_policy = bxo.task_policy.clone();
     m.accepting_work = bxo.accepting_work;
+    m.tts_threads = bxo.tts_threads;
     m
 }
 
@@ -334,6 +342,7 @@ mod tests {
             role: "worker".into(),
             task_policy: None,
             accepting_work: true,
+            tts_threads: None,
         };
         let one = super::join_all(vec![bxo], &serde_json::Map::new());
         assert!(
@@ -361,6 +370,7 @@ mod tests {
             role: "worker".into(),
             task_policy: None,
             accepting_work: true,
+            tts_threads: None,
         };
         super::save_box(&path, &bxo).unwrap();
         // Same address re-binds in place (the name may change); a new
@@ -398,6 +408,7 @@ mod tests {
             role: "worker".into(),
             task_policy: None,
             accepting_work: true,
+            tts_threads: None,
         }
         .machine();
         assert_eq!(m.ssh_target(), "thang@10.0.0.9");

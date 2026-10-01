@@ -17,7 +17,7 @@ pub use self::plan::{
 };
 pub use self::renderplan::{
     reconcile, reconcile_with, take_file, take_key, PlanUpdate, RenderPlan, Take, TakeQuality,
-    PLAN_VERSION,
+    PLAN_VERSION, TAKE_EXTENSIONS,
 };
 pub use self::wav::{
     read_wav, sample_rate_for, silent_wav, wav_info, wav_seconds, GEMINI_RATE, VIENEU_RATE,
@@ -197,6 +197,56 @@ pub fn encode_mp3(wav: &Path, mp3: &Path, kbps: u32) -> Result<()> {
         "-1",
         &dst,
     ])
+}
+
+/// Decode a stored take into a PCM wav the mixer can read, when the storage
+/// tier stored it encoded.
+///
+/// [`TakeQuality`] lets a take sit on disk as an mp3 (`encode_mp3`), but every
+/// reader downstream of the renderer — the timeline, the concat, the layer
+/// pass — parses PCM with [`read_wav`]. An encoded take is therefore not a take
+/// to the mixer until it is decoded, and a merge that skipped this failed with
+/// `t-c34f70e248807aaf.mp3 is not a RIFF/WAVE file` while the audio sat on
+/// disk.
+///
+/// A take already in PCM is returned **unchanged**, so the `raw` tier costs no
+/// process and no copy; only the encoded default pays one ffmpeg pass per take
+/// it mixes. The decode shape is exactly the shape [`encode_mp3`] encoded at
+/// (mono 48 kHz), so a decoded take is interchangeable with a raw one for the
+/// engines whose sidecar already speaks 48 kHz.
+pub fn decode_take(path: &Path, scratch: &Path) -> Result<PathBuf> {
+    // The sniff is the header probe, not the extension: a `.wav` name holding
+    // something else is the lie the tier's naming rule exists to prevent, so
+    // trust the bytes.
+    let head = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WAVE" {
+        return Ok(path.to_path_buf());
+    }
+    std::fs::create_dir_all(scratch)
+        .with_context(|| format!("creating take scratch {}", scratch.display()))?;
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "take".into());
+    let dst = scratch.join(stem).with_extension("wav");
+    let src = path.to_string_lossy().into_owned();
+    let out = dst.to_string_lossy().into_owned();
+    run_ffmpeg(&[
+        "-nostdin",
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        &src,
+        "-ac",
+        "1",
+        "-ar",
+        "48000",
+        "-c:a",
+        "pcm_s16le",
+        &out,
+    ])?;
+    Ok(dst)
 }
 
 /// Pair every wav the renderer produced with the scene, mood and speaker the
@@ -392,6 +442,16 @@ pub fn assemble(
     std::fs::create_dir_all(scratch)
         .with_context(|| format!("creating scratch {}", scratch.display()))?;
 
+    // The storage tier may hold takes encoded (see [`TakeQuality`]); everything
+    // from the timeline on reads PCM, so decode them once into `scratch` here
+    // and use those paths. A raw take is returned as-is, so the `raw` tier pays
+    // nothing for this step.
+    let take_scratch = scratch.join("takes");
+    let wavs: Vec<PathBuf> = wavs
+        .iter()
+        .map(|p| decode_take(p, &take_scratch))
+        .collect::<Result<_>>()?;
+
     // The scene map is read here, not inside the layer pass, because it decides
     // two things the *timeline* needs: where the beats go, and what mood each
     // turn carries. A missing map degrades to "no sound design" rather than
@@ -542,6 +602,44 @@ mod tests {
         silent_wav(&b, 0.05, 48_000).unwrap();
         let err = concat_wavs(&[a, b], &d.join("o.wav"), 0).unwrap_err();
         assert!(err.to_string().contains("mixed engines"), "{err}");
+    }
+
+    /// A `raw` take is already PCM, so the merge must not spend a process (or a
+    /// copy) on it — the decode is only the encoded tier's tax.
+    #[test]
+    fn a_pcm_take_is_returned_untouched() {
+        let d = tmpdir("decode-pcm");
+        let a = d.join("t-abc.wav");
+        silent_wav(&a, 0.05, 48_000).unwrap();
+        let scratch = d.join("takes");
+        let got = decode_take(&a, &scratch).unwrap();
+        assert_eq!(got, a, "a RIFF/WAVE take answers for itself");
+        assert!(!scratch.exists(), "and no scratch was created for it");
+    }
+
+    /// The default tier stores takes as mp3; every reader below the timeline
+    /// parses PCM, so an encoded take has to come back as a readable wav. This
+    /// is the merge half of the storage tier — its absence failed a merge with
+    /// `t-….mp3 is not a RIFF/WAVE file`.
+    #[test]
+    fn an_encoded_take_is_decoded_to_pcm() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let d = tmpdir("decode-mp3");
+        let wav = d.join("t-abc.wav");
+        silent_wav(&wav, 0.10, 48_000).unwrap();
+        let mp3 = d.join("t-abc.mp3");
+        encode_mp3(&wav, &mp3, 96).unwrap();
+        assert!(read_wav(&mp3).is_err(), "the encoded take is not PCM");
+
+        let got = decode_take(&mp3, &d.join("takes")).unwrap();
+        assert_ne!(got, mp3, "the encoded take yields a decoded copy");
+        let w = read_wav(&got).unwrap();
+        assert_eq!((w.channels, w.sample_rate), (1, 48_000));
+        // mp3 carries encoder padding, so the length is close but not exact —
+        // what matters is that the bytes are PCM the timeline and concat read.
+        assert!((w.seconds() - 0.10).abs() < 0.1, "{}", w.seconds());
     }
 
     /// A hit on the chapter's *last* line plays in silence the concat has to

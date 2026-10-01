@@ -420,6 +420,12 @@ struct Sidecar {
     /// The thresholds in force **on this box**, resolved once at construction
     /// from the compiled defaults plus any per-box override. See [`Budget`].
     budget: Budget,
+    /// The `threads` value the model on the port was last *asked* to open with,
+    /// or `None` for the sidecar's own default. An edit in the TUI changes
+    /// this and `ensure` recycles a server that no longer matches, so the edit
+    /// lands at the next render instead of waiting for the model to be reaped
+    /// for some other reason.
+    applied_threads: Option<u32>,
 }
 
 /// The memory guard's decision, as a pure function of what was measured.
@@ -477,6 +483,7 @@ impl Sidecar {
             serving_since: None,
             sys: sysinfo::System::new(),
             budget: Budget::from_env(),
+            applied_threads: None,
         }
     }
 
@@ -536,9 +543,18 @@ impl Sidecar {
     /// loading is *waited for*, never raced. `bm-tts` binds its port before
     /// the load, so a bound port answering 503 means "starting", and spawning
     /// here would put two models in RAM on an 8 GiB box.
-    async fn ensure(&mut self, layout: &Layout) -> Result<()> {
+    async fn ensure(&mut self, layout: &Layout, desired_threads: Option<u32>) -> Result<()> {
         if self.serving_current().await {
-            return Ok(());
+            if self.applied_threads == desired_threads {
+                return Ok(());
+            }
+            // The count changed (or a value was pushed where the box had
+            // none): recycle so the next render opens the model with it. An
+            // adopted server is `applied_threads: None`, so a pushed value
+            // always disagrees and a provision-started model is replaced too.
+            // This is the one place an adopted server is dropped for a reason
+            // other than memory; it is still the operator's own instruction.
+            self.reap_all().await;
         }
         // Not ready, but two different things can be in the way, and they want
         // opposite treatment.
@@ -565,7 +581,10 @@ impl Sidecar {
             Health::Up => self.reap_all().await,
             Health::Absent => self.stop(),
         }
-        let (bin, args) = layout.sidecar_command(self.port());
+        let resolved = desired_threads
+            .map(|n| n as usize)
+            .unwrap_or_else(bm_core::config::tts_threads);
+        let (bin, args) = layout.sidecar_command(self.port(), resolved);
         if !bin.is_file() {
             anyhow::bail!(
                 "no TTS sidecar at {} — build it (`make build`) or provision this box (`make provision BOX=…`)",
@@ -591,6 +610,9 @@ impl Sidecar {
             tokio::time::sleep(SIDECAR_STARTUP_TICK).await;
             if self.serving_current().await {
                 self.child = Some(child);
+                // A fresh process opened with this count: record it so a later
+                // `ensure` with the same value does not recycle it again.
+                self.applied_threads = desired_threads;
                 // A fresh process: the renders counted against the previous one
                 // are not its work and must not count towards its budget.
                 self.forget_work();
@@ -1375,6 +1397,7 @@ fn heartbeat_now(
     who: &WorkerIdentity,
     probe: &mut LoadProbe,
     sidecar_keep: bool,
+    tts_threads: Option<u32>,
 ) -> Heartbeat {
     let (cpu_pct, mem_pct, mem_gb, sidecars, sidecar_gb) = probe.sample();
     // A completed stage must not survive the task boundary as a live-looking
@@ -1415,6 +1438,7 @@ fn heartbeat_now(
         capabilities: capabilities(),
         sources_stages: bundle_slots(&who.root),
         sidecar_keep: Some(sidecar_keep),
+        tts_threads,
     }
 }
 
@@ -1456,7 +1480,9 @@ async fn heartbeat_loop(
     let mut probe = LoadProbe::new();
     loop {
         let p = shared.lock().map(|p| p.clone()).unwrap_or_default();
-        let body = heartbeat_now(&p, &who, &mut probe, true);
+        // Pull mode has no instruction channel, so the sidecar's own default
+        // (or its `BM_TTS_THREADS` environment) stands: `None`.
+        let body = heartbeat_now(&p, &who, &mut probe, true, None);
         // The inductor's only command channel: a shutdown latch read on
         // every answer. Exiting here strands nothing, the inductor
         // reaps the lease (no strike) or requeues the ledger on its way
@@ -1624,6 +1650,11 @@ async fn run_offer(
     // re-warming it. A snapshot taken per call, so no hidden mutable state
     // sits on `Sidecar` for an offer to read stale.
     keep_sidecar: bool,
+    // The ONNX thread count the inductor pushed for this box's sidecar, or
+    // `None` for the sidecar's own default. A per-call snapshot, like
+    // `keep_sidecar`, so an edit made mid-task is applied at the next
+    // boundary rather than under a running render.
+    tts_threads: Option<u32>,
 ) -> Result<TaskResult> {
     use bm_proto::Stage::*;
     let n = offer.chapter;
@@ -1778,7 +1809,7 @@ async fn run_offer(
             // See `Sidecar::recycle_if_over_budget` for what it measures and
             // why it is not the idle reaper's job.
             sidecar.recycle_if_over_budget().await;
-            sidecar.ensure(layout).await?;
+            sidecar.ensure(layout, tts_threads).await?;
             let (units, unit_files) = match render_action(offer.render_units.as_deref()) {
                 // Old inductor: plan from the local script, keep files
                 // locally, upload nothing, exactly as before the migration.
@@ -1923,6 +1954,16 @@ fn announce_budget() {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
     println!("{}", Budget::from_env().describe(sys.total_memory()));
+    // The ONNX thread count is the other per-box number that decides what a
+    // render costs, and the guard's line does not carry it. `0` is the
+    // sidecar's own default, so say which one is in force — a box that set
+    // `BM_TTS_THREADS` can then see that it took.
+    match bm_core::config::tts_threads() {
+        0 => println!(
+            "TTS sidecar threads: the sidecar's own default (half this box's cores, capped at 8) — set BM_TTS_THREADS to use more"
+        ),
+        n => println!("TTS sidecar threads: {n} (BM_TTS_THREADS)"),
+    }
 }
 
 async fn worker_loop(
@@ -1987,6 +2028,9 @@ async fn worker_loop(
             // against that, and the inductor's `POST /sidecar-policy` is the
             // one thing that may clear it (an operator turning render off).
             keep_sidecar: std::sync::atomic::AtomicBool::new(true),
+            // No opinion until the inductor pushes one: the sidecar's own
+            // default (or its `BM_TTS_THREADS`) stands.
+            tts_threads: std::sync::atomic::AtomicU64::new(push::THREADS_UNSET),
             // Merge data-plane: the hook base *is* the inductor API through
             // the reverse tunnel. `no_proxy`, like every loopback client
             // here, an ambient HTTP_PROXY would answer instead of the tunnel.
@@ -2112,6 +2156,7 @@ async fn worker_loop(
             &mut sidecar,
             Some((&http, inductor.as_str())),
             true,
+            None,
         )
         .await
         {
@@ -2389,7 +2434,9 @@ async fn run(cli: Cli) -> Result<()> {
                 "render" => {
                     let tts_url = tts_url.unwrap_or_else(|| "http://127.0.0.1:8818".into());
                     let mut sidecar = Sidecar::new(&tts_url);
-                    sidecar.ensure(&layout).await?;
+                    // The hand-driven path has no inductor instruction channel:
+                    // the sidecar's own default or its `BM_TTS_THREADS` stands.
+                    sidecar.ensure(&layout, None).await?;
                     run_render(&layout, chapter, &engine, &sidecar.tts(), &shared).await?;
                     sidecar.stop();
                 }
@@ -2494,7 +2541,7 @@ mod tests {
             root: PathBuf::new(),
         };
         let mut probe = LoadProbe::new();
-        let beat = heartbeat_now(&p, &who, &mut probe, true);
+        let beat = heartbeat_now(&p, &who, &mut probe, true, None);
         assert_eq!(beat.task_id, None);
         assert_eq!(beat.stage, None);
         assert_eq!(beat.chapter, None);
@@ -3036,6 +3083,7 @@ mod tests {
             &mut sidecar,
             None,
             true,
+            None,
         )
         .await
         .expect("a batch renders");
@@ -3078,6 +3126,7 @@ mod tests {
             &mut sidecar,
             None,
             true,
+            None,
         )
         .await
         .expect("the retry renders");
@@ -3147,7 +3196,7 @@ mod tests {
         let layout = Layout::new(&root);
         let engine = layout.engine_dir();
         let models = engine.join("models");
-        let (bin, args) = layout.sidecar_command(8818);
+        let (bin, args) = layout.sidecar_command(8818, 0);
 
         assert_eq!(bin, engine.join("bm-tts"));
         assert_eq!(args[0], "--models");
@@ -3156,6 +3205,9 @@ mod tests {
         let value_of = |flag: &str| -> Option<String> {
             args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
         };
+        // `0` means "let the sidecar pick" (half the cores, capped at 8), so
+        // the flag is omitted rather than frozen into the argv.
+        assert_eq!(value_of("--threads"), None);
         // The dictionary and the voice store live inside the model directory,
         // and the codec shares it, one directory, not three.
         assert_eq!(value_of("--codec"), Some(models.display().to_string()));
@@ -3171,6 +3223,13 @@ mod tests {
         // Loopback: the agent is the only caller, and the port is not
         // authenticated.
         assert_eq!(value_of("--bind"), Some("127.0.0.1".into()));
+
+        // A per-box override rides the argv the box asked for: `BM_TTS_THREADS`
+        // is the one lever that makes a single render use more of the cores.
+        let (_, threaded) = layout.sidecar_command(8818, 8);
+        assert!(threaded
+            .windows(2)
+            .any(|w| w[0] == "--threads" && w[1] == "8"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3356,6 +3415,7 @@ mod tests {
             &mut sidecar,
             None,
             true,
+            None,
         )
         .await;
 
@@ -3432,7 +3492,7 @@ mod census_probe {
     #[ignore = "starts the real bm-tts and loads the model — run deliberately, see the doc comment"]
     fn the_census_finds_a_real_bm_tts_and_reads_its_rss() {
         let layout = Layout::new(repo_root());
-        let (bin, args) = layout.sidecar_command(SIDECAR_PORT);
+        let (bin, args) = layout.sidecar_command(SIDECAR_PORT, 0);
         // Fail loudly rather than skipping: a check that quietly does nothing
         // when it cannot run is worse than no check.
         assert!(

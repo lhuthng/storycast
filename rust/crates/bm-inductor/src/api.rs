@@ -58,6 +58,7 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
         sources_stages: r.sources_stages,
         // A registration carries no sidecar belief; the next beat does.
         sidecar_keep: None,
+        tts_threads: None,
     };
     inner.observe(&beat);
     inner.save();
@@ -378,6 +379,39 @@ async fn set_accepting_work(
             inner.persist_box(&addr, &addr);
             inner.save();
             Json(serde_json::json!({"ok": true, "accepting_work": u.accepting_work}))
+        }
+        None => {
+            Json(serde_json::json!({"ok": false, "error": format!("unknown machine {}", u.addr)}))
+        }
+    }
+}
+
+/// The per-box ONNX thread count the TUI's `:threads` edits. `None` clears the
+/// override and restores the sidecar's own default (half the cores, capped at
+/// 8). Config, like `task_policy`: written to `machines.json`, and pushed to the
+/// worker by the dispatcher's convergent sidecar-policy channel, so a box that
+/// is down at edit time still converges when it comes back.
+#[derive(Deserialize)]
+struct TtsThreadsUpdate {
+    addr: String,
+    #[serde(default)]
+    threads: Option<u16>,
+}
+
+async fn set_tts_threads(
+    State(st): State<Shared>,
+    Json(u): Json<TtsThreadsUpdate>,
+) -> impl IntoResponse {
+    let mut inner = st.lock().await;
+    match inner.machines.get_mut(&u.addr) {
+        Some(m) => {
+            m.tts_threads = u.threads;
+            let addr = u.addr.clone();
+            // Config, not runtime: it belongs in machines.json beside the
+            // box's login, so it survives the ledger being cleared.
+            inner.persist_box(&addr, &addr);
+            inner.save();
+            Json(serde_json::json!({"ok": true, "tts_threads": u.threads}))
         }
         None => {
             Json(serde_json::json!({"ok": false, "error": format!("unknown machine {}", u.addr)}))
@@ -1516,7 +1550,7 @@ async fn ensure_sidecar(layout: &bm_core::Layout) -> anyhow::Result<()> {
         .next()
         .and_then(|p| p.trim_end_matches('/').parse().ok())
         .unwrap_or(8818);
-    let (bin, args) = layout.sidecar_command(port);
+    let (bin, args) = layout.sidecar_command(port, bm_core::config::tts_threads());
     if !bin.is_file() {
         anyhow::bail!(
             "no TTS sidecar at {} — build it (`make build`) or provision this box",
@@ -1726,6 +1760,7 @@ pub fn router(st: Shared) -> Router {
         .route("/api/machines/state", post(set_machine_state))
         .route("/api/machines/policy", post(set_task_policy))
         .route("/api/machines/accepting", post(set_accepting_work))
+        .route("/api/machines/tts-threads", post(set_tts_threads))
         .route("/api/relink", post(relink))
         .route("/api/op", post(op))
         .route("/api/state", get(state))
@@ -1994,6 +2029,7 @@ mod tests {
                 capabilities: vec![],
                 sources_stages: Vec::new(),
                 sidecar_keep: None,
+                tts_threads: None,
             }),
         )
         .await;
@@ -2023,6 +2059,7 @@ mod tests {
                 role: "worker".into(),
                 task_policy: None,
                 accepting_work: true,
+                tts_threads: None,
             },
         )
         .unwrap();
@@ -2093,6 +2130,7 @@ mod tests {
             capabilities: vec![],
             sources_stages: Vec::new(),
             sidecar_keep: None,
+            tts_threads: None,
         };
         heartbeat(State(st.clone()), Json(beat())).await;
         {

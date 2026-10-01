@@ -4,8 +4,7 @@ use crate::tui::{
     app::{App, Panel},
     layout::COMPACT_MACHINE_COLS,
     model::{
-        addr_label, clamp_scroll, live_workers, machine_kind, machine_label, policy_summary,
-        work_label,
+        addr_label, clamp_scroll, machine_kind, machine_label, policy_summary, work_label,
     },
     style::{
         cell, empty_body, seen_label, selection_bg, state_glyph_cell, style_bold_of, style_of,
@@ -94,7 +93,16 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
                 cell(format!("{cursor}{}", machine_label(m))),
                 cell(machine_kind(m).to_string()),
                 cell(addr_label(m)),
-                cell(live_workers(&app.beats, &m.addr, bm_proto::now_secs()).to_string()),
+                // The sidecar thread count this box was told to run, which is
+                // the number the operator tunes per box (`:threads`). It was a
+                // live-worker count, which answered a question nobody asked:
+                // one worker per box by construction, so the column always read
+                // `1`. `—` is no override: the sidecar picks its own default.
+                cell(
+                    m.tts_threads
+                        .map(|t| t.to_string())
+                        .unwrap_or_else(|| "—".into()),
+                ),
                 cell(policy_summary(m)),
                 state_glyph_cell(colour, &work_label(m)),
             ];
@@ -117,7 +125,7 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
 
     // The cursor column: cells carry `▸ name`, so the header is indented to
     // match the rows and `machine` no longer sits a column left of its data.
-    let mut header = vec![" machine", "kind", "ip", "workers", "policy", "state"];
+    let mut header = vec![" machine", "kind", "ip", "threads", "policy", "state"];
     let mut widths: Vec<Constraint> = if compact {
         // Taken from the constant the compile-time guard checks.
         COMPACT_MACHINE_COLS[..6]

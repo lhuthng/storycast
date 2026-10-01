@@ -84,6 +84,9 @@ pub(crate) enum Command {
     /// How many of one chapter's takes a single render offer carries. Saved to
     /// this workspace's settings; applies to offers made from then on.
     RenderBatch,
+    /// The selected box's TTS sidecar thread count. Saved to `machines.json` and
+    /// pushed to the worker, so the box's sidecar is relaunched with it.
+    TtsThreads,
     Mix,
     Sound,
     Rerender,
@@ -192,6 +195,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["release", "modelsrelease"], desc: Some("GitHub owner/name whose releases hold the model artifact, so a box fetches the weights from a CDN instead of your uplink (empty = push)"), cmd: Command::ModelsRelease },
     Word { key: None, names: &["packrelease", "packsrelease"], desc: Some("GitHub owner/name whose releases hold the profile pack, so a box fetches assets/ from a CDN instead of your uplink — the tag comes from the loaded profile's version (empty = push)"), cmd: Command::PacksRelease },
     Word { key: None, names: &["batch", "renderbatch"], desc: Some("how many of one chapter's takes one render offer carries (default 5)"), cmd: Command::RenderBatch },
+    Word { key: None, names: &["threads", "ttsthreads"], desc: Some("the selected box's TTS sidecar threads — a number 1-64, or empty for the sidecar's own default; the box's sidecar restarts on its next render"), cmd: Command::TtsThreads },
     Word { key: Some('q'), names: &["quit", "exit", "q"], desc: None, cmd: Command::Key(KeyCode::Char('q')) },
     Word { key: None, names: &["inspect"], desc: None, cmd: Command::Key(KeyCode::Char('i')) },
     Word { key: None, names: &["policy"], desc: Some("per-machine work policy: which stages the selected box may run, in priority order"), cmd: Command::Key(KeyCode::Char('P')) },
@@ -719,6 +723,28 @@ pub(crate) fn do_command(
                 &cur.to_string(),
             ));
         }
+        Command::TtsThreads => match app.selected_machine() {
+            None => app.set_status(
+                Level::Warn,
+                "no machine selected — the sidecar thread count is one box's",
+            ),
+            Some(m) => {
+                // Prefilled with the box's own override, empty when it has
+                // none — so the prompt's starting point is what is in force,
+                // and clearing the line is the visible way back to the default.
+                let cur = m.tts_threads.map(|t| t.to_string()).unwrap_or_default();
+                let label = crate::tui::model::machine_label(&m);
+                app.screen = Screen::Text(TextPrompt::new(
+                    TextKind::TtsThreads,
+                    &format!("TTS threads — {label}"),
+                    "ONNX threads for this box's TTS sidecar, 1-64. Empty restores the \
+                     sidecar's own default (half the cores, capped at 8). The box restarts \
+                     its sidecar on the next render. One model sits behind a mutex, so more \
+                     threads run one line faster, never two lines at once.",
+                    &cur,
+                ));
+            }
+        },
         Command::Mix => {
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::Mix,
