@@ -3,7 +3,10 @@ use crate::tui::{
     app::{App, HitTarget, ListTarget, Panel},
     layout::size_class,
     layout::Size,
-    model::{abandoned, age_secs, clamp_scroll, filtered_tasks, task_state_counts, Facet},
+    model::{
+        abandoned, age_secs, clamp_scroll, filtered_tasks, pipeline_counts, task_state_counts,
+        Facet,
+    },
     screen::TasksView,
     style::{
         cell, centered_padded, empty_body, selection_bg, stage_color, state_color,
@@ -29,7 +32,7 @@ pub(crate) fn draw_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::DarkGray),
             )));
         }
-        Some(obj) if obj.is_empty() => {
+        Some(_) if app.tasks.is_empty() => {
             lines.push(Line::from(Span::styled(
                 "no tasks queued",
                 Style::default().fg(Color::DarkGray),
@@ -39,23 +42,28 @@ pub(crate) fn draw_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::DarkGray),
             )));
         }
-        Some(obj) => {
-            let mut stages: Vec<&String> = obj.keys().collect();
-            stages.sort();
-            for st in stages {
-                let c = &obj[st.as_str()];
-                let get = |k: &str| c.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-                let done = get("done");
-                let shelved = get("shelved");
-                let failed = get("failed");
-                let total: u64 = c
-                    .as_object()
-                    .map(|m| m.values().filter_map(|v| v.as_u64()).sum())
-                    .unwrap_or(0);
-                let open = total.saturating_sub(done).saturating_sub(shelved);
+        Some(_) => {
+            // Pipeline order with pipeline denominators: each stage over what
+            // the previous one finished, so `digest 3/10` means three of the
+            // ten crawled chapters, not three of a hundred ledger rows.
+            for (st, done, denom) in pipeline_counts(&app.tasks) {
+                let failed = app
+                    .tasks
+                    .iter()
+                    .filter(|t| t.stage == st && t.state == TaskState::Failed)
+                    .count() as u64;
+                let shelved = app
+                    .tasks
+                    .iter()
+                    .filter(|t| t.stage == st && t.state == TaskState::Shelved)
+                    .count() as u64;
+                let open = denom.saturating_sub(done);
                 let mut spans = vec![
-                    Span::styled(format!("{st:8}"), app.style_bold(stage_color(st))),
-                    Span::raw(format!("{done}/{total} done")),
+                    Span::styled(
+                        format!("{:8}", st.as_str()),
+                        app.style_bold(stage_color(st.as_str())),
+                    ),
+                    Span::raw(format!("{done}/{denom} done")),
                     Span::styled(
                         format!("  · {open} open"),
                         Style::default().fg(Color::DarkGray),

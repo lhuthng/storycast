@@ -348,7 +348,16 @@ fn tasks_height(app: &App, compact: bool, frame_h: u16) -> u16 {
     } else {
         (FULL_TASKS_MIN_H, FULL_TASKS_MAX_H)
     };
-    let stages = app.counts.as_object().map(|o| o.len() as u16).unwrap_or(1);
+    // The pane always draws the four pipeline stages, so the count is fixed —
+    // the ledger's row totals used to size this and clipped a stage whenever
+    // a stage had no rows yet.
+    let stages: u16 = if app.counts.as_object().is_none() {
+        1
+    } else if app.tasks.is_empty() {
+        2
+    } else {
+        4
+    };
     let stats = (PANE_CHROME + 1 + app.live_workers().len() as u16).min(6);
     // A quarter of the frame, and never more than the stats table needs.
     (PANE_CHROME + stages)

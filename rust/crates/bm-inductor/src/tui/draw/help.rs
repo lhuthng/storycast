@@ -69,8 +69,8 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         (
             "↑ ↓ ← →",
             "in the rack, move on it: ↑↓ a whole row of boxes, ←→ one box. The console stays \
-             put at the left and the boxes move past it. With the table up the arrows move \
-             the cursor down a list, as they always did",
+             put at the left and the boxes move past it. With the table up ↑↓ move \
+             the cursor and ←→ steps the Logs filter",
         ),
         (
             "Tab / J",

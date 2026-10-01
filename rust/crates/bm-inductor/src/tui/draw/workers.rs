@@ -2,7 +2,7 @@
 use crate::tui::{
     app::{App, HitTarget, Panel},
     layout::COMPACT_WORKER_COLS,
-    model::{beat_backed, live_beats, machine_name, reported_alias},
+    model::{beat_backed, live_beats, machine_name, reported_alias, short_activity},
     style::{bar, cell, empty_body, stage_color, style_bold_of, style_of, worker_alias},
 };
 use ratatui::{
@@ -12,27 +12,8 @@ use ratatui::{
     widgets::{Row, Table},
 };
 
-/// The `tts` cell: how many sidecars are resident and what they cost.
-///
-/// A dash, never a zero, when the agent never reported — an older agent has no
-/// opinion about sidecars, and `0×` would read as "none running" on the one box
-/// that has one.
-fn tts_cell(colour: bool, b: &bm_proto::Heartbeat) -> Line<'static> {
-    let Some(n) = b.sidecars else {
-        return cell("—".into());
-    };
-    let text = match b.sidecar_gb {
-        Some(g) if n > 0 => format!("{n}× {g:.1}G"),
-        _ => format!("{n}×"),
-    };
-    Line::from(Span::styled(
-        text,
-        style_of(colour, if n > 1 { Color::Red } else { Color::Gray }),
-    ))
-}
-
 /// `compact` is the tier, not the width: it decides which **columns** exist.
-/// The box name, cpu, ram and tts columns only appear on the full tier, because
+/// The box name, cpu and ram columns only appear on the full tier, because
 /// the compact column set is measured against `MIN_W` and there is no room for
 /// them there. Height, by contrast, is this pane's content and is settled by
 /// the caller.
@@ -145,19 +126,9 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &mut App, area: Rect, co
                             (Some(p), Some(g)) => format!("{p:.0}% {g:.1}G"),
                             _ => "—".into(),
                         }),
-                        // How many sidecars are resident, and what they cost. The
-                        // quantity that actually kills these boxes: one model is
-                        // ~2.85 GB, so `2×` on an 8 GiB box is the OOM race — and
-                        // one the scheduler stops feeding it (`MEM_PCT_CEILING`).
-                        // Red above one, because this column exists to be noticed.
-                        tts_cell(colour, b),
                     ]);
                 }
-                cells.push(cell(if b.activity.is_empty() {
-                    "—".into()
-                } else {
-                    b.activity.clone()
-                }));
+                cells.push(cell(short_activity(b)));
                 Row::new(cells)
             })
             .collect();
@@ -177,7 +148,7 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &mut App, area: Rect, co
             // Length column and truncates at its edge with no pad, so the 7-glyph
             // word in a 7-wide column drew as `box cp`. The column is 8, and the
             // space keeps the word clear of the edge even where the two abut.
-            header.extend(["box cpu ", "box ram", "tts"]);
+            header.extend(["box cpu ", "box ram"]);
         }
         header.push("activity");
         if compact {
@@ -196,7 +167,6 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &mut App, area: Rect, co
                 Constraint::Length(5),
                 Constraint::Length(19),
                 Constraint::Length(8),
-                Constraint::Length(10),
                 Constraint::Length(10),
                 Constraint::Min(20),
             ]);

@@ -99,12 +99,6 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
                 cell(policy_summary(m)),
                 state_glyph_cell(colour, &work_label(m)),
             ];
-            // The tts column is the widest and the least urgent; in the compact
-            // tier it is the first thing to go, so the remaining columns keep
-            // their full width instead of all clipping together.
-            if !compact {
-                cells.push(cell(m.tts_url.clone().unwrap_or_else(|| "—".into())));
-            }
             cells.push(cell(seen_label(m)));
             let mut row = Row::new(cells);
             if idx == selected {
@@ -118,7 +112,14 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
 
     // The cursor column: cells carry `▸ name`, so the header is indented to
     // match the rows and `machine` no longer sits a column left of its data.
-    let mut header = vec![" machine", "kind", "ip", "threads", "policy", "state"];
+    let mut header = vec![
+        " machine",
+        "kind",
+        "ip",
+        "tts-threads",
+        "policy",
+        "state",
+    ];
     let mut widths: Vec<Constraint> = if compact {
         // Taken from the constant the compile-time guard checks.
         COMPACT_MACHINE_COLS[..6]
@@ -126,10 +127,7 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
             .map(|w| Constraint::Length(*w))
             .collect()
     } else {
-        // The 100-column floor leaves 98 inside the border, and this set sums
-        // to exactly that. The old set summed to 102: at the floor, `seen` and
-        // the tail of `state` were pushed off the pane entirely.
-        //
+        // Under the 100-column floor's 98 inside the border, so nothing clips.
         // `policy` gave up two of its eleven columns to `state`, because policy
         // is fixed-width by construction — `policy_summary` is always the four
         // stage letters and three `>` (seven) — while `state` is a word of up to
@@ -140,15 +138,11 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
             Constraint::Length(14),
             Constraint::Length(6),
             Constraint::Length(17),
-            Constraint::Length(8),
+            Constraint::Length(12),
             Constraint::Length(9),
             Constraint::Length(15),
         ]
     };
-    if !compact {
-        header.push("tts");
-        widths.push(Constraint::Length(22));
-    }
     header.push("seen");
     widths.push(Constraint::Length(if compact {
         COMPACT_MACHINE_COLS[6]

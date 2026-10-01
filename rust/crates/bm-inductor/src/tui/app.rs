@@ -337,6 +337,8 @@ pub(crate) struct App {
     /// the Cloud view renders the reason rather than an empty account.
     pub(crate) cloud: Vec<AwsInstance>,
     pub(crate) cloud_error: Option<String>,
+    /// The Logs pane filter, stepped with `←/→`. TUI-local: polls never reset it.
+    pub(crate) log_filter: crate::tui::model::LogFilter,
     /// The pane highlighted by keyboard focus or a mouse click.
     pub(crate) focused_panel: Panel,
     /// Rebuilt on every frame; mouse hit testing is therefore resize-safe.
@@ -366,6 +368,7 @@ impl App {
             worker_scroll: 0,
             events_scroll: 0,
             events_rows: 10,
+            log_filter: crate::tui::model::LogFilter::All,
             screen: Screen::Normal,
             roster: None,
             roster_loading: false,

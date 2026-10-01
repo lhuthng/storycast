@@ -15,37 +15,63 @@ use ratatui::{
 pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let wrap_w = area.width.saturating_sub(2) as usize;
     let viewport_h = area.height.saturating_sub(2) as usize;
-    let total = app.events.len();
     // Publish the pane's real height so PgUp/PgDn page by exactly what one
     // screenful shows. The keys are the only place that can know this, and
     // they run between frames.
     app.events_rows = viewport_h.max(1);
 
-    let title = if app.events_scroll == 0 {
-        "Logs".to_string()
-    } else if app.events_scroll >= total {
-        // The buffer keeps EVENT_CAP lines and drops the rest; the top of the
-        // buffer is a real edge, so the title names it instead of showing a
-        // number that looks stuck. Reading is still one `G` (or one run of
-        // PgDn) from the newest line.
-        "Logs — oldest kept line · G for newest".to_string()
-    } else {
-        format!("Logs — {} line(s) back · G for newest", app.events_scroll)
+    // The filter narrows first, so scroll distances and the buffer edge below
+    // are in filtered lines, not raw ones.
+    let shown: Vec<usize> = app
+        .events
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| app.log_filter.matches(l))
+        .map(|(i, _)| i)
+        .collect();
+    let total = shown.len();
+    // Scroll is a distance from the filtered tail, so a filter with fewer
+    // lines cannot leave it pointing past its own top.
+    app.events_scroll = app.events_scroll.min(total);
+
+    let title = {
+        let base = format!("Logs [{}]", app.log_filter.label());
+        if total == app.events.len() && app.events_scroll == 0 {
+            format!("{base} · ←→ filter")
+        } else if app.events_scroll >= total {
+            // The buffer keeps EVENT_CAP lines and drops the rest; the top of the
+            // buffer is a real edge, so the title names it instead of showing a
+            // number that looks stuck. Reading is still one `G` (or one run of
+            // PgDn) from the newest line.
+            format!("{base} — oldest kept line · G for newest · ←→ filter")
+        } else {
+            format!(
+                "Logs [{}] — {} of {} · G for newest · ←→ filter",
+                app.log_filter.label(),
+                app.events_scroll,
+                total,
+            )
+        }
     };
     let block = super::pane_block_for(app, Some(Panel::Events), title);
-    if app.events.is_empty() {
+    if total == 0 {
         f.render_widget(
-            empty_body(vec!["nothing has happened yet".into()]).block(block),
+            empty_body(vec![if app.events.is_empty() {
+                "nothing has happened yet".into()
+            } else {
+                format!("no {} lines — ←→ steps the filter", app.log_filter.label())
+            }])
+            .block(block),
             area,
         );
         return;
     }
 
     let colour = app.colour();
-    let lines: Vec<Line> = app
-        .events
+    let lines: Vec<Line> = shown
         .iter()
-        .map(|l| {
+        .map(|i| {
+            let l = &app.events[*i];
             let body_style = match l.level {
                 Level::Warn => style_of(colour, Color::Yellow),
                 Level::Error => style_of(colour, Color::Red),

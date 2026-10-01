@@ -1,7 +1,7 @@
 //! Pure selection: filters, cast rows, task queries. No widgets, no keys.
 use crate::tui::{
     app::App,
-    style::{gender_label, style_of, worker_alias},
+    style::{gender_label, style_of, worker_alias, Level, LogLine},
 };
 use bm_proto::{Heartbeat, Machine, MachineState, Roster, Stage, Task, TaskState, VoiceInfo};
 use ratatui::{
@@ -758,6 +758,27 @@ pub(crate) fn machine_name<'a>(machines: &'a [Machine], beat: &'a Heartbeat) -> 
         })
 }
 
+/// Workers `activity` without the `{stage} ch{n}` the stage/ch columns already
+/// say (`render ch91 Aria (3/12)` → `Aria (3/12)`, `merge ch9` → `—`).
+pub(crate) fn short_activity(b: &Heartbeat) -> String {
+    let a = b.activity.trim();
+    if a.is_empty() {
+        return "—".into();
+    }
+    if let (Some(st), Some(ch)) = (b.stage, b.chapter) {
+        let prefix = format!("{} ch{}", st.as_str(), ch);
+        if let Some(rest) = a.strip_prefix(&prefix) {
+            let rest = rest.trim();
+            return if rest.is_empty() {
+                "—".into()
+            } else {
+                rest.to_string()
+            };
+        }
+    }
+    a.to_string()
+}
+
 /// The `threads` column: `{eff}/{cores}` (`?` where either is unknown).
 pub(crate) fn threads_label(m: &Machine, beats: &[Heartbeat]) -> String {
     let cores = beats
@@ -773,6 +794,92 @@ pub(crate) fn threads_label(m: &Machine, beats: &[Heartbeat]) -> String {
     }
 }
 
+/// Per-stage chapter progress in pipeline order: done chapters over the chapters
+/// the stage can draw on (crawl: every chapter; digest: crawled; render:
+/// digested; merge: rendered). A chapter is done when it has rows and every
+/// row for the stage is Done (render runs one row per take).
+pub(crate) fn pipeline_counts(tasks: &[Task]) -> Vec<(Stage, usize, usize)> {
+    fn done_chapters(tasks: &[Task], stage: Stage) -> BTreeSet<u32> {
+        tasks
+            .iter()
+            .filter(|t| t.stage == stage)
+            .map(|t| t.chapter)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|ch| {
+                tasks
+                    .iter()
+                    .filter(|t| t.stage == stage && t.chapter == *ch)
+                    .all(|t| t.state == TaskState::Done)
+            })
+            .collect()
+    }
+    let chapters: BTreeSet<u32> = tasks.iter().map(|t| t.chapter).collect();
+    let crawl = done_chapters(tasks, Stage::Crawl);
+    let digest = done_chapters(tasks, Stage::Digest);
+    let render = done_chapters(tasks, Stage::Render);
+    let merge = done_chapters(tasks, Stage::Merge);
+    vec![
+        (Stage::Crawl, crawl.len(), chapters.len()),
+        (Stage::Digest, digest.len(), crawl.len()),
+        (Stage::Render, render.len(), digest.len()),
+        (Stage::Merge, merge.len(), render.len()),
+    ]
+}
+///
+/// The Logs pane filter, stepped with `←/→`: everything, one stage's lines,
+/// or one severity. Stage filters match the stage word in the line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum LogFilter {
+    #[default]
+    All,
+    Crawl,
+    Digest,
+    Render,
+    Merge,
+    Warn,
+    Error,
+}
+
+impl LogFilter {
+    pub(crate) const ALL: [LogFilter; 7] = [
+        LogFilter::All,
+        LogFilter::Crawl,
+        LogFilter::Digest,
+        LogFilter::Render,
+        LogFilter::Merge,
+        LogFilter::Warn,
+        LogFilter::Error,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            LogFilter::All => "all",
+            LogFilter::Crawl => "crawl",
+            LogFilter::Digest => "digest",
+            LogFilter::Render => "render",
+            LogFilter::Merge => "merge",
+            LogFilter::Warn => "warn",
+            LogFilter::Error => "error",
+        }
+    }
+
+    pub(crate) fn step(self, forward: bool) -> LogFilter {
+        let n = Self::ALL.len();
+        let i = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ALL[if forward { (i + 1) % n } else { (i + n - 1) % n }]
+    }
+
+    pub(crate) fn matches(self, l: &LogLine) -> bool {
+        match self {
+            LogFilter::All => true,
+            LogFilter::Warn => l.level == Level::Warn,
+            LogFilter::Error => l.level == Level::Error,
+            stage => l.text.to_lowercase().contains(stage.label()),
+        }
+    }
+}
+///
 /// The `ip` column, which is not always an address.
 ///
 /// A launched box whose public address the account has not assigned yet is keyed

@@ -1973,7 +1973,7 @@ fn every_dashboard_header_reads_in_full_at_the_100_column_floor() {
     // exact terminal where they broke.
     let mut app = stats_app();
     let text = render_text(&mut app, 100, 32);
-    for header in ["box cpu", "box ram", "threads", "activity", "seen"] {
+    for header in ["box cpu", "box ram", "tts-threads", "activity", "seen"] {
         assert!(text.contains(header), "{header} clipped:\n{text}");
     }
 }
@@ -2813,7 +2813,7 @@ fn machines_pane_shows_each_boxs_sidecar_threads_instead_of_the_worker_count() {
     app.beats = vec![beat_local, beat_remote];
     let text = render_text(&mut app, 140, 44);
     assert!(
-        text.contains("threads"),
+        text.contains("tts-threads"),
         "the count column is headed:\n{text}"
     );
     assert!(
@@ -2833,6 +2833,100 @@ fn machines_pane_shows_each_boxs_sidecar_threads_instead_of_the_worker_count() {
         1,
         "the addr appears once, never echoed:\n{text}"
     );
+}
+
+#[test]
+fn workers_activity_drops_the_stage_and_chapter_the_columns_already_say() {
+    use super::model::short_activity;
+    let mut b = beat("w1", "192.168.2.2", 2, "marmot");
+    b.stage = Some(Stage::Render);
+    b.chapter = Some(91);
+    b.activity = "render ch91 Accord (3/12)".into();
+    assert_eq!(short_activity(&b), "Accord (3/12)");
+    b.stage = Some(Stage::Digest);
+    b.chapter = Some(7);
+    b.activity = "digest ch7 via gemini".into();
+    assert_eq!(short_activity(&b), "via gemini");
+    b.stage = Some(Stage::Merge);
+    b.chapter = Some(9);
+    b.activity = "merge ch9".into();
+    assert_eq!(short_activity(&b), "—", "nothing left past the prefix");
+    b.stage = None;
+    b.chapter = None;
+    b.activity = "idle".into();
+    assert_eq!(short_activity(&b), "idle", "no columns to repeat, keep it whole");
+}
+
+#[test]
+fn tasks_pane_counts_chapters_against_the_pipeline_that_feeds_them() {
+    use super::model::pipeline_counts;
+    // chapters {3, 4}: crawl done on 4; digest shelved on 3; render running on 3.
+    let counts = pipeline_counts(&tasks_app().tasks);
+    assert_eq!(
+        counts
+            .iter()
+            .map(|(st, done, denom)| (st.as_str(), *done, *denom))
+            .collect::<Vec<_>>(),
+        vec![
+            ("crawl", 1, 2),
+            ("digest", 0, 1),
+            ("render", 0, 0),
+            ("merge", 0, 0),
+        ]
+    );
+    let mut app = tasks_app();
+    app.counts = serde_json::json!({});
+    let text = render_text(&mut app, 140, 44);
+    assert!(text.contains("1/2 done"), "crawl over every chapter:\n{text}");
+    assert!(
+        text.contains("0/1 done"),
+        "digest over crawled chapters:\n{text}"
+    );
+    assert!(text.contains("shelved"), "row faults still show:\n{text}");
+    let (c, d, r) = (
+        text.find("1/2 done").unwrap(),
+        text.find("0/1 done").unwrap(),
+        text.find("0/0 done").unwrap(),
+    );
+    assert!(c < d && d < r, "crawl → digest → render → merge:\n{text}");
+}
+
+#[test]
+fn logs_filter_steps_through_stages_and_severities() {
+    use super::model::LogFilter;
+    assert_eq!(LogFilter::All.step(true), LogFilter::Crawl);
+    assert_eq!(LogFilter::Error.step(true), LogFilter::All);
+    assert_eq!(LogFilter::All.step(false), LogFilter::Error);
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.log_at(Level::Info, "crawl ch1 fetched");
+    app.log_at(Level::Warn, "digest ch2 slow");
+    app.log_at(Level::Error, "render ch3 boom");
+    let last = app.events.back().unwrap();
+    assert!(LogFilter::All.matches(last));
+    assert!(LogFilter::Render.matches(last));
+    assert!(!LogFilter::Digest.matches(last));
+    assert!(!LogFilter::Warn.matches(last), "severity is the level, not the text");
+    assert!(LogFilter::Error.matches(last));
+    app.log_filter = LogFilter::Digest;
+    let text = render_text(&mut app, 140, 44);
+    assert!(text.contains("[digest]"), "title names the filter:\n{text}");
+    assert!(text.contains("digest ch2 slow"), "match stays:\n{text}");
+    assert!(!text.contains("render ch3 boom"), "others hide:\n{text}");
+    assert!(!text.contains("crawl ch1 fetched"), "others hide:\n{text}");
+}
+
+#[tokio::test]
+async fn arrows_step_the_logs_filter_and_pin_to_newest() {
+    use super::model::LogFilter;
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://x");
+    handle_key(&mut app, key(KeyCode::Right), &http, &job_tx).await;
+    assert_eq!(app.log_filter, LogFilter::Crawl);
+    app.events_scroll = 5;
+    handle_key(&mut app, key(KeyCode::Left), &http, &job_tx).await;
+    assert_eq!(app.log_filter, LogFilter::All, "left steps back");
+    assert_eq!(app.events_scroll, 0, "a new filter starts at the tail");
 }
 
 #[test]

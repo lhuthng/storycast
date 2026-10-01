@@ -137,6 +137,23 @@ pub(crate) async fn normal_key(
         KeyCode::Right if app.machines_graph => {
             app.selected = (app.selected + 1).min(app.machines.len().saturating_sub(1))
         }
+        // Step the Logs filter; the rack owns these arrows in graph mode.
+        KeyCode::Left => {
+            app.log_filter = app.log_filter.step(false);
+            app.events_scroll = 0;
+            app.set_status(
+                Level::Info,
+                format!("logs [{}] — ←→ steps the filter", app.log_filter.label()),
+            );
+        }
+        KeyCode::Right => {
+            app.log_filter = app.log_filter.step(true);
+            app.events_scroll = 0;
+            app.set_status(
+                Level::Info,
+                format!("logs [{}] — ←→ steps the filter", app.log_filter.label()),
+            );
+        }
         // Up and down walk a *row* of the rack — a whole band of servers — and
         // a single machine in the table. The step is the pane's own width, which
         // the drawer publishes; a key handler cannot know it.
