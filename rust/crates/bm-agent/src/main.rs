@@ -1452,9 +1452,10 @@ fn heartbeat_now(
 /// `render-segments` is the migration gate: the inductor only offers render
 /// tasks to a box that can produce units.
 ///
-/// `merge` is advertised **only when ffmpeg is on PATH**. The merge stage shells
-/// out to ffmpeg, so a box without it would take every merge offered and fail
-/// each one, three strikes and the chapter shelves. Reporting the capability
+/// `merge` is advertised **only when both ffmpeg and sox are on PATH**. The
+/// merge stage shells out to ffmpeg for the beds and to sox for every voice
+/// treatment's room, so a box missing either would take merges it cannot
+/// finish, three strikes and the chapter shelves. Reporting the capability
 /// truthfully lets the scheduler skip merge here and give the box its other
 /// stages, instead of poisoning the ledger with failures it cannot help.
 fn capabilities() -> Vec<String> {
@@ -1464,7 +1465,7 @@ fn capabilities() -> Vec<String> {
         "render".into(),
         "render-segments".into(),
     ];
-    if bm_core::assemble::ffmpeg_available() {
+    if bm_core::assemble::ffmpeg_available() && bm_core::assemble::sox_available() {
         caps.push("merge".into());
     }
     caps

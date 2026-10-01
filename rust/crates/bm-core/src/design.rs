@@ -80,8 +80,8 @@ struct Reachable<'a> {
     /// labels resolving to the same rule are still two entries: which labels a
     /// script names is part of the design.
     scenes: BTreeMap<String, SceneRule>,
-    /// Reverb name -> filter, for the names those rules reach.
-    reverbs: BTreeMap<String, String>,
+    /// Reverb name -> treatment, for the names those rules reach.
+    reverbs: BTreeMap<String, ambience::VoiceFx>,
     /// Mood -> palette entry, for the moods the script declares.
     music: BTreeMap<String, PaletteEntry>,
     /// The sounds `pick` can return for the tags those rules reach.
@@ -139,7 +139,7 @@ impl MergeDesign {
 
         // The reverb presets those rules name. A preset nothing here reaches is
         // somebody else's chapter's problem.
-        let mut reverbs: BTreeMap<String, String> = BTreeMap::new();
+        let mut reverbs: BTreeMap<String, ambience::VoiceFx> = BTreeMap::new();
         for rule in scenes.values() {
             if let Some(name) = &rule.reverb {
                 if let Some(fx) = self.map.reverb_presets.get(name) {

@@ -489,13 +489,96 @@ pub struct SceneMap {
     #[serde(default)]
     pub legacy_scene_music: LegacyMusic,
     #[serde(default)]
-    pub reverb_presets: BTreeMap<String, String>,
+    pub reverb_presets: BTreeMap<String, VoiceFx>,
     #[serde(default)]
     pub duck: Duck,
     #[serde(default)]
     pub layers: Layers,
     #[serde(default)]
     pub pause: PausePlan,
+}
+
+/// Which engine runs a voice treatment's chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FxEngine {
+    Ffmpeg,
+    Sox,
+}
+
+/// One voice treatment: what a slot's voice is run through, how much decay to
+/// **reserve** after it so a reverb is not cut mid-tail, and how much of it the
+/// Narrator takes.
+///
+/// Two shapes, so a pack migrates at its own pace:
+///
+/// * a bare string — a legacy ffmpeg `-af` chain, no reserved tail, Narrator dry;
+/// * an object — `{"sox": "reverb 45 45 80", "tail_s": 1.2, "narrator": 0.35}`.
+///
+/// A `sox` chain is a SoX effect list (`reverb 45 45 80`, `overdrive gain -3`),
+/// run on the slot's piece by the `sox` binary; an `ffmpeg` chain is the same
+/// `-af` string the presets used to be. The engine is chosen by which key is
+/// set, never inferred from the text: the two grammars overlap but are not the
+/// same, and guessing is how one gets run by the other.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum VoiceFx {
+    Chain(String),
+    Spec(VoiceFxSpec),
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
+pub struct VoiceFxSpec {
+    /// SoX effect chain, run by `sox` (no `sox`/input/output — just the effects).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sox: Option<String>,
+    /// Legacy ffmpeg `-af` chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ffmpeg: Option<String>,
+    /// Seconds of decay to reserve after the slot, so the tail rings out
+    /// instead of being cut at the next line. Zero is "no tail".
+    #[serde(default)]
+    pub tail_s: f64,
+    /// How much of the treatment the Narrator takes, as a fraction of the
+    /// speakers' depth: `1.0` is in the room with everyone, `0.0` is dry. The
+    /// default is a low, adaptive fraction — the narrator reads *in* the room
+    /// but always further from its walls than a character standing in it.
+    #[serde(default = "d_narrator_wet")]
+    pub narrator: f64,
+}
+
+fn d_narrator_wet() -> f64 {
+    0.35
+}
+
+impl VoiceFx {
+    /// The engine and chain this treatment runs.
+    pub fn engine_and_chain(&self) -> (FxEngine, &str) {
+        match self {
+            VoiceFx::Chain(c) => (FxEngine::Ffmpeg, c.as_str()),
+            VoiceFx::Spec(s) => match (&s.sox, &s.ffmpeg) {
+                (Some(c), _) => (FxEngine::Sox, c.as_str()),
+                (None, Some(c)) => (FxEngine::Ffmpeg, c.as_str()),
+                (None, None) => (FxEngine::Sox, ""),
+            },
+        }
+    }
+
+    /// Seconds of decay reserved after the slot, clamped to something sane.
+    pub fn tail_s(&self) -> f64 {
+        match self {
+            VoiceFx::Chain(_) => 0.0,
+            VoiceFx::Spec(s) => s.tail_s.clamp(0.0, 10.0),
+        }
+    }
+
+    /// The Narrator's fraction of this treatment's depth.
+    pub fn narrator(&self) -> f64 {
+        match self {
+            VoiceFx::Chain(_) => 1.0,
+            VoiceFx::Spec(s) => s.narrator.clamp(0.0, 1.0),
+        }
+    }
 }
 
 /// The palette's keys, sorted, what a script's `music` value is checked
@@ -1875,31 +1958,319 @@ fn s(v: impl ToString) -> String {
     v.to_string()
 }
 
-fn concat_files(parts: &[PathBuf], out: &Path) -> Result<()> {
-    let list = out.with_file_name("parts.txt");
-    let mut body = String::new();
-    for p in parts {
-        // absolute paths: the concat demuxer resolves relative ones against the playlist dir
-        let abs = p.canonicalize().unwrap_or_else(|_| p.clone());
-        body.push_str(&format!("file '{}'\n", abs.display()));
+/// The edge fade every spoken slot gets: a line must not begin or end on a hard
+/// sample. A tenth of a second is a click guard, not an attack.
+pub const FADE_S: f64 = 0.1;
+
+/// `sox`, the second audio engine the merge shells out to. A voice treatment
+/// that names a `sox` chain needs it, exactly as the beds need ffmpeg.
+fn sox(args: &[String]) -> Result<()> {
+    let out = Command::new("sox")
+        .args(args)
+        .output()
+        .context("spawning sox")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "sox failed: {}",
+            crate::util::head_chars(&String::from_utf8_lossy(&out.stderr), 300)
+        );
     }
-    std::fs::write(&list, body)?;
-    let r = ffmpeg(&[
+    Ok(())
+}
+
+/// The longest decay any span in this chapter asks for. Zero when nothing
+/// reserves a tail, which is when the mix is exactly as long as the voice.
+fn voice_reserve(spans: &[Span], presets: &BTreeMap<String, VoiceFx>) -> f64 {
+    spans
+        .iter()
+        .filter_map(|s| s.reverb.as_ref())
+        .filter_map(|r| presets.get(r))
+        .map(VoiceFx::tail_s)
+        .fold(0.0_f64, f64::max)
+}
+
+/// Pad `raw` out to `span_len` and put a [`FADE_S`] fade at each edge. Used for
+/// a slot with no treatment, which still must not start or end on a click.
+fn fade_edges(raw: &Path, out: &Path, span_len: f64) -> Result<()> {
+    let af = format!(
+        "apad=whole_dur={span_len:.3},atrim=0:{span_len:.3},\
+         afade=t=in:st=0:d={FADE_S:.3},afade=t=out:st={:.3}:d={FADE_S:.3}",
+        (span_len - FADE_S).max(0.0)
+    );
+    ffmpeg(&[
         "-y".into(),
         "-loglevel".into(),
         "error".into(),
-        "-f".into(),
-        "concat".into(),
-        "-safe".into(),
-        "0".into(),
         "-i".into(),
-        s(list.display()),
+        s(raw.display()),
+        "-ar".into(),
+        "48000".into(),
+        "-ac".into(),
+        "1".into(),
+        "-af".into(),
+        af,
         "-c:a".into(),
         "pcm_s16le".into(),
         s(out.display()),
-    ]);
-    let _ = std::fs::remove_file(&list);
-    r
+    ])
+}
+
+/// The whole voice track: every slot's piece treated and placed at its own
+/// offset, then summed.
+///
+/// **Placement, not concatenation.** A concat grew the track by every reserved
+/// tail and slid the speech against the beds; placing each piece where the
+/// script put it keeps the turn fixed, with the decay ringing under the next
+/// line.
+fn build_voice_track(
+    voice_wav: &Path,
+    slots: &[Slot],
+    spans: &[Span],
+    presets: &BTreeMap<String, VoiceFx>,
+    total: f64,
+    work: &Path,
+) -> Result<PathBuf> {
+    let mut pieces: Vec<(PathBuf, f64)> = Vec::new();
+    for (n, slot) in slots.iter().enumerate() {
+        let len = (slot.end - slot.start).max(0.0);
+        if len <= 0.0 {
+            continue;
+        }
+        // Seek BEFORE the input: `-ss` as an input option seeks (PCM is
+        // sample-accurate for this), so each piece decodes only its own span.
+        let raw = work.join(format!("v{n}.raw.wav"));
+        ffmpeg(&[
+            "-y".into(),
+            "-loglevel".into(),
+            "error".into(),
+            "-ss".into(),
+            format!("{:.3}", slot.start),
+            "-t".into(),
+            format!("{len:.3}"),
+            "-i".into(),
+            s(voice_wav.display()),
+            "-ar".into(),
+            "48000".into(),
+            "-ac".into(),
+            "1".into(),
+            "-c:a".into(),
+            "pcm_s16le".into(),
+            s(raw.display()),
+        ])?;
+        let fx = slot_effect(slot, spans, presets);
+        let tail = fx.map(|(f, _)| f.tail_s()).unwrap_or(0.0);
+        let span_len = len + tail;
+        let p = work.join(format!("v{n}.wav"));
+        match fx {
+            Some((f, narrator)) => {
+                let depth = if narrator { f.narrator() } else { 1.0 };
+                apply_voice_fx(f, depth, &raw, &p, span_len, work)?;
+            }
+            None => fade_edges(&raw, &p, span_len)?,
+        }
+        pieces.push((p, slot.start));
+    }
+    let voice_fx = work.join("voice_fx.wav");
+    place_voice(&pieces, &voice_fx, total)?;
+    Ok(voice_fx)
+}
+
+/// Run one slot's treatment: the effect, the reserved tail, the edge fades, and
+/// (for the Narrator) a fraction of the depth by blending back toward dry.
+///
+/// `depth` is 1.0 for a character and the preset's `narrator` fraction for the
+/// Narrator: a blend against the dry piece, because "in the room but not
+/// standing in it" is a mix of two signals rather than a knob the effect has.
+fn apply_voice_fx(
+    fx: &VoiceFx,
+    depth: f64,
+    raw: &Path,
+    out: &Path,
+    span_len: f64,
+    work: &Path,
+) -> Result<()> {
+    if depth <= 0.0 {
+        return fade_edges(raw, out, span_len);
+    }
+    let stem = out
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("v")
+        .to_string();
+    let (engine, chain) = fx.engine_and_chain();
+    let chain = chain.trim();
+    let processed = work.join(format!("{stem}.wet.wav"));
+    match engine {
+        FxEngine::Ffmpeg => {
+            let mut af: Vec<String> = Vec::new();
+            if !chain.is_empty() {
+                af.push(chain.to_string());
+            }
+            af.push(format!("apad=whole_dur={span_len:.3}"));
+            af.push(format!("atrim=0:{span_len:.3}"));
+            af.push(format!("afade=t=in:st=0:d={FADE_S:.3}"));
+            af.push(format!(
+                "afade=t=out:st={:.3}:d={FADE_S:.3}",
+                (span_len - FADE_S).max(0.0)
+            ));
+            ffmpeg(&[
+                "-y".into(),
+                "-loglevel".into(),
+                "error".into(),
+                "-i".into(),
+                s(raw.display()),
+                "-ar".into(),
+                "48000".into(),
+                "-ac".into(),
+                "1".into(),
+                "-af".into(),
+                af.join(","),
+                "-c:a".into(),
+                "pcm_s16le".into(),
+                s(processed.display()),
+            ])?;
+        }
+        FxEngine::Sox => {
+            // SoX's `reverb` never extends its own output, so the room has to
+            // ring into silence that already exists: pad the reserved tail on
+            // *first*, run the chain, then land the edges on the result.
+            let padded = work.join(format!("{stem}.pad.wav"));
+            ffmpeg(&[
+                "-y".into(),
+                "-loglevel".into(),
+                "error".into(),
+                "-i".into(),
+                s(raw.display()),
+                "-ar".into(),
+                "48000".into(),
+                "-ac".into(),
+                "1".into(),
+                "-af".into(),
+                format!("apad=whole_dur={span_len:.3}"),
+                "-c:a".into(),
+                "pcm_s16le".into(),
+                s(padded.display()),
+            ])?;
+            let wet = work.join(format!("{stem}.sox.wav"));
+            if chain.is_empty() {
+                std::fs::copy(&padded, &wet)?;
+            } else {
+                let mut args = vec!["-q".to_string(), s(padded.display()), s(wet.display())];
+                args.extend(chain.split_whitespace().map(str::to_string));
+                sox(&args)?;
+            }
+            let af = format!(
+                "atrim=0:{span_len:.3},afade=t=in:st=0:d={FADE_S:.3},\
+                 afade=t=out:st={:.3}:d={FADE_S:.3}",
+                (span_len - FADE_S).max(0.0)
+            );
+            ffmpeg(&[
+                "-y".into(),
+                "-loglevel".into(),
+                "error".into(),
+                "-i".into(),
+                s(wet.display()),
+                "-ar".into(),
+                "48000".into(),
+                "-ac".into(),
+                "1".into(),
+                "-af".into(),
+                af,
+                "-c:a".into(),
+                "pcm_s16le".into(),
+                s(processed.display()),
+            ])?;
+        }
+    }
+    if depth >= 1.0 {
+        std::fs::rename(&processed, out)?;
+        return Ok(());
+    }
+    // The dry leg is the un-treated piece: it is mixed back in for the
+    // Narrator, so it needs the same edge fades the wet piece got, or the
+    // blend would put the click back at full amplitude over a faded tail.
+    let dry_len = (span_len - fx.tail_s()).max(0.0);
+    let dry_fade_out = (dry_len - FADE_S).max(0.0);
+    ffmpeg(&[
+        "-y".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-i".into(),
+        s(raw.display()),
+        "-i".into(),
+        s(processed.display()),
+        "-filter_complex".into(),
+        format!(
+            "[0:a]afade=t=in:st=0:d={FADE_S:.3},\
+             afade=t=out:st={dry_fade_out:.3}:d={FADE_S:.3},\
+             volume={:.4}[d];[1:a]volume={depth:.4}[w];\
+             [d][w]amix=inputs=2:normalize=0,atrim=0:{span_len:.3}[m]",
+            1.0 - depth
+        ),
+        "-map".into(),
+        "[m]".into(),
+        "-ar".into(),
+        "48000".into(),
+        "-ac".into(),
+        "1".into(),
+        "-c:a".into(),
+        "pcm_s16le".into(),
+        s(out.display()),
+    ])
+}
+
+/// Sum the slot pieces at their absolute offsets, then pad the whole track out
+/// to `total` (the voice plus the reserved tail).
+fn place_voice(pieces: &[(PathBuf, f64)], out: &Path, total: f64) -> Result<()> {
+    if pieces.is_empty() {
+        return ffmpeg(&[
+            "-y".into(),
+            "-loglevel".into(),
+            "error".into(),
+            "-f".into(),
+            "lavfi".into(),
+            "-i".into(),
+            "anullsrc=r=48000:cl=mono".into(),
+            "-t".into(),
+            format!("{total:.3}"),
+            "-c:a".into(),
+            "pcm_s16le".into(),
+            s(out.display()),
+        ]);
+    }
+    let mut args: Vec<String> = vec!["-y".into(), "-loglevel".into(), "error".into()];
+    for (p, _) in pieces {
+        args.push("-i".into());
+        args.push(s(p.display()));
+    }
+    let mut graph = String::new();
+    for (i, (_, start)) in pieces.iter().enumerate() {
+        let ms = (start * 1000.0).round().max(0.0) as i64;
+        graph.push_str(&format!("[{i}:a]adelay={ms}[p{i}];"));
+    }
+    let labels: String = (0..pieces.len()).map(|i| format!("[p{i}]")).collect();
+    if pieces.len() == 1 {
+        graph.push_str(&format!(
+            "{labels}apad=whole_dur={total:.3},atrim=0:{total:.3}[v]"
+        ));
+    } else {
+        graph.push_str(&format!(
+            "{labels}amix=inputs={}:normalize=0,apad=whole_dur={total:.3},atrim=0:{total:.3}[v]",
+            pieces.len()
+        ));
+    }
+    args.push("-filter_complex".into());
+    args.push(graph);
+    args.push("-map".into());
+    args.push("[v]".into());
+    args.push("-ar".into());
+    args.push("48000".into());
+    args.push("-ac".into());
+    args.push("1".into());
+    args.push("-c:a".into());
+    args.push("pcm_s16le".into());
+    args.push(s(out.display()));
+    ffmpeg(&args)
 }
 
 /// One thing to place on the layer's own track.
@@ -2060,20 +2431,18 @@ fn music_fades(n: usize, last: bool, cfg: &MusicLayer) -> (f64, f64) {
 /// `work` is a directory the caller owns, used for the per-span slices this
 /// pass needs. It is created on demand and never cleaned up here, so pass a
 /// throwaway path, the merge passes its per-chapter scratch directory.
-/// The reverb filter for one slot's piece of the voice track: its span's
-/// preset, unless the voice is the Narrator, who always reads dry.
-fn slot_reverb<'a>(
+/// The voice treatment for one slot, and whether the slot is the Narrator —
+/// who takes the same room at a fraction of its depth, never as a full wet.
+fn slot_effect<'a>(
     slot: &Slot,
     spans: &[Span],
-    presets: &'a BTreeMap<String, String>,
-) -> Option<&'a String> {
-    if slot.speaker == "Narrator" {
-        return None;
-    }
+    presets: &'a BTreeMap<String, VoiceFx>,
+) -> Option<(&'a VoiceFx, bool)> {
     let span = spans
         .iter()
         .find(|s| slot.start >= s.start && slot.start < s.end)?;
-    span.reverb.as_ref().and_then(|r| presets.get(r))
+    let fx = span.reverb.as_ref().and_then(|r| presets.get(r))?;
+    Some((fx, slot.speaker == "Narrator"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2097,55 +2466,30 @@ pub fn apply_layers(
     let spans = build_spans(slots, &cfg);
     let pauses = pause_intervals(slots);
 
-    // 1. the voice track, with per-scene reverb. Not a layer: it is applied to
-    //    the voice itself, before anything is mixed under it. It rides with the
-    //    effect switch because it is part of that layer's scene treatment, an
-    //    operator turning the effects off is asking for a plain read, not a
-    //    plain read in a cave.
-    //
-    //    Speakers only, never the Narrator: narration is the dry read the room
-    //    plays around, not a voice inside it.
+    // 1. the voice track: one treatment per slot, a short edge fade on every
+    //    line, and a reserved decay so a reverb rings out. Not a layer: it is
+    //    applied to the voice itself, before anything is mixed under it. It
+    //    rides the effect switch because it is that layer's scene treatment —
+    //    effects off is a plain read, not a plain read in a cave.
     let work = work.join("layers");
     std::fs::create_dir_all(&work)?;
     // Header probe: the mix WAV is the biggest file in the merge, and the
     // layers need only its length.
-    let total = wav_seconds(voice_wav)?;
-    let mut voice_fx = voice_wav.to_path_buf();
-    if on.effects && spans.iter().any(|s| s.reverb.is_some()) {
-        let mut parts = Vec::new();
-        for (n, slot) in slots.iter().enumerate() {
-            // Tile contiguously: each piece runs to the next slot's start, so
-            // no gap is lost at a scene change (the old span cut dropped
-            // them). A tail is cut where the next line starts, masking does
-            // the rest, as it did at span ends before.
-            let end = slots.get(n + 1).map(|s| s.start).unwrap_or(slot.end);
-            let p = work.join(format!("v{n}.wav"));
-            // Seek BEFORE the input: `-ss` as an input option seeks (PCM is
-            // sample-accurate for this), so each piece decodes only its own
-            // span. With the seek after `-i`, ffmpeg decoded the whole mix
-            // from byte 0 for every slot, quadratic in the chapter length.
-            let mut args: Vec<String> = vec![
-                "-y".into(),
-                "-loglevel".into(),
-                "error".into(),
-                "-ss".into(),
-                format!("{:.3}", slot.start),
-                "-t".into(),
-                format!("{:.3}", (end - slot.start).max(0.0)),
-                "-i".into(),
-                s(voice_wav.display()),
-            ];
-            if let Some(fx) = slot_reverb(slot, &spans, &cfg.reverb_presets) {
-                args.push("-af".into());
-                args.push(fx.clone());
-            }
-            args.push(s(p.display()));
-            ffmpeg(&args)?;
-            parts.push(p);
-        }
-        voice_fx = work.join("voice_fx.wav");
-        concat_files(&parts, &voice_fx)?;
-    }
+    let voice_total = wav_seconds(voice_wav)?;
+    // Room for the longest decay any slot asks for, so a tail at the end of the
+    // chapter rings out instead of being cut by the mix edge. Only when the
+    // treatment runs: effects off is a plain read, not a read plus a silence.
+    let reserve = if on.effects {
+        voice_reserve(&spans, &cfg.reverb_presets)
+    } else {
+        0.0
+    };
+    let total = voice_total + reserve;
+    let voice_fx = if on.effects {
+        build_voice_track(voice_wav, slots, &spans, &cfg.reverb_presets, total, &work)?
+    } else {
+        voice_wav.to_path_buf()
+    };
 
     // 2. the effect layer: gated windows, sparse on purpose.
     let windows = if on.effects {
@@ -2481,8 +2825,14 @@ pub fn apply_layers(
     if beds.is_empty() && inject_mix.is_none() {
         eprintln!("sound design: no layer produced anything, skipped");
         log_plan(&spans, &pauses, &fx_log, &runs, &[], &cfg);
+        // The voice track IS the mix when nothing plays under it. Promote it to
+        // the caller's path before the scratch dir that holds it is removed:
+        // returning the path inside `work` handed back a file this line deletes.
+        if voice_fx.as_path() != out {
+            std::fs::copy(&voice_fx, out)?;
+        }
         cleanup(&work);
-        return Ok(voice_fx);
+        return Ok(out.to_path_buf());
     }
     let duck = &cfg.duck;
     let sc = format!(
@@ -3233,11 +3583,11 @@ mod tests {
         assert!((merged[0].end - 2.0).abs() < 0.01);
     }
 
-    /// Narration reads dry in every room: the hall preset is for voices
-    /// inside the scene, and a wet Narrator is what ch77's opening was.
+    /// The Narrator now takes the room at a **fraction** of its depth — in the
+    /// scene, never with a character's full wet — and the preset says how much.
     #[test]
-    fn reverb_covers_speakers_but_never_the_narrator() {
-        let d = tmpdir("narrator-dry");
+    fn the_narrator_takes_a_fraction_of_the_room() {
+        let d = tmpdir("narrator-fraction");
         let a = d.join("a.wav");
         let b = d.join("b.wav");
         silent_wav(&a, 1.0, 48_000).unwrap();
@@ -3252,16 +3602,85 @@ mod tests {
         let spans = build_spans(&slots, &cfg);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].reverb.as_deref(), Some("hall"));
-        assert_eq!(slot_reverb(&slots[0], &spans, &cfg.reverb_presets), None);
-        assert_eq!(
-            slot_reverb(&slots[1], &spans, &cfg.reverb_presets),
-            cfg.reverb_presets.get("hall"),
+
+        // Both slots reach the same preset; only the Narrator flag differs, and
+        // the preset's own `narrator` fraction decides the depth.
+        let mut presets = cfg.reverb_presets.clone();
+        presets.insert(
+            "hall".into(),
+            VoiceFx::Spec(VoiceFxSpec {
+                sox: Some("reverb 45 45 80".into()),
+                ffmpeg: None,
+                tail_s: 1.2,
+                narrator: 0.35,
+            }),
         );
+        let (narr_fx, narr) = slot_effect(&slots[0], &spans, &presets).unwrap();
+        let (char_fx, char_narr) = slot_effect(&slots[1], &spans, &presets).unwrap();
+        assert!(narr && !char_narr, "only the Narrator slot is marked");
+        assert_eq!(narr_fx, char_fx, "one preset, two depths");
+        assert_eq!(narr_fx.engine_and_chain(), (FxEngine::Sox, "reverb 45 45 80"));
+        assert_eq!(narr_fx.tail_s(), 1.2);
+        assert!((narr_fx.narrator() - 0.35).abs() < 1e-9);
+
         // Where the scene names no reverb, nobody gets any.
         let turns = vec![turn(&a, "street-day", "Lỗ Đạt Sênh")];
         let slots = timeline(&turns, 300, &BTreeMap::new()).unwrap();
         let spans = build_spans(&slots, &cfg);
-        assert_eq!(slot_reverb(&slots[0], &spans, &cfg.reverb_presets), None);
+        assert!(slot_effect(&slots[0], &spans, &cfg.reverb_presets).is_none());
+    }
+
+    /// A bare string is the legacy shape: ffmpeg, no reserved tail, and a
+    /// Narrator that takes it whole — the pack migrates at its own pace.
+    #[test]
+    fn a_legacy_preset_is_ffmpeg_with_no_tail() {
+        let fx = VoiceFx::Chain("aecho=0.8:0.9:80|170:0.08|0.05".into());
+        assert_eq!(fx.engine_and_chain().0, FxEngine::Ffmpeg);
+        assert_eq!(fx.tail_s(), 0.0);
+        assert_eq!(fx.narrator(), 1.0);
+    }
+
+    /// The reserve is the longest decay any span in the chapter reaches, and
+    /// it is what keeps a reverb from being chopped at the chapter's end. An
+    /// object preset deserializes to its engine, its tail, and a Narrator
+    /// fraction; a string preset (and a span that names no room) reserves
+    /// nothing, so a chapter with no tails is exactly as long as the voice.
+    #[test]
+    fn the_longest_reached_decay_is_the_reserve() {
+        let presets: BTreeMap<String, VoiceFx> = serde_json::from_str(
+            r#"{
+              "hall": {"sox": "reverb 65 55 85", "tail_s": 2.0, "narrator": 0.3},
+              "cave": {"sox": "reverb 78 35 95", "tail_s": 2.8},
+              "flat": "aecho=0.8:0.9:80:0.1"
+            }"#,
+        )
+        .unwrap();
+
+        // The object shape is read as SoX, with a reserved tail and a Narrator
+        // fraction that defaults when the field is absent.
+        assert_eq!(
+            presets["cave"].engine_and_chain(),
+            (FxEngine::Sox, "reverb 78 35 95")
+        );
+        assert_eq!(presets["cave"].tail_s(), 2.8);
+        assert!((presets["cave"].narrator() - 0.35).abs() < 1e-9);
+
+        let mut a = span(0.0, 5.0, &[], 0.0);
+        a.reverb = Some("hall".into());
+        let mut b = span(5.0, 10.0, &[], 0.0);
+        b.reverb = Some("cave".into());
+        // The cave's 2.8 s wins over the hall's 2.0 s — the chapter takes the
+        // room that rings longest, or its floor would be cut mid-tail.
+        assert_eq!(voice_reserve(&[a, b], &presets), 2.8);
+
+        // A span that names no room reserves nothing.
+        assert_eq!(voice_reserve(&[span(0.0, 5.0, &[], 0.0)], &presets), 0.0);
+
+        // A legacy string preset is ffmpeg with no reserve, so a pack that has
+        // not migrated is mixed to exactly the old length.
+        let mut c = span(0.0, 5.0, &[], 0.0);
+        c.reverb = Some("flat".into());
+        assert_eq!(voice_reserve(&[c], &presets), 0.0);
     }
 
     /// The complaint the effect gates exist for: a bed under the whole chapter.

@@ -318,8 +318,9 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         "down the order, Space drops it; Enter toggles a stage on or off. Every",
         "change saves at once, so there is no unsaved state to lose on Esc.",
         "A stage is also gated by what the box can actually do: a worker without",
-        "ffmpeg reports no `merge` capability, so merge stays off there until",
-        "provisioning installs ffmpeg (or you install it and re-provision).",
+        "ffmpeg or sox reports no `merge` capability (the beds need ffmpeg, every",
+        "voice treatment needs sox), so merge stays off there until provisioning",
+        "installs both (or you install them and re-provision).",
     ] {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }

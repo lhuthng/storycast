@@ -49,17 +49,27 @@ between two lines, or between the two halves of one line it split. How a clip
 In order, once each:
 
 ```
-voice ──▶ per-scene reverb (SPEAKERS ONLY) ──▶ voice + effects
+voice ──▶ per-scene SoX treatment (room + character) ──▶ voice + effects
                                                    │
                      effect ──▶ trim ───────────────┤
                      music  ──▶ level ──────────────┤──▶ one sidechain ──▶ mix ──▶ limiter
                      inject ──▶ level ──────────────┘     (keyed on the voice)
 ```
 
-**The reverb never touches the Narrator.** Narration is the dry read the room
-plays around, not a voice inside it. This is a real constraint with a real
-consequence: a whole chapter of narration gets no room at all, by design, and
-the place is carried by the effect bed and the music instead.
+**The treatment touches the Narrator too, at a fraction of its depth.** Every
+spoken slot is run through its scene's treatment — a room, a tone, a character —
+and the Narrator takes the *same* treatment at the preset's `narrator` fraction
+(default 0.35): in the scene, never standing with a character's full wet. So a
+chapter of narration is read inside the place rather than dry in front of it,
+which is a real change from the old "the reverb never touches the Narrator".
+
+The chain is SoX's (`reverb`, `overdrive`, `chorus`, `echos`, `treble`, …), not
+ffmpeg's. A treatment that decays declares `tail_s`, the seconds of decay
+**reserved** after the line so a room rings out under the next one instead of
+being chopped at the seam; the mix takes the *longest* reachable tail once and
+extends only the chapter's end. Every line, treated or not, still gets a 0.1 s
+edge fade. SoX's `reverb` is a true feedback network that never extends its own
+output, so the tail is padded on *before* the chain runs.
 
 **One sidechain, on the voice bus**, applied to both layers as a single bus — so
 "every layer drops whenever anyone speaks" is a property of the signal path and
@@ -98,11 +108,11 @@ The measured calibrations, which are what the numbers were chosen against:
 | `inject.default_hold_s` | 2.0 | solo seconds before a `trail`'s tail ducks under speech |
 | `inject.tail_fade_s` | 1.0 | a natural tail end, clamped to half the clip |
 | `inject.loop_xfade_s` | 0.25 | the crossfade at each seam of a `looped` inject |
-| `pause.pause_s` | 1.5 | a beat held before a scene's first line; must outlast `duck.release` (400 ms) or the music never lifts inside it |
+| `pause.pause_s` | 1.5 | a beat held before a scene's first line; must outlast `duck.release` (500 ms) or the music never lifts inside it |
 | `pause.max_per_chapter` | 1 | and at most this many of them |
 | `duck.threshold` | 0.02 | the voice level at which the sidechain starts |
 | `duck.ratio` | 6.0 | how far it drops |
-| `duck.attack` / `release` | 20 / 400 | ms |
+| `duck.attack` / `release` | 20 / 500 | ms |
 | `duck.head_key` | 0.0 | the one exception to "drops whenever anyone speaks": while the chapter's headline is spoken the key is held at this gain, so the opening cue comes up under the title at its own level instead of being ducked under the one line it was written for |
 
 ### The three-rung rule
@@ -567,6 +577,93 @@ The model's licence is the **Stability AI Community Licence**: read it before
 this audio is distributed, and put the line in the pack's `LICENSES.json` (§6).
 Prompts are not stored in the script — they live with the reason for them, in
 [AUDIO-NEEDS.md](AUDIO-NEEDS.md).
+
+## 10. Shaping, triaging and mutating clips with SoX
+
+SoX is now **both** an authoring tool *and* a runtime dependency of the merge,
+and the split is deliberate. It is the merge's voice-treatment engine (§2): the
+per-scene room and character chains in `scene-map.json`'s `reverb_presets` are
+SoX effect lists, run per slot by `ambience.rs` — because SoX's `reverb` is a
+true feedback network that actually rings, while ffmpeg 9 has no reverb filter
+and its convolution `afir` is broken on this build. ffmpeg still does everything
+else: decoding, resampling, the beds, the placement and the final mix.
+
+Two things stay ffmpeg's for the same reason they always did. `normalize-audio.sh`
+is ffmpeg because of the one thing SoX does not have: **EBU R128 integrated-
+loudness normalization** — a clip's `level` means something only because every
+clip sits on a known rung, and `loudnorm` is what puts it there. And ffmpeg still
+**decodes** every input (48 kHz mono f32 wav), so one decoder and one resampler
+serve the whole pipeline. A file SoX authors still goes through `add-sound.py`
+for the spec check, the rung, the registry edit and the aliases: nothing in §3
+changes, `normalize-audio.sh` is still the only way into a pool. Because the
+merge now needs SoX to run at all, the worker's `merge` capability is gated on
+`sox` being on PATH, beside ffmpeg (see [ARTIFACTS.md](ARTIFACTS.md)).
+
+```sh
+brew install sox            # macOS;  apt install sox  on Debian/Ubuntu
+tools/shape-sound.py doctor        # what is present, and what each command needs
+tools/shape-sound.py self-test     # the pure helpers, needing no sox at all
+```
+
+
+### `triage` — the take-ranking problem, measured
+
+SOUND.md §9 says a whole-clip average cannot see *when* a sound happens inside a
+clip. SoX `stat` gives crest factor (peak/RMS — high is a hit, low is a bed), the
+deltas and DC offset; with numpy present, the raw stream adds attack time and the
+count of onsets.
+
+```sh
+tools/shape-sound.py triage tmp/takes/*.wav --sort crest
+```
+
+The pick wants **two takes that differ**. Take the pair whose crest and attack
+differ most — those are the two the second roll will actually distinguish.
+
+### `variants` — a second take when nobody can re-record
+
+`pick` rolls a second, decorrelated take, and a one-room foley session often
+yields only one. A *subtle* pitch/tone/gain variation is better than nothing, and
+the parameters are deterministic from `--seed`, so a variation worth keeping can
+be re-made.
+
+```sh
+tools/shape-sound.py variants tmp/pestle.wav --count 2 --seed 4 \
+    --pitch 25 --tone 1.0 --gain 0.5
+```
+
+These are variations, not recordings. Listen before keeping one.
+
+### `mutate` — the palette of deliberately strange
+
+`tools/shape-sound.py recipes` lists them: `ghost` (reverse into reverb and back
+for a tail that arrives), `demon`/`giant`/`sprite` (pitch), `alien`, `underwater`,
+`radio`/`megaphone`, `lofi`, `cave`, `shimmer`, `drone`, `stutter`, `robot`,
+`grit`, `muffle`, `pulse`, `reverse`. `--amount` scales intensity 0.1–3.0.
+
+```sh
+tools/shape-sound.py mutate tmp/door-close.wav --recipe ghost --amount 1.4
+tools/shape-sound.py mutate tmp/wind.wav --recipe demon --amount 0.6 --as wind-demon
+```
+
+A recipe makes a **clip**, and a clip's character is baked in before it enters a
+pool — so naming one here hides nothing from the scene map. That is the
+difference between this and a mix knob.
+
+### `synth` — a source clip from nothing
+
+SoX's `synth`/`tremolo` vocabulary is richer than ffmpeg's `sine`/`anoisesrc`,
+and a generated bed is a legitimate starting point for a place the model or a
+microphone cannot reach.
+
+```sh
+tools/shape-sound.py synth --effect "synth 3 sine 90 sine 93 tremolo 1.2 35 reverb 40" \
+    --as low-drone --seconds 3
+```
+
+Every command writes into `refs/temp/clips/shape-sound/` (gitignored) and prints
+the `add-sound.py` line that registers the result — which is where the rung,
+the alias table and the pool check happen.
 
 ## See also
 

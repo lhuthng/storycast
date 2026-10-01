@@ -824,9 +824,9 @@ them, and swaps the tree into place, so a box takes 363 MB off a CDN instead of
 disagree stop the provision. See [ARTIFACTS.md](ARTIFACTS.md).
 
 **On a box that is already configured, the installers are not run at all.**
-`may_install(configured, force)` gates `ensure_opencode` and `ensure_ffmpeg`:
-the first provision on a fresh box installs, and every later one only asks
-`command -v` whether the tool is there. Without that, a re-provision of a
+`may_install(configured, force)` gates `ensure_opencode`, `ensure_ffmpeg` and
+`ensure_sox`: the first provision on a fresh box installs, and every later one
+only asks `command -v` whether the tool is there. Without that, a re-provision of a
 perfectly healthy box re-ran `npm i` (bounded at 600 s) and `apt install -y`
 for no reason, which is most of what made `B` feel slow on a cluster that was
 already working. The check-only path says "force a re-provision to try again"
@@ -1331,7 +1331,7 @@ be removed from it. The merge is a *signal path* problem, and it is worth
 stating in one place because the numbers are only meaningful in this order:
 
 ```
-voice ──▶ per-scene reverb (speakers only) ──▶ voice + effects
+voice ──▶ per-scene SoX treatment (room + character) ──▶ voice + effects
                                                    │
                      effect ──▶ trim ───────────────┤
                      music  ──▶ level ──────────────┤──▶ one sidechain ──▶ mix ──▶ limiter

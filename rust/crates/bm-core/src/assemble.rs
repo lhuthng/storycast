@@ -20,9 +20,9 @@ pub use self::renderplan::{
     PLAN_VERSION, TAKE_EXTENSIONS,
 };
 pub use self::wav::{
-    read_wav, sample_rate_for, silent_wav, wav_info, wav_seconds, GEMINI_RATE, VIENEU_RATE,
+    read_wav, sample_rate_for, silent_wav, wav_info, wav_seconds, write_wav, Wav, GEMINI_RATE,
+    VIENEU_RATE,
 };
-use self::wav::{write_wav, Wav};
 use crate::util::head_chars;
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -137,8 +137,21 @@ pub fn concat_slots(slots: &[crate::ambience::Slot], out: &Path) -> Result<()> {
 /// agent can advertise the `merge` capability truthfully: a box without it
 /// provisions cleanly and then fails every merge it is offered.
 pub fn ffmpeg_available() -> bool {
-    Command::new("ffmpeg")
-        .arg("-version")
+    tool_available("ffmpeg", "-version")
+}
+
+/// Whether this host can run the merge stage's *voice treatment* engine. The
+/// effect pass shells out to SoX for every slot's room/character, so merge
+/// needs it exactly as much as it needs ffmpeg — and unlike ffmpeg this is a
+/// hard gate on the capability, because a merge without it cannot produce the
+/// voice track at all.
+pub fn sox_available() -> bool {
+    tool_available("sox", "--version")
+}
+
+fn tool_available(bin: &str, probe: &str) -> bool {
+    Command::new(bin)
+        .arg(probe)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()

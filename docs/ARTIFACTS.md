@@ -424,12 +424,13 @@ change the code path at all. And linking it is not a real option: libavcodec,
 libavformat, libavfilter, libswscale and libswresample are tens of megabytes with
 hundreds of external codec dependencies and LGPL/GPL exposure.
 
-More to the point, **the box-without-ffmpeg case is already the designed-for
-case.** `bm-agent` advertises the `merge` capability *only when ffmpeg is on
-PATH*; `ensure_ffmpeg` tries `apt-get`/`dnf`/`yum` under `sudo -n`; a refusal is
-a warning, never fatal, and the machine summary says
-`· NO FFMPEG, merges will fail here`. Merge goes off that box, crawl, digest and
-render keep working.
+More to the point, **the box-without-the-tools case is already the designed-for
+case.** `bm-agent` advertises the `merge` capability *only when both ffmpeg and
+sox are on PATH* — ffmpeg for the beds, sox for every voice treatment;
+`ensure_ffmpeg` and `ensure_sox` each try `apt-get`/`dnf`/`yum` under `sudo -n`;
+a refusal is a warning, never fatal, and the machine summary says
+`· NO FFMPEG, merges will fail here` or `· NO SOX, merges will fail here`. Merge
+goes off that box, crawl, digest and render keep working.
 
 And ffmpeg is **0 bytes in the payload**, it is a package-manager install on the
 box, never a push. It was never part of the 886 MB.

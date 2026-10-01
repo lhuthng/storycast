@@ -180,6 +180,13 @@ pub struct Probe {
     /// than it saves.
     #[serde(default)]
     pub ffmpeg_present: bool,
+    /// `sox` on PATH. The merge now shells out to it for every voice
+    /// treatment (a room, a character, a decay), so a box with ffmpeg but no
+    /// sox would take merges and fail every one of them. Reported and, unlike
+    /// ffmpeg, **gated**: the worker advertises no `merge` without it, because
+    /// a voice treatment is not optional in the effect pass.
+    #[serde(default)]
+    pub sox_present: bool,
     /// The sidecar's roster, as `/voices` sends it: **labels, not names**
     /// `"<name>, <description>"` for a voice with a description (every preset)
     /// and the bare name for one without (every enrolled clone).
@@ -256,10 +263,14 @@ impl Probe {
                 format!("{} voices", self.voices.len())
             },
             if self.tts_up { "up" } else { "down" },
-        ) + if self.ffmpeg_present {
+        ) + if self.ffmpeg_present && self.sox_present {
             ""
-        } else {
+        } else if !self.ffmpeg_present && !self.sox_present {
+            " · NO FFMPEG/SOX, merges will fail here"
+        } else if !self.ffmpeg_present {
             " · NO FFMPEG, merges will fail here"
+        } else {
+            " · NO SOX, merges will fail here"
         }
     }
 }
@@ -408,6 +419,36 @@ echo "FFMPEG-SKIP (already configured, not reinstalling; force a re-provision to
     }
 }
 
+/// The `sox` step. Same shape as [`ffmpeg_script`], and the same split: a
+/// present `sox` short-circuits either way, so `allow_install` only decides
+/// whether a *missing* one is chased this time. SoX is the second engine the
+/// merge shells out to, and unlike ffmpeg it is a hard gate on `merge`.
+fn sox_script(allow_install: bool) -> String {
+    if allow_install {
+        r#"export DEBIAN_FRONTEND=noninteractive
+if command -v sox >/dev/null 2>&1; then echo "SOX-OK (present)"; exit 0; fi
+install() { $1 >/dev/null 2>&1; }
+if command -v apt-get >/dev/null 2>&1; then
+  sudo -n apt-get install -y sox >/dev/null 2>&1 || install "apt-get install -y sox"
+elif command -v dnf >/dev/null 2>&1; then
+  sudo -n dnf install -y sox >/dev/null 2>&1 || install "dnf install -y sox"
+elif command -v yum >/dev/null 2>&1; then
+  sudo -n yum install -y sox >/dev/null 2>&1 || install "yum install -y sox"
+elif command -v brew >/dev/null 2>&1; then
+  install "brew install sox"
+else
+  echo "SOX-SKIP (no known package manager, install sox by hand)"; exit 0
+fi
+if command -v sox >/dev/null 2>&1; then echo "SOX-OK (installed)"; else echo "SOX-SKIP (install refused, needs sudo? run: sudo apt-get install -y sox)"; fi
+"#
+            .into()
+    } else {
+        r#"if command -v sox >/dev/null 2>&1; then echo "SOX-OK (present)"; exit 0; fi
+echo "SOX-SKIP (already configured, not reinstalling; force a re-provision to try again)""#
+            .into()
+    }
+}
+
 /// The `zstd` step: the sources bundle is `tar` + `zstd`, so every box that
 /// takes sources needs the decompressor.
 ///
@@ -478,6 +519,11 @@ if command -v ffmpeg >/dev/null 2>&1; then
 else
   echo "ffmpeg=absent"
 fi
+if command -v sox >/dev/null 2>&1; then
+  echo "sox=present"
+else
+  echo "sox=absent"
+fi
 # The roster the sidecar is *serving*, asked of the process that owns the
 # answer rather than re-parsed out of the file it loaded. Two things fall out
 # of that: the list describes what a render will actually find, not what a file
@@ -531,6 +577,7 @@ echo "probe=done"
                         "tts_lib" => probe.tts_lib_present = v == "present",
                         "models" => probe.models_present = v == "present",
                         "ffmpeg" => probe.ffmpeg_present = v == "present",
+                        "sox" => probe.sox_present = v == "present",
                         "voices" => {
                             // Names contain spaces ("Minh Triết"), the probe
                             // joins them with \x1f, never whitespace.
@@ -1314,6 +1361,20 @@ fi
         Ok(stdout.trim().to_string())
     }
 
+    /// The merge stage's second engine, installed beside ffmpeg. A refusal is
+    /// a warning, and the worker reports no `merge` capability until sox is
+    /// present (so the scheduler simply never offers it one).
+    pub fn ensure_sox(&self, allow_install: bool) -> Result<String> {
+        let (code, stdout, stderr) = self.run(&sox_script(allow_install), 300)?;
+        if code != 0 {
+            return Ok(format!(
+                "SOX-SKIP (check failed: {})",
+                crate::util::head_chars(stderr.trim(), 120)
+            ));
+        }
+        Ok(stdout.trim().to_string())
+    }
+
     /// Start the TTS sidecar detached, unless it is already answering, and
     /// **wait for it to be ready** before returning.
     ///
@@ -1951,6 +2012,17 @@ pub fn provision(
             m.id
         )),        Err(e) => log.push(format!("[{}] ffmpeg install check failed: {e}", m.id)),
     }
+
+    // The merge stage's second engine. The voice treatment (room, character,
+    // decay) runs through sox, and the worker gates `merge` on it, so it is
+    // installed beside ffmpeg rather than discovered at merge time.
+    match ssh.ensure_sox(installs) {
+        Ok(v) if v.starts_with("SOX-OK") => log.push(format!("[{}] {v}", m.id)),
+        Ok(v) => log.push(format!(
+            "[{}] {v}, merge stays disabled on this box until sox is present (apt/dnf install sox), then force a re-provision",
+            m.id
+        )),        Err(e) => log.push(format!("[{}] sox install check failed: {e}", m.id)),
+    }
     // The sidecar loads its voice roster at startup. A models push therefore
     // has to recycle an already-running sidecar; otherwise the new store is
     // present on disk but the process keeps serving the old 66-voice roster.
@@ -2000,6 +2072,15 @@ pub fn provision(
     if !after.ffmpeg_present {
         log.push(format!(
             "[{}] ffmpeg is not on PATH, this box can crawl/digest/render but every merge it is offered will fail; install it (apt install ffmpeg / dnf install ffmpeg) and force a re-provision",
+            m.id
+        ));
+    }
+    // Same warning for the second engine, and here the capability gate means
+    // the box simply never gets a merge offered — the line exists so the
+    // operator knows *why* this box sits out the merge lane.
+    if !after.sox_present {
+        log.push(format!(
+            "[{}] sox is not on PATH, this box can crawl/digest/render but advertises no merge capability; install it (apt install sox / dnf install sox) and force a re-provision",
             m.id
         ));
     }
@@ -2171,7 +2252,7 @@ mod tests {
         // including the ones whose answer was not going to change. A catch-up
         // on a working cluster is a verification, so the install half is
         // reserved for a fresh or forced provision.
-        for script in [opencode_script(false), ffmpeg_script(false)] {
+        for script in [opencode_script(false), ffmpeg_script(false), sox_script(false)] {
             assert!(
                 script.contains("command -v"),
                 "the check must survive: {script}"
@@ -2192,6 +2273,7 @@ mod tests {
         // The full path keeps both halves: a fresh box still gets them.
         assert!(opencode_script(true).contains("npm i -g"));
         assert!(ffmpeg_script(true).contains("install -y ffmpeg"));
+        assert!(sox_script(true).contains("install -y sox"));
 
         // zstd is the deliberate exception to that rule: one second, ~1 MB, and
         // the very next push cannot proceed without it. Its script installs
@@ -2527,21 +2609,43 @@ mod tests {
             reachable: true,
             hostname: "box".into(),
             ffmpeg_present: true,
+            sox_present: true,
             ..Default::default()
         };
         assert!(
-            !present.summary().contains("FFMPEG"),
+            !present.summary().contains("FFMPEG") && !present.summary().contains("SOX"),
             "{}",
             present.summary()
         );
         let absent = Probe {
             ffmpeg_present: false,
-            ..present
+            ..present.clone()
         };
         assert!(
             absent.summary().contains("NO FFMPEG"),
             "{}",
             absent.summary()
+        );
+        // SoX is the second engine and a hard gate on merge, so it gets its
+        // own line rather than hiding inside the ffmpeg warning.
+        let no_sox = Probe {
+            sox_present: false,
+            ..present.clone()
+        };
+        assert!(
+            no_sox.summary().contains("NO SOX"),
+            "{}",
+            no_sox.summary()
+        );
+        let neither = Probe {
+            ffmpeg_present: false,
+            sox_present: false,
+            ..present.clone()
+        };
+        assert!(
+            neither.summary().contains("NO FFMPEG/SOX"),
+            "{}",
+            neither.summary()
         );
     }
 
