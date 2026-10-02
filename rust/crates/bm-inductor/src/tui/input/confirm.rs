@@ -6,6 +6,7 @@ use crate::tui::{
     screen::{Confirm, ConfirmAction, Screen},
     style::Level,
 };
+use crate::tui::input::Flow;
 use bm_proto::{Op, OpRequest};
 use crossterm::event::{KeyCode, KeyEvent};
 use std::sync::atomic::Ordering;
@@ -16,12 +17,12 @@ pub(crate) async fn key_confirm(
     key: KeyEvent,
     http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     match key.code {
         KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
             app.screen = Screen::Normal;
             match c.action {
-                ConfirmAction::Quit => return true,
+                ConfirmAction::Quit => return Flow::Quit,
                 ConfirmAction::Provision { addr, force } => {
                     if let Some(m) = app.machine_by_addr(&addr).cloned() {
                         app.set_status(
@@ -79,7 +80,7 @@ pub(crate) async fn key_confirm(
                             Level::Warn,
                             format!("{old_addr} is no longer in the registry"),
                         );
-                        return true;
+                        return Flow::Quit;
                     };
                     dispatch(
                         app,
@@ -239,5 +240,5 @@ pub(crate) async fn key_confirm(
         }
         _ => {}
     }
-    false
+    Flow::KeepRunning
 }

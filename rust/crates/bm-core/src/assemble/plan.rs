@@ -149,10 +149,20 @@ pub(crate) fn seg_text(seg: &Value) -> &str {
     seg.get("text").and_then(|t| t.as_str()).unwrap_or("")
 }
 
-/// True when a segment is an embedded chapter headline ("Chương 12: ...").
-/// ASCII-prefix scan only — safe on UTF-8 text.
+/// True when a segment is an embedded chapter headline (`Chương 12: …` or
+/// `Chapter 12: …`). ASCII-prefix scan only — safe on UTF-8 text.
+///
+/// Both spellings are recognized because the word follows the *content
+/// language* (see [`heading_word`]) while a script may carry either: a
+/// translation can keep the source's `Chapter`, and a digest written before a
+/// language was declared can carry the other. Requiring a following digit keeps
+/// prose that merely opens with the word (`Chương pháp này…`) out.
 pub fn is_headline(text: &str) -> bool {
-    let rest = match text.trim_start().strip_prefix("Chương") {
+    let t = text.trim_start();
+    let rest = match t
+        .strip_prefix("Chương")
+        .or_else(|| t.strip_prefix("Chapter"))
+    {
         Some(r) => r,
         None => return false,
     };
@@ -226,7 +236,8 @@ pub struct RenderUnit {
     pub indices: Vec<usize>,
 }
 
-/// The spoken chapter headline ("Chương 46, <title>", Narrator). Digests
+/// The spoken chapter headline ("Chương 46, <title>" / "Chapter 46, <title>",
+/// Narrator). Digests
 /// routinely drop the headline and concatenation would glue it to the first
 /// line with no pause — so the headline is its own leading run with its own
 /// cache file (`title_<voice>.wav`, never colliding with numeric tags) and
@@ -249,14 +260,44 @@ pub fn title_speech(
     // The planned first line already carries the headline (a second embedded
     // headline, or narration quoting the title): don't speak it twice.
     // Callers pass post-drop text; is_headline matches drop_headline exactly.
-    if first_text.contains(title.as_str()) || is_headline(first_text) {
+    //
+    // The `contains` half is only right under `title_mode: auto`. There the
+    // title is the digest's own name — a phrase, not a word — and a line
+    // mentioning it really is a repeat. Under `default` the title *is* the
+    // crawled headline, which the planner drops itself, so nothing has said it;
+    // the guard would instead fire on any prose mentioning a one-word title
+    // (a chapter headed `Chapter 1: Maomao` is about Maomao) and silence the
+    // heading altogether.
+    let auto = crate::config::Settings::load(&layout.settings()).auto_title();
+    if is_headline(first_text) || (auto && first_text.contains(title.as_str())) {
         return None;
     }
     let voice = cast.get("Narrator")?.clone();
     Some(TitleSpeech {
         voice,
-        text: format!("Chương {n}, {title}"),
+        text: format!("{} {n}, {title}", heading_word(layout)),
     })
+}
+
+/// The word a chapter's spoken headline is announced with, in the content
+/// language: `Chapter 3, <title>` for English, `Chương 3, <title>` for
+/// Vietnamese.
+///
+/// The language is the adapter's, as its manifest declares it. An adapter that
+/// claims none keeps the checkout's long-standing Vietnamese wording rather
+/// than guessing — and [`is_headline`] matches both spellings regardless, so a
+/// script that carries the other word is still recognized as a headline.
+fn heading_word(layout: &Layout) -> &'static str {
+    let language = crate::adapter::in_force(layout)
+        .ok()
+        .flatten()
+        .map(|m| m.language)
+        .unwrap_or_default();
+    if language.trim().to_ascii_lowercase().starts_with("en") {
+        "Chapter"
+    } else {
+        "Chương"
+    }
 }
 
 /// Same, when only the script path is known (merge path): the chapter number
@@ -362,6 +403,7 @@ pub fn plan_render(
 /// True if every expected segment wav exists — the renderer's skip check and
 /// the merger's ready check. Read-only.
 pub fn segments_complete(
+    layout: &Layout,
     script_path: &Path,
     cast_path: &Path,
     bible_path: &Path,
@@ -382,9 +424,16 @@ pub fn segments_complete(
     }
     // Same policy the renderer assigned with: the completeness check and the
     // renderer read one set of names.
-    let policy = crate::cast::policy_for_bible(engine);
-    let Ok(cast) = crate::cast::load_cast(script_path, cast_path, bible_path, &policy, false)
-    else {
+    let policy = crate::cast::policy_for_bible(engine, layout);
+    let installed = crate::pool::installed_voices(layout);
+    let Ok(cast) = crate::cast::load_cast(
+        script_path,
+        cast_path,
+        bible_path,
+        &policy,
+        installed.as_ref(),
+        false,
+    ) else {
         return false;
     };
     let local = engine == "vieneu";
@@ -758,6 +807,85 @@ mod tests {
     }
 
     #[test]
+    fn under_title_mode_default_the_headline_is_spoken_even_when_the_prose_names_it() {
+        // `Chapter 1: Maomao` is a chapter *about* Maomao, so its first line
+        // names her. The "the first line already said the title" guard must not
+        // read that as a repeat and silence the heading: under `default` the
+        // title IS the headline the planner itself dropped, so nothing has
+        // spoken it yet. The digest's own name for the chapter is ignored here.
+        let d = tmpdir("title-default");
+        std::fs::create_dir_all(d.join("adapters/jnovel-en-US/prompts")).unwrap();
+        std::fs::write(
+            d.join("adapters/jnovel-en-US/adapter.json"),
+            r#"{"pack":"","language":"en-US","engine":""}"#,
+        )
+        .unwrap();
+        let mut l = crate::Layout::new(&d);
+        l.adapter = "jnovel-en-US".into();
+        std::fs::create_dir_all(l.chapters()).unwrap();
+        std::fs::write(l.chapter_txt(1), "Chapter 1: Maomao\n\nbody\n").unwrap();
+        std::fs::create_dir_all(l.script(1).parent().unwrap()).unwrap();
+        std::fs::write(
+            l.script(1),
+            r#"{"title":"Maomao Enters The Rear Palace","segments":[]}"#,
+        )
+        .unwrap();
+        let mut s = crate::config::Settings::load(&l.settings());
+        s.title_mode = "default".into();
+        std::fs::create_dir_all(l.settings().parent().unwrap()).unwrap();
+        s.save(&l.settings()).unwrap();
+
+        let mut cast = Cast::new();
+        cast.insert("Narrator".into(), "your-narrator".into());
+        let title = title_speech(&l, 1, &cast, "Maomao looked up at the overcast sky.").unwrap();
+        assert_eq!(title.text, "Chapter 1, Maomao");
+    }
+
+    #[test]
+    fn a_headline_is_recognized_in_both_languages() {
+        assert!(is_headline("Chapter 7: Kiếm khí xung thiên"));
+        assert!(is_headline("  Chapter 12 — x"));
+        // The word must lead and be followed by a digit: prose that merely
+        // mentions the word is content, not a heading.
+        assert!(!is_headline("Chapter without digits"));
+        assert!(!is_headline("The Chapter 7 was long"));
+    }
+
+    #[test]
+    fn the_spoken_heading_follows_the_adapters_language() {
+        let d = tmpdir("title-en");
+        std::fs::create_dir_all(d.join("adapters/jnovel-en-US/prompts")).unwrap();
+        std::fs::write(
+            d.join("adapters/jnovel-en-US/adapter.json"),
+            r#"{"pack":"","language":"en-US","engine":""}"#,
+        )
+        .unwrap();
+        let mut l = crate::Layout::new(&d);
+        l.adapter = "jnovel-en-US".into();
+        std::fs::create_dir_all(l.chapters()).unwrap();
+        std::fs::write(
+            l.chapter_txt(7),
+            "Chapter 7: Kiếm khí xung thiên\n\nbody\n",
+        )
+        .unwrap();
+        let mut cast = Cast::new();
+        cast.insert("Narrator".into(), "your-narrator".into());
+        cast.insert("A".into(), "Adam".into());
+        let title = title_speech(&l, 7, &cast, "mở đầu").unwrap();
+        assert_eq!(title.text, "Chapter 7, Kiếm khí xung thiên");
+
+        // And the embedded English headline is recognized, so a script that
+        // kept it does not speak the chapter twice.
+        let kept = vec![
+            json!({"speaker": "Narrator", "text": "Chapter 7: Kiếm khí xung thiên"}),
+            json!({"speaker": "A", "text": "mở đầu"}),
+        ];
+        let body = planned(&kept);
+        assert_eq!(body.speech.len(), 1, "the English headline is dropped");
+        assert_eq!(seg_text(&body.speech[0]), "mở đầu");
+    }
+
+    #[test]
     fn kept_headline_never_speaks_twice() {
         let (_d, l) = titled_layout("t2", "Chương 7: Kiếm khí xung thiên");
         let mut cast = Cast::new();
@@ -805,6 +933,7 @@ mod tests {
     #[test]
     fn segments_complete_is_false_until_every_wav_exists() {
         let d = tmpdir("complete");
+        let l = crate::Layout::new(&d);
         let script = d.join("script-01.json");
         std::fs::write(
             &script,
@@ -816,6 +945,7 @@ mod tests {
         let segs = d.join("segs");
         std::fs::create_dir_all(&segs).unwrap();
         assert!(!segments_complete(
+            &l,
             &script,
             &cast,
             &d.join("bible.json"),
@@ -824,6 +954,7 @@ mod tests {
         ));
         silent_wav(&segs.join("0000-0001_Đức Trí.wav"), 0.05, 48_000).unwrap();
         assert!(segments_complete(
+            &l,
             &script,
             &cast,
             &d.join("bible.json"),

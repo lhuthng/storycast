@@ -1,5 +1,30 @@
 use serde::{Deserialize, Serialize};
 
+/// What shape an engine's `models/voices.json` has — and therefore how a clone
+/// is enrolled into it.
+///
+/// The store is the gate every render passes through (the sidecar answers an
+/// unknown name with `unknown voice "…" on this box`, and the render shelves),
+/// so this is what decides whether a voice the pool or the manifest declares
+/// can actually be spoken here. Declared, because the merge that fills a store
+/// cannot guess the shape: a VieNeu preset written into pocket's store left its
+/// sidecar unable to parse its own file, while a clip entry written into
+/// VieNeu's would be a voice the model cannot read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceStore {
+    /// A **preset store**: `speaker_emb` + `codes` per voice, which the python
+    /// enrollment writes and [`crate::pool::bake_missing_voices`] merges from
+    /// it. VieNeu's shape.
+    Presets,
+    /// A **clip store**: each entry is a reference `file` under the engine's
+    /// own `models/`, cloned when the sidecar loads. Enrollment copies the
+    /// book's own clip in, which is the pocket shape.
+    Clips,
+    /// No local store at all: nothing can be enrolled on this machine (a cloud
+    /// engine has no reference clip to clone from).
+    None,
+}
+
 /// What one engine declares about itself.
 ///
 /// **This table is the API, and nothing outside it branches on an engine's
@@ -49,6 +74,41 @@ pub struct EngineDecl {
     pub sample_rate: u32,
     /// Channel count, same rule as `sample_rate`.
     pub channels: u16,
+    /// The shape of its `models/voices.json`, and so how a clone is enrolled
+    /// into it. See [`VoiceStore`] — this is what lets the merge decide by
+    /// declaration rather than by branching on the engine's name.
+    pub store: VoiceStore,
+    /// The hottest sampling temperature this engine can be asked for.
+    ///
+    /// **A ceiling, not a default**, because the number that reaches it is
+    /// chosen by an acting mood (`assemble::mood::MOOD_TAKE`, 0.70–0.92) and
+    /// that table is tuned for one engine's flow model. Pocket's does not hold
+    /// up there: measured on the shipped bundle, at 0.8 a nine-word sentence
+    /// came back as 0.56 s of fragment on some seeds and 8.00 s on others, and
+    /// at 0.7 two of four sentences degraded — which is what "static, and
+    /// sometimes inaudible" is. At 0 it is deterministic and clean. So the
+    /// ceiling is 0.0 and every mood collapses onto it, which costs the
+    /// variation the table exists to buy and buys back an audible chapter.
+    ///
+    /// `1.0` means "no ceiling": the mood table's own range is the intent.
+    pub max_temperature: f64,
+    /// The `bm-tts` cargo features this engine's sidecar must be built with.
+    ///
+    /// Empty means the default build, which is the whole crate. `pocket` is
+    /// **default-off**, and a sidecar built without it starts, answers `/health`
+    /// and loads every other engine's model — then refuses a pocket tree with
+    /// "built without it, rebuild with `--features pocket`". A build that is
+    /// wrong in a way only a render notices is why this is declared next to
+    /// the engine rather than left to whoever remembers to pass the flag:
+    /// provisioning (`build_tts_binary`) and `make tts` both read it.
+    pub tts_features: &'static [&'static str],
+}
+
+/// `engine`'s sidecar cargo features, `None` when nothing declares that name.
+///
+/// The lookup [`declaration`] does, narrowed to the one answer a build needs.
+pub fn tts_features(engine: &str) -> Option<&'static [&'static str]> {
+    declaration(engine).map(|d| d.tts_features)
 }
 
 /// VieNeu-TTS v3 Turbo — the local engine, and the only one here that voices
@@ -71,6 +131,9 @@ pub const VIENEU: EngineDecl = EngineDecl {
     dict: Some("sea_g2p.bin"),
     sample_rate: 48_000,
     channels: 1,
+    store: VoiceStore::Presets,
+    max_temperature: 1.0,
+    tts_features: &[],
 };
 
 /// Gemini prebuilt TTS — cloud, and tagless. Every non-verbal sound stays as the
@@ -90,10 +153,42 @@ pub const GEMINI: EngineDecl = EngineDecl {
     dict: None,
     sample_rate: 24_000,
     channels: 1,
+    store: VoiceStore::None,
+    max_temperature: 1.0,
+    tts_features: &[],
+};
+
+/// Kyutai's Pocket TTS — the second local engine, and the one the English
+/// adapters are written for. A ~117M FlowLM over the Mimi codec: small enough
+/// for CPU, which is the whole reason a laptop narrates a book without a
+/// cluster. Its ONNX graphs are what the probe tool already knows
+/// (`flow_lm_main`); until its weights land in `engines/pocket/`, every stage
+/// below the digest refuses honestly on a missing engine tree rather than
+/// mis-speaking.
+///
+/// English only for now: the model also ships fr/de/es/it/pt voices, but no
+/// adapter here reads them yet, and an over-broad list answers "yes" when
+/// nobody checked. It clones (the README's `--voice` takes a plain WAV), and
+/// it has no lexicon — the text front end is the model's own.
+pub const POCKET: EngineDecl = EngineDecl {
+    name: "pocket",
+    // **Zero, and measured.** See `EngineDecl::max_temperature`: at the mood
+    // table's 0.70–0.92 this engine's flow model collapses on some seeds into a
+    // fraction of a second of unusable audio, which the whole pipeline then
+    // merges into the chapter like any other take. Deterministic and clean at 0.
+    nonverbal: &[],
+    languages: &["en-US"],
+    cloning: true,
+    dict: None,
+    sample_rate: 24_000,
+    channels: 1,
+    store: VoiceStore::Clips,
+    max_temperature: 0.0,
+    tts_features: &["pocket"],
 };
 
 /// Every engine this build declares, in declaration order.
-pub const ENGINES: &[EngineDecl] = &[VIENEU, GEMINI];
+pub const ENGINES: &[EngineDecl] = &[VIENEU, GEMINI, POCKET];
 
 /// `engine`'s declaration, or `None` when nothing here declares that name.
 pub fn declaration(engine: &str) -> Option<&'static EngineDecl> {
@@ -150,6 +245,36 @@ pub fn clones(engine: &str) -> bool {
 /// The G2P dictionary file name inside `engine`'s `models/`, if it has one.
 pub fn dictionary(engine: &str) -> Option<&'static str> {
     declaration(engine).and_then(|d| d.dict)
+}
+
+/// The shape of `engine`'s `models/voices.json` — see [`VoiceStore`].
+///
+/// Undeclared answers [`VoiceStore::None`], like every declaration lookup: an
+/// engine nobody declared has no store to enroll into, and a merge that
+/// assumed otherwise would corrupt whatever file the name happened to resolve
+/// to.
+pub fn store_kind(engine: &str) -> VoiceStore {
+    declaration(engine)
+        .map(|d| d.store)
+        .unwrap_or(VoiceStore::None)
+}
+
+/// The hottest sampling temperature `engine` can be handed.
+///
+/// See [`EngineDecl::max_temperature`] for why this is a ceiling an acting mood
+/// runs into rather than a number the planner picks. **An undeclared name gets
+/// no ceiling**, matching the rule the rest of this module follows: an engine we
+/// know nothing about is not the broken one.
+pub fn max_temperature(engine: &str) -> f64 {
+    declaration(engine).map(|d| d.max_temperature).unwrap_or(1.0)
+}
+
+/// `wanted`, capped at what `engine` can actually speak.
+///
+/// The one place the mood table meets the engine, so a caller holding a
+/// temperature cannot skip it by accident.
+pub fn clamp_temperature(engine: &str, wanted: f64) -> f64 {
+    wanted.min(max_temperature(engine))
 }
 
 /// What `engine`'s audio comes back as: `(sample_rate, channels)`.
@@ -237,6 +362,39 @@ pub const GEMINI_FEMALE: [&str; 7] = [
 ];
 pub const GEMINI_NEUTRAL: [&str; 4] = ["Schedar", "Puck", "Erinome", "Rasalgethi"];
 
+/// Pocket TTS's English voices, gendered by name and by sample — the catalog
+/// labels carry a language and no gender, so this is the same judgment call
+/// Gemini's list makes, recorded rather than guessed at silently. Several are
+/// Les Misérables names (Fantine, Éponine, Cosette and Azelma are the
+/// women; Marius and Javert the men), and `bill-boerst`, `peter-yearsley` and
+/// `stuart-bell` are LibriVox readers — the underscore spellings Pocket's own
+/// catalog uses are the engine's ids, not the slug-safe keys a cache path
+/// needs, and the store maps between them the way VieNeu's does. `caro-davy`
+/// is the one the samples would not settle, so it sits in the neutral pool
+/// rather than a wrong one.
+///
+/// The non-English voices (`giovanni`, `lola`, `juergen`, `rafael`, `estelle`)
+/// are catalogue metadata only and stay out of the pools: an adapter here is
+/// en-US, and a voice tagged for another language narrating English prose is a
+/// mismatch no operator asked for.
+pub const POCKET_MALE: [&str; 10] = [
+    "bill-boerst",
+    "charles",
+    "george",
+    "jean",
+    "javert",
+    "marius",
+    "michael",
+    "paul",
+    "peter-yearsley",
+    "stuart-bell",
+];
+pub const POCKET_FEMALE: [&str; 11] = [
+    "alba", "anna", "azelma", "cosette", "eponine", "eve", "fantine", "jane", "lola", "mary",
+    "vera",
+];
+pub const POCKET_NEUTRAL: [&str; 1] = ["caro-davy"];
+
 /// Female markers are checked *first*: "female" contains "male".
 const FEMALE_HINTS: [&str; 12] = [
     "female",
@@ -288,6 +446,36 @@ impl VoicePolicy {
             &self.neutral
         }
     }
+
+    /// This policy with every pool cut down to `installed`.
+    ///
+    /// The catalogue declares every preset an engine *could* voice; the
+    /// engine's own store holds the ones this build *does*. Assigning across
+    /// that gap is not a near-miss — the sidecar answers a voice it has never
+    /// heard of with `unknown voice "…" on this box`, and the render shelves
+    /// after three strikes. Cutting the pools is what keeps the cast inside
+    /// what can actually speak.
+    ///
+    /// Clones are untouched: they live in the sample pool and the store, not in
+    /// these tables, so a curated `refs/` voice is never narrowed away.
+    pub fn restricted_to(
+        &self,
+        installed: &std::collections::BTreeSet<String>,
+    ) -> VoicePolicy {
+        let keep = |pool: &[String]| -> Vec<String> {
+            pool.iter()
+                .filter(|v| installed.contains(*v))
+                .cloned()
+                .collect()
+        };
+        VoicePolicy {
+            engine: self.engine.clone(),
+            male: keep(&self.male),
+            female: keep(&self.female),
+            neutral: keep(&self.neutral),
+            default_cast: self.default_cast.clone(),
+        }
+    }
 }
 
 /// The shipped VieNeu policy: every declared preset, no preference.
@@ -319,9 +507,22 @@ pub fn gemini_policy() -> VoicePolicy {
     }
 }
 
+/// The shipped Pocket policy: the English catalog, no restriction, no cast.
+pub fn pocket_policy() -> VoicePolicy {
+    VoicePolicy {
+        engine: "pocket".into(),
+        male: POCKET_MALE.iter().map(|s| s.to_string()).collect(),
+        female: POCKET_FEMALE.iter().map(|s| s.to_string()).collect(),
+        neutral: POCKET_NEUTRAL.iter().map(|s| s.to_string()).collect(),
+        default_cast: Vec::new(),
+    }
+}
+
 pub fn policy_for(engine: &str) -> VoicePolicy {
     if engine == "vieneu" {
         vieneu_policy()
+    } else if engine == "pocket" {
+        pocket_policy()
     } else {
         gemini_policy()
     }
@@ -393,6 +594,24 @@ mod tests {
     }
     /// The declarations answer for their engine, and nothing else does.
     #[test]
+    fn only_pocket_needs_its_sidecar_built_with_a_feature() {
+        // The regression this exists for: a cross-built `bm-tts` without
+        // `--features pocket` boots and answers /health, then refuses a pocket
+        // model tree on the first render — which reads as a broken model, not
+        // a broken build.
+        assert_eq!(tts_features("pocket"), Some(&["pocket"][..]));
+        assert_eq!(tts_features("vieneu"), Some(&[][..]));
+        assert_eq!(tts_features("gemini"), Some(&[][..]));
+        assert_eq!(tts_features("nothing-claims-this"), None);
+        // Every declared engine answers, so no engine can be added without
+        // being asked the build question too.
+        for d in ENGINES {
+            assert_eq!(tts_features(d.name), Some(d.tts_features));
+        }
+    }
+
+    /// The declarations answer for their engine, and nothing else does.
+    #[test]
     fn an_engines_declaration_is_what_gates_its_tags() {
         assert!(supports_nonverbal("vieneu"));
         let tags = nonverbals("vieneu");
@@ -444,6 +663,30 @@ mod tests {
         assert_eq!(dictionary("not-an-engine"), None);
         // ...and an empty language is never voiced, or `""` would be a match.
         assert!(!voices_language("gemini", ""));
+    }
+
+    /// The store declaration is what tells enrollment which shape `:A`/`:N`
+    /// writes, so every declared engine has to answer — and a name nobody
+    /// declared gets the answer that refuses rather than a guessed shape.
+    #[test]
+    fn an_engine_declares_the_shape_of_its_voice_store() {
+        assert_eq!(store_kind("vieneu"), VoiceStore::Presets);
+        assert_eq!(store_kind("pocket"), VoiceStore::Clips);
+        assert_eq!(store_kind("gemini"), VoiceStore::None);
+        assert_eq!(store_kind("not-an-engine"), VoiceStore::None);
+        // An engine that clones needs somewhere to put a clone: a store-less
+        // cloner would enroll a voice no render could speak, and an undeclared
+        // name must never look like one.
+        for d in ENGINES {
+            if d.cloning {
+                assert_ne!(
+                    d.store,
+                    VoiceStore::None,
+                    "{} clones, so it needs a store",
+                    d.name
+                );
+            }
+        }
     }
 
     /// The primary subtag answers for its variants: a table of `vi-VN` has to

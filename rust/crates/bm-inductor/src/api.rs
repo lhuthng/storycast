@@ -1140,7 +1140,15 @@ async fn op_voices(layout: &bm_core::Layout, engine: &str) -> OpResult {
     // assignment, so curated voices survive; newcomers get least-used voices.
     let scripts = layout.scripts();
     for sp in &scripts {
-        if let Err(e) = bm_core::cast::load_cast(sp, &cast_path, &layout.bible(), &policy, true) {
+        let installed = bm_core::pool::installed_voices(layout);
+        if let Err(e) = bm_core::cast::load_cast(
+            sp,
+            &cast_path,
+            &layout.bible(),
+            &policy,
+            installed.as_ref(),
+            true,
+        ) {
             return OpResult::fail(format!("cast refill failed on {}: {e:#}", sp.display()));
         }
     }
@@ -1345,7 +1353,7 @@ fn disk_voices(
     effective: &bm_core::voices::EngineRoster,
 ) -> Vec<VoiceInfo> {
     let mut voices = effective.to_offline_voices(engine);
-    for clone in bm_core::voices::enrolled_voices(&layout.root.join("voices.json")) {
+    for clone in bm_core::voices::enrolled_voices(&layout.voices_manifest()) {
         if !voices.iter().any(|v| v.name == clone.name) {
             voices.push(clone);
         }
@@ -1356,7 +1364,7 @@ fn disk_voices(
     // like any clone (the render fails loudly if it never gets enrolled). The
     // tags also ride along as `pool_tags`, which is what makes the picker able
     // to tell an auto-assignable voice from a unique one.
-    for (name, entry) in bm_core::pool::load_pool(&layout.root.join("voice-pool.json")) {
+    for (name, entry) in bm_core::pool::load_pool(&layout.voice_pool()) {
         let style = if entry.tags.is_empty() {
             "named voice".to_string()
         } else {
@@ -1456,7 +1464,7 @@ async fn build_roster(
     }
     // The merges below are no-ops on the disk path (same names, same styles)
     // and complete a live answer with the local truth.
-    for clone in bm_core::voices::enrolled_voices(&layout.root.join("voices.json")) {
+    for clone in bm_core::voices::enrolled_voices(&layout.voices_manifest()) {
         if !voices.iter().any(|v| v.name == clone.name) {
             voices.push(clone);
         }
@@ -1467,7 +1475,7 @@ async fn build_roster(
     // like any clone (the render fails loudly if it never gets enrolled). The
     // tags also ride along as `pool_tags`, which is what makes the picker able
     // to tell an auto-assignable voice from a unique one.
-    for (name, entry) in bm_core::pool::load_pool(&layout.root.join("voice-pool.json")) {
+    for (name, entry) in bm_core::pool::load_pool(&layout.voice_pool()) {
         let style = if entry.tags.is_empty() {
             "named voice".to_string()
         } else {

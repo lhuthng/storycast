@@ -10,6 +10,7 @@
 //! fetch(url, opts?)        -> { status, body, url }     the only way out
 //! epub_chapter(path, n)    -> { text, title } | nil      a local book, one chapter
 //! epub_total(path)         -> number | nil              how many it has
+//! epub_books(dir)          -> [ path, … ]              the .epub volumes in a folder
 //! select(html, sel)        -> string                    first match, one line
 //! select_all(html, sel)    -> [ { text, html, attrs } ]
 //! select_text(html, sel)   -> string                    first match, as prose
@@ -344,6 +345,34 @@ pub mod fns {
         host.check_budget()?;
         let real = super::super::epub::confined(host.read_root()?, path)?;
         super::super::epub::open(&real)?.text(from, to)
+    }
+
+    /// `epub_books(dir)` — every `.epub` in a workspace directory, as paths
+    /// relative to the workspace.
+    ///
+    /// The **multi-volume** read. One EPUB is one volume, and how their
+    /// chapters number together is the script's question — a fact about this
+    /// book, not about EPUB — so the host answers with the *list* and leaves the
+    /// tree to `discover()`. Confined like every other read, and sorted so the
+    /// order is a property of the library rather than of the filesystem.
+    pub fn epub_books(host: &mut Host, dir: &str) -> Result<Value> {
+        host.check_budget()?;
+        let root = host.read_root()?.to_path_buf();
+        let real = super::super::epub::confined_dir(&root, dir)?;
+        let base = root.canonicalize().unwrap_or_else(|_| root.clone());
+        let mut out: Vec<Value> = Vec::new();
+        for path in super::super::epub::books_in(&real)? {
+            // The path the *script* spells back into `epub_index`/`epub_text`:
+            // relative to the workspace, so the same spelling resolves on the
+            // inductor and on a worker whose read root is the worker root.
+            let rel = path
+                .canonicalize()
+                .ok()
+                .and_then(|p| p.strip_prefix(&base).ok().map(|p| p.to_path_buf()))
+                .unwrap_or_else(|| path.clone());
+            out.push(Value::String(rel.display().to_string()));
+        }
+        Ok(Value::Array(out))
     }
 
     fn book_chapters(book: &mut super::super::epub::Epub) -> u32 {

@@ -173,6 +173,9 @@ const PRELUDE: &str = r#"
   globalThis.epub_text = function (path, from, to) {
     return String(unwrap(__bm_epub_text(String(path), from, to)));
   };
+  globalThis.epub_books = function (dir) {
+    return unwrap(__bm_epub_books(String(dir)));
+  };
   globalThis.log = function (m) {
     __bm_log(typeof m === "string" ? m : JSON.stringify(m));
   };
@@ -325,6 +328,8 @@ fn bind<'js>(ctx: &rquickjs::Ctx<'js>, g: &rquickjs::Object<'js>, host: &SharedH
     one_arg!("__bm_epub_index", |host, path| {
         Ok(fns::epub_index(host, path)?.unwrap_or(Value::Null))
     });
+    // The multi-volume listing: the `.epub` files in a workspace directory.
+    one_arg!("__bm_epub_books", fns::epub_books);
     // Three arguments, which the two- and one-argument macros cannot spell, so
     // the closure is written out. Still `String`-in/`String`-out: the third
     // argument crosses as text and is parsed here, because the envelope is a

@@ -1,0 +1,66 @@
+# Architecture contract for the Pocket TTS checkpoint `b6369a24`.
+#
+# Taken from the `pocket-tts` crate's own `config/b6369a24.yaml`. The two paths
+# are the only things that differ: upstream points them at the Hugging Face hub
+# (`kyutai/pocket-tts`, a gated repo), and `Pocket::load` rewrites them to
+# absolute local paths so a render needs no network and no HF token.
+#
+# `__WEIGHTS__` and `__TOKENIZER__` are substituted by `pocket::load_model`.
+#
+# WHY THE WHOLE FILE IS HERE RATHER THAN READ FROM `engines/`: `/engines/` is
+# gitignored — it holds fetched weights, not authored files — so a template
+# that has to stay in step with the code cannot live there. The numbers below
+# are the model's shape, and the shape is part of the source.
+weights_path: __WEIGHTS__
+weights_path_without_voice_cloning: __WEIGHTS__
+
+flow_lm:
+  dtype: float32
+  flow:
+    depth: 6
+    dim: 512
+  transformer:
+    d_model: 1024
+    hidden_scale: 4
+    max_period: 10000
+    num_heads: 16
+    num_layers: 6
+  lookup_table:
+    dim: 1024
+    n_bins: 4000
+    tokenizer: sentencepiece
+    tokenizer_path: __TOKENIZER__
+
+mimi:
+  dtype: float32
+  sample_rate: 24000
+  channels: 1
+  frame_rate: 12.5
+  seanet:
+    dimension: 512
+    channels: 1
+    n_filters: 64
+    n_residual_layers: 1
+    ratios:
+    - 6
+    - 5
+    - 4
+    kernel_size: 7
+    residual_kernel_size: 3
+    last_kernel_size: 3
+    dilation_base: 2
+    pad_mode: constant
+    compress: 2
+  transformer:
+    d_model: 512
+    num_heads: 8
+    num_layers: 2
+    layer_scale: 0.01
+    context: 250
+    dim_feedforward: 2048
+    input_dimension: 512
+    output_dimensions:
+    - 512
+  quantizer:
+    dimension: 32
+    output_dimension: 512

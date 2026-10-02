@@ -72,8 +72,10 @@ pub const LEGACY_ENGINE: &str = "vieneu";
 /// had a home, a language *was* two directory names the checkout happened to
 /// have — the root's `prompts/` and, for its crawlers, the pack's
 /// `assets/crawl/` — and they were this project's own: the Vietnamese one, whose
-/// sites the bundled templates are written for. So the one-time move puts both
-/// under `adapters/vi-VN/`. A second language never had a flat tree to migrate.
+/// sites the bundled templates are written for. So the one-time move puts the
+/// prompts under `adapters/vi-VN/` (the crawlers are the global `crawlers/` tree
+/// now, so they are not moved into a language's home). A second language never
+/// had a flat tree to migrate.
 pub const LEGACY_ADAPTER: &str = "vi-VN";
 
 /// The engine's name as it appears in a cache path.
@@ -155,6 +157,24 @@ impl Layout {
         let engine = Self::bound_engine(&root);
         let pointer = Self::active_workspace_file(&root);
         if !pointer.is_file() {
+            // No pointer, so this root **is** the workspace (or a bare
+            // checkout). Its own `settings.json` still names its adapter and
+            // engine, exactly as a pointed-to workspace's do below. Without
+            // this a layout rooted at a book reports `default` for both, and
+            // every adapter-scoped fact silently degrades — the spoken
+            // heading's language most visibly, which is how a `Chapter` title
+            // came out as `Chương` for a book whose adapter declares `en-US`.
+            let ws = crate::config::Settings::load(&root.join("settings.json"));
+            let adapter = if ws.profile.adapter.name.is_empty() {
+                adapter
+            } else {
+                ws.profile.adapter.name.clone()
+            };
+            let engine = if ws.profile.engine.name.is_empty() {
+                engine
+            } else {
+                ws.profile.engine.name.clone()
+            };
             return Ok(Layout {
                 adapter,
                 engine,
@@ -174,6 +194,24 @@ impl Layout {
                 name,
             );
         }
+        // The active workspace's own binding is the authority for what it
+        // reads. Prompts, crawlers and every cache path key on the adapter and
+        // engine, and those are facts about the BOOK — `workspace new
+        // --profile` stamps them into the workspace's settings precisely so a
+        // second language can live beside the first. The checkout pointer is
+        // the fallback: what this checkout was unpacked with, and what every
+        // workspace whose binding does not name the piece keeps following.
+        let ws = crate::config::Settings::load(&work.join("settings.json"));
+        let adapter = if ws.profile.adapter.name.is_empty() {
+            adapter
+        } else {
+            ws.profile.adapter.name.clone()
+        };
+        let engine = if ws.profile.engine.name.is_empty() {
+            engine
+        } else {
+            ws.profile.engine.name.clone()
+        };
         Ok(Layout {
             root,
             work,
@@ -317,24 +355,29 @@ impl Layout {
         self.data().join("crawl-index.json")
     }
 
-    /// The crawlers the **adapter** ships: `<adapter home>/crawl/`.
+    /// The **global** crawler tree: `crawlers/`, at the checkout root.
     ///
-    /// The language's, not the pack's. A crawler is one site read in one
-    /// language, and the adapter's language is both the source's and the
-    /// target's — so a Vietnamese site's crawler belongs beside the Vietnamese
-    /// prompts, and the same genre crawled in English is a different site
-    /// rather than a different genre. Keeping them in `assets/` made the pack
-    /// carry a tree that no pack value ever reads and that changes for a
-    /// reason (the site) the art never changes for.
+    /// Not a language's and not a workspace's. A crawler is one site read in one
+    /// language, but the *set* of crawlers this project has written is a fact
+    /// about the project, and keeping it in one place is what lets a preset name
+    /// a known site (`crawlers/known/storya.lua`) or the example EPUB crawler
+    /// (`crawlers/examples/epub.lua`) without a copy per workspace. One tree, so
+    /// an edit reaches every book and a new known site is one file and one
+    /// registry row.
     ///
-    /// **Pre-split they were the pack's**, at `assets/crawl/`, which is what a
-    /// checkout with no adapter bundle still reads — so nothing on disk changes
-    /// meaning, and the fallback is a tree that is already there.
+    /// The registry that names these files is `crawlers/knownsites.json`, read
+    /// through [`crate::crawl::known_sites`].
+    pub fn crawlers_dir(&self) -> PathBuf {
+        self.root.join("crawlers")
+    }
+
+    /// The crawlers on this machine, for the screens that list them.
+    ///
+    /// Kept as a method because two callers ask it (the TUI's crawl view and the
+    /// provision planner) and answers have to agree: the global tree. A book's
+    /// own crawlers are [`Self::crawl_workspace`].
     pub fn crawl_scripts(&self) -> PathBuf {
-        match self.adapter_home() {
-            Some(home) => home.join("crawl"),
-            None => self.assets().join("crawl"),
-        }
+        self.crawlers_dir()
     }
 
     /// The active workspace's own crawlers: `workspaces/<name>/crawl/`.
@@ -426,13 +469,26 @@ impl Layout {
     /// wrong, and being one level short of the workspace does not fail, it hands
     /// back a layout whose `chapters/` is somewhere else entirely. A path that
     /// is not in a script folder is `None` rather than a guess.
+    /// The layout a script at this path belongs to, and its chapter number.
+    ///
+    /// **Resolved, not defaulted.** This used to hand back [`Layout::new`],
+    /// whose adapter is the hardcoded `"default"` — so every adapter-scoped
+    /// fact read through a script path silently degraded, and the most visible
+    /// was the spoken chapter heading: `title_speech_for_script` asks the
+    /// layout's adapter for its language, found no `adapters/default/`, and
+    /// announced `Chương` for an English book whose adapter declares `en-US`.
+    /// A checkout resolves its binding, a book-rooted workspace its own
+    /// `settings.json`, and a provisioned box its pushed `.bm/profile`, so all
+    /// three say which language they write. `new` remains the fallback for a
+    /// root that cannot resolve at all.
     pub fn of_script(script_path: &Path) -> Option<(Self, u32)> {
         let chapter = chapter_of(script_path)?;
         let script_dir = script_path.parent()?;
         if script_dir.file_name()? != std::ffi::OsStr::new("script") {
             return None;
         }
-        Some((Self::new(script_dir.parent()?.parent()?), chapter))
+        let root = script_dir.parent()?.parent()?;
+        Some((Self::resolve(root).unwrap_or_else(|_| Self::new(root)), chapter))
     }
 
     pub fn bible(&self) -> PathBuf {
@@ -469,12 +525,15 @@ impl Layout {
     /// why a second one could not exist, and why the crawlers ended up in the
     /// pack, where nothing about them is a genre fact.
     ///
-    /// So the trees are **moved**, never rebuilt, into one directory that names
-    /// the language: `adapters/<name>/{prompts,crawl}/`. The name is the
-    /// checkout's own when it already names one, and [`LEGACY_ADAPTER`] when it
-    /// does not. Rename-only, never overwriting, idempotent — and it does
-    /// nothing at all until a pointer exists, because stamping a name is a claim
-    /// about a checkout that has loaded something.
+    /// So the prompts are **moved**, never rebuilt, into one directory that
+    /// names the language: `adapters/<name>/prompts/`. (The crawlers are the
+    /// global `crawlers/` tree now, tracked in the repo, so a checkout's old
+    /// `assets/crawl/` is left where it is rather than moved into a home the
+    /// resolver no longer reads crawlers from.) The name is the checkout's own
+    /// when it already names one, and [`LEGACY_ADAPTER`] when it does not.
+    /// Rename-only, never overwriting, idempotent — and it does nothing at all
+    /// until a pointer exists, because stamping a name is a claim about a
+    /// checkout that has loaded something.
     pub fn migrate_adapter_tree(&self) -> Result<Option<String>> {
         if self.adapter_home().is_some() {
             return Ok(None); // already has one; nothing to move again
@@ -489,10 +548,11 @@ impl Layout {
         };
         let home = self.root.join(ADAPTERS_DIR).join(&name);
         let mut moved = false;
-        for (from, to) in [
-            (self.root.join("prompts"), home.join("prompts")),
-            (self.assets().join("crawl"), home.join("crawl")),
-        ] {
+        // Only the prompts. The crawlers that a pre-split checkout kept in
+        // `assets/crawl/` are global now (the tracked `crawlers/` tree), so
+        // moving one checkout's old copy into a per-language home would put a
+        // second, stale tree where nothing resolves it.
+        for (from, to) in [(self.root.join("prompts"), home.join("prompts"))] {
             if !from.exists() || to.exists() {
                 continue;
             }
@@ -789,8 +849,53 @@ impl Layout {
         self.prompts_dir().join("script.txt")
     }
 
+    /// The quote-repair template, asked only when the pre-digest gate finds
+    /// unbalanced quotation marks.
+    ///
+    /// A prompt file like the other two, not a string in the digest: an
+    /// operator reworking how a chapter is proofread should edit text, and a
+    /// language whose prose does not read Vietnamese gets its own wording
+    /// without a recompile.
+    pub fn repair_prompt(&self) -> PathBuf {
+        self.prompts_dir().join("repair.txt")
+    }
+
+    /// The pack tree in force: the active workspace's own `assets/` when it
+    /// has one, the checkout's when it does not.
+    ///
+    /// Prompts have been work-scoped since the adapter split, for the same
+    /// reason this now is: `:profile load` replaces the checkout's trees
+    /// wholesale, and a score every book on the root must share is a score
+    /// none of them owns. A workspace that carries its own composition —
+    /// `workspaces/<name>/assets/`, `pack.json` and a resolve written at
+    /// creation (see `preset::compose_workspace_pack`) — reads its own music,
+    /// its own beds, its own scene map; the checkout's tree is the fallback,
+    /// which is what every existing workspace still reads, so nothing on disk
+    /// changes meaning and no migration is needed.
+    ///
+    /// This is ROADMAP §3's "what I'd do first", one line of it: a workspace
+    /// releasing its own composition and a binding that names it follow from
+    /// this, and mostly already have.
     pub fn assets(&self) -> PathBuf {
-        self.root.join("assets")
+        if self.owns_assets() {
+            self.work.join("assets")
+        } else {
+            self.root.join("assets")
+        }
+    }
+
+    /// Whether the `assets/` tree in force is the **workspace's own** rather
+    /// than the checkout's.
+    ///
+    /// The distinction is not cosmetic. A released profile pack describes the
+    /// *checkout's* tree: its manifest, its receipt and the fetch that lands it
+    /// are all about that one directory, so a release only names what is on
+    /// disk when this is false. A workspace that composes its own pack is not
+    /// the checkout a release was cut from — its tree travels in the sources
+    /// bundle, and a pack release pointed at it would land the wrong book's
+    /// `assets/` on the box.
+    pub fn owns_assets(&self) -> bool {
+        self.work != self.root && self.work.join("assets").is_dir()
     }
 
     /// The scene map: the rules, the palette and the layer knobs.
@@ -814,8 +919,30 @@ impl Layout {
         self.assets().join(kind.dir())
     }
 
+    /// The reference clips a book owns: `workspaces/<name>/refs/`.
+    ///
+    /// **Not shared, and not the checkout's.** Voices are not a preset yet
+    /// (they arrive as bundles), so `workspace new` puts none in a workspace —
+    /// and this resolves the workspace's own tree, finding none, rather than
+    /// reaching back to the checkout's. That tree is beyond-myriads': reading
+    /// it from another book is how `the-apothecary-diaries` cast from a roster
+    /// that was never its own. A checkout root (`work == root`) owns everything
+    /// by definition and reads its own `refs/`.
     pub fn refs(&self) -> PathBuf {
-        self.root.join("refs")
+        self.work.join("refs")
+    }
+
+    /// The clone manifest a book owns: `workspaces/<name>/voices.json`.
+    /// `name -> refs/clip` for every enrolled clone. Missing reads as none —
+    /// never as the checkout's.
+    pub fn voices_manifest(&self) -> PathBuf {
+        self.work.join("voices.json")
+    }
+
+    /// The sample pool a book owns: `workspaces/<name>/voice-pool.json`. The
+    /// registry the cast assigner rolls from. Missing reads as none.
+    pub fn voice_pool(&self) -> PathBuf {
+        self.work.join("voice-pool.json")
     }
 
     pub fn python_dir(&self) -> PathBuf {
@@ -885,14 +1012,24 @@ impl Layout {
     }
 
     /// The sidecar binary to spawn: the engine's provisioned copy first, then
-    /// the workspace's own debug/release builds beside it.
+    /// the workspace's own **release** build, then its debug one.
     ///
     /// The local worker runs from the repo, where no provision ever installs
-    /// `bm-tts` — but `cargo build --workspace` keeps `target/debug/bm-tts`
-    /// fresh. Without the fallback a dead sidecar is fatal locally even
-    /// though a working binary sits one directory over. Order matters only
-    /// in that the provisioned copy wins where it exists, so remote
-    /// behaviour is unchanged.
+    /// `bm-tts`, so a checkout that has only `cargo build`-ed needs a fallback
+    /// or a dead sidecar is fatal locally even though a working binary sits one
+    /// directory over. The provisioned copy still wins where it exists, so
+    /// remote behaviour is unchanged.
+    ///
+    /// **Release before debug, and that order is load-bearing.** An engine
+    /// whose support is a *default-off* cargo feature — `pocket` — cannot be
+    /// served by a plain `cargo build --workspace` binary: it exits at startup
+    /// ("built without it"). The workspace build produces exactly that binary
+    /// at `target/debug/bm-tts`, so preferring debug hands the worker a sidecar
+    /// that can never serve the tree it was given, while the working release
+    /// build sits unused beside it. The release sidecar is also what the
+    /// Makefile requires for rendering at all (a debug one decodes an order of
+    /// magnitude slower). Debug remains the last resort for a checkout that has
+    /// never been built for release.
     ///
     /// The repo-build fallbacks stay at their historical paths: the build tree
     /// is a build artifact, not an engine's own file, and `cargo` is the one
@@ -900,8 +1037,8 @@ impl Layout {
     pub fn sidecar_binary(&self) -> PathBuf {
         [
             self.tts_binary(),
-            self.root.join("rust/target/debug/bm-tts"),
             self.root.join("rust/target/release/bm-tts"),
+            self.root.join("rust/target/debug/bm-tts"),
         ]
         .into_iter()
         .find(|p| p.is_file())
@@ -997,8 +1134,17 @@ impl Layout {
     /// workspaces existed. Migration shim — remove once no checkout predates
     /// it; every legacy root migrates by moving `.bm/{settings,ledger}.json`
     /// and `stats.jsonl` into `workspaces/<name>/`.
+    ///
+    /// **`work == root` alone does not mean legacy.** A layout resolved from a
+    /// *book's* directory has `work == root` too, and its state sits in that
+    /// directory, not in a `.bm/` nobody wrote. The test is the file itself: a
+    /// root that carries `settings.json` is a workspace, and the shim applies
+    /// only to a checkout that has never had one. Without this, the same book
+    /// reads its settings depending on which directory the layout was resolved
+    /// from — which is how `title_mode` (and `speed`, `gap_ms`) went missing
+    /// on one path and not the other.
     fn state_file(&self, name: &str) -> PathBuf {
-        if self.work == self.root {
+        if self.work == self.root && !self.root.join("settings.json").is_file() {
             self.root.join(".bm").join(name)
         } else {
             self.work.join(name)
@@ -1127,7 +1273,8 @@ impl Layout {
 
     /// Chapter title for the output filename, ported from `main._chapter_title`.
     ///
-    /// **The script's own `title` wins.** The crawled headline is the site's
+    /// **The script's own `title` wins — unless `title_mode` says `default`.**
+    /// The crawled headline is the site's
     /// auto-excerpt of the chapter — `Chương 9: Tê! Thật là khủng khiếp dao
     /// phay`, `Chương 10: Tiền bối đối với dao phay yêu cầu đều cao như vậy?` —
     /// a sentence out of the prose with the punctuation still on it, which then
@@ -1136,18 +1283,29 @@ impl Layout {
     /// name it, so its `title` is the one used; the headline stays as the
     /// fallback for a chapter that was digested before the field existed.
     ///
+    /// [`crate::config::Settings::title_mode`] = `default` inverts that and
+    /// takes the headline only. A digest is a fresh model call, so under
+    /// `auto` a re-digest can answer a different `title` — and that moves both
+    /// the spoken headline and this filename. A book that must not drift pins
+    /// the headline instead.
+    ///
     /// Both routes end in the same scrub, so a title from either source is a
     /// legal filename and the spoken headline and the file agree.
     pub fn chapter_title(&self, n: u32) -> String {
-        let from_script = crate::read_json::<serde_json::Value>(&self.script(n))
-            .ok()
-            .and_then(|d| {
-                d.get("title")
-                    .and_then(|t| t.as_str())
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-                    .map(String::from)
-            });
+        let auto = crate::config::Settings::load(&self.settings()).auto_title();
+        let from_script = if auto {
+            crate::read_json::<serde_json::Value>(&self.script(n))
+                .ok()
+                .and_then(|d| {
+                    d.get("title")
+                        .and_then(|t| t.as_str())
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(String::from)
+                })
+        } else {
+            None
+        };
         let raw = from_script.unwrap_or_else(|| {
             let raw = std::fs::read_to_string(self.chapter_txt(n)).unwrap_or_default();
             let first = raw.lines().next().unwrap_or("").trim().to_string();
@@ -1204,6 +1362,98 @@ fn chapter_files(dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// What a directory under `workspaces/` carries: the config that makes it a
+/// book, or the reason it is not one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceConfig {
+    /// `settings.json` is there and parses — the file `workspace new` stamps
+    /// and the first thing every command reads, so this directory is a book.
+    Valid,
+    /// No `settings.json`: a directory somebody left here, not a workspace.
+    Missing,
+    /// The file is there and does not parse. Worse than missing, because
+    /// `Settings::load` falls back to defaults rather than refusing — so the
+    /// commands would run against settings nobody wrote.
+    Broken,
+}
+
+/// One directory under `workspaces/`: what it is called, whether the pointer
+/// names it, what config it carries, and how far the book has got.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceEntry {
+    /// The directory name — what `:ws <name>` and `workspace use <name>` take.
+    pub name: String,
+    /// The pointer names this one: the book every command runs on right now.
+    pub active: bool,
+    pub config: WorkspaceConfig,
+    /// Chapters crawled and scripts written: the two numbers that say whether a
+    /// switch is worth making.
+    pub chapters: usize,
+    pub scripts: usize,
+}
+
+/// Every directory under `workspaces/`, by name, with the pointer marked.
+///
+/// For a *list*, never for a switch — switching is a pointer write, and what a
+/// list has to answer is which directories are books at all. An unusable one is
+/// listed and marked rather than hidden: the usual way to find one is to have
+/// made it by accident, and a row that quietly vanished is how a stale pointer
+/// turns into a mystery.
+pub fn workspaces(root: &Path) -> Vec<WorkspaceEntry> {
+    let active = std::fs::read_to_string(Layout::active_workspace_file(root))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let mut out: Vec<WorkspaceEntry> = std::fs::read_dir(root.join("workspaces"))
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    WorkspaceEntry {
+                        active: name == active,
+                        config: workspace_config(&e.path()),
+                        chapters: files_with_extension(&e.path().join("data").join("chapters"), "txt"),
+                        scripts: files_with_extension(&e.path().join("data").join("script"), "json"),
+                        name,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// A workspace's own `settings.json`, or the reason it is not a book. Read
+/// rather than loaded: [`crate::config::Settings::load`] treats a missing file
+/// as defaults, which is right for a command that may legitimately run at the
+/// repo root and wrong for a question about whether a directory is a workspace.
+fn workspace_config(dir: &Path) -> WorkspaceConfig {
+    let path = dir.join("settings.json");
+    if !path.is_file() {
+        return WorkspaceConfig::Missing;
+    }
+    let parsed = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<crate::config::Settings>(&raw).ok());
+    match parsed {
+        Some(_) => WorkspaceConfig::Valid,
+        None => WorkspaceConfig::Broken,
+    }
+}
+
+/// How many `*.<ext>` files sit in `dir`. Zero for a directory that is not
+/// there, which is an ordinary state: a book nobody has crawled yet.
+fn files_with_extension(dir: &Path, ext: &str) -> usize {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some(ext))
+                .count()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1218,12 +1468,129 @@ mod tests {
     }
 
     #[test]
+    fn the_workspace_list_says_which_directory_is_a_book() {
+        // A list that offers a directory with no settings.json — or with one
+        // that does not parse — is offering a switch that fails a second later.
+        // So the config is read here and marked, and the switch is refused on
+        // the row, instead of the failure arriving as a job error.
+        let root = fixture_root("ws-inventory");
+        let book = root.join("workspaces/book-a");
+        std::fs::create_dir_all(book.join("data/chapters")).unwrap();
+        std::fs::create_dir_all(book.join("data/script")).unwrap();
+        // Exactly what `workspace new` stamps.
+        crate::config::Settings::default()
+            .save(&book.join("settings.json"))
+            .unwrap();
+        std::fs::write(book.join("data/chapters/ch01.txt"), "x").unwrap();
+        std::fs::write(book.join("data/script/01.json"), "{}").unwrap();
+        // A directory whose settings do not parse, and a file under
+        // `workspaces/` that is not a directory at all.
+        std::fs::create_dir_all(root.join("workspaces/book-b/data/chapters")).unwrap();
+        std::fs::write(root.join("workspaces/book-b/data/chapters/ch01.txt"), "x").unwrap();
+        std::fs::write(root.join("workspaces/book-b/settings.json"), "{ not json").unwrap();
+        std::fs::write(root.join("workspaces/notes.txt"), "x").unwrap();
+        std::fs::create_dir_all(root.join(".bm")).unwrap();
+        std::fs::write(Layout::active_workspace_file(&root), "book-a\n").unwrap();
+
+        let found = workspaces(&root);
+        assert_eq!(
+            found.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(),
+            vec!["book-a", "book-b"],
+            "a plain file under workspaces/ is not a workspace"
+        );
+        assert_eq!(found[0].config, WorkspaceConfig::Valid);
+        assert!(found[0].active, "the pointer marks the row it names");
+        assert_eq!((found[0].chapters, found[0].scripts), (1, 1));
+        assert_eq!(found[1].config, WorkspaceConfig::Broken);
+        assert_eq!(
+            (found[1].chapters, found[1].scripts),
+            (1, 0),
+            "the counts come from the tree whatever the config says"
+        );
+        assert!(!found[1].active);
+
+        // No pointer is not an error: the root is the implicit default, and a
+        // list with nothing marked is exactly right for it.
+        std::fs::remove_file(Layout::active_workspace_file(&root)).unwrap();
+        assert!(workspaces(&root).iter().all(|w| !w.active));
+    }
+
+    #[test]
+    fn title_mode_default_pins_the_crawled_headline() {
+        // A digest is a fresh model call, so its `title` can differ every time
+        // it runs; `default` pins the book to the headline the source shipped.
+        let root = fixture_root("title-mode");
+        let l = Layout::new(&root);
+        std::fs::create_dir_all(l.chapters()).unwrap();
+        std::fs::write(l.chapter_txt(3), "Chapter 3: Maomao\n\nbody\n").unwrap();
+        std::fs::create_dir_all(l.script(3).parent().unwrap()).unwrap();
+        std::fs::write(
+            l.script(3),
+            r#"{"title":"The Digest Renamed This","segments":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            l.chapter_title(3),
+            "The Digest Renamed This",
+            "auto is the default and prefers the digest's title"
+        );
+        let mut s = crate::config::Settings::load(&l.settings());
+        s.title_mode = "default".into();
+        std::fs::create_dir_all(l.settings().parent().unwrap()).unwrap();
+        s.save(&l.settings()).unwrap();
+        assert_eq!(
+            l.chapter_title(3),
+            "Maomao",
+            "default takes the headline, so a re-digest cannot move the title"
+        );
+    }
+
+    #[test]
+    fn a_workspace_rooted_layout_keeps_its_adapter_and_its_settings() {
+        // Resolved from the *book*, this layout used to report the adapter as
+        // `default` — with no manifest to read, so the content language with
+        // it — and to look for its settings in a `.bm/` the book does not
+        // have. That is how an adapter declaring `en-US` still produced a
+        // Vietnamese spoken heading, and how one book read two different
+        // settings files depending on which directory resolved it.
+        let root = fixture_root("ws-rooted");
+        let book = root.join("workspaces/book");
+        std::fs::create_dir_all(book.join("adapters/jnovel-en-US")).unwrap();
+        std::fs::write(
+            book.join("adapters/jnovel-en-US/adapter.json"),
+            r#"{"pack":"","language":"en-US","engine":""}"#,
+        )
+        .unwrap();
+        let mut s = crate::config::Settings::default();
+        s.profile.adapter.name = "jnovel-en-US".into();
+        s.profile.engine.name = "pocket".into();
+        s.save(&book.join("settings.json")).unwrap();
+
+        let l = Layout::resolve(&book).unwrap();
+        assert_eq!(l.adapter, "jnovel-en-US");
+        assert_eq!(l.engine, "pocket");
+        assert_eq!(
+            l.settings(),
+            book.join("settings.json"),
+            "a root carrying settings.json is a workspace, not a legacy .bm/"
+        );
+        assert_eq!(
+            crate::adapter::in_force(&l).unwrap().unwrap().language,
+            "en-US"
+        );
+    }
+
+    #[test]
     fn the_sidecar_prefers_the_provisioned_copy_then_the_workspace_build() {
         // Moved with the fallback itself: the local worker runs from the
-        // repo, where no provision ever installs `bm-tts` — but `cargo
-        // build` keeps the debug binary fresh, so a dead sidecar must fall
-        // back to it, not fail the render. The provisioned copy still wins
-        // where it exists, so remote behaviour is unchanged.
+        // repo, where no provision ever installs `bm-tts`, so a dead sidecar
+        // must fall back to a repo build rather than fail the render. The
+        // provisioned copy still wins where it exists, so remote behaviour is
+        // unchanged.
+        //
+        // Release wins over debug: a plain `cargo build --workspace` produces a
+        // pocket-less debug binary that exits at startup, so preferring it
+        // would hand the worker a sidecar that can never serve a pocket tree.
         let root = std::env::temp_dir().join(format!("bm-sidecar-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let layout = Layout::new(&root);
@@ -1240,7 +1607,11 @@ mod tests {
         let debug = root.join("rust/target/debug/bm-tts");
         std::fs::create_dir_all(debug.parent().unwrap()).unwrap();
         std::fs::write(&debug, b"fake").unwrap();
-        assert_eq!(layout.sidecar_binary(), debug);
+        assert_eq!(layout.sidecar_binary(), debug, "debug is the last resort");
+        let release = root.join("rust/target/release/bm-tts");
+        std::fs::create_dir_all(release.parent().unwrap()).unwrap();
+        std::fs::write(&release, b"fake").unwrap();
+        assert_eq!(layout.sidecar_binary(), release, "release beats debug");
         let provisioned = layout.tts_binary();
         std::fs::create_dir_all(provisioned.parent().unwrap()).unwrap();
         std::fs::write(&provisioned, b"fake").unwrap();
@@ -1313,12 +1684,13 @@ mod tests {
 
     /// A language that was flat at the root takes its own home, and the pointer
     /// is stamped with the name every path below then resolves through —
-    /// rename-only, never overwriting, idempotent.
+    /// rename-only, never overwriting, idempotent. The old pack's `assets/crawl/`
+    /// stays where it is: crawlers are the global `crawlers/` tree now.
     #[test]
-    fn a_pre_adapter_home_checkout_moves_both_trees_into_the_languages_home() {
+    fn a_pre_adapter_home_checkout_moves_the_prompts_into_the_languages_home() {
         let root = fixture_root("adapter-migrate");
         // The flat language, as it sat before adapters were a directory: the
-        // root's prompts, and the crawlers still inside the pack.
+        // root's prompts, and the old pack crawlers.
         std::fs::create_dir_all(root.join("prompts")).unwrap();
         std::fs::write(root.join("prompts/analyze.txt"), "vi-VN").unwrap();
         std::fs::create_dir_all(root.join("assets/crawl/templates")).unwrap();
@@ -1338,21 +1710,24 @@ mod tests {
 
         let home = root.join("adapters/vi-VN");
         assert!(home.join("prompts/analyze.txt").is_file());
-        assert!(home.join("crawl/templates/storya.lua").is_file());
         assert!(!root.join("prompts").exists(), "moved, not copied");
-        assert!(!root.join("assets/crawl").exists());
+        assert!(
+            root.join("assets/crawl/templates/storya.lua").is_file(),
+            "the old pack crawlers are left where they are — the global tree is the live one"
+        );
         assert!(
             root.join("assets/music/day-1.mp3").is_file(),
             "the art stays"
         );
 
         // The name is the pointer's, and it is what the layout now resolves
-        // through: both of the language's trees come from one directory.
+        // through: the prompts come from the home, the crawlers from the global
+        // tree.
         let after = Layout::resolve(&root).unwrap();
         assert_eq!(after.adapter, "vi-VN");
         assert_eq!(after.adapter_home(), Some(home.clone()));
         assert_eq!(after.prompts_base(), home);
-        assert_eq!(after.crawl_scripts(), home.join("crawl"));
+        assert_eq!(after.crawl_scripts(), root.join("crawlers"));
 
         // Idempotent: a bundle exists, so there is nothing left to move.
         assert_eq!(after.migrate_adapter_tree().unwrap(), None);
@@ -1525,13 +1900,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The adapter is a *home* now, not a pair of directory names: a checkout
-    /// carrying `adapters/<name>/` reads its prompts **and** its crawlers from
-    /// there, and one carrying no bundle keeps reading the flat trees it always
-    /// read — including the pack's `assets/crawl/`, which is where the crawlers
-    /// were before they were the language's.
+    /// The pack is work-scoped the way the prompts are: a workspace with its
+    /// own `assets/` scores its own book, and a workspace without one keeps
+    /// reading the checkout's tree — which is every workspace that exists
+    /// today, so nothing changes meaning underneath them.
     #[test]
-    fn an_adapter_bundle_owns_both_its_prompts_and_its_crawlers() {
+    fn the_pack_comes_from_the_workspace_and_falls_back_to_the_checkout() {
+        let root = fixture_root("workspace-assets");
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("assets/scene-map.json"), "{}").unwrap();
+
+        // No tree of its own: the checkout answers, exactly as before.
+        let bare = Layout::new(&root);
+        assert_eq!(bare.assets(), root.join("assets"));
+        assert_eq!(bare.scene_map(), root.join("assets/scene-map.json"));
+
+        // The workspace's own composition wins whole — scene map, pools,
+        // everything a pack owns, because a score that is half the checkout's
+        // is a score neither book can trust.
+        let book = root.join("workspaces/book");
+        std::fs::create_dir_all(book.join("assets")).unwrap();
+        std::fs::write(book.join("assets/scene-map.json"), "{}").unwrap();
+        std::fs::write(book.join("assets/music-pool.json"), "{}").unwrap();
+        let l = Layout {
+            root: root.clone(),
+            work: book.clone(),
+            adapter: DEFAULT_ADAPTER.into(),
+            engine: DEFAULT_ENGINE.into(),
+        };
+        assert_eq!(l.assets(), book.join("assets"));
+        assert_eq!(l.scene_map(), book.join("assets/scene-map.json"));
+        assert_ne!(l.assets(), bare.assets());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Voice material is the workspace's own and is **not** the checkout's:
+    /// a book with no `voices.json` reads none, not beyond-myriads'.
+    ///
+    /// This is the voice half of the `the-apothecary-diaries` bug. Voices are
+    /// not a preset yet (they arrive as bundles), so `workspace new` puts none
+    /// in a workspace — and the resolution has to find none too, or the second
+    /// book silently casts from the first one's roster. A checkout root
+    /// (`work == root`) still reads its own, because those *are* its voices.
+    #[test]
+    fn voice_material_is_the_workspaces_own_and_not_the_checkouts() {
+        let root = fixture_root("workspace-voices");
+        std::fs::create_dir_all(root.join("refs")).unwrap();
+        std::fs::write(root.join("voices.json"), r#"{"Narrator":"refs/n.wav"}"#).unwrap();
+        std::fs::write(
+            root.join("voice-pool.json"),
+            r#"{"a":{"file":"refs/a.wav","tags":[]}}"#,
+        )
+        .unwrap();
+
+        // The checkout root owns its own material by definition.
+        let bare = Layout::new(&root);
+        assert_eq!(bare.voices_manifest(), root.join("voices.json"));
+        assert_eq!(bare.voice_pool(), root.join("voice-pool.json"));
+        assert_eq!(bare.refs(), root.join("refs"));
+
+        // A workspace with none of its own reads none — never the root's.
+        let book = root.join("workspaces/book");
+        let l = Layout {
+            root: root.clone(),
+            work: book.clone(),
+            adapter: DEFAULT_ADAPTER.into(),
+            engine: DEFAULT_ENGINE.into(),
+        };
+        assert_eq!(l.voices_manifest(), book.join("voices.json"));
+        assert_eq!(l.voice_pool(), book.join("voice-pool.json"));
+        assert_eq!(l.refs(), book.join("refs"));
+        assert!(
+            !l.voices_manifest().exists() && !l.voice_pool().exists(),
+            "the checkout's manifests must not answer for the workspace"
+        );
+        assert!(
+            crate::pool::load_manifest(&l.voices_manifest()).is_empty(),
+            "a book with no voices casts from none, not from another book's"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The adapter is a *home* now for **prompts**: a checkout carrying
+    /// `adapters/<name>/` reads its prompts from there, and one carrying no
+    /// bundle keeps reading the flat tree it always read. The crawlers are
+    /// neither — they are the global `crawlers/` tree, the same for every
+    /// adapter and every workspace.
+    #[test]
+    fn an_adapter_bundle_owns_its_prompts_and_the_crawlers_are_global() {
         let root = fixture_root("adapter-home");
         std::fs::create_dir_all(root.join("prompts")).unwrap();
         std::fs::write(root.join("prompts/analyze.txt"), "flat").unwrap();
@@ -1546,16 +2002,11 @@ mod tests {
             root,
             "so the prompts are the flat ones"
         );
-        assert_eq!(
-            flat.crawl_scripts(),
-            root.join("assets/crawl"),
-            "and the crawlers are still the pack's"
-        );
+        assert_eq!(flat.crawl_scripts(), root.join("crawlers"));
 
-        // With the bundle, both trees answer from one directory.
+        // With the bundle, the prompts answer from one directory.
         let home = root.join("adapters/vi-VN");
         std::fs::create_dir_all(home.join("prompts")).unwrap();
-        std::fs::create_dir_all(home.join("crawl")).unwrap();
         std::fs::write(home.join("prompts/analyze.txt"), "vi-VN").unwrap();
         let l = Layout {
             adapter: "vi-VN".into(),
@@ -1564,12 +2015,13 @@ mod tests {
         assert_eq!(l.adapter_home(), Some(home.clone()));
         assert_eq!(l.prompts_base(), home);
         assert_eq!(l.prompt(), home.join("prompts/analyze.txt"));
-        assert_eq!(l.crawl_scripts(), home.join("crawl"));
+        // …while the crawlers do not move: they are the global tree either way.
+        assert_eq!(l.crawl_scripts(), root.join("crawlers"));
 
-        // A workspace's own bundle is nearer than the checkout's — the same
-        // rule the flat trees already followed.
+        // A workspace's own prompts are nearer than the checkout's — the same
+        // rule the flat trees already followed; the crawlers stay global.
         let book = root.join("workspaces/book");
-        std::fs::create_dir_all(book.join("adapters/vi-VN/crawl")).unwrap();
+        std::fs::create_dir_all(book.join("adapters/vi-VN/prompts")).unwrap();
         let scoped = Layout {
             root: root.clone(),
             work: book.clone(),
@@ -1577,7 +2029,7 @@ mod tests {
             engine: DEFAULT_ENGINE.into(),
         };
         assert_eq!(scoped.prompts_base(), book.join("adapters/vi-VN"));
-        assert_eq!(scoped.crawl_scripts(), book.join("adapters/vi-VN/crawl"));
+        assert_eq!(scoped.crawl_scripts(), root.join("crawlers"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1681,6 +2133,53 @@ mod tests {
         std::fs::write(dir.join(".bm/active-workspace"), "gone\n").unwrap();
         let err = Layout::resolve(&dir).unwrap_err();
         assert!(err.to_string().contains("gone"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The workspace's own binding is what it reads: a book stamped with
+    /// `--profile` follows its adapter and engine even when the checkout's
+    /// pointer names another language — two languages on one checkout is the
+    /// preset's whole point. A workspace whose binding does not name the
+    /// piece (every one made before presets) keeps following the pointer,
+    /// which is the pre-preset behaviour unchanged.
+    #[test]
+    fn the_active_workspaces_binding_chooses_its_adapter_and_engine() {
+        let dir = std::env::temp_dir().join(format!("bm-resolve-bind{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".bm")).unwrap();
+        std::fs::create_dir_all(dir.join("workspaces/book")).unwrap();
+        std::fs::write(dir.join(".bm/active-workspace"), "book\n").unwrap();
+        std::fs::write(
+            dir.join(".bm/profile"),
+            r#"{"pack":{"name":"xianxia","hash":"p"},"adapter":{"name":"vi-VN","hash":"a"},"engine":{"name":"vieneu","hash":""}}"#,
+        )
+        .unwrap();
+
+        // No workspace settings: the pointer answers, as always.
+        let l = Layout::resolve(&dir).unwrap();
+        assert_eq!(l.adapter, "vi-VN");
+        assert_eq!(l.engine, "vieneu");
+
+        // The workspace stamps its own triple: it wins, piece by piece.
+        std::fs::write(
+            dir.join("workspaces/book/settings.json"),
+            r#"{"profile":{"pack":{"name":"apothecary","hash":"q"},"adapter":{"name":"jnovel-en-US","hash":"b"},"engine":{"name":"pocket","hash":""}}}"#,
+        )
+        .unwrap();
+        let l = Layout::resolve(&dir).unwrap();
+        assert_eq!(l.adapter, "jnovel-en-US", "the book's adapter");
+        assert_eq!(l.engine, "pocket", "the book's engine");
+
+        // A binding that names only some pieces: the named ones win, the
+        // unnamed ones stay the pointer's — a stamp is a claim, not a wipe.
+        std::fs::write(
+            dir.join("workspaces/book/settings.json"),
+            r#"{"profile":{"pack":{"name":"xianxia","hash":"p"},"adapter":{"name":"","hash":""},"engine":{"name":"gemini","hash":""}}}"#,
+        )
+        .unwrap();
+        let l = Layout::resolve(&dir).unwrap();
+        assert_eq!(l.adapter, "vi-VN", "unnamed stays the pointer's");
+        assert_eq!(l.engine, "gemini", "named wins");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1889,5 +2388,67 @@ mod tests {
         // nowhere.
         assert!(Layout::of_script(&l.chapter_txt(9)).is_none());
         assert!(Layout::of_script(&l.data().join("bible.json")).is_none());
+    }
+
+    /// A layout reached through a script path keeps the adapter that names the
+    /// book's language, on both shapes a book is read from.
+    ///
+    /// The regression: `of_script` handed back `Layout::new`, whose adapter is
+    /// the hardcoded `"default"`, so `title_speech_for_script` found no
+    /// `adapters/default/` and announced `Chương` for a book whose adapter
+    /// declares `en-US`. The word is inaudible in an English chapter and the
+    /// chapter simply loses its heading, so nothing looks wrong but the audio.
+    #[test]
+    fn a_script_path_keeps_the_adapter_that_declares_the_language() {
+        // A book-rooted workspace: its own `settings.json` is the authority.
+        let book = Layout::new(fixture_root("of-script-book"));
+        book.ensure().unwrap();
+        std::fs::create_dir_all(book.root.join("adapters/en-US")).unwrap();
+        std::fs::write(
+            book.root.join("adapters/en-US/adapter.json"),
+            r#"{"pack":"","language":"en-US","engine":""}"#,
+        )
+        .unwrap();
+        let mut settings = crate::config::Settings::default();
+        settings.profile.adapter.name = "en-US".into();
+        settings.save(&book.root.join("settings.json")).unwrap();
+        std::fs::write(book.script(3), r#"{"segments":[]}"#).unwrap();
+
+        let (from_book, chapter) = Layout::of_script(&book.script(3)).expect("a script resolves");
+        assert_eq!(chapter, 3);
+        assert_eq!(from_book.adapter, "en-US", "the book's own settings name it");
+        assert_eq!(
+            crate::adapter::in_force(&from_book)
+                .expect("readable")
+                .expect("a manifest")
+                .language,
+            "en-US",
+            "so the language the heading word is chosen from is the real one"
+        );
+
+        // A provisioned box: no `settings.json` and no workspace pointer, so
+        // the pushed `.bm/profile` binding is what says which adapter it is.
+        let boxy = Layout::new(fixture_root("of-script-box"));
+        boxy.ensure().unwrap();
+        std::fs::create_dir_all(boxy.root.join("adapters/en-US")).unwrap();
+        std::fs::write(
+            boxy.root.join("adapters/en-US/adapter.json"),
+            r#"{"pack":"","language":"en-US","engine":""}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(boxy.root.join(".bm")).unwrap();
+        std::fs::write(
+            boxy.root.join(".bm/profile"),
+            r#"{"pack":{"name":"b","hash":"","version":""},"adapter":{"name":"en-US","hash":"","version":""},"engine":{"name":"pocket","hash":"","version":""}}"#,
+        )
+        .unwrap();
+        std::fs::write(boxy.script(4), r#"{"segments":[]}"#).unwrap();
+
+        let (from_box, chapter) = Layout::of_script(&boxy.script(4)).expect("a script resolves");
+        assert_eq!(chapter, 4);
+        assert_eq!(
+            from_box.adapter, "en-US",
+            "a box's pushed binding names its adapter, not `default`"
+        );
     }
 }

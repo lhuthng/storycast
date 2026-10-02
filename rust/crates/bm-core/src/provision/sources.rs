@@ -239,6 +239,14 @@ impl Sources {
             missing: Vec::new(),
         };
         let root = &layout.root;
+        // The `assets/` tree **in force** — the workspace's own composition when
+        // it has one, the checkout's when it does not — and the directory its
+        // paths are relative to. Both matter: a member must come from the tree
+        // the run reads *and* land at `assets/…` on the worker, and addressing
+        // the workspace's files relative to the checkout root breaks that
+        // pairing (`a member's source must be its landing path under its base`).
+        let assets = layout.assets();
+        let assets_base = assets.parent().unwrap_or(root).to_path_buf();
 
         // The clone manifest: 5 KB, and the inductor's warnings are computed
         // against it, so a box holding a different declaration is a silent
@@ -283,20 +291,20 @@ impl Sources {
 
         for stage in out.stages.clone() {
             for reg in registries(stage) {
-                out.push_file(root, &format!("assets/{reg}"));
+                out.push_file(&assets_base, &format!("assets/{reg}"));
             }
             match stage {
                 Stage::Crawl => {
-                    // The bundled templates — pre-split only. With adapter
-                    // homes they already rode them above, and a crawler named
-                    // by a registry resolves out of whichever `templates/` the
-                    // resolver reaches first: the language's.
-                    if homes.is_empty() {
-                        out.push_tree(root, "assets/crawl");
-                    }
+                    // The **global** crawler tree: `crawlers/known/…` (the
+                    // registry's sites) and `crawlers/examples/…`. A named path
+                    // (`crawlers/known/storya.lua`) resolves out of it on any
+                    // box, so it travels even though the offer also carries the
+                    // script's source — a box that reads `crawl.script` against
+                    // its own filesystem must find the same file.
+                    out.push_tree(&layout.root, "crawlers");
                     // …and the workspace's own crawlers, which
                     // `resolve_script` searches first: a book whose site needs
-                    // its own script keeps it out of the shared profile tree.
+                    // its own script keeps it out of the shared tree.
                     out.push_tree(&layout.work, "crawl");
                 }
                 // The registries the digest prompt renders from are still its
@@ -329,7 +337,7 @@ impl Sources {
 
         // Attribution for the media, whenever any of it travels.
         if out.stages.iter().any(|s| *s != Stage::Render) {
-            out.push_file(root, "assets/LICENSES.json");
+            out.push_file(&assets_base, "assets/LICENSES.json");
         }
 
         // Sorted *and* deduped: the stages overlap on purpose (scene-map and
@@ -348,6 +356,9 @@ impl Sources {
     /// Every file the three clip registries name, resolved under `assets/`.
     fn push_clips(&mut self, layout: &crate::Layout) {
         let assets = layout.assets();
+        // The clip's base is the `assets/` parent, so a workspace's own tree is
+        // addressed relative to the workspace and not to the checkout root.
+        let base = assets.parent().unwrap_or(&layout.root).to_path_buf();
         for kind in crate::audio_pool::PoolKind::ALL {
             let pool = crate::audio_pool::load_pool(&layout.pool(kind));
             for (sound, entry) in pool {
@@ -367,7 +378,7 @@ impl Sources {
                     // The member name is the registry path under `assets/`,
                     // because that is where it has to *land*: the merge resolves
                     // it from the worker's own `assets/`.
-                    self.push_member(&layout.root, format!("assets/{file}"), from);
+                    self.push_member(&base, format!("assets/{file}"), from);
                 }
             }
         }
@@ -756,6 +767,9 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(l.work.join("crawl")).unwrap();
         std::fs::write(l.work.join("crawl/site.lua"), "-- crawl").unwrap();
+        // The global crawler tree: a known site, shipped to every crawl box.
+        std::fs::create_dir_all(l.root.join("crawlers/known")).unwrap();
+        std::fs::write(l.root.join("crawlers/known/storya.lua"), "-- global").unwrap();
         // Finder noise must never enter the manifest.
         std::fs::write(l.assets().join(".DS_Store"), b"junk").unwrap();
         l
@@ -836,8 +850,8 @@ mod tests {
         let got = paths(&l, &[Stage::Crawl]);
         assert!(got.contains(&"crawl/site.lua".to_string()), "{got:?}");
         assert!(
-            got.iter().any(|p| p.starts_with("assets/crawl/templates/")),
-            "{got:?}"
+            got.iter().any(|p| p.starts_with("crawlers/known/")),
+            "the global crawler tree ships: {got:?}"
         );
         assert!(
             !got.contains(&"assets/scene-map.json".to_string()),
@@ -927,7 +941,6 @@ mod tests {
         let adapters = l.root.join(crate::paths::ADAPTERS_DIR);
         for (name, file) in [
             ("xianxia-vi-VN", "prompts/analyze.txt"),
-            ("xianxia-vi-VN", "crawl/site.lua"),
             ("xianxia-en-US", "prompts/analyze.txt"),
         ] {
             let p = adapters.join(name).join(file);
@@ -953,12 +966,11 @@ mod tests {
         let got = paths(&l, &[Stage::Crawl, Stage::Digest]);
         for want in [
             "adapters/xianxia-vi-VN/prompts/analyze.txt",
-            "adapters/xianxia-vi-VN/crawl/site.lua",
             "adapters/xianxia-en-US/prompts/analyze.txt",
         ] {
             assert!(got.contains(&want.to_string()), "{want} missing: {got:?}");
         }
-        // The flat trees are *not* beside them: the resolver prefers the home,
+        // The flat prompts are *not* beside them: the resolver prefers the home,
         // so a flat copy would be a stale tree the box silently ignored — and a
         // prompt edit would stop reaching it.
         assert!(
@@ -967,10 +979,15 @@ mod tests {
         );
         assert!(
             !got.iter().any(|p| p.starts_with("assets/crawl/")),
-            "the bundled templates travelled beside the language's own: {got:?}"
+            "the retired pack crawlers travelled: {got:?}"
         );
-        // …while a book's own crawlers still ride along, which is what keeps a
-        // site-specific script out of the shared profile tree.
+        // …the global crawler tree ships once for every language…
+        assert!(
+            got.contains(&"crawlers/known/storya.lua".to_string()),
+            "{got:?}"
+        );
+        // …and a book's own crawlers still ride along, which is what keeps a
+        // site-specific script out of the shared tree.
         assert!(got.contains(&"crawl/site.lua".to_string()), "{got:?}");
 
         // The manifest carries the same claim, so the box can report it.
@@ -1088,6 +1105,57 @@ mod tests {
             c.files["assets/music/market-bg-1.mp3"]
         );
         assert_ne!(Sources::hash(&a), Sources::hash(&c));
+    }
+
+    /// A workspace that owns its own `assets/` — the shape `workspace new
+    /// --profile` writes — must ship **that** tree, and every member's source
+    /// must be its landing path under its base. Addressing the workspace's
+    /// files relative to the checkout root is what panicked the packer.
+    #[test]
+    fn a_workspace_owning_assets_ships_its_own_tree_with_a_consistent_base() {
+        let dir = std::env::temp_dir().join("bm-sources-ws-assets");
+        let _ = std::fs::remove_dir_all(&dir);
+        // The checkout has the fixture's assets too, so a wrong base would still
+        // *find* a file and quietly ship the wrong book's score.
+        crate::profile::install_fixture(&dir).unwrap();
+        let work = dir.join("workspaces/book");
+        std::fs::create_dir_all(work.join("assets/effects")).unwrap();
+        std::fs::write(work.join("assets/scene-map.json"), "{}").unwrap();
+        std::fs::write(
+            work.join("assets/effect-pool.json"),
+            r#"{"clash":{"tags":["clash"],"files":["effects/clash-1.mp3"]}}"#,
+        )
+        .unwrap();
+        std::fs::write(work.join("assets/effects/clash-1.mp3"), b"clip").unwrap();
+
+        let l = crate::Layout {
+            root: dir.clone(),
+            work: work.clone(),
+            ..crate::Layout::new(dir.clone())
+        };
+        // `debug_assert_eq!` inside `push_member` is the invariant; asserting it
+        // over the whole set here is what makes the failure a message rather
+        // than a panic inside a provision task.
+        let s = Sources::plan(&l, &[Stage::Merge]).unwrap();
+        for m in &s.members {
+            assert_eq!(m.base.join(&m.to), m.from, "member {} addressed against its base", m.to);
+        }
+        let clip = s
+            .members
+            .iter()
+            .find(|m| m.to == "assets/effects/clash-1.mp3")
+            .expect("the workspace's registered clip rides the bundle");
+        assert_eq!(
+            clip.from,
+            work.join("assets/effects/clash-1.mp3"),
+            "the clip comes from the workspace's own tree"
+        );
+        assert_eq!(
+            clip.base,
+            work,
+            "and is addressed relative to the workspace, not the checkout root"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A registry naming a clip that is not here is reported, not shipped and

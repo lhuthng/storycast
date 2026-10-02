@@ -1,4 +1,4 @@
--- assets/crawl/templates/webnovel.lua — the hard shape, and the one that
+-- crawlers/known/webnovel.lua — the hard shape, and the one that
 -- teaches the most.
 --
 -- Read this one *after* `truyencom.lua`, and only if you have to. WebNovel is
@@ -30,7 +30,7 @@
 --     "mode": "script",
 --     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) …Chrome/131…",
 --     "headers": { "Cookie": "cf_clearance=<paste from your browser>" },
---     "script": "assets/crawl/templates/webnovel.lua",
+--     "script": "crawlers/known/webnovel.lua",
 --     "params": { "catalog": "https://www.webnovel.com/vi/book/<bookId>/catalog" }
 --   },
 --   "url_template": ""

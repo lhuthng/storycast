@@ -9,6 +9,7 @@ use crate::tui::{
     screen::{PickStage, Screen},
     style::Level,
 };
+use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::time::{Duration, Instant};
 
@@ -17,9 +18,9 @@ pub(crate) async fn handle_mouse(
     mouse: MouseEvent,
     http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     let Some(region) = app.hit_region(mouse.column, mouse.row) else {
-        return false;
+        return Flow::KeepRunning;
     };
 
     match mouse.kind {
@@ -172,7 +173,7 @@ pub(crate) async fn handle_mouse(
         MouseEventKind::ScrollDown => scroll(app, region.target, 1),
         _ => {}
     }
-    false
+    Flow::KeepRunning
 }
 
 fn list_len(app: &App, kind: ListTarget) -> usize {
@@ -392,7 +393,7 @@ mod tests {
 
     /// A helper so each test can say "click here" instead of spelling out a
     /// whole `MouseEvent`.
-    async fn click(app: &mut App, column: u16, row: u16) -> bool {
+    async fn click(app: &mut App, column: u16, row: u16) -> Flow {
         let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel();
         handle_mouse(
             app,

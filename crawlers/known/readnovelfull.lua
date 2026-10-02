@@ -1,4 +1,4 @@
--- assets/crawl/templates/readnovelfull.lua — the third kind of crawl.
+-- crawlers/known/readnovelfull.lua — the third kind of crawl.
 --
 -- `truyencom.lua` templates the URL, `madara.lua` walks a paginated listing,
 -- and this one needs **neither**, which is the case worth having a template for:
@@ -18,7 +18,7 @@
 -- Setup, in full:
 --
 --   "crawl": { "mode": "script",
---              "script": "assets/crawl/templates/readnovelfull.lua",
+--              "script": "crawlers/known/readnovelfull.lua",
 --              "params": { "book": "https://readnovelfull.com/the-sword-god-of-the-universe.html" },
 --              "max_fetches": 400, "max_seconds": 900 },
 --   "url_template": ""

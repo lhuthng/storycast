@@ -236,19 +236,19 @@ fn site_golden(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
 }
 
-/// The two templates, read from the repo rather than inlined: these tests are
-/// the gate for those *files*, so reading them is the point.
+/// The known-site templates, read from the repo rather than inlined: these tests
+/// are the gate for those *files*, so reading them is the point.
 ///
-/// The directory is tracked (`.gitignore` excludes the rest of the live tree and
-/// un-ignores `adapters/vi-VN/crawl/templates/`), so these run on a fresh clone.
-/// While the whole of `assets/` was ignored they read machine-local state, and
-/// passed or failed depending on whether somebody had fetched a profile.
+/// The directory is tracked (`crawlers/known/` ships in the repo), so these run
+/// on a fresh clone. While the crawlers rode an ignored tree they read
+/// machine-local state, and passed or failed depending on whether somebody had
+/// fetched something.
 ///
-/// The templates are the **language's** now, so they are read out of the home
-/// those templates belong to rather than out of the pack's old copy.
+/// They are the **global** tree now — one set every workspace selects from —
+/// rather than a language's or the pack's.
 fn template(file: &str) -> String {
     std::fs::read_to_string(format!(
-        "{}/../../../adapters/vi-VN/crawl/templates/{file}",
+        "{}/../../../crawlers/known/{file}",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap_or_else(|e| panic!("reading the template {file}: {e}"))
@@ -1005,21 +1005,21 @@ fn spec(engine: &str, name: &str, source: &str) -> CrawlSpec {
 /// the parity gate for that *file*, so reading it is the point.
 fn bundled(file: &str) -> String {
     std::fs::read_to_string(format!(
-        "{}/../../../adapters/vi-VN/crawl/templates/{file}",
+        "{}/../../../crawlers/known/{file}",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap_or_else(|e| panic!("reading the bundled {file}: {e}"))
 }
 
-/// A **sample** crawler, read from the repo rather than inlined.
+/// An **example** crawler, read from the repo rather than inlined.
 ///
-/// Not [`bundled`]: `adapters/vi-VN/crawl/templates/` is one language's
-/// knowledge of its own *sites*, and an EPUB is a format that no site owns. The
-/// samples live in `samples/crawl/`, outside every adapter, and this is the
-/// gate for the files there.
+/// Not the known sites: `crawlers/known/` is knowledge of particular *sites*,
+/// and an EPUB is a format that no site owns. The examples live in
+/// `crawlers/examples/` — the unknown-structure shapes — and this is the gate
+/// for the files there.
 fn sample(file: &str) -> String {
     std::fs::read_to_string(format!(
-        "{}/../../../samples/crawl/{file}",
+        "{}/../../../crawlers/examples/{file}",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap_or_else(|e| panic!("reading the sample {file}: {e}"))
@@ -1030,6 +1030,19 @@ fn sample(file: &str) -> String {
 /// exists to drive the shipped `epub.lua` through the real Lua engine, and a
 /// shared builder would let a bug in the builder pass both.
 fn epub_fixture(path: &std::path::Path) {
+    epub_fixture_named(
+        path,
+        &[
+            ("mot-chuong", "Một câu trong chương đầu tiên của cuốn sách."),
+            ("hai-chuong", "Câu thứ hai nằm ở chương thứ hai của cuốn sách."),
+        ],
+    );
+}
+
+/// The same builder for an arbitrary spine. A multi-volume test needs volumes
+/// whose prose says which volume it is, so a test can prove a chapter came out
+/// of the volume its locator named rather than merely one of the two.
+fn epub_fixture_named(path: &std::path::Path, chapters: &[(&str, &str)]) {
     use std::io::Write;
     let file = std::fs::File::create(path).unwrap();
     let mut w = zip::ZipWriter::new(file);
@@ -1050,25 +1063,7 @@ fn epub_fixture(path: &std::path::Path) {
     // guard a crawled page does, so a two-sentence chapter is refused exactly
     // as it would be from a site.
     let filler = "Câu văn nối tiếp trong chương, đủ dài để qua ngưỡng kiểm tra. ";
-    for (i, (name, body)) in [
-        (
-            "mot-chuong",
-            format!(
-                "Một câu trong chương đầu tiên của cuốn sách. {}",
-                filler.repeat(5)
-            ),
-        ),
-        (
-            "hai-chuong",
-            format!(
-                "Câu thứ hai nằm ở chương thứ hai của cuốn sách. {}",
-                filler.repeat(5)
-            ),
-        ),
-    ]
-    .iter()
-    .enumerate()
-    {
+    for (i, (name, body)) in chapters.iter().enumerate() {
         let id = format!("c{i}");
         items.push_str(&format!(r#"<item id="{id}" href="text/{name}.xhtml"/>"#));
         refs.push_str(&format!(r#"<itemref idref="{id}"/>"#));
@@ -1076,7 +1071,8 @@ fn epub_fixture(path: &std::path::Path) {
         w.write_all(
             format!(
                 "<html><head><title>{name}</title></head><body>\
-                 <h1>Chương {name}</h1><p>{body}</p></body></html>"
+                 <h1>Chương {name}</h1><p>{body} {}</p></body></html>",
+                filler.repeat(5)
             )
             .as_bytes(),
         )
@@ -1154,6 +1150,75 @@ fn the_epub_template_reads_a_local_book_and_stops_at_its_end() {
         .expect_err("a book that is not there")
         .to_string();
     assert!(err.contains("nope.epub"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Several volumes are numbered as **one book**: the running count continues
+/// across volumes in name order, and each chapter carries the locator that
+/// says which volume and which spine range it is. This is the whole point of
+/// the multi-volume path — the pipeline's index stays dense, so `chNN.txt` is
+/// the book's Nth chapter rather than any one volume's.
+#[test]
+fn volumes_are_numbered_as_one_book_and_carry_their_own_locator() {
+    let dir = std::env::temp_dir().join(format!("bm-epub-multi-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("books")).unwrap();
+    // Two chapters each, with prose that names its volume, and written out of
+    // order so the *name* is what decides the volume order rather than the
+    // filesystem's answer.
+    epub_fixture_named(
+        &dir.join("books/vol-02.epub"),
+        &[
+            ("v2-mot", "Một câu trong chương đầu của tập hai."),
+            ("v2-hai", "Một câu trong chương cuối của tập hai."),
+        ],
+    );
+    epub_fixture_named(
+        &dir.join("books/vol-01.epub"),
+        &[
+            ("v1-mot", "Một câu trong chương đầu của tập một."),
+            ("v1-hai", "Một câu trong chương cuối của tập một."),
+        ],
+    );
+
+    let mut s = spec("lua", "epub.lua", &sample("epub.lua"));
+    s.read_root = dir.clone();
+    s.params.insert("books".into(), serde_json::json!("books"));
+
+    let found = Provider::new(&s)
+        .discover(1, 10)
+        .expect("discover")
+        .expect("has chapters");
+    assert_eq!(found.total, Some(4), "two volumes of two chapters");
+    let ns: Vec<u32> = found.chapters.iter().map(|c| c.n).collect();
+    assert_eq!(ns, vec![1, 2, 3, 4], "the numbering is dense across volumes");
+
+    // Every chapter names its volume and spine range, and volume 1's chapters
+    // come first whatever order the fixture wrote the files in.
+    let first = found.chapters[0].url.clone().expect("locator");
+    let third = found.chapters[2].url.clone().expect("locator");
+    assert!(first.starts_with("epub:books/vol-01.epub#"), "{first}");
+    assert!(third.starts_with("epub:books/vol-02.epub#"), "{third}");
+
+    // The locator is what `crawl` reads back, and reading it is a *lookup*:
+    // the chapter comes out of the volume it names.
+    let text = text_of(
+        Provider::new(&s)
+            .crawl(3, Some(third.as_str()), 1)
+            .expect("ch 3")
+            .outcome,
+    );
+    assert!(text.contains("v2-mot"), "{text}");
+    assert!(text.contains("tập hai"), "{text}");
+    let text = text_of(
+        Provider::new(&s)
+            .crawl(1, Some(first.as_str()), 1)
+            .expect("ch 1")
+            .outcome,
+    );
+    assert!(text.contains("tập một"), "{text}");
+    assert!(text.contains("v1-mot"), "{text}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1305,79 +1370,68 @@ fn the_workspaces_crawler_shadows_the_profiles() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Every bundled crawler now lives in `assets/crawl/templates/`, which is what
-/// `templates/` means. A `settings.json` written before the move still spells
-/// the old path, and it has to keep working: the failure mode otherwise is "no
-/// such file" on the first crawl of a book that was fine yesterday.
+/// Every crawler now lives in the global `crawlers/` tree, so a `settings.json`
+/// written before the move spells an old path (`assets/crawl/templates/…`,
+/// `crawl/templates/…`) that no longer exists. It has to keep working: the
+/// failure mode otherwise is "no such file" on the first crawl of a book that
+/// was fine yesterday.
 ///
-/// The fallback is by **basename only** and only for a path that missed, so it
-/// cannot shadow a real file and cannot turn a bare name into a bundled one.
+/// The fallback is by **basename only**, into `crawlers/known/` and
+/// `crawlers/examples/`, and only for a path that missed — so it cannot shadow a
+/// real file and cannot turn a bare name into a bundled one.
 #[test]
 fn a_settings_file_naming_the_pre_move_path_still_finds_its_crawler() {
     let dir = std::env::temp_dir().join(format!("bm-move-{}-{}", std::process::id(), line!()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("assets/crawl/templates")).unwrap();
+    std::fs::create_dir_all(dir.join("crawlers/known")).unwrap();
     std::fs::create_dir_all(dir.join("workspaces/book")).unwrap();
     std::fs::create_dir_all(dir.join(".bm")).unwrap();
     std::fs::write(dir.join(".bm/active-workspace"), "book\n").unwrap();
-    std::fs::write(dir.join("assets/crawl/templates/storya.lua"), "moved").unwrap();
+    std::fs::write(dir.join("crawlers/known/storya.lua"), "moved").unwrap();
     let layout = Layout::resolve(&dir).unwrap();
 
-    // The old spelling resolves to where the file went…
-    let picked = resolve_script(&layout, "assets/crawl/templates/storya.lua")
-        .expect("the pre-move path must still find the bundled crawler");
-    assert_eq!(picked, dir.join("assets/crawl/templates/storya.lua"));
-    // …and so does the current one.
-    assert_eq!(
-        resolve_script(&layout, "assets/crawl/templates/storya.lua").unwrap(),
-        picked
-    );
+    // The old spellings resolve to where the file went…
+    for old in [
+        "assets/crawl/templates/storya.lua",
+        "crawl/templates/storya.lua",
+    ] {
+        let picked = resolve_script(&layout, old)
+            .unwrap_or_else(|| panic!("the pre-move path {old} must still find the bundled crawler"));
+        assert_eq!(picked, dir.join("crawlers/known/storya.lua"), "{old}");
+    }
     // A basename alone is still not a lookup: it must not silently become a
     // bundled crawler, because a typo would then run someone else's script.
     assert_eq!(resolve_script(&layout, "storya.lua"), None);
-    // And a path that moved nowhere stays missing rather than guessing.
+    // And a path whose basename is nowhere stays missing rather than guessing.
     assert_eq!(resolve_script(&layout, "assets/crawl/nosuchsite.lua"), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The crawlers are the **adapter's** now. With a language bundle unpacked, the
-/// language's `crawl/` is a scope the resolver walks, and its `templates/` is
-/// the bundled directory a bare-ish name falls back to — while the pack's
-/// pre-split `assets/crawl/` is only reached by a checkout that has no bundle.
+/// The crawlers are **global** now: `crawlers/` at the checkout root, the same
+/// for every adapter and every workspace. A book's own `crawl/` still shadows
+/// them — that is where a site nobody has written down yet lives.
 #[test]
-fn a_bundled_crawler_resolves_out_of_the_adapters_own_tree() {
-    let dir = std::env::temp_dir().join(format!("bm-adapter-crawl-{}", std::process::id()));
+fn the_global_crawlers_resolve_from_the_root_and_a_book_can_shadow_them() {
+    let dir = std::env::temp_dir().join(format!("bm-global-crawl-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("assets/crawl/templates")).unwrap();
-    std::fs::create_dir_all(dir.join("adapters/vi-VN/crawl/templates")).unwrap();
-    std::fs::write(dir.join("assets/crawl/templates/storya.lua"), "pack copy").unwrap();
-    std::fs::write(
-        dir.join("adapters/vi-VN/crawl/templates/storya.lua"),
-        "language copy",
-    )
-    .unwrap();
+    std::fs::create_dir_all(dir.join("crawlers/known")).unwrap();
+    std::fs::write(dir.join("crawlers/known/storya.lua"), "global copy").unwrap();
 
-    // A checkout with no bundle still reads the pack's — nothing on disk has
-    // changed meaning for it.
-    assert_eq!(Layout::new(&dir).crawl_scripts(), dir.join("assets/crawl"));
-
-    let named = Layout {
-        adapter: "vi-VN".into(),
-        ..Layout::new(&dir)
-    };
-    assert_eq!(named.crawl_scripts(), dir.join("adapters/vi-VN/crawl"));
-
-    // A name relative to a scope resolves inside the language's own home…
-    std::fs::write(dir.join("adapters/vi-VN/crawl/site.lua"), "language").unwrap();
+    let layout = Layout::new(&dir);
+    assert_eq!(layout.crawl_scripts(), dir.join("crawlers"));
+    // The registry spelling resolves straight out of the root…
     assert_eq!(
-        resolve_script(&named, "crawl/site.lua").unwrap(),
-        dir.join("adapters/vi-VN/crawl/site.lua")
+        resolve_script(&layout, "crawlers/known/storya.lua").unwrap(),
+        dir.join("crawlers/known/storya.lua")
     );
-    // …and the bundled lookup goes to the language's `templates/` rather than
-    // the pack's.
+
+    // …and a book's own crawler shadows a global one of the same name, because
+    // `work` is searched before the root.
+    std::fs::create_dir_all(dir.join("crawl")).unwrap();
+    std::fs::write(dir.join("crawl/site.lua"), "book copy").unwrap();
     assert_eq!(
-        resolve_script(&named, "templates/storya.lua").unwrap(),
-        dir.join("adapters/vi-VN/crawl/templates/storya.lua")
+        resolve_script(&layout, "crawl/site.lua").unwrap(),
+        dir.join("crawl/site.lua")
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1635,9 +1689,9 @@ fn discover_builds_the_index_and_marks_the_tail_absent() {
     let _ = std::fs::remove_dir_all(&root);
     let layout = Layout::new(&root);
     layout.ensure().unwrap();
-    std::fs::create_dir_all(layout.crawl_scripts()).unwrap();
+    std::fs::create_dir_all(layout.crawlers_dir().join("known")).unwrap();
     std::fs::write(
-        layout.crawl_scripts().join("site.lua"),
+        layout.crawlers_dir().join("known/site.lua"),
         r#"
         function discover(input)
           local r = fetch(input.params.entry)
@@ -1659,7 +1713,7 @@ fn discover_builds_the_index_and_marks_the_tail_absent() {
     let settings = Settings {
         url_template: String::new(),
         crawl: CrawlSettings {
-            script: "assets/crawl/site.lua".into(),
+            script: "crawlers/known/site.lua".into(),
             params: [(
                 "entry".to_string(),
                 serde_json::json!(format!("{base}/book")),

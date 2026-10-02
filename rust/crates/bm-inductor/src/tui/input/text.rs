@@ -13,6 +13,7 @@ use crate::tui::{
     screen::{Screen, TextKind, TextPrompt},
     style::Level,
 };
+use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub(crate) async fn key_text(
@@ -21,7 +22,7 @@ pub(crate) async fn key_text(
     key: KeyEvent,
     http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     let mut p = prompt;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -44,7 +45,7 @@ pub(crate) async fn key_text(
                 app.screen = app.command_return.take().unwrap_or(Screen::Normal);
                 if buf.is_empty() {
                     app.set_status(Level::Info, "cancelled — nothing was submitted");
-                    return false;
+                    return Flow::KeepRunning;
                 }
                 // From here the prompt is spent, not stacked, and the command
                 // owns the keypress: anything it opens — `:m` raises a
@@ -77,11 +78,11 @@ pub(crate) async fn key_text(
                     }
                     Some(cmd) => {
                         do_command(app, cmd, http, job_tx);
-                        false
+                        Flow::KeepRunning
                     }
                     None => {
                         app.set_status(Level::Error, format!("unknown command :{buf} — try :help"));
-                        false
+                        Flow::KeepRunning
                     }
                 };
             }
@@ -206,6 +207,50 @@ pub(crate) async fn key_text(
                     }
                     Err(msg) => app.set_status(Level::Error, msg),
                 }
+            } else if p.kind == TextKind::Workspace {
+                // `new` or `new <name>` opens the guided flow: pick a profile,
+                // then how chapters arrive. A typed `--profile <id>` is the
+                // fast path and falls through to `submit_text`, which already
+                // validates the id against `profiles/presets.json`.
+                let buf = p.buf.trim();
+                if buf.is_empty() {
+                    // Nothing typed means "which book?" — so the books are
+                    // listed and chosen, each row saying what its directory
+                    // carries. Typing a name still switches, because that is
+                    // one keystroke and this is not the only way in.
+                    app.screen =
+                        Screen::WorkspaceList(crate::tui::screen::WsList::read(&app.layout.root));
+                    app.set_status(
+                        Level::Info,
+                        "workspace: ↑↓ to move, Enter to switch, Esc to close",
+                    );
+                    // Handled, so: not the main loop's exit.
+                    return Flow::KeepRunning;
+                }
+                let guided = if buf == "new" {
+                    Some(String::new())
+                } else if let Some(rest) = buf.strip_prefix("new ") {
+                    (!rest.contains("--profile")).then(|| rest.trim().to_string())
+                } else {
+                    None
+                };
+                match guided {
+                    Some(name) => {
+                        let profiles = super::workspace_new::preset_items(&app.layout.root);
+                        app.screen = Screen::WorkspaceNew(
+                            crate::tui::screen::WorkspaceNew::new(name, profiles),
+                        );
+                        app.set_status(Level::Info, "workspace: pick a name, then a profile");
+                    }
+                    None => match submit_text(app, &p) {
+                        Ok(job) => {
+                            app.set_status(Level::Ok, format!("submitted: {}", buf));
+                            app.screen = Screen::Normal;
+                            dispatch(app, job_tx, job);
+                        }
+                        Err(msg) => app.set_status(Level::Error, msg),
+                    },
+                }
             } else {
                 match submit_text(app, &p) {
                     Ok(job) => {
@@ -241,5 +286,5 @@ pub(crate) async fn key_text(
     if matches!(app.screen, Screen::Text(_)) {
         app.screen = Screen::Text(p);
     }
-    false
+    Flow::KeepRunning
 }

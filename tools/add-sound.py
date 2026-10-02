@@ -197,6 +197,12 @@ def render_member(key, entry, pool_kind, kind, ind):
             return f'{pad2}"{name}": [\n{body}\n{pad2}]'
         lines.append(arr("tags", entry["tags"]) + ",")
         lines.append(arr("files", entry["files"]) + ",")
+        if pool_kind == "place":
+            # a bed writes `looped` only when it is not the default
+            if not entry.get("looped", True):
+                lines.append(arr("looped", ["false"]))
+            lines[-1] = lines[-1].rstrip(",")
+            return "\n".join(lines) + f"\n{pad}}}"
         lines.append(f'{pad2}"mode": "{entry["mode"]}",')
         if entry.get("hold") is not None:
             lines.append(f'{pad2}"hold": {entry["hold"]},')

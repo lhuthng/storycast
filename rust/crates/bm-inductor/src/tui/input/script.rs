@@ -26,6 +26,7 @@ use crate::tui::{
     screen::{Screen, ScriptPick, ScriptView},
     style::Level,
 };
+use crate::tui::input::Flow;
 use bm_proto::{Op, OpRequest};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -35,7 +36,7 @@ pub(crate) async fn key_script(
     key: KeyEvent,
     http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
 
@@ -140,7 +141,7 @@ pub(crate) async fn key_script(
             v.pick = Some(pick);
         }
         app.screen = Screen::Script(v);
-        return false;
+        return Flow::KeepRunning;
     }
 
     // ---- depth 2: the open chapter's segments -------------------------------
@@ -156,7 +157,7 @@ pub(crate) async fn key_script(
                 v.seg_cursor = 0;
                 app.screen = Screen::Script(v);
                 app.set_status(Level::Info, format!("back to the chapter list (ch{ch} left as read)"));
-                return false;
+                return Flow::KeepRunning;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 v.seg_cursor = v.seg_cursor.saturating_sub(1);
@@ -219,7 +220,7 @@ pub(crate) async fn key_script(
             _ => {}
         }
         app.screen = Screen::Script(v);
-        return false;
+        return Flow::KeepRunning;
     }
 
     // ---- depth 1: the chapter list ------------------------------------------
@@ -233,7 +234,7 @@ pub(crate) async fn key_script(
             // digest manager's Esc arm documents.
             app.screen = app.back_out();
             app.set_status(Level::Info, "closed the script window");
-            return false;
+            return Flow::KeepRunning;
         }
         KeyCode::Up | KeyCode::Char('k') => v.cursor = v.cursor.saturating_sub(1),
         KeyCode::Down | KeyCode::Char('j') => v.cursor = (v.cursor + 1).min(last),
@@ -280,5 +281,5 @@ pub(crate) async fn key_script(
     // so a change that shrinks the list can leave it past the end.
     v.cursor = v.cursor.min(v.rows().len().saturating_sub(1));
     app.screen = Screen::Script(v);
-    false
+    Flow::KeepRunning
 }

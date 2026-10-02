@@ -398,6 +398,7 @@ fn plan_turns(
 /// before takes were content-addressed.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble(
+    layout: &crate::Layout,
     script_path: &Path,
     cast_path: &Path,
     bible_path: &Path,
@@ -411,8 +412,16 @@ pub fn assemble(
     assets: &Path,
     takes: Option<&[String]>,
 ) -> Result<PathBuf> {
-    let policy = crate::cast::policy_for_bible(engine);
-    let cast = crate::cast::load_cast(script_path, cast_path, bible_path, &policy, false)?;
+    let policy = crate::cast::policy_for_bible(engine, layout);
+    let installed = crate::pool::installed_voices(layout);
+    let cast = crate::cast::load_cast(
+        script_path,
+        cast_path,
+        bible_path,
+        &policy,
+        installed.as_ref(),
+        false,
+    )?;
     let text = std::fs::read_to_string(script_path)
         .with_context(|| format!("reading {}", script_path.display()))?;
     let data: Value = serde_json::from_str(&text)?;

@@ -15,6 +15,7 @@ use crate::tui::{
     screen::{Confirm, ConfirmAction, PickStage, Picker, Screen, TextKind, TextPrompt},
     style::Level,
 };
+use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Last valid cursor for the rows on screen right now, per stage.
@@ -35,7 +36,7 @@ pub(crate) async fn key_picker(
     key: KeyEvent,
     http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     let mut p = picker;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -259,5 +260,5 @@ pub(crate) async fn key_picker(
         }
         _ => {}
     }
-    false
+    Flow::KeepRunning
 }

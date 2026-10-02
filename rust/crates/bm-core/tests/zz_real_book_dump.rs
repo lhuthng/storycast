@@ -29,10 +29,10 @@ fn crawl_a_real_book() {
         engine: "lua".into(),
         script: "epub.lua".into(),
         source: std::fs::read_to_string(format!(
-            "{}/../../../samples/crawl/epub.lua",
+            "{}/../../../crawlers/examples/epub.lua",
             env!("CARGO_MANIFEST_DIR")
         ))
-        .expect("samples/crawl/epub.lua"),
+        .expect("crawlers/examples/epub.lua"),
         params: serde_json::Map::new(),
         ..Default::default()
     };

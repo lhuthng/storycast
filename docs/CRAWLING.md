@@ -4,7 +4,45 @@
 
 *You can stop reading after this section. The rest is for writing a crawler.*
 
-There is one command that matters, and it is not the crawler:
+**A book that is already a file needs none of this.** `crawlers/examples/epub.lua`
+reads a local EPUB — no URL, no listing page, no site to refuse you. A preset
+can wire it in at creation (`crawler` in `profiles/presets.json`); the shipped
+`jnovel-en` names `custom`, so the guided create flow's **Local file (EPUB)**
+choice (or a copy into the workspace once) is how a book starts:
+
+```sh
+bm-inductor workspace new my-book --profile jnovel-en
+# …or point settings at the global example, which is what the picker does:
+#   "crawl": { "mode": "script", "script": "crawlers/examples/epub.lua" }
+cp somewhere/book.epub workspaces/my-book/tmp/book.epub
+bm-inductor crawl --start 1 --count 40      # into data/chapters/, no cluster
+```
+
+`crawl` is the worker's own fetch run here: the workspace's crawler, the same
+chapter index a run builds, and each chapter at `data/chapters/chNN.txt` where
+the digest and the cluster find them. An EPUB crawl does no network at all.
+
+**Several volumes: point it at a folder.** Name a directory in `params.books`
+instead of one file, and every `.epub` directly inside it is one volume, ordered
+by file name — so name them `vol-01.epub`, `vol-02.epub`. The volumes are
+numbered as **one book**: `ch01.txt` is the first chapter of the first volume
+and the count runs straight through, which is what the pipeline's dense chapter
+index needs. Each entry in `data/crawl-index.json` then carries a locator saying
+which volume and which spine range it is, so reading a chapter is a lookup into
+one file rather than a re-walk of the library.
+
+```json
+// workspaces/my-book/settings.json
+"crawl": { "mode": "script", "script": "crawlers/examples/epub.lua",
+           "params": { "books": "books" } }
+```
+
+Because the chapter tree lives on this disk and not on a server, the index
+fingerprint includes a digest of the books' **bytes** as well as the settings.
+Swap a volume in place and the tree rebuilds by itself; there is no stale index
+to delete. Only files inside the workspace are read.
+
+For a site, there is one command that matters, and it is not the crawler:
 
 ```bash
 bm-inductor check https://your-site.example/book/chapter-1
@@ -32,7 +70,7 @@ What it says, and what it means:
 If it says `ok` and the site is not one it knows, you need a crawler: a small
 file that says which part of the page is the text. §4 below is a brief you can
 paste straight into an AI chat together with a saved copy of the page, and it
-comes back with a working one. `assets/crawl/templates/` has five crawlers to
+comes back with a working one. `crawlers/known/` has five crawlers to
 start from, four of them written against a page captured from the live site
 they are for.
 
@@ -129,7 +167,7 @@ heuristics. That covered exactly one shape of site. Real ones come in two:
    something has to read an index page and follow links.
 
 So crawling is now a **script** the operator supplies, and the rules the old
-Rust crawler hardcoded now live in the bundled `assets/crawl/templates/storya.lua`: which
+Rust crawler hardcoded now live in the bundled `crawlers/known/storya.lua`: which
 element holds the prose, where the body starts, which lines are the site's
 chrome. Rust's part of this is "run `crawl`, take the text", nothing else.
 Nothing about the pipeline downstream changed either: the invariant
@@ -245,7 +283,8 @@ Two properties worth knowing:
 
 * **A generated index is reused, not rebuilt.** A bot hitting the site once per
   run is a bot that gets banned; the fingerprint (engine + script + params +
-  template + range) is what decides whether a rebuild is needed.
+  template + range, plus a digest of any local book the crawl reads) is what
+  decides whether a rebuild is needed.
 * **A frozen index is what makes pagination safe.** Append a chapter to a
   paginated listing and every `n` after it re-maps to its neighbour. Per-chapter
   discovery would silently crawl the wrong chapter for half a book; a frozen
@@ -396,34 +435,36 @@ Then tune by evidence, not by reading code: run it, and let the outputs argue.
   numbered copy in the script, the host's boundary drops the common shapes, but
   your page may have a fifth.
 * Save the wrong page beside `rust/fixtures/crawl/` and diff: the failure is a
-  selector, not a mystery.
-
-Put the file in the workspace, `workspaces/<name>/crawl/mysite.lua`, not in
-`assets/crawl/`: it is then per-book, survives profile switches, syncs to every
-worker with the next provision, and drifts the provision stamp when edited.
+  selector, not a mystery.Put a site nobody has written down yet in the workspace,
+`workspaces/<name>/crawl/mysite.lua`, not in the global `crawlers/` tree: it is
+then per-book, survives profile switches, syncs to every worker with the next
+provision, and drifts the provision stamp when edited. (A crawler for a site the
+project ships belongs in `crawlers/known/`, where every book can select it.)
 Point `crawl.script` at it (`"script": "crawl/mysite.lua"`) and set
 `"mode": "script"`, **manual is the default mode**, so nothing fetches until a
 workspace asks for it.
 
 ---
 
-## 5. The bundled crawlers
+## 5. The global crawlers
 
-This one directory is the only part of `assets/` that is tracked in git, and
-it has to be: `crawl.script` defaults to one of these files, and a crawler that
-is not on disk is **not an error**, the lookup finds nothing and the crawl
-quietly runs without selectors. So a fresh clone has all six of them without
-fetching a profile. (`git check-ignore assets/scene-map.json` says ignored;
-`git check-ignore assets/crawl/templates/storya.lua` says nothing.)
+The `crawlers/` tree is tracked in git, and it has to be: it holds the registry
+(`crawlers/knownsites.json`), the known-site crawlers (`crawlers/known/`) and
+the unknown-structure examples (`crawlers/examples/`). A crawler that is not on
+disk is **not an error** — the lookup finds nothing and the crawl quietly runs
+without selectors — so a clone that did not ship them could not crawl at all
+and would say nothing about why. Every workspace selects from this one tree, and
+`DEFAULT_SCRIPT` is one of its files. (`git check-ignore assets/scene-map.json`
+says ignored; `git check-ignore crawlers/known/storya.lua` says nothing.)
 
 | file | what it is |
 | --- | --- |
-| `assets/crawl/templates/storya.lua` | the crawler the pipeline shipped before scripted crawls existed, kept for the migration: the old Rust crawl, moved into a script. Fetch `input.url`, lift the body out of the page with the rules in its `SITE` table, classify the status. **Not a default**, a new workspace names no crawler at all; this is what a pre-`crawl` `settings.json` still points at |
-| `assets/crawl/templates/storya.js` | the same crawler in JavaScript, the second engine as a working example, not a claim |
-| `assets/crawl/templates/madara.lua` | a **listing** site: `discover` walks the index (paginated, `next` link), `crawl` extracts with selectors and falls back to `readable()` |
-| `assets/crawl/templates/truyencom.lua` | the **easy** shape: the chapter URL is a function of `n`, so a `url_template` is the whole crawler. Read this one first |
-| `assets/crawl/templates/readnovelfull.lua` | the **slug** shape: the number *is* in the URL but is not the last thing, so nothing can template it, and the book's own index stops at 30 chapters, so `discover` walks the `next_chap` chain |
-| `assets/crawl/templates/webnovel.lua` | the **hard** shape: slug URLs, the container one level deeper than the obvious one, a paid-chapter flag, and a site behind a bot check |
+| `crawlers/known/storya.lua` | the crawler the pipeline shipped before scripted crawls existed, kept for the migration: the old Rust crawl, moved into a script. Fetch `input.url`, lift the body out of the page with the rules in its `SITE` table, classify the status. **Not a default**, a new workspace names no crawler at all; this is what a pre-`crawl` `settings.json` still points at |
+| `crawlers/known/storya.js` | the same crawler in JavaScript, the second engine as a working example, not a claim |
+| `crawlers/known/madara.lua` | a **listing** site: `discover` walks the index (paginated, `next` link), `crawl` extracts with selectors and falls back to `readable()` |
+| `crawlers/known/truyencom.lua` | the **easy** shape: the chapter URL is a function of `n`, so a `url_template` is the whole crawler. Read this one first |
+| `crawlers/known/readnovelfull.lua` | the **slug** shape: the number *is* in the URL but is not the last thing, so nothing can template it, and the book's own index stops at 30 chapters, so `discover` walks the `next_chap` chain |
+| `crawlers/known/webnovel.lua` | the **hard** shape: slug URLs, the container one level deeper than the obvious one, a paid-chapter flag, and a site behind a bot check |
 
 ### The three worked examples
 
@@ -501,13 +542,13 @@ check before you rely on any of them; bot policies move.
 | site | a chapter | template | note |
 | --- | --- | --- | --- |
 | **`storya.click`** | ✅ 11.8 KB, 117 ¶ | `storya.lua` | the site the pipeline was built for. Live and unchallenged. **Do not confuse it with `storya.vn`, which is NXDOMAIN** |
-| `truyencom.com` | ✅ 13.4 KB, 77 ¶ | `templates/truyencom.lua` | the easy shape; no bot check |
-| `readnovelfull.com` | ✅ 8.8 KB, 154 ¶ | `templates/readnovelfull.lua` | works; the URL carries a title slug, so `discover` walks the `next_chap` chain instead |
+| `truyencom.com` | ✅ 13.4 KB, 77 ¶ | `known/truyencom.lua` | the easy shape; no bot check |
+| `readnovelfull.com` | ✅ 8.8 KB, 154 ¶ | `known/readnovelfull.lua` | works; the URL carries a title slug, so `discover` walks the `next_chap` chain instead |
 | `truyenfull.vn` | ❌ 200 interstitial | *none* | redirects to `truyenfull.live`, which serves a Cloudflare interstitial **as 200**, the case a status check cannot see |
 | `lightnovel.vn` | ❌ 22 bytes | *none* | a Next.js SPA; the reader is `hub.lightnovel.vn/reader?book=…` and the text arrives via JavaScript. `js_required`, and nothing here runs JavaScript |
 | `novelfull.com` | ❌ 403 | *none* | Cloudflare on the front page too |
 | `truyenthanh.vn` | ❌ 500 | *none* | upstream broken |
-| `webnovel.com` | ❌ 403 | `templates/webnovel.lua` | Cloudflare; cookie-only. The template is verified against captured pages and **cannot be run** |
+| `webnovel.com` | ❌ 403 | `known/webnovel.lua` | Cloudflare; cookie-only. The template is verified against captured pages and **cannot be run** |
 
 **A note on the Storya domain, because it is an easy mistake.** `storya.vn` no
 longer resolves, but the site has not gone anywhere: it is at **`storya.click`**,
@@ -539,10 +580,10 @@ no Rust, no rebuild, and the provision stamp moves, so every worker picks the
 new crawler up.
 
 Start from the template and copy it where the book can own it, a workspace
-directory, not the shared profile tree (see the next section):
+directory, not the global tree (see the next section):
 
 ```bash
-cp assets/crawl/templates/madara.lua workspaces/<name>/crawl/mysite.lua
+cp crawlers/known/madara.lua workspaces/<name>/crawl/mysite.lua
 ```
 
 ```json
@@ -557,10 +598,9 @@ selectors live at the top of the script, in one table.
 
 ### Per-workspace crawlers
 
-`assets/crawl/` is the **profile's**: every workspace on the root sees it, and
-`:profile load` replaces it wholesale, a crawler edited there is one profile
-switch away from vanishing. A book whose site needs its own crawler therefore
-lives in the workspace instead:
+`crawlers/` is **global**: every workspace on the root sees it, and a preset's
+`crawler` descriptor selects one. A book whose site needs its own crawler — a
+site nobody has written down yet — therefore lives in the workspace instead:
 
 ```
 workspaces/<name>/crawl/mysite.lua
@@ -569,23 +609,22 @@ workspaces/<name>/crawl/mysite.lua
 Resolution order for `crawl.script`, first existing file wins:
 
 1. `workspaces/<active>/crawl/<name>`, this book's own crawler;
-2. `<name>` from the root, so `assets/crawl/…` still names the profile's;
-3. `<name>` from `assets/`.
+2. `<name>` from the checkout root, so `crawlers/known/…` and
+   `crawlers/examples/…` name the global tree;
+3. `<name>` from the adapter's own home, then `assets/` (legacy scopes).
 
-A same-named file in the workspace **shadows** the profile's, so one workspace
+A same-named file in the workspace **shadows** the global one, so one workspace
 can retarget `crawl/site.lua` for its own site while the rest of the cluster
 keeps the shipped crawler, and switching workspaces switches crawlers with no
 edit at all, because each workspace's directory is searched first.
 
-**It reaches the machines.** A box whose work policy runs **crawl** is sent
-`workspaces/<active>/crawl/` and every language's own crawlers —
-`adapters/<name>/crawl/`, or the pack's `assets/crawl/` in a checkout that has
-no adapter trees yet — inside the sources bundle, and the bundle's manifest
-hashes every file in them, so an edit is drift and a removed crawler is cleared
-by the prune-then-extract that takes delivery. Edit the script, run `:prov` (or
-wait for the next one), and the cluster crawls through the new bytes — the same
-guarantee the profile's `assets/crawl/` has always had. A box with crawl turned
-off gets none of them, and no other stage opens the directory.
+**It reaches the machines.** A box whose work policy runs **crawl** is sent the
+global `crawlers/` tree *and* `workspaces/<active>/crawl/` inside the sources
+bundle, and the bundle's manifest hashes every file in them, so an edit is drift
+and a removed crawler is cleared by the prune-then-extract that takes delivery.
+Edit the script, run `:prov` (or wait for the next one), and the cluster crawls
+through the new bytes. A box with crawl turned off gets none of them, and no
+other stage opens the directory.
 
 Without an active workspace (legacy mode) the root *is* the workspace, so its
 directory is `<root>/crawl/`, the same path on both sides.
@@ -606,13 +645,16 @@ directory is `<root>/crawl/`, the same path on both sides.
 | `crawl.max_seconds` | `180` | per chapter, interpreter included |
 | `crawl.max_fetches` | `64` | round trips per chapter |
 
-`url_template` is unchanged and still the built-in mapping. **A workspace that
-predates the whole `crawl` block needs no edit**: an absent block means an *old*
-workspace, which keeps `mode: script` and the bundled Storya crawler, the same
-URL the old Rust path expanded, asserted byte-identical by the fixture test. The
-manual default applies to workspaces created now, whose settings name no site
-yet; the wrong default there would fetch *something* the first time `:translate`
-ran, and there is no site it could have been the right thing for.
+A workspace's own `url_template` is unchanged and is still the book's mapping.
+**A workspace that predates the whole `crawl` block needs no edit**: an absent
+block means an *old* workspace, which keeps `mode: script` and the bundled
+Storya crawler, the same URL the old Rust path expanded, asserted byte-identical
+by the fixture test. **A workspace created now names no site at all** —
+`url_template` defaults to empty and `crawl.mode` to `manual`, because the wrong
+default would fetch *something* the first time `:translate` ran and there is no
+site it could have been the right thing for. (It used to default to the
+`beyond-myriads` URL, so every new workspace silently pointed at that one book
+and its digest wrote that book's cast and bible into the new one.)
 
 `crawl.params` is opaque to the host with exactly **one** exception, and it is
 for the workspace with no script at all:
@@ -741,7 +783,7 @@ https://readnovelfull.com/the-sword-god-of-the-universe.html
   ok: 4312 bytes of prose in 159 paragraph(s) under "The Sword God of the Universe"
 
   known site: readnovelfull.com
-    crawler: assets/crawl/templates/readnovelfull.lua
+    crawler: crawlers/known/readnovelfull.lua
     shape:   `/{book}/chapter-{n}-{title-slug}.html`, the number is in the
                 URL but not last, so nothing can invent the slug. The book
                 page also lists only the first ~30 chapters with no
@@ -750,7 +792,7 @@ https://readnovelfull.com/the-sword-god-of-the-universe.html
         "url_template": "",
         "crawl": {
           "mode": "script",
-          "script": "assets/crawl/templates/readnovelfull.lua",
+          "script": "crawlers/known/readnovelfull.lua",
           "params": {
             "book": "https://readnovelfull.com/the-sword-god-of-the-universe.html"
           },
@@ -769,7 +811,7 @@ shows the host, the crawler and the one fact that decides what you do next,
 above the input line:
 
 ```
-known site · readnovelfull.com · crawler assets/crawl/templates/readnovelfull.lua · no {n} in its URLs: submit empty and set crawl.script
+known site · readnovelfull.com · crawler crawlers/known/readnovelfull.lua · no {n} in its URLs: submit empty and set crawl.script
 ```
 
 and pressing Enter on a URL with no `{n}` in it, which the prompt otherwise
@@ -777,7 +819,7 @@ refuses, correctly, names the crawler and the way through instead of saying
 `must contain {n}` a second time:
 
 ```
-readnovelfull.com is known: its crawler is assets/crawl/templates/readnovelfull.lua, its
+readnovelfull.com is known: its crawler is crawlers/known/readnovelfull.lua, its
 chapter URLs carry a title slug, so there is no chapter-number template to write. Submit an
 empty line to probe, then set "crawl"."script" to that path (and "crawl"."params"."book" to
 this URL).

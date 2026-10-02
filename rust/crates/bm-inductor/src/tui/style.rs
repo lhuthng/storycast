@@ -475,26 +475,31 @@ pub(crate) fn stage_count_cell(colour: bool, stage: &str, n: u64) -> Line<'stati
 /// the light shade. Ten columns of `█░` can only move in 10% steps; these
 /// partial glyphs make the same width read in ~2% steps, so a bar that is
 /// "almost done" looks almost done.
-pub(crate) fn bar(frac: f32, width: usize) -> String {
+///
+/// Returned in **two pieces** — the work done and the empty track — because they
+/// are drawn in different colours: the caller tints the filled part with the
+/// task's own hue and leaves the track dim, so a bar reads as progress rather
+/// than as a coloured block with a bit missing. Concatenating the two gives
+/// the same string this always drew.
+pub(crate) fn bar_parts(frac: f32, width: usize) -> (String, String) {
     const EIGHTHS: [char; 7] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉'];
     let frac = frac.clamp(0.0, 1.0) as f64;
     let exact = frac * width as f64;
     let full = exact.floor() as usize;
-    let rest = exact - full as f64;
-    let mut out = String::with_capacity(width * 3);
-    out.push_str(&"█".repeat(full));
-    if full < width {
-        // The remainder in eighths, rounded; zero remainder is the light
-        // shade, never a stray one-eighth tick.
-        if rest <= 0.0 {
-            out.push('░');
-        } else {
-            let eighths = ((rest * 8.0).round() as usize).clamp(1, 7);
-            out.push(EIGHTHS[eighths - 1]);
-        }
-        out.push_str(&"░".repeat(width - full - 1));
+    let mut done = String::with_capacity(width * 3);
+    done.push_str(&"█".repeat(full));
+    if full >= width {
+        return (done, String::new());
     }
-    out
+    // The remainder in eighths, rounded; a zero remainder is left to the track,
+    // never a stray one-eighth tick.
+    let rest = exact - full as f64;
+    if rest > 0.0 {
+        let eighths = ((rest * 8.0).round() as usize).clamp(1, 7);
+        done.push(EIGHTHS[eighths - 1]);
+    }
+    let track = width - done.chars().count();
+    (done, "░".repeat(track))
 }
 
 /// A pane's "nothing here yet" body: centred, dim, and always actionable.

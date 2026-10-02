@@ -47,8 +47,57 @@ path = "src/bin/check.rs"
 name = "bm-tts-render"
 path = "src/bin/render.rs"
 
+[features]
+# Pocket TTS is a pure-Rust Candle port, but it is not free: it drags in
+# candle-core/-nn/-transformers, hf-hub, rubato and a *second* copy of
+# `tokenizers` (the crate pins 0.21, while this workspace already ships 0.23.2
+# for VieNeu, and 0.x versions are semver-incompatible so both get compiled).
+# A workspace that renders with VieNeu should not pay for any of that, so the
+# engine is opt-in and off by default:
+#
+#     cargo build --features pocket
+#
+# A ready-to-run binary is what `--features pocket` produces; without it,
+# `bm-tts` is VieNeu-only and `bundle.json`/`pocket.safetensors` are not
+# recognised at all.
+pocket = [
+    "dep:pocket-tts",
+    "dep:candle-core",
+    "dep:tempfile",
+    "dep:realfft",
+    # `pocket-tts` -> `hf-hub` -> `reqwest` (default features) -> `native-tls`
+    # -> `openssl-sys`, and Cargo unifies features additively, so no flag on
+    # `reqwest` can turn that off from here. Unvendored, the Linux cross-build
+    # (`make tts`, which provisioning runs for every remote box) dies in
+    # openssl-sys's build script: there is no Linux OpenSSL to find from a
+    # macOS host, and the failure reads as a missing library rather than as the
+    # build configuration it is. `vendored` makes openssl-sys compile its own
+    # OpenSSL through `cc`, which zigbuild already cross-compiles with, so the
+    # cross-build needs nothing staged and nothing installed — and the binary
+    # it produces no longer needs libssl on the box at all.
+    "dep:openssl-sys",
+]
+
 [dependencies]
 anyhow = { workspace = true }
+
+# The Pocket TTS runtime. Optional — see the `pocket` feature above.
+pocket-tts = { version = "0.6.2", optional = true }
+# Only for `Tensor`/`Device`, which `pocket-tts` re-exports in its API surface.
+candle-core = { version = "0.9.1", optional = true }
+# Staging the config the crate resolves relative to the cwd, in a directory
+# that removes itself. Already a dev-dependency; only the `pocket` feature
+# needs it at runtime.
+tempfile = { workspace = true, optional = true }
+# A real-input FFT for the clone-source denoiser. `pocket-tts` already pulls
+# realfft in transitively (via rubato), so this costs no new code in the tree.
+realfft = { version = "3.5", optional = true }
+# A feature lever, not code: `pocket-tts` reaches `openssl-sys` through
+# `hf-hub`, and the only way to make it build its own OpenSSL instead of
+# looking for one is to enable `vendored` on it. Features are additive across
+# the graph, so declaring it here covers the one `openssl-sys` everything
+# shares. Nothing in this crate imports it.
+openssl-sys = { version = "0.9", optional = true, features = ["vendored"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 axum = { workspace = true }

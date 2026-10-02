@@ -20,14 +20,18 @@ So a profile is now three pieces, each named and recorded separately:
 | Piece | What it is | Who makes it |
 | --- | --- | --- |
 | **Pack** (an *asset*) | The genre: music, effects, injects, the scene map | You, or a shipped bundle |
-| **Adapter** | The language: the prompts a stage renders from **and the crawlers it is read with** | You, or a shipped bundle |
+| **Adapter** | The language: the prompts a stage renders from | You, or a shipped bundle |
 | **Engine** | The voices: the weights, the binary, the voice store | Code — a new engine is a port |
 
-**In the tree.** The root's flat `prompts/` and the pack's `assets/crawl/` were
-moved into `adapters/vi-VN/` (`Layout::migrate_adapter_tree`, rename-only and
-idempotent), the binding now names the language, and provisioning ships the
-tree as one member. `LIVE_DIRS` is three names. What is left of
-[ASSETS.md](ASSETS.md) is the per-piece release split.
+**In the tree.** The root's flat `prompts/` moved into `adapters/vi-VN/`
+(`Layout::migrate_adapter_tree`, rename-only and idempotent), the binding now
+names the language, and provisioning ships the tree as one member. The crawlers
+are neither the adapter's nor the pack's: they are the **global** `crawlers/`
+tree (`crawlers/known/` for the registered sites, `crawlers/examples/` for the
+unknown-structure shapes, `crawlers/knownsites.json` for the registry), shared
+by every workspace and selected by a preset's `crawler` descriptor. `LIVE_DIRS`
+is three names. What is left of [ASSETS.md](ASSETS.md) is the per-piece release
+split.
 
 **The payoff.** A second language costs a pair of prompt files and, eventually,
 a second engine — not a second set of music. A second genre costs art and
@@ -65,7 +69,7 @@ back to a bundle.
 | Piece | Trees | Bytes |
 | --- | --- | --- |
 | Pack | `assets/` | **58 MB** |
-| Adapter | `prompts/` | **21 KB** (`analyze.txt` 4,985 + `script.txt` 15,930) |
+| Adapter | `prompts/` | **22 KB** (`analyze.txt` 4,985 + `script.txt` 15,930 + `repair.txt` 1,438) |
 | Engine | `engines/<name>/` — weights, binary, runtime, lexicon, voice store, clips | **1.0 GB** |
 
 What each actually holds:
@@ -630,6 +634,121 @@ and the flat tree does not travel beside it
 render writes under the offer's adapter rather than its own
 (`a_batched_offer_renders_every_take_it_carries`, with `Layout::rebind`'s own
 test for the mechanism).
+
+## Choosing a profile: presets and the workspace's own pack
+
+Creating a workspace used to mean inheriting whatever the checkout had loaded:
+`.bm/profile` was stamped into the new book's settings, and a second book
+wanting another pack, language or engine had to re-load the checkout, create,
+then load back. A **profile preset** is the data that removes the dance —
+`profiles/presets.json`, one named triple:
+
+```json
+"jnovel-en": {
+  "label": "JNovel (en) — no genre pack, PocketTTS, English EPub prompts",
+  "pack": "",
+  "pack_deps": ["common", "craft", "court-mystery"],
+  "adapter": "jnovel-en-US",
+  "engine": "pocket"
+}
+```
+
+```sh
+bm-inductor workspace new the-apothecary-diaries --profile jnovel-en
+```
+
+The dashboard's `:workspace` → `new <name>` is the same creation without the
+flags: it opens a guided screen that asks for the name, shows the presets to
+pick from, then asks how chapters arrive — **none**, a **local file (EPUB)**,
+one of the **known sites** whose bundled crawler is on this checkout, or a
+**custom site** whose chapter-URL template you type. The **local file** step
+takes a `.epub` (copied to the workspace's `tmp/book.epub`) or a **folder of
+volumes** (each `.epub` copied into its `books/`, numbered as one book). The
+chosen crawler is copied into the new workspace's own `crawl/`. `new <name>
+--profile <id>` skips the pickers and is the same fast path as the CLI.
+
+An empty `pack` with `pack_deps` set means the composition is named after the
+workspace itself, so the preset never claims a genre it does not have. A preset
+*may* name a `crawler`, which is copied into the workspace's own `crawl/` (the
+tree the crawler resolver searches first) and wired into settings — but none of
+the shipped presets does: a book's source is the operator's to set, not a
+default that follows from the language.
+
+The preset stamps the **workspace's own binding** (`settings.json`) from the
+triple. The checkout's `.bm/profile` is **never written** — a book created
+beside a running one cannot rebind the checkout under it, and switching between
+books stays `workspace use`. `workspace new` without `--profile` is unchanged:
+the loaded profile is inherited, which is every workspace that predates
+presets.
+
+**A workspace owns the material its preset declares, not a pointer to the
+checkout's.** A preset is a pack × adapter × engine triple, and each piece is
+created differently: the pack is **composed** (real files resolved from the
+linked deps), the preset's crawler is **copied** into the workspace's `crawl/`,
+and the adapter's home is **copied** in (`adapters/<adapter>/`, so a book's
+`prompts/` and `crawl/` resolve from the workspace, which
+`Layout::adapter_home` already searches first). Before this, one tree served
+every workspace on the root and a second book silently inherited the first one's
+language — `the-apothecary-diaries` read `beyond-myriads`' prompts because it had
+nothing of its own. **`workspace migrate <name>`** copies the adapter home into
+an existing workspace (additive — it never overwrites a file the book owns).
+
+**Voices are not a preset yet** — they arrive as bundles later. So a workspace
+created now gets none and reads none: `Layout::{voices_manifest, voice_pool,
+refs}` resolve to the workspace's own tree alone, never the checkout's, whose
+roster belongs to beyond-myriads and to no other book. A checkout root still
+reads its own, because those *are* its voices.
+
+A preset naming **`pack_deps`** composes the workspace's own pack — the
+workspace-pack shape ROADMAP §3 deferred to this. The deps (each an authored
+tree under `assets/_extends/`) are folded into
+`workspaces/<name>/assets/` at creation, and `Layout::assets()` reads the
+workspace's tree when it has one, the checkout's when it does not — the same
+work-first-then-checkout shape `prompts/` has had since the adapter split. Two
+books on one checkout therefore do not share a score: `beyond-myriads` scores
+from the checkout's `xianxia` tree, `the-apothecary-diaries` from its own
+`common + craft + court-mystery` composition, and neither resolve ever touches
+the other's files. The dependency trees are **symlinked** in, not copied — an
+input, never shipped and never hashed — while the resolved result is real files
+the workspace owns.
+
+The adapter and engine are stamped by name and claim, the adapter hashed over
+its home the way the load gate folds it; and `Layout::resolve` now reads the
+**active workspace's** binding for both, falling back to the checkout pointer
+piece by piece for any workspace whose binding does not name them — which is
+every workspace made before presets, so nothing existing changes behaviour. A
+preset like `xianxia-vi` (`pack: xianxia`, no `pack_deps`) names the checkout's
+live pack and shares it, which is the pre-preset shape stated as data instead
+of assumed by code.
+
+The two shipped presets are the two books: `xianxia-vi` (Xianxia Pack ·
+`vi-VN` prompts · VieNeu) and `jnovel-en` (a `common + craft + court-mystery`
+composition · `jnovel-en-US` prompts, written for translated light novels read
+out of EPUBs · Pocket TTS). Adding a third is adding a JSON block and, if the
+language is new, an adapter directory — no code.
+
+**Two books, one checkout.** The preset is what makes switching a non-event:
+`workspace use <book>` moves the pointer, and the next `serve` reads *that*
+book's binding, its own ledger and its own pack tree — `beyond-myriads` keeps
+the checkout's `xianxia` tree and its 4,812 tasks while
+`the-apothecary-diaries` runs its own composition and pocket engine, and
+neither boot changed the other's files. One inductor runs at a time (the
+control port is the lock), each boot is held until `:go`, and the sidecar
+loaded is the *book's* engine: the spawn command is engine-agnostic, the
+models directory says which engine it is (`bundle.json` = pocket), and a
+second engine's voices come from its own `voices.json` beside the bundle.
+
+**The pocket engine is wired end to end.** `bm-tts` serves either engine
+behind the same `/infer` contract: the sidecar sniffs the bundle, and the
+pocket backend ports the community ONNX runtime
+(`engines/pocket/reference/`) — text → `text_conditioner`, voice wav →
+`mimi_encoder` → conditioned LM states, per-frame `flow_lm_main`/`flow_lm_flow`
+with the 18 states fed back, `mimi_decoder` for audio. Weights are the
+`models-v99056bc351c6` release; a book's voices come from its
+`engines/pocket/models/voices.json`, which clones from 24 kHz reference wavs —
+the shipped keys cycle through converted clips from the user's `refs/` pool as
+*placeholders* until each key is enrolled (or pointed at one of Kyutai's gated
+predefined-voice files).
 
 ## Not built yet
 

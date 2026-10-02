@@ -125,4 +125,39 @@ mod tests {
         let (t, _s) = mood_take(&segs, &[0, 1]);
         assert_eq!(t, take_for_mood("urgent").0, "hottest mood must win");
     }
+
+    /// **The regression this table's range once caused.** Every temperature here
+    /// is 0.70 or above, and handed to pocket's flow model those come back as a
+    /// fraction of a second of unusable static on some seeds — so a whole chapter
+    /// was merged out of takes that were never speech, while sound effects and
+    /// music (which never pass through here) were fine. `EngineDecl::
+    /// max_temperature` is the clamp, and this asserts it is total for that
+    /// engine and invisible to the ones the table was written for.
+    #[test]
+    fn every_mood_temperature_is_speakable_by_every_declared_engine() {
+        use crate::voices::{clamp_temperature, ENGINES};
+        for (mood, wanted, _) in MOOD_TAKE {
+            assert!(
+                wanted >= 0.70,
+                "the table moved: {mood} is {wanted}, and the pocket measurement was \
+                 taken against this range — re-measure before widening the ceiling"
+            );
+        }
+        for engine in ENGINES {
+            let capped = clamp_temperature(engine.name, take_for_mood("urgent").0);
+            if engine.name == "pocket" {
+                assert_eq!(capped, 0.0, "pocket cannot take the table's range at all");
+            } else {
+                assert_eq!(
+                    capped,
+                    take_for_mood("urgent").0,
+                    "{} took the table as written",
+                    engine.name
+                );
+            }
+        }
+        // And the unknown engine is not the broken one: no ceiling, the way every
+        // other answer in `voices` treats a name it does not declare.
+        assert_eq!(clamp_temperature("whoever", 0.9), 0.9);
+    }
 }

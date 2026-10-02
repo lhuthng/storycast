@@ -56,7 +56,13 @@ impl Res {
 pub(crate) enum WorkspaceReq {
     List,
     Use(String),
-    New(String),
+    New {
+        name: String,
+        profile: Option<String>,
+        /// Built by the guided create flow: the crawler to seed the book with.
+        /// `None` falls back to the preset's own `crawler`.
+        crawler: Option<bm_core::preset::CrawlerSetup>,
+    },
 }
 
 /// What `:profile` was asked to do.
@@ -398,7 +404,7 @@ impl Job {
             Job::Workspace { req, .. } => match req {
                 WorkspaceReq::List => "list workspaces",
                 WorkspaceReq::Use(_) => "switch workspace",
-                WorkspaceReq::New(_) => "create workspace",
+                WorkspaceReq::New { .. } => "create workspace",
             },
             Job::Profile { req, .. } => match req {
                 ProfileReq::List => "list profiles",
@@ -1083,7 +1089,7 @@ pub(crate) async fn job_add_sample(
     // while. Same shape as the provision arm below.
     let for_log = path.clone();
     let out = tokio::task::spawn_blocking(move || {
-        bm_core::pool::add_sample(&layout.root, std::path::Path::new(&path), tags, name)
+        bm_core::pool::add_sample(&layout, std::path::Path::new(&path), tags, name)
     })
     .await;
     match out {
@@ -2377,9 +2383,20 @@ pub(crate) async fn job_workspace(
             Some(why) => Err(anyhow::anyhow!("{why}")),
             None => run(crate::WorkspaceCmd::Use { name }).await,
         },
-        WorkspaceReq::New(name) => match cluster_busy(&api).await {
+        WorkspaceReq::New {
+            name,
+            profile,
+            crawler,
+        } => match cluster_busy(&api).await {
             Some(why) => Err(anyhow::anyhow!("{why}")),
-            None => run(crate::WorkspaceCmd::New { name }).await,
+            None => {
+                run(crate::WorkspaceCmd::New {
+                    name,
+                    profile,
+                    crawler,
+                })
+                .await
+            }
         },
     };
     let switched = out.is_ok() && !listing;

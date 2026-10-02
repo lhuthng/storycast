@@ -3,7 +3,7 @@ use crate::tui::{
     app::{App, HitTarget, Panel},
     layout::COMPACT_WORKER_COLS,
     model::{beat_backed, live_beats, machine_name, reported_alias, short_activity},
-    style::{bar, cell, empty_body, stage_color, style_bold_of, style_of, worker_alias},
+    style::{bar_parts, cell, empty_body, stage_color, style_bold_of, style_of, worker_alias},
 };
 use ratatui::{
     layout::{Constraint, Rect},
@@ -87,8 +87,22 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &mut App, area: Rect, co
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "—".into());
                 let pct = (b.progress.clamp(0.0, 1.0) * 100.0).round() as u32;
-                let stage_line =
-                    Line::from(Span::styled(st.clone(), style_of(colour, stage_color(&st))));
+                let stage_style = style_of(colour, stage_color(&st));
+                let stage_line = Line::from(Span::styled(st.clone(), stage_style));
+                // The bar wears the task's own hue, so a cluster mid-render is a
+                // wall of cyan in the progress column too and not only in the
+                // stage name — the column becomes readable at a glance from
+                // across a room. Only the **filled** part is tinted: the track
+                // stays dim, so the bar reads as progress rather than as a
+                // coloured block with a hole in it.
+                let (done, track) = bar_parts(b.progress, 12);
+                let bar_line = Line::from(vec![
+                    Span::styled(done, stage_style),
+                    Span::styled(track, style_of(colour, Color::DarkGray)),
+                    // The number stays plain: it is the part an operator reads
+                    // exactly, and a hue on a figure buys nothing.
+                    Span::raw(format!(" {pct:>3}%")),
+                ]);
                 // The worker's own alias when it reports one (drawn once at
                 // startup, kept across restarts); the id hash otherwise, for older
                 // agents whose every restart renamed them.
@@ -104,11 +118,7 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &mut App, area: Rect, co
                 if !compact {
                     cells.push(cell(machine_name(&app.machines, b).to_string()));
                 }
-                cells.extend([
-                    stage_line,
-                    cell(ch),
-                    cell(format!("{} {:>3}%", bar(b.progress, 12), pct)),
-                ]);
+                cells.extend([stage_line, cell(ch), bar_line]);
                 // Box load from the heartbeat (`5.2%`, `38% 6.1G`) — a dash
                 // while the agent never measured (older agents, first beat).
                 // Full tier only: the compact tier has no room to spare.

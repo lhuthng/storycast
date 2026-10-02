@@ -1,5 +1,6 @@
 //! The jobs overlay: what the background lanes are actually doing, scroll only.
 use crate::tui::{app::App, screen::Screen};
+use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) async fn key_jobs(
@@ -7,7 +8,7 @@ pub(crate) async fn key_jobs(
     scroll: usize,
     previous: Screen,
     key: KeyEvent,
-) -> bool {
+) -> Flow {
     match key.code {
         // Tab closes what Tab opened — the same toggle shape the sound
         // editor's layer tabs use, so the key behaves the same everywhere.
@@ -40,5 +41,5 @@ pub(crate) async fn key_jobs(
         }
         _ => {}
     }
-    false
+    Flow::KeepRunning
 }

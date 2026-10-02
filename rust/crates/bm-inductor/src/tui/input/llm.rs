@@ -13,6 +13,7 @@ use crate::tui::{
     screen::{LlmView, Screen, TextKind, TextPrompt},
     style::Level,
 };
+use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// Open the screen, remembering where the cursor was.
@@ -140,12 +141,12 @@ pub(crate) async fn key_llm(
     key: KeyEvent,
     _http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     let cfg = bm_core::config::LlmConfig::load(&app.layout.root);
     let ids = LlmView::ids(&cfg);
     if ids.is_empty() {
         app.screen = Screen::Normal;
-        return false;
+        return Flow::KeepRunning;
     }
     let mut v = view;
     v.cursor = v.cursor.min(ids.len().saturating_sub(1));
@@ -266,7 +267,7 @@ pub(crate) async fn key_llm(
                     Level::Warn,
                     format!("{id} has no URL — set one with `u` first"),
                 );
-                return false;
+                return Flow::KeepRunning;
             }
             if !e.has_key() && cfg.kind_of(&id) != bm_core::config::LlmKind::Ollama {
                 app.screen = Screen::Llm(v);
@@ -274,7 +275,7 @@ pub(crate) async fn key_llm(
                     Level::Warn,
                     format!("{id} has no key — add one with `k` first"),
                 );
-                return false;
+                return Flow::KeepRunning;
             }
             app.llm_models.clear();
             app.llm_models_for = id.clone();
@@ -298,5 +299,5 @@ pub(crate) async fn key_llm(
             app.screen = Screen::Llm(v);
         }
     }
-    false
+    Flow::KeepRunning
 }

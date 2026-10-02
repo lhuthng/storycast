@@ -1,8 +1,9 @@
 //! Help: scroll only, any dismiss key closes.
 use crate::tui::{app::App, screen::Screen};
+use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 
-pub(crate) async fn key_help(app: &mut App, scroll: usize, key: KeyEvent) -> bool {
+pub(crate) async fn key_help(app: &mut App, scroll: usize, key: KeyEvent) -> Flow {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') | KeyCode::Enter => {
             app.screen = Screen::Normal;
@@ -23,5 +24,5 @@ pub(crate) async fn key_help(app: &mut App, scroll: usize, key: KeyEvent) -> boo
         }
         _ => {}
     }
-    false
+    Flow::KeepRunning
 }

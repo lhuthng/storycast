@@ -156,6 +156,25 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Fetch chapters into `data/chapters/` without a cluster.
+    ///
+    /// The worker's own crawl, run here: the workspace's crawler, the chapter
+    /// index built the way a run builds it, each chapter written to
+    /// `data/chapters/chNN.txt` — the file every later stage reads, so a
+    /// chapter fetched this way is a chapter the next serve offers digest and
+    /// render for. An EPUB crawl needs no network and no worker at all: the
+    /// book is already on this machine, and the crawler is a lookup into it.
+    Crawl {
+        /// First chapter.
+        #[arg(long, default_value_t = 1)]
+        start: u32,
+        /// How many chapters.
+        #[arg(long, default_value_t = 1)]
+        count: u32,
+        /// Rebuild the chapter index even when the fingerprint matches.
+        #[arg(long)]
+        force: bool,
+    },
     /// Backup digestor: run the digest here, while the cluster's digest has no
     /// quota, and hand every accepted chapter to a running inductor.
     ///
@@ -455,10 +474,32 @@ enum WorkspaceCmd {
     New {
         /// Workspace name, e.g. `beyond-myriads`.
         name: String,
+        /// A profile preset from `profiles/presets.json`, binding THIS
+        /// workspace to its pack × adapter × engine triple instead of
+        /// inheriting the checkout's loaded profile. A preset with `pack_deps`
+        /// composes the workspace's own pack from those roots, so two books on
+        /// one checkout do not share a score; the checkout's `.bm/profile` is
+        /// never touched.
+        #[arg(long)]
+        profile: Option<String>,
+        /// A crawler to seed the new workspace with. Not a CLI flag: the guided
+        /// create flow (the dashboard's `:workspace` → `new`) builds this, and
+        /// the CLI keeps the preset's own `crawler` as its whole story.
+        #[arg(skip)]
+        crawler: Option<bm_core::preset::CrawlerSetup>,
     },
     /// Switch the pointer to an existing workspace. Data follows the
     /// directory, so selecting never wipes.
     Use {
+        /// Workspace name.
+        name: String,
+    },
+    /// Give an existing workspace its own copy of the preset material it would
+    /// otherwise borrow — the adapter's `prompts/` and `crawl/`. Idempotent and
+    /// additive: it copies what the workspace does not already own and never
+    /// overwrites what it has, so a book's edited prompts cannot be clobbered.
+    /// Voices are not migrated: they are not a preset yet and are not shared.
+    Migrate {
         /// Workspace name.
         name: String,
     },
@@ -603,9 +644,16 @@ pub fn provision_machine(
             false,
         );
     }
-    let pointer = match bm_core::profile::read_pointer(&layout.root) {
-        Ok(p) => p,
-        Err(_) => {
+    // The binding **in force**, not the checkout pointer: a workspace's own
+    // pack travels in the bundle, and this is the line that has to agree with
+    // the pointer `provision` writes to the worker. An unset binding is the
+    // no-profile refusal, exactly as a missing pointer was.
+    let binding = match bm_core::profile::in_force(&layout)
+        .ok()
+        .filter(|b| !b.is_unset())
+    {
+        Some(b) => b,
+        None => {
             return stopped(
                 &mut log,
                 addr,
@@ -616,8 +664,8 @@ pub fn provision_machine(
     };
     log.push(format!(
         "[{addr}] profile: {} ({})",
-        pointer.name,
-        &pointer.hash[..12.min(pointer.hash.len())]
+        bm_core::profile::label(&binding),
+        &binding.pack.hash[..12.min(binding.pack.hash.len())]
     ));
     let binary = match agent_binary_for(pre.os.as_str(), pre.arch.as_str(), layout) {
         Ok(b) => b,
@@ -705,13 +753,15 @@ async fn cmd_serve(
     let drive_root = drive_layout.root.clone();
     let mut inner = state::Inner::new(layout, settings);
     // No profile, no run. A drifted live tree is adopted by verify
-    // (a `:sound` retune), not refused, only a missing pointer or an
-    // empty live tree stops us before touching the ledger.
-    let pointer = bm_core::profile::verify(&inner.layout.root)?;
+    // (a `:sound` retune), not refused, only a missing binding or an
+    // empty live tree stops us before touching the ledger. The binding is the
+    // one **in force** — the active workspace's, not the checkout's — so
+    // running one book neither reports nor re-stamps another's.
+    let binding = bm_core::profile::verify_layout(&inner.layout, Some(&inner.settings.engine))?;
     println!(
         "profile {} ({})",
-        pointer.name,
-        &pointer.hash[..12.min(pointer.hash.len())]
+        bm_core::profile::label(&binding),
+        &binding.pack.hash[..12.min(binding.pack.hash.len())]
     );
     // The cluster token, generated on first use and then stable across
     // restarts: a worker that outlived a restart must not be locked out, and
@@ -1051,11 +1101,25 @@ fn build_tts_binary(cand: &std::path::Path, layout: &Layout) -> anyhow::Result<(
         "bm-tts",
         "--bin",
         "bm-tts",
-        "--manifest-path",
-    ])
-    .arg(rust_dir.join("Cargo.toml"))
-    .env("ORT_LIB_LOCATION", &runtime)
-    .env("ORT_PREFER_DYNAMIC_LINK", "1")
+    ]);
+    // The engine's own cargo features, or the sidecar is built for the wrong
+    // engine. `pocket` is default-off, so without this the box gets a binary
+    // that boots, answers `/health` and then refuses its model tree on the
+    // first render — the same shape of failure as the missing weights, and
+    // much harder to read. Declared per engine in
+    // `voices::consts::EngineDecl::tts_features`; `make tts` reads the same
+    // fact.
+    let engine = bm_core::config::Settings::load(&layout.settings()).engine;
+    let features: Vec<&str> = bm_core::voices::tts_features(engine.trim())
+        .unwrap_or(&[])
+        .to_vec();
+    if !features.is_empty() {
+        cmd.arg("--features").arg(features.join(","));
+    }
+    cmd.arg("--manifest-path")
+        .arg(rust_dir.join("Cargo.toml"))
+        .env("ORT_LIB_LOCATION", &runtime)
+        .env("ORT_PREFER_DYNAMIC_LINK", "1")
     // A GUI launch (or a desktop shortcut) inherits a PATH without
     // `~/.cargo/bin`, and the linker is looked up by name from there.
     .env("PATH", path_with_shim(shim_dir));
@@ -1382,6 +1446,338 @@ fn tts_candidates(os: &str, arch: &str, layout: &Layout) -> Vec<std::path::PathB
     cands
 }
 
+/// Stamp a workspace's binding from a profile preset — the `--profile` half of
+/// `workspace new`.
+///
+/// Three properties the checkout's own load path does not have, all because a
+/// second book must be creatable beside a first one that is mid-run:
+///
+/// * **The checkout's `.bm/profile` is never written.** The binding lands in
+///   the new workspace's `settings.json` alone; switching between books stays
+///   `workspace use`, and re-loading the checkout stays an explicit
+///   `profile load`.
+/// * **A preset with `pack_deps` composes the workspace's own pack** (see
+///   `preset::compose_workspace_pack`), so its score is its own — the
+///   workspace-pack shape ROADMAP §3 defers to this. The binding's pack hash
+///   is the resolved workspace tree's, the same fold a checkout's pack gets.
+/// * **The adapter and engine are stamped by name and claim**, the adapter
+///   hashed over its home the way `verify_binding` folds it. The engine is a
+///   declaration and never a digest.
+fn apply_preset(
+    root: &std::path::Path,
+    work: &std::path::Path,
+    id: &str,
+    settings: &mut Settings,
+    out: &mut Vec<String>,
+    crawler: Option<&bm_core::preset::CrawlerSetup>,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let presets = bm_core::preset::read_presets(root)?;
+    let preset = presets.get(id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no profile preset {id:?} in profiles/presets.json — available: {}",
+            presets.keys().cloned().collect::<Vec<_>>().join(", ")
+        )
+    })?;
+    let mut binding = bm_core::profile::Binding::default();
+
+    // The pack. Composed into the workspace when the preset names roots.
+    if !preset.pack_deps.is_empty() {
+        bm_core::preset::compose_workspace_pack(
+            work,
+            &root.join("assets").join("_extends"),
+            &preset.pack_deps,
+        )?;
+        let pack_name = if preset.pack.is_empty() {
+            work.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| preset.pack.clone())
+        } else {
+            preset.pack.clone()
+        };
+        binding.pack = bm_core::profile::Pointer {
+            hash: bm_core::preset::workspace_pack_hash(work)?,
+            name: pack_name,
+            version: String::new(),
+        };
+        out.push(format!(
+            "pack     {} — this workspace's own composition of {}",
+            binding.pack.name,
+            preset.pack_deps.join(" + ")
+        ));
+    } else {
+        // Shared pack: the checkout's tree is the one in force, so its hash
+        // travels with the name when the two agree — and an empty hash with a
+        // note when they do not, because a binding claiming the checkout's
+        // hash under another name would be a lie about bytes nobody hashed.
+        let checkout = bm_core::profile::read_binding(root).ok();
+        binding.pack = bm_core::profile::Pointer {
+            name: preset.pack.clone(),
+            hash: String::new(),
+            version: String::new(),
+        };
+        match &checkout {
+            Some(b) if !preset.pack.is_empty() && b.pack.name != preset.pack => {
+                out.push(format!(
+                    "note: the checkout's live pack is '{}' — run `profile load {}` before this workspace runs, or it will bind against {}",
+                    b.pack.name, preset.pack, preset.pack,
+                ));
+            }
+            Some(b) if !preset.pack.is_empty() => binding.pack.hash = b.pack.hash.clone(),
+            _ => {}
+        }
+        out.push(format!(
+            "pack     {} — the checkout's live tree",
+            if preset.pack.is_empty() {
+                "(unnamed)"
+            } else {
+                &preset.pack
+            }
+        ));
+    }
+
+    // The adapter, hashed over its home the way the load gate folds it. No
+    // `crawl` half: an adapter ships no crawlers — they are global (`crawlers/`)
+    // or the book's own (`crawl/`), and hashing a directory that is not there
+    // would report a language as incomplete for a reason that is not its own.
+    let home_dirs = [format!("adapters/{}/prompts", preset.adapter)];
+    let adapter = bm_core::profile::Pointer {
+        hash: bm_core::profile::trees_hash(root, &home_dirs).unwrap_or_else(|_| {
+            out.push(format!(
+                "note: adapters/{}/ holds no prompts or crawlers yet — the binding stamps the name only",
+                preset.adapter
+            ));
+            String::new()
+        }),
+        name: preset.adapter.clone(),
+        version: String::new(),
+    };
+    binding.adapter = adapter;
+
+    // The engine: `settings.engine` is the whole fact, the binding's claim
+    // beside it for the label and the wire.
+    binding.engine = bm_core::profile::Pointer {
+        name: preset.engine.clone(),
+        hash: String::new(),
+        version: String::new(),
+    };
+    settings.engine = preset.engine.clone();
+
+    // The crawler: a `{ type, file }` selection. A **global** crawler (a known
+    // site, the EPUB example) is referenced in place — `resolve_script` finds it
+    // under the root, and an edit reaches every book that selected it. A
+    // **custom** one is the book's own, copied into `crawl/`, where it shadows
+    // the global tree. The guided create flow hands one in; a preset's own
+    // `crawler` is the fallback, and neither is required — a book that names no
+    // source starts in `manual`.
+    let crawler: Option<bm_core::preset::CrawlerSetup> = match crawler {
+        Some(c) => Some(c.clone()),
+        None if !preset.crawler.is_none() => {
+            Some(crawler_from_preset(work, &preset.crawler)?)
+        }
+        None => None,
+    };
+    if let Some(c) = &crawler {
+        if !c.source.as_os_str().is_empty() {
+            let file_name = c
+                .source
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("crawler {:?} has no file name", c.source))?
+                .to_string_lossy()
+                .into_owned();
+            let dest = work.join("crawl").join(&file_name);
+            std::fs::create_dir_all(dest.parent().expect("crawl/ has a parent"))?;
+            std::fs::copy(&c.source, &dest)
+                .with_context(|| format!("copying {} -> {}", c.source.display(), dest.display()))?;
+            settings.crawl.mode = "script".into();
+            settings.crawl.script = format!("crawl/{file_name}");
+            out.push(format!(
+                "crawler  crawl/{file_name} — this workspace's own, seeded from {}",
+                c.source.display()
+            ));
+        } else if !c.script.trim().is_empty() {
+            settings.crawl.mode = "script".into();
+            settings.crawl.script = c.script.clone();
+            out.push(format!("crawler  {} — global, shared by every book", c.script));
+        }
+        // The guided "Local file (EPUB)" choice: the operator named a book and
+        // it is copied into the workspace's own `tmp/book.epub`, which is what
+        // `crawl.params.epub` names. Copied, not referenced: the crawl's read
+        // root is the workspace, and a path outside it is refused.
+        if !c.book.as_os_str().is_empty() {
+            let dest = work.join("tmp").join("book.epub");
+            std::fs::create_dir_all(dest.parent().expect("tmp/ has a parent"))?;
+            std::fs::copy(&c.book, &dest)
+                .with_context(|| format!("copying {} -> {}", c.book.display(), dest.display()))?;
+            out.push(format!(
+                "book     tmp/book.epub — copied from {}",
+                c.book.display()
+            ));
+        }
+        // The multi-volume shape: a folder of `.epub`s, each one a volume, in
+        // the workspace's own `books/`, which is what `crawl.params.books`
+        // names. Only `.epub` files are copied — it is a person's own folder
+        // and the rest of it is not the crawl's business.
+        if !c.books.as_os_str().is_empty() {
+            let dest = work.join("books");
+            std::fs::create_dir_all(&dest)?;
+            let mut copied = 0usize;
+            for entry in std::fs::read_dir(&c.books)
+                .with_context(|| format!("reading the books directory {}", c.books.display()))?
+            {
+                let path = entry?.path();
+                let is_epub = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("epub"));
+                if !is_epub || !path.is_file() {
+                    continue;
+                }
+                let name = path.file_name().expect("an .epub has a file name");
+                std::fs::copy(&path, dest.join(name))
+                    .with_context(|| format!("copying {} -> books/{}", path.display(), name.to_string_lossy()))?;
+                copied += 1;
+            }
+            anyhow::ensure!(
+                copied > 0,
+                "no .epub in {} — a books directory needs at least one volume",
+                c.books.display()
+            );
+            out.push(format!(
+                "books    books/ — {copied} volume(s) copied from {}",
+                c.books.display()
+            ));
+        }
+        if !c.url_template.is_empty() {
+            settings.url_template = c.url_template.clone();
+            out.push(format!("url      {}", c.url_template));
+        }
+        if !c.params.is_empty() {
+            settings.crawl.params = c.params.clone();
+        }
+        if c.max_fetches > 0 {
+            settings.crawl.max_fetches = c.max_fetches;
+        }
+        if c.max_seconds > 0 {
+            settings.crawl.max_seconds = c.max_seconds;
+        }
+    }
+
+    out.push(format!("adapter  {}", preset.adapter));
+    out.push(format!("engine   {}", preset.engine));
+    settings.profile = binding;
+    Ok(())
+}
+
+/// Turn a preset's `{ type, file }` crawler into the setup `apply_preset`
+/// installs.
+///
+/// `known` and `example` are **global** and referenced in place, so the setup
+/// carries the `crawlers/…` path and no `source`; `custom` is the book's own, so
+/// it carries no path (the operator drops the file into `crawl/`) and just makes
+/// the directory. A `known` host the registry does not have, or one it lists
+/// without a crawler, is a preset error worth failing on: a workspace silently
+/// born with no crawler is the failure this whole flow exists to prevent.
+fn crawler_from_preset(
+    work: &std::path::Path,
+    c: &bm_core::preset::PresetCrawler,
+) -> anyhow::Result<bm_core::preset::CrawlerSetup> {
+    match c.kind.as_str() {
+        "known" => {
+            let site = bm_core::crawl::known_sites()
+                .iter()
+                .find(|s| s.host == c.file)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "preset crawler names known site {:?}, which crawlers/knownsites.json does not have",
+                        c.file
+                    )
+                })?;
+            anyhow::ensure!(
+                site.is_crawlable(),
+                "preset crawler names site {:?}, which has no bundled crawler — {}",
+                site.host,
+                site.caveat.unwrap_or("no reason recorded")
+            );
+            let mut params = serde_json::Map::new();
+            for (k, v) in site.params {
+                params.insert((*k).to_string(), serde_json::Value::String((*v).to_string()));
+            }
+            Ok(bm_core::preset::CrawlerSetup {
+                script: site.script.to_string(),
+                url_template: site.url_template.to_string(),
+                params,
+                max_fetches: site.max_fetches,
+                max_seconds: site.max_seconds,
+                source: std::path::PathBuf::new(),
+                book: std::path::PathBuf::new(),
+                books: std::path::PathBuf::new(),
+            })
+        }
+        "example" => Ok(bm_core::preset::CrawlerSetup {
+            script: format!("crawlers/examples/{}", c.file.trim()),
+            ..Default::default()
+        }),
+        "custom" => {
+            // The book's own crawler: make the directory ready, and name the
+            // file only if the preset already knows it. Otherwise the operator
+            // drops the script in and sets `crawl.script` when they do.
+            std::fs::create_dir_all(work.join("crawl"))?;
+            Ok(if c.file.trim().is_empty() {
+                bm_core::preset::CrawlerSetup::default()
+            } else {
+                bm_core::preset::CrawlerSetup {
+                    script: format!("crawl/{}", c.file.trim()),
+                    ..Default::default()
+                }
+            })
+        }
+        other => anyhow::bail!(
+            "preset crawler type {other:?} is not known — use known, example, custom or none"
+        ),
+    }
+}
+
+/// Give a workspace its own copy of the material the **profile preset**
+/// declares: the adapter's trees — its `prompts/` and `crawl/`.
+///
+/// A preset names a pack × adapter × engine triple, and each piece is created
+/// differently: the pack is **composed** (`compose_workspace_pack`, real files
+/// resolved from the linked deps), the preset's crawler is **installed** by
+/// `apply_preset` (referenced globally, or copied for a custom one), and the
+/// adapter's home (its `prompts/`) is **copied here** — so a book's prompts
+/// resolve from the workspace, which
+/// [`bm_core::paths::Layout::adapter_home`] already searches first, instead of
+/// from the checkout's shared home.
+///
+/// **Voices are deliberately not here.** They are not a preset yet — they
+/// arrive as bundles later — so a new workspace gets none and reads none: it
+/// must not reach back to the checkout's roster, which belongs to
+/// beyond-myriads and to nobody else.
+///
+/// `only_missing` is the `migrate` case: a workspace that already owns the
+/// adapter home keeps it, so a migration can never clobber edited prompts.
+fn clone_book_material(
+    root: &std::path::Path,
+    work: &std::path::Path,
+    adapter: &str,
+    only_missing: bool,
+    out: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    if adapter.is_empty() {
+        return Ok(());
+    }
+    let from = root.join(bm_core::paths::ADAPTERS_DIR).join(adapter);
+    let to = work.join(bm_core::paths::ADAPTERS_DIR).join(adapter);
+    if from.is_dir() && !(only_missing && to.is_dir()) {
+        bm_core::util::copy_tree(&from, &to)?;
+        out.push(format!(
+            "book     adapters/{adapter}/ copied in (this workspace's own prompts and crawlers)"
+        ));
+    }
+    Ok(())
+}
+
 /// `workspace`, one directory per book. Creating switches to it; selecting
 /// only moves the pointer, so data is never wiped and ledgers never mix
 /// (the serve gate still refuses a ledger bound to another profile).
@@ -1402,7 +1798,11 @@ pub(crate) fn workspace_cmd(
             && !name.contains('\0')
     };
     match cmd {
-        WorkspaceCmd::New { name } => {
+        WorkspaceCmd::New {
+            name,
+            profile,
+            crawler,
+        } => {
             if !valid(&name) {
                 anyhow::bail!("bad workspace name {name:?}");
             }
@@ -1414,19 +1814,38 @@ pub(crate) fn workspace_cmd(
             for d in ["data/chapters", "data/audio", "output"] {
                 std::fs::create_dir_all(dir(&name).join(d))?;
             }
-            // A workspace is born bound to the loaded profile, so its first
-            // run cannot mix genres. No profile loaded yet is not an error
-            // the serve gate names it when it matters.
+            // A workspace is born bound to a profile, so its first run cannot
+            // mix genres. A `--profile` preset names its own triple; without
+            // one the loaded profile is inherited, which is the shape every
+            // workspace before presets had. No profile loaded yet is not an
+            // error — the serve gate names it when it matters.
             let mut settings = Settings::default();
-            match bm_core::profile::read_binding(root) {
-                Ok(b) => settings.profile = b,
-                Err(_) => {
-                    out.push(
-                        "note: no profile loaded — `:profile` in the dashboard, or `tools/profile.sh fetch/unpack <name>`, first"
-                            .into(),
-                    )
+            match profile.as_deref() {
+                Some(id) => {
+                    apply_preset(root, &dir(&name), id, &mut settings, &mut out, crawler.as_ref())?
                 }
+                None => match bm_core::profile::read_binding(root) {
+                    Ok(b) => settings.profile = b,
+                    Err(_) => {
+                        out.push(
+                            "note: no profile loaded — `:profile` in the dashboard, or `tools/profile.sh fetch/unpack <name>`, first"
+                                .into(),
+                        )
+                    }
+                },
             }
+            // …and its own copy of the adapter the profile names, so the first
+            // run reads its own prompts and crawlers instead of the checkout's
+            // shared home — which is how a second book used to inherit the
+            // first one's language. Voices are not copied: they are not a preset
+            // yet, and a new workspace must not read another book's roster.
+            clone_book_material(
+                root,
+                &dir(&name),
+                &settings.profile.adapter.name,
+                false,
+                &mut out,
+            )?;
             settings.save(&dir(&name).join("settings.json"))?;
             std::fs::create_dir_all(root.join(".bm"))?;
             std::fs::write(Layout::active_workspace_file(root), format!("{name}\n"))?;
@@ -1442,24 +1861,39 @@ pub(crate) fn workspace_cmd(
             out.push(format!("workspace {name} selected"));
             Ok(out)
         }
+        WorkspaceCmd::Migrate { name } => {
+            if !dir(&name).is_dir() {
+                anyhow::bail!("no workspace {name:?} under workspaces/");
+            }
+            let ws = dir(&name);
+            let adapter = bm_core::config::Settings::load(&ws.join("settings.json"))
+                .profile
+                .adapter
+                .name;
+            clone_book_material(root, &ws, &adapter, true, &mut out)?;
+            out.push(format!("workspace {name} now owns its book material"));
+            Ok(out)
+        }
         WorkspaceCmd::List => {
-            let active = std::fs::read_to_string(Layout::active_workspace_file(root))
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-            let mut names: Vec<String> = std::fs::read_dir(root.join("workspaces"))
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok())
-                        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                        .map(|e| e.file_name().to_string_lossy().into_owned())
-                        .collect()
-                })
-                .unwrap_or_default();
-            names.sort();
-            if names.is_empty() {
+            // The same read the TUI picker draws from, so a name listed here is
+            // a name offered there, and both say the same thing about a
+            // directory that is not a book.
+            let found = bm_core::paths::workspaces(root);
+            if found.is_empty() {
                 out.push("no workspaces (this root is the implicit default)".into());
             }
-            for n in names {
-                out.push(format!("{} {n}", if n == active { "*" } else { " " }));
+            for w in found {
+                let mark = if w.active { "*" } else { " " };
+                let note = match w.config {
+                    bm_core::paths::WorkspaceConfig::Valid => String::new(),
+                    bm_core::paths::WorkspaceConfig::Missing => {
+                        "  — no settings.json, not a workspace".into()
+                    }
+                    bm_core::paths::WorkspaceConfig::Broken => {
+                        "  — settings.json does not parse".into()
+                    }
+                };
+                out.push(format!("{mark} {}{note}", w.name));
             }
             Ok(out)
         }
@@ -1677,8 +2111,9 @@ fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec<String>> {
         AwsCmd::Up { count, dry_run } => {
             let cfg = AwsConfig::load_layered(root);
             let missing = cfg.missing();
-            let hash = bm_core::profile::read_pointer(root)
-                .map(|p| p.hash)
+            let layout = bm_core::Layout::resolve_or_root(root).0;
+            let hash = bm_core::profile::in_force(&layout)
+                .map(|b| b.pack.hash)
                 .unwrap_or_default();
             if dry_run {
                 // No call at all, and that is the point: a dry run has to work
@@ -2116,7 +2551,7 @@ fn cmd_roster_add_sample(
         );
     }
     let tags = if tags.is_empty() { None } else { Some(tags) };
-    for line in bm_core::pool::add_sample(&layout.root, path, tags, name)? {
+    for line in bm_core::pool::add_sample(layout, path, tags, name)? {
         println!("{line}");
     }
     Ok(())
@@ -2185,7 +2620,7 @@ async fn main() -> anyhow::Result<()> {
     // one, and it does nothing at all on a checkout that never loaded a profile.
     if let Some(name) = layout.migrate_adapter_tree().unwrap_or(None) {
         println!(
-            "adapter '{name}': prompts/ and assets/crawl/ moved under adapters/{name}/ — the language has its own tree now"
+            "adapter '{name}': prompts/ moved under adapters/{name}/ — the language has its own tree now"
         );
         // Re-read: the name the pointer now carries is what every path below
         // resolves through, including the ones already computed above.
@@ -2202,11 +2637,13 @@ async fn main() -> anyhow::Result<()> {
     // `roster` and `workspace` are local file work: requiring ssh/rsync/ffmpeg
     // to rewrite JSON would make them unusable on exactly the machine that
     // needs them. Same for `digest`, which is one HTTP call to an analyzer
-    // and touches no worker.
+    // and touches no worker — and for `crawl`, which is one book lookup or
+    // a few polite HTTP calls and touches no worker either.
     if !matches!(
         &cli.cmd,
         Cmd::Roster { .. }
             | Cmd::Digest { .. }
+            | Cmd::Crawl { .. }
             | Cmd::Backup { .. }
             | Cmd::Workspace { .. }
             | Cmd::Aws { .. }
@@ -2298,6 +2735,11 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
+        Cmd::Crawl {
+            start,
+            count,
+            force,
+        } => cmd_crawl(&layout, &settings, start, count, force).await,
         Cmd::Backup {
             start,
             through,
@@ -2487,7 +2929,10 @@ async fn main() -> anyhow::Result<()> {
 /// the wrong voice: the run names one engine while the weights on disk are
 /// another's.
 fn profile_check(layout: &Layout, settings: &Settings) -> anyhow::Result<(Vec<String>, bool)> {
-    let binding = bm_core::profile::read_binding(&layout.root)?;
+    // The binding **in force**, not the checkout's pointer: a workspace owns
+    // its pack, language and engine, and `profile check` has to answer for the
+    // book that will run rather than the root it sits on.
+    let binding = bm_core::profile::in_force(layout)?;
     let declared = bm_core::adapter::in_force(layout)?;
     let verdict = bm_core::adapter::inspect(layout, &binding.pack.name, &settings.engine);
     let home = format!("{}/{}", bm_core::paths::ADAPTERS_DIR, layout.adapter);
@@ -2642,6 +3087,80 @@ fn cmd_check_blocking(settings: &Settings, url: &str, timeout: u64) -> anyhow::R
 /// is to ask the question without waking it. It reads the chapter text and the
 /// bible, calls [`bm_core::digest::analyze_chapter`], the same function the
 /// digest worker calls, and prints the result.
+/// `crawl`: the worker's own fetch, run here, for a book that needs no
+/// cluster to be read — an EPUB is a lookup, not a website.
+///
+/// The chapter index is built exactly the way a run builds it (same
+/// fingerprint, same `data/crawl-index.json`, so a later `serve` reuses what
+/// this wrote), and each chapter lands at `data/chapters/chNN.txt`, the file
+/// reconcile plans from. A block or an absent chapter is reported and
+/// skipped, not fatal: a book whose tail is missing should still get the
+/// chapters it has.
+async fn cmd_crawl(
+    layout: &Layout,
+    settings: &Settings,
+    start: u32,
+    count: u32,
+    force: bool,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    // Everything — the index build included — runs on a blocking thread: the
+    // crawl host builds a blocking HTTP client even when an EPUB never
+    // fetches, and creating or dropping that client inside the tokio runtime
+    // is the panic this command must not have.
+    let layout = layout.clone();
+    let settings = settings.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let index = bm_core::crawl::chapter_index(&layout, &settings, start, count, force)?;
+        let spec = bm_core::crawl::provider::spec_from_settings(&layout, &settings);
+        let how = if spec.engine.is_empty() {
+            "built-in fetcher".to_string()
+        } else {
+            format!("{} {}", spec.engine, spec.script)
+        };
+        println!(
+            "crawl: {how}, chapters {start}..{} (index: data/crawl-index.json)",
+            start + count
+        );
+        let mut fetched = 0usize;
+        let mut absent = 0usize;
+        let mut blocked = 0usize;
+        for n in start..start.saturating_add(count) {
+            if index.is_absent(n) {
+                println!("ch{n}: not in the index — skipping");
+                absent += 1;
+                continue;
+            }
+            let url = index.url(n).map(str::to_string);
+            let crawled = bm_core::crawl::Provider::new(&spec).crawl(n, url.as_deref(), 1)?;
+            for line in &crawled.log {
+                println!("ch{n}: {line}");
+            }
+            match crawled.outcome {
+                bm_core::crawl::CrawlOutcome::Text { text, .. } => {
+                    bm_core::atomic_write(&layout.chapter_txt(n), &text)?;
+                    println!("ch{n}: crawled ({} bytes)", text.len());
+                    fetched += 1;
+                }
+                bm_core::crawl::CrawlOutcome::Absent { reason } => {
+                    println!("ch{n}: absent — {reason}");
+                    absent += 1;
+                }
+                bm_core::crawl::CrawlOutcome::Blocked(b) => {
+                    println!("ch{n}: blocked [{:?}] — {}", b.class, b.detail);
+                    blocked += 1;
+                }
+            }
+        }
+        println!(
+            "crawl: {fetched} fetched, {absent} absent, {blocked} blocked — `serve` will plan what landed"
+        );
+        Ok(())
+    })
+    .await
+    .context("the crawl thread panicked")?
+}
+
 async fn cmd_digest(
     layout: &Layout,
     settings: &Settings,
@@ -3092,6 +3611,8 @@ mod tests {
             &dir,
             WorkspaceCmd::New {
                 name: "demo".into(),
+                profile: None,
+                crawler: None,
             },
         )
         .unwrap();
@@ -3104,7 +3625,9 @@ mod tests {
         assert!(workspace_cmd(
             &dir,
             WorkspaceCmd::New {
-                name: "demo".into()
+                name: "demo".into(),
+                profile: None,
+                crawler: None,
             }
         )
         .is_err());
@@ -3132,6 +3655,8 @@ mod tests {
             &dir,
             WorkspaceCmd::New {
                 name: "second".into(),
+                profile: None,
+                crawler: None,
             },
         )
         .unwrap();
@@ -3145,6 +3670,213 @@ mod tests {
         assert_eq!(settings["profile"]["pack"]["name"], "xianxia");
         assert_eq!(settings["profile"]["adapter"]["name"], "");
         assert_eq!(settings["profile"]["engine"]["name"], "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The guided create flow's crawler: the script is copied into the book's
+    /// own `crawl/`, wired into settings, and the URL template and params
+    /// travel with it — the difference between the picker and a bare preset.
+    #[test]
+    fn a_custom_crawler_setup_is_copied_and_wired_into_the_new_workspace() {
+        let dir = std::env::temp_dir().join(format!("bm-ws-crawler{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("profiles")).unwrap();
+        std::fs::write(
+            dir.join("profiles/presets.json"),
+            r#"{"jnovel-en": {"label": "JNovel", "pack": "xianxia", "adapter": "vi-VN", "engine": "vieneu"}}"#,
+        )
+        .unwrap();
+        // An arbitrary local source for the guided flow's custom copy — not a
+        // repo path, so this test does not depend on the global crawler tree.
+        std::fs::create_dir_all(dir.join("local")).unwrap();
+        std::fs::write(dir.join("local/mysite.lua"), "-- crawl").unwrap();
+
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "epub".into(),
+            serde_json::Value::String("tmp/book.epub".into()),
+        );
+        let crawler = bm_core::preset::CrawlerSetup {
+            source: dir.join("local/mysite.lua"),
+            url_template: "https://example.test/{book}/chuong-{n}".into(),
+            params,
+            ..Default::default()
+        };
+        workspace_cmd(
+            &dir,
+            WorkspaceCmd::New {
+                name: "book".into(),
+                profile: Some("jnovel-en".into()),
+                crawler: Some(crawler),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            dir.join("workspaces/book/crawl/mysite.lua").is_file(),
+            "the script is the book's own copy"
+        );
+        let s: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("workspaces/book/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(s["crawl"]["mode"], "script");
+        assert_eq!(s["crawl"]["script"], "crawl/mysite.lua");
+        assert_eq!(s["crawl"]["params"]["epub"], "tmp/book.epub");
+        assert_eq!(s["url_template"], "https://example.test/{book}/chuong-{n}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The guided **Local file (EPUB)** choice: the operator named a book and it
+    /// is copied into the new workspace's `tmp/book.epub`, which is what the
+    /// global example crawler reads. Copied, not referenced — the crawl's read
+    /// root is the workspace.
+    #[test]
+    fn an_epub_crawler_setup_copies_the_book_into_the_new_workspace() {
+        let dir = std::env::temp_dir().join(format!("bm-ws-epub{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("profiles")).unwrap();
+        std::fs::write(
+            dir.join("profiles/presets.json"),
+            r#"{"jnovel-en": {"label": "JNovel", "pack": "xianxia", "adapter": "vi-VN", "engine": "pocket"}}"#,
+        )
+        .unwrap();
+        let src = dir.join("somewhere/apothecary.epub");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, b"PK\x03\x04 not really a zip, but bytes").unwrap();
+
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "epub".into(),
+            serde_json::Value::String("tmp/book.epub".into()),
+        );
+        let crawler = bm_core::preset::CrawlerSetup {
+            script: "crawlers/examples/epub.lua".into(),
+            params,
+            book: src.clone(),
+            ..Default::default()
+        };
+        workspace_cmd(
+            &dir,
+            WorkspaceCmd::New {
+                name: "book".into(),
+                profile: Some("jnovel-en".into()),
+                crawler: Some(crawler),
+            },
+        )
+        .unwrap();
+
+        let dest = dir.join("workspaces/book/tmp/book.epub");
+        assert!(dest.is_file(), "the book lands in the workspace");
+        assert_eq!(std::fs::read(&dest).unwrap(), std::fs::read(&src).unwrap());
+        let s: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("workspaces/book/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(s["crawl"]["mode"], "script");
+        assert_eq!(s["crawl"]["script"], "crawlers/examples/epub.lua");
+        assert_eq!(s["crawl"]["params"]["epub"], "tmp/book.epub");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The guided flow's **folder of volumes** shape: the operator named a
+    /// directory and each `.epub` in it is copied into the new workspace's own
+    /// `books/`, which is what `crawl.params.books` reads. Whatever else is in
+    /// the folder is left behind — it is a person's own folder.
+    #[test]
+    fn a_books_directory_is_copied_into_the_new_workspace() {
+        let dir = std::env::temp_dir().join(format!("bm-ws-books{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("profiles")).unwrap();
+        std::fs::write(
+            dir.join("profiles/presets.json"),
+            r#"{"jnovel-en": {"label": "JNovel", "pack": "xianxia", "adapter": "vi-VN", "engine": "pocket"}}"#,
+        )
+        .unwrap();
+        let shelf = dir.join("somewhere/volumes");
+        std::fs::create_dir_all(&shelf).unwrap();
+        std::fs::write(shelf.join("vol-01.epub"), b"volume one").unwrap();
+        std::fs::write(shelf.join("vol-02.epub"), b"volume two").unwrap();
+        std::fs::write(shelf.join("cover.jpg"), b"not a book").unwrap();
+
+        let mut params = serde_json::Map::new();
+        params.insert("books".into(), serde_json::Value::String("books".into()));
+        let crawler = bm_core::preset::CrawlerSetup {
+            script: "crawlers/examples/epub.lua".into(),
+            params,
+            books: shelf.clone(),
+            ..Default::default()
+        };
+        workspace_cmd(
+            &dir,
+            WorkspaceCmd::New {
+                name: "book".into(),
+                profile: Some("jnovel-en".into()),
+                crawler: Some(crawler),
+            },
+        )
+        .unwrap();
+
+        let dest = dir.join("workspaces/book/books");
+        assert_eq!(
+            std::fs::read(dest.join("vol-01.epub")).unwrap(),
+            b"volume one"
+        );
+        assert!(dest.join("vol-02.epub").is_file());
+        assert!(
+            !dest.join("cover.jpg").exists(),
+            "only .epub volumes are copied"
+        );
+        let s: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("workspaces/book/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(s["crawl"]["script"], "crawlers/examples/epub.lua");
+        assert_eq!(s["crawl"]["params"]["books"], "books");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A preset that names a **known** site wires the *global* crawler into the
+    /// new workspace's settings and does not copy it in: `crawlers/known/…` is
+    /// shared by every book, so an edit reaches them all.
+    #[test]
+    fn a_preset_that_names_a_known_site_wires_the_global_crawler() {
+        let dir = std::env::temp_dir().join(format!("bm-ws-known{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("profiles")).unwrap();
+        std::fs::create_dir_all(dir.join("crawlers/known")).unwrap();
+        std::fs::write(dir.join("crawlers/known/storya.lua"), "-- global").unwrap();
+        std::fs::write(
+            dir.join("profiles/presets.json"),
+            r#"{"xianxia-vi": {"label": "Xianxia", "pack": "xianxia", "adapter": "vi-VN", "engine": "vieneu", "crawler": {"type": "known", "file": "storya.click"}}}"#,
+        )
+        .unwrap();
+        workspace_cmd(
+            &dir,
+            WorkspaceCmd::New {
+                name: "book".into(),
+                profile: Some("xianxia-vi".into()),
+                crawler: None,
+            },
+        )
+        .unwrap();
+        let s: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("workspaces/book/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(s["crawl"]["mode"], "script");
+        assert_eq!(
+            s["crawl"]["script"], "crawlers/known/storya.lua",
+            "the registry path, from the checkout root"
+        );
+        assert_eq!(
+            s["url_template"],
+            "https://storya.click/truyen/nguoi-tren-van-nguoi/chuong-{n}"
+        );
+        assert!(
+            !dir.join("workspaces/book/crawl/storya.lua").exists(),
+            "the global crawler is referenced, not copied in"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

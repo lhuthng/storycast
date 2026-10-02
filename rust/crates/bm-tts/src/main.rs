@@ -22,12 +22,13 @@
 //! shutting down — have no signal to send it otherwise.
 
 use anyhow::{Context, Result};
-use bm_tts::server::{router, Server};
+use bm_tts::server::{router, Backend, Server};
 use bm_tts::synth::Synth;
 use bm_tts::text::FrontEnd;
 use bm_tts::voice::Roster;
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -39,12 +40,15 @@ struct Args {
     /// The backbone: config.json, tokenizer.json, vieneu_v3_heads.npz, the graphs.
     #[arg(long)]
     models: PathBuf,
-    /// The MOSS audio codec's decode graph.
+    /// The MOSS audio codec's decode graph. VieNeu only: a bundle engine
+    /// (pocket) carries its codec inside the bundle and ignores this flag —
+    /// it stays because the spawn command is engine-agnostic.
     #[arg(long)]
-    codec: PathBuf,
-    /// The sea-g2p phoneme dictionary (`sea_g2p.bin`).
+    codec: Option<PathBuf>,
+    /// The sea-g2p phoneme dictionary (`sea_g2p.bin`). VieNeu only: an engine
+    /// whose declaration names no lexicon is never handed one.
     #[arg(long)]
-    dict: PathBuf,
+    dict: Option<PathBuf>,
     /// The preset voice store (`voices_v3_turbo.json`).
     #[arg(long)]
     voices: PathBuf,
@@ -61,12 +65,7 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    for (what, p) in [
-        ("models", &args.models),
-        ("codec", &args.codec),
-        ("dict", &args.dict),
-        ("voices", &args.voices),
-    ] {
+    for (what, p) in [("models", &args.models), ("voices", &args.voices)] {
         if !p.exists() {
             anyhow::bail!("--{what} does not exist: {}", p.display());
         }
@@ -88,7 +87,10 @@ async fn main() -> Result<()> {
     eprintln!("TTS worker on {addr} bound — loading models (health answers 503 until ready)");
 
     // The load is blocking CPU/IO: keep it off the async threads so the bound
-    // listener can answer 503 while it runs.
+    // listener can answer 503 while it runs. Which engine loads is decided by
+    // the models directory itself — a Pocket TTS tree is the one carrying the
+    // `pocket.safetensors` checkpoint beside its `voices.json` — so the spawn
+    // command never had to learn the difference.
     let started = std::time::Instant::now();
     let (models, codec, dict, voices_path) = (
         args.models.clone(),
@@ -96,20 +98,78 @@ async fn main() -> Result<()> {
         args.dict.clone(),
         args.voices.clone(),
     );
+    let _ = &codec;
     let threads = args.threads;
-    let (front, roster, synth) =
-        tokio::task::spawn_blocking(move || -> Result<(FrontEnd, Roster, Synth)> {
+    let is_pocket = models.join("pocket.safetensors").is_file();
+    let (backend, voices, default) = tokio::task::spawn_blocking(move || -> Result<_, _> {
+        // A Pocket tree handed to a VieNeu-only build is refused rather than
+        // silently served by the wrong engine, which would fail at the first
+        // request with a lexicon error saying nothing about the real cause.
+        #[cfg(not(feature = "pocket"))]
+        if is_pocket {
+            anyhow::bail!(
+                "{} is a Pocket TTS tree, but this bm-tts was built without it — \
+                 rebuild with `--features pocket`",
+                models.display()
+            );
+        }
+
+        // The `return` (rather than if/else) is load-bearing: without the
+        // feature the arm above is gone entirely, and an if/else here would
+        // leave this block's tail as the removed expression's empty type.
+        #[cfg(feature = "pocket")]
+        if is_pocket {
+            let engine = bm_tts::pocket::Pocket::load(&models, &voices_path, threads)?;
+            let voices = engine.voices.len();
+            let default = engine.default_voice.clone().unwrap_or_else(|| "?".into());
+            return Ok((
+                Backend::Pocket { engine: Box::new(Mutex::new(engine)) },
+                voices,
+                default,
+            ));
+        }
+
+        {
+            let (codec, dict) = match (codec, dict) {
+                (Some(c), Some(d)) => (c, d),
+                (None, _) => anyhow::bail!("--codec is required for the vieneu engine"),
+                (_, None) => anyhow::bail!("--dict is required for the vieneu engine"),
+            };
+            // The codec is a *directory* holding the decode graph, not a file:
+            // `Codec::load` joins `moss_audio_tokenizer_decode_full.onnx` to it.
+            // Checking a directory with `is_file` refuses every correct VieNeu
+            // command line — the sidecar dies at startup saying a directory that
+            // is right there "does not exist". The dictionary is the one that
+            // really is a file.
+            if !codec.is_dir() {
+                anyhow::bail!(
+                    "--codec does not exist or is not a directory: {}",
+                    codec.display()
+                );
+            }
+            if !dict.is_file() {
+                anyhow::bail!("--dict does not exist: {}", dict.display());
+            }
             let front = FrontEnd::new(dict.to_str().context("--dict must be valid UTF-8")?)?;
             let roster = Roster::load(&voices_path)?;
             let synth = Synth::load(&models, &codec, threads)?;
-            Ok((front, roster, synth))
-        })
-        .await
-        .context("the model-load task panicked")??;
+            let voices = roster.voices.len();
+            let default = roster.default_voice.clone().unwrap_or_else(|| "?".into());
+            Ok((
+                Backend::Vieneu {
+                    front,
+                    roster,
+                    synth: Mutex::new(synth),
+                },
+                voices,
+                default,
+            ))
+        }
+    })
+    .await
+    .context("the model-load task panicked")??;
 
-    let voices = roster.voices.len();
-    let default = roster.default_voice.clone().unwrap_or_else(|| "?".into());
-    server.fill(front, roster, synth);
+    server.fill(backend);
     eprintln!(
         "loaded {voices} preset voices (default {default:?}) in {:.1?} — now serving on {addr}",
         started.elapsed()

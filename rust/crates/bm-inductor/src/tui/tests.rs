@@ -1210,7 +1210,7 @@ fn a_known_site_url_names_its_crawler_instead_of_only_refusing() {
     let err = submit_text(&mut app, &p).unwrap_err();
     assert!(err.contains("readnovelfull.com"), "{err}");
     assert!(
-        err.contains("crawl/templates/readnovelfull.lua"),
+        err.contains("crawlers/known/readnovelfull.lua"),
         "the refusal must name the crawler, not just refuse: {err}"
     );
 
@@ -1296,10 +1296,36 @@ fn workspace_prompt_parses_list_use_and_new() {
     assert!(matches!(
         submit_text(&mut app, &prompt("new second-book")),
         Ok(Job::Workspace {
-            req: WorkspaceReq::New(ref n),
+            req: WorkspaceReq::New { name: ref n, profile: None, crawler: None },
             ..
         }) if n == "second-book"
     ));
+    // `--profile` selects a preset at creation, and the id is checked against
+    // profiles/presets.json while the prompt is still open — the checkout's
+    // own presets, not a compiled list.
+    let presets = app.layout.root.join("profiles/presets.json");
+    std::fs::create_dir_all(presets.parent().unwrap()).unwrap();
+    std::fs::write(
+        &presets,
+        r#"{"jnovel-en": {"label": "JNovel (en)", "pack": "",
+            "pack_deps": ["common"], "adapter": "jnovel-en-US", "engine": "pocket"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        submit_text(&mut app, &prompt("new second-book --profile jnovel-en")),
+        Ok(Job::Workspace {
+            req: WorkspaceReq::New { name: ref n, profile: Some(ref p), crawler: None },
+            ..
+        }) if n == "second-book" && p == "jnovel-en"
+    ));
+    // An unknown preset is a refused line, not a queued job.
+    let err = submit_text(&mut app, &prompt("new second-book --profile nope")).unwrap_err();
+    assert!(err.contains("no preset"), "{err}");
+    assert!(
+        submit_text(&mut app, &prompt("new second-book --profile")).is_err(),
+        "a bare --profile is refused"
+    );
+
     // A name is one path segment: `../x` would escape workspaces/.
     for bad in ["../x", "a/b", "new ", "."] {
         assert!(
@@ -1307,6 +1333,86 @@ fn workspace_prompt_parses_list_use_and_new() {
             "“{bad}” must be refused"
         );
     }
+}
+
+#[test]
+fn the_ws_command_line_carries_the_name_to_the_prompt() {
+    // `:ws <name>` matched no arm in the splitter, fell through to the word
+    // list, and arrived as a bare `:ws` — so the documented recipe (`:X`, then
+    // `:ws <name>`) opened the prompt with the name dropped and whichever book
+    // was already live sitting in its place. Whatever else changed, the name
+    // has to survive the trip.
+    let prefill = |line: &str| match command_key(line) {
+        Some(Command::Workspace { prefill }) => prefill,
+        other => panic!("`:{line}` gave {other:?}, not the workspace prompt"),
+    };
+
+    assert_eq!(prefill("ws beyond-myriads"), "beyond-myriads");
+    // A book's title has spaces in it, so every word after `ws` is the name and
+    // quoting is not the price of using one.
+    assert_eq!(prefill("ws beyond myriads"), "beyond myriads");
+    // The whole line travels, which is what carries the other two verbs:
+    // creating, and creating with a preset chosen.
+    assert_eq!(prefill("ws new second-book"), "new second-book");
+    assert_eq!(
+        prefill("workspace new second-book --profile jnovel-en"),
+        "new second-book --profile jnovel-en"
+    );
+
+    // Bare `:ws` is the picker — the whole point of it — and the word table
+    // says so too, so the two cannot drift into disagreeing about the word
+    // with no argument.
+    assert!(
+        matches!(command_key("ws"), Some(Command::WorkspacePick)),
+        "{:?}",
+        command_key("ws")
+    );
+    assert!(
+        matches!(command_key("workspace"), Some(Command::WorkspacePick)),
+        "{:?}",
+        command_key("workspace")
+    );
+    assert_eq!(
+        WORDS
+            .iter()
+            .find(|w| w.names.contains(&"ws"))
+            .expect("ws is in the word table")
+            .cmd,
+        Command::WorkspacePick,
+        "the word table must not claim bare `:ws` opens the prompt"
+    );
+}
+
+#[test]
+fn the_ws_command_line_ends_in_the_workspace_it_named() {
+    // The splitter test above proves the name is carried; this proves it is
+    // carried *to somewhere*, since the bug's symptom was a prompt that looked
+    // right and held the wrong book.
+    let mut app = App::new("http://x");
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+
+    do_command(
+        &mut app,
+        command_key("ws beyond myriads").unwrap(),
+        &http,
+        &job_tx,
+    );
+    let Screen::Text(p) = app.screen.clone() else {
+        panic!("the prompt opens, got {:?}", app.screen);
+    };
+    assert_eq!(
+        p.buf, "beyond myriads",
+        "the prompt must hold what was typed, not the workspace in force"
+    );
+    // Enter from there is the switch the recipe meant all along.
+    assert!(matches!(
+        submit_text(&mut app, &p),
+        Ok(Job::Workspace {
+            req: WorkspaceReq::Use(ref n),
+            ..
+        }) if n == "beyond myriads"
+    ));
 }
 
 #[test]
@@ -5580,7 +5686,7 @@ async fn quit_word_quits_from_the_picker_command_line() {
     app.command_return = Some(pick);
     app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "quit"));
     let quit = handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
-    assert!(quit, ":quit from the picker must quit");
+    assert_eq!(quit, super::input::Flow::Quit, ":quit from the picker must quit");
 }
 
 #[tokio::test]
@@ -6811,8 +6917,9 @@ async fn the_mouse_key_does_not_collide_with_the_reconcile_alias() {
     assert!(rx.try_recv().is_err(), "a bare m must dispatch nothing");
 }
 
-/// The crawl view answers the question the dashboard could not: what is
-/// actually in force, and what will this book fetch.
+/// The crawl view answers the question the dashboard could not: what will this
+/// crawl, and is anything wrong with it — in three lines, with the whole
+/// configuration one keypress away.
 #[tokio::test]
 async fn the_crawl_key_answers_what_is_in_force() {
     let dir = std::env::temp_dir().join("bm-crawlview-render");
@@ -6838,14 +6945,11 @@ async fn the_crawl_key_answers_what_is_in_force() {
         "c opens the crawl view, not nothing"
     );
 
+    // The default is the verdict, and the two faults this settings file causes
+    // without saying so anywhere else.
     let text = render_text(&mut app, 120, 44);
-    // The three things the question is made of: the method, the crawler, and
-    // the limits.
-    assert!(text.contains("mode"), "{text}");
-    assert!(text.contains("script"), "{text}");
-    assert!(text.contains("truyencom.lua"), "{text}");
-    assert!(text.contains("max_fetches"), "{text}");
-    // And the two faults a hand-edited settings file causes without saying so.
+    assert!(text.contains("Reading"), "{text}");
+    assert!(text.contains("Faults"), "{text}");
     assert!(
         text.contains("NOT FOUND"),
         "a crawler that is not there must say so on screen:\n{text}"
@@ -6854,6 +6958,41 @@ async fn the_crawl_key_answers_what_is_in_force() {
         text.contains("pacing off"),
         "pace 0 is a decision, so it is flagged:\n{text}"
     );
+    // The configuration nobody edited is **not** on this screen. That is the
+    // change: it was, and it put a screenful of defaults above the two facts
+    // the operator pressed a key to see.
+    for noise in ["max_fetches", "timeout_secs", "user_agent"] {
+        assert!(
+            !text.contains(noise),
+            "{noise} is not an answer, and the default screen must not be one:\n{text}"
+        );
+    }
+    assert!(text.contains("Enter detail"), "and the way to it is named: {text}");
+
+    // Enter opens the whole configuration, which is what the key is for.
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Crawl { expanded: true, .. }),
+        "Enter expands, not closes: {:?}",
+        app.screen
+    );
+    let detail = render_text(&mut app, 120, 44);
+    assert!(detail.contains("truyencom.lua"), "{detail}");
+    assert!(detail.contains("max_fetches"), "{detail}");
+    assert!(detail.contains("Enter verdict"), "and back: {detail}");
+
+    // Enter again returns to the verdict, from the top.
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Crawl { expanded: false, scroll: 0, .. }),
+        "Enter collapses: {:?}",
+        app.screen
+    );
+
+    // Esc still closes it, which is what three keys already did.
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -7669,7 +7808,7 @@ fn the_digest_chapter_page_names_the_round_and_the_last_thing_that_happened() {
     let mut v = super::screen::DigestView::new(vec![7, 9]);
     v.open = Some(super::screen::DigestChapter {
         n: 9,
-        round: bm_core::digest::Round::Cast,
+        round: bm_core::digest::Round::Attribution,
         prompt: "You are a Vietnamese web-novel dramaturg.".into(),
         cast: None,
         part: None,
@@ -7710,7 +7849,7 @@ fn a_long_validator_complaint_does_not_push_the_chapter_page_off_its_own_box() {
     let mut v = super::screen::DigestView::new(vec![7]);
     v.open = Some(super::screen::DigestChapter {
         n: 7,
-        round: bm_core::digest::Round::Script,
+        round: bm_core::digest::Round::Staging,
         prompt: "You are a Vietnamese web-novel dramaturg.".into(),
         cast: Some(serde_json::json!({"roster": ["Narrator"]})),
         part: None,
@@ -7847,7 +7986,7 @@ async fn the_digest_manager_arrows_follow_the_grid_and_esc_steps_back_from_a_cha
     if let Screen::Digest(v) = &mut app.screen {
         v.open = Some(super::screen::DigestChapter {
             n: 7,
-            round: bm_core::digest::Round::Cast,
+            round: bm_core::digest::Round::Attribution,
             prompt: "a prompt".into(),
             cast: None,
             part: None,
@@ -7979,18 +8118,105 @@ async fn the_policy_panel_toggles_and_reorders_a_machine() {
 }
 
 #[test]
+fn the_progress_bar_wears_the_task_colour_and_leaves_its_track_dim() {
+    // `render_text` can only see glyphs, so this is the one thing it cannot
+    // check: that the bar is actually *coloured*. Read the buffer's styles
+    // instead, and pin both halves — the work done takes the stage's hue, the
+    // track stays dim. A bar whose empty track wore the same colour would read
+    // as a solid block with a hole in it, which is the failure this guards.
+    fn render_styled(app: &mut App, w: u16, h: u16) -> Vec<Vec<(String, Color)>> {
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| {
+                        let cell = &buf[(x, y)];
+                        (
+                            cell.symbol().to_string(),
+                            cell.style().fg.unwrap_or(Color::Reset),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    let mut app = App::new("http://127.0.0.1:8901");
+    let mut b = beat("thang-w", "52.2.2.2", 2, "marmot");
+    b.stage = Some(Stage::Digest);
+    b.chapter = Some(12);
+    b.progress = 0.5;
+    app.beats = vec![b];
+
+    fn text(row: &[(String, Color)]) -> String {
+        row.iter().map(|(s, _)| s.as_str()).collect()
+    }
+    let rows = render_styled(&mut app, 120, 44);
+    // A buffer cell is one glyph, so the row is found by its text and the
+    // assertion reads the cells back out of it.
+    let row = rows
+        .iter()
+        .find(|r| text(r).contains("digest"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the workers pane lists the stage:\n{}",
+                rows.iter().map(|r| text(r)).collect::<Vec<_>>().join("\n")
+            )
+        });
+    let glyphs = |g: &str| -> Vec<Color> {
+        row.iter()
+            .filter(|(s, _)| s == g)
+            .map(|(_, c)| *c)
+            .collect()
+    };
+    let done = glyphs("█");
+    let track = glyphs("░");
+    assert_eq!(done.len(), 6, "half of a 12-wide bar: {}", text(row));
+    assert_eq!(track.len(), 6, "and half of it still to go: {}", text(row));
+    let want = themed(stage_color("digest"));
+    for c in &done {
+        assert_eq!(*c, want, "the work done wears the task's own colour");
+    }
+    for c in &track {
+        assert_eq!(*c, themed(Color::DarkGray), "the empty track stays dim");
+    }
+}
+
+#[test]
 fn the_bar_uses_partial_blocks_and_stays_exact_at_the_ends() {
+    // The bar is drawn in two colours now — the work done in the task's hue and
+    // the track dim — so the test joins the halves back the way the pane lays
+    // them out and pins the whole, then pins the split itself.
+    fn bar(frac: f32, width: usize) -> String {
+        let (done, track) = bar_parts(frac, width);
+        format!("{done}{track}")
+    }
+
     assert_eq!(bar(0.0, 10), "░".repeat(10));
     assert_eq!(bar(1.0, 10), "█".repeat(10));
     assert_eq!(bar(0.5, 10), "█████░░░░░");
     // A third of one cell in the last slot: the old bar could not show it.
     assert_eq!(bar(0.93, 10), "█████████▎");
-    // Width is always exactly what was asked for.
+    // Width is always exactly what was asked for, split or not.
     for frac in [0.0f32, 0.01, 0.05, 0.33, 0.5, 0.87, 0.99, 1.0] {
         for w in [1usize, 4, 10, 17] {
             assert_eq!(bar(frac, w).chars().count(), w, "bar({frac}, {w})");
+            let (done, track) = bar_parts(frac, w);
+            assert_eq!(done.chars().count() + track.chars().count(), w);
+            // Only the track is ever the light shade, so the tinted half can
+            // never include an empty cell the eye would read as done.
+            assert!(
+                !done.contains('░'),
+                "the tinted half must be work done only: {done:?} at {frac}/{w}"
+            );
         }
     }
+    // Nothing done, nothing left: the ends are each one colour, never both.
+    assert_eq!(bar_parts(0.0, 10), (String::new(), "░".repeat(10)));
+    assert_eq!(bar_parts(1.0, 10), ("█".repeat(10), String::new()));
 }
 
 // --- the hint audit: every hint a screen draws is a promise about its keys
@@ -8801,7 +9027,9 @@ async fn the_workspace_job_without_its_cluster_guard(
             let cmd = match req {
                 WorkspaceReq::List => crate::WorkspaceCmd::List,
                 WorkspaceReq::Use(name) => crate::WorkspaceCmd::Use { name },
-                WorkspaceReq::New(name) => crate::WorkspaceCmd::New { name },
+                WorkspaceReq::New { name, profile, crawler } => {
+                    crate::WorkspaceCmd::New { name, profile, crawler }
+                }
             };
             let out = tokio::task::spawn_blocking(move || crate::workspace_cmd(&root, cmd))
                 .await
@@ -8860,7 +9088,11 @@ async fn creating_and_switching_a_workspace_moves_the_dashboard_with_it() {
                 Job::Workspace {
                     layout,
                     api: "http://127.0.0.1:8901".into(),
-                    req: WorkspaceReq::New("book-a".into()),
+                    req: WorkspaceReq::New {
+                        name: "book-a".into(),
+                        profile: None,
+                        crawler: None,
+                    },
                 }
             ),
             "a workspace request must be dispatchable"
@@ -8930,4 +9162,674 @@ async fn creating_and_switching_a_workspace_moves_the_dashboard_with_it() {
     );
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A checkout with two books, one of which is not one, and the pointer on the
+/// first. The shared shape both the picker and `workspace list` read.
+fn two_workspaces_one_bad(name: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("bm-ws-pick-{name}"));
+    let _ = std::fs::remove_dir_all(&root);
+    let book = root.join("workspaces/book-a");
+    std::fs::create_dir_all(book.join("data/chapters")).unwrap();
+    std::fs::create_dir_all(book.join("data/script")).unwrap();
+    bm_core::config::Settings::default()
+        .save(&book.join("settings.json"))
+        .unwrap();
+    std::fs::write(book.join("data/chapters/ch01.txt"), "x").unwrap();
+    std::fs::write(book.join("data/script/01.json"), "{}").unwrap();
+    // A directory somebody left under workspaces/, with no settings at all.
+    std::fs::create_dir_all(root.join("workspaces/scratch")).unwrap();
+    std::fs::create_dir_all(root.join(".bm")).unwrap();
+    std::fs::write(
+        bm_core::Layout::active_workspace_file(&root),
+        "book-a\n",
+    )
+    .unwrap();
+    root
+}
+
+#[tokio::test]
+async fn a_workspace_prompt_lists_the_books_instead_of_demanding_a_name() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let root = two_workspaces_one_bad("list");
+
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.layout = bm_core::Layout::new(&root);
+
+    // `:ws` with nothing after it: the operator never has to remember a name,
+    // and a directory that is not a book says so in its own row.
+    type_command(&mut app, &http, &job_tx, "ws").await;
+    let Screen::WorkspaceList(ws) = app.screen.clone() else {
+        panic!(":ws lists the books, got {:?}", app.screen);
+    };
+    assert_eq!(
+        ws.list().iter().map(|i| i.label.as_str()).collect::<Vec<_>>(),
+        vec!["book-a", "scratch"],
+    );
+    assert!(
+        ws.list()[0].note.starts_with("active"),
+        "the pointer's book is marked: {:?}",
+        ws.list()[0].note
+    );
+    assert!(
+        ws.list()[0].note.contains("1 chapter") && ws.list()[0].note.contains("1 script"),
+        "a book's row says how far it has got: {:?}",
+        ws.list()[0].note
+    );
+    assert!(
+        ws.list()[1].note.contains("no settings.json"),
+        "a directory that is not a book says why: {:?}",
+        ws.list()[1].note
+    );
+    assert_eq!(
+        ws.unusable.keys().copied().collect::<Vec<_>>(),
+        vec![1],
+        "only the row that cannot be switched is refused"
+    );
+    assert!(
+        job_rx.try_recv().is_err(),
+        "listing is not a job: it reads the tree"
+    );
+
+    // Esc closes it without moving anything.
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+}
+
+#[tokio::test]
+async fn choosing_a_book_switches_it_and_a_directory_that_is_not_one_is_refused() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let root = two_workspaces_one_bad("choose");
+
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.layout = bm_core::Layout::new(&root);
+    type_command(&mut app, &http, &job_tx, "ws").await;
+
+    // Down onto the directory that is not a workspace, Enter: refused where it
+    // was asked for, with the reason on the row, and nothing dispatched.
+    handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    let Screen::WorkspaceList(ws) = app.screen.clone() else {
+        panic!("the refusal stays on the list, got {:?}", app.screen);
+    };
+    assert!(
+        ws.error.as_deref().unwrap_or_default().contains("no settings.json"),
+        "{:?}",
+        ws.error
+    );
+    assert!(
+        job_rx.try_recv().is_err(),
+        "a pointer write onto a directory no command can read is never queued"
+    );
+
+    // Up onto the book, Enter: the switch is dispatched and the screen closes.
+    handle_key(&mut app, key(KeyCode::Up), &http, &job_tx).await;
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    match job_rx.try_recv().map(Job::into_bare) {
+        Ok(Job::Workspace { req, .. }) => {
+            assert!(
+                matches!(req, WorkspaceReq::Use(ref n) if n == "book-a"),
+                "the highlighted row is what gets switched to: {req:?}"
+            );
+        }
+        other => panic!("expected the switch, got {other:?}"),
+    }
+    assert!(
+        matches!(app.screen, Screen::Normal),
+        "the list closes once the switch is queued: {:?}",
+        app.screen
+    );
+}
+
+#[tokio::test]
+async fn no_key_on_the_workspace_picker_asks_the_app_to_quit() {
+    // `handle_key` answers one question: does the app keep running? A screen
+    // that answers it the other way closes the app on its first arrow — which
+    // is what this one did, and what every earlier test here missed, because all
+    // of them stopped at `app.screen` and never asked what the loop asks.
+    use super::input::Flow;
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let root = two_workspaces_one_bad("quit");
+
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.layout = bm_core::Layout::new(&root);
+
+    for c in ":ws".chars() {
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char(c)), &http, &job_tx).await,
+            Flow::KeepRunning,
+            "typing {c:?} must not exit"
+        );
+    }
+    assert_eq!(
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await,
+        Flow::KeepRunning,
+        "opening the list must not exit"
+    );
+    assert!(matches!(app.screen, Screen::WorkspaceList(_)), "{:?}", app.screen);
+
+    for k in [
+        KeyCode::Down,
+        KeyCode::Up,
+        KeyCode::Char('j'),
+        KeyCode::Char('k'),
+        KeyCode::Home,
+        KeyCode::Char('x'),
+    ] {
+        assert_eq!(
+            handle_key(&mut app, key(k), &http, &job_tx).await,
+            Flow::KeepRunning,
+            "{k:?} must not exit the app"
+        );
+        assert!(
+            matches!(app.screen, Screen::WorkspaceList(_)),
+            "{k:?} must leave the picker up, got {:?}",
+            app.screen
+        );
+    }
+
+    // End puts the highlight on the directory that is not a workspace, so this
+    // Enter is the refusal — refused *and* not an exit.
+    assert_eq!(
+        handle_key(&mut app, key(KeyCode::End), &http, &job_tx).await,
+        Flow::KeepRunning
+    );
+    assert_eq!(
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await,
+        Flow::KeepRunning,
+        "a refused Enter must not exit either"
+    );
+    let Screen::WorkspaceList(ws) = app.screen.clone() else {
+        panic!("the refusal stays up, got {:?}", app.screen);
+    };
+    assert!(
+        ws.error.as_deref().unwrap_or_default().contains("no settings.json"),
+        "{:?}",
+        ws.error
+    );
+    assert!(job_rx.try_recv().is_err(), "nothing was queued");
+}
+
+/// Every screen, one battery of keys, one answer: the app keeps running.
+///
+/// The workspace picker proved that a screen can close the app without any of
+/// its own tests going red, because every one of them stopped at `app.screen`
+/// and never asked the question the loop asks. `Flow` makes the wrong answer
+/// hard to spell, but nothing stops a handler from spelling it anyway, so this
+/// holds every screen to `KeepRunning` for the keys a hand presses on a screen
+/// it has never read.
+///
+/// Two keys are outside the battery, both for a reason rather than for
+/// convenience: `q` is the dashboard's own way out and is checked below, and
+/// `r` is the only binding that reaches the network.
+#[tokio::test]
+async fn only_the_dashboards_q_ends_the_app() {
+    use super::input::Flow;
+    let http = reqwest::Client::new();
+    let layout = bm_core::Layout::new("");
+    let battery = [
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Home,
+        KeyCode::End,
+        KeyCode::PageUp,
+        KeyCode::PageDown,
+        KeyCode::Tab,
+        KeyCode::Backspace,
+        KeyCode::Enter,
+        KeyCode::Char('j'),
+        KeyCode::Char('k'),
+        KeyCode::Char('x'),
+        KeyCode::Char('a'),
+        KeyCode::Char('?'),
+    ];
+
+    // One screen per row of the `Screen` enum that needs nothing from the
+    // network to exist. The picker has its own test above; the workspace list
+    // is skipped here for the same reason.
+    let screens: Vec<(&str, Screen)> = vec![
+        ("dashboard", Screen::Normal),
+        (
+            "jobs",
+            Screen::Jobs {
+                scroll: 0,
+                previous: Box::new(Screen::Normal),
+            },
+        ),
+        ("help", Screen::Help { scroll: 0 }),
+        ("crawl", Screen::Crawl { scroll: 0, expanded: false }),
+        ("run", Screen::Run),
+        (
+            "command prompt",
+            Screen::Text(TextPrompt::new(TextKind::Command, ":", "hint", "")),
+        ),
+        ("picker", Screen::Pick(Picker::new())),
+        ("cast", Screen::Cast(CastView::new())),
+        ("tasks", Screen::Tasks(TasksView::new())),
+        ("digest", Screen::Digest(DigestView::new(vec![1]))),
+        ("llm", Screen::Llm(LlmView::new())),
+        ("sound", Screen::Sound(SoundView::new())),
+        ("cloud", Screen::Cloud(CloudView::new())),
+        ("script", Screen::Script(ScriptView::new(&layout))),
+        (
+            "policy",
+            Screen::Policy(PolicyView::new("10.0.0.1".into(), "box".into(), vec![])),
+        ),
+        (
+            "workspace new",
+            Screen::WorkspaceNew(WorkspaceNew::new("book".into(), vec![])),
+        ),
+        ("machine", Screen::Machine("10.0.0.1".into())),
+        // A confirm whose action is *not* quitting, so its Enter exercises the
+        // "an answered dialog is still not an exit" half of the rule.
+        ("confirm (rerender)", Screen::Confirm(Confirm::rerender())),
+    ];
+
+    for (name, screen) in screens {
+        for k in battery {
+            let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+            let mut app = App::new("http://127.0.0.1:8901");
+            app.layout = bm_core::Layout::new("");
+            app.screen = screen.clone();
+            assert_eq!(
+                handle_key(&mut app, key(k), &http, &job_tx).await,
+                Flow::KeepRunning,
+                "{name}: {k:?} must not close the app (screen is now {:?})",
+                app.screen
+            );
+        }
+    }
+
+    // The first way out: the dashboard's `q`, when nothing is in flight.
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.layout = bm_core::Layout::new("");
+    assert_eq!(
+        handle_key(&mut app, key(KeyCode::Char('q')), &http, &job_tx).await,
+        Flow::Quit,
+        "q on the dashboard is still the way out"
+    );
+
+    // The second: the dialog `q` grows when work is in flight, which reaches
+    // the loop only once the operator says yes — and stays put when they do not.
+    let quitting = || Screen::Confirm(Confirm {
+        title: "Quit with work in flight?".into(),
+        danger: true,
+        body: vec!["1 background job(s) are still running.".into()],
+        action: ConfirmAction::Quit,
+    });
+    app.screen = quitting();
+    assert_eq!(
+        handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await,
+        Flow::Quit,
+        "answering yes to the quit dialog is the way out"
+    );
+    app.screen = quitting();
+    assert_eq!(
+        handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await,
+        Flow::KeepRunning,
+        "changing your mind is not quitting"
+    );
+}
+
+#[test]
+fn the_workspace_picker_renders_the_books_and_why_one_is_not_one() {
+    // Without this the painter never runs: a picker that draws nothing is
+    // indistinguishable, from the dashboard, from a picker with nothing to
+    // list — and this one exists precisely so there is never a name to type.
+    let root = two_workspaces_one_bad("draw");
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.layout = bm_core::Layout::new(&root);
+    app.screen = super::screen::Screen::WorkspaceList(super::screen::WsList::read(
+        &app.layout.root,
+    ));
+
+    let text = render_text(&mut app, 90, 24);
+    assert!(text.contains("Workspace — switch"), "no title:\n{text}");
+    assert!(text.contains("book-a"), "the book is not listed:\n{text}");
+    assert!(
+        hint_visible(&text, "active · 1 chapter · 1 script"),
+        "the active book's row says where it stands:\n{text}"
+    );
+    assert!(
+        hint_visible(&text, "no settings.json"),
+        "the directory that is not a book says why:\n{text}"
+    );
+    assert!(
+        hint_visible(&text, "Enter switches"),
+        "the keys are on screen:\n{text}"
+    );
+}
+
+/// The dashboard reads the **workspace's** binding, not the checkout's pointer:
+/// a book created from a preset owns its pack and engine, and the footer must
+/// name the book that will run rather than the root it sits on.
+#[test]
+fn the_dashboard_reads_the_workspace_binding_not_the_checkout_pointer() {
+    let root = tempfile::tempdir().unwrap();
+    // The checkout's pointer names another book's pack and language.
+    std::fs::create_dir_all(root.path().join(".bm")).unwrap();
+    std::fs::write(
+        root.path().join(".bm/profile"),
+        r#"{"pack":{"name":"xianxia","hash":"c"},"adapter":{"name":"vi-VN","hash":"a"},"engine":{"name":"vieneu","hash":""}}"#,
+    )
+    .unwrap();
+    // The workspace names its own pack and engine, and leaves the language to
+    // the checkout — the piece-by-piece merge `Layout::resolve` already makes.
+    std::fs::create_dir_all(root.path().join("workspaces/book")).unwrap();
+    std::fs::write(
+        root.path().join("workspaces/book/settings.json"),
+        r#"{"profile":{"pack":{"name":"apothecary","hash":"w","version":""},"engine":{"name":"pocket","hash":"","version":""}}}"#,
+    )
+    .unwrap();
+    std::fs::write(root.path().join(".bm/active-workspace"), "book\n").unwrap();
+
+    let mut app = App::new("http://127.0.0.1:9");
+    app.layout = bm_core::Layout::resolve(root.path()).unwrap();
+    let (dead_tx, _dead_rx) = tokio::sync::mpsc::unbounded_channel();
+    app.relayout(&dead_tx, &reqwest::Client::new());
+
+    let binding = app.profile.as_ref().expect("a binding in force");
+    assert_eq!(binding.pack.name, "apothecary");
+    assert_eq!(binding.adapter.name, "vi-VN", "the checkout's language fills the gap");
+    assert_eq!(binding.engine.name, "pocket");
+    assert_eq!(
+        super::model::profile_label(app.profile.as_ref()),
+        "apothecary · vi-VN · pocket (w)",
+        "the footer names the book's own binding"
+    );
+}
+
+/// The guided create flow: name → profile → crawler, then one create job
+/// carrying the chosen preset and the crawler it seeds the book with.
+#[tokio::test]
+async fn the_guided_create_picks_a_profile_and_a_crawler_then_creates() {
+    let root = std::env::temp_dir().join(format!("bm-ws-guided-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("profiles")).unwrap();
+    std::fs::write(
+        root.join("profiles/presets.json"),
+        r#"{"xianxia-vi": {"label": "Xianxia (vi)", "pack": "xianxia", "adapter": "vi-VN", "engine": "vieneu"}}"#,
+    )
+    .unwrap();
+    // A known site is only offered when its global script is on this checkout.
+    std::fs::create_dir_all(root.join("crawlers/known")).unwrap();
+    std::fs::write(root.join("crawlers/known/storya.lua"), "-- crawl").unwrap();
+
+    let mut app = App::new("http://127.0.0.1:9");
+    app.layout = bm_core::Layout::new(&root);
+    let profiles: Vec<super::screen::WsItem> = bm_core::preset::read_presets(&root)
+        .unwrap()
+        .into_iter()
+        .map(|(id, p)| super::screen::WsItem {
+            label: p.label,
+            note: id.clone(),
+            value: id,
+        })
+        .collect();
+    assert_eq!(profiles.len(), 1);
+    app.screen = super::screen::Screen::WorkspaceNew(super::screen::WorkspaceNew::new(
+        "book".into(),
+        profiles,
+    ));
+
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+
+    // name → profile
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, super::screen::Screen::WorkspaceNew(ref ws) if ws.step == super::screen::WsStep::Profile),
+        "{:?}",
+        app.screen
+    );
+
+    // profile → crawler
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    let crawlers = match &app.screen {
+        super::screen::Screen::WorkspaceNew(ws) => {
+            assert_eq!(ws.step, super::screen::WsStep::Crawler);
+            ws.crawlers.clone()
+        }
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        crawlers.iter().any(|c| c.value == "site:storya.click"),
+        "a known site whose script is on disk is offered: {crawlers:?}"
+    );
+
+    // Walk to the known site and create.
+    let idx = crawlers
+        .iter()
+        .position(|c| c.value == "site:storya.click")
+        .unwrap();
+    for _ in 0..idx {
+        handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+
+    assert!(
+        matches!(app.screen, super::screen::Screen::Normal),
+        "the wizard closes on create: {:?}",
+        app.screen
+    );
+    let Job::Tracked { job, .. } = job_rx.try_recv().expect("a create job") else {
+        panic!("the create must be a tracked job")
+    };
+    match *job {
+        Job::Workspace {
+            req:
+                WorkspaceReq::New {
+                    name,
+                    profile,
+                    crawler,
+                },
+            ..
+        } => {
+            assert_eq!(name, "book");
+            assert_eq!(profile.as_deref(), Some("xianxia-vi"));
+            let c = crawler.expect("the chosen crawler travels with the job");
+            assert_eq!(
+                c.script, "crawlers/known/storya.lua",
+                "a known site is referenced globally, not copied"
+            );
+            assert!(c.source.as_os_str().is_empty(), "nothing to copy");
+            assert!(c.url_template.contains("{n}"), "{}", c.url_template);
+        }
+        other => panic!("expected a workspace create, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Choosing **Local file (EPUB)** asks for the book, and the create job carries
+/// it (`book`) beside the global example script and the workspace-relative
+/// `params.epub` — the TUI's "add epub", with no hand-copied file.
+#[tokio::test]
+async fn the_guided_create_takes_an_epub_path_and_hands_it_to_the_job() {
+    let root = std::env::temp_dir().join(format!("bm-ws-guided-epub-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("profiles")).unwrap();
+    std::fs::write(
+        root.join("profiles/presets.json"),
+        r#"{"jnovel-en": {"label": "JNovel", "pack": "", "adapter": "jnovel-en-US", "engine": "pocket"}}"#,
+    )
+    .unwrap();
+    // The book the operator names is a real file, so the path step accepts it.
+    let book = root.join("somewhere/apothecary.epub");
+    std::fs::create_dir_all(book.parent().unwrap()).unwrap();
+    std::fs::write(&book, b"PK\x03\x04 placeholder").unwrap();
+
+    let mut app = App::new("http://127.0.0.1:9");
+    app.layout = bm_core::Layout::new(&root);
+    let profiles: Vec<WsItem> = bm_core::preset::read_presets(&root)
+        .unwrap()
+        .into_iter()
+        .map(|(id, p)| WsItem {
+            label: p.label,
+            note: id.clone(),
+            value: id,
+        })
+        .collect();
+    app.screen = Screen::WorkspaceNew(WorkspaceNew::new("book".into(), profiles));
+
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+
+    // name → profile → crawler
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+
+    let crawlers = match &app.screen {
+        Screen::WorkspaceNew(ws) => ws.crawlers.clone(),
+        other => panic!("{other:?}"),
+    };
+    let idx = crawlers
+        .iter()
+        .position(|c| c.value == "local-epub")
+        .expect("the EPUB choice is always offered");
+    for _ in 0..idx {
+        handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::WorkspaceNew(ref ws) if ws.step == WsStep::Epub),
+        "the EPUB choice asks for the book: {:?}",
+        app.screen
+    );
+
+    if let Screen::WorkspaceNew(ws) = &mut app.screen {
+        ws.epub = book.display().to_string();
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+
+    assert!(
+        matches!(app.screen, Screen::Normal),
+        "the wizard closes on create: {:?}",
+        app.screen
+    );
+    let Job::Tracked { job, .. } = job_rx.try_recv().expect("a create job") else {
+        panic!("the create must be a tracked job")
+    };
+    match *job {
+        Job::Workspace {
+            req: WorkspaceReq::New { crawler, .. },
+            ..
+        } => {
+            let c = crawler.expect("the EPUB crawler travels with the job");
+            assert_eq!(c.script, "crawlers/examples/epub.lua");
+            assert_eq!(c.params["epub"], "tmp/book.epub");
+            assert_eq!(c.book, book, "the named file is what gets copied in");
+            assert!(c.source.as_os_str().is_empty(), "no script to copy");
+        }
+        other => panic!("expected a workspace create, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Choosing **Local file (EPUB)** and naming a **folder** is the multi-volume
+/// shape: the create job carries the directory (`books`) and the
+/// workspace-relative `params.books`, and no single book.
+#[tokio::test]
+async fn the_guided_create_takes_a_books_folder_and_hands_it_to_the_job() {
+    let root = std::env::temp_dir().join(format!("bm-ws-guided-books-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("profiles")).unwrap();
+    std::fs::write(
+        root.join("profiles/presets.json"),
+        r#"{"jnovel-en": {"label": "JNovel", "pack": "", "adapter": "jnovel-en-US", "engine": "pocket"}}"#,
+    )
+    .unwrap();
+    // The operator names a real directory, so the path step accepts it.
+    let shelf = root.join("somewhere/volumes");
+    std::fs::create_dir_all(&shelf).unwrap();
+    std::fs::write(shelf.join("vol-01.epub"), b"PK\x03\x04 one").unwrap();
+    std::fs::write(shelf.join("vol-02.epub"), b"PK\x03\x04 two").unwrap();
+
+    let mut app = App::new("http://127.0.0.1:9");
+    app.layout = bm_core::Layout::new(&root);
+    let profiles: Vec<WsItem> = bm_core::preset::read_presets(&root)
+        .unwrap()
+        .into_iter()
+        .map(|(id, p)| WsItem {
+            label: p.label,
+            note: id.clone(),
+            value: id,
+        })
+        .collect();
+    app.screen = Screen::WorkspaceNew(WorkspaceNew::new("book".into(), profiles));
+
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+
+    // name → profile → crawler
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    let crawlers = match &app.screen {
+        Screen::WorkspaceNew(ws) => ws.crawlers.clone(),
+        other => panic!("{other:?}"),
+    };
+    let idx = crawlers
+        .iter()
+        .position(|c| c.value == "local-epub")
+        .expect("the EPUB choice is always offered");
+    for _ in 0..idx {
+        handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::WorkspaceNew(ref ws) if ws.step == WsStep::Epub));
+
+    if let Screen::WorkspaceNew(ws) = &mut app.screen {
+        ws.epub = shelf.display().to_string();
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+
+    let Job::Tracked { job, .. } = job_rx.try_recv().expect("a create job") else {
+        panic!("the create must be a tracked job")
+    };
+    match *job {
+        Job::Workspace {
+            req: WorkspaceReq::New { crawler, .. },
+            ..
+        } => {
+            let c = crawler.expect("the EPUB crawler travels with the job");
+            assert_eq!(c.script, "crawlers/examples/epub.lua");
+            assert_eq!(c.params["books"], "books");
+            assert!(c.params.get("epub").is_none(), "a folder is not one book");
+            assert_eq!(c.books, shelf, "the named folder is what gets copied in");
+            assert!(c.book.as_os_str().is_empty(), "no single book");
+        }
+        other => panic!("expected a workspace create, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_guided_create_overlay_draws_the_step_and_the_presets() {
+    let mut app = App::new("http://x");
+    app.screen = super::screen::Screen::WorkspaceNew(super::screen::WorkspaceNew::new(
+        "book".into(),
+        vec![super::screen::WsItem {
+            label: "Xianxia (vi)".into(),
+            note: "xianxia-vi".into(),
+            value: "xianxia-vi".into(),
+        }],
+    ));
+    let name_step = render_text(&mut app, 100, 44);
+    assert!(name_step.contains("Workspace — new"), "{name_step}");
+    assert!(name_step.contains("book"), "the typed name is echoed: {name_step}");
+
+    if let super::screen::Screen::WorkspaceNew(mut ws) = app.screen.clone() {
+        ws.step = super::screen::WsStep::Profile;
+        app.screen = super::screen::Screen::WorkspaceNew(ws);
+    }
+    let profile_step = render_text(&mut app, 100, 44);
+    assert!(
+        profile_step.contains("Xianxia (vi)"),
+        "the preset list draws: {profile_step}"
+    );
 }

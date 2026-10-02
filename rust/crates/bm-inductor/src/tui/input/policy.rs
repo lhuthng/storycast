@@ -18,6 +18,7 @@ use crate::tui::{
     screen::{PolicyView, Screen},
     style::Level,
 };
+use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) async fn key_policy(
@@ -26,13 +27,13 @@ pub(crate) async fn key_policy(
     key: KeyEvent,
     http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     let mut save = false;
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.screen = Screen::Normal;
             app.set_status(Level::Info, "closed the policy editor");
-            return false;
+            return Flow::KeepRunning;
         }
         KeyCode::Enter => {
             if let Screen::Policy(v) = &mut app.screen {
@@ -134,5 +135,5 @@ pub(crate) async fn key_policy(
             app.set_status(Level::Warn, msg);
         }
     }
-    false
+    Flow::KeepRunning
 }

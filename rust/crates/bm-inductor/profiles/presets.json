@@ -1,0 +1,2 @@
+{"jnovel-en": {"label": "JNovel (en)", "pack": "",
+            "pack_deps": ["common"], "adapter": "jnovel-en-US", "engine": "pocket"}}

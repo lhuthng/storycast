@@ -22,6 +22,8 @@ mod stats;
 mod task_detail;
 mod tasks;
 mod workers;
+mod workspace_list;
+mod workspace_new;
 
 use crate::tui::{
     app::{App, HitTarget, Panel},
@@ -539,8 +541,10 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Screen::TaskDetail(d) => task_detail::draw_task_detail(f, app, &d),
         Screen::Sound(v) => sound::draw_sound(f, app, &v),
         Screen::Cloud(v) => cloud::draw_cloud(f, app, &v),
-        Screen::Crawl { scroll } => crawl::draw_crawl(f, app, scroll),
+        Screen::Crawl { scroll, expanded } => crawl::draw_crawl(f, app, scroll, expanded),
         Screen::Llm(v) => llm::draw_llm(f, app, &v),
+        Screen::WorkspaceNew(ws) => workspace_new::draw_workspace_new(f, app, &ws),
+        Screen::WorkspaceList(ws) => workspace_list::draw_workspace_list(f, app, &ws),
         _ => {}
     }
 }

@@ -1,5 +1,6 @@
-//! The crawl view's painter. Reads [`crate::tui::crawl::rows`] and paints it;
-//! it decides nothing about what the rows say.
+//! The crawl view's painter. Reads [`crate::tui::crawl::rows`] — or
+//! [`crate::tui::crawl::detail`] when the operator has asked for the whole
+//! configuration — and paints it; it decides nothing about what the rows say.
 use crate::tui::{
     app::{App, HitTarget, ListTarget},
     crawl::{Row, KEY_W},
@@ -41,7 +42,12 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-pub(crate) fn draw_crawl(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
+pub(crate) fn draw_crawl(
+    f: &mut ratatui::Frame,
+    app: &mut App,
+    scroll: usize,
+    expanded: bool,
+) {
     let area = centered_padded(f.area(), 96, 34, 1);
     f.render_widget(Clear, area);
     app.add_hit_region(
@@ -53,7 +59,16 @@ pub(crate) fn draw_crawl(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         },
     );
 
-    let rows = crate::tui::crawl::rows(&app.layout, &app.effective_settings());
+    // The verdict is the default and the configuration is one keypress away.
+    // Which one is on screen is named in the title bar, because a screen that
+    // hides half of itself without saying so is the same mistake the concise
+    // view was made to fix.
+    let settings = app.effective_settings();
+    let rows = if expanded {
+        crate::tui::crawl::detail(&app.layout, &settings)
+    } else {
+        crate::tui::crawl::rows(&app.layout, &settings)
+    };
     let key = app.style(Color::Cyan);
     let fault = app.style_bold(Color::Yellow);
     let dim = Style::default().fg(Color::DarkGray);
@@ -91,7 +106,15 @@ pub(crate) fn draw_crawl(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         }
     }
 
-    let block = super::pane_block(app, "Crawl — Esc or c to close · ↑↓ PgUp PgDn scroll");
+    let toggle = if expanded {
+        "Enter verdict"
+    } else {
+        "Enter detail"
+    };
+    let block = super::pane_block(
+        app,
+        format!("Crawl — {toggle} · Esc or c to close · ↑↓ PgUp PgDn scroll"),
+    );
     let inner_h = area.height.saturating_sub(2) as usize;
     let max = lines.len().saturating_sub(inner_h);
     let offset = scroll.min(max) as u16;

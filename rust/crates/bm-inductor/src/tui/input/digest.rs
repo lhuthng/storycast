@@ -23,6 +23,7 @@ use crate::tui::{
     screen::{DigestChapter, DigestView, Screen, DIGEST_COLS as COLS},
     style::Level,
 };
+use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) async fn key_digest(
@@ -31,7 +32,7 @@ pub(crate) async fn key_digest(
     key: KeyEvent,
     http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     // "Digested" is one question with one answer, and the list, the filter and
     // the draw must all ask it the same way: the chapter has a script on disk.
     // Derived from the layout rather than remembered, so a digest that lands
@@ -51,7 +52,7 @@ pub(crate) async fn key_digest(
             KeyCode::Esc | KeyCode::Char('q') => {
                 app.screen = Screen::Normal;
                 app.set_status(Level::Info, "closed the digest manager");
-                return false;
+                return Flow::KeepRunning;
             }
             // **A grid, so the arrows mean what the picture means.** The chapters
             // are drawn `COLS` to a row, so ←/→ step one chapter and ↑/↓ step a
@@ -85,7 +86,7 @@ pub(crate) async fn key_digest(
                 };
                 app.screen = Screen::Digest(v.clone());
                 do_command(app, cmd, http, job_tx);
-                return false;
+                return Flow::KeepRunning;
             }
             KeyCode::Char('f') => {
                 v.hide_done = !v.hide_done;
@@ -127,7 +128,7 @@ pub(crate) async fn key_digest(
             _ => {}
         }
         app.screen = Screen::Digest(v);
-        return false;
+        return Flow::KeepRunning;
     };
 
     // ---- inside a chapter: the two rounds ---------------------------------
@@ -149,7 +150,7 @@ pub(crate) async fn key_digest(
                 format!("back to the chapter list (ch{} left as it was)", ch.n),
             );
             app.screen = Screen::Digest(v);
-            return false;
+            return Flow::KeepRunning;
         }
         KeyCode::Char('c') => match clipboard::copy(&ch.prompt) {
             Ok(()) => {
@@ -208,7 +209,7 @@ pub(crate) async fn key_digest(
     // why this is safe to do unconditionally *here*.
     v.open = Some(ch);
     app.screen = Screen::Digest(v);
-    false
+    Flow::KeepRunning
 }
 
 /// Start a chapter: build round 1's prompt and put it on the clipboard.
@@ -306,8 +307,8 @@ fn accept(
                 "{}{} accepted — {copied}",
                 part_note(part),
                 match round {
-                    bm_core::digest::Round::Script => "cast",
-                    bm_core::digest::Round::Cast => "script",
+                    bm_core::digest::Round::Staging => "cast",
+                    bm_core::digest::Round::Attribution => "script",
                 }
             );
             return Ok(None);

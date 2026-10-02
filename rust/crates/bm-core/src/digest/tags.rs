@@ -362,6 +362,20 @@ pub fn validate_script(
         if text.is_empty() {
             anyhow::bail!("segment {i}: empty text");
         }
+        // `kind` is code-attached, and `thought` is the only value code ever
+        // writes: it is the marker the mixer keys the pack's thought sound on
+        // (`scene-map.json` → `thought.sound`), so another value — or one the
+        // staging model invented — would either fire that sound on a spoken
+        // line or promise a marker nothing downstream honours. Refused here,
+        // where the digest can still ask for a repair.
+        match s.get("kind") {
+            None => {}
+            Some(Value::String(kind)) if kind == "thought" => {}
+            Some(other) => anyhow::bail!(
+                "segment {i}: `kind` may only be \"thought\" (the marker the digest attaches \
+                 to a thought event), got {other}"
+            ),
+        }
         has_speakable_segment |= crate::util::has_speakable_content(text);
         // Only the engine's three emotion cues may stand in brackets —
         // anything else is spoken aloud literally downstream.
@@ -1053,6 +1067,32 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect()
+    }
+
+    /// `kind` is code-attached, and `thought` is the only value code writes:
+    /// the marker is what the mixer keys the pack's thought sound on, so any
+    /// other value — a model invention or a hand edit — is refused where the
+    /// digest can still ask for a repair.
+    #[test]
+    fn only_a_thought_may_carry_a_kind() {
+        let bible = json!({"characters": []});
+        let context = json!({"roster": ["Narrator"]});
+        let line = |kind: Option<&str>| {
+            let mut line = json!({"speaker": "Narrator", "text": "She looked up."});
+            if let Some(kind) = kind {
+                line["kind"] = json!(kind);
+            }
+            line
+        };
+        validate_script(&json!({"segments": [line(Some("thought"))]}), &bible, &context, &pal())
+            .unwrap();
+        validate_script(&json!({"segments": [line(None)]}), &bible, &context, &pal()).unwrap();
+
+        for bogus in ["dialogue", "narration", "spoken"] {
+            let data = json!({"segments": [line(Some(bogus))]});
+            let err = validate_script(&data, &bible, &context, &pal()).unwrap_err();
+            assert!(err.to_string().contains("kind"), "{bogus}: {err}");
+        }
     }
 
     #[test]

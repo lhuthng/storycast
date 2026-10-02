@@ -382,7 +382,7 @@ fn engine_kind(engine: &str, script: &str) -> Option<super::engine::EngineKind> 
         return super::engine::EngineKind::parse(engine);
     }
     // An empty engine with a named script means "pick by extension": that is
-    // what makes `script = "assets/crawl/site.js"` work without a second field
+    // what makes `script = "crawlers/known/site.js"` work without a second field
     // to keep in step.
     if script.trim().is_empty() {
         None
@@ -434,26 +434,28 @@ pub fn spec_from_settings(layout: &Layout, s: &Settings) -> CrawlSpec {
     spec
 }
 
-/// Resolve a script path contained in the workspace.
+/// Resolve a script path contained in the checkout.
 ///
 /// Containment is deliberate: a crawl script runs with the worker's own
 /// privileges, so `crawl.script` naming `/etc/…` or a path outside the root is
 /// not a configuration to honour. A relative name is tried against the active
-/// workspace first — `crawl/mysite.lua` there is the per-book crawler, and it
-/// shadows anything the profile ships — then the root (`assets/crawl/…`, the
-/// profile's), then `assets/`. The workspace base is `layout.work` rather than
-/// the crawl directory itself so one spelling (`crawl/x.lua`) means the same
-/// file on the inductor and on a worker, where provision pushed the dir to
-/// `~/bm-worker/crawl`.
+/// workspace first — `crawl/mysite.lua` there is the per-book crawler (a site
+/// nobody has written down yet, the operator's own copy) — then the checkout
+/// root, which is what every global path spells (`crawlers/known/storya.lua`,
+/// `crawlers/examples/epub.lua`), then the adapter's own home, then the pack.
+/// The workspace base is `layout.work` rather than the crawl directory itself
+/// so one spelling (`crawl/x.lua`) means the same file on the inductor and on a
+/// worker, where provision pushed the dir to `~/bm-worker/crawl`.
 ///
-/// **Last resort: a bundled crawler by bare filename.** Every bundled crawler
-/// now lives in `assets/crawl/templates/`, and a `settings.json` written before
-/// that move spells it `assets/crawl/storya.lua` — a path that no longer
-/// exists. Falling back to the basename keeps those files working instead of
-/// failing at the first crawl with "script not found", which is a confusing way
-/// to learn about a directory move. An exact hit always wins, so this cannot
-/// shadow an operator's own crawler, and a bare name is left alone: it has no
-/// directory to have moved out from under it.
+/// **Last resort: a global crawler by filename.** A `settings.json` written
+/// before the crawlers moved into the global `crawlers/` tree spells an old
+/// path (`assets/crawl/templates/storya.lua`, `crawl/templates/storya.lua`) that
+/// no longer exists. Falling back to the basename in `crawlers/known/` and
+/// `crawlers/examples/` keeps those files working instead of failing at the
+/// first crawl with "script not found", which is a confusing way to learn about
+/// a directory move. An exact hit always wins, so this cannot shadow an
+/// operator's own crawler, and a bare name is left alone: it has no directory to
+/// have moved out from under it.
 pub fn resolve_script(layout: &Layout, name: &str) -> Option<std::path::PathBuf> {
     let name = name.trim();
     if name.is_empty() {
@@ -464,13 +466,12 @@ pub fn resolve_script(layout: &Layout, name: &str) -> Option<std::path::PathBuf>
         let inside = candidate.starts_with(&layout.root);
         return (inside && candidate.is_file()).then(|| candidate.to_path_buf());
     }
-    // Nearest scope first: this book's own crawlers, then the checkout's, then
-    // the adapter's own home, then the pack. The adapter is *after* the two
-    // book scopes on purpose — a book that has written a crawler for its own
-    // site means it, and a language release arriving later must not silently
-    // take that over. It is *before* `assets/` because the crawlers are the
-    // language's now: with a bundle unpacked, `assets/crawl/` is the pre-split
-    // tree and is only reached by a checkout that has no bundle at all.
+    // Nearest scope first: this book's own crawlers, then the checkout root (the
+    // global `crawlers/…` tree, and any other root-relative path), then the
+    // adapter's own home (it may carry a language's own `crawl/`), then the
+    // pack. A book that has written a crawler for its own site must win over the
+    // global one, so `work` is first and the root — which holds `crawlers/` — is
+    // second.
     let mut bases = vec![layout.work.clone(), layout.root.clone()];
     if let Some(home) = layout.adapter_home() {
         if !bases.contains(&home) {
@@ -487,15 +488,13 @@ pub fn resolve_script(layout: &Layout, name: &str) -> Option<std::path::PathBuf>
     if candidate.components().count() < 2 {
         return None;
     }
-    // A bare name is a *bundled* crawler: one that ships in a `templates/`
-    // directory rather than being configured by path. Two can exist, and the
-    // adapter's is the live one.
+    // A named path that missed is a pre-move spelling of a crawler that now
+    // lives in the global tree: find it by filename under `known/` or
+    // `examples/`. A bare name never gets here (it has no directory to have
+    // moved out from under it), so a typo still resolves to nothing.
     let file = candidate.file_name()?;
-    let mut bundled = vec![layout.assets().join("crawl").join("templates")];
-    if let Some(home) = layout.adapter_home() {
-        bundled.insert(0, home.join("crawl").join("templates"));
-    }
-    bundled
+    let crawlers = layout.crawlers_dir();
+    [crawlers.join("known"), crawlers.join("examples")]
         .into_iter()
         .map(|dir| dir.join(file))
         .find(|p| p.is_file())

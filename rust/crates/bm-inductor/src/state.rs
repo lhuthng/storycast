@@ -2919,6 +2919,54 @@ mod tests {
         assert!(inner.op_swap_voice("A", "young-female-1").is_ok());
     }
 
+    #[test]
+    fn swap_enrolls_a_pocket_clones_clip_into_the_engines_store() {
+        // The pocket lane, which used to be impossible: its store is a `file`
+        // per voice, nothing in the app could write one, and the gate looked
+        // for a VieNeu preset key — so every `:N` voice was refused with
+        // "enroll it (:A …)", instructions to do what had just been done.
+        // Now `swap_apply` enrolls the book's own clip into the engine's
+        // store and admits the voice.
+        let (_d, mut inner) = fixture();
+        let mut layout = inner.layout.clone();
+        layout.engine = "pocket".to_string();
+        inner.layout = layout.clone();
+        inner.settings.engine = "pocket".to_string();
+        std::fs::create_dir_all(layout.bm_state()).unwrap();
+        std::fs::write(layout.cast("pocket"), r#"{"A":"alba"}"#).unwrap();
+        let clip = layout.work.join("refs/Maomao.wav");
+        bm_core::assemble::silent_wav(&clip, 1.0, 24_000).unwrap();
+        std::fs::write(
+            layout.voice_pool(),
+            r#"{"Maomao":{"file":"refs/Maomao.wav","tags":[]}}"#,
+        )
+        .unwrap();
+        std::fs::write(layout.voices_manifest(), r#"{"Maomao":"refs/Maomao.wav"}"#).unwrap();
+        std::fs::create_dir_all(layout.models_dir()).unwrap();
+        std::fs::write(
+            layout.tts_voices(),
+            r#"{"presets":{"alba":{"file":"voices/alba.safetensors"}}}"#,
+        )
+        .unwrap();
+
+        let msg = inner.op_swap_voice("A", "Maomao").unwrap();
+        assert!(msg.contains("Maomao"), "{msg}");
+        let store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(layout.tts_voices()).unwrap()).unwrap();
+        assert_eq!(store["presets"]["Maomao"]["file"], "refs/maomao.wav");
+        assert!(
+            layout.models_dir().join("refs/maomao.wav").is_file(),
+            "the clip the sidecar clones at load is in the engine's own tree"
+        );
+
+        // Nothing left to enroll: a second swap is admitted by the entry the
+        // first one wrote, and the store is not rewritten.
+        let before = std::fs::read_to_string(layout.tts_voices()).unwrap();
+        std::fs::write(layout.cast("pocket"), r#"{"A":"alba"}"#).unwrap();
+        assert!(inner.op_swap_voice("A", "Maomao").is_ok());
+        assert_eq!(std::fs::read_to_string(layout.tts_voices()).unwrap(), before);
+    }
+
     fn busy_inner() -> (tempfile::TempDir, Inner) {
         // One chapter mid-render on w1: assigned task + fresh beat with task.
         let (d, mut inner) = fixture();

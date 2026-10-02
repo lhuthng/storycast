@@ -94,9 +94,9 @@ Everything book-specific is runtime-created and git-ignored:
 | Created by you / at runtime | What it is |
 | --- | --- |
 | **`url_template` + `crawl` in `workspaces/<name>/settings.json`** | **Required.** Where chapters come from: `{n}` is the number, plus the [crawl script](docs/CRAWLING.md) that fetches them. The only novel-specific settings you must change. New workspaces default to `crawl.mode: "manual"`, nothing fetches until you name a crawler and set `"mode": "script"` |
-| **`workspaces/<name>/crawl/*.lua` \| `*.js`** | **Required if crawling.** Your crawler, per book. `assets/crawl/templates/` has five to start from, four written against a page captured from the live site they are for: `storya.lua` (the site this was built for), `truyencom.lua` (the easy shape), `madara.lua` (a paginated listing), `readnovelfull.lua` (slug URLs and a book index that stops at 30 chapters), `webnovel.lua` (the hard shape, a site behind a bot check). Pushed with the next provision to every worker whose policy runs crawl. See [docs/CRAWLING.md](docs/CRAWLING.md) |
+| **`crawlers/known/*.lua` \| `*.js`** | **Your crawler.** The **global** crawler tree, tracked in the repo and shared by every workspace: `storya.lua` (the site this was built for), `truyencom.lua` (the easy shape), `madara.lua` (a paginated listing), `readnovelfull.lua` (slug URLs and a book index that stops at 30 chapters), `webnovel.lua` (the hard shape, a site behind a bot check). `crawlers/examples/epub.lua` reads a local EPUB. A preset selects one (`crawler` in `profiles/presets.json`); a book that needs its own puts it in `workspaces/<name>/crawl/`, which is searched first. See [docs/CRAWLING.md](docs/CRAWLING.md) |
 | **`prompts/script.txt`** | Your style and language, if the example does not fit |
-| `voices.json`, `voice-pool.json`, `refs/` | Cloned voices and clips (skip to use catalogue voices) |
+| **`workspaces/<name>/voices.json`, `voice-pool.json`, `refs/`** | Cloned voices and clips, **per book** — the checkout root holds none (skip to use catalogue voices) |
 | `data/`, `output/` | Scripts, bible, cached audio, finished MP3s |
 | `.bm/` | Ledger, settings, machines, logs |
 | `.bm/llm.json` | LLM providers (keys, endpoints, active model), inductor only. Workers receive the active key with the task that needs it |
@@ -312,14 +312,14 @@ Write one without reading much of anything:
    contract, the host functions, the refusal classes) written exactly for this.
    Ask for a Lua script; the chat investigates the selectors and hands back a
    working crawler. Start from a template if you would rather not begin from
-   nothing: `templates/truyencom.lua` is the easy shape (the chapter URL is a
-   function of `n`), `templates/madara.lua` a paginated listing,
-   `templates/readnovelfull.lua` a site whose URLs carry a title slug and whose
-   book index stops at 30 chapters, `templates/webnovel.lua` the hard one (slug
-   URLs, a container one level deeper than the obvious one, a paid-chapter
-   flag). `templates/storya.lua` is the crawler the pipeline shipped with, kept
-   for workspaces whose settings predate the `crawl` block; a new workspace
-   names no crawler at all.
+   nothing: `crawlers/known/truyencom.lua` is the easy shape (the chapter URL is
+   a function of `n`), `crawlers/known/madara.lua` a paginated listing,
+   `crawlers/known/readnovelfull.lua` a site whose URLs carry a title slug and
+   whose book index stops at 30 chapters, `crawlers/known/webnovel.lua` the hard
+   one (slug URLs, a container one level deeper than the obvious one, a
+   paid-chapter flag). `crawlers/known/storya.lua` is the crawler the pipeline
+   shipped with, kept for workspaces whose settings predate the `crawl` block; a
+   new workspace names no crawler at all.
 3. Put it at `workspaces/<name>/crawl/mysite.lua` (per book, synced to every
    worker by the next provision), point `crawl.script` at it, and probe with
    `c` in the TUI. The probe runs the real crawler over a real chapter and
@@ -342,11 +342,15 @@ the size guard refuses a whole-page scrape. Everything else about the format is
 
 ### Cloned voices (optional)
 
-- `voices.json` maps character to clip in `refs/` (e.g.
-  `{"Narrator": "refs/narrator.mp3"}`). Both git-ignored.
-- `voice-pool.json` is the tag-matched pool: `bm-inductor roster add-sample
-  refs/young-female-4.mp3`, tags from the filename, enrolled on every worker at
-  the next provision.
+Voices are a **book's own**, under `workspaces/<name>/` — not the checkout's.
+The checkout root carries no `voices.json`, and one book never reads another's.
+
+- `workspaces/<name>/voices.json` maps character to clip in `refs/` (e.g.
+  `{"Narrator": "refs/narrator.mp3"}`), beside `refs/` in the same workspace.
+  Both git-ignored.
+- `workspaces/<name>/voice-pool.json` is the tag-matched pool: `bm-inductor
+  roster add-sample refs/young-female-4.mp3`, tags from the filename, enrolled
+  on every worker at the next provision.
 - Nothing added: the built-in catalogue voices are the whole roster, and
   assignment is automatic.
 
@@ -628,7 +632,7 @@ at top).
 | `data/crawl-index.json` | The chapter index: `n` to url for the current range. Hand-editable, the escape hatch for slug URLs |
 | `data/bible.json`, `data/cast-vieneu.json` | Character bible, speaker-to-voice (one per engine) |
 | `data/audio/segments-vieneu-NN/` | Cached segment audio, resumable renders |
-| `voices.json`, `voice-pool.json`, `refs/` | Clone mapping, sample pool, clips. **This machine only** — `refs/` is never pushed to a worker (enrollment happens here, and a box is sent the encoded voice store in `engines/<name>/models/voices.json`) |
+| `workspaces/<name>/voices.json`, `voice-pool.json`, `refs/` | Clone mapping, sample pool, clips — **per book**, not the checkout. **This machine only** — `refs/` is never pushed to a worker (enrollment happens here, and a box is sent the encoded voice store in `engines/<name>/models/voices.json`) |
 | `workspaces/<name>/settings.json` | Run config **per book**: url_template, engine, range, speed, gap_ms, ambience, music, volumes, analyzer, models, render_batch (`:mix`, `:batch`), digest (how a chapter too long for one answer is staged in parts). No workspace: the same file is `.bm/settings.json` |
 | `workspaces/<name>/ledger.json` | Task states, survive restarts. Root form: `.bm/ledger.json` |
 | `.bm/machines.json` | Linked machines (addr, ssh user/port/key), machine-global |

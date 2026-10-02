@@ -138,7 +138,7 @@ Where the cloud plane lives, kept as a map now that the work is done:
 | `bm-inductor/src/tui/{draw,input}/{cloud,policy}.rs` | the Cloud view and the policy view |
 | `aws.default.json`, `aws-policy.json` | the tracked pool shape, and the policy to paste |
 
-## 3. A workspace pack: one live pack per book (`planned`, deferred)
+## 3. A workspace pack: one live pack per book (`in progress`)
 
 **Your words:** "no need to do a workspace until the settings are completed."
 
@@ -150,6 +150,22 @@ already names this as the box that changes what a book sounds. The target: a
 workspace's pack **extends its profile's pack one-to-one** and adds the book's
 own taste and presets on top, so two books do not share a score.
 
+**What shipped, 2026-10-01.** The first step, and most of what this item
+asked for. `Layout::assets()` is **work-scoped** — the active workspace's own
+`assets/` when it has one, the checkout's when it does not — and
+`workspace new --profile <preset>` composes that tree at creation from the
+preset's `pack_deps` (`profiles/presets.json`; see
+[PROFILES.md §Choosing a profile](PROFILES.md#choosing-a-profile-presets-and-the-workspaces-own-pack)).
+`the-apothecary-diaries` runs its own `common + craft + court-mystery`
+composition beside `beyond-myriads`' checkout-level `xianxia` tree, and the
+composition resolved on a real book end to end — the crawl through the digest —
+with no change to the checkout's files. Not done yet: a workspace releasing
+its own composition as a bundle (`profile manifest <name> --piece pack`
+currently hashes whichever tree is in force, so the verb already works for the
+active workspace; the tag/release flow around it is untested), and a binding
+stamp beside the workspace cache so a hand-edited `settings.json` cannot point
+a book at another book's score silently.
+
 **What I did first, and why it was the right order.** The two packs
 (`craft`, `court-mystery`) were built and gated *before* this, so the shape a
 layout change has to carry is a known one rather than a sketch. That turned out
@@ -157,15 +173,15 @@ to matter more than expected: the gate found on its first run that **a preset
 must answer the entire palette it inherits**, because the mood vocabulary lives
 in a root and no root holds a score. That is a property of the data model, not
 of the workspace question, and it is now written down in
-[SOUND.md §8](SOUND.md#8-the-mood-vocabulary-and-how-it-grows).
+[SOUND.md §8](SOUND.md#8-the-mood-vocabulary-and-how-it-grows). It mattered
+again: composing the two packs for a real book was what surfaced the alias
+hazards (an alias a root ships that a stronger pack's own vocabulary makes
+canonical) that no per-pack gate can see, because only a composition folds
+both.
 
-**What I'd do first.** Make `Layout::assets()` work-scoped the way `prompts/`
-already is, reading the workspace's own `pack.json` and falling back to the
-profile's. Everything else — a workspace releasing its own composition, the
-binding pointing at it — follows from that one line.
-
-**Not now.** It is a layout change, and the two packs are the thing it has to
-carry.
+**What I'd do first.** ~~Make `Layout::assets()` work-scoped the way
+`prompts/` already is, reading the workspace's own `pack.json` and falling back
+to the profile's.~~ Done — everything else followed from that one line.
 
 ## 4. The music loop seam becomes a property, not a fix (`planned`)
 

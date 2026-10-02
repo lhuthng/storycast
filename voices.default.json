@@ -53,6 +53,38 @@
         { "key": "rasalgethi", "name": "Rasalgethi", "gender": "neutral", "accent": "unknown", "style": "" }
       ],
       "default_cast": {}
+    },
+    "pocket": {
+      "label": "Kyutai Pocket TTS — local (FlowLM + Mimi)",
+      "voices": [
+        { "key": "bill-boerst", "name": "Bill Boerst", "gender": "male", "accent": "en", "style": "" },
+        { "key": "charles", "name": "Charles", "gender": "male", "accent": "en", "style": "" },
+        { "key": "george", "name": "George", "gender": "male", "accent": "en", "style": "" },
+        { "key": "jean", "name": "Jean", "gender": "male", "accent": "en", "style": "" },
+        { "key": "javert", "name": "Javert", "gender": "male", "accent": "en", "style": "" },
+        { "key": "marius", "name": "Marius", "gender": "male", "accent": "en", "style": "" },
+        { "key": "michael", "name": "Michael", "gender": "male", "accent": "en", "style": "" },
+        { "key": "paul", "name": "Paul", "gender": "male", "accent": "en", "style": "" },
+        { "key": "peter-yearsley", "name": "Peter Yearsley", "gender": "male", "accent": "en", "style": "" },
+        { "key": "stuart-bell", "name": "Stuart Bell", "gender": "male", "accent": "en", "style": "" },
+        { "key": "alba", "name": "Alba", "gender": "female", "accent": "en", "style": "" },
+        { "key": "anna", "name": "Anna", "gender": "female", "accent": "en", "style": "" },
+        { "key": "azelma", "name": "Azelma", "gender": "female", "accent": "en", "style": "" },
+        { "key": "cosette", "name": "Cosette", "gender": "female", "accent": "en", "style": "" },
+        { "key": "eponine", "name": "Eponine", "gender": "female", "accent": "en", "style": "" },
+        { "key": "eve", "name": "Eve", "gender": "female", "accent": "en", "style": "" },
+        { "key": "fantine", "name": "Fantine", "gender": "female", "accent": "en", "style": "" },
+        { "key": "jane", "name": "Jane", "gender": "female", "accent": "en", "style": "" },
+        { "key": "lola", "name": "Lola", "gender": "female", "accent": "es", "style": "" },
+        { "key": "mary", "name": "Mary", "gender": "female", "accent": "en", "style": "" },
+        { "key": "vera", "name": "Vera", "gender": "female", "accent": "en", "style": "" },
+        { "key": "estelle", "name": "Estelle", "gender": "female", "accent": "fr", "style": "" },
+        { "key": "giovanni", "name": "Giovanni", "gender": "male", "accent": "it", "style": "" },
+        { "key": "juergen", "name": "Juergen", "gender": "male", "accent": "de", "style": "" },
+        { "key": "rafael", "name": "Rafael", "gender": "male", "accent": "pt", "style": "" },
+        { "key": "caro-davy", "name": "Caro Davy", "gender": "neutral", "accent": "en", "style": "" }
+      ],
+      "default_cast": {}
     }
   }
 }

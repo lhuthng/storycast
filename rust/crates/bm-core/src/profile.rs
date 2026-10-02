@@ -315,25 +315,34 @@ pub fn compute_manifest(
     version: &str,
 ) -> Result<Manifest> {
     let root = layout.root.as_path();
-    let dirs: Vec<String> = match piece {
-        Piece::Pack => vec!["assets".to_string()],
-        Piece::Adapter => adapter_dirs(root, name),
+    // The pack is the tree **in force** — the workspace's own composition when
+    // it has one, the checkout's otherwise — while a language's trees are the
+    // checkout's. `base` is what the manifest keys are relative to, and it has
+    // to be the tree's parent: `push_pack` rsyncs `layout.assets()`, and the
+    // receipt this manifest becomes is diffed against the box, so a manifest
+    // rooted anywhere else describes files the push never sent.
+    let (base, dirs): (PathBuf, Vec<String>) = match piece {
+        Piece::Pack => (
+            layout.assets().parent().unwrap_or(root).to_path_buf(),
+            vec!["assets".to_string()],
+        ),
+        Piece::Adapter => (root.to_path_buf(), adapter_dirs(root, name)),
         Piece::Engine => anyhow::bail!(
             "an engine is not a bundle: engines/<name>/ comes from the models release, not from profiles/"
         ),
     };
-    let files = files_under(root, &dirs);
+    let files = files_under(&base, &dirs);
     if files.is_empty() {
         anyhow::bail!(
             "nothing to pack: {} is missing or empty under {}",
             dirs.join(" + "),
-            root.display()
+            base.display()
         );
     }        Ok(Manifest {
         name: name.to_string(),
         version: version.to_string(),
         piece: piece.noun().to_string(),
-        files: hash_files(root, files).context("hashing the live piece")?,
+        files: hash_files(&base, files).context("hashing the live piece")?,
         // Only an asset is built on anything, and the record of what it was
         // built on is the one composition already keeps.
         deps: match piece {
@@ -638,6 +647,23 @@ pub fn manifest_hash(files: &BTreeMap<String, String>) -> String {
     hex_digest(h.finalize())
 }
 
+/// The manifest hash over an explicit set of trees, relative to `root`.
+///
+/// The number a bundle manifest folds to and a binding's piece hash carries,
+/// computed on demand rather than read from a pointer — which is what lets a
+/// workspace stamp its own binding at creation without a pointer to read.
+/// Refuses an empty set: a hash over nothing is not a claim, it is a blank
+/// that looks like one.
+pub fn trees_hash(root: &Path, dirs: &[String]) -> Result<String> {
+    let files = files_under(root, dirs);
+    anyhow::ensure!(
+        !files.is_empty(),
+        "nothing to hash under {} — the tree is missing or empty",
+        dirs.join(" + ")
+    );
+    Ok(manifest_hash(&hash_files(root, files)?))
+}
+
 /// Read a release bundle's `manifest.json` back, and fold it to the one number
 /// that release is named by.
 ///
@@ -693,6 +719,35 @@ pub fn read_binding(root: &Path) -> Result<Binding> {
     let stored: Stored =
         serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     Ok(Binding::from_stored(stored))
+}
+
+/// The binding **in force** for a layout: the active workspace's own
+/// `settings.json` binding when it names a piece, the checkout's `.bm/profile`
+/// for every piece it does not.
+///
+/// The merge is piece by piece, not all-or-nothing, because that is what
+/// [`crate::paths::Layout::resolve`] already does for the adapter and the engine:
+/// a workspace made before presets names only its pack, and its language and
+/// engine still come from the checkout. Reading the whole binding from one side
+/// or the other would either lose the workspace's pack or invent an adapter it
+/// never claimed.
+///
+/// This is the one answer to "what is this book bound to", so the dashboard,
+/// `profile check` and the serve gate cannot each arrive at a different one.
+/// The checkout pointer is the fallback; a checkout that has none and a
+/// workspace that names nothing is an unset binding, not an error.
+pub fn in_force(layout: &crate::paths::Layout) -> Result<Binding> {
+    if layout.work == layout.root {
+        return read_binding(&layout.root);
+    }
+    let mut binding = crate::config::Settings::load(&layout.settings()).profile;
+    let checkout = read_binding(&layout.root).unwrap_or_default();
+    for piece in Piece::ALL {
+        if binding.get(piece).name.is_empty() {
+            *binding.get_mut(piece) = checkout.get(piece).clone();
+        }
+    }
+    Ok(binding)
 }
 
 pub fn write_binding(root: &Path, binding: &Binding) -> Result<()> {
@@ -777,6 +832,50 @@ pub fn verify_binding(root: &Path, engine: Option<&str>) -> Result<Binding> {
             binding.pack.name,
             drifted.join(" + "),
             binding.pack.name,
+        );
+    }
+    Ok(binding)
+}
+
+/// [`verify_binding`], for a layout: the load gate, over the binding **in
+/// force**.
+///
+/// The default root workspace keeps the pre-workspace behaviour exactly — the
+/// checkout's `.bm/profile` is read and a drifted live tree is adopted there.
+/// A real workspace is verified **read-only**: its binding lives in its own
+/// `settings.json`, and that document is also the ledger's stamp (the gate in
+/// [`pieces_differing`]'s caller compares the two), so re-stamping the pack
+/// hash here would make every following `serve` refuse a book whose ledger is
+/// perfectly consistent. Adopting workspace drift is a re-compose or a
+/// reconcile, not a load-time stamp.
+///
+/// What this refuses is unchanged: a binding that names nothing, or a live
+/// `assets/` + `prompts/` that are both missing or empty, is a missing unpack
+/// rather than an edit.
+pub fn verify_layout(layout: &crate::paths::Layout, engine: Option<&str>) -> Result<Binding> {
+    if layout.work == layout.root {
+        return verify_binding(&layout.root, engine);
+    }
+    let mut binding = in_force(layout)?;
+    if let Some(name) = engine {
+        binding.engine.name = name.to_string();
+    }
+    // The trees the layout actually reads: the workspace's own `assets/` when
+    // it has one, the checkout's otherwise — the same work-first shape
+    // `Layout::assets` gives every reader.
+    let pack = if layout.work.join("assets").is_dir() {
+        files_under(&layout.work, &["assets"])
+    } else {
+        files_under(&layout.root, Piece::Pack.trees())
+    };
+    let adapter = files_under(
+        &layout.root,
+        &adapter_dirs(&layout.root, &binding.cache_adapter()),
+    );
+    if pack.is_empty() && adapter.is_empty() {
+        anyhow::bail!(
+            "live assets/ + prompts/ are missing or empty for workspace '{}' — no pack to run",
+            layout.work.display()
         );
     }
     Ok(binding)
@@ -926,6 +1025,123 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The binding in force is the workspace's, piece by piece — the same
+    /// merge `Layout::resolve` gives the adapter and the engine, so the
+    /// dashboard, `profile check` and the serve gate all answer with one voice.
+    #[test]
+    fn the_binding_in_force_merges_the_workspace_and_the_checkout_piece_by_piece() {
+        let dir = live_fixture("in-force");
+        write_binding(
+            &dir,
+            &Binding {
+                pack: Pointer {
+                    name: "xianxia".into(),
+                    hash: "c".into(),
+                    version: String::new(),
+                },
+                adapter: Pointer {
+                    name: "vi-VN".into(),
+                    hash: "a".into(),
+                    version: String::new(),
+                },
+                engine: Pointer::default(),
+            },
+        )
+        .unwrap();
+        // The workspace names its own pack and engine and leaves the adapter to
+        // the checkout.
+        let work = dir.join("workspaces/book");
+        std::fs::create_dir_all(&work).unwrap();
+        let mut settings = crate::config::Settings::default();
+        settings.profile = Binding {
+            pack: Pointer {
+                name: "apothecary".into(),
+                hash: "w".into(),
+                version: String::new(),
+            },
+            adapter: Pointer::default(),
+            engine: Pointer {
+                name: "pocket".into(),
+                hash: String::new(),
+                version: String::new(),
+            },
+        };
+        settings.save(&work.join("settings.json")).unwrap();
+        let layout = crate::paths::Layout {
+            root: dir.clone(),
+            work: work.clone(),
+            ..crate::paths::Layout::new(dir.clone())
+        };
+        let b = in_force(&layout).unwrap();
+        assert_eq!(b.pack.name, "apothecary");
+        assert_eq!(b.adapter.name, "vi-VN", "the checkout's language fills the gap");
+        assert_eq!(b.engine.name, "pocket");
+        // The implicit root workspace still reads the pointer alone.
+        let root_layout = crate::paths::Layout::new(dir.clone());
+        assert_eq!(in_force(&root_layout).unwrap(), read_binding(&dir).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Running a workspace verifies *its* binding and writes neither side: the
+    /// workspace's `settings.json` is the ledger's stamp, so re-stamping it at
+    /// load would make the next `serve` refuse a consistent book; and the
+    /// checkout's `.bm/profile` is never this workspace's to write.
+    #[test]
+    fn verify_layout_reads_the_workspace_binding_and_writes_neither_side() {
+        let dir = live_fixture("verify-ws");
+        let before = Binding {
+            pack: Pointer {
+                name: "xianxia".into(),
+                hash: "checkout".into(),
+                version: String::new(),
+            },
+            adapter: Pointer {
+                name: "vi-VN".into(),
+                hash: "a".into(),
+                version: String::new(),
+            },
+            engine: Pointer::default(),
+        };
+        write_binding(&dir, &before).unwrap();
+
+        let work = dir.join("workspaces/book");
+        std::fs::create_dir_all(work.join("assets")).unwrap();
+        std::fs::write(work.join("assets/world.json"), "{}").unwrap();
+        let mut settings = crate::config::Settings::default();
+        settings.profile = Binding {
+            pack: Pointer {
+                name: "book".into(),
+                hash: String::new(),
+                version: String::new(),
+            },
+            adapter: Pointer::default(),
+            engine: Pointer {
+                name: "pocket".into(),
+                hash: String::new(),
+                version: String::new(),
+            },
+        };
+        settings.save(&work.join("settings.json")).unwrap();
+
+        let layout = crate::paths::Layout {
+            root: dir.clone(),
+            work: work.clone(),
+            ..crate::paths::Layout::new(dir.clone())
+        };
+        let b = verify_layout(&layout, Some("pocket")).unwrap();
+        assert_eq!(b.pack.name, "book");
+        assert_eq!(b.adapter.name, "vi-VN", "the checkout's language fills the gap");
+        assert_eq!(b.engine.name, "pocket", "named from settings");
+        let stamped = crate::config::Settings::load(&work.join("settings.json")).profile;
+        assert_eq!(stamped.pack.hash, "", "the workspace binding was not re-stamped");
+        assert_eq!(
+            read_binding(&dir).unwrap(),
+            before,
+            "the checkout pointer is untouched"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_binding_round_trips_and_names_all_three_pieces() {
         let dir = live_fixture("binding");
@@ -1049,6 +1265,52 @@ mod tests {
         );
         assert!(language.deps.is_empty(), "a language is built on nothing");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A workspace that composes its own `assets/` is the tree a pack manifest
+    /// hashes — not the checkout's.
+    ///
+    /// The manifest is keyed by the paths `push_pack` rsyncs and the receipt a
+    /// box diffs against, so a manifest rooted at the checkout while the tree
+    /// in force is the workspace's would describe bytes that never travelled:
+    /// the pack release gate would compare a box's receipt to the wrong book
+    /// and re-push (or skip) forever. This is the same split `sources.rs`
+    /// enforces for the bundle, one layer up.
+    #[test]
+    fn a_workspace_owned_pack_manifests_the_workspace_tree_not_the_checkouts() {
+        let root = live_fixture("ws-pack-manifest");
+        // The checkout keeps its own `assets/`, so a root-layout manifest is
+        // still buildable — the assertion is that the workspace's is not it.
+        let workspace = root.join("workspaces/book");
+        std::fs::create_dir_all(workspace.join("assets")).unwrap();
+        std::fs::write(
+            workspace.join("assets/scene-map.json"),
+            r#"{"scenes":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(workspace.join("assets/only-here.json"), "{}").unwrap();
+        let layout = crate::paths::Layout {
+            root: root.clone(),
+            work: workspace.clone(),
+            adapter: crate::paths::DEFAULT_ADAPTER.into(),
+            engine: crate::paths::DEFAULT_ENGINE.into(),
+        };
+        assert!(layout.owns_assets(), "the fixture is the case under test");
+
+        let pack = compute_manifest(&layout, Piece::Pack, "book", "1").unwrap();
+        assert!(
+            pack.files.keys().any(|k| k == "assets/only-here.json"),
+            "the manifest must name the workspace's own file: {:?}",
+            pack.files.keys().take(5).collect::<Vec<_>>()
+        );
+        let checkout =
+            compute_manifest(&crate::paths::Layout::new(&root), Piece::Pack, "book", "1").unwrap();
+        assert_ne!(
+            manifest_hash(&pack.files),
+            manifest_hash(&checkout.files),
+            "the workspace's own tree is a different pack from the checkout's"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// One file per piece, in a directory per piece — so `xianxia` the pack and

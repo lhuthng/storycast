@@ -93,8 +93,8 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         ),
         (
             "c",
-            "crawl view: the settings in force, this book's chapter links, the crawlers \
-             on this machine, and the sites we know",
+            "crawl view: what this crawl reads and what is wrong with it — Enter shows the \
+             whole configuration",
         ),
         ("R", "system overview: preview everything"),
         ("PgUp PgDn", "page through the log   (G returns to newest)"),

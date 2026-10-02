@@ -21,6 +21,8 @@ pub(crate) mod sound;
 pub(crate) mod submit;
 mod tasks;
 mod text;
+mod workspace_list;
+mod workspace_new;
 
 use crate::tui::{
     app::App,
@@ -150,12 +152,33 @@ pub(crate) fn urlencode(s: &str) -> String {
         .collect()
 }
 
+/// What a key or a click asks the event loop to do next.
+///
+/// **Not "was this handled".** Every screen handles its own keys; the only
+/// question that reaches the loop is whether the app should keep running, and
+/// it arrived there through one `bool` every handler had to agree about. They
+/// did not: the first version of the workspace picker returned the opposite of
+/// what the loop reads and closed the app on its first arrow — and a test that
+/// asserted only on `app.screen` after each key could not see it, because the
+/// return value was the whole bug.
+///
+/// So the two answers are named, and the one a screen wants by default is the
+/// one that reads as the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Flow {
+    /// Keep running, whatever the key did. Every screen's answer unless the
+    /// operator asked to leave.
+    KeepRunning,
+    /// Leave the loop: the operator quit.
+    Quit,
+}
+
 pub(crate) async fn handle_key(
     app: &mut App,
     key: KeyEvent,
     http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     // Tab is the footer's own key: "the other side of the dashboard". A screen
     // may spend it on something of its own (the sound editor's layer tabs, the
     // jobs view's own toggle), and the three modal screens swallow every press —
@@ -168,12 +191,12 @@ pub(crate) async fn handle_key(
             scroll: 0,
             previous,
         };
-        return false;
+        return Flow::KeepRunning;
     }
     let before = app.screen.clone();
-    let quit = route(app, key, http, job_tx).await;
+    let flow = route(app, key, http, job_tx).await;
     note_layer(app, before, key.code);
-    quit
+    flow
 }
 
 /// Whether screens have spent `Tab` on something of their own.
@@ -189,6 +212,8 @@ fn tab_is_free(screen: &Screen) -> bool {
             | Screen::Text(_)
             | Screen::Confirm(_)
             | Screen::Pick(_)
+            | Screen::WorkspaceList(_)
+            | Screen::WorkspaceNew(_)
     )
 }
 
@@ -263,15 +288,15 @@ pub(crate) async fn route(
     key: KeyEvent,
     http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     if let Screen::Confirm(c) = app.screen.clone() {
         return confirm::key_confirm(app, c, key, http, job_tx).await;
     }
     if let Screen::Help { scroll } = app.screen.clone() {
         return help::key_help(app, scroll, key).await;
     }
-    if let Screen::Crawl { scroll } = app.screen.clone() {
-        return crawl::key_crawl(app, scroll, key).await;
+    if let Screen::Crawl { scroll, expanded } = app.screen.clone() {
+        return crawl::key_crawl(app, scroll, expanded, key).await;
     }
     if let Screen::Machine(_) = app.screen.clone() {
         return machine::key_machine(app, key).await;
@@ -314,6 +339,12 @@ pub(crate) async fn route(
     }
     if let Screen::Llm(view) = app.screen.clone() {
         return llm::key_llm(app, view, key, http, job_tx).await;
+    }
+    if let Screen::WorkspaceNew(ws) = app.screen.clone() {
+        return workspace_new::key_workspace_new(app, ws, key, job_tx).await;
+    }
+    if let Screen::WorkspaceList(ws) = app.screen.clone() {
+        return workspace_list::key_workspace_list(app, ws, key, job_tx).await;
     }
     normal::normal_key(app, key, http, job_tx).await
 }

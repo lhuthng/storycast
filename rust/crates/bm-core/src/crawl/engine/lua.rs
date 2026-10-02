@@ -309,6 +309,15 @@ fn install_fns(lua: &Lua, host: SharedHost) -> mlua::Result<()> {
 
     let h = host.clone();
     g.set(
+        "epub_books",
+        lua.create_function(move |lua, dir: String| {
+            let out = fns::epub_books(&mut *held(&h)?, &dir).map_err(ext)?;
+            lua.to_value(&out)
+        })?,
+    )?;
+
+    let h = host.clone();
+    g.set(
         "log",
         lua.create_function(move |_, msg: String| {
             fns::log(&mut *held(&h)?, &msg);

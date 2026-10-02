@@ -12,7 +12,7 @@
 //! | [`ambience`]  | `ambience.py`    |
 //!
 //! [`crawl`] differs in one respect: its *extraction rules* are not Rust any
-//! more. They are `assets/crawl/templates/storya.lua`, a script in the operator's own
+//! more. They are `crawlers/known/storya.lua`, a script in the operator's own
 //! profile, held byte-for-byte to the Rust extractor it replaced by the tests in
 //! `crawl/script_tests.rs`. The module keeps the host half — the script engines,
 //! the fetch budget, the chapter boundary. See `docs/CRAWLING.md`.
@@ -35,6 +35,7 @@ pub mod eta;
 pub mod pack_update;
 pub mod paths;
 pub mod pool;
+pub mod preset;
 pub mod profile;
 pub mod provision;
 pub mod segments;

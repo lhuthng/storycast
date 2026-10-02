@@ -412,7 +412,7 @@ pub(crate) fn save_app_setting(
                 settings.packs_release = String::new();
                 "pack release cleared — the profile travels over the push again".to_string()
             } else {
-                let pointer = bm_core::profile::read_pointer(&app.layout.root).ok();
+                let pointer = bm_core::profile::in_force(&app.layout).ok().map(|b| b.pack);
                 bm_core::artifact::PackRelease::for_repo(
                     repo,
                     pointer.as_ref().map(|p| p.name.as_str()).unwrap_or("pack"),

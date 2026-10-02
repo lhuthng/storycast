@@ -1,0 +1,94 @@
+{
+  "_note": "Which crawler belongs to which website — the global list, so pasting a URL can say 'we know this one'. `script` is relative to this directory (`crawlers/`), so `known/storya.lua` is `crawlers/known/storya.lua`; an empty `script` is a site we know about but have no crawler for (the caveat says what blocked it). `language` is not trivia: the voices and the G2P are Vietnamese, so an English chapter is silently mispronounced until someone reads this field. This registry is deliberately not exhaustive and not auto-updating — it is the set this project has actually verified, and a missing site is a site nobody has written down yet. Embedded at compile time (see bm-core's crawl/known.rs), so a script named here that is not on disk is a test failure rather than a crawl that quietly runs without selectors.",
+  "version": 1,
+  "sites": [
+    {
+      "host": "storya.click",
+      "script": "known/storya.lua",
+      "params": [],
+      "url_template": "https://storya.click/truyen/nguoi-tren-van-nguoi/chuong-{n}",
+      "max_fetches": 0,
+      "max_seconds": 0,
+      "shape": "`/{book}/chuong-{n}` — templatable, one fetch a chapter. The crawler the pipeline shipped before scripted crawls existed, still bundled and parity-tested; a new workspace names no crawler at all.",
+      "language": "Vietnamese",
+      "caveat": null
+    },
+    {
+      "host": "truyencom.com",
+      "script": "known/truyencom.lua",
+      "params": [],
+      "url_template": "https://truyencom.com/{book}/chuong-{n}.html",
+      "max_fetches": 64,
+      "max_seconds": 180,
+      "shape": "Templatable, but the chapter *list* is paginated — `discover` walks the page links.",
+      "language": "Vietnamese",
+      "caveat": null
+    },
+    {
+      "host": "readnovelfull.com",
+      "script": "known/readnovelfull.lua",
+      "params": [["book", "https://readnovelfull.com/the-sword-god-of-the-universe.html"]],
+      "url_template": "",
+      "max_fetches": 400,
+      "max_seconds": 900,
+      "shape": "`/{book}/chapter-{n}-{title-slug}.html` — the number is in the URL but not last, so nothing can invent the slug. The book page also lists only the first ~30 chapters with no pagination, so `discover` walks the `next_chap` chain instead.",
+      "language": "English",
+      "caveat": null
+    },
+    {
+      "host": "webnovel.com",
+      "script": "known/webnovel.lua",
+      "params": [["book", "https://www.webnovel.com/book/tu-chan-lieu-thien-quan_13320161405417805"]],
+      "url_template": "",
+      "max_fetches": 128,
+      "max_seconds": 300,
+      "shape": "English, slug discovery over the catalogue's 14 chapter columns.",
+      "language": "English — but `/vi/` is the Vietnamese edition of the same catalogue",
+      "caveat": "Refused behind Cloudflare: 403 whatever we send. The template is correct and cannot be run without a `cf_clearance` cookie in `crawl.headers`; a browser User-Agent alone does not get in."
+    },
+    {
+      "host": "truyenfull.vn",
+      "script": "",
+      "params": [],
+      "url_template": "",
+      "max_fetches": 0,
+      "max_seconds": 0,
+      "shape": "The old `truyenfull.vn` now redirects to `truyenfull.live`.",
+      "language": "Vietnamese",
+      "caveat": "Answers 200 with a Cloudflare interstitial rather than a 403 — the one shape that reads as success. `bm-inductor check` is what tells the two apart."
+    },
+    {
+      "host": "lightnovel.vn",
+      "script": "",
+      "params": [],
+      "url_template": "",
+      "max_fetches": 0,
+      "max_seconds": 0,
+      "shape": "Reader lives at `hub.lightnovel.vn/reader?book=<uuid>`.",
+      "language": "Vietnamese",
+      "caveat": "A Next.js app: the chapter is fetched by JavaScript and is not in the HTML at all. Needs a browser, which this crawler deliberately has not."
+    },
+    {
+      "host": "novelfull.com",
+      "script": "",
+      "params": [],
+      "url_template": "",
+      "max_fetches": 0,
+      "max_seconds": 0,
+      "shape": "—",
+      "language": "English",
+      "caveat": "Cloudflare: 403 to every request."
+    },
+    {
+      "host": "truyenthanh.vn",
+      "script": "",
+      "params": [],
+      "url_template": "",
+      "max_fetches": 0,
+      "max_seconds": 0,
+      "shape": "—",
+      "language": "Vietnamese",
+      "caveat": "Upstream is broken: 500."
+    }
+  ]
+}

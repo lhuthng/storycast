@@ -215,7 +215,7 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                         } else {
                             format!(
                                 "{} is known and we have no crawler for it: {}. Pick another site, \
-                                 or write one against crawl/templates/truyencom.lua.",
+                                 or write one against crawlers/known/truyencom.lua.",
                                 site.host,
                                 site.caveat.unwrap_or("nothing on file")
                             )
@@ -302,9 +302,34 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
             let req = if buf.is_empty() {
                 WorkspaceReq::List
             } else if buf == "new" {
-                return Err("`new` needs a name — `new <name>`".into());
-            } else if let Some(name) = buf.strip_prefix("new ") {
-                WorkspaceReq::New(workspace_name(name)?)
+                return Err("`new` needs a name — `new <name> [--profile <id>]`".into());
+            } else if let Some(rest) = buf.strip_prefix("new ") {
+                // `new <name> --profile <id>`; the id is checked against the
+                // presets here, with the prompt still open, so a typo is a
+                // refused line and not a queued job that fails a second later.
+                let (name, profile) = match rest.split_once("--profile") {
+                    Some((name, id)) => {
+                        let id = id.trim();
+                        if id.is_empty() {
+                            return Err("--profile needs a preset id — see profiles/presets.json".into());
+                        }
+                        let presets = bm_core::preset::read_presets(&app.layout.root)
+                            .map_err(|e| format!("presets: {e:#}"))?;
+                        if !presets.contains_key(id) {
+                            return Err(format!(
+                                "no preset {id:?} — available: {}",
+                                presets.keys().cloned().collect::<Vec<_>>().join(", ")
+                            ));
+                        }
+                        (workspace_name(name.trim())?, Some(id.to_string()))
+                    }
+                    None => (workspace_name(rest)?, None),
+                };
+                WorkspaceReq::New {
+                    name,
+                    profile,
+                    crawler: None,
+                }
             } else {
                 WorkspaceReq::Use(workspace_name(buf)?)
             };
@@ -417,7 +442,7 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
 /// `workspace_cmd` enforces the same rule, but by then the job is queued and
 /// the prompt is closed — the operator would have to retype it. Refusing here
 /// keeps the prompt open with the name still on screen.
-fn workspace_name(raw: &str) -> Result<String, String> {
+pub(crate) fn workspace_name(raw: &str) -> Result<String, String> {
     let name = raw.trim();
     if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0') {
         return Err(format!(

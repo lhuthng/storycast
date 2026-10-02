@@ -1004,8 +1004,16 @@ async fn run_render(
         .and_then(|s| s.as_array())
         .cloned()
         .unwrap_or_default();
-    let policy = bm_core::cast::policy_for_bible(engine);
-    let cast = bm_core::cast::load_cast(&script_path, &cast_path, &layout.bible(), &policy, true)?;
+    let policy = bm_core::cast::policy_for_bible(engine, &layout);
+    let installed = bm_core::pool::installed_voices(&layout);
+    let cast = bm_core::cast::load_cast(
+        &script_path,
+        &cast_path,
+        &layout.bible(),
+        &policy,
+        installed.as_ref(),
+        true,
+    )?;
     let local = engine == "vieneu";
     let planned = bm_core::assemble::Planned::plan(&segments);
     let first = planned
@@ -1158,6 +1166,7 @@ async fn run_merge(
     let assembled = tokio::task::spawn_blocking(move || {
         let (layout, n, engine, gap_ms, speed, on, scratch, takes) = params;
         bm_core::assemble::assemble(
+            &layout,
             &layout.script(n),
             &layout.cast(&engine),
             &layout.bible(),

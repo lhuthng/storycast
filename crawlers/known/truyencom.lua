@@ -1,4 +1,4 @@
--- assets/crawl/templates/truyencom.lua — an *easy* site, and the shape most
+-- crawlers/known/truyencom.lua — an *easy* site, and the shape most
 -- sites have.
 --
 -- Read this one first, and copy it when a site turns out to be easy. Three
@@ -14,7 +14,7 @@
 -- Setup, in full:
 --
 --   "crawl": { "mode": "script",
---              "script": "assets/crawl/templates/truyencom.lua",
+--              "script": "crawlers/known/truyencom.lua",
 --              "params": { "slug": "nga-thi-nhan-gian-tinh-long-vuong" } },
 --   "url_template": "https://truyencom.com/{slug}/chuong-{n}.html"
 --

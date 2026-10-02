@@ -6,6 +6,7 @@ use crate::tui::{
     screen::{Screen, TextKind, TextPrompt},
     style::{Conn, Level},
 };
+use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 use std::sync::{atomic::AtomicBool, Arc};
 
@@ -14,7 +15,7 @@ pub(crate) async fn key_run(
     key: KeyEvent,
     _http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     match key.code {
         KeyCode::Esc => {
             app.screen = Screen::Normal;
@@ -74,5 +75,5 @@ pub(crate) async fn key_run(
         }
         _ => {}
     }
-    false
+    Flow::KeepRunning
 }

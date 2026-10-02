@@ -747,6 +747,194 @@ pub(crate) struct TaskDetail {
     pub(crate) list: TasksView,
 }
 
+/// Which step the guided `workspace new` is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WsStep {
+    Name,
+    Profile,
+    Crawler,
+    /// The chosen crawler is a local EPUB: where the book is.
+    Epub,
+    CustomUrl,
+}
+
+/// One row of a guided-create list: what it says, what it explains, and the
+/// value the step reads back.
+#[derive(Debug, Clone)]
+pub(crate) struct WsItem {
+    pub(crate) label: String,
+    pub(crate) note: String,
+    /// A preset id, a crawler kind, or a known site's host.
+    pub(crate) value: String,
+}
+
+/// The guided `workspace new`: name, then profile, then how chapters arrive.
+///
+/// **One screen rather than a chain of prompts**, because the steps share
+/// state — the preset list is read once, and the crawler list is built from the
+/// chosen profile's adapter — and a prompt that closed between steps would have
+/// to stash that on the app and re-read it. `Esc` steps *back* one step rather
+/// than closing, so a wrong profile is one key from the name already typed.
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceNew {
+    pub(crate) step: WsStep,
+    pub(crate) name: String,
+    pub(crate) name_cursor: usize,
+    /// Every preset, `(id, label)`, read when the screen opens.
+    pub(crate) profiles: Vec<WsItem>,
+    pub(crate) profile: Option<usize>,
+    /// Built once the profile is chosen: none / local file / known sites /
+    /// custom. Empty until then.
+    pub(crate) crawlers: Vec<WsItem>,
+    /// The custom-site URL template, typed on the [`WsStep::CustomUrl`] step.
+    pub(crate) url: String,
+    pub(crate) url_cursor: usize,
+    /// The EPUB path, typed on the [`WsStep::Epub`] step — a `.epub` copied
+    /// into the new workspace's `tmp/book.epub`, or a folder of volumes copied
+    /// into its `books/`. Which one it is, is read off the path itself.
+    pub(crate) epub: String,
+    pub(crate) epub_cursor: usize,
+    /// Highlight within whichever list is on screen.
+    pub(crate) cursor: usize,
+    pub(crate) scroll: usize,
+    /// Why the last Enter was refused, if it was. Drawn in place of the hint.
+    pub(crate) error: Option<String>,
+}
+
+impl WorkspaceNew {
+    pub(crate) fn new(name: String, profiles: Vec<WsItem>) -> Self {
+        WorkspaceNew {
+            name_cursor: name.chars().count(),
+            name,
+            profiles,
+            step: WsStep::Name,
+            profile: None,
+            crawlers: Vec::new(),
+            url: String::new(),
+            url_cursor: 0,
+            epub: String::new(),
+            epub_cursor: 0,
+            cursor: 0,
+            scroll: 0,
+            error: None,
+        }
+    }
+
+    /// The list the current step navigates, if it has one.
+    pub(crate) fn list(&self) -> &[WsItem] {
+        match self.step {
+            WsStep::Profile => &self.profiles,
+            WsStep::Crawler => &self.crawlers,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn move_cursor(&mut self, down: bool) {
+        let len = self.list().len();
+        if len == 0 {
+            self.cursor = 0;
+            return;
+        }
+        self.cursor = if down {
+            (self.cursor + 1).min(len - 1)
+        } else {
+            self.cursor.saturating_sub(1)
+        };
+    }
+
+}
+
+/// `:ws` with no name: every book this checkout holds, chosen with arrows
+/// rather than spelled.
+///
+/// The rows are [`WsItem`]s because the guided-create list already draws
+/// `label` + `note`, and a switch wants those same two columns: the name, and
+/// what the directory actually carries.
+#[derive(Debug, Clone)]
+pub(crate) struct WsList {
+    pub(crate) rows: Vec<WsItem>,
+    /// The rows that are directories but not workspaces, by index, each with
+    /// the reason. Beside the rows rather than folded into `note` because
+    /// `Enter` has to refuse *on the spot* — the one rule this TUI keeps: a
+    /// thing that cannot work is refused where it is asked for, not queued as a
+    /// job that fails a second later.
+    pub(crate) unusable: std::collections::BTreeMap<usize, String>,
+    pub(crate) cursor: usize,
+    pub(crate) scroll: usize,
+    /// Why the last Enter was refused, if it was. Drawn in place of the hint.
+    pub(crate) error: Option<String>,
+}
+
+impl WsList {
+    /// One row per directory under `workspaces/`, and the rows `Enter` refuses.
+    ///
+    /// Read by [`bm_core::paths::workspaces`] — the same inventory
+    /// `workspace list` prints — so the picker and the CLI can never disagree
+    /// about what counts as a book. A directory that is not one is listed with
+    /// its reason rather than hidden: the usual way to find one is to have made
+    /// it by accident, and `Enter` refusing on the row is the whole point.
+    pub(crate) fn read(root: &std::path::Path) -> Self {
+        let mut rows = Vec::new();
+        let mut unusable = std::collections::BTreeMap::new();
+        for entry in bm_core::paths::workspaces(root) {
+            let reason = match entry.config {
+                bm_core::paths::WorkspaceConfig::Valid => None,
+                bm_core::paths::WorkspaceConfig::Missing => {
+                    Some("no settings.json — a directory, not a workspace".to_string())
+                }
+                bm_core::paths::WorkspaceConfig::Broken => {
+                    Some("settings.json does not parse — fix or remove it".to_string())
+                }
+            };
+            let note = match &reason {
+                Some(r) => r.clone(),
+                None => {
+                    let where_it = if entry.active { "active · " } else { "" };
+                    format!(
+                        "{where_it}{} · {}",
+                        plural(entry.chapters, "chapter"),
+                        plural(entry.scripts, "script"),
+                    )
+                }
+            };
+            if let Some(r) = reason {
+                unusable.insert(rows.len(), r);
+            }
+            rows.push(WsItem {
+                label: entry.name.clone(),
+                note,
+                value: entry.name,
+            });
+        }
+        WsList {
+            rows,
+            unusable,
+            cursor: 0,
+            scroll: 0,
+            error: None,
+        }
+    }
+
+    pub(crate) fn list(&self) -> &[WsItem] {
+        &self.rows
+    }
+
+    /// The highlight, arrows or `j`/`k`. Shared with the guided list's own so
+    /// both feel the same on the first keypress.
+    pub(crate) fn move_cursor(&mut self, down: bool) {
+        let len = self.rows.len();
+        if len == 0 {
+            self.cursor = 0;
+            return;
+        }
+        self.cursor = if down {
+            (self.cursor + 1).min(len - 1)
+        } else {
+            self.cursor.saturating_sub(1)
+        };
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Screen {
     Normal,
@@ -786,11 +974,30 @@ pub(crate) enum Screen {
     /// on this machine, and the sites we know. Scroll only.
     Crawl {
         scroll: usize,
+        /// Whether the full configuration is showing instead of the verdict.
+        /// Default off: the verdict is what the screen is for, and the detail
+        /// is what you press when the verdict is not enough.
+        expanded: bool,
     },
     /// LLM providers: keys, endpoints, models, and which one digests.
     /// `L` opens it; every edit saves `.bm/llm.json` at once and the next
     /// task offer carries the active key+model, so there is no second sync.
     Llm(LlmView),
+    /// The guided `workspace new`: name → profile → crawler, then create.
+    WorkspaceNew(WorkspaceNew),
+    /// `:ws` with nothing typed: the books, with the config each one carries,
+    /// arrows to move and Enter to switch.
+    WorkspaceList(WsList),
+}
+
+/// `1 chapter` but `0 chapters`: a row that said "0 chapter" would read as a
+/// count nobody kept.
+fn plural(n: usize, what: &str) -> String {
+    if n == 1 {
+        format!("1 {what}")
+    } else {
+        format!("{n} {what}s")
+    }
 }
 
 /// Chapter numbers per row in the digest manager's grid.

@@ -9,38 +9,41 @@ __pycache__/
 # (`tools/profile.sh fetch <name>`); only the fixture in rust/fixtures/ is
 # tracked, so the suite never needs the network.
 #
-# The crawlers are no longer under `assets/`: they are the language's, so they
-# live in the adapter's home — see the `/adapters/` block below.
+# The crawlers are no longer under `assets/` and no longer an adapter's: they are
+# the **global** `crawlers/` tree (tracked), which every workspace selects from —
+# see the `crawlers/` block below.
 /assets/*
 /prompts/
 /workspaces/
-/profiles/
+/profiles/*
+# The preset file is configuration, not a bundle: it is what
+# `workspace new --profile` reads, and a clone without it cannot create the
+# books the presets name (see docs/PROFILES.md §Choosing a profile).
+!/profiles/presets.json
 
 # Language adapters: `adapters/<name>/` is a language's own home — its
-# analyze/script prompts *and* the crawlers it is read with (a workspace that
-# carries this tree speaks its own language — see docs/PROFILES.md).
-# Machine-local for the same reason the live `prompts/` tree is: the text is the
-# artifact, shipped as a release bundle, and cutting a release is where a prompt
-# edit becomes visible. The suite builds its own stubs under rust/fixtures/, so
-# nothing here is needed to test.
+# analyze/script prompts. Machine-local for the same reason the live `prompts/`
+# tree is: the text is the artifact, shipped as a release bundle, and cutting a
+# release is where a prompt edit becomes visible. The suite builds its own stubs
+# under rust/fixtures/, so nothing here is needed to test.
 #
-# **Except the bundled crawlers.** `adapters/vi-VN/crawl/templates/` is tracked,
-# and has to be: `crawl::DEFAULT_SCRIPT` and every `KnownSite::script` name files
-# in it, and a crawler that is not on disk is not an error — `resolve_script`
-# returns nothing and the crawl quietly takes the built-in fetcher's path. So a
-# clone that ignored this directory could not crawl at all until somebody
-# fetched a language release, and would say nothing about why. Git cannot
-# un-ignore a file inside an ignored directory, hence the per-entry form below.
-# `vi-VN` is named because it is the language those templates are written for:
-# they are one language's knowledge of its own sites, not a genre's.
-/adapters/*
-!/adapters/vi-VN/
-/adapters/vi-VN/*
-!/adapters/vi-VN/crawl/
-/adapters/vi-VN/crawl/*
-!/adapters/vi-VN/crawl/templates/
-!/adapters/vi-VN/crawl/templates/*.lua
-!/adapters/vi-VN/crawl/templates/*.js
+# Adapters ship **no crawlers** — those are the global `crawlers/` tree below.
+#
+# The whole tree is ignored, `jnovel-en-US/` included. It used to be let through
+# by a block of negations, which read as if the adapter were tracked — but a
+# negation cannot un-ignore a path that is already in the index, so six
+# `vi-VN/crawl/templates/` scripts stayed tracked under a rule that said they
+# should not be. Ignored and untracked together now, so the tree means the same
+# thing on disk as it does in the index.
+/adapters/
+
+# Global crawlers: `crawlers/` is **tracked** — the known-site scripts
+# (`crawlers/known/`), the unknown-structure examples (`crawlers/examples/`) and
+# the registry (`crawlers/knownsites.json`) that names them. A crawler that is
+# not on disk is not an error — `resolve_script` returns nothing and the crawl
+# quietly takes the built-in fetcher's path — so a clone that ignored this tree
+# could not crawl at all until somebody fetched something, and would say nothing
+# about why. Nothing under `crawlers/` is ignored.
 
 # Inductor state, run logs
 .bm/

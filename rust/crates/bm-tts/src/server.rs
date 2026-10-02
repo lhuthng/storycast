@@ -23,10 +23,12 @@
 
 use crate::codec::to_wav_bytes;
 use crate::engine::Request;
+#[cfg(feature = "pocket")]
+use crate::pocket::Pocket;
 use crate::sample::{Rng, Sampling};
 use crate::synth::{gaps_to_silence, join_with_pauses, Synth, SAMPLE_RATE};
 use crate::text::FrontEnd;
-use crate::voice::{Roster, Voice};
+use crate::voice::Roster;
 use axum::{
     extract::State,
     http::{header, StatusCode},
@@ -38,8 +40,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Fixed on purpose: two voice samples are only comparable if both say the same
-/// thing.
-pub const PREVIEW_TEXT: &str = "Xin chào, đây là giọng đọc thử của bộ truyện.";
+/// thing. One per engine, because the preview is spoken, and each engine reads
+/// its own language.
+pub const PREVIEW_TEXT_VIENEU: &str = "Xin chào, đây là giọng đọc thử của bộ truyện.";
+pub const PREVIEW_TEXT_POCKET: &str =
+    "Hello, this is a storycast voice preview. The narrator reads the chapters.";
 
 /// The HTTP surface's shared state, constructed **empty** and filled once the
 /// model has loaded.
@@ -60,10 +65,24 @@ pub struct Server {
 }
 
 struct Inner {
-    front: FrontEnd,
-    roster: Roster,
-    synth: Mutex<Synth>,
+    backend: Backend,
 }
+
+/// The two engines the one HTTP surface serves. The contract — `/infer` in,
+/// wav out — is the engine-independent part; everything an engine owns (its
+/// text front end, its voice store, its sample rate) lives behind this enum,
+/// and nothing outside it branches on which engine is in force.
+#[allow(clippy::large_enum_variant)] // one Backend per process, behind a OnceLock
+pub enum Backend {
+    Vieneu { front: FrontEnd, roster: Roster, synth: Mutex<Synth> },
+    // Absent entirely without the `pocket` feature, so a VieNeu-only build
+    // never mentions the type. Every arm below is gated to match.
+    #[cfg(feature = "pocket")]
+    Pocket { engine: Box<Mutex<Pocket>> },
+}
+// The size difference between the variants is real but irrelevant: an `Inner`
+// holds exactly one of these behind a `OnceLock` for the life of the process,
+// never in a collection or on a hot stack.
 
 impl Server {
     pub fn new() -> Arc<Server> {
@@ -85,12 +104,8 @@ impl Server {
     }
 
     /// Install the loaded model. Once; a later call is ignored.
-    pub fn fill(&self, front: FrontEnd, roster: Roster, synth: Synth) {
-        let _ = self.inner.set(Inner {
-            front,
-            roster,
-            synth: Mutex::new(synth),
-        });
+    pub fn fill(&self, backend: Backend) {
+        let _ = self.inner.set(Inner { backend });
     }
 
     /// The loaded state, or `None` while the model is still loading.
@@ -99,41 +114,95 @@ impl Server {
     }
 }
 
+/// One voice's picker label: the description after an em dash, or bare.
+fn label(name: &str, description: &str) -> String {
+    if description.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} — {description}")
+    }
+}
+
 impl Inner {
-    /// Render one text with one voice, start to finish.
+    /// Render one text with one voice, start to finish — whichever engine is
+    /// in force. Each engine is serialised behind its own mutex for the same
+    /// reason the reference holds an `RLock`: ONNX sessions are not re-entrant.
     fn render(
         &self,
         text: &str,
-        voice: &Voice,
+        voice: Option<&str>,
         temperature: f64,
         seed: u64,
-    ) -> anyhow::Result<Vec<f32>> {
-        let chunks = self.front.chunks_sentence_level(text);
-        if chunks.chunks.is_empty() {
-            return Ok(Vec::new());
+    ) -> anyhow::Result<(Vec<f32>, usize)> {
+        match &self.backend {
+            Backend::Vieneu { front, roster, synth } => {
+                let voice = roster.resolve(voice)?;
+                let chunks = front.chunks_sentence_level(text);
+                if chunks.chunks.is_empty() {
+                    return Ok((Vec::new(), SAMPLE_RATE));
+                }
+                let mut synth = synth
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("the render lock is poisoned: {e}"))?;
+                let mut rng = Rng::new(seed);
+                let mut wavs = Vec::with_capacity(chunks.chunks.len());
+                for ch in &chunks.chunks {
+                    let phonemes = front.phonemize_with_emotions(ch);
+                    let mut req = Request::new(&phonemes);
+                    req.sampling = Sampling {
+                        temperature,
+                        ..Default::default()
+                    };
+                    req.speaker_emb = Some(&voice.speaker_emb);
+                    req.ref_codes = Some(&voice.codes);
+                    wavs.push(synth.chunk(&req, &mut rng)?.pcm);
+                }
+                Ok((
+                    join_with_pauses(
+                        &wavs,
+                        &gaps_to_silence(&chunks.gaps),
+                        SAMPLE_RATE,
+                    ),
+                    SAMPLE_RATE,
+                ))
+            }
+            #[cfg(feature = "pocket")]
+            Backend::Pocket { engine } => {
+                let mut engine = engine
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("the render lock is poisoned: {e}"))?;
+                engine.generate(text, voice.unwrap_or_default(), temperature, seed)
+            }
         }
-        let mut synth = self
-            .synth
-            .lock()
-            .map_err(|e| anyhow::anyhow!("the render lock is poisoned: {e}"))?;
-        let mut rng = Rng::new(seed);
-        let mut wavs = Vec::with_capacity(chunks.chunks.len());
-        for ch in &chunks.chunks {
-            let phonemes = self.front.phonemize_with_emotions(ch);
-            let mut req = Request::new(&phonemes);
-            req.sampling = Sampling {
-                temperature,
-                ..Default::default()
-            };
-            req.speaker_emb = Some(&voice.speaker_emb);
-            req.ref_codes = Some(&voice.codes);
-            wavs.push(synth.chunk(&req, &mut rng)?.pcm);
+    }
+
+    /// The engine's name, for `/policy` and the roster.
+    fn engine_name(&self) -> &'static str {
+        match &self.backend {
+            Backend::Vieneu { .. } => "vieneu",
+            #[cfg(feature = "pocket")]
+            Backend::Pocket { .. } => "pocket",
         }
-        Ok(join_with_pauses(
-            &wavs,
-            &gaps_to_silence(&chunks.gaps),
-            SAMPLE_RATE,
-        ))
+    }
+
+    /// `(label, id)` pairs, the shape the reference's SDK returns.
+    fn labels(&self) -> Vec<(String, String)> {
+        match &self.backend {
+            Backend::Vieneu { roster, .. } => roster
+                .voices
+                .values()
+                .map(|v| (label(&v.name, &v.description), v.name.clone()))
+                .collect(),
+            #[cfg(feature = "pocket")]
+            Backend::Pocket { engine } => match engine.try_lock() {
+                Ok(engine) => engine
+                    .voices
+                    .values()
+                    .map(|v| (label(&v.name, &v.description), v.name.clone()))
+                    .collect(),
+                Err(_) => Vec::new(),
+            },
+        }
     }
 }
 
@@ -164,7 +233,7 @@ pub struct PreviewBody {
     pub voice: Option<String>,
 }
 
-fn wav(pcm: &[f32]) -> Response {
+fn wav(pcm: &[f32], sample_rate: usize) -> Response {
     if pcm.is_empty() {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -177,7 +246,7 @@ fn wav(pcm: &[f32]) -> Response {
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "audio/wav")],
-        to_wav_bytes(pcm, SAMPLE_RATE as u32),
+        to_wav_bytes(pcm, sample_rate as u32),
     )
         .into_response()
 }
@@ -238,25 +307,9 @@ async fn shutdown(State(s): State<Arc<Server>>) -> Response {
     Json(serde_json::json!({"ok": true, "exiting": true})).into_response()
 }
 
-/// `(label, id)` pairs, the shape the reference's SDK returns.
-fn labels(roster: &Roster) -> Vec<(String, String)> {
-    roster
-        .voices
-        .values()
-        .map(|v| {
-            let label = if v.description.is_empty() {
-                v.name.clone()
-            } else {
-                format!("{} — {}", v.name, v.description)
-            };
-            (label, v.name.clone())
-        })
-        .collect()
-}
-
 async fn voices(State(s): State<Arc<Server>>) -> Response {
     match s.inner() {
-        Some(i) => Json(labels(&i.roster)).into_response(),
+        Some(i) => Json(i.labels()).into_response(),
         None => loading(),
     }
 }
@@ -268,8 +321,8 @@ async fn voices(State(s): State<Arc<Server>>) -> Response {
 async fn roster(State(s): State<Arc<Server>>) -> Response {
     match s.inner() {
         Some(i) => Json(bm_core::voices::voices_from_labels(
-            "vieneu",
-            &labels(&i.roster),
+            i.engine_name(),
+            &i.labels(),
         ))
         .into_response(),
         None => loading(),
@@ -287,19 +340,23 @@ struct PolicyResponse {
 }
 
 async fn policy(State(s): State<Arc<Server>>) -> Response {
-    if s.inner().is_none() {
+    let Some(i) = s.inner() else {
         return loading();
-    }
-    let p = bm_core::voices::vieneu_policy();
+    };
+    let (name, rate, pools) = match &i.backend {
+        Backend::Vieneu { .. } => ("vieneu", SAMPLE_RATE as u32, bm_core::voices::vieneu_policy()),
+        #[cfg(feature = "pocket")]
+        Backend::Pocket { .. } => ("pocket", 24_000, bm_core::voices::pocket_policy()),
+    };
     let mut cast = std::collections::BTreeMap::new();
-    for (character, voice) in p.default_cast {
+    for (character, voice) in pools.default_cast {
         cast.insert(character, voice);
     }
     Json(PolicyResponse {
-        engine: "vieneu",
-        sample_rate: SAMPLE_RATE as u32,
-        male_voices: p.male,
-        female_voices: p.female,
+        engine: name,
+        sample_rate: rate,
+        male_voices: pools.male,
+        female_voices: pools.female,
         // Always empty: the field stays because `bm-agent` probes for it to
         // tell a serving sidecar from a stale one. Nothing restricts voices
         // any more — the catalogue is the whole roster.
@@ -320,12 +377,8 @@ async fn infer(State(s): State<Arc<Server>>, Json(body): Json<InferBody>) -> Res
         )
             .into_response();
     }
-    let voice = match inner.roster.resolve(body.voice.as_deref()) {
-        Ok(v) => v,
-        Err(e) => return failed(e),
-    };
-    match inner.render(&body.text, voice, body.temperature, seed()) {
-        Ok(pcm) => wav(&pcm),
+    match inner.render(&body.text, body.voice.as_deref(), body.temperature, seed()) {
+        Ok((pcm, rate)) => wav(&pcm, rate),
         Err(e) => failed(e),
     }
 }
@@ -334,12 +387,13 @@ async fn preview(State(s): State<Arc<Server>>, Json(body): Json<PreviewBody>) ->
     let Some(inner) = s.inner() else {
         return loading();
     };
-    let voice = match inner.roster.resolve(body.voice.as_deref()) {
-        Ok(v) => v,
-        Err(e) => return failed(e),
+    let text = match inner.backend {
+        Backend::Vieneu { .. } => PREVIEW_TEXT_VIENEU,
+        #[cfg(feature = "pocket")]
+        Backend::Pocket { .. } => PREVIEW_TEXT_POCKET,
     };
-    match inner.render(PREVIEW_TEXT, voice, 0.8, seed()) {
-        Ok(pcm) => wav(&pcm),
+    match inner.render(text, body.voice.as_deref(), 0.8, seed()) {
+        Ok((pcm, rate)) => wav(&pcm, rate),
         Err(e) => failed(e),
     }
 }
@@ -388,7 +442,11 @@ mod tests {
     fn labels_carry_the_description_after_an_em_dash() {
         let dir = tempfile::tempdir().unwrap();
         let r = Roster::load(&store(dir.path())).unwrap();
-        let l = labels(&r);
+        let l: Vec<(String, String)> = r
+            .voices
+            .values()
+            .map(|v| (label(&v.name, &v.description), v.name.clone()))
+            .collect();
         assert_eq!(
             l[0],
             ("A — Nam · Bắc · Kể chuyện".to_string(), "A".to_string())
@@ -402,7 +460,12 @@ mod tests {
     fn the_roster_reads_gender_and_accent_positionally() {
         let dir = tempfile::tempdir().unwrap();
         let r = Roster::load(&store(dir.path())).unwrap();
-        let v = bm_core::voices::voices_from_labels("vieneu", &labels(&r));
+        let l: Vec<(String, String)> = r
+            .voices
+            .values()
+            .map(|v| (label(&v.name, &v.description), v.name.clone()))
+            .collect();
+        let v = bm_core::voices::voices_from_labels("vieneu", &l);
         let a = v.iter().find(|v| v.name == "A").unwrap();
         assert_eq!(a.gender, "male");
         assert_eq!(a.accent, "Northern");
@@ -451,14 +514,14 @@ mod tests {
 
     #[test]
     fn a_wav_response_is_audio_not_json() {
-        let r = wav(&[0.0, 0.5]);
+        let r = wav(&[0.0, 0.5], 48_000);
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(r.headers()[header::CONTENT_TYPE], "audio/wav");
     }
 
     #[test]
     fn empty_audio_is_not_wrapped_as_a_valid_44_byte_wav() {
-        let r = wav(&[]);
+        let r = wav(&[], 48_000);
         assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 

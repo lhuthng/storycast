@@ -7,6 +7,19 @@ use super::ssh::{RsyncProgress, Ssh};
 use super::stamp::{compute_provision_stamp, parse_stamp, stamp_from, ProvisionStamp};
 use super::{REMOTE_DIR, TTS_PORT};
 
+/// The directory a pack's `assets/…` paths are relative to: the `assets/` tree
+/// **in force's** parent — the workspace's when it composes its own, the
+/// checkout's otherwise. `push_pack` rsyncs that tree and the receipt is keyed
+/// against it, so a delta must be addressed the same way, or it pushes a
+/// workspace's changed paths out of the checkout's directory.
+fn pack_base(layout: &crate::Layout) -> std::path::PathBuf {
+    layout
+        .assets()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| layout.root.clone())
+}
+
 /// The line the box is asked to run, and the exit codes it answers with.
 ///
 /// Split out of the ssh call so both halves are testable without one: the
@@ -924,10 +937,14 @@ echo "probe=done"
             ));
             return Ok(None);
         }
+        // The pack's `assets/…` paths are relative to the tree **in force's**
+        // parent — the workspace's when it composes its own, the checkout's
+        // otherwise — the same base `push_pack` rsyncs from.
+        let base = pack_base(layout);
         let bytes: u64 = delta
             .changed
             .iter()
-            .map(|p| std::fs::metadata(layout.root.join(p)).map(|m| m.len()).unwrap_or(0))
+            .map(|p| std::fs::metadata(base.join(p)).map(|m| m.len()).unwrap_or(0))
             .sum();
         if let Err(e) = self.apply_pack_delta(layout, &delta) {
             say(format!("pack {} delta failed ({e:#}) — taking the whole tree instead", release.name));
@@ -967,7 +984,7 @@ echo "probe=done"
         delta: &crate::artifact::PackDelta,
     ) -> Result<()> {
         if !delta.changed.is_empty() {
-            self.rsync_push_files(&layout.root, &delta.changed)?;
+            self.rsync_push_files(&pack_base(layout), &delta.changed)?;
         }
         if !delta.removed.is_empty() {
             let mut script = String::from("set -e\n");
@@ -1671,18 +1688,36 @@ pub fn provision(
     // pointer with no version resolves to nothing, which is the push: every
     // box provisioned before this existed keeps working.
     let settings = crate::config::Settings::load(&layout.settings());
-    let pack = crate::artifact::PackRelease::resolve(&layout.root, &settings.packs_release);
-    if !settings.packs_release.trim().is_empty() && pack.is_none() {
-        let pointer = crate::profile::read_pointer(&layout.root)
-            .map(|p| format!("{} (version {:?})", p.name, p.version))
-            .unwrap_or_else(|e| format!("no profile pointer: {e}"));
-        log.push(format!(
-            "[{}] packs_release is set but {} names no versioned pack, so assets/ travels over the push \
-             (re-publish it: tools/profile.sh pack <name> --version <v> && gh release create {}-pack-v<v> …)",
-            m.id,
-            pointer,
-            crate::profile::read_pointer(&layout.root).map(|p| p.name).unwrap_or_default(),
-        ));
+    // A released pack is the **checkout's** profile: its tag, its manifest and
+    // the tree it lands are all that one directory. A workspace that composes
+    // its own `assets/` is not that checkout — a release pointed at it would put
+    // the wrong book's score on the box while this book runs its own — so the
+    // book's tree travels in the bundle instead.
+    let pack = if layout.owns_assets() {
+        None
+    } else {
+        crate::artifact::PackRelease::resolve(&layout.root, &settings.packs_release)
+    };
+    if !settings.packs_release.trim().is_empty() {
+        if layout.owns_assets() {
+            log.push(format!(
+                "[{}] packs_release is set but this workspace composes its own assets/ — the book's tree travels in the bundle, not as a pack release",
+                m.id
+            ));
+        } else if pack.is_none() {
+            let binding = crate::profile::in_force(layout).ok();
+            let pointer = binding
+                .as_ref()
+                .map(|b| format!("{} (version {:?})", b.pack.name, b.pack.version))
+                .unwrap_or_else(|| "no profile binding".to_string());
+            log.push(format!(
+                "[{}] packs_release is set but {} names no versioned pack, so assets/ travels over the push \
+                 (re-publish it: tools/profile.sh pack <name> --version <v> && gh release create {}-pack-v<v> …)",
+                m.id,
+                pointer,
+                binding.map(|b| b.pack.name).unwrap_or_default(),
+            ));
+        }
     }
 
     // Before anything is pushed: the sources bundle is `tar` + `zstd`, so the
@@ -1740,7 +1775,7 @@ pub fn provision(
     // there is no separate voices check. Also verify the remote names: a stamp
     // written by the old already-configured path could say “in sync” after it
     // skipped the model push, which is exactly how Narrator 2 stayed missing.
-    let manifest = crate::pool::load_manifest(&layout.root);
+    let manifest = crate::pool::load_manifest(&layout.voices_manifest());
     // An *unknown* roster is not a missing one. The probe cannot read the
     // roster when the sidecar is not answering, and reading that as "this box
     // knows none of the declared voices" would answer a down sidecar with a
@@ -1949,7 +1984,12 @@ pub fn provision(
     // carry the profile content, the pointer says what it claims to be.
     // Written every provision (one small file) so a re-pointed inductor
     // cannot leave a worker verifying yesterday's profile.
-    match crate::profile::read_binding(&layout.root) {
+    //
+    // The binding **in force**, not the checkout pointer: a workspace's own
+    // pack travels in the bundle above, so a box handed that tree but stamped
+    // with the checkout's `xianxia` would verify against a profile it does not
+    // hold.
+    match crate::profile::in_force(layout) {
         Ok(binding) => match ssh.write_profile_pointer(&binding) {
             Ok(()) => log.push(format!(
                 "[{}] profile pointer: {} ({})",
@@ -1971,7 +2011,7 @@ pub fn provision(
     // have quietly enrolled it on first use. Say so instead.
     {
         let manifest: std::collections::HashMap<String, String> = serde_json::from_str(
-            &std::fs::read_to_string(layout.root.join("voices.json")).unwrap_or_default(),
+            &std::fs::read_to_string(layout.voices_manifest()).unwrap_or_default(),
         )
         .unwrap_or_default();
         if !manifest.is_empty() {
@@ -2090,10 +2130,10 @@ pub fn provision(
     {
         let engine = crate::config::Settings::load(&layout.settings()).engine;
         let manifest: std::collections::HashMap<String, String> = serde_json::from_str(
-            &std::fs::read_to_string(layout.root.join("voices.json")).unwrap_or_default(),
+            &std::fs::read_to_string(layout.voices_manifest()).unwrap_or_default(),
         )
         .unwrap_or_default();
-        let pool = crate::pool::load_pool(&layout.root.join("voice-pool.json"));
+        let pool = crate::pool::load_pool(&layout.voice_pool());
         let catalogue: Vec<String> = crate::voices::offline_voices(&engine)
             .iter()
             .map(|v| v.name.clone())

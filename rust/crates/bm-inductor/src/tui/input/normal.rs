@@ -6,6 +6,7 @@ use crate::tui::{
     screen::{Confirm, ConfirmAction, Screen, TasksView, TextKind, TextPrompt},
     style::{theme_next, Conn, Level, Theme},
 };
+use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 use std::sync::{atomic::AtomicBool, Arc};
 
@@ -14,7 +15,7 @@ pub(crate) async fn normal_key(
     key: KeyEvent,
     http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     match key.code {
         KeyCode::Char('q') => {
             if app.pending > 0 {
@@ -29,7 +30,7 @@ pub(crate) async fn normal_key(
                     action: ConfirmAction::Quit,
                 });
             } else {
-                return true;
+                return Flow::Quit;
             }
         }
         KeyCode::Char('?') => app.screen = Screen::Help { scroll: 0 },
@@ -85,7 +86,10 @@ pub(crate) async fn normal_key(
         KeyCode::Char('c') => {
             // The crawl view. Lowercase, because uppercase C is the palette
             // cycle and the two must never trade places silently.
-            app.screen = Screen::Crawl { scroll: 0 };
+            app.screen = Screen::Crawl {
+                scroll: 0,
+                expanded: false,
+            };
         }
         KeyCode::Char('C') => {
             // The theme cycle: default → dim → mono. The palette itself is
@@ -378,5 +382,5 @@ pub(crate) async fn normal_key(
         }
         _ => {}
     }
-    false
+    Flow::KeepRunning
 }

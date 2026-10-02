@@ -103,7 +103,16 @@ pub(crate) enum Command {
     ExclusiveCancel { route: Option<String> },
     /// Open the script inspection window (`:script`).
     Script,
-    Workspace,
+    /// The workspace prompt, opened by `:ws <name>` with the line already in it.
+    ///
+    /// Bare `:ws` is [`Command::WorkspacePick`] and never comes here: the word
+    /// table carries the same answer, so the two cannot disagree about what the
+    /// word with no argument does. `prefill` is everything after `ws`, verbatim.
+    Workspace { prefill: String },
+    /// `:ws` with nothing after it: the books, with arrows. The prompt it used
+    /// to open answers the same question by asking for a name, and the name is
+    /// the one thing an operator switching books should not have to remember.
+    WorkspacePick,
     Profile,
     /// LLM providers: keys, endpoints, models, and which one digests.
     /// Same screen as the `L` key.
@@ -179,7 +188,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["xdrop"], desc: Some("drop the queued exclusive write (a swap/merge/remix waiting for the cluster to quiet) — :xdrop swap-voice drops only that kind"), cmd: Command::ExclusiveCancel { route: None } },
     Word { key: None, names: &["go"], desc: Some("start distributing: armed here and now, and the remainder of the range queued — a process comes up held, so a restart never resumes on its own"), cmd: Command::Dispatch { go: true } },
     Word { key: None, names: &["hold"], desc: Some("stop distributing: what is in flight finishes, nothing new is offered — `:go` to resume; `:drain` is the other thing (workers exit)"), cmd: Command::Dispatch { go: false } },
-    Word { key: None, names: &["workspace", "ws"], desc: Some("list, switch or create a workspace — one per book; only with the cluster stopped"), cmd: Command::Workspace },
+    Word { key: None, names: &["workspace", "ws"], desc: Some("list, switch or create a workspace — one per book; only with the cluster stopped"), cmd: Command::WorkspacePick },
     Word { key: None, names: &["profile"], desc: Some("list, load or pack a genre profile — loading replaces assets/ + prompts/, so only with the cluster stopped"), cmd: Command::Profile },
     Word { key: None, names: &["login"], desc: Some("store the IAM user's key from the console's accessKeys.csv — setup, once"), cmd: Command::AwsLogin },
     Word { key: None, names: &["discover"], desc: Some("read the account into `.bm/aws.json`: AMI, subnet, group, keypair, instance profile"), cmd: Command::AwsDiscover },
@@ -280,6 +289,25 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
             // are quoted like a shell: `:merge "Vân Bá" "Vân bá"`. The first
             // name survives, the rest are absorbed. One name is a no-op
             // stated as an error rather than a merge that folds nothing.
+            "ws" | "workspace" if rest.is_empty() => return Some(Command::WorkspacePick),
+            // `:ws <name>` used to arrive here as a bare `:ws`: the argument
+            // matched no arm, fell through to the word list, and opened the
+            // prompt with the name dropped and the *current* workspace in its
+            // place — so the documented recipe typed a name and switched to
+            // whichever book was already live.
+            //
+            // The prompt still opens. A name is a typo often enough, and this
+            // line moves the ledger, the settings and every rendered file, so
+            // what will happen should be readable before it happens. What
+            // changes is that the prompt arrives holding what was typed, which
+            // also carries `new <name>` and `--profile` through untouched —
+            // every word after `ws` is the name, because a book's title has
+            // spaces in it and quoting it would be the wrong price to charge.
+            "ws" | "workspace" => {
+                return Some(Command::Workspace {
+                    prefill: rest.join(" "),
+                });
+            }
             "merge" if !rest.is_empty() => {
                 let args = split_args(&rest.join(" "));
                 let [survivor, absorbed @ ..] = args.as_slice() else {
@@ -693,7 +721,7 @@ pub(crate) fn do_command(
             // The prompt says where the *tag* comes from, because the obvious
             // question is "which release of which pack?" and the answer is the
             // loaded profile — not a field the operator could get wrong here.
-            let which = match bm_core::profile::read_pointer(&app.layout.root) {
+            let which = match bm_core::profile::in_force(&app.layout).map(|b| b.pack) {
                 Ok(p) if !p.version.is_empty() => {
                     format!("The loaded profile is {} v{}, so boxes ask for {}.", p.name, p.version, bm_core::artifact::pack_tag_for(&p.name, &p.version))
                 }
@@ -805,18 +833,27 @@ pub(crate) fn do_command(
         Command::Llm => {
             super::llm::open_llm(app);
         }
-        Command::Workspace => {
-            // Prefilled with what is in force, like every other prompt: the
-            // operator sees the active name before editing it, and an empty
-            // line lists instead of switching.
-            let cur = crate::tui::model::workspace_label(&app.layout);
-            let initial = if cur == "default" { "" } else { cur.as_str() };
+        Command::WorkspacePick => {
+            // `:ws` on its own: read the tree and list it. Rows come from the
+            // same inventory `workspace list` prints, so a name offered here is
+            // a name that list would call a workspace.
+            app.screen = Screen::WorkspaceList(crate::tui::screen::WsList::read(&app.layout.root));
+            app.set_status(Level::Info, "workspace: ↑↓ to move, Enter to switch, Esc to close");
+        }
+        Command::Workspace { prefill } => {
+            // Prefilled with what was typed after `:ws`, not with the workspace
+            // in force: that spelling exists so the switch is one Enter away,
+            // and keeping the prompt is what makes it safe enough to offer. The
+            // name is readable and editable before anything moves.
+            let initial = prefill.clone();
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::Workspace,
                 "Workspace — one directory per book",
-                "<name> to switch · `new <name>` to create and switch · empty to list. \
+                "<name> to switch · `new <name>` to create (pick a profile and a crawler) · \
+                 `new <name> --profile <id>` to skip the pickers · clear the line to pick \
+                 from the list. \
                  Only with the cluster stopped (:X): the ledger, settings and data all move.",
-                initial,
+                &initial,
             ));
         }
         Command::Profile => {

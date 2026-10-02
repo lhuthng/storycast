@@ -111,12 +111,13 @@ adapter-independent in the sense that it never reads an *adapter's prompts* —
 but it does read the adapter's crawlers, which is the one thing this move makes
 explicit rather than implied.
 
-The bundled templates (`crawl::DEFAULT_SCRIPT`, every `KnownSite::script`) move
-with them, which is a real change to what a fresh clone can do: the tracked
-templates live under a language's tree now, so a clone with no language loaded
-can neither crawl nor claim it could. That is the honest consequence of the
-split, and it retires the `/assets/crawl/templates/` un-ignore rule in
-`.gitignore` for a rule under the language's tree.
+The bundled templates (`crawl::DEFAULT_SCRIPT`, every `KnownSite::script`) are
+**not** an adapter's: they live in the global `crawlers/` tree, tracked in the
+repo and shared by every workspace, so a fresh clone can crawl without fetching
+anything. The registry that names them is `crawlers/knownsites.json`; the
+unknown-structure examples are `crawlers/examples/`. A preset selects one with
+its `crawler` descriptor (`known` / `example` / `custom` / `none`), and
+`.gitignore` tracks the whole `crawlers/` directory.
 
 ## Composition: `assets/pack.json`
 
@@ -510,19 +511,22 @@ This is not a small edit, and two items are structural:
    and `verify_binding` has to hash `adapters/<name>/…` rather than `root/…`.
    `LIVE_DIRS` keeps its job (the fixture, the both-missing check) as the *union*
    of names, but the hashing path stops reading it.
-2. **Crawlers resolve from two trees, and the book's own must not be one of the
-   language's.** `work/crawl/` is a *book's* crawlers (already searched first,
-   already shipped separately by `provision::sources`). It cannot double as the
-   language's, or `profile load` — which replaces a language wholesale — would
-   delete a book's own crawler. So: `work/crawl` (the book) → the language's
-   `crawl/` → the retired `assets/crawl` for one release cycle. `Layout` gains
-   the language's home; `crawl::resolve_script`'s base list follows.
+2. **Crawlers are global, not a language's.** `work/crawl/` is a *book's*
+   crawlers (already searched first, already shipped separately by
+   `provision::sources`), and the shared crawlers are the **global** `crawlers/`
+   tree at the checkout root — tracked, registry-driven
+   (`crawlers/knownsites.json`), and shared by every workspace. A preset selects
+   one with its `crawler` descriptor. So `crawl::resolve_script` walks:
+   `work/crawl` (the book) → the root (`crawlers/…`) → the adapter's home →
+   `assets/`. Keeping them out of the language's home means no `profile load`
+   replaces them, and the same tree serves a Vietnamese and an English book.
 
-The rest is mechanical: `provision::sources` (the crawl stage ships the
-language's tree), the stamp (its signature covers the language's `crawl/`), the
-tracked templates' new `$HOME`-relative home, and one migration that moves this
-checkout's `assets/crawl/` under the language it belongs to — rename-only and
-idempotent, the way the engine tree's move was.
+The rest is mechanical: `provision::sources` (the crawl stage ships the global
+`crawlers/` tree and the book's own `crawl/`), the stamp (its signature covers
+them), and one migration that moves this checkout's flat `prompts/` under the
+language it belongs to — rename-only and idempotent, the way the engine tree's
+move was. The old `assets/crawl/` is left where it is, since nothing resolves
+crawlers out of it any more.
 
 ## What is not decided here
 

@@ -8,15 +8,25 @@
 -- ## Setup
 --
 --   workspaces/<book>/crawl/epub.lua          this file
---   workspaces/<book>/.bm/tmp/book.epub       the book
+--   workspaces/<book>/tmp/book.epub            the book
 --   workspaces/<book>/settings.json            { "crawl": { "script": "crawl/epub.lua",
---                                                        "params": { "epub": "book.epub" } } }
+--                                                        "params": { "epub": "tmp/book.epub" } } }
 --
 -- The path is relative to the workspace and is **confined to it**: a book
 -- outside is refused by name, so the one local read this crawler does not
 -- become a way to read the worker. Drop the file in the workspace's tmp
--- directory and name it as `.bm/tmp/book.epub`; a bare `book.epub` beside this
+-- directory and name it as `tmp/book.epub`; a bare `book.epub` beside this
 -- script works too.
+--
+-- ## Several volumes
+--
+-- Name a **directory** in `crawl.params.books` instead of one file, and every
+-- `.epub` directly inside it is one volume, in file-name order (name them
+-- `vol-01.epub`, `vol-02.epub`). The volumes are numbered as **one book** — the
+-- running count continues across them — so the pipeline's dense index stays
+-- dense: `chNN.txt` is the book's Nth chapter, and a chapter's locator in the
+-- index says which volume and spine range it is. The bytes of those volumes are
+-- part of the index fingerprint, so replacing one rebuilds the tree by itself.
 --
 -- ## Why this is Lua and not Rust
 --
@@ -77,9 +87,32 @@ local function book_path(input)
   local p = input.params or {}
   local path = p.epub or p.book or p.path
   if not path or path == "" then
-    error("crawl.params.epub is not set — name the book, e.g. \"book.epub\"")
+    error("crawl.params.epub (or crawl.params.books) is not set — name the book")
   end
   return path
+end
+
+--- The volumes to read.
+---
+--- `crawl.params.books` names a **directory** holding one `.epub` per volume;
+--- otherwise this is the single `crawl.params.epub` as one book. The listing is
+--- the *host's* — a script has no filesystem — and the paths it returns are
+--- workspace-relative, which is exactly what `epub_index`/`epub_text` take.
+---
+--- Sorted by file name, so the volume order (and therefore the chapter numbers)
+--- are a property of the library rather than of the filesystem's mood. Name the
+--- volumes so that order is the reading order: `vol-01.epub`, `vol-02.epub`.
+local function book_paths(input)
+  local p = input.params or {}
+  local dir = p.books
+  if dir and dir ~= "" then
+    local found = epub_books(dir)
+    if not found or #found == 0 then
+      error(("no .epub in the books directory %q"):format(dir))
+    end
+    return found
+  end
+  return { book_path(input) }
 end
 
 --- What counts as the start of a chapter, in this book's prose.
@@ -144,6 +177,29 @@ local function chapter_range(input, path, n, items)
   -- runs to the end of the book, and `epub_text` clamps a range that is one
   -- too far, so `total + 1` needs no special case here.
   return starts[n], (starts[n + 1] or (total + 1)) - 1
+end
+
+--- One book's chapters, as `{from, to}` spine ranges in reading order.
+---
+--- A scanned book's chapters are the entries that begin a heading; a typed
+--- book's are the spine itself. This is the one place the two shapes are folded
+--- into a list, so a multi-volume `discover` can number them as one book.
+local function book_ranges(input, path)
+  local items = epub_index(path)
+  local starts = chapter_starts(input, items)
+  local out = {}
+  if starts then
+    local total = (items and #items) or 0
+    for i = 1, #starts do
+      out[#out + 1] = { from = starts[i], to = (starts[i + 1] or (total + 1)) - 1 }
+    end
+  else
+    local total = epub_total(path) or 0
+    for n = 1, total do
+      out[#out + 1] = { from = n, to = n }
+    end
+  end
+  return out
 end
 
 --- Every `Chapter N: …` heading in a run-on string, as `{n = , heading = }`.
@@ -276,7 +332,7 @@ local function junk_patterns(input)
     end
     return p.junk
   end
-  return { "%d*%s*Goldenagato%s*|%s*mp4directs%.com" }
+  return { "%s*%d*%s*Goldenagato%s*|%s*mp4directs%.com" }
 end
 
 --- Delete every pattern in `patterns` from `text`.
@@ -309,22 +365,48 @@ end
 --- non-failure that must not cost a strike. Raising here would burn three
 --- retries and then shelve the row.
 function crawl(input)
-  local path = book_path(input)
-  -- One walk of the book per crawl: the chapter starts and the contents are
-  -- both read off the same index, and `epub_index` is the expensive call.
-  local items = epub_index(path)
-  local from, to = chapter_range(input, path, input.n, items)
-  if not from then
-    log(("book has no chapter %d"):format(input.n))
-    local starts = chapter_starts(input, items)
-    local total = starts and #starts or (epub_total(path) or 0)
-    return { none = true, reason = ("the book has %d chapters"):format(total) }
+  -- A locator from `discover`: which volume, and which spine range. That is the
+  -- multi-volume path — and it is why the tree is carried in the index rather
+  -- than rebuilt: a chapter names its own place, so nothing re-walks the
+  -- library to find it.
+  local path, from, to
+  local loc = input.url
+  if type(loc) == "string" then
+    -- `#` is literal; `%-` is an escaped `-`, which is otherwise the lazy
+    -- modifier and would never match the separator before `to`.
+    local p, f, t = string.match(loc, "^epub:(.+)#(%d+)%-(%d+)$")
+    if p then
+      path, from, to = p, tonumber(f), tonumber(t)
+    end
+  end
+
+  local items
+  if not path then
+    -- No locator: the single-book shape, and what a hand-written index still
+    -- hands in.
+    path = book_path(input)
+    -- One walk of the book per crawl: the chapter starts and the contents are
+    -- both read off the same index, and `epub_index` is the expensive call.
+    items = epub_index(path)
+    from, to = chapter_range(input, path, input.n, items)
+    if not from then
+      log(("book has no chapter %d"):format(input.n))
+      local starts = chapter_starts(input, items)
+      local total = starts and #starts or (epub_total(path) or 0)
+      return { none = true, reason = ("the book has %d chapters"):format(total) }
+    end
   end
 
   local text = from == to and (epub_chapter(path, from) or {}).text or epub_text(path, from, to)
   if text then
     text = strip_junk(text, junk_patterns(input))
-    text = split_heading(contents(input, path, items), text)
+    if items then
+      -- The scanned-book heading split needs the book's own contents page, so
+      -- it runs only on the single-book path, where `epub_index` was walked
+      -- anyway. A multi-volume library numbers chapters; it does not re-walk
+      -- every volume per chapter to find one contents page.
+      text = split_heading(contents(input, path, items), text)
+    end
   end
   if not text or text == "" then
     return { none = true, reason = ("chapter %d is spine %d..%d, which has no text"):format(input.n, from, to) }
@@ -333,7 +415,7 @@ function crawl(input)
     text = text,
     -- Echo only. It lands in the ledger so a walk can say where a chapter came
     -- from; nothing parses it for a number.
-    url = ("epub:%s#%d"):format(path, input.n),
+    url = ("epub:%s#%d-%d"):format(path, from, to),
   }
 end
 
@@ -344,20 +426,31 @@ end
 --- total lets a range that runs off the end be trimmed *before* twenty tasks
 --- are enqueued, rather than after twenty of them come back absent.
 function discover(input)
-  local path = book_path(input)
-  local starts = chapter_starts(input, epub_index(path))
-  local total = starts and #starts or (epub_total(path) or 0)
-  if total == 0 then
-    return { chapters = {}, total = 0 }
-  end
-  -- No URLs: there is nothing to fetch, so each chapter is a spine range the
-  -- host already knows how to ask for.
+  -- The library is numbered as **one book**: volume by volume, in name order,
+  -- and a volume's first chapter continues the running count. So the pipeline's
+  -- index stays dense and `ch01.txt` is the book's first chapter, not whichever
+  -- volume the filesystem happened to list first.
+  local start = input.start or 1
+  local count = input.count or 0
+  local p = input.params or {}
+  local multi = p.books ~= nil and p.books ~= ""
   local chapters = {}
-  for n = input.start, input.start + input.count - 1 do
-    if n > total then
-      break
+  local total = 0
+  for _, path in ipairs(book_paths(input)) do
+    for _, r in ipairs(book_ranges(input, path)) do
+      total = total + 1
+      if total >= start and total < start + count then
+        local entry = { n = total }
+        if multi then
+          -- The locator `crawl(n)` reads back: which volume and which spine
+          -- entries. It rides the index's `url`, which the offer hands to the
+          -- worker. Single-file keeps `{ n = n }`, the shape it has always
+          -- had — there is nothing to fetch, only a book to read.
+          entry.url = ("epub:%s#%d-%d"):format(path, r.from, r.to)
+        end
+        chapters[#chapters + 1] = entry
+      end
     end
-    chapters[#chapters + 1] = { n = n }
   end
   return { chapters = chapters, total = total }
 end

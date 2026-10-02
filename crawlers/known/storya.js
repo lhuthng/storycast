@@ -1,4 +1,4 @@
-// assets/crawl/storya.js — the default crawler's JavaScript twin.
+// crawlers/known/storya.js — the default crawler's JavaScript twin.
 //
 // Not the workspace default (that is `storya.lua`), but shipped so the second
 // engine is a working example rather than a claim: same contract, same host

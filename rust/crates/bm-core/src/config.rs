@@ -375,6 +375,22 @@ pub struct Settings {
     /// ones go stale.
     #[serde(default = "default_take_quality")]
     pub take_quality: String,
+    /// Where a chapter's title comes from: `auto` or `default`.
+    ///
+    /// `auto` (the default) uses the digest's own `title` — the model reads the
+    /// chapter and names it — which is why `beyond-myriads` runs this way.
+    /// `default` uses the crawled headline instead.
+    ///
+    /// The distinction is about **stability**. A digest is a fresh model call:
+    /// re-running it for any reason (a new model, a repair round, a requeue)
+    /// can answer a different `title`, and under `auto` that moves the spoken
+    /// headline *and* the `Ch.N - ….mp3` filename with it. A book whose
+    /// chapter titles must not drift pins `default`.
+    ///
+    /// An unrecognised value reads as `auto`: this names a preference, and a
+    /// typo should not silently pin a book to its crawled heading.
+    #[serde(default = "default_title_mode")]
+    pub title_mode: String,
 }
 
 fn default_excerpt_window() -> u32 {
@@ -383,6 +399,10 @@ fn default_excerpt_window() -> u32 {
 
 fn default_take_quality() -> String {
     "balanced".into()
+}
+
+fn default_title_mode() -> String {
+    "auto".into()
 }
 
 /// How the digest splits a chapter that cannot be answered in one call.
@@ -508,7 +528,13 @@ impl Default for SshDefaults {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            url_template: "https://storya.click/truyen/nguoi-tren-van-nguoi/chuong-{n}".into(),
+            // **No book by default.** A fresh workspace has named no source, and
+            // the wrong default fetches: this used to be the `beyond-myriads`
+            // URL, so every new workspace silently pointed at that one book —
+            // the digest then produced a cast and a bible for the wrong novel.
+            // `crawl` is `manual` for the same reason, and an empty template is
+            // the template that agrees with it.
+            url_template: String::new(),
             crawl: CrawlSettings::default(),
             engine: "vieneu".into(),
             start: 1,
@@ -544,6 +570,7 @@ impl Default for Settings {
             profile: crate::profile::Binding::default(),
             excerpt_window: default_excerpt_window(),
             take_quality: default_take_quality(),
+            title_mode: default_title_mode(),
         }
     }
 }
@@ -551,6 +578,15 @@ impl Default for Settings {
 impl Settings {
     pub fn load(path: &Path) -> Settings {
         read_json::<Settings>(path).unwrap_or_default()
+    }
+
+    /// Whether the digest's own `title` is this chapter's title.
+    ///
+    /// See [`Settings::title_mode`]. Only `default` opts out; anything else,
+    /// including an empty or misspelled value, keeps the digest's title so an
+    /// existing workspace never loses its heading by accident.
+    pub fn auto_title(&self) -> bool {
+        !self.title_mode.trim().eq_ignore_ascii_case("default")
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -1116,6 +1152,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_default_opts_out_of_the_digest_title() {
+        // `auto` is the default, so every workspace written before this field
+        // existed keeps the digest's title.
+        let v: Settings = serde_json::from_str(r#"{"engine":"pocket"}"#).unwrap();
+        assert!(v.auto_title(), "a settings file without the field reads as auto");
+        assert!(Settings::default().auto_title());
+        let mut s = Settings::default();
+        s.title_mode = "default".into();
+        assert!(!s.auto_title());
+        s.title_mode = "  DEFAULT  ".into();
+        assert!(!s.auto_title(), "case and padding are not a different mode");
+        s.title_mode = "auto".into();
+        assert!(s.auto_title());
+        // A typo must not silently pin a book to its crawled headline: the
+        // safe direction is the behaviour every existing workspace already has.
+        s.title_mode = "defualt".into();
+        assert!(s.auto_title(), "an unrecognised mode is not an opt-out");
+    }
+
+    #[test]
     fn settings_without_ssh_parses_as_defaults_and_roundtrips() {
         // A pre-ssh settings.json has no `ssh` key: it must load as defaults.
         let v: Settings = serde_json::from_str(r#"{"engine":"gemini"}"#).unwrap();
@@ -1213,6 +1269,10 @@ mod tests {
         let fresh = Settings::default();
         assert!(fresh.crawl.is_manual(), "the fresh default does not fetch");
         assert!(fresh.crawl.script.is_empty());
+        assert!(
+            fresh.url_template.is_empty(),
+            "a fresh workspace names no book — the old default pointed at beyond-myriads"
+        );
         // …and an explicit value is honoured. A block that names no script is
         // the built-in fetcher (`script` fills from the per-field default, which
         // is empty — the operator named no crawler); a block naming one gets it.

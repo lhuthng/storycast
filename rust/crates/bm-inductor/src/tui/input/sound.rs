@@ -16,6 +16,7 @@ use crate::tui::{
     sound::{self, SoundView},
     style::Level,
 };
+use crate::tui::input::Flow;
 use bm_core::audio_pool::PoolKind;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -54,7 +55,7 @@ pub(crate) async fn key_sound(
     key: KeyEvent,
     _http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     let mut v = view;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -81,7 +82,7 @@ pub(crate) async fn key_sound(
         v.cursor = 0;
         v.scroll = 0;
         app.screen = Screen::Sound(v);
-        return false;
+        return Flow::KeepRunning;
     }
 
     match key.code {
@@ -191,7 +192,7 @@ pub(crate) async fn key_sound(
         },
         _ => {}
     }
-    false
+    Flow::KeepRunning
 }
 
 /// Submit one of the editor's three prompts: the whole-entry line, or a level.

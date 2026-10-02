@@ -151,10 +151,14 @@ pub fn load_pool(path: &Path) -> Pool {
         .collect()
 }
 
-/// The clone manifest: enrolled voice name -> clip, from `voices.json` at the
-/// repo root. Missing or broken reads as empty, like the pool.
-pub fn load_manifest(root: &Path) -> std::collections::BTreeMap<String, String> {
-    std::fs::read_to_string(root.join("voices.json"))
+/// The clone manifest: enrolled voice name -> clip, read from the given
+/// `voices.json`. Missing or broken reads as empty, like the pool.
+///
+/// Takes the file, not a root, because the manifest in force is a
+/// **workspace's** now ([`crate::paths::Layout::voices_manifest`]): a book owns
+/// its own, and the checkout answers only when the workspace has none.
+pub fn load_manifest(path: &Path) -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
         .and_then(|v| v.as_object().cloned())
@@ -207,13 +211,17 @@ fn resolve_clip(root: &Path, src: &Path) -> PathBuf {
 ///
 /// Returns the human-readable lines the caller should log.
 pub fn add_sample(
-    root: &Path,
+    layout: &crate::Layout,
     src: &Path,
     tags_override: Option<Vec<String>>,
     name_override: Option<String>,
 ) -> anyhow::Result<Vec<String>> {
     use anyhow::Context;
     let mut log = Vec::new();
+    let root = layout.root.as_path();
+    // The clip is resolved against the checkout (where the operator typed the
+    // path) but **lands in the workspace**: the book owns its refs, pool and
+    // manifest, so a second book's `:N` cannot change the first one's voices.
     let src = resolve_clip(root, src);
     let src = src.as_path();
     if !src.is_file() {
@@ -262,7 +270,7 @@ pub fn add_sample(
         }
     };
 
-    let refs = root.join("refs");
+    let refs = layout.work.join("refs");
     std::fs::create_dir_all(&refs)?;
     let dest = refs.join(&filename);
     if dest.exists() {
@@ -280,7 +288,7 @@ pub fn add_sample(
         log.push(format!("copied {} -> refs/{filename}", src.display()));
     }
 
-    let pool_path = root.join("voice-pool.json");
+    let pool_path = layout.work.join("voice-pool.json");
     let mut pool = load_pool(&pool_path);
     pool.insert(
         name.clone(),
@@ -300,7 +308,7 @@ pub fn add_sample(
 
     // The pool decides *who* a sample may voice; `voices.json` gets it onto
     // workers. One entry, same name, so the two files cannot drift apart.
-    let manifest_path = root.join("voices.json");
+    let manifest_path = layout.work.join("voices.json");
     let mut manifest: serde_json::Value = std::fs::read_to_string(&manifest_path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
@@ -317,13 +325,68 @@ pub fn add_sample(
     // store when it has one. A failure here never fails the add — the registry
     // above is the durable state; the enroll is a convenience for this box.
     // Blocking (loads the voice model); callers run it off the UI thread.
-    match enroll_local(root, &name, &format!("refs/{filename}")) {
-        Ok(lines) => log.extend(lines),
-        Err(e) => log.push(format!(
-            "local enroll failed (provision still covers it): {e:#}"
+    // The clip now lives in the workspace, so the enrol is handed the absolute
+    // path rather than `refs/…` against the checkout's cwd.
+    //
+    // **Which enrollment runs is the engine's declaration, not this function's
+    // assumption** ([`crate::voices::VoiceStore`]). A preset store takes the
+    // encoded preset the python enrollment writes; a clip store takes the clip
+    // itself, converted into the engine's own `models/refs/` — where its
+    // sidecar clones from at load; an engine with no store has nowhere to put
+    // either, and saying so beats a `next provision` line that never resolves.
+    match crate::voices::store_kind(&layout.engine) {
+        crate::voices::VoiceStore::Presets => {
+            match enroll_local(root, &name, &dest.to_string_lossy()) {
+                Ok(lines) => log.extend(lines),
+                Err(e) => log.push(format!(
+                    "local enroll failed (provision still covers it): {e:#}"
+                )),
+            }
+        }
+        crate::voices::VoiceStore::Clips => match enroll_clip_voice(layout, &name, &dest) {
+            Ok(Some(file)) => log.push(format!(
+                "engine store: {name} -> {file} (the sidecar clones it at load)"
+            )),
+            Ok(None) => log.push(format!(
+                "no {} store on this machine — enroll it once the engine tree is fetched",
+                layout.engine
+            )),
+            Err(e) => log.push(format!(
+                "local enroll failed (provision still covers it): {e:#}"
+            )),
+        },
+        crate::voices::VoiceStore::None => log.push(format!(
+            "engine {} takes no local clone — {name} is registered, but no render can speak it here",
+            layout.engine
         )),
     }
     Ok(log)
+}
+
+/// The voices this engine's **own store** holds, from
+/// `engines/<engine>/models/voices.json`.
+///
+/// The catalogue is not the answer here, and treating it as one is how a cast
+/// ends up naming a voice the sidecar has never heard of: `voices.default.json`
+/// declares every preset any pocket variant ships, and the installed tree is
+/// one variant — nine voices, not the catalogue's twenty-five. An assignment
+/// drawn from the catalogue is only valid against the store that will speak
+/// it, and the store is this file.
+///
+/// `None` when it cannot be read, and the caller then keeps the catalogue's
+/// pools unchanged: an engine with no per-engine store, or a tree not fetched
+/// yet, is the old behaviour rather than an empty cast.
+pub fn installed_voices(layout: &crate::Layout) -> Option<std::collections::BTreeSet<String>> {
+    let text = std::fs::read_to_string(layout.tts_voices()).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let presets = value.get("presets")?.as_object()?;
+    Some(
+        presets
+            .keys()
+            .filter(|k| !k.starts_with('_'))
+            .cloned()
+            .collect(),
+    )
 }
 
 /// Bake clone voices the manifest declares but the pushed store lacks.
@@ -335,14 +398,36 @@ pub fn add_sample(
 /// models/voices.json — fix it and run :prov again") and every render naming
 /// it failed on workers, no matter how often `:prov` ran.
 ///
-/// Copies missing presets from the local enrollment's own files into the
-/// bake. Called at the top of `provision`, before the stamp is computed, so
-/// the `tts_hash` drift pushes the updated store to workers in the same run.
-/// Returns the names baked (empty = nothing to do). Voices enrolled nowhere
-/// stay missing — the provision warning still names exactly those.
+/// Called at the top of `provision`, before the stamp is computed, so the
+/// `tts_hash`/`voices_hash` drift pushes the updated store to workers in the
+/// same run — and by the swap gate, so a voice this book just added is checked
+/// against the store as it will actually be, not as it was.
+///
+/// **How a store is filled is its engine's declaration**
+/// ([`crate::voices::VoiceStore`]), never a branch on an engine's name: a
+/// preset store merges the encoded preset the python enrollment wrote, while a
+/// clip store takes the book's own reference clip, converted into the engine's
+/// `models/refs/`. Returns the names baked (empty = nothing to do). Voices
+/// enrolled nowhere stay missing — the provision warning still names exactly
+/// those.
 pub fn bake_missing_voices(layout: &crate::Layout) -> Vec<String> {
+    match crate::voices::store_kind(&layout.engine) {
+        crate::voices::VoiceStore::Presets => bake_preset_voices(layout),
+        crate::voices::VoiceStore::Clips => bake_clip_voices(layout),
+        crate::voices::VoiceStore::None => Vec::new(),
+    }
+}
+
+/// The preset-store half of [`bake_missing_voices`]: copy each manifest voice
+/// the store lacks out of the local enrollment's own files.
+///
+/// The entries copied are presets — a `speaker_emb` + `codes`, which is what
+/// the python enrollment writes. A second engine's store has its own shape, so
+/// this never runs for one: writing a VieNeu preset into pocket's store left
+/// the sidecar unable to parse its own `voices.json` and exit on startup.
+fn bake_preset_voices(layout: &crate::Layout) -> Vec<String> {
     let root = layout.root.as_path();
-    let manifest: BTreeMap<String, String> = std::fs::read_to_string(root.join("voices.json"))
+    let manifest: BTreeMap<String, String> = std::fs::read_to_string(layout.voices_manifest())
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
@@ -393,6 +478,215 @@ pub fn bake_missing_voices(layout: &crate::Layout) -> Vec<String> {
     baked
 }
 
+/// The clip-store half of [`bake_missing_voices`]: copy each voice the store
+/// lacks out of the book's own `refs/` into the engine's `models/refs/` — the
+/// file its sidecar clones from when it loads.
+///
+/// The clip comes from **this workspace's manifest**, so a second book's voice
+/// cannot arrive here by accident: the store is keyed by name, and a name this
+/// book does not declare is not this book's to enroll.
+fn bake_clip_voices(layout: &crate::Layout) -> Vec<String> {
+    let manifest = load_manifest(&layout.voices_manifest());
+    if manifest.is_empty() {
+        return Vec::new();
+    }
+    // What the store already holds, read once: `enroll_clip_voice` is
+    // idempotent, so a voice that was already there must not be reported as
+    // freshly baked (the provision log's count and the tests both read this).
+    let before = load_store(&layout.tts_voices()).unwrap_or(serde_json::Value::Null);
+    let mut baked = Vec::new();
+    for (name, clip) in &manifest {
+        if name.starts_with('_') || before["presets"].get(name).is_some() {
+            continue;
+        }
+        let clip = if Path::new(clip).is_absolute() {
+            PathBuf::from(clip)
+        } else {
+            layout.work.join(clip)
+        };
+        if enroll_clip_voice(layout, name, &clip).is_ok_and(|file| file.is_some()) {
+            baked.push(name.clone());
+        }
+    }
+    baked.sort();
+    baked
+}
+
+/// Enroll `name` from `clip` into a **clip store** — see
+/// [`crate::voices::VoiceStore::Clips`].
+///
+/// Returns the store-relative file once the store holds the voice: written
+/// here, or already there. Enrollment is keyed by name and the store is
+/// machine-wide, so an entry that already exists is left alone — a second book
+/// enrolling the same name must not silently replace the first book's voice
+/// with its own clip. `Ok(None)` means there is no store to enroll into (the
+/// engine's tree is not fetched); `Err` carries the reason it could not.
+pub fn enroll_clip_voice(
+    layout: &crate::Layout,
+    name: &str,
+    clip: &Path,
+) -> anyhow::Result<Option<String>> {
+    use anyhow::Context;
+    // The declaration is the guard as well as the dispatch: a clip entry
+    // written into a preset store is a file the sidecar cannot parse, so a
+    // caller pointed at the wrong engine gets "nothing to do", not a
+    // corrupted store.
+    if crate::voices::store_kind(&layout.engine) != crate::voices::VoiceStore::Clips {
+        return Ok(None);
+    }
+    let store_path = layout.tts_voices();
+    let Some(mut doc) = load_store(&store_path) else {
+        return Ok(None);
+    };
+    if let Some(file) = doc["presets"]
+        .get(name)
+        .and_then(|entry| entry.get("file"))
+        .and_then(|f| f.as_str())
+    {
+        return Ok(Some(file.to_string()));
+    }
+    if !clip.is_file() {
+        anyhow::bail!("no such reference clip: {}", clip.display());
+    }
+    let rel = store_file_for(&doc, name);
+    let dest = layout.models_dir().join(&rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    write_clone_source(clip, &dest)?;
+    let description = match crate::assemble::wav_info(&dest) {
+        Ok(info) if info.seconds() > 0.0 => {
+            format!("Clone of {name} (24 kHz mono, {:.1} s)", info.seconds())
+        }
+        _ => format!("Clone of {name} (24 kHz mono)"),
+    };
+    doc["presets"][name] = serde_json::json!({ "description": description, "file": rel });
+    crate::util::atomic_write(&store_path, &serde_json::to_string(&doc)?)?;
+    Ok(Some(rel))
+}
+
+/// Read an engine store in place — its `presets` object is the only shape this
+/// module knows, shared by both declared kinds (a preset store's values carry
+/// `speaker_emb`/`codes`, a clip store's a `file`). `None` when the file is
+/// missing, unreadable or not a store, which every caller treats as "nothing
+/// to enroll into" rather than as an error: an engine tree that is not fetched
+/// yet is a valid state.
+fn load_store(path: &Path) -> Option<serde_json::Value> {
+    let doc: serde_json::Value = std::fs::read_to_string(path).ok()?.parse().ok()?;
+    doc.get("presets")?.as_object()?;
+    Some(doc)
+}
+
+/// The store-relative file a new clip entry should name: `refs/<slug>.wav`,
+/// with a short name hash when the slug is already claimed by another entry —
+/// two voices are two clips, and one path cannot be both.
+fn store_file_for(doc: &serde_json::Value, name: &str) -> String {
+    let stem = slug_for_file(name);
+    let rel = format!("refs/{stem}.wav");
+    let claimed = doc["presets"].as_object().is_some_and(|presets| {
+        presets.iter().any(|(other, entry)| {
+            other != name && entry.get("file").and_then(|f| f.as_str()) == Some(rel.as_str())
+        })
+    });
+    if claimed {
+        format!("refs/{}-{}.wav", stem, short_hash(name))
+    } else {
+        rel
+    }
+}
+
+/// The stem a voice name contributes to a store file: lowercase ASCII
+/// alphanumerics, dash-joined, so a store path carries no space, slash or
+/// diacritic for a shell, rsync or the sidecar's own path join to disagree
+/// about. A name with no ASCII word characters at all still gets a stable,
+/// unique stem rather than a shared `voice.wav`.
+fn slug_for_file(name: &str) -> String {
+    let mut out = String::new();
+    let mut dash = false;
+    for c in crate::util::fold(name).chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            dash = false;
+        } else if !out.is_empty() && !dash {
+            out.push('-');
+            dash = true;
+        }
+    }
+    let out = out.trim_end_matches('-');
+    if out.is_empty() {
+        format!("voice-{}", short_hash(name))
+    } else {
+        out.to_string()
+    }
+}
+
+/// The first four bytes of a name's sha256, hex — enough to separate two names
+/// that slug the same without inventing a name→number registry to keep.
+fn short_hash(name: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(name.as_bytes())
+        .iter()
+        .take(4)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Write the sidecar's clone source for `clip` at `dest`.
+///
+/// A clip that already **is** the store's house shape (24 kHz mono 16-bit PCM
+/// wav) is copied byte for byte: the bytes the operator auditioned are the
+/// bytes the box loads, and no decoder runs. Anything else — mp3, m4a, ogg,
+/// flac, a differently shaped wav — goes through ffmpeg, the one decoder this
+/// repository already depends on, to that shape (the engine's store documents
+/// 24 kHz, and its codec runs there).
+fn write_clone_source(clip: &Path, dest: &Path) -> anyhow::Result<()> {
+    use anyhow::Context;
+    if house_wav(clip) {
+        std::fs::copy(clip, dest)
+            .with_context(|| format!("copying {} -> {}", clip.display(), dest.display()))?;
+        return Ok(());
+    }
+    let src = clip.to_string_lossy().into_owned();
+    let dst = dest.to_string_lossy().into_owned();
+    let out = std::process::Command::new("ffmpeg")
+        .args([
+            "-nostdin",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            &src,
+            "-ac",
+            "1",
+            "-ar",
+            "24000",
+            "-c:a",
+            "pcm_s16le",
+            &dst,
+        ])
+        .output()
+        .context("spawning ffmpeg to decode the clone source")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "ffmpeg could not decode {}: {}",
+            clip.display(),
+            crate::util::head_chars(String::from_utf8_lossy(&out.stderr).trim(), 200)
+        );
+    }
+    Ok(())
+}
+
+/// Whether `path` is already the store's house shape — read from the header
+/// alone; the samples are not touched.
+fn house_wav(path: &Path) -> bool {
+    matches!(
+        crate::assemble::wav_info(path),
+        Ok(info) if info.channels == 1 && info.sample_rate == 24_000 && info.bits == 16
+    )
+}
+
 /// Preset files the local enrollment writes to, turbo first: the venv
 /// package's own assets, found through the venv this checkout carries.
 /// Empty where there is no venv — then nothing can be baked.
@@ -421,9 +715,16 @@ fn enrollment_stores(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Enroll one sample into THIS machine's voice store, so renders use it
-/// immediately. Skips cleanly with no local venv — provision enrolls from
-/// `voices.json` then.
+/// Enroll one sample into THIS machine's **preset store**, so renders use it
+/// immediately.
+///
+/// This is the VieNeu lane: the preset store is written by the python package,
+/// which is why it is the one engine that needs a venv. It is picked by
+/// declaration ([`crate::voices::VoiceStore::Presets`]) — a clip store enrolls
+/// through [`enroll_clip_voice`] instead, and running *this* for one was how a
+/// pocket workspace's `:N` wrote its voice into VieNeu's store, a voice no
+/// engine there could speak. Skips cleanly with no local venv — provision
+/// enrolls from `voices.json` then.
 pub fn enroll_local(root: &Path, name: &str, file: &str) -> anyhow::Result<Vec<String>> {
     let layout = crate::Layout::new(root);
     let Some(py) = layout.venv_python() else {
@@ -561,12 +862,19 @@ mod tests {
         assert_eq!(got, root.join("in/young-male-9.mp3"));
 
         // End to end through add_sample with a root-relative path.
-        let log = add_sample(&root, Path::new("in/young-male-9.mp3"), None, None).unwrap();
+        let log = add_sample(&crate::Layout::new(&root), Path::new("in/young-male-9.mp3"), None, None)
+            .unwrap();
         assert!(log.iter().any(|l| l.contains("young-male-9")), "{log:?}");
         assert!(root.join("refs/young-male-9.mp3").is_file());
 
         // Missing everywhere: the error names what was typed.
-        let err = add_sample(&root, Path::new("nope/young-male-9.mp3"), None, None).unwrap_err();
+        let err = add_sample(
+            &crate::Layout::new(&root),
+            Path::new("nope/young-male-9.mp3"),
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("nope/young-male-9.mp3"), "{err}");
     }
 
@@ -681,7 +989,7 @@ mod tests {
         let src = d.join("young-female-9.mp3");
         std::fs::write(&src, b"fake-audio").unwrap();
 
-        let log = add_sample(&d, &src, None, None).unwrap();
+        let log = add_sample(&crate::Layout::new(&d), &src, None, None).unwrap();
         assert!(log.iter().any(|l| l.contains("young-female-9")), "{log:?}");
         assert!(d.join("refs/young-female-9.mp3").is_file());
         // No venv here: enrollment defers to provisioning, loudly, not silently.
@@ -694,7 +1002,7 @@ mod tests {
         assert_eq!(manifest["young-female-9"], "refs/young-female-9.mp3");
 
         // Adding the same file twice is idempotent, not an error.
-        let again = add_sample(&d, &src, None, None).unwrap();
+        let again = add_sample(&crate::Layout::new(&d), &src, None, None).unwrap();
         assert!(
             again.iter().any(|l| l.contains("already in place")),
             "{again:?}"
@@ -755,7 +1063,7 @@ mod tests {
         let src = d.join("narrator.mp3");
         std::fs::write(&src, b"fake-audio").unwrap();
 
-        let log = add_sample(&d, &src, None, Some("Narrator".into())).unwrap();
+        let log = add_sample(&crate::Layout::new(&d), &src, None, Some("Narrator".into())).unwrap();
         assert!(log.iter().any(|l| l.contains("named voice")), "{log:?}");
         let pool = load_pool(&d.join("voice-pool.json"));
         assert!(pool["Narrator"].tags.is_empty());
@@ -782,7 +1090,7 @@ mod tests {
         std::fs::write(&src, b"fake-audio").unwrap();
 
         add_sample(
-            &d,
+            &crate::Layout::new(&d),
             &src,
             Some(vec!["old".into(), "male".into()]),
             Some("Lão".into()),
@@ -794,6 +1102,48 @@ mod tests {
             candidates(&pool, &["old".to_string(), "male".to_string()]),
             vec!["Lão".to_string()]
         );
+    }
+
+    #[test]
+    fn add_sample_enrolls_a_clip_store_and_leaves_vieneus_alone() {
+        // `:N` on a pocket workspace: the engine's store takes the clip, and
+        // the VieNeu enrollment is not even attempted — running it wrote this
+        // book's voice into an unrelated engine's store, which is the leak the
+        // declaration closes. A venv is planted but has no `tts_vieneu.py`, so
+        // a fall-through into the preset lane would log its "next provision"
+        // deferral.
+        let d = std::env::temp_dir().join("bm-pool-add-pocket");
+        let _ = std::fs::remove_dir_all(&d);
+        let mut layout = crate::Layout::new(&d);
+        layout.engine = "pocket".to_string();
+        std::fs::create_dir_all(layout.models_dir()).unwrap();
+        std::fs::create_dir_all(d.join(".venv/bin")).unwrap();
+        std::fs::write(d.join(".venv/bin/python"), b"x").unwrap();
+        std::fs::write(
+            layout.tts_voices(),
+            r#"{"presets":{"alba":{"file":"voices/alba.safetensors"}}}"#,
+        )
+        .unwrap();
+        let src = d.join("Maomao.wav");
+        crate::assemble::silent_wav(&src, 1.0, 24_000).unwrap();
+
+        // Exactly the TUI's `:N` shape: an explicit (empty) tag list, which is
+        // what makes the voice named rather than auto-rolled.
+        let log = add_sample(&layout, &src, Some(Vec::new()), Some("Maomao".into())).unwrap();
+        assert!(
+            log.iter()
+                .any(|l| l.contains("engine store: Maomao -> refs/maomao.wav")),
+            "{log:?}"
+        );
+        assert!(
+            !log.iter().any(|l| l.contains("no local voice store")),
+            "the preset lane must not run for a clip store: {log:?}"
+        );
+        let store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(layout.tts_voices()).unwrap()).unwrap();
+        assert_eq!(store["presets"]["Maomao"]["file"], "refs/maomao.wav");
+        assert!(layout.models_dir().join("refs/maomao.wav").is_file());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -841,6 +1191,96 @@ mod tests {
         );
         // Idempotent: nothing missing, nothing written.
         assert!(bake_missing_voices(&layout).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bake_never_writes_vieneu_presets_into_another_engines_store() {
+        // The pocket shape: `models/voices.json` is a `file` per voice, not a
+        // preset. A VieNeu preset (a `speaker_emb`/`codes` pair the python side
+        // writes) copied into it is a store the sidecar cannot parse — the
+        // crash this guards. The venv store is never even read for pocket, so
+        // the preset's `emb` cannot land here.
+        let d = std::env::temp_dir().join("bm-pool-bake-pocket");
+        let _ = std::fs::remove_dir_all(&d);
+        let assets = d.join(".venv/lib/python3.12/site-packages/vieneu/assets");
+        let mut layout = crate::Layout::new(&d);
+        layout.engine = "pocket".to_string();
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::create_dir_all(layout.models_dir()).unwrap();
+        std::fs::create_dir_all(d.join(".venv/bin")).unwrap();
+        std::fs::write(d.join(".venv/bin/python"), b"x").unwrap();
+        std::fs::write(layout.voices_manifest(), r#"{"Want":"refs/w.mp3"}"#).unwrap();
+        std::fs::write(
+            assets.join("voices_v3_turbo.json"),
+            r#"{"presets":{"Want":{"emb":[2]}}}"#,
+        )
+        .unwrap();
+        let store = r#"{"presets":{"alba":{"file":"refs/deep-voice.wav"}}}"#;
+        std::fs::write(layout.tts_voices(), store).unwrap();
+
+        // The clip `refs/w.mp3` does not exist, so there is nothing to
+        // enroll — and nothing from the venv store is eligible either.
+        assert!(bake_missing_voices(&layout).is_empty());
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(layout.tts_voices()).unwrap()).unwrap();
+        assert!(
+            after["presets"].get("Want").is_none(),
+            "no VieNeu preset may enter a clip store: {after}"
+        );
+        assert_eq!(after["presets"]["alba"]["file"], "refs/deep-voice.wav");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bake_enrolls_a_clip_store_from_the_books_own_refs() {
+        // The other half of the same declaration: where a preset store is
+        // merged, a clip store is **filled** — the manifest's clip is copied
+        // into the engine's `models/refs/`, which is the file pocket's sidecar
+        // clones at load. Without this, `:N` on a pocket workspace registered
+        // a voice that no swap could ever accept (`not enrolled in this
+        // machine's voice store`) and no provision could ever fix.
+        let d = std::env::temp_dir().join("bm-pool-bake-clips");
+        let _ = std::fs::remove_dir_all(&d);
+        let mut layout = crate::Layout::new(&d);
+        layout.engine = "pocket".to_string();
+        std::fs::create_dir_all(layout.models_dir()).unwrap();
+        std::fs::create_dir_all(layout.work.join("refs")).unwrap();
+        // The book's own clip, already the store's house shape.
+        let clip = layout.work.join("refs/Maomao.wav");
+        crate::assemble::silent_wav(&clip, 1.0, 24_000).unwrap();
+        std::fs::write(
+            layout.voices_manifest(),
+            r#"{"Maomao":"refs/Maomao.wav","Ghost":"refs/ghost.mp3","_note":"x"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            layout.tts_voices(),
+            r#"{"presets":{"alba":{"file":"voices/alba.safetensors"}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(bake_missing_voices(&layout), vec!["Maomao".to_string()]);
+        let store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(layout.tts_voices()).unwrap()).unwrap();
+        assert_eq!(store["presets"]["Maomao"]["file"], "refs/maomao.wav");
+        let copied = layout.models_dir().join("refs/maomao.wav");
+        assert_eq!(
+            std::fs::read(&copied).unwrap(),
+            std::fs::read(&clip).unwrap(),
+            "an already-house-shape clip travels byte for byte"
+        );
+        assert!(
+            store["presets"].get("Ghost").is_none(),
+            "a clip that is not there stays missing for the provision warning"
+        );
+        assert_eq!(store["presets"]["alba"]["file"], "voices/alba.safetensors");
+        // Idempotent: the entry is held, so a second run writes nothing and
+        // reports nothing. The store is machine-wide and name-keyed, so an
+        // existing entry is never replaced by another book's clip.
+        let before = std::fs::read_to_string(layout.tts_voices()).unwrap();
+        assert!(bake_missing_voices(&layout).is_empty());
+        assert_eq!(std::fs::read_to_string(layout.tts_voices()).unwrap(), before);
         let _ = std::fs::remove_dir_all(&d);
     }
 

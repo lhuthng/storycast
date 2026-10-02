@@ -213,7 +213,15 @@ impl CrawlIndex {
 }
 
 /// Fingerprint of everything that decides the mapping, so a changed script,
-/// engine, param or template invalidates a generated index and nothing else.
+/// engine, param, template **or book** invalidates a generated index and
+/// nothing else.
+///
+/// `books` is the digest [`books_fingerprint`] produced for the local files the
+/// crawl reads, or the empty string when it reads none. It is a separate input
+/// rather than a param because the params are configuration the operator wrote
+/// and this is the disk those params point at: a site listing lives on the
+/// server, but a local book's chapter tree lives on this machine and changes
+/// with no setting to show for it.
 pub fn fingerprint(
     engine: &str,
     script: &str,
@@ -221,6 +229,7 @@ pub fn fingerprint(
     url_template: &str,
     start: u32,
     count: u32,
+    books: &str,
 ) -> String {
     let mut h = Sha256::new();
     for part in [
@@ -230,12 +239,92 @@ pub fn fingerprint(
         url_template,
         &start.to_string(),
         &count.to_string(),
+        books,
     ] {
         h.update(part.as_bytes());
         h.update([0]);
     }
     let digest = h.finalize();
     digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A digest of the local book files a crawl reads, for [`fingerprint`].
+///
+/// **Why this exists.** A scripted `discover()` is cached in
+/// `data/crawl-index.json` and reused while its fingerprint matches. For a site
+/// that fingerprint is configuration alone — the listing lives on the server.
+/// For a **local book** the listing lives on this disk, and swapping
+/// `book.epub` for a different file (or adding a volume to `books/`) changes
+/// every chapter's place without changing a single setting. The bytes are part
+/// of what decides the mapping, so they are part of the fingerprint.
+///
+/// **Why the rule is over-inclusive.** The host cannot know which param a
+/// script treats as a book the way the script does. So every string param that
+/// resolves to a readable `.epub` inside the read root — as a file, or as a
+/// directory holding them — is included; anything that does not resolve, or is
+/// not an EPUB, contributes nothing. Being slow to invalidate a cache costs a
+/// rebuild; failing to invalidate one serves a stale chapter tree.
+///
+/// The empty string means "no local book", and is what a site crawler gets.
+pub fn books_fingerprint(
+    read_root: &std::path::Path,
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> String {
+    let Ok(base) = read_root.canonicalize() else {
+        return String::new();
+    };
+    let mut books: Vec<std::path::PathBuf> = Vec::new();
+    for value in params.values() {
+        let Some(named) = value.as_str() else {
+            continue;
+        };
+        if named.trim().is_empty() {
+            continue;
+        }
+        let candidate = if std::path::Path::new(named).is_absolute() {
+            std::path::PathBuf::from(named)
+        } else {
+            read_root.join(named)
+        };
+        // The same containment a crawl read gets: only a file inside the
+        // workspace can be what the mapping is derived from.
+        let Ok(real) = candidate.canonicalize() else {
+            continue;
+        };
+        if !real.starts_with(&base) {
+            continue;
+        }
+        if real.is_dir() {
+            if let Ok(found) = super::epub::books_in(&real) {
+                books.extend(found);
+            }
+        } else if is_epub(&real) {
+            books.push(real);
+        }
+    }
+    books.sort();
+    books.dedup();
+    if books.is_empty() {
+        return String::new();
+    }
+    let mut h = Sha256::new();
+    for path in &books {
+        // The name decides the **order** of the volumes, so it is part of the
+        // mapping; the bytes decide the chapters.
+        h.update(path.to_string_lossy().as_bytes());
+        h.update([0]);
+        let bytes = std::fs::read(path).unwrap_or_default();
+        h.update(&bytes);
+        h.update([0]);
+    }
+    let digest = h.finalize();
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn is_epub(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("epub"))
 }
 
 /// Expand `{n}` / `{n:03}` in a chapter URL template.
@@ -411,30 +500,73 @@ mod tests {
     #[test]
     fn the_fingerprint_moves_with_every_input_that_decides_the_mapping() {
         let params = serde_json::Map::new();
-        let base = fingerprint("lua", "src", &params, "https://x/{n}", 1, 5);
+        let base = fingerprint("lua", "src", &params, "https://x/{n}", 1, 5, "");
         assert_eq!(
             base,
-            fingerprint("lua", "src", &params, "https://x/{n}", 1, 5)
+            fingerprint("lua", "src", &params, "https://x/{n}", 1, 5, "")
         );
         assert_ne!(
             base,
-            fingerprint("js", "src", &params, "https://x/{n}", 1, 5)
+            fingerprint("js", "src", &params, "https://x/{n}", 1, 5, "")
         );
         assert_ne!(
             base,
-            fingerprint("lua", "src2", &params, "https://x/{n}", 1, 5)
+            fingerprint("lua", "src2", &params, "https://x/{n}", 1, 5, "")
         );
         assert_ne!(
             base,
-            fingerprint("lua", "src", &params, "https://y/{n}", 1, 5)
+            fingerprint("lua", "src", &params, "https://y/{n}", 1, 5, "")
         );
         assert_ne!(
             base,
-            fingerprint("lua", "src", &params, "https://x/{n}", 2, 5)
+            fingerprint("lua", "src", &params, "https://x/{n}", 2, 5, "")
         );
         let mut p2 = serde_json::Map::new();
         p2.insert("per_page".into(), serde_json::json!(50));
-        assert_ne!(base, fingerprint("lua", "src", &p2, "https://x/{n}", 1, 5));
+        assert_ne!(base, fingerprint("lua", "src", &p2, "https://x/{n}", 1, 5, ""));
+        // The book digest is its own input: a swapped volume moves the mapping
+        // with no configuration change to see it in.
+        assert_ne!(
+            base,
+            fingerprint("lua", "src", &params, "https://x/{n}", 1, 5, "deadbeef")
+        );
+    }
+
+    /// A local book's **bytes** are part of what decides the chapter tree, so
+    /// they are part of the fingerprint. This is the stale-index gap: replacing
+    /// a volume in place changed nothing an operator could point at.
+    #[test]
+    fn a_local_books_bytes_decide_the_fingerprint() {
+        let dir = std::env::temp_dir().join("bm-booksfp");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let one = dir.join("vol-01.epub");
+        std::fs::write(&one, b"first edition").unwrap();
+
+        let mut params = serde_json::Map::new();
+        params.insert("epub".into(), serde_json::json!("vol-01.epub"));
+        let before = books_fingerprint(&dir, &params);
+        assert!(!before.is_empty(), "a named book is hashed");
+        assert_eq!(before, books_fingerprint(&dir, &params));
+
+        // Same name, different bytes: the tree would change, so the digest must.
+        std::fs::write(&one, b"second edition").unwrap();
+        assert_ne!(before, books_fingerprint(&dir, &params));
+
+        // A directory of volumes, and one added volume is a new tree.
+        params.remove("epub");
+        params.insert("books".into(), serde_json::json!("."));
+        let two = books_fingerprint(&dir, &params);
+        std::fs::write(dir.join("vol-02.epub"), b"another").unwrap();
+        assert_ne!(two, books_fingerprint(&dir, &params));
+
+        // A param that names no file, or a non-book file, contributes nothing —
+        // so a site crawler's fingerprint is unchanged by this machinery.
+        let mut site = serde_json::Map::new();
+        site.insert("url_template".into(), serde_json::json!("https://x/{n}"));
+        site.insert("novel".into(), serde_json::json!("apothecary"));
+        assert_eq!(books_fingerprint(&dir, &site), "");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

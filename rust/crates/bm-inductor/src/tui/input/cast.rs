@@ -16,6 +16,7 @@ use crate::tui::{
     screen::{CastView, Screen, TextKind, TextPrompt},
     style::Level,
 };
+use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub(crate) async fn key_cast(
@@ -24,7 +25,7 @@ pub(crate) async fn key_cast(
     key: KeyEvent,
     http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     let mut v = view;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -40,7 +41,7 @@ pub(crate) async fn key_cast(
                 );
             } else {
                 app.screen = Screen::Normal;
-                return false;
+                return Flow::KeepRunning;
             }
             app.screen = Screen::Cast(v);
         }
@@ -142,5 +143,5 @@ pub(crate) async fn key_cast(
         }
         _ => {}
     }
-    false
+    Flow::KeepRunning
 }

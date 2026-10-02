@@ -88,12 +88,14 @@ impl Inner {
             .get("segments")
             .and_then(|s| s.as_array())
             .with_context(|| format!("{} has no `segments` array", script_path.display()))?;
-        let policy = bm_core::cast::policy_for_bible(&engine);
+        let policy = bm_core::cast::policy_for_bible(&engine, &self.layout);
+        let installed = bm_core::pool::installed_voices(&self.layout);
         let cast = bm_core::cast::load_cast(
             &script_path,
             &self.layout.cast(&engine),
             &self.layout.bible(),
             &policy,
+            installed.as_ref(),
             save,
         )
         .with_context(|| format!("loading the {engine:?} cast"))?;
@@ -101,8 +103,20 @@ impl Inner {
         let title = bm_core::assemble::title_speech_for_script(&script_path, &cast, segments);
         let seg_dir = self.layout.seg_dir(&engine, chapter);
         let planned = bm_core::assemble::Planned::plan(segments);
-        bm_core::assemble::plan_render(&planned, &cast, &seg_dir, local, title.as_ref())
-            .with_context(|| format!("planning chapter {chapter}"))
+        let mut units = bm_core::assemble::plan_render(&planned, &cast, &seg_dir, local, title.as_ref())
+            .with_context(|| format!("planning chapter {chapter}"))?;
+        // **The engine's ceiling, applied here and not inside the planner.**
+        // `plan_render` picks a temperature from the acting mood, and that table
+        // (0.70–0.92) is tuned for VieNeu's flow model — handed to pocket's, a
+        // chapter comes back as seconds of unusable static on some seeds. The
+        // planner has no engine to clamp against (it is handed a `local: bool`),
+        // so the one caller that knows the engine does it, and the clamp is a
+        // declaration read rather than a number written here.
+        let cap = bm_core::voices::max_temperature(&engine);
+        for u in &mut units {
+            u.temperature = u.temperature.min(cap);
+        }
+        Ok(units)
     }
 
     /// One line naming why [`Inner::plan_units`] refused, for the ledger.

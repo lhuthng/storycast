@@ -252,11 +252,27 @@ impl Epub {
         let mut out = String::new();
         for item in &items {
             let text = self.prose(item)?;
-            if text.trim().is_empty() {
+            let t = text.trim();
+            if t.is_empty() {
                 continue;
             }
-            out.push_str(text.trim_end());
-            out.push_str("\n\n");
+            if out.is_empty() {
+                out.push_str(t);
+            } else if page_continues(&out, t) {
+                // ponytail: hyphen word-split across pages rejoins without a space; upgrade if a book hyphenates compounds at page ends
+                if out.ends_with('-')
+                    && t.chars().next().is_some_and(|c| c.is_lowercase())
+                {
+                    out.pop();
+                    out.push_str(t);
+                } else {
+                    out.push(' ');
+                    out.push_str(t);
+                }
+            } else {
+                out.push_str("\n\n");
+                out.push_str(t);
+            }
         }
         if out.is_empty() {
             return Ok(String::new());
@@ -271,6 +287,27 @@ impl Epub {
         let markup = read_entry(&mut self.zip, &item.path)?;
         Ok(text_of(&markup))
     }
+}
+
+/// A page break is not a paragraph break: a scanned book puts one page per
+/// spine entry, so a sentence runs across entries and joining every entry
+/// with a blank line cuts sentences in half mid-file.
+fn page_continues(prev: &str, next: &str) -> bool {
+    if prev.ends_with('-') {
+        return true;
+    }
+    let stripped = prev
+        .trim_end_matches(['"', '”', '’', '\'', ')', ']', '»'])
+        .trim_end();
+    if !matches!(
+        stripped.chars().last(),
+        Some('.' | '!' | '?' | '…')
+    ) {
+        return true;
+    }
+    // A terminal followed by a lowercase start is an abbreviation ("Mr. /
+    // Smith"), not a sentence end.
+    next.chars().next().is_some_and(|c| c.is_lowercase())
 }
 
 /// The OPF path, from `META-INF/container.xml`'s `rootfile`.
@@ -553,6 +590,44 @@ pub fn confined(root: &Path, named: &str) -> Result<PathBuf> {
     Ok(real)
 }
 
+/// Resolve a **directory** a script named, with [`confined`]'s containment.
+///
+/// What a multi-volume library lives in (`crawl.params.books`): the crawl gains
+/// one folder of books, not the filesystem. A path that names a file, or lands
+/// outside the workspace, is refused by the same rule a single book is.
+pub fn confined_dir(root: &Path, named: &str) -> Result<PathBuf> {
+    let real = confined(root, named)?;
+    if !real.is_dir() {
+        anyhow::bail!("{named:?} is not a directory");
+    }
+    Ok(real)
+}
+
+/// The EPUBs directly inside `dir`, sorted by path.
+///
+/// One `.epub` is one *volume*, and only the script decides how their chapters
+/// number together — so the host answers with the list and leaves the tree to
+/// `discover()`. Sorted so the order is a property of the library rather than of
+/// the filesystem's answer order. Anything that is not an `.epub` file is
+/// ignored, not refused: a `books/` directory is a person's own folder.
+pub fn books_in(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(dir)
+        .with_context(|| format!("reading the books directory {}", dir.display()))?
+    {
+        let path = entry?.path();
+        let is_epub = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("epub"));
+        if is_epub && path.is_file() {
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// `Epub` holds a whole archive, and its `Debug` would dump every chapter of
 /// the book into a failing test's output. This says the two things that
 /// actually explain a failure: how big the spine is, and the names in it.
@@ -743,6 +818,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A page break is not a paragraph break: a scanned book puts one page
+    /// per spine entry, so entries joined into one chapter must not cut
+    /// sentences in half mid-file.
+    #[test]
+    fn a_ranged_read_joins_a_sentence_split_across_pages_with_a_space() {
+        use std::io::Write;
+        let dir = tmp("pagesplit");
+        let p = dir.join("book.epub");
+        let pages = [
+            "the dreary central courtyard housed washing areas, where the court\u{2019}s servants\u{2014}people",
+            "who were neither quite man nor quite woman did laundry by the armload. Men were not allowed.",
+            "A new paragraph starts here.",
+        ];
+        let file = std::fs::File::create(&p).unwrap();
+        let mut w = zip::ZipWriter::new(file);
+        let opts: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("mimetype", opts).unwrap();
+        w.write_all(b"application/epub+zip").unwrap();
+        w.start_file("META-INF/container.xml", opts).unwrap();
+        w.write_all(
+            br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/book.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"#,
+        )
+        .unwrap();
+        let mut items = String::new();
+        let mut refs = String::new();
+        for (i, body) in pages.iter().enumerate() {
+            let href = format!("text/p{i}.xhtml");
+            let id = format!("p{i}");
+            items.push_str(&format!(
+                r#"<item id="{id}" href="{href}" media-type="application/xhtml+xml"/>"#
+            ));
+            refs.push_str(&format!(r#"<itemref idref="{id}"/>"#));
+            w.start_file(format!("OEBPS/{href}"), opts).unwrap();
+            w.write_all(
+                format!("<html><head><title>p{i}</title></head><body><p>{body}</p></body></html>")
+                    .as_bytes(),
+            )
+            .unwrap();
+        }
+        w.start_file("OEBPS/book.opf", opts).unwrap();
+        w.write_all(
+            format!(
+                r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>{items}</manifest>
+  <spine>{refs}</spine>
+</package>"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        w.finish().unwrap();
+
+        let mut e = open(&p).unwrap();
+        let got = e.text(1, 3).unwrap();
+        assert_eq!(
+            got,
+            "the dreary central courtyard housed washing areas, where the court\u{2019}s servants\u{2014}people \
+             who were neither quite man nor quite woman did laundry by the armload. Men were not allowed.\n\n\
+             A new paragraph starts here.\n"
+        );
+        assert!(!got.contains("people\n\nwho"), "split sentence: {got:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_zip_that_is_not_an_epub_is_refused_by_name() {
         let dir = tmp("notepub");
@@ -783,6 +927,35 @@ mod tests {
         assert!(confined(&dir, "  ").is_err());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&book_dir);
+    }
+
+    /// A books directory is its `.epub` files, in name order — the listing a
+    /// multi-volume `discover` numbers from. Non-books are ignored rather than
+    /// refused (it is a person's own folder), a file is not a directory, and
+    /// the same containment a single book gets applies to the folder.
+    #[test]
+    fn a_books_directory_is_its_epubs_in_name_order() {
+        let dir = tmp("books");
+        let shelf = dir.join("books");
+        std::fs::create_dir_all(&shelf).unwrap();
+        // Written out of order on purpose: the listing is sorted, so volume
+        // order is a property of the names and not of the filesystem.
+        book(&shelf.join("vol-02.epub"), &[("two", "B")]);
+        book(&shelf.join("vol-01.epub"), &[("one", "A")]);
+        std::fs::write(shelf.join("notes.txt"), b"not a book").unwrap();
+        std::fs::create_dir_all(shelf.join("covers")).unwrap();
+
+        let found = books_in(&confined_dir(&dir, "books").unwrap()).unwrap();
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["vol-01.epub", "vol-02.epub"]);
+        // A path that names a file is not a directory.
+        assert!(confined_dir(&dir, "books/vol-01.epub").is_err());
+        // And a folder outside the workspace is refused like a book outside it.
+        assert!(confined_dir(&dir, "../").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A chapter long enough to need windows, so the budget has something to

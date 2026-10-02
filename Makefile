@@ -169,6 +169,19 @@ ORT_DIR := $(CURDIR)/$(RUST_DIR)/target/ort-linux-x64
 TTS_TARGET := x86_64-unknown-linux-gnu
 TTS_BIN := $(RUST_DIR)/target/$(TTS_TARGET)/release/bm-tts
 
+# The sidecar's cargo features, from the active workspace's engine. `pocket` is
+# default-off in bm-tts, so a build without it produces a sidecar that boots,
+# answers /health, and then refuses a pocket model tree on the first render.
+# The engine -> feature fact lives in `voices::consts::EngineDecl::tts_features`
+# and `bm-inductor provision` reads the same one; override with
+# `make tts TTS_FEATURES="--features pocket"`.
+ACTIVE_ENGINE := $(shell python3 -c "import json,pathlib;r=pathlib.Path('.');p=r/'.bm'/'active-workspace';n=p.read_text().strip() if p.exists() else '';s=r/'workspaces'/n/'settings.json';print(json.load(s.open()).get('engine','') if s.exists() else '')" 2>/dev/null)
+ifeq ($(ACTIVE_ENGINE),pocket)
+TTS_FEATURES ?= --features pocket
+else
+TTS_FEATURES ?=
+endif
+
 .PHONY: runtime tts
 
 runtime:
@@ -195,5 +208,7 @@ tts: runtime
 	@[ -x "$(ZIG)" ] || { echo "zig is required (looked for $(ZIG)): https://ziglang.org/download"; exit 1; }
 	PATH="$(CARGO_BIN_DIR):$$PATH" ORT_LIB_LOCATION="$(ORT_DIR)" ORT_PREFER_DYNAMIC_LINK=1 \
 		$(CARGO) zigbuild --release --target $(TTS_TARGET) -p bm-tts --bin bm-tts \
+		$(TTS_FEATURES) \
 		--manifest-path $(RUST_DIR)/Cargo.toml
+	@echo "  engine $(or $(ACTIVE_ENGINE),none) -> features '$(or $(TTS_FEATURES),none)'"
 	@ls -l "$(TTS_BIN)" | awk '{printf "  %d bytes  %s\n", $$5, $$NF}'

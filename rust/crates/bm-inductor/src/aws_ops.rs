@@ -739,9 +739,12 @@ pub(crate) fn launch(
     }
     // The marker tag's value *is* the profile hash, so without one the box would
     // be untraceable in `ls` and unprovisionable anyway — `provision` refuses
-    // without a loaded profile.
-    let hash = bm_core::profile::read_pointer(root)
-        .map(|p| p.hash)
+    // without a loaded profile. Read from the binding **in force**, so a box
+    // launched while a workspace is active is tagged with the pack provision
+    // will actually hand it.
+    let layout = bm_core::Layout::resolve_or_root(root).0;
+    let hash = bm_core::profile::in_force(&layout)
+        .map(|b| b.pack.hash)
         .unwrap_or_default();
     if hash.is_empty() {
         anyhow::bail!(

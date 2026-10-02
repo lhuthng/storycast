@@ -1,0 +1,18 @@
+{
+  "_note": "A profile preset is a NAME for a pack × adapter × engine triple, so `bm-inductor workspace new <book> --profile <preset>` stamps a new workspace without touching the checkout's own binding (.bm/profile). `pack` names what the binding's pack piece is called; `pack_deps` — when present — says the workspace composes its OWN pack from these roots (authored under assets/_extends/, resolved into workspaces/<name>/assets/), so two books on one checkout do not share a score. With no `pack_deps` the workspace shares the checkout's live pack, the pre-preset shape. `crawler` is a { type, file } selection: `known` names a host in crawlers/knownsites.json, `example` names a file under crawlers/examples/, `custom` leaves the book to drop its own script into its crawl/, and `none` (or an absent block) names no crawler. The global crawlers live in crawlers/ and are referenced in place, not copied.",
+  "xianxia-vi": {
+    "label": "Xianxia (vi) — Xianxia Pack, VieNeuTTS, Vietnamese prompts",
+    "pack": "xianxia",
+    "adapter": "vi-VN",
+    "engine": "vieneu",
+    "crawler": { "type": "known", "file": "storya.click" }
+  },
+  "jnovel-en": {
+    "label": "JNovel (en) — no genre pack, PocketTTS, English EPub prompts",
+    "pack": "",
+    "pack_deps": ["common", "craft", "court-mystery"],
+    "adapter": "jnovel-en-US",
+    "engine": "pocket",
+    "crawler": { "type": "custom" }
+  }
+}

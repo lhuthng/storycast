@@ -191,26 +191,40 @@ pub fn cast_on_disk(engine: &str, cast: &Cast) -> Cast {
     cast_for_disk(engine, cast)
 }
 
-/// The sample pool for this bible: the first non-empty `voice-pool.json`
-/// walking up from the bible — beside it in tests, at the repo root in real
-/// layouts (the bible lives two levels down, under `<workspace>/data/`).
-/// Missing means "no pool".
+/// The sample pool for this bible: the **workspace's own** `voice-pool.json`.
+///
+/// Beside the bible in tests (both in one temp dir), or at the workspace root
+/// in a real layout, where the bible lives under `<workspace>/data/`. **It does
+/// not climb past the workspace**: the checkout's pool is beyond-myriads', and
+/// a second book casting from it is exactly how `the-apothecary-diaries` got a
+/// roster that was never its own. Missing means "no pool".
 fn pool_for_bible(bible_path: &Path) -> crate::pool::Pool {
-    let mut dir = bible_path.parent();
-    while let Some(d) = dir {
-        let pool = crate::pool::load_pool(&d.join("voice-pool.json"));
+    let beside = bible_path.parent();
+    let workspace = beside.and_then(|d| d.parent());
+    for dir in [beside, workspace].into_iter().flatten() {
+        let pool = crate::pool::load_pool(&dir.join("voice-pool.json"));
         if !pool.is_empty() {
             return pool;
         }
-        dir = d.parent();
     }
     crate::pool::load_pool(Path::new("/nonexistent/voice-pool.json"))
 }
 
-/// The assignable-voice policy for a render: the shipped catalogue. There is
-/// no machine-local overlay.
-pub fn policy_for_bible(engine: &str) -> VoicePolicy {
-    crate::voices::effective_policy(engine)
+/// The assignable-voice policy for a render: the shipped catalogue, narrowed
+/// to the voices this engine's own store holds.
+///
+/// There is no machine-local overlay, but there **is** a per-engine store, and
+/// it is the authority on what can speak: the catalogue lists every preset an
+/// engine could voice, which for pocket is twenty-five names against a tree
+/// that ships nine. A pool that crosses that gap produces a cast the sidecar
+/// rejects by name. When the store cannot be read the catalogue stands, which
+/// is the old behaviour rather than a cast with nothing in it.
+pub fn policy_for_bible(engine: &str, layout: &crate::Layout) -> VoicePolicy {
+    let policy = crate::voices::effective_policy(engine);
+    match crate::pool::installed_voices(layout) {
+        Some(installed) => policy.restricted_to(&installed),
+        None => policy,
+    }
 }
 
 /// Resolve the full cast for a chapter, assigning any missing speaker.
@@ -224,11 +238,19 @@ pub fn policy_for_bible(engine: &str) -> VoicePolicy {
 ///
 /// `save = false` is the read-only mode used by the merge stage and by the
 /// completeness check: it must never mutate the cast just because it looked.
+///
+/// `installed` is what this engine's store holds (`pool::installed_voices`).
+/// An assignment already on disk that the store cannot speak is **dropped and
+/// re-rolled** rather than kept: it was either drawn from a catalogue the tree
+/// does not satisfy, or written before the tree changed, and either way it is a
+/// render that fails three times and shelves. `None` skips that check, which is
+/// the behaviour for an engine with no per-engine store.
 pub fn load_cast(
     script_path: &Path,
     cast_path: &Path,
     bible_path: &Path,
     policy: &VoicePolicy,
+    installed: Option<&std::collections::BTreeSet<String>>,
     save: bool,
 ) -> Result<Cast> {
     // --- gather speakers and voice hints -------------------------------------
@@ -305,6 +327,14 @@ pub fn load_cast(
     // `read_cast` resolves keys *and* names, so a migrated, half-migrated or
     // untouched file all arrive here as display names.
     for (character, voice) in read_cast(&policy.engine, cast_path) {
+        // A stored voice the store cannot speak is not an assignment, it is a
+        // promise the sidecar will refuse. Drop it here so the roll below gives
+        // the character a voice that exists.
+        if let Some(have) = installed {
+            if !have.contains(&voice) {
+                continue;
+            }
+        }
         cast.insert(character, voice);
     }
 
@@ -450,6 +480,7 @@ mod tests {
             &cast_path,
             &d.join("bible.json"),
             &vieneu_policy(),
+            None,
             true,
         )
         .unwrap();
@@ -472,7 +503,7 @@ mod tests {
         )
         .unwrap();
 
-        let cast = load_cast(&first, &cast_path, &bible, &vieneu_policy(), true).unwrap();
+        let cast = load_cast(&first, &cast_path, &bible, &vieneu_policy(), None, true).unwrap();
         assert_eq!(
             cast.get("Anonymous"),
             cast.get("Narrator"),
@@ -487,7 +518,7 @@ mod tests {
         std::fs::write(&second, r#"{"roster":["anonymous:anon-1"],"segments":[]}"#).unwrap();
         let created = Cast::from_iter([("anonymous:anon-1".to_string(), "Bảo An".to_string())]);
         write_cast("vieneu", &cast_path, &created).unwrap();
-        let again = load_cast(&second, &cast_path, &bible, &vieneu_policy(), true).unwrap();
+        let again = load_cast(&second, &cast_path, &bible, &vieneu_policy(), None, true).unwrap();
         assert_eq!(again.get("anonymous:anon-1"), again.get("Narrator"));
         assert_ne!(again.get("anonymous:anon-1"), Some(&"Bảo An".to_string()));
     }
@@ -504,6 +535,7 @@ mod tests {
             &cast_path,
             &d.join("bible.json"),
             &vieneu_policy(),
+            None,
             true,
         )
         .unwrap();
@@ -521,6 +553,7 @@ mod tests {
             &cast_path,
             &d.join("bible.json"),
             &vieneu_policy(),
+            None,
             false,
         )
         .unwrap();
@@ -555,6 +588,7 @@ mod tests {
             &d.join("cast-vieneu.json"),
             &bible,
             &vieneu_policy(),
+            None,
             false,
         )
         .unwrap();
@@ -577,6 +611,7 @@ mod tests {
             &d.join("cast-vieneu.json"),
             &bible,
             &vieneu_policy(),
+            None,
             false,
         )
         .unwrap();
@@ -610,6 +645,7 @@ mod tests {
             &cast_path,
             &d.join("bible.json"),
             &vieneu_policy(),
+            None,
             true,
         )
         .unwrap();
@@ -646,6 +682,7 @@ mod tests {
             &cast_path,
             &d.join("bible.json"),
             &vieneu_policy(),
+            None,
             true,
         )
         .unwrap();
@@ -672,6 +709,7 @@ mod tests {
             &cast_path,
             &d.join("bible.json"),
             &vieneu_policy(),
+            None,
             true,
         )
         .unwrap();
@@ -702,6 +740,7 @@ mod tests {
             &cast_path,
             &d.join("bible.json"),
             &vieneu_policy(),
+            None,
             false,
         )
         .unwrap();
@@ -723,8 +762,16 @@ mod tests {
         )
         .unwrap();
 
-        let policy = policy_for_bible("vieneu");
-        let cast = load_cast(&script, &d.join("cast-vieneu.json"), &bible, &policy, false).unwrap();
+        let policy = policy_for_bible("vieneu", &crate::Layout::new(&d));
+        let cast = load_cast(
+            &script,
+            &d.join("cast-vieneu.json"),
+            &bible,
+            &policy,
+            None,
+            false,
+        )
+        .unwrap();
         let got = cast.get("Ông Già").unwrap();
         assert!(
             policy.male.contains(got),
@@ -739,10 +786,94 @@ mod tests {
         let d = tmpdir("policy-catalogue");
         std::fs::create_dir_all(d.join(".bm")).unwrap();
         std::fs::write(d.join(".bm/voices.json"), "{ nope").unwrap();
-        let policy = policy_for_bible("vieneu");
+        let policy = policy_for_bible("vieneu", &crate::Layout::new(&d));
         assert_eq!(policy.engine, "vieneu");
         assert_eq!(policy.male, vieneu_policy().male);
         assert_eq!(policy.female, vieneu_policy().female);
+    }
+
+    /// A cast may only name voices the engine's own store holds.
+    ///
+    /// The bug this is for, as it actually happened: `voices.default.json`
+    /// declares twenty-five pocket presets, the installed tree ships nine, and
+    /// the roll drew `anna` and `bill-boerst` from the catalogue. Both renders
+    /// came back `unknown voice "…" on this box`, failed three times and
+    /// shelved. Nothing was wrong with the engine, the book or the voice files
+    /// — only with trusting the catalogue over the store.
+    #[test]
+    fn a_cast_only_ever_names_voices_the_engine_store_holds() {
+        let d = tmpdir("installed-only");
+        let layout = crate::Layout::new(&d);
+        std::fs::create_dir_all(d.join("data")).unwrap();
+        let cast_path = layout.cast("vieneu");
+        // An engine tree holding three of the female presets the catalogue
+        // declares five of.
+        let models = d.join("engines/vieneu/models");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(
+            models.join("voices.json"),
+            r#"{"presets":{"alba":{},"cosette":{},"eponine":{}}}"#,
+        )
+        .unwrap();
+
+        let bible = d.join("bible.json");
+        std::fs::write(
+            &bible,
+            r#"{"characters":[
+                {"name":"A","voice_hint":"adult female","tags":["female"]},
+                {"name":"B","voice_hint":"adult female","tags":["female"]},
+                {"name":"C","voice_hint":"adult female","tags":["female"]}
+            ]}"#,
+        )
+        .unwrap();
+        let script = d.join("script-01.json");
+        std::fs::write(
+            &script,
+            r#"{"roster":["Narrator","A","B","C"],"segments":[{"speaker":"A","text":"x"}]}"#,
+        )
+        .unwrap();
+
+        let policy = policy_for_bible("vieneu", &layout);
+        let installed = crate::pool::installed_voices(&layout).expect("the store is readable");
+        assert_eq!(installed.len(), 3, "the store is the authority, not the catalogue");
+        for pool in [&policy.female, &policy.male, &policy.neutral] {
+            for voice in pool {
+                assert!(
+                    installed.contains(voice),
+                    "{voice} is in the catalogue but not in the store it would be spoken by"
+                );
+            }
+        }
+
+        let cast = load_cast(&script, &cast_path, &bible, &policy, Some(&installed), true).unwrap();
+        for (who, voice) in &cast {
+            assert!(
+                installed.contains(voice),
+                "{who} was given {voice}, which this engine cannot speak"
+            );
+        }
+
+        // And a cast already on disk naming a voice the store lacks is re-rolled
+        // rather than kept: it is a promise the sidecar will refuse.
+        std::fs::write(&cast_path, r#"{"A":"marius","B":"alba"}"#).unwrap();
+        let healed = load_cast(
+            &script,
+            &cast_path,
+            &bible,
+            &policy,
+            Some(&installed),
+            true,
+        )
+        .unwrap();
+        assert!(
+            !healed.values().any(|v| v == "marius"),
+            "a voice the store cannot speak must not survive into the cast"
+        );
+        assert_eq!(
+            healed.get("B"),
+            Some(&"alba".to_string()),
+            "an installed voice that is already assigned is left alone"
+        );
     }
 
     #[test]
@@ -786,6 +917,7 @@ mod tests {
             &d.join("cast-vieneu.json"),
             &bible,
             &vieneu_policy(),
+            None,
             false,
         )
         .unwrap();
@@ -848,6 +980,7 @@ mod tests {
             &d.join("cast-vieneu.json"),
             &bible,
             &vieneu_policy(),
+            None,
             false,
         )
         .unwrap();
@@ -877,6 +1010,7 @@ mod tests {
             &d.join("cast-vieneu.json"),
             &bible,
             &vieneu_policy(),
+            None,
             false,
         )
         .unwrap();
@@ -892,14 +1026,20 @@ mod tests {
     }
 
     #[test]
-    fn the_pool_is_found_two_levels_up_like_the_real_layout() {
-        // Real layout: the pool at the repo root, the bible two levels down
-        // at `<workspace>/data/bible.json`. The old lookup only climbed one
-        // level, loaded nothing, and every newcomer fell through to presets.
+    fn the_pool_is_the_workspaces_own_and_not_the_checkouts() {
+        // Real layout: the pool in the workspace, the bible under
+        // `<workspace>/data/`. The lookup climbs from `data/` to the
+        // workspace — and **stops there**. The checkout's pool belongs to
+        // whatever book owns the checkout; a second book reading it is exactly
+        // how the wrong roster got cast.
         let d = tmpdir("pool-walkup");
-        pool_fixture(&d);
-        let data = d.join("workspaces").join("book").join("data");
+        let book = d.join("workspaces").join("book");
+        let data = book.join("data");
         std::fs::create_dir_all(&data).unwrap();
+        // Both a checkout pool and the workspace's own: the workspace's wins.
+        pool_fixture(&d);
+        pool_fixture(&book);
+
         let script = data.join("script-01.json");
         std::fs::write(&script, r#"{"roster":["Cô Bé"],"segments":[]}"#).unwrap();
         let bible = data.join("bible.json");
@@ -913,10 +1053,19 @@ mod tests {
             &data.join("cast-vieneu.json"),
             &bible,
             &vieneu_policy(),
+            None,
             false,
         )
         .unwrap();
         assert_eq!(cast.get("Cô Bé").unwrap(), "young-female-1");
+
+        // With no pool of its own, the checkout's does not answer for it: the
+        // walk stops at the workspace.
+        std::fs::remove_file(book.join("voice-pool.json")).unwrap();
+        assert!(
+            pool_for_bible(&bible).is_empty(),
+            "a book with no pool of its own must not cast from the checkout's"
+        );
     }
 
     #[test]
@@ -937,6 +1086,7 @@ mod tests {
             &d.join("cast-vieneu.json"),
             &bible,
             &vieneu_policy(),
+            None,
             false,
         )
         .unwrap();

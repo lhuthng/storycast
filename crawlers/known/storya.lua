@@ -1,4 +1,4 @@
--- assets/crawl/templates/storya.lua — the crawler the pipeline shipped before scripted crawls.
+-- crawlers/known/storya.lua — the crawler the pipeline shipped before scripted crawls.
 --
 -- **Everything site-specific is in this file.** Which element holds the chapter,
 -- where the prose starts and stops, which lines are the site's chrome — all of

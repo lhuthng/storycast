@@ -7,6 +7,7 @@ use crate::tui::{
     screen::{CloudView, Screen},
     style::Level,
 };
+use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) async fn key_cloud(
@@ -15,7 +16,7 @@ pub(crate) async fn key_cloud(
     key: KeyEvent,
     _http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.screen = Screen::Normal;
@@ -46,5 +47,5 @@ pub(crate) async fn key_cloud(
         }
         _ => {}
     }
-    false
+    Flow::KeepRunning
 }

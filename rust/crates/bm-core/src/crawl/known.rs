@@ -20,9 +20,19 @@
 //! the set this project has actually verified; a site that is missing from it is
 //! not a site that cannot be crawled, it is a site nobody has written down yet,
 //! and the workflow for that is the same as for a site that was never here:
-//! `check` it, copy `assets/crawl/templates/truyencom.lua`, edit the selectors.
+//! `check` it, copy `crawlers/known/truyencom.lua`, edit the selectors.
+//!
+//! The list itself lives in `crawlers/knownsites.json` — a global file beside
+//! the global crawlers, embedded here at compile time (the same bargain
+//! `voices.default.json` keeps) so a clone cannot miss it. Each entry's
+//! `script` is relative to `crawlers/`, and this module presents it as the path
+//! a `settings.json` spells (`crawlers/known/storya.lua`), which is what
+//! `resolve_script` looks for.
 
 use std::fmt;
+use std::sync::OnceLock;
+
+use serde::Deserialize;
 
 /// One website we have a crawler for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,132 +83,99 @@ pub struct KnownSite {
     pub caveat: Option<&'static str>,
 }
 
-/// The bundled Storya path. **Not a default** — see
-/// [`crate::crawl::DEFAULT_SCRIPT`], which is what this is for.
+/// The global registry, embedded at compile time.
 ///
-/// Relative to the **language's home**, not to the checkout: a crawler is one
-/// site read in one language, so `crawl/templates/…` is where it lives —
-/// `adapters/vi-VN/crawl/templates/…` once a checkout has an adapter bundle, and
-/// `assets/crawl/templates/…` while it still has the pre-split flat tree, which
-/// is why the same spelling resolves in both.
-const STORYA: &str = "crawl/templates/storya.lua";
+/// Embedded rather than read at runtime for the same reason
+/// [`crate::voices::catalogue::CATALOGUE_JSON`] is: the file cannot go missing or
+/// be half-edited at the moment a `check` needs it. Three hops up from the
+/// manifest directory: `bm-core` -> `crates` -> `rust` -> root.
+pub const REGISTRY_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../crawlers/knownsites.json"
+));
+
+/// The registry file as it is written: `script` relative to `crawlers/`.
+#[derive(Deserialize)]
+struct RegistryFile {
+    #[serde(default)]
+    sites: Vec<RegistrySite>,
+}
+
+#[derive(Deserialize)]
+struct RegistrySite {
+    host: String,
+    #[serde(default)]
+    script: String,
+    #[serde(default)]
+    params: Vec<(String, String)>,
+    #[serde(default)]
+    url_template: String,
+    #[serde(default)]
+    max_fetches: u32,
+    #[serde(default)]
+    max_seconds: u64,
+    #[serde(default)]
+    shape: String,
+    #[serde(default)]
+    language: String,
+    #[serde(default)]
+    caveat: Option<String>,
+}
+
+/// Leak a parsed string into a `'static` field.
+///
+/// The registry is compile-time data that lives for the whole process, so this
+/// is not a leak so much as the shape the old hand-written table already had:
+/// bounded, written once, never freed.
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+impl KnownSite {
+    /// One entry, with every string/param promoted to `'static`.
+    fn from_registry(s: RegistrySite) -> Self {
+        // A script is stored relative to `crawlers/`; the setting a caller
+        // pastes names it from the checkout root, so prefix the directory the
+        // registry lives in. An empty script stays empty (no bundled crawler).
+        let script = if s.script.trim().is_empty() {
+            String::new()
+        } else {
+            format!("crawlers/{}", s.script.trim())
+        };
+        let params: Vec<(&'static str, &'static str)> = s
+            .params
+            .into_iter()
+            .map(|(k, v)| (leak(k), leak(v)))
+            .collect();
+        KnownSite {
+            host: leak(s.host),
+            script: leak(script),
+            params: Box::leak(params.into_boxed_slice()),
+            url_template: leak(s.url_template),
+            max_fetches: s.max_fetches,
+            max_seconds: s.max_seconds,
+            shape: leak(s.shape),
+            language: leak(s.language),
+            caveat: s.caveat.map(leak),
+        }
+    }
+}
 
 /// Every site this project has verified, in the order a reader should meet them:
 /// the one that works out of the box, then the shapes worth learning from.
+///
+/// Parsed once from the embedded [`REGISTRY_JSON`] and cached; the returned
+/// slice is `'static` so a caller can hold a site for as long as it likes.
 pub fn known_sites() -> &'static [KnownSite] {
-    &[
-        KnownSite {
-            host: "storya.click",
-            script: STORYA,
-            params: &[],
-            url_template: "https://storya.click/truyen/nguoi-tren-van-nguoi/chuong-{n}",
-            max_fetches: 0,
-            max_seconds: 0,
-            shape: "`/{book}/chuong-{n}` — templatable, one fetch a chapter. The \
-                    crawler the pipeline shipped before scripted crawls existed, still \
-                    bundled and parity-tested; a new workspace names no crawler at all.",
-            language: "Vietnamese",
-            caveat: None,
-        },
-        KnownSite {
-            host: "truyencom.com",
-            script: "crawl/templates/truyencom.lua",
-            params: &[],
-            url_template: "https://truyencom.com/{book}/chuong-{n}.html",
-            max_fetches: 64,
-            max_seconds: 180,
-            shape: "Templatable, but the chapter *list* is paginated — `discover` walks the page links.",
-            language: "Vietnamese",
-            caveat: None,
-        },
-        KnownSite {
-            host: "readnovelfull.com",
-            script: "crawl/templates/readnovelfull.lua",
-            params: &[(
-                "book",
-                "https://readnovelfull.com/the-sword-god-of-the-universe.html",
-            )],
-            // Empty on purpose: see `shape`.
-            url_template: "",
-            // A walk that follows `next_chap` spends a fetch per chapter, and the
-            // default 64 is sized for a single chapter.
-            max_fetches: 400,
-            max_seconds: 900,
-            shape: "`/{book}/chapter-{n}-{title-slug}.html` — the number is in the URL but not last, \
-                    so nothing can invent the slug. The book page also lists only the first ~30 \
-                    chapters with no pagination, so `discover` walks the `next_chap` chain instead.",
-            language: "English",
-            caveat: None,
-        },
-        KnownSite {
-            host: "webnovel.com",
-            script: "crawl/templates/webnovel.lua",
-            params: &[(
-                "book",
-                "https://www.webnovel.com/book/tu-chan-lieu-thien-quan_13320161405417805",
-            )],
-            url_template: "",
-            max_fetches: 128,
-            max_seconds: 300,
-            shape: "English, slug discovery over the catalogue's 14 chapter columns.",
-            language: "English — but `/vi/` is the Vietnamese edition of the same catalogue",
-            caveat: Some(
-                "Refused behind Cloudflare: 403 whatever we send. The template is correct and \
-                 cannot be run without a `cf_clearance` cookie in `crawl.headers`; a browser \
-                 User-Agent alone does not get in.",
-            ),
-        },
-        KnownSite {
-            host: "truyenfull.vn",
-            script: "",
-            params: &[],
-            url_template: "",
-            max_fetches: 0,
-            max_seconds: 0,
-            shape: "The old `truyenfull.vn` now redirects to `truyenfull.live`.",
-            language: "Vietnamese",
-            caveat: Some(
-                "Answers 200 with a Cloudflare interstitial rather than a 403 — the one shape \
-                 that reads as success. `bm-inductor check` is what tells the two apart.",
-            ),
-        },
-        KnownSite {
-            host: "lightnovel.vn",
-            script: "",
-            params: &[],
-            url_template: "",
-            max_fetches: 0,
-            max_seconds: 0,
-            shape: "Reader lives at `hub.lightnovel.vn/reader?book=<uuid>`.",
-            language: "Vietnamese",
-            caveat: Some(
-                "A Next.js app: the chapter is fetched by JavaScript and is not in the HTML at \
-                 all. Needs a browser, which this crawler deliberately has not.",
-            ),
-        },
-        KnownSite {
-            host: "novelfull.com",
-            script: "",
-            params: &[],
-            url_template: "",
-            max_fetches: 0,
-            max_seconds: 0,
-            shape: "—",
-            language: "English",
-            caveat: Some("Cloudflare: 403 to every request."),
-        },
-        KnownSite {
-            host: "truyenthanh.vn",
-            script: "",
-            params: &[],
-            url_template: "",
-            max_fetches: 0,
-            max_seconds: 0,
-            shape: "—",
-            language: "Vietnamese",
-            caveat: Some("Upstream is broken: 500."),
-        },
-    ]
+    static REGISTRY: OnceLock<Vec<KnownSite>> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let file: RegistryFile = serde_json::from_str(REGISTRY_JSON)
+            .expect("crawlers/knownsites.json is embedded and must parse");
+        file.sites
+            .into_iter()
+            .map(KnownSite::from_registry)
+            .collect()
+    })
 }
 
 /// The site a URL belongs to, if we have one.
@@ -448,19 +425,22 @@ mod tests {
         // A registry that names a file we do not ship is worse than no registry:
         // it is a confident answer that fails at the moment it is trusted.
         //
-        // Reading the repo's own `adapters/vi-VN/crawl/templates/` is the point,
-        // not a shortcut: that directory is **tracked** (see `.gitignore`, which
-        // excludes the rest of the live tree and un-ignores this one directory),
-        // so this test passes on a fresh clone with no release fetched. It did
-        // not always — while the whole of `assets/` was ignored, this passed only
-        // on machines that had fetched a profile, and a clone could not crawl at
-        // all without failing silently.
+        // The registry is embedded from `crawlers/knownsites.json`, so this is
+        // also the gate that the file parses and its `script` fields point at
+        // crawlers that actually ship.
         //
-        // `vi-VN` is named because that is the language these templates are
-        // written for. The names they are configured under are relative to it
-        // (`crawl/templates/…`) and resolve through a checkout's adapter home,
-        // which is why the check has to look in that home.
-        let root = format!("{}/../../../adapters/vi-VN", env!("CARGO_MANIFEST_DIR"));
+        // Reading the repo's own `crawlers/` is the point, not a shortcut: the
+        // global crawler tree is **tracked** (see `.gitignore`), so this test
+        // passes on a fresh clone with no release fetched. It did not always —
+        // while the crawlers rode an ignored tree, this passed only on machines
+        // that had fetched something, and a clone could not crawl at all without
+        // failing silently.
+        //
+        // `KnownSite::script` is the path a `settings.json` spells
+        // (`crawlers/known/storya.lua`), so it resolves from the checkout root —
+        // the registry's own `script` is relative to `crawlers/`, and that
+        // prefix is what this checks is real.
+        let root = format!("{}/../../..", env!("CARGO_MANIFEST_DIR"));
         for site in known_sites() {
             if !site.is_crawlable() {
                 continue;

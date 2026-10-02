@@ -398,9 +398,10 @@ impl Inner {
             .chain(&policy.neutral)
             .any(|n| n == &voice);
         let in_use = cast.values().any(|v| v == &voice);
-        let pooled = bm_core::pool::load_pool(&self.layout.root.join("voice-pool.json"))
-            .contains_key(&voice);
-        let manifested = bm_core::pool::load_manifest(&self.layout.root).contains_key(&voice);
+        let pooled =
+            bm_core::pool::load_pool(&self.layout.voice_pool()).contains_key(&voice);
+        let manifested =
+            bm_core::pool::load_manifest(&self.layout.voices_manifest()).contains_key(&voice);
         if !(declared || in_use || pooled || manifested) {
             anyhow::bail!("voice {voice:?} is neither a preset nor an enrolled clone");
         }

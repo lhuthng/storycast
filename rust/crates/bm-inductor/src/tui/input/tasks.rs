@@ -7,6 +7,7 @@ use crate::tui::{
     screen::{Confirm, Screen, TaskDetail, TasksView, TextKind, TextPrompt},
     style::Level,
 };
+use crate::tui::input::Flow;
 use bm_proto::{Op, OpRequest, Task, TaskState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeSet;
@@ -82,7 +83,7 @@ pub(crate) async fn key_tasks(
     key: KeyEvent,
     http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     let mut v = view;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -315,7 +316,7 @@ pub(crate) async fn key_tasks(
         }
         _ => {}
     }
-    false
+    Flow::KeepRunning
 }
 
 pub(crate) async fn key_task_detail(
@@ -324,7 +325,7 @@ pub(crate) async fn key_task_detail(
     key: KeyEvent,
     http: &reqwest::Client,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
-) -> bool {
+) -> Flow {
     let mut v = view.clone();
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let task = app
@@ -370,5 +371,5 @@ pub(crate) async fn key_task_detail(
         }
         _ => {}
     }
-    false
+    Flow::KeepRunning
 }

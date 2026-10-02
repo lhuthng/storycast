@@ -36,7 +36,7 @@ pub(crate) const REFRESH_TICKS: u64 = 4;
 use crate::tui::{
     app::App,
     draw::draw,
-    input::{dispatch, dispatch_op, handle_key, mouse::handle_mouse},
+    input::{dispatch, dispatch_op, handle_key, mouse::handle_mouse, Flow},
     jobs::DoneKind,
     jobs::{fetch_state, run_jobs, Ev, Job},
     model::reported_alias,
@@ -85,7 +85,7 @@ async fn run_loop(
     app.layout = layout;
     // Read once here, not per frame: the footer shows it, and the footer is
     // redrawn on every keystroke.
-    app.profile = bm_core::profile::read_binding(&app.layout.root).ok();
+    app.profile = bm_core::profile::in_force(&app.layout).ok();
     app.http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         // The inductor is a LAN service — loopback for a solo run, a private
@@ -158,7 +158,7 @@ async fn run_loop(
             dirty = true;
             match event::read()? {
                 Event::Mouse(mouse) => {
-                    if handle_mouse(&mut app, mouse, &http, &job_tx).await {
+                    if handle_mouse(&mut app, mouse, &http, &job_tx).await == Flow::Quit {
                         break;
                     }
                 }
@@ -166,7 +166,7 @@ async fn run_loop(
                 // binding twice.
                 Event::Key(key)
                     if key.kind == KeyEventKind::Press
-                        && handle_key(&mut app, key, &http, &job_tx).await =>
+                        && handle_key(&mut app, key, &http, &job_tx).await == Flow::Quit =>
                 {
                     break;
                 }

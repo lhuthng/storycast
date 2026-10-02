@@ -26,6 +26,36 @@ pub fn atomic_write(path: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Recursively copy a directory tree, creating `to`. Files are **copied**, not
+/// linked: the whole point of a workspace owning its own prompts, crawlers and
+/// clips is that editing one book's copy cannot reach back into the checkout's.
+///
+/// A missing `from` copies nothing and is not an error — the callers are
+/// `workspace new`/`migrate`, where a checkout that simply has no `refs/` yet
+/// should not fail a create. A partial tree is copied as far as it goes; the
+/// caller words the result.
+pub fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    let entries = match std::fs::read_dir(from) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        let kind = entry
+            .file_type()
+            .with_context(|| format!("reading {}", src.display()))?;
+        if kind.is_dir() {
+            copy_tree(&src, &dst)?;
+        } else if kind.is_file() {
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Whether a `segments` item is a sound rather than a line of speech.
 ///
 /// A `segments` array is a sequence of items, and an item is one of two kinds:

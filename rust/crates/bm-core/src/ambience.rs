@@ -496,6 +496,30 @@ pub struct SceneMap {
     pub layers: Layers,
     #[serde(default)]
     pub pause: PausePlan,
+    /// The sound a thought fires at its seam, declared by the pack. See
+    /// [`ThoughtRule`].
+    #[serde(default)]
+    pub thought: ThoughtRule,
+}
+
+/// The spot sound a thought fires at its seam, declared by the pack:
+/// `"thought": {"sound": "thought-chime"}`.
+///
+/// A thought is marked in the script by code (`"kind": "thought"`) and is
+/// otherwise just another line to the mixer. This names the one clip that goes
+/// with that marker, and the digest *lifts* it into a sibling `{"sound": …}`
+/// item at the thought's seam — so no render path learns a new rule: the inject
+/// layer already places a spot effect the script names, and this is simply a
+/// name the pack chooses once instead of the analyzer guessing per line. The
+/// name must exist in `inject-pool.json`: a declared sound nobody has a clip
+/// for is refused at digest time, not mixed down to silence.
+///
+/// Absent or empty means thoughts carry no sound, which is every pack that has
+/// not asked for one.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct ThoughtRule {
+    #[serde(default)]
+    pub sound: String,
 }
 
 /// How much of a scene's treatment the Narrator takes: a tenth of a

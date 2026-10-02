@@ -527,7 +527,13 @@ impl App {
         }
     }
 
-    pub(crate) fn push_log(&mut self, line: LogLine) {
+    pub(crate) fn push_log(&mut self, mut line: LogLine) {
+        // Absolute paths are the machine's, not the pane's: shorten them to
+        // this checkout's own terms before the line is stored, so a worker's
+        // `/Volumes/…/engines/pocket/models` reads as `./engines/pocket/models`.
+        // The message still says exactly what failed — only the prefix it was
+        // wrapped in changes.
+        line.text = shorten_paths(&self.layout.root, &line.text);
         // A new line must not shove the operator's reading position away. While
         // the view is scrolled back, the same line stays on screen and the
         // distance grows by one — so "N back" is always the honest distance
@@ -783,7 +789,7 @@ impl App {
         }
         let (layout, problem) = bm_core::Layout::resolve_or_root(&self.layout.root);
         self.layout = layout;
-        self.profile = bm_core::profile::read_binding(&self.layout.root).ok();
+        self.profile = bm_core::profile::in_force(&self.layout).ok();
         // Cached file indexes: all of them belong to the workspace that was.
         self.lines = None;
         self.lines_loading = false;
@@ -1180,5 +1186,50 @@ impl App {
                 }
             }
         }
+    }
+}
+
+/// Rewrite the absolute prefixes a log line carries so the Events pane reads in
+/// this checkout's own terms.
+///
+/// Worker and backend messages name files absolutely
+/// (`/Volumes/…/engines/pocket/models`). The dashboard knows exactly one root,
+/// so it becomes `.`, and the home directory becomes `~` — the venv, the model
+/// caches and the HF token all live there. A path under neither is another
+/// machine's fact and is left as it was written.
+fn shorten_paths(root: &std::path::Path, text: &str) -> String {
+    let mut out = text.to_string();
+    let root = root.to_string_lossy();
+    // A one-character root (`/`) would rewrite every path in the line to `.`;
+    // refuse it rather than mangle the message.
+    if root.len() > 1 {
+        out = out.replace(root.as_ref(), ".");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = home.to_string_lossy();
+        if home.len() > 1 {
+            out = out.replace(home.as_ref(), "~");
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shorten_paths;
+    use std::path::Path;
+
+    #[test]
+    fn only_this_root_and_home_are_shortened() {
+        assert_eq!(
+            shorten_paths(Path::new("/repo"), "Error: /repo/engines/pocket/models"),
+            "Error: ./engines/pocket/models"
+        );
+        // A path under neither is another machine's and is left alone. (The
+        // test avoids `$HOME` on purpose: rewriting it is the same branch and
+        // asserting on an env-derived string is not worth the flake.)
+        assert_eq!(shorten_paths(Path::new("/repo"), "/elsewhere/x"), "/elsewhere/x");
+        // A bare `/` root must not turn every path into `.`.
+        assert_eq!(shorten_paths(Path::new("/"), "/a/b"), "/a/b");
     }
 }

@@ -5,7 +5,7 @@
 //! must not vary: the chapter boundary ([`sanitize_chapter_text`]) and the
 //! length guard. *Which element of which page holds the prose* is a fact about a
 //! website rather than about this program, so it lives in
-//! `assets/crawl/templates/storya.lua`, beside the operator who can read the page.
+//! `crawlers/known/storya.lua`, beside the operator who can read the page.
 //!
 //! What is left in this file is the part that is genuinely the host's:
 //!
@@ -53,12 +53,16 @@ use anyhow::Result;
 /// means "an old workspace", and that one used to hardcode this path — see
 /// [`CrawlSettings::legacy_default`](crate::config::CrawlSettings::legacy_default).
 ///
-/// A path rather than a `include_str!` on purpose. The script is *profile
-/// content* — it ships in `assets/`, is rsynced to workers with the rest of the
-/// tree, and an operator is expected to copy it and edit the copy for their own
-/// site. Compiling it in would make the first thing they must do (read it) the
-/// hardest.
-pub const DEFAULT_SCRIPT: &str = "crawl/templates/storya.lua";
+/// A path rather than a `include_str!` on purpose. The script is *content* — it
+/// ships in the global `crawlers/` tree, is rsynced to workers with the rest of
+/// the tree, and an operator is expected to copy it and edit the copy for their
+/// own site. Compiling it in would make the first thing they must do (read it)
+/// the hardest.
+///
+/// Relative to the **checkout root**, like every `crawlers/…` path — the
+/// resolver tries the root, so the same spelling works on the inductor and on a
+/// worker that provision pushed `crawlers/` to.
+pub const DEFAULT_SCRIPT: &str = "crawlers/known/storya.lua";
 
 /// The index a run works from: `data/crawl-index.json`.
 ///
@@ -80,6 +84,9 @@ pub fn chapter_index(
     force: bool,
 ) -> Result<CrawlIndex> {
     let spec = provider::spec_from_settings(layout, settings);
+    // A local book's bytes decide the chapter tree, so they are part of what
+    // decides reuse: see `index::books_fingerprint`. Empty for a site crawler.
+    let books = index::books_fingerprint(&spec.read_root, &spec.params);
     let hash = index::fingerprint(
         &spec.engine,
         &spec.source,
@@ -87,6 +94,7 @@ pub fn chapter_index(
         &settings.url_template,
         start,
         count,
+        &books,
     );
     index::resolve(layout, &hash, start, count, force, || {
         // A script's own `discover()` first: it is the only thing that can map
@@ -282,7 +290,7 @@ pub(crate) fn decode_entities(s: &str) -> String {
 /// not which lines are the site's furniture, not what a chapter headline looks
 /// like in the language the novel is written in: those are facts about a site,
 /// and they live in the crawler script — `SITE.artifact` in
-/// `assets/crawl/templates/storya.lua` is where Storya's own lines are listed,
+/// `crawlers/known/storya.lua` is where Storya's own lines are listed,
 /// and a new site adds its own.
 ///
 /// This function used to hold a list of Storya's junk lines and drop them. That

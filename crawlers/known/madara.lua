@@ -1,4 +1,4 @@
--- assets/crawl/templates/madara.lua — a crawler for a listing site.
+-- crawlers/known/madara.lua — a crawler for a listing site.
 --
 -- The second kind of crawl: the chapter URL is **not** a function of `n`. The
 -- site exposes an index, so the crawler enters at `params.entry`, reads the
@@ -8,7 +8,7 @@
 --
 -- Copy it, point `params.entry` at your site, and adjust the selectors:
 --
---   "crawl": { "script": "assets/crawl/templates/madara.lua",
+--   "crawl": { "script": "crawlers/known/madara.lua",
 --              "params": { "entry": "https://site.example/truyen/ten-truyen" } }
 --
 -- Everything site-specific is in `L`. If your site is a Madara/WordPress novel

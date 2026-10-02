@@ -715,37 +715,50 @@ impl Inner {
         // the same trust clones get at enrolment — so a fresh sample is
         // assignable before anything speaks with it. Without this a new sample
         // could be rolled automatically but never picked by hand.
-        let pooled = bm_core::pool::load_pool(&self.layout.root.join("voice-pool.json"))
-            .contains_key(&voice);
-        let manifested = bm_core::pool::load_manifest(&self.layout.root).contains_key(&voice);
+        let pooled =
+            bm_core::pool::load_pool(&self.layout.voice_pool()).contains_key(&voice);
+        let manifested =
+            bm_core::pool::load_manifest(&self.layout.voices_manifest()).contains_key(&voice);
         let admitted = declared || in_use || pooled || manifested;
         if !admitted {
             anyhow::bail!("voice {voice:?} is neither a preset nor an enrolled clone");
         }
         // A swap must be speakable everywhere it will be offered: a clone the
-        // local bake lacks is one no freshly-provisioned worker has either,
-        // and the invalidation below would queue renders that 500 on every
-        // box. So a swap first merges whatever the local store already holds
-        // into the bake (drifting the stamp, which is what makes the next
-        // :prov push it) and refuses what is enrolled nowhere. Presets ship
-        // with the sidecar, so only clones gate here — and only where a bake
-        // exists to check against.
+        // engine's store lacks is one no freshly-provisioned worker has
+        // either, and the invalidation below would queue renders that 500 on
+        // every box. So a swap first enrolls what this book declares and the
+        // store lacks — the same merge provisioning runs, in the shape the
+        // bound engine declares (a preset store takes the python enrollment's
+        // preset, a clip store takes this book's own clip) — and refuses only
+        // what the store still does not hold. Presets ship with the sidecar, so
+        // only clones gate here, and only where a store exists to check
+        // against.
+        //
+        // The check reads the **engine's own store**
+        // (`bm_core::pool::installed_voices`), never an assumption about what
+        // a store is: the old form looked for a VieNeu preset key and so
+        // refused every clone in a pocket workspace, where the store is a
+        // `file` per voice and nothing could ever have put one there.
         if !declared && self.layout.tts_voices().is_file() {
             bm_core::pool::bake_missing_voices(&self.layout);
             let want = bm_core::util::fold(&voice);
-            let baked = std::fs::read_to_string(self.layout.tts_voices())
-                .ok()
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                .and_then(|v| {
-                    v.get("presets").and_then(|p| p.as_object()).map(|o| {
-                        o.keys()
-                            .any(|k| k == &voice || bm_core::util::fold(k) == want)
-                    })
-                })
-                .unwrap_or(false);
-            if !baked {
+            let held = bm_core::pool::installed_voices(&self.layout).is_some_and(|names| {
+                names
+                    .iter()
+                    .any(|n| n == &voice || bm_core::util::fold(n) == want)
+            });
+            if !held {
+                // Name the clip the book declared, when there is one: a
+                // `refs/…` file that is gone (or undecodable) is the one
+                // reason the just-run enrollment could still have left the
+                // store without the voice, and it is not visible from here.
+                let declared = bm_core::pool::load_manifest(&self.layout.voices_manifest())
+                    .get(&voice)
+                    .map(|clip| format!(" (this book's clip: {clip})"))
+                    .unwrap_or_default();
                 anyhow::bail!(
-                    "voice {voice:?} is not enrolled in this machine's voice store — enroll it (:A / roster add-sample) and :prov before swapping, or every render naming it fails on workers"
+                    "voice {voice:?} is not enrolled in {engine}'s voice store ({}){declared} — :N/:A enrolls a clip from this book's refs/ into that store and :prov pushes it to workers; every render naming it fails on workers until then",
+                    self.layout.tts_voices().display()
                 );
             }
         }

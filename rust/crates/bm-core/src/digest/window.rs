@@ -122,7 +122,13 @@ fn slice(chapter: &PreparedChapter, from: usize, to: usize) -> PreparedChapter {
     PreparedChapter {
         prompt_json: serde_json::to_string_pretty(&value).unwrap_or_else(|_| "[]".into()),
         events,
-        unbalanced: false,
+        // Parity is a fact about the WHOLE chapter and is decided on the whole
+        // chapter, before the plan cuts it. A window has no say in it: `None`
+        // here keeps a slice from reporting a chapter-wide fault against one
+        // part's text, which is the same local-window blindness the gate exists
+        // to catch. Nothing reads it off a slice — the check runs on the
+        // chapter, in `digest::quote_fault`.
+        unbalanced_at: None,
     }
 }
 
@@ -505,7 +511,10 @@ mod tests {
                 slice.events[0].id, c.events[w.from].id,
                 "window {i} starts where the chapter does"
             );
-            assert!(!slice.unbalanced, "a window does not re-report the chapter");
+            assert!(
+                slice.unbalanced_at.is_none(),
+                "a window does not re-report the chapter"
+            );
             for (j, e) in slice.events.iter().enumerate() {
                 assert_eq!(e.id, c.events[w.from + j].id, "window {i} event {j}");
                 assert_eq!(e.kind, c.events[w.from + j].kind);
@@ -549,15 +558,16 @@ mod tests {
         "/../../fixtures/crawl/truyencom-chapter.txt"
     ));
 
-    /// The sample EPUB crawler, read from `samples/crawl/` rather than inlined:
-    /// this test is a gate for that file as much as for the budget. Outside
-    /// `adapters/`, because an EPUB is a format and no adapter's sites own it.
+    /// The example EPUB crawler, read from `crawlers/examples/` rather than
+    /// inlined: this test is a gate for that file as much as for the budget. In
+    /// the global tree, because an EPUB is a format and no adapter's sites own
+    /// it.
     fn epub_crawler() -> String {
         std::fs::read_to_string(format!(
-            "{}/../../../samples/crawl/epub.lua",
+            "{}/../../../crawlers/examples/epub.lua",
             env!("CARGO_MANIFEST_DIR")
         ))
-        .unwrap_or_else(|e| panic!("reading samples/crawl/epub.lua: {e}"))
+        .unwrap_or_else(|e| panic!("reading crawlers/examples/epub.lua: {e}"))
     }
 
     /// A book, written as a real ZIP: container, manifest, spine, XHTML.
