@@ -1,22 +1,4 @@
 //! The AWS account verbs, callable from two front ends.
-//!
-//! `main.rs::aws_cmd` builds the lines the operator reads for the setup
-//! commands. The verbs a *second* front end needs live here instead, so the
-//! dashboard does not become a second implementation of any of them: list the
-//! pool, launch into it, terminate from it, store the IAM user's key, and read
-//! the account into the pool. The low-level `aws` CLI plumbing stays at the
-//! crate root and is shared through `crate::aws_cli_*`: one place runs the
-//! subprocess and explains a missing CLI, a rejected key, or a policy that
-//! forbids the call.
-//!
-//! Everything here returns lines or structured instances, and prints nothing —
-//! the CLI prints what it gets back, the dashboard logs it and, for a launch,
-//! links what came back into the registry.
-//!
-//! The flags for `login` and `discover` are defined **once**, as clap `Args`
-//! structs, and used by both front ends: the CLI derives its subcommand from
-//! them and the TUI parses the same tokens through the same definition, so a
-//! flag cannot mean two things depending on where it was typed.
 
 use anyhow::Result;
 use bm_core::provision::{
@@ -28,34 +10,21 @@ use bm_core::provision::{
 use std::path::{Path, PathBuf};
 
 /// Flags for `aws login`, one definition shared by both front ends.
-///
-/// The CSV is the natural handoff and the only route a TUI can offer: the
-/// secret is read from stdin by the CLI, and a screen must never echo it. A
-/// front end with no terminal passes `csv`; `access_key_id` alone is for a CLI
-/// that can still prompt.
 #[derive(Debug, Clone, clap::Args)]
 pub(crate) struct LoginArgs {
     /// The key id. Omit to be prompted for it.
     #[arg(long)]
     pub(crate) access_key_id: Option<String>,
     /// The CSV the console's **Download .csv file** button gives you.
-    ///
-    /// It already holds both halves, so this replaces the two prompts. It
-    /// is the one artifact the console produces that a terminal would
-    /// otherwise make you retype by hand.
     #[arg(long)]
     pub(crate) csv: Option<PathBuf>,
 }
 
 impl LoginArgs {
     /// Parse the flags a dashboard prompt supplied.
-    ///
-    /// The same clap definition the CLI derives from, so `--csv` means the
-    /// same thing in both places; only the token source differs.
     pub(crate) fn parse_tokens(tokens: &[String]) -> Result<Self> {
         use clap::FromArgMatches as _;
         // `no_binary_name`: the tokens come from a dashboard prompt and carry
-        // no `argv[0]`, so the first flag would otherwise be eaten as one.
         let cmd = <LoginArgs as clap::Args>::augment_args(
             clap::Command::new("login").no_binary_name(true),
         );
@@ -76,34 +45,18 @@ pub(crate) struct DiscoverArgs {
     #[arg(long)]
     pub(crate) ami: Option<String>,
     /// Import the `.pem` you downloaded from the console, as
-    /// `.bm/aws/<region>.pem` (0600).
     #[arg(long)]
     pub(crate) pem: Option<PathBuf>,
     /// Replace a `.bm/aws/<region>.pem` that already exists with the one you
-    /// pass.
-    ///
-    /// Only needed when the two are *different* keys: an identical file is
-    /// left alone, and a different one is refused without this, because the
-    /// old private half cannot be recovered from AWS.
     #[arg(long)]
     pub(crate) force: bool,
     /// Name the instance profile to use.
-    ///
-    /// Needed when the account holds more than one — which is the normal
-    /// case for an account that also runs something else — because `discover`
-    /// will not guess between them. Checked against the account, so a typo is
-    /// caught here rather than at `RunInstances`.
     #[arg(long)]
     pub(crate) instance_profile: Option<String>,
     /// Name the subnet to use, instead of the default VPC's.
     #[arg(long)]
     pub(crate) subnet: Option<String>,
     /// Name the security group to use, instead of the account's default.
-    ///
-    /// The one to reach for on an account that already runs something else:
-    /// the default group is shared, so opening port 22 on it opens it for
-    /// every instance using that group, including ones this tool has never
-    /// heard of. A group of your own costs nothing and changes nothing else.
     #[arg(long)]
     pub(crate) security_group: Option<String>,
 }
@@ -114,7 +67,6 @@ impl DiscoverArgs {
     pub(crate) fn parse_tokens(tokens: &[String]) -> Result<Self> {
         use clap::FromArgMatches as _;
         // `no_binary_name`, for the same reason `login` sets it: a prompt
-        // supplies flags, not argv.
         let cmd = <DiscoverArgs as clap::Args>::augment_args(
             clap::Command::new("discover").no_binary_name(true),
         );
@@ -126,11 +78,6 @@ impl DiscoverArgs {
 }
 
 /// What the account holds, filtered to our marker tag.
-///
-/// The credential and region check, and the first thing a fresh dashboard
-/// wants: if this answers, `up` can too. A payload we do not understand is a
-/// refusal, never an empty list — "nothing running" is the one wrong answer that
-/// costs money.
 pub(crate) fn pool(root: &Path) -> Result<(AwsConfig, Vec<AwsInstance>)> {
     let cfg = AwsConfig::load_layered(root);
     if cfg.region.trim().is_empty() {
@@ -162,13 +109,6 @@ pub(crate) fn pool_lines(root: &Path) -> Result<Vec<String>> {
 }
 
 /// Store the app's IAM user, after proving the key is one.
-///
-/// The two halves are handed in rather than prompted for: the CLI reads them
-/// off a terminal, the dashboard passes the console's CSV — and neither front
-/// end gets its own copy of the verify-then-write order.
-///
-/// `csv` carries both halves and wins; `key_id` + `secret` are the typed
-/// route, which only a front end with a hidden stdin can offer.
 pub(crate) fn login(
     root: &Path,
     csv: Option<PathBuf>,
@@ -218,9 +158,6 @@ pub(crate) fn login(
         }
     };
     // Verify **before** storing, with the key supplied to this one call.
-    // The order matters now that the stored identity has to be an IAM user:
-    // writing first would leave a file we refuse to use, and the next `aws ls`
-    // would quietly run as whatever it holds.
     let region = AwsConfig::load_layered(root).region;
     let mut args: Vec<String> = vec![
         "sts".into(),
@@ -260,7 +197,6 @@ pub(crate) fn login(
                 ));
             }
             // A verified call we cannot read is not an identity we can
-            // claim to have stored — say so rather than record a guess.
             None => out.push(format!(
                 "stored nothing: `sts get-caller-identity` answered something this does not \
                  understand, so the identity could not be confirmed. Raw answer: {}",
@@ -268,9 +204,6 @@ pub(crate) fn login(
             )),
         },
         // No account to check against (offline, no CLI, a policy that
-        // forbids nothing because it is not attached yet). Store it
-        // unverified — the key is what the operator just supplied, and
-        // `aws show` will say it is unverified rather than pretend.
         Err(e) => {
             let file = bm_core::provision::aws_credentials::write(root, &key_id, &secret, None)?;
             out.push(format!("wrote {} (0600)", file.display()));
@@ -278,8 +211,6 @@ pub(crate) fn login(
         }
     }
     // The key id is an identifier, like a username; the secret is not
-    // printed, only a hash of it, so an operator can tell *which*
-    // secret is loaded without it reaching a terminal or a log.
     out.push(format!(
         "key {} · secret {}",
         key_id.trim(),
@@ -289,10 +220,6 @@ pub(crate) fn login(
 }
 
 /// Read the account and write what it answers into the pool definition.
-///
-/// Read-modify-writes the local document rather than `cfg.save()`: the layered
-/// config is template + local, so re-serialising it would flatten the tracked
-/// template into the operator's file and drop the `_note`s they edit against.
 pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
     let DiscoverArgs {
         region,
@@ -306,8 +233,6 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
     let path = root.join(".bm").join("aws.json");
     let mut out: Vec<String> = Vec::new();
     // Seed the pool if it has never been written, so this works as the
-    // first command anyone runs and still leaves the `_note`s that
-    // explain every field.
     if !path.exists() {
         out.push(crate::seed_pool(root, &path, false)?);
     }
@@ -327,9 +252,6 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
     out.push(format!("region {region}"));
 
     // The AMI: the one field that cannot be read off a console page
-    // without hunting through the AMI catalogue. Resolved only when
-    // there is nothing there — a pinned `images.<region>` is a decision
-    // and this must not quietly undo it on the next run.
     if let Some(a) = ami.map(|a| a.trim().to_string()).filter(|a| !a.is_empty()) {
         crate::set_json(&mut doc, &["images", region.as_str()], serde_json::json!(a));
         out.push(format!("  AMI {a}   (pinned by --ami)"));
@@ -373,20 +295,11 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
     }
 
     // The security group. `--security-group` settles it, which is the
-    // answer on an account that already runs something else: the default
-    // group is shared, so an inbound rule on it is an inbound rule on
-    // every instance that uses it.
     let chosen_sg = if let Some(g) = security_group
         .map(|g| g.trim().to_string())
         .filter(|g| !g.is_empty())
     {
         // Checked before it is written, like `--instance-profile` and
-        // `--pem`. A group that is not in this region is the same trap
-        // as a keypair that is not: an id read off a console page in
-        // another region looks perfectly valid. Writing it anyway would
-        // also skip the ingress check below on the strength of an
-        // unverified id, which is how a pool ends up launching into a
-        // group that does not exist.
         match crate::aws_cli_opt(root, &describe_security_group_args(&region, &g)) {
             Ok(Some(_)) => {
                 crate::set_json(&mut doc, &["security_group_id"], serde_json::json!(g));
@@ -441,11 +354,6 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
         }
     };
     // Whether that group actually admits you, on **every** port the
-    // cluster needs. Said here, while the group is being chosen, because
-    // both failures are invisible later: a closed port does not refuse a
-    // connection, it swallows it. Port 22 hangs and you notice; the task
-    // port gives you a box that launches, looks healthy and is never
-    // driven.
     if let Some(g) = &chosen_sg {
         let task_port = bm_proto::DEFAULT_TASK_PORT;
         if let Ok(Some(json)) = crate::aws_cli_opt(root, &describe_security_group_args(&region, g))
@@ -487,14 +395,6 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
     }
 
     // The keypair first from the `.pem` if one was handed over, because
-    // the console names the download after the key pair — so the file
-    // name *is* the name — but only *in the region it was created in*.
-    // EC2 keypairs are region-scoped, so an inferred name is checked
-    // against the region rather than trusted: a name that is not there
-    // fails at `RunInstances`, and `aws show` saying "ready" while the
-    // launch would be refused is the one answer that costs a debugging
-    // round. (This was found the hard way: a keypair created in the
-    // console's default region while the pool points elsewhere.)
     let mut have_keypair = cfg.keypair().is_some();
     let region_keypairs: Option<Vec<String>> = if have_keypair {
         Some(Vec::new())
@@ -511,15 +411,8 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
     let mut key_refused = false;
     if let Some(src) = pem {
         // The path follows the *resolved* region, not `cfg.key_file()`:
-        // the region may have come from `--region` on this very
-        // command, in which case the config still has none.
         let dest = root.join(".bm").join("aws").join(format!("{region}.pem"));
         // Identical bytes are the idempotent re-run. *Different* bytes
-        // mean a key is being replaced, and the old private half cannot
-        // be recovered from AWS — so that takes `--force`, the same
-        // idiom `init` uses for a file that already exists. Keeping the
-        // stale file and reporting the keypair as verified would be the
-        // worst answer: "ready" with a key that cannot open the box.
         let current = std::fs::read(&dest).ok();
         let same = current.is_some() && current == std::fs::read(&src).ok();
         let replacing = current.is_some() && !same;
@@ -548,13 +441,10 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
             ));
         }
         // The name is checked whether or not the copy happened: a `.pem`
-        // already in place from an earlier run is exactly when the
-        // mismatch is easiest to miss, and that is how this was found.
         if !have_keypair {
             if let Some(name) = src.file_stem().and_then(|s| s.to_str()) {
                 match &region_keypairs {
                     // Verified against the region: the file name is the
-                    // keypair name the console gave it.
                     Some(names) if names.iter().any(|n| n == name) => {
                         crate::set_json(
                             &mut doc,
@@ -565,9 +455,6 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
                         have_keypair = true;
                     }
                     // Not written on purpose. The name came from a file,
-                    // not from this region, and writing it would make
-                    // `aws show` claim a readiness the launch does not
-                    // have.
                     Some(names) => {
                         out.push(format!(
                             "  keypair {name}   — WARNING: {region} has no such keypair ({})",
@@ -582,7 +469,6 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
                         ));
                     }
                     // The lookup failed, so nothing could be checked:
-                    // use it, and say it is unverified.
                     None => {
                         crate::set_json(
                             &mut doc,
@@ -599,8 +485,6 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
         }
     }
     // Only when no `--pem` was given: the block above already printed the
-    // diagnosis — verified, warned, or unverified — and repeating the
-    // generic version under it just adds a line to read past.
     if !have_keypair && !had_pem {
         if let Some(names) = &region_keypairs {
             match sole_name(names) {
@@ -625,9 +509,6 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
     }
 
     // The instance profile. `--instance-profile` settles it when the
-    // account holds more than one — the normal case for an account that
-    // also runs something else — and it is checked against the account so
-    // a typo is caught here rather than at `RunInstances`.
     if let Some(p) = instance_profile
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
@@ -689,14 +570,9 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
     out.push(String::new());
     out.push(format!("wrote {}", path.display()));
     // Whatever is left is a decision rather than a lookup, so the next
-    // command names it instead of this one guessing.
     let missing = AwsConfig::load_layered(root).missing();
     if missing.is_empty() {
         // Two separate claims, kept separate: the *launch* is ready (the
-        // box gets the public half from AWS, so the local file is not
-        // needed to start one), while a refused key means the box could
-        // not be reached afterwards. Saying only "ready" would be true
-        // and useless.
         out.push(if key_refused {
             "ready to launch — but the private key above was NOT replaced, so ssh to the box will fail until it matches"
                 .into()
@@ -716,14 +592,6 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
 }
 
 /// Launch `count` boxes, returning the lines to show, what the account answered,
-/// and the pool they were launched into.
-///
-/// The config rides back with the instances because the caller has to turn each
-/// one into a [`Machine`](bm_proto::Machine) with the same pool key and login —
-/// and re-reading the file to do it would be a second, quieter source of truth.
-///
-/// The cap is checked against the *total*, not this call: a cap that only counts
-/// what one invocation asked for is not a cap.
 pub(crate) fn launch(
     root: &Path,
     count: u32,
@@ -738,10 +606,6 @@ pub(crate) fn launch(
         anyhow::bail!("{msg}");
     }
     // The marker tag's value *is* the profile hash, so without one the box would
-    // be untraceable in `ls` and unprovisionable anyway — `provision` refuses
-    // without a loaded profile. Read from the binding **in force**, so a box
-    // launched while a workspace is active is tagged with the pack provision
-    // will actually hand it.
     let layout = bm_core::Layout::resolve_or_root(root).0;
     let hash = bm_core::profile::in_force(&layout)
         .map(|b| b.pack.hash)
@@ -764,8 +628,6 @@ pub(crate) fn launch(
         );
     }
     // The mapping must name the image's own root device (`/dev/sda1` on Ubuntu,
-    // `/dev/xvda` on Amazon Linux), so it is resolved rather than assumed —
-    // otherwise `disk_gb` is silently ignored.
     let image = cfg.image().unwrap_or_default().to_string();
     let root_device = crate::aws_cli_text(root, &describe_image_args(&cfg, &image))?;
     let argv = run_instances_args(&cfg, count, root_device.trim(), &hash);
@@ -790,10 +652,6 @@ pub(crate) fn launch(
 }
 
 /// Terminate exactly the ids given, and report what the API said.
-///
-/// Takes ids rather than a filter on purpose: the destructive step is always
-/// over a list someone could read. The caller resolves the ids from the marker
-/// tag (CLI) or from the Cloud view (dashboard).
 pub(crate) fn terminate(root: &Path, ids: &[String]) -> Result<Vec<String>> {
     let cfg = AwsConfig::load_layered(root);
     if cfg.region.trim().is_empty() {

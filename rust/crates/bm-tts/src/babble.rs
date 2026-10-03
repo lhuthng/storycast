@@ -1,28 +1,4 @@
 //! The babble guard: deciding whether a generated chunk is believable.
-//!
-//! A port of `core_utils.babble_suspect` / `babble_prefer` /
-//! `count_speech_bursts`, and the retry loop around them.
-//!
-//! Why this exists: the generator stops at an end-of-speech token, and on a very
-//! short chunk it sometimes misses. The model then keeps talking — inventing
-//! words that were never in the text. The guard catches that after the fact and
-//! generates again.
-//!
-//! For chunks of at most [`MAX_SYLLABLES`] syllables and no emotion cue, it
-//! compares speech bursts with syllables. Past three syllables those bursts merge
-//! and the count stops meaning anything, so long chunks are not judged that way.
-//! They still get one unambiguous check: reaching the model-generated frame cap
-//! means the generator failed to emit its end-of-speech token. Accepting such a
-//! take can preserve a babbled tail or a repeated phrase, so it is regenerated.
-//!
-//! Two signals, from an A/B over 720 chunks:
-//!
-//! * **More bursts than syllables.** Each syllable is one energy burst; extra
-//!   bursts mean extra speech.
-//! * **A one-or-two-syllable chunk that ran to the frame ceiling.** Every case of
-//!   invented words was a one-syllable chunk sitting at 12-13 of 13 frames, while
-//!   a normal one-syllable chunk ends at 6-9. The cap is not a limit the model
-//!   respects, it is a symptom when reached.
 
 use crate::framecap::{is_cue_only, syllable_count};
 
@@ -49,10 +25,6 @@ pub struct Verdict {
 
 impl Verdict {
     /// Is `self` a better generation than `old`?
-    ///
-    /// Better first means "not suspect at all"; otherwise fewer bursts wins, and
-    /// on a tie the shorter one — a chunk that stopped earlier is less likely to
-    /// have run on.
     pub fn better_than(&self, old: &Verdict) -> bool {
         if self.suspect != old.suspect {
             return !self.suspect;
@@ -81,10 +53,6 @@ impl Verdict {
 }
 
 /// Approximate syllable count from a waveform: how many energy bursts it has.
-///
-/// A 10 ms envelope, thresholded 18 dB below the chunk's own peak, with bursts
-/// closer than 60 ms merged. The threshold is relative to the peak on purpose —
-/// an absolute one would depend on how loud the render happened to be.
 pub fn count_speech_bursts(wav: &[f32], sample_rate: usize) -> usize {
     let hop = (sample_rate / 100).max(1);
     let n = wav.len() / hop;
@@ -129,7 +97,6 @@ pub fn count_speech_bursts(wav: &[f32], sample_rate: usize) -> usize {
 }
 
 /// Judge one generated chunk. `cap_frames` is the ceiling it was generated
-/// under, and `frames` how many it actually produced.
 pub fn suspect(
     pcm: &[f32],
     sample_rate: usize,
@@ -139,7 +106,6 @@ pub fn suspect(
 ) -> Verdict {
     if is_cue_only(phonemes) {
         // A run of laughter is many bursts, so counting is meaningless here —
-        // only the ceiling rule applies.
         return Verdict {
             suspect: frames >= cap_frames.saturating_sub(1),
             syllables: 0,
@@ -159,10 +125,6 @@ pub fn suspect(
     }
     if syl > MAX_SYLLABLES {
         // Burst counting is not reliable for continuous long-form speech, but
-        // running into the hard frame ceiling is: the generator did not stop.
-        // Do not use a duration heuristic here. The ceiling is the model's own
-        // failure signal, and regenerating is safer than publishing a take that
-        // may contain the babbled or repeated tail seen in production.
         return Verdict {
             suspect: hit_cap,
             syllables: syl,
@@ -240,7 +202,6 @@ mod tests {
     }
 
     /// Burst counting is meaningless for long chunks, but a long generation that
-    /// reaches its hard frame cap missed the stop token and must be retried.
     #[test]
     fn a_long_chunk_is_only_suspect_when_it_hits_the_frame_cap() {
         let v = suspect(&clicks(9, 48_000), 48_000, "a b c d e f g", 40, 30);

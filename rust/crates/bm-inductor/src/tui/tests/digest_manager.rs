@@ -44,7 +44,6 @@ fn machine_kind_separates_local_aws_and_remote() {
 async fn the_digest_manager_lists_chapters_and_hides_the_digested() {
     let mut app = App::new("http://127.0.0.1:8901");
     // The list comes from the ledger the panes already hold, so a chapter the
-    // ledger has never heard of is not offered work it cannot report against.
     app.tasks = vec![
         Task::new(11, Stage::Render),
         Task::new(7, Stage::Digest),
@@ -66,7 +65,6 @@ async fn the_digest_manager_lists_chapters_and_hides_the_digested() {
     }
 
     // Rendered, not just constructed: this is the test that would catch the
-    // overlay clipping its own grid or losing the key hints off the bottom.
     let text = render_text(&mut app, 100, 32);
     assert!(text.contains("digest manager"), "{text}");
     for n in ["7", "9", "11"] {
@@ -74,7 +72,6 @@ async fn the_digest_manager_lists_chapters_and_hides_the_digested() {
     }
     assert!(text.contains("3 chapters"), "the count is stated:\n{text}");
     // The keys, not the prose: a hint that is reworded should not fail a test
-    // about whether the screen *has* hints.
     for hint in ["Enter open", "f filter", "←→ chapter", "stop digest"] {
         assert!(
             hint_visible(&text, hint),
@@ -83,8 +80,6 @@ async fn the_digest_manager_lists_chapters_and_hides_the_digested() {
     }
 
     // `f` filters. It also has to keep the cursor *inside* the list it filters
-    // the cursor indexes the rows, so a filter that shrinks them can leave it
-    // pointing past the end at nothing.
     handle_key(&mut app, press(KeyCode::Down), &http, &job_tx).await;
     handle_key(&mut app, press(KeyCode::Down), &http, &job_tx).await;
     handle_key(&mut app, press(KeyCode::Char('f')), &http, &job_tx).await;
@@ -92,12 +87,6 @@ async fn the_digest_manager_lists_chapters_and_hides_the_digested() {
         Screen::Digest(v) => {
             assert!(v.hide_done, "the filter is on");
             // Asserted through `Layout::digested`, which is the question the
-            // handler and the painter both ask. An earlier version of this test
-            // invented its own predicate (`n == 7`) and then complained that the
-            // cursor, correctly clamped against the *real* rows, was out of
-            // range for the invented ones. The lesson is the reason
-            // `Layout::digested` exists: three sites spelling out one question is
-            // three chances to disagree.
             let rows = v.rows(&|n| app.layout.digested(n));
             assert!(
                 v.cursor < rows.len(),
@@ -122,9 +111,6 @@ async fn the_digest_manager_lists_chapters_and_hides_the_digested() {
 #[test]
 fn the_digest_chapter_page_names_the_round_and_the_last_thing_that_happened() {
     // Built directly rather than by opening a chapter: opening one builds a real
-    // prompt, which needs a chapter file and a bible. What this pins is the
-    // *page*, that the round, the validator's words and the prompt's identity
-    // are all on it, at every tier the layout supports.
     let mut app = App::new("http://127.0.0.1:8901");
     let mut v = super::screen::DigestView::new(vec![7, 9]);
     v.open = Some(super::screen::DigestChapter {
@@ -161,11 +147,6 @@ fn the_digest_chapter_page_names_the_round_and_the_last_thing_that_happened() {
 #[test]
 fn a_long_validator_complaint_does_not_push_the_chapter_page_off_its_own_box() {
     // The other half of the bug the grid had. A validator's complaint is the
-    // *instruction*, the operator pastes it back into their model, so it is
-    // deliberately shown in full, and a real one is a paragraph, not a phrase.
-    // This is the same trap as the confirm dialog and the grid footer: the height
-    // counts lines, the paragraph wraps, and the line that falls off the bottom is
-    // whichever was drawn last.
     let mut app = App::new("http://127.0.0.1:8901");
     let mut v = super::screen::DigestView::new(vec![7]);
     v.open = Some(super::screen::DigestChapter {
@@ -186,8 +167,6 @@ fn a_long_validator_complaint_does_not_push_the_chapter_page_off_its_own_box() {
     for (w, h) in [(76, 20), (76, 24), (100, 32), (160, 50)] {
         let text = render_text(&mut app, w, h);
         // The prompt's identity is the last thing drawn, so it is what falls off
-        // when the note overflows, and it is how the operator checks the right
-        // prompt is on the clipboard before pasting anything.
         assert!(
             hint_visible(&text, "clipboard:"),
             "{w}x{h}: the clipboard line survived the complaint:\n{text}"
@@ -202,12 +181,6 @@ fn a_long_validator_complaint_does_not_push_the_chapter_page_off_its_own_box() {
 #[tokio::test]
 async fn the_digest_grid_scrolls_so_the_selection_is_never_off_screen() {
     // The complaint this answers: move down past the last visible row and the
-    // selection disappears. The grid had no viewport at all, so the cursor walked
-    // off the bottom of a 200-chapter book with nothing on screen to show where it
-    // had got to.
-    //
-    // Chapters in the thousands so **absence is testable**: "1000" occurs in no
-    // other number in this list, whereas "1" hides inside 100, 121, 200…
     let mut app = App::new("http://127.0.0.1:8901");
     let http = reqwest::Client::new();
     let (job_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -215,7 +188,6 @@ async fn the_digest_grid_scrolls_so_the_selection_is_never_off_screen() {
     app.screen = Screen::Digest(super::screen::DigestView::new((1000..=1200).collect()));
 
     // A short terminal, deliberately: on a tall one all seventeen rows fit and the
-    // window would never have to move, so the test would pass against the bug.
     let (w, h) = (100, 20);
     let first = render_text(&mut app, w, h);
     assert!(
@@ -254,7 +226,6 @@ async fn the_digest_grid_scrolls_so_the_selection_is_never_off_screen() {
     );
 
     // Walking back up brings the top of the book back, so the window follows the
-    // cursor in both directions rather than only ever scrolling forward.
     for _ in 0..20 {
         handle_key(&mut app, press(KeyCode::Up), &http, &job_tx).await;
     }
@@ -279,8 +250,6 @@ async fn the_digest_manager_arrows_follow_the_grid_and_esc_steps_back_from_a_cha
     app.screen = Screen::Digest(super::screen::DigestView::new((1..=30).collect()));
 
     // ←/→ step one chapter; ↑/↓ step a **row**, because that is what the picture
-    // shows, the numbers are drawn `DIGEST_COLS` to a line. Stepping one chapter
-    // on ↑ would move the highlight sideways.
     handle_key(&mut app, press(KeyCode::Right), &http, &job_tx).await;
     assert_eq!(cursor(&app), 1, "→ is one chapter");
     handle_key(&mut app, press(KeyCode::Left), &http, &job_tx).await;
@@ -300,10 +269,6 @@ async fn the_digest_manager_arrows_follow_the_grid_and_esc_steps_back_from_a_cha
     assert_eq!(cursor(&app), 29, "the last chapter, not a wrap");
 
     // **The regression.** Esc inside a chapter returns to the list. It used to do
-    // nothing: the handler works on a *clone* of the view and writes it back after
-    // the match, so the Esc arm clearing `open` had that undone one line later.
-    // The list-level Esc was tested and passed, which is exactly why this went
-    // unnoticed, since the bug only lived in the branch the test never entered.
     if let Screen::Digest(v) = &mut app.screen {
         v.open = Some(super::screen::DigestChapter {
             n: 7,
@@ -329,8 +294,6 @@ async fn the_digest_manager_arrows_follow_the_grid_and_esc_steps_back_from_a_cha
     );
 
     // `x` and `s` are the cluster-wide switch, on the screen it belongs to, the
-    // same command the `:off`/`:on` words run, so there is one implementation and
-    // two ways in.
     app.machines = vec![named_machine("192.168.2.2", "box-1")];
     app.screen = Screen::Digest(super::screen::DigestView::new(vec![1, 2]));
     handle_key(&mut app, press(KeyCode::Char('x')), &http, &job_tx).await;
@@ -339,8 +302,6 @@ async fn the_digest_manager_arrows_follow_the_grid_and_esc_steps_back_from_a_cha
         other => panic!("{other:?}"),
     }
     // `s` restores, which needs a snapshot; whether this machine has one is the
-    // filesystem's business, not the test's, what the test holds is that the
-    // screen survives the attempt, because the operator is still on it.
     handle_key(&mut app, press(KeyCode::Char('s')), &http, &job_tx).await;
     assert!(
         matches!(app.screen, Screen::Digest(_)),
@@ -351,8 +312,6 @@ async fn the_digest_manager_arrows_follow_the_grid_and_esc_steps_back_from_a_cha
 #[tokio::test]
 async fn digest_off_snapshots_every_machine_and_on_refuses_without_a_snapshot() {
     // Two halves of one feature: `:off` must carry *every* machine's policy into
-    // the job (it is the snapshot), and `:on` must refuse rather than guess when
-    // there is nothing to restore.
     let mut app = App::new("http://127.0.0.1:8901");
     app.machines = vec![
         named_machine("192.168.2.2", "box-1"),
@@ -378,8 +337,6 @@ async fn digest_off_snapshots_every_machine_and_on_refuses_without_a_snapshot() 
     }
 
     // The refusal, tested against a path that certainly has no snapshot. It has
-    // to refuse *before* posting anything: an empty policy reads as the default
-    // list, which is digest ON everywhere, the opposite of the ask.
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("digest-suspend.json");
     let err = super::super::jobs::digest_restore(&missing, "http://127.0.0.1:9", &http, &[])
@@ -441,10 +398,6 @@ async fn the_policy_panel_toggles_and_reorders_a_machine() {
 #[test]
 fn the_progress_bar_wears_the_task_colour_and_leaves_its_track_dim() {
     // `render_text` can only see glyphs, so this is the one thing it cannot
-    // check: that the bar is actually *coloured*. Read the buffer's styles
-    // instead, and pin both halves — the work done takes the stage's hue, the
-    // track stays dim. A bar whose empty track wore the same colour would read
-    // as a solid block with a hole in it, which is the failure this guards.
     fn render_styled(app: &mut App, w: u16, h: u16) -> Vec<Vec<(String, Color)>> {
         let backend = ratatui::backend::TestBackend::new(w, h);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -477,7 +430,6 @@ fn the_progress_bar_wears_the_task_colour_and_leaves_its_track_dim() {
     }
     let rows = render_styled(&mut app, 120, 44);
     // A buffer cell is one glyph, so the row is found by its text and the
-    // assertion reads the cells back out of it.
     let row = rows
         .iter()
         .find(|r| text(r).contains("digest"))
@@ -509,8 +461,6 @@ fn the_progress_bar_wears_the_task_colour_and_leaves_its_track_dim() {
 #[test]
 fn the_bar_uses_partial_blocks_and_stays_exact_at_the_ends() {
     // The bar is drawn in two colours now — the work done in the task's hue and
-    // the track dim — so the test joins the halves back the way the pane lays
-    // them out and pins the whole, then pins the split itself.
     fn bar(frac: f32, width: usize) -> String {
         let (done, track) = bar_parts(frac, width);
         format!("{done}{track}")
@@ -528,7 +478,6 @@ fn the_bar_uses_partial_blocks_and_stays_exact_at_the_ends() {
             let (done, track) = bar_parts(frac, w);
             assert_eq!(done.chars().count() + track.chars().count(), w);
             // Only the track is ever the light shade, so the tinted half can
-            // never include an empty cell the eye would read as done.
             assert!(
                 !done.contains('░'),
                 "the tinted half must be work done only: {done:?} at {frac}/{w}"

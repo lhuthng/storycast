@@ -35,14 +35,6 @@ fn write_pool(dir: &Path, registry: &str, entries: &[(&str, &str)]) {
 }
 
 /// **The diamond, folded once.** `B` and `C` both name `E`, which is the
-/// shape a preset reaches the moment two of its libraries share a parent:
-/// folding per *direct* dependency puts a copy of `E` inside each of them and
-/// records neither, so a fix to `E` is a fix in two places and the tree has
-/// no way to say so.
-///
-/// The closure is the answer: `E` is one node at its weakest position, every
-/// parent still sits behind it, and `via` is where the shared reach is
-/// written down — which is the map a provisioning step flattens from.
 #[test]
 fn a_shared_parent_is_folded_once_and_the_map_says_how_it_was_reached() {
     let assets = scratch("diamond");
@@ -99,7 +91,6 @@ fn a_shared_parent_is_folded_once_and_the_map_says_how_it_was_reached() {
     assert_eq!(r.deps.len(), 2, "but `deps` stays the direct list");
 
     // The record is the map, and it says which node is a dependency and
-    // which was only reached through one.
     let marker = read_marker(&assets);
     let recorded: Vec<&str> = marker.tree.iter().map(|n| n.name.as_str()).collect();
     assert_eq!(recorded, names, "the record is the closure, in fold order");
@@ -136,8 +127,6 @@ fn a_shared_parent_is_folded_once_and_the_map_says_how_it_was_reached() {
 }
 
 /// A parent that moves *under* a dependency the child never named directly
-/// is the staleness a flat fold could not see: the child's own `deps` list
-/// does not mention it, so comparing that list alone reads as up to date.
 #[test]
 fn a_parent_that_moves_below_a_dependency_makes_the_child_stale() {
     let assets = scratch("deep-stale");
@@ -162,7 +151,6 @@ fn a_parent_that_moves_below_a_dependency_makes_the_child_stale() {
 }
 
 /// A graph that loops is a mistake to name, not to follow: the walk says
-/// which packs form the loop rather than spinning or blowing the stack.
 #[test]
 fn a_graph_that_loops_is_refused_with_the_path() {
     let assets = scratch("cycle");
@@ -178,7 +166,6 @@ fn a_graph_that_loops_is_refused_with_the_path() {
 }
 
 /// A dependency that is not on disk is named before anything is folded in,
-/// so a half-unpacked closure never half-resolves.
 #[test]
 fn a_missing_pack_in_the_closure_is_refused_by_name() {
     let assets = scratch("missing-in-closure");
@@ -256,7 +243,6 @@ fn a_dependency_fills_in_only_what_the_asset_lacks() {
     assert!(marker.files.contains_key("effects/wind-1.mp3"));
 
     // Idempotent: nothing in, nothing out — and the asset's own entry is
-    // still its own.
     let again = resolve(&assets, false).unwrap();
     assert_eq!(again.added, 0, "{again:?}");
     assert_eq!(again.withdrawn, 0);
@@ -309,7 +295,6 @@ fn a_re_resolve_withdraws_a_key_the_parent_has_dropped() {
     assert!(assets.join("effects/rain-1.mp3").is_file());
 
     // The parent drops `rain` and its clip. A fill-in-only merge would leave
-    // both behind for good; the record is what makes them withdrawable.
     std::fs::remove_file(dep.join("effects/rain-1.mp3")).unwrap();
     write_pool(&dep, "effect-pool.json", &[("wind", "wind")]);
     let r = resolve(&assets, false).unwrap();
@@ -331,7 +316,6 @@ fn an_edited_inherited_entry_is_adopted_rather_than_overwritten() {
     resolve(&assets, false).unwrap();
 
     // The operator retunes it — the reason the live tree is the source of
-    // truth. The next resolve must not throw that away.
     write_pool(&assets, "effect-pool.json", &[("wind", "retuned")]);
     let r = resolve(&assets, false).unwrap();
     assert_eq!(r.adopted, 1, "{r:?}");
@@ -386,8 +370,6 @@ fn a_dry_run_reports_what_a_real_one_would_do_and_writes_nothing() {
 #[test]
 fn a_second_resolve_leaves_the_files_already_in_place_alone() {
     // Delete-then-refill rewrites every inherited clip on every resolve —
-    // and a dry run, which cannot delete, would then find each file already
-    // present and report it as withdrawn.
     let assets = scratch("file-churn");
     std::fs::write(pack_path(&assets), r#"{"deps":["common"]}"#).unwrap();
     let dep = dep_tree(&assets, "common");
@@ -431,7 +413,6 @@ fn a_moving_dependency_is_reported_stale() {
     assert!(resolve(&assets, false).unwrap().stale.is_empty());
 
     // The parent gains a sound. Until this tree is re-packed against it, it
-    // is built on something that has moved — a comparison, not a guess.
     write_pool(
         &dep,
         "effect-pool.json",
@@ -480,7 +461,6 @@ fn read(assets: &Path, file: &str) -> String {
 }
 
 /// Every rule's first `match`, in order — the one thing about a rule list
-/// that order decides.
 fn matches_of(assets: &Path) -> Vec<String> {
     let text = read(assets, "scene-map.json");
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -546,7 +526,6 @@ fn a_rule_the_root_drops_is_withdrawn_from_the_genre() {
     assert_eq!(matches_of(&assets), vec!["sect", "rain", "night"]);
 
     // The root drops `night`. A fill-in-only merge would leave it here for
-    // good, which is the reason the marker exists.
     write_map(&dep, r#""rules": [{"match": ["rain"]}]"#);
     let r = resolve(&assets, false).unwrap();
     assert_eq!(r.withdrawn, 1, "{r:?}");
@@ -557,9 +536,6 @@ fn a_rule_the_root_drops_is_withdrawn_from_the_genre() {
 #[test]
 fn a_stronger_dependency_has_its_rules_seen_before_a_weaker_one() {
     // `deps` is weakest first, and a keyed name wins by replacing a value —
-    // but a rule list has no key to replace, so a stronger dependency can
-    // only win a scene by being matched *first*. Hence the lists fold in
-    // reverse `deps` order.
     let assets = scratch("rules-order");
     std::fs::write(
         pack_path(&assets),
@@ -587,9 +563,6 @@ fn a_stronger_dependency_has_its_rules_seen_before_a_weaker_one() {
         "the file's own first, then the strongest dependency"
     );
     // And it settles. Asserting the list rather than only the report: a
-    // withdrawal that takes the wrong block off reads as an operator edit,
-    // is adopted, and the rules arrive a second time — while the record is
-    // unchanged, so the counters alone would call that "up to date".
     let again = resolve(&assets, false).unwrap();
     assert!(!again.changed(), "{again:?}");
     assert_eq!(
@@ -652,9 +625,6 @@ fn a_licence_line_from_the_root_survives_a_genre_stating_its_own() {
 #[test]
 fn a_member_name_that_looks_like_a_record_key_is_still_withdrawn() {
     // `LICENSES.json`'s categories are prose, and a record's two separators
-    // can appear inside one — so the encoding has to be injective or a
-    // withdrawal reads the record as a different kind, silently drops it,
-    // and the line arrives again on every resolve after that.
     let assets = scratch("layer-separators");
     std::fs::write(pack_path(&assets), r#"{"deps":["common"]}"#).unwrap();
     std::fs::write(assets.join("LICENSES.json"), r#"{"_note": "ours"}"#).unwrap();
@@ -717,11 +687,6 @@ fn a_later_dependency_wins_a_keyed_name_over_an_earlier_one() {
 #[test]
 fn a_keyed_member_accumulates_across_dependencies() {
     // The shape a real asset now has: `common` states the world's words,
-    // `weapons` the ones for its own clips. Every dependency's names are
-    // *added* to the member. Losing a weaker dependency's whole table
-    // because a stronger one states the same member is the one outcome that
-    // would make the vocabulary unusable — and the quietest, because the
-    // file still parses and the names are simply gone.
     let assets = scratch("layer-keyed");
     std::fs::write(pack_path(&assets), r#"{"deps":["common","weapons"]}"#).unwrap();
     std::fs::create_dir_all(dep_tree(&assets, "common")).unwrap();
@@ -746,8 +711,6 @@ fn a_keyed_member_accumulates_across_dependencies() {
 #[test]
 fn a_stronger_dependency_takes_a_whole_member_a_weaker_one_filled() {
     // `Whole` means the *file's* member wins, not the first dependency's to
-    // arrive: the fill runs weakest first, and a knob a weak dependency set
-    // would otherwise be impossible for a strong one to correct.
     let assets = scratch("layer-whole-order");
     std::fs::write(pack_path(&assets), r#"{"deps":["common","xianxia-base"]}"#).unwrap();
     write_map(&dep_tree(&assets, "common"), r#""pause": {"min_s": 1.0}"#);
@@ -766,12 +729,6 @@ fn a_stronger_dependency_takes_a_whole_member_a_weaker_one_filled() {
 }
 
 /// **The release record is a record, not a fold output.** A fold hashes the
-/// tree in front of it and cannot know which tag produced it, so `versions`
-/// arrives from `profile update` and has to survive every resolve after it —
-/// losing it would make each update re-download the world. It is pruned
-/// against the tree as well, so a pack that left the closure stops claiming a
-/// release: the map and the tree stay the same set, and a dropped-and-re-added
-/// dependency cannot read as one that never moved.
 #[test]
 fn a_resolve_keeps_the_release_record_and_drops_what_left_the_tree() {
     let assets = scratch("versions");

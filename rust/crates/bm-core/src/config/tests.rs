@@ -4,7 +4,6 @@ use crate::util::read_json;
 #[test]
 fn only_default_opts_out_of_the_digest_title() {
     // `auto` is the default, so every workspace written before this field
-    // existed keeps the digest's title.
     let v: Settings = serde_json::from_str(r#"{"engine":"pocket"}"#).unwrap();
     assert!(
         v.auto_title(),
@@ -21,7 +20,6 @@ fn only_default_opts_out_of_the_digest_title() {
     s.title_mode = "auto".into();
     assert!(s.auto_title());
     // A typo must not silently pin a book to its crawled headline: the
-    // safe direction is the behaviour every existing workspace already has.
     s.title_mode = "defualt".into();
     assert!(s.auto_title(), "an unrecognised mode is not an opt-out");
 }
@@ -50,9 +48,6 @@ fn settings_without_ssh_parses_as_defaults_and_roundtrips() {
 #[test]
 fn an_unset_advertise_is_not_an_address_to_hand_out() {
     // The default is the sentinel for "unset". Read as a value it would
-    // hand every worker `http://127.0.0.1:8901` — a URL that works on the
-    // inductor and nowhere else, which is the silent failure this field
-    // exists to prevent.
     let mut s = Settings::default();
     assert_eq!(s.advertise, "127.0.0.1");
     assert!(s.advertised_host().is_none());
@@ -94,7 +89,6 @@ fn chapter_url_substitutes_every_n() {
     };
     assert_eq!(s.chapter_url(12), "https://x/chuong-12?page=12");
     // The padded form, which is the whole reason this is not a bare
-    // `replace`: a site numbering `chapter-001` needs no script.
     let padded = Settings {
         url_template: "https://x/chapter-{n:03}".into(),
         ..Default::default()
@@ -105,10 +99,6 @@ fn chapter_url_substitutes_every_n() {
 #[test]
 fn a_workspace_written_before_scripted_crawls_still_crawls_the_same_way() {
     // The migration promise: a settings.json that only ever named a
-    // url_template loads as `mode: script` with the bundled crawler, and
-    // that crawler is handed the same URL the old Rust path expanded.
-    // The absent `crawl` block means *old workspace*, so it keeps the
-    // scripted default — the manual default is for workspaces created now.
     let old: Settings =
         serde_json::from_str(r#"{"url_template":"https://storya.click/truyen/x/chuong-{n}"}"#)
             .unwrap();
@@ -120,7 +110,6 @@ fn a_workspace_written_before_scripted_crawls_still_crawls_the_same_way() {
         "https://storya.click/truyen/x/chuong-34"
     );
     // A workspace created now defaults to manual: nothing fetches until
-    // the operator says how chapters arrive.
     let fresh = Settings::default();
     assert!(fresh.crawl.is_manual(), "the fresh default does not fetch");
     assert!(fresh.crawl.script.is_empty());
@@ -129,8 +118,6 @@ fn a_workspace_written_before_scripted_crawls_still_crawls_the_same_way() {
         "a fresh workspace names no book — the old default pointed at beyond-myriads"
     );
     // …and an explicit value is honoured. A block that names no script is
-    // the built-in fetcher (`script` fills from the per-field default, which
-    // is empty — the operator named no crawler); a block naming one gets it.
     let plain: Settings = serde_json::from_str(r#"{"crawl":{"script":""}}"#).unwrap();
     assert_eq!(plain.crawl.script, "");
     assert!(plain.crawl.params.is_empty());
@@ -163,14 +150,10 @@ fn settings_roundtrip_and_default_on_missing() {
 #[test]
 fn a_settings_file_without_an_endpoint_still_names_one() {
     // The field is newer than every settings file in the wild. A missing
-    // key must mean the public service, not an empty string: an empty base
-    // builds a relative URL, which fails as a transport error naming
-    // neither the provider nor the field.
     let parsed: Settings = serde_json::from_str(r#"{"engine":"vieneu"}"#).unwrap();
     assert_eq!(parsed.gemini_url, DEFAULT_GEMINI_URL);
     assert_eq!(Settings::default().gemini_url, DEFAULT_GEMINI_URL);
     // A file that names one keeps it, trailing slash and all — trimming is
-    // the request builder's business, and this stays the operator's words.
     let named: Settings = serde_json::from_str(r#"{"gemini_url":"https://gw.example/"}"#).unwrap();
     assert_eq!(named.gemini_url, "https://gw.example/");
 }
@@ -178,11 +161,6 @@ fn a_settings_file_without_an_endpoint_still_names_one() {
 #[test]
 fn a_gemini_providers_endpoint_travels_with_its_model() {
     // `kind: gemini` is a protocol slot, not a host. An operator pointing it
-    // at a compatible gateway used to have the endpoint silently dropped —
-    // the offer carried the model alone, so the box listed models off the
-    // operator's endpoint and then generated against Google's. Both halves
-    // are asserted here: the offer carries the base, and the overlay lands
-    // it on the field the request builder reads.
     let mut cfg = llm_cfg(
         "google",
         &[("google", "gemini", "g-key", "gemini-3.5-flash")],
@@ -207,7 +185,6 @@ fn a_gemini_providers_endpoint_travels_with_its_model() {
     );
 
     // An older inductor says nothing about the endpoint: the box keeps its
-    // own, exactly as it does for the model and the other two URLs.
     let older = bm_proto::AnalyzerSettings {
         analyze_models: Some(vec!["m".into()]),
         ..Default::default()
@@ -221,7 +198,6 @@ fn a_gemini_providers_endpoint_travels_with_its_model() {
 #[test]
 fn llm_config_defaults_to_nothing_at_all() {
     // Default is none twice over: no active provider AND no providers —
-    // slots come from `llm.default.json` (or `.bm/llm.json`), never code.
     let cfg = LlmConfig::default();
     assert!(cfg.active.is_empty());
     assert!(cfg.providers.is_empty());
@@ -279,7 +255,6 @@ fn llm_resolve_needs_a_key_and_a_model() {
 #[test]
 fn backend_slots_come_from_kinds_and_legacy_names() {
     // Labels travel, slots decide. Routing reads the entry's `kind`;
-    // the retired wire values still map, so old offers keep working.
     let cfg = llm_cfg(
         "",
         &[
@@ -308,8 +283,6 @@ fn backend_slots_come_from_kinds_and_legacy_names() {
 #[test]
 fn the_active_key_travels_never_a_neighbour() {
     // The outage: active TokenHarbor plus a stocked OpenRouter entry sent
-    // OpenRouter's key to tokenharbor.ai — a 401 from the wrong issuer
-    // that reads exactly like a revoked key.
     let cfg = llm_cfg(
         "tokenharbor",
         &[
@@ -353,7 +326,6 @@ fn llm_offer_carries_only_the_active_provider() {
         "the digest offer carries its key and nothing else"
     );
     // Switching provider switches the next offer — that is the whole
-    // sync: the id, key, model and slot travel per task.
     cfg.active = "tokenharbor".into();
     cfg.providers.get_mut("tokenharbor").unwrap().api_key = "t-key".into();
     cfg.providers.get_mut("tokenharbor").unwrap().model = "th-model".into();
@@ -399,8 +371,6 @@ fn llm_seed_migrates_legacy_settings_once() {
 #[test]
 fn llm_seed_reads_the_retired_env_file_once() {
     // The file is retired — nothing loads it at startup — but its keys
-    // are still the operator's, so the one-time seed carries them over.
-    // Process env wins over the file.
     let dir = std::env::temp_dir().join(format!("bm-llm-env{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join(".bm")).unwrap();
@@ -433,8 +403,6 @@ fn llm_seed_reads_the_retired_env_file_once() {
 #[test]
 fn the_shipped_default_names_no_key_and_no_model() {
     // The template a fresh clone copies: endpoints only. A default key
-    // would be a leaked secret and a default model a choice the operator
-    // never made — both are set with `L`, never shipped.
     let root =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../llm.default.json");
     let cfg: LlmConfig =
@@ -459,8 +427,6 @@ fn the_shipped_default_names_no_key_and_no_model() {
 #[test]
 fn llm_load_backfills_kinds_from_the_shipped_file() {
     // Files written before `kind` existed carry keys and models but no
-    // routing info. Loading restores it from the shipped data — same id,
-    // else same endpoint — instead of stranding them on the default path.
     let dir = std::env::temp_dir().join(format!("bm-llm-kind{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join(".bm")).unwrap();
@@ -483,8 +449,6 @@ fn llm_load_backfills_kinds_from_the_shipped_file() {
 #[test]
 fn llm_load_falls_back_to_the_shipped_default() {
     // No `.bm/llm.json` and no tracked file in this temp root: empty.
-    // With a `llm.default.json` beside it: that file's content, and
-    // nothing else — the file is the whole roster.
     let dir = std::env::temp_dir().join(format!("bm-llm-fallback{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -505,8 +469,6 @@ fn llm_load_falls_back_to_the_shipped_default() {
 #[test]
 fn the_inductors_analyzer_settings_win_over_the_boxes_own() {
     // The outage: a provisioned worker has no `.bm/settings.json` —
-    // provisioning copies the sources bundle and never `.bm/` — so
-    // `Settings::load` hands back the compiled default.
     let remote_box = Settings::default();
     let inductor = Settings {
         analyze_models: vec!["gemini-3.5-flash-lite".into()],
@@ -521,7 +483,6 @@ fn the_inductors_analyzer_settings_win_over_the_boxes_own() {
 #[test]
 fn an_inductor_with_no_opinion_leaves_the_boxes_own_analyzer_alone() {
     // An older inductor sends no block at all. Every local value survives,
-    // which is what keeps either side upgradable on its own.
     let boxed = Settings {
         analyze_models: vec!["mine-1".into(), "mine-2".into()],
         ollama_url: "http://elsewhere:11434".into(),
@@ -552,9 +513,6 @@ fn a_deliberately_empty_chain_clears_the_boxes_own() {
 #[test]
 fn the_render_batch_defaults_to_five_and_a_saved_value_wins() {
     // Three ways the setting can arrive, and the rule for each:
-    //   * absent from settings.json  → five (the compiled default)
-    //   * present                    → that value, not the default
-    //   * nonsense                   → clamped, never obeyed and never fatal
     let omitted: Settings = serde_json::from_str(r#"{"engine":"vieneu"}"#).unwrap();
     assert_eq!(omitted.render_batch, DEFAULT_RENDER_BATCH);
     assert_eq!(omitted.render_batch(), 5, "and the scheduler sees five");
@@ -567,8 +525,6 @@ fn the_render_batch_defaults_to_five_and_a_saved_value_wins() {
     );
 
     // Zero is the deadlock the clamp exists for: an offer of no takes
-    // assigns no row, so the chapter would never leave Pending and nothing
-    // anywhere would say why.
     let zero: Settings = serde_json::from_str(r#"{"render_batch":0}"#).unwrap();
     assert_eq!(zero.render_batch(), 1, "zero would offer nothing at all");
 
@@ -599,7 +555,6 @@ fn the_sidecar_thread_override_is_opt_in_and_a_typo_never_fails_a_run() {
 #[test]
 fn a_saved_render_batch_round_trips_through_the_file() {
     // The value has to survive `save`/`load`, because that file is the
-    // single source the run screen previews and the next backend boots with.
     let dir = std::env::temp_dir().join("bm-settings-batch");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -621,8 +576,6 @@ fn a_saved_render_batch_round_trips_through_the_file() {
 #[test]
 fn the_overlay_carries_only_the_analyzer() {
     // `url_template`, the chapter range, the control port and the ssh
-    // defaults are the inductor's business. A task offer is not a channel
-    // for them, and this path must not become one.
     let boxed = Settings {
         url_template: "https://mine/{n}".into(),
         count: 7,

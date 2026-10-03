@@ -1,8 +1,4 @@
 //! Live check: does a real model actually use `not_speech`?
-//!
-//! Not part of the suite. Run by hand against a throwaway workspace copy, so
-//! a real chapter goes through the real attribution prompt with the real
-//! backend and the answer is inspected rather than asserted.
 #![allow(clippy::print_stdout)]
 
 use bm_core::config::Settings;
@@ -13,8 +9,6 @@ use std::path::PathBuf;
 const SANDBOX: &str = "/private/tmp/claude-501/-Users-wwzz-Downloads-proxyclawd/88833871-9d1c-410a-8425-a5a54e5377ef/scratchpad/live";
 
 /// `root` stays the repo, because that is where `prompts/` and `assets/` live.
-/// `work` is the sandbox, so every write lands in a copy and the real
-/// workspace is never touched.
 fn layout() -> Layout {
     Layout {
         root: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -95,7 +89,6 @@ async fn a_real_model_uses_the_retraction() -> anyhow::Result<()> {
     }
 
     // The one thing worth looking at by eye: the short segments that are not
-    // narration, i.e. exactly the spans the retraction is meant to move.
     println!("\n--- short non-narration segments ---");
     for s in &segs {
         let (Some(t), Some(sp)) = (

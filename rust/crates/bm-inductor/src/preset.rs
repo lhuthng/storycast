@@ -2,22 +2,6 @@ use super::cli::WorkspaceCmd;
 use super::*;
 
 /// Stamp a workspace's binding from a profile preset — the `--profile` half of
-/// `workspace new`.
-///
-/// Three properties the checkout's own load path does not have, all because a
-/// second book must be creatable beside a first one that is mid-run:
-///
-/// * **The checkout's `.bm/profile` is never written.** The binding lands in
-///   the new workspace's `settings.json` alone; switching between books stays
-///   `workspace use`, and re-loading the checkout stays an explicit
-///   `profile load`.
-/// * **A preset with `pack_deps` composes the workspace's own pack** (see
-///   `preset::compose_workspace_pack`), so its score is its own — the
-///   workspace-pack shape ROADMAP §3 defers to this. The binding's pack hash
-///   is the resolved workspace tree's, the same fold a checkout's pack gets.
-/// * **The adapter and engine are stamped by name and claim**, the adapter
-///   hashed over its home the way `verify_binding` folds it. The engine is a
-///   declaration and never a digest.
 fn apply_preset(
     root: &std::path::Path,
     work: &std::path::Path,
@@ -62,9 +46,6 @@ fn apply_preset(
         ));
     } else {
         // Shared pack: the checkout's tree is the one in force, so its hash
-        // travels with the name when the two agree — and an empty hash with a
-        // note when they do not, because a binding claiming the checkout's
-        // hash under another name would be a lie about bytes nobody hashed.
         let checkout = bm_core::profile::read_binding(root).ok();
         binding.pack = bm_core::profile::Pointer {
             name: preset.pack.clone(),
@@ -92,9 +73,6 @@ fn apply_preset(
     }
 
     // The adapter, hashed over its home the way the load gate folds it. No
-    // `crawl` half: an adapter ships no crawlers — they are global (`crawlers/`)
-    // or the book's own (`crawl/`), and hashing a directory that is not there
-    // would report a language as incomplete for a reason that is not its own.
     let home_dirs = [format!("adapters/{}/prompts", preset.adapter)];
     let adapter = bm_core::profile::Pointer {
         hash: bm_core::profile::trees_hash(root, &home_dirs).unwrap_or_else(|_| {
@@ -110,7 +88,6 @@ fn apply_preset(
     binding.adapter = adapter;
 
     // The engine: `settings.engine` is the whole fact, the binding's claim
-    // beside it for the label and the wire.
     binding.engine = bm_core::profile::Pointer {
         name: preset.engine.clone(),
         hash: String::new(),
@@ -119,12 +96,6 @@ fn apply_preset(
     settings.engine = preset.engine.clone();
 
     // The crawler: a `{ type, file }` selection. A **global** crawler (a known
-    // site, the EPUB example) is referenced in place — `resolve_script` finds it
-    // under the root, and an edit reaches every book that selected it. A
-    // **custom** one is the book's own, copied into `crawl/`, where it shadows
-    // the global tree. The guided create flow hands one in; a preset's own
-    // `crawler` is the fallback, and neither is required — a book that names no
-    // source starts in `manual`.
     let crawler: Option<bm_core::preset::CrawlerSetup> = match crawler {
         Some(c) => Some(c.clone()),
         None if !preset.crawler.is_none() => Some(crawler_from_preset(work, &preset.crawler)?),
@@ -157,9 +128,6 @@ fn apply_preset(
             ));
         }
         // The guided "Local file (EPUB)" choice: the operator named a book and
-        // it is copied into the workspace's own `tmp/book.epub`, which is what
-        // `crawl.params.epub` names. Copied, not referenced: the crawl's read
-        // root is the workspace, and a path outside it is refused.
         if !c.book.as_os_str().is_empty() {
             let dest = work.join("tmp").join("book.epub");
             std::fs::create_dir_all(dest.parent().expect("tmp/ has a parent"))?;
@@ -171,9 +139,6 @@ fn apply_preset(
             ));
         }
         // The multi-volume shape: a folder of `.epub`s, each one a volume, in
-        // the workspace's own `books/`, which is what `crawl.params.books`
-        // names. Only `.epub` files are copied — it is a person's own folder
-        // and the rest of it is not the crawl's business.
         if !c.books.as_os_str().is_empty() {
             let dest = work.join("books");
             std::fs::create_dir_all(&dest)?;
@@ -231,14 +196,6 @@ fn apply_preset(
 }
 
 /// Turn a preset's `{ type, file }` crawler into the setup `apply_preset`
-/// installs.
-///
-/// `known` and `example` are **global** and referenced in place, so the setup
-/// carries the `crawlers/…` path and no `source`; `custom` is the book's own, so
-/// it carries no path (the operator drops the file into `crawl/`) and just makes
-/// the directory. A `known` host the registry does not have, or one it lists
-/// without a crawler, is a preset error worth failing on: a workspace silently
-/// born with no crawler is the failure this whole flow exists to prevent.
 fn crawler_from_preset(
     work: &std::path::Path,
     c: &bm_core::preset::PresetCrawler,
@@ -284,8 +241,6 @@ fn crawler_from_preset(
         }),
         "custom" => {
             // The book's own crawler: make the directory ready, and name the
-            // file only if the preset already knows it. Otherwise the operator
-            // drops the script in and sets `crawl.script` when they do.
             std::fs::create_dir_all(work.join("crawl"))?;
             Ok(if c.file.trim().is_empty() {
                 bm_core::preset::CrawlerSetup::default()
@@ -303,24 +258,6 @@ fn crawler_from_preset(
 }
 
 /// Give a workspace its own copy of the material the **profile preset**
-/// declares: the adapter's trees — its `prompts/` and `crawl/`.
-///
-/// A preset names a pack × adapter × engine triple, and each piece is created
-/// differently: the pack is **composed** (`compose_workspace_pack`, real files
-/// resolved from the linked deps), the preset's crawler is **installed** by
-/// `apply_preset` (referenced globally, or copied for a custom one), and the
-/// adapter's home (its `prompts/`) is **copied here** — so a book's prompts
-/// resolve from the workspace, which
-/// [`bm_core::paths::Layout::adapter_home`] already searches first, instead of
-/// from the checkout's shared home.
-///
-/// **Voices are deliberately not here.** They are not a preset yet — they
-/// arrive as bundles later — so a new workspace gets none and reads none: it
-/// must not reach back to the checkout's roster, which belongs to
-/// beyond-myriads and to nobody else.
-///
-/// `only_missing` is the `migrate` case: a workspace that already owns the
-/// adapter home keeps it, so a migration can never clobber edited prompts.
 fn clone_book_material(
     root: &std::path::Path,
     work: &std::path::Path,
@@ -343,11 +280,6 @@ fn clone_book_material(
 }
 
 /// `workspace`, one directory per book. Creating switches to it; selecting
-/// only moves the pointer, so data is never wiped and ledgers never mix
-/// (the serve gate still refuses a ledger bound to another profile).
-///
-/// Returns the lines to show rather than printing them: the CLI prints, the
-/// dashboard logs them into its event pane, and both are the same operation.
 pub(crate) fn workspace_cmd(
     root: &std::path::Path,
     cmd: WorkspaceCmd,
@@ -379,10 +311,6 @@ pub(crate) fn workspace_cmd(
                 std::fs::create_dir_all(dir(&name).join(d))?;
             }
             // A workspace is born bound to a profile, so its first run cannot
-            // mix genres. A `--profile` preset names its own triple; without
-            // one the loaded profile is inherited, which is the shape every
-            // workspace before presets had. No profile loaded yet is not an
-            // error — the serve gate names it when it matters.
             let mut settings = Settings::default();
             match profile.as_deref() {
                 Some(id) => {
@@ -399,10 +327,6 @@ pub(crate) fn workspace_cmd(
                 },
             }
             // …and its own copy of the adapter the profile names, so the first
-            // run reads its own prompts and crawlers instead of the checkout's
-            // shared home — which is how a second book used to inherit the
-            // first one's language. Voices are not copied: they are not a preset
-            // yet, and a new workspace must not read another book's roster.
             clone_book_material(
                 root,
                 &dir(&name),
@@ -440,8 +364,6 @@ pub(crate) fn workspace_cmd(
         }
         WorkspaceCmd::List => {
             // The same read the TUI picker draws from, so a name listed here is
-            // a name offered there, and both say the same thing about a
-            // directory that is not a book.
             let found = bm_core::paths::workspaces(root);
             if found.is_empty() {
                 out.push("no workspaces (this root is the implicit default)".into());

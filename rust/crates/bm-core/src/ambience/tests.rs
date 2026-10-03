@@ -53,9 +53,6 @@ fn scene_map() -> SceneMap {
 }
 
 /// The tracked fixture profile, installed to a scratch dir: same shapes as
-/// production, no clips. Tests must never read the live tree, which is
-/// ignored and may be absent. Unique per call, tests run in parallel and
-/// a shared dir is a race.
 fn fixture_live(tag: &str) -> PathBuf {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -66,10 +63,6 @@ fn fixture_live(tag: &str) -> PathBuf {
 }
 
 /// The fixture map. The chapter-1 regression this file exists for lived in
-/// a shipped file, not in the code, so this helper installs the tracked
-/// fixture profile (same shapes as production) rather than reading the
-/// live tree, which is ignored and may be absent. Live-tree drift is
-/// profile::verify's job, not the suite's.
 fn shipped_map() -> SceneMap {
     let dir = fixture_live("map");
     let map =
@@ -149,12 +142,8 @@ fn sound(tags: &[&str], files: &[&str], level: Option<f64>) -> ClipPool {
 }
 
 // -----------------------------------------------------------------------
-// what a pool is still being used for
-// -----------------------------------------------------------------------
 
 /// The point of the whole usage query: the scene map never says `wind`, and
-/// `wind` is exactly what a mountain scene plays. A guard keyed on names
-/// would call it unused and let it be deleted.
 #[test]
 fn effect_usage_reaches_by_tag_not_by_name() {
     let map: SceneMap = serde_json::from_str(
@@ -194,7 +183,6 @@ fn effect_usage_reaches_by_tag_not_by_name() {
     assert!(wind[0].label().contains("mountain"), "{wind:?}");
     assert!(usage.contains_key("night"));
     // The catch-all counts too: every scene the rules do not match is
-    // answered by it, so it is the most-used sound in the pool.
     assert!(usage["catch-all"][0].by.contains("default"));
     assert!(
         !usage.contains_key("orphan"),
@@ -202,7 +190,6 @@ fn effect_usage_reaches_by_tag_not_by_name() {
     );
 
     // And against the fixture map: every sound in the fixture effect pool
-    // is reachable, or a rule is silently scoring zero.
     let shipped = shipped_map();
     let fx = fixture_live("usage-pool");
     let shipped_pool = crate::audio_pool::load_pool(&fx.join("assets/effect-pool.json"));
@@ -249,7 +236,6 @@ fn music_usage_names_the_palette_value_that_reaches_it() {
 }
 
 /// A `stop` is placed *for* a sound, dropping the sound leaves the stop
-/// fading nothing, which is the same defect as a scene gone quiet.
 #[test]
 fn inject_usage_reads_the_scripts_and_counts_a_stop() {
     let scripts = vec![
@@ -278,7 +264,6 @@ fn inject_usage_reads_the_scripts_and_counts_a_stop() {
 }
 
 /// The two guards a removal can hit, side by side: one sound is named by
-/// the map, the other is not, and nothing else differs between them.
 #[test]
 fn a_sound_nothing_names_has_no_usage_and_one_the_map_reaches_does() {
     let mut pool = ClipPool::new();
@@ -307,7 +292,6 @@ fn a_sound_nothing_names_has_no_usage_and_one_the_map_reaches_does() {
 }
 
 /// The music layer's third rung: a track's own trim rides on the run, and
-/// a track with none is 1.0, so nothing already on disk changes.
 #[test]
 fn plan_music_carries_the_sounds_own_level() {
     let cfg = scene_map();
@@ -333,10 +317,6 @@ fn plan_music_carries_the_sounds_own_level() {
 }
 
 /// The chapter's first cue opens the chapter: pulled back to the head of
-/// the timeline it comes up *under the headline* and fades in, instead of
-/// hitting at full level on the first line that happens to name a mood.
-/// Later cues are not moved, a gap between two runs is silence the script
-/// asked for, not a gap to fill.
 #[test]
 fn the_chapters_first_cue_starts_at_the_head() {
     let cfg = scene_map();
@@ -356,8 +336,6 @@ fn the_chapters_first_cue_starts_at_the_head() {
 }
 
 /// The layer's head and tail fade over three seconds; the seams in between
-/// stay the short crossfade, because a seam is covered by the next track
-/// arriving and an edge is not.
 #[test]
 fn the_music_layers_edges_fade_over_three_seconds_and_its_seams_do_not() {
     let cfg = MusicLayer::default();
@@ -380,7 +358,6 @@ fn an_effects_own_level_reaches_the_pick() {
 }
 
 /// The shipped registries are all at unity, so the two new multiplication
-/// sites are no-ops on every chapter that exists today.
 #[test]
 fn the_shipped_effect_and_music_pools_change_no_existing_mix() {
     for kind in [
@@ -478,9 +455,6 @@ fn the_timeline_places_pauses_and_keeps_the_gap() {
 }
 
 /// The merge tempoes the speech and then places the layers, so the timeline
-/// the layers read has to be the one the listener hears. Without this the
-/// music drifts behind the voice by a line's worth per line, the whole
-/// reason the tempo pass moved ahead of `apply_layers`.
 #[test]
 fn retime_puts_the_timeline_on_the_delivered_clock() {
     let d = tmpdir("retime");
@@ -488,7 +462,6 @@ fn retime_puts_the_timeline_on_the_delivered_clock() {
     silent_wav(&a, 4.0, 48_000).unwrap();
     let turns = vec![turn(&a, "s", "Narrator"), turn(&a, "s", "Narrator")];
     // A beat authored *before* turn 1 is written into the gap that follows
-    // turn 0, the same silence, named from the other side.
     let mut pauses = BTreeMap::new();
     pauses.insert(1usize, 1875u32);
     let mut slots = timeline(&turns, 300, &pauses).unwrap();
@@ -545,7 +518,6 @@ fn spans_merge_adjacent_identical_scenes() {
 }
 
 /// The Narrator takes the room at a tenth of its depth — in the scene,
-/// never with a character's full wet — and no preset says otherwise.
 #[test]
 fn the_narrator_takes_a_tenth_of_the_room() {
     let d = tmpdir("narrator-tenth");
@@ -565,7 +537,6 @@ fn the_narrator_takes_a_tenth_of_the_room() {
     assert_eq!(spans[0].reverb.as_deref(), Some("hall"));
 
     // Both slots reach the same preset; only the Narrator flag differs, and
-    // the depth is a tenth for the Narrator and whole for the character.
     let mut presets = cfg.reverb_presets.clone();
     presets.insert(
         "hall".into(),
@@ -594,7 +565,6 @@ fn the_narrator_takes_a_tenth_of_the_room() {
 }
 
 /// A bare string is the legacy shape: ffmpeg with no reserved tail. An old
-/// map's `narrator` key still parses, and is ignored.
 #[test]
 fn a_legacy_preset_is_ffmpeg_with_no_tail() {
     let fx = VoiceFx::Chain("aecho=0.8:0.9:80|170:0.08|0.05".into());
@@ -603,10 +573,6 @@ fn a_legacy_preset_is_ffmpeg_with_no_tail() {
 }
 
 /// The reserve is the longest decay any span in the chapter reaches, and
-/// it is what keeps a reverb from being chopped at the chapter's end. An
-/// object preset deserializes to its engine and its tail; a string preset
-/// (and a span that names no room) reserves nothing, so a chapter with no
-/// tails is exactly as long as the voice.
 #[test]
 fn the_longest_reached_decay_is_the_reserve() {
     let presets: BTreeMap<String, VoiceFx> = serde_json::from_str(
@@ -619,7 +585,6 @@ fn the_longest_reached_decay_is_the_reserve() {
     .unwrap();
 
     // The object shape is read as SoX, with a reserved tail; an old map's
-    // `narrator` key still parses, and is ignored.
     assert_eq!(
         presets["cave"].engine_and_chain(),
         (FxEngine::Sox, "reverb 78 35 95")
@@ -631,14 +596,12 @@ fn the_longest_reached_decay_is_the_reserve() {
     let mut b = span(5.0, 10.0, &[], 0.0);
     b.reverb = Some("cave".into());
     // The cave's 2.8 s wins over the hall's 2.0 s — the chapter takes the
-    // room that rings longest, or its floor would be cut mid-tail.
     assert_eq!(voice_reserve(&[a, b], &presets), 2.8);
 
     // A span that names no room reserves nothing.
     assert_eq!(voice_reserve(&[span(0.0, 5.0, &[], 0.0)], &presets), 0.0);
 
     // A legacy string preset is ffmpeg with no reserve, so a pack that has
-    // not migrated is mixed to exactly the old length.
     let mut c = span(0.0, 5.0, &[], 0.0);
     c.reverb = Some("flat".into());
     assert_eq!(voice_reserve(&[c], &presets), 0.0);
@@ -665,8 +628,6 @@ fn the_effect_layer_is_sparse_where_the_old_one_was_wall_to_wall() {
 }
 
 /// The layer's one master gain. A rule's `level` is a relative balance
-/// between scenes; `trim` is the operator saying the whole layer is too hot,
-/// and it must reach every window without anyone editing thirteen rules.
 #[test]
 fn the_layer_trim_scales_every_rule_and_defaults_to_no_change() {
     let spans = vec![span(0.0, 100.0, &["rain"], 0.20)];
@@ -692,7 +653,6 @@ fn the_layer_trim_scales_every_rule_and_defaults_to_no_change() {
     );
 
     // The trim must not resurrect a rule that declared silence, the hall
-    // rule's `level: 0.0` means "no bed here", not "quiet bed".
     let silent = vec![span(0.0, 100.0, &["night"], 0.0)];
     assert!(plan_windows(&silent, &quieter.layers.effect, 200.0).is_empty());
 }
@@ -709,7 +669,6 @@ fn a_short_scene_and_a_spent_budget_both_get_nothing() {
     .is_empty());
 
     // Budget spent by the first window stops the rest: 100 s of chapter
-    // buys 35 s, which the first eligible scene takes.
     let w = plan_windows(
         &[
             span(0.0, 100.0, &["rain"], 0.18),
@@ -730,7 +689,6 @@ fn a_beat_lands_on_narrated_scene_changes_only() {
     silent_wav(&w, 1.0, 48_000).unwrap();
 
     // Narration handing off to a character, then narration resuming: the
-    // resuming boundary wins, even though both are narrated.
     let turns = vec![
         turn(&w, "street-day", "Narrator"),
         turn(&w, "night-x", "Dịch Phong"),
@@ -773,10 +731,6 @@ fn only_one_beat_per_chapter_however_many_boundaries_there_are() {
 }
 
 /// Sound-keyed, like the shipped registry: `soft` is one sound with two
-/// takes, and `soft-alt` is a *second* sound answering the same tags, the
-/// shape the real pool has (`soft-relax` and `generic-soft` both answer
-/// `[soft, calm]`), and the only way a mood change can resolve to a
-/// different track.
 fn music_pool() -> ClipPool {
     let mut p = ClipPool::new();
     for (name, tags, files) in [
@@ -846,8 +800,6 @@ fn music_runs_break_on_a_sound_change_not_a_scene_change() {
 #[test]
 fn a_mood_change_mid_scene_changes_the_track() {
     // The case the old scene-keyed system could not express: one place, one
-    // span, two moods. Nothing about the scene changed, so nothing but the
-    // `music` field can carry this.
     let cfg = scene_map();
     let pool = music_pool();
     let slots = [
@@ -870,10 +822,6 @@ fn a_mood_change_mid_scene_changes_the_track() {
 #[test]
 fn the_log_shows_every_cue_in_a_span_not_just_the_first() {
     // Regression: the report used to fold music into the span line by
-    // taking the first run that overlapped, so a span holding three cues
-    // printed one. Since spans are places and runs are moods, that hid
-    // exactly the in-chapter change the design exists to express, and the
-    // log is the only place a merged chapter is inspectable.
     let cfg = scene_map();
     let pool = music_pool();
     let slots = [
@@ -892,7 +840,6 @@ fn the_log_shows_every_cue_in_a_span_not_just_the_first() {
     assert!(music[1].contains("busy"), "{music:#?}");
     assert!(music[2].contains("quiet"), "{music:#?}");
     // ...and the span line no longer claims a track, because a span does
-    // not have one.
     let span = lines.iter().find(|l| l.starts_with("span ")).unwrap();
     assert!(!span.contains("music"), "{span}");
 }
@@ -900,7 +847,6 @@ fn the_log_shows_every_cue_in_a_span_not_just_the_first() {
 #[test]
 fn the_log_says_so_when_a_chapter_resolves_to_no_music() {
     // `none` emits no run, so the report has to say that explicitly rather
-    // than print an empty section the reader has to interpret.
     let cfg = scene_map();
     let lines = plan_lines(&[], &[], &[], &[], &[], &cfg);
     assert_eq!(lines, vec!["music none — no cue resolved for this chapter"]);
@@ -909,11 +855,6 @@ fn the_log_says_so_when_a_chapter_resolves_to_no_music() {
 #[test]
 fn the_log_attributes_a_window_the_cooldown_pushed_to_its_own_place() {
     // `plan_windows` opens at `span.start.max(free_at)`, so the second
-    // window starts *after* its span does. Matching windows to spans by
-    // start offset, which the report did, through a formatted string
-    // then reported "no effect" for a span that had 75 s of one. Chapter 13
-    // was measured that way: `courtyard-evening` looked silent while
-    // carrying a night bed from 120 s to 195 s.
     let cfg = scene_map();
     let spans = vec![
         Span {
@@ -960,7 +901,6 @@ fn the_log_attributes_a_window_the_cooldown_pushed_to_its_own_place() {
         "a pushed window still belongs to its own place: {effects:#?}"
     );
     // And the span line carries no effect of its own, a span does not have
-    // one, so it must not imply it does.
     let span_line = lines.iter().find(|l| l.starts_with("span ")).unwrap();
     assert!(!span_line.contains("effect"), "{span_line}");
 }
@@ -968,11 +908,6 @@ fn the_log_attributes_a_window_the_cooldown_pushed_to_its_own_place() {
 #[test]
 fn two_moods_that_name_the_same_tags_are_one_run_when_one_sound_answers() {
     // The old premise here, "a mood change always changes the track", was
-    // false the moment picks became sound-based, and it is not a bug. The
-    // seed decides *among the candidates*; with one candidate there is
-    // nothing to decide, so both moods resolve to the same sound and the
-    // run merges. Rendering two runs of the same take with a crossfade
-    // between them would be a hole with extra steps.
     let mut cfg = scene_map();
     cfg.music_palette.insert(
         "warm".into(),
@@ -1012,10 +947,6 @@ fn two_moods_that_name_the_same_tags_are_one_run_when_one_sound_answers() {
 #[test]
 fn two_moods_that_name_the_same_tags_can_still_split() {
     // What seeding from the palette *value* actually buys. Two values naming
-    // one tag set are two independent draws from the candidate set, so a
-    // pool with two sounds for those tags spreads them across moods instead
-    // of crossfading one into itself. The pool has to offer the choice
-    // this is not a guarantee plan_music can make on its own.
     let mut cfg = scene_map();
     cfg.music_palette.insert(
         "warm".into(),
@@ -1025,14 +956,12 @@ fn two_moods_that_name_the_same_tags_can_still_split() {
         },
     );
     // The mechanism, stated where it is visible: the seed is a function of
-    // the mood value, so the two moods are not forced onto one answer.
     assert_ne!(
         audio_pool::seed(1, 0, &["quiet".to_string()]),
         audio_pool::seed(1, 0, &["warm".to_string()])
     );
 
     // ...and the consequence: `soft` and `soft-alt` both answer [soft, calm],
-    // so some chapter splits the two moods across them.
     let pool = music_pool();
     let split = (1..=32).any(|c| {
         let runs = plan_music(
@@ -1063,7 +992,6 @@ fn none_an_unpooled_mood_and_an_empty_value_all_mean_no_music() {
     // A palette value whose tags nothing in the pool answers.
     assert!(plan_music(&[slot("grand", 0.0, 100.0)], &[], 1, &pool, pal).is_empty());
     // A value that is not in the palette at all, the validator's job to
-    // catch, and the mix still refuses to guess.
     assert!(plan_music(&[slot("melancholy", 0.0, 100.0)], &[], 1, &pool, pal).is_empty());
 }
 
@@ -1099,13 +1027,11 @@ fn the_declared_mood_wins_and_the_legacy_shim_covers_scripts_without_one() {
     assert_eq!(run_music(&segs, &runs_of(2), &cfg), vec!["battle"]);
 
     // No value anywhere: the shim scores the scene label instead, so the
-    // ~200 chapters already on disk keep merging.
     let segs = build(&[("street-morning", ""), ("street-morning", "")]);
     assert_eq!(run_music(&segs, &runs_of(2), &cfg), vec!["busy"]);
     let segs = build(&[("night-forest", ""), ("night-forest", "")]);
     assert_eq!(run_music(&segs, &runs_of(2), &cfg), vec!["quiet"]);
     // Nothing in the shim matches: silence, exactly as the old `default`
-    // (no music tags) did.
     let segs = build(&[("somewhere-else", ""), ("somewhere-else", "")]);
     assert_eq!(run_music(&segs, &runs_of(2), &cfg), vec!["none"]);
 }
@@ -1114,7 +1040,6 @@ fn the_declared_mood_wins_and_the_legacy_shim_covers_scripts_without_one() {
 fn the_palette_is_read_once_and_rendered_for_the_prompt() {
     let cfg = scene_map();
     // The `_note` key documents the section in place; it is not a value the
-    // analyzer could be asked to emit.
     assert_eq!(
         palette_names(&cfg),
         vec!["busy", "none", "quiet", "warm"],
@@ -1130,14 +1055,6 @@ fn the_palette_is_read_once_and_rendered_for_the_prompt() {
 }
 
 /// The place vocabulary, and the whole point of adding it: a rule whose
-/// match words the analyzer has never been shown is a rule that does not
-/// fire, and nothing downstream can see that.
-///
-/// Pinned against the real shape rather than the fixture's, because the
-/// fixture's rules all happen to match on words that are also bed tags —
-/// which is exactly why the conflation survived. These three rules use
-/// `palace`, `hall` and `garden`, none of which is a bed tag on the shipped
-/// pool, and all three must reach the prompt anyway.
 #[test]
 fn the_place_vocabulary_is_every_rule_match_word_sorted_and_deduped() {
     let cfg: SceneMap = serde_json::from_value(json!({
@@ -1155,7 +1072,6 @@ fn the_place_vocabulary_is_every_rule_match_word_sorted_and_deduped() {
         "sorted, deduped across rules, blank words dropped"
     );
     // `default` has no match set, so it contributes nothing: it is what a
-    // label matches when nothing else did, not a word to write.
     assert!(
         !scene_prompt(&cfg).contains("night"),
         "{:?}",
@@ -1164,10 +1080,6 @@ fn the_place_vocabulary_is_every_rule_match_word_sorted_and_deduped() {
 }
 
 /// The conflation itself, stated as a test: the place words and the bed
-/// words are different lists, and a place word off the bed list is still
-/// correct to write. On the shipped map 15 of 61 match words are bed tags,
-/// so 46 rule words reached nothing while the prompt called the bed list
-/// "the vocabulary it answers to".
 #[test]
 fn the_place_words_and_the_bed_words_are_different_lists() {
     let map = shipped_map();
@@ -1183,8 +1095,6 @@ fn the_place_words_and_the_bed_words_are_different_lists() {
          test is no longer testing anything"
     );
     // The words this was actually about. If a future edit made the scene
-    // map match only bed tags, these four would go, and the prompt's
-    // conflation would have become harmless by accident.
     for word in ["palace", "hall", "garden", "gate"] {
         assert!(
             places.contains(word),
@@ -1202,15 +1112,10 @@ fn the_effect_vocabulary_is_the_sorted_union_of_pool_tags() {
     }))
     .unwrap();
     // Sorted, deduped, and drawn from sounds, even one with no files,
-    // because the vocabulary describes the pool, not one pick.
     assert_eq!(effect_tags(&pool), vec!["calm", "ghost", "night", "rain"]);
 }
 
 /// The defect that started this: chapter 1 opened with a hearth crackling
-/// under a martial-arts shop at dawn. The label `martial-shop-morning`
-/// matched the generic `shop` keyword of a catch-all fire rule, which sat
-/// *before* the daylight rule, so `morning` never got a say. Against the
-/// map that actually ships, not a fixture.
 #[test]
 fn the_shipped_map_no_longer_puts_a_hearth_under_a_shop_at_dawn() {
     let cfg = shipped_map();
@@ -1223,12 +1128,6 @@ fn the_shipped_map_no_longer_puts_a_hearth_under_a_shop_at_dawn() {
     assert_eq!(match_scene("forge", &cfg).effect, vec!["fire"]);
     assert_eq!(match_scene("kitchen", &cfg).effect, vec!["fire"]);
     // ...but a courtyard does not. `courtyard` used to sit in a fire rule,
-    // which put a hearth under `courtyard-battle-moment` and
-    // `courtyard-confrontation`, 20 labels and ~800 segments in the
-    // corpus, the same absurdity as the shop at dawn, just louder. A
-    // courtyard is not a place with a fire in it: the battle rule owns the
-    // ones that say battle, the daylight rule owns the ones that name a
-    // time, and a bare `courtyard` is silent like any other unlisted place.
     assert_eq!(
         match_scene("courtyard-battle-moment", &cfg).effect,
         vec!["battle", "sword"]
@@ -1248,15 +1147,11 @@ fn the_shipped_map_no_longer_puts_a_hearth_under_a_shop_at_dawn() {
         vec!["market"]
     );
     // Ordering is a decision, not a detail: an earlier rule's keyword beats
-    // a later rule's, so a label carrying a time of day is scored by the
-    // time and not by the place. Pinned here because *that* mechanism is
-    // what mis-scored chapter 1, and it still cuts both ways.
     assert_eq!(match_scene("forge-night", &cfg).effect, vec!["night"]);
     assert_eq!(match_scene("courtyard-dusk", &cfg).effect, vec!["night"]);
 }
 
 /// The shipped palette has to be answerable by the shipped pool, or a mood
-/// the prompt offers would silently mean silence.
 #[test]
 fn every_shipped_palette_value_but_none_has_a_pooled_track() {
     let cfg = shipped_map();
@@ -1282,14 +1177,6 @@ fn every_shipped_palette_value_but_none_has_a_pooled_track() {
 }
 
 /// Every shipped rule must actually resolve, or the rule is decoration.
-/// Every shipped effect rule resolves, and the daylight rule owns its scene.
-///
-/// A tie between interchangeable variants is the pool's designed behaviour
-/// `night-1..4` are four nights, and the seed spreads them across chapters.
-/// A tie between *different sounds* is not: `["day"]` alone sat on six clips
-/// spanning birdsong, a calm bed and a market crowd, one of them a one-shot
-/// stinger, so the daylight rule drew its bed at random and chapter 1 got a
-/// crowd under a shop at dawn.
 #[test]
 fn every_shipped_effect_rule_resolves_and_daylight_is_a_bed() {
     let cfg = shipped_map();
@@ -1309,8 +1196,6 @@ fn every_shipped_effect_rule_resolves_and_daylight_is_a_bed() {
     }
 
     // The rule this change was about, pinned by name. A 75 s window needs a
-    // looped bed, and the *sound* is the decision, the take (`day-1/2/3`)
-    // is the pool's business and must not appear here.
     let day = match_scene("martial-shop-morning", &cfg);
     assert_eq!(day.effect, vec!["day", "calm"], "the daylight rule owns it");
     let got = audio_pool::pick(&pool, &day.effect, audio_pool::seed(1, 0, &day.effect)).unwrap();
@@ -1329,13 +1214,6 @@ fn every_shipped_effect_rule_resolves_and_daylight_is_a_bed() {
 }
 
 /// Every file a fixture pool names must exist on disk here, placeholder
-/// takes, written below, because the fixture ships shapes without clips.
-///
-/// The merge resolves a pool `file` through `clip_path` and, when it is
-/// missing, prints a warning and skips the run, so a registry pointing at a
-/// renamed or deleted clip is not an error, it is *silence*. The disk half
-/// of this runs at runtime too, where the tree actually lives: `check_files`
-/// at load and `profile::verify` on the pointer hash.
 #[test]
 fn every_shipped_pool_file_exists() {
     let dir = fixture_live("takes");
@@ -1375,7 +1253,6 @@ fn the_level_expression_is_flat_without_a_pause_and_lifts_inside_one() {
     assert_eq!(lifted.matches("clip").count(), 2, "{lifted}");
 
     // No lift to make: the expression stays flat rather than emitting a
-    // pair of cancelling ramps.
     assert_eq!(level_expr(0.06, 0.06, 0.6, 0.0, &[(1.0, 2.0)]), "0.060000");
 }
 
@@ -1408,7 +1285,6 @@ fn negative_volumes_mute_instead_of_inverting() {
 #[test]
 fn a_fade_never_runs_past_half_a_slice() {
     // `place` clamps, so a 0.3 s fade on a 0.2 s one-shot cannot invert the
-    // envelope. Exercised through the pure part of the arithmetic.
     let dur = 0.2f64;
     let fo = 0.3f64.clamp(0.0, dur / 2.0);
     assert!((fo - 0.1).abs() < 1e-9);
@@ -1454,10 +1330,6 @@ fn islot(start: f64, end: f64, injects: &[Value]) -> Slot {
 }
 
 /// The script names the sound; **the pool says how it behaves**. A
-/// directive that tries to restate `mode` is ignored, not honoured, that
-/// is the whole point of moving it out of the JSON, and it is asserted here
-/// because a silent "the script won" would reintroduce the second source of
-/// truth without anything failing.
 #[test]
 fn injects_of_takes_the_sounds_behaviour_from_the_pool_not_the_script() {
     let pool = inject_pool();
@@ -1488,8 +1360,6 @@ fn injects_of_takes_the_sounds_behaviour_from_the_pool_not_the_script() {
                 level: 0.1
             },
             // `hold` and `level` come from the entry too, not the layer
-            // default, and the level then takes the mode's gain, so a
-            // trail's 0.5 is rendered at 0.05.
             Inject::Start {
                 sound: "rumble".into(),
                 mode: InjectMode::Trail,
@@ -1524,7 +1394,6 @@ fn injects_of_takes_the_sounds_behaviour_from_the_pool_not_the_script() {
         }],
     );
     // Absent, empty, malformed and unknown entries are silence, not errors
-    // the digest validator is the strict gate, the merge survives hand edits.
     assert!(injects_of(&[], &pool, 2.0).is_empty());
     assert!(injects_of(
         &[
@@ -1542,7 +1411,6 @@ fn injects_of_takes_the_sounds_behaviour_from_the_pool_not_the_script() {
         "an unregistered sound has no mode either, so it is not guessed at"
     );
     // A registered sound with no takes resolves here and is dropped later
-    // with one warning, so the plan and the mix agree on what was asked for.
     assert_eq!(
         injects_of(&[json!({"sound": "empty"})], &pool, 2.0).len(),
         1
@@ -1550,14 +1418,6 @@ fn injects_of_takes_the_sounds_behaviour_from_the_pool_not_the_script() {
 }
 
 /// An `overlap` and a `trail` are beds: they run *under* the speech, so they
-/// render at a tenth of the level their pool entry carries. A `hit` owns the
-/// silence it was written into and keeps its level.
-///
-/// The gain belongs to the *mode*, so two clips of one mode keep their ratio
-/// to each other, the pool's `level` stays the balance between them rather
-/// than a second volume knob for the layer. And it is applied *after* the
-/// `None`/zero rule, so a bed with no level of its own is 0.1, not 0.0: the
-/// "a pool can never mute by arithmetic accident" promise survives it.
 #[test]
 fn a_bed_renders_at_a_tenth_of_its_level_and_a_hit_at_all_of_it() {
     let pool: ClipPool = serde_json::from_value(json!({
@@ -1592,11 +1452,6 @@ fn a_bed_renders_at_a_tenth_of_its_level_and_a_hit_at_all_of_it() {
 }
 
 /// An entry whose `mode` names nothing is silence, not a default. The pool
-/// said something the mixer does not understand, and guessing `hit` would
-/// play a length of clip nobody asked for. `inject_mode` returning `None` is
-/// what makes that a skip, and it is now also the answer the `:sound`
-/// editor's own validation reads, so the two cannot disagree about which
-/// strings are modes.
 #[test]
 fn an_entry_with_an_unknown_mode_is_skipped_not_defaulted() {
     let pool: ClipPool = serde_json::from_value(json!({
@@ -1626,7 +1481,6 @@ fn an_entry_with_an_unknown_mode_is_skipped_not_defaulted() {
 fn inject_takes_name_the_sound_and_roll_with_the_slot() {
     let pool = inject_pool();
     // Direct registry lookup: the analyzer names the sound, the pool rolls
-    // the take, tag scoring could only answer a question nobody asked.
     for slot in 0..8 {
         let t = inject_take(&pool, 1, slot, "blood").unwrap();
         assert_eq!(t.sound, "blood");
@@ -1647,7 +1501,6 @@ fn inject_takes_name_the_sound_and_roll_with_the_slot() {
 fn the_prompt_names_sounds_tags_and_lengths() {
     let rendered = inject_prompt(&inject_pool());
     // mode first, because it is what the analyzer cannot choose and must
-    // know: a `hit` pauses the narration, an `overlap` runs under it.
     assert!(rendered.contains("blood (hit; blood; 1.1s)"), "{rendered}");
     assert!(
         rendered.contains("boil (overlap; water, boiling; 51s)"),
@@ -1663,9 +1516,6 @@ fn the_prompt_names_sounds_tags_and_lengths() {
 }
 
 /// Hits queue in the silence their holds wrote, an overlap costs no time,
-/// a trail holds its solo and tails under the speech, and a stop fades
-/// never cuts, from its anchor. Every mode here comes from the pool entry,
-/// because that is where a clip's behaviour lives.
 #[test]
 fn inject_events_hit_queue_overlap_tails_and_stops_fade() {
     let pool = inject_pool();
@@ -1704,7 +1554,6 @@ fn inject_events_hit_queue_overlap_tails_and_stops_fade() {
     assert!((ev[0].end - (10.0 + blood_dur)).abs() < 1e-9);
     assert_eq!(ev[0].fade_in, 0.0);
     // The overlap starts at the same cursor (after the hit) and costs no
-    // time; the retrigger at slot 1 end (20.0) fades it over `fade_s`.
     assert_eq!(ev[1].mode, InjectMode::Overlap);
     assert!((ev[1].start - (10.0 + blood_dur)).abs() < 1e-9);
     assert!((ev[1].end - (20.0 + 0.3)).abs() < 1e-9, "{ev:?}");
@@ -1713,16 +1562,11 @@ fn inject_events_hit_queue_overlap_tails_and_stops_fade() {
     assert!((ev[2].start - 20.0).abs() < 1e-9);
     assert!((ev[2].end - (20.0 + 51.0)).abs() < 1e-9, "{ev:?}");
     // The trail starts at 20.0 too, holds 3 s solo, then the stop fades it
-    // from 23.0 over `stop_fade_s` = 3 s, an ending, not a cut.
     assert_eq!(ev[3].mode, InjectMode::Trail);
     assert!((ev[3].start - 20.0).abs() < 1e-9);
     assert!((ev[3].end - (23.0 + 3.0)).abs() < 1e-9, "{ev:?}");
     assert!((ev[3].fade_out - 3.0).abs() < 1e-9, "stop_fade_s");
     // The level the render multiplies by `layers.inject.level` is the pool's
-    // with the mode's gain already folded in, `boil` carries none (unity),
-    // `rumble` 0.5. Pinned here, at the far end of the pipeline from
-    // `injects_of`, because a gain that stopped halfway would still leave
-    // every test above passing.
     assert!((ev[1].level - 0.1).abs() < 1e-9, "{ev:?}");
     assert!((ev[3].level - 0.05).abs() < 1e-9, "{ev:?}");
 }
@@ -1753,7 +1597,6 @@ fn a_retrigger_fades_the_old_instance_and_a_stop_for_nothing_is_silence() {
 #[test]
 fn holds_are_authored_delivered_and_written_pre_tempo() {
     // Like a planned pause: authored in delivered seconds, scaled by speed
-    // for the concat, divided back by `retime`.
     let pool = inject_pool();
     let durs = durs();
     let slots = vec![islot(0.0, 10.0, &[json!({"sound": "rumble"})])];
@@ -1764,7 +1607,6 @@ fn holds_are_authored_delivered_and_written_pre_tempo() {
 }
 
 /// A wrong bus assignment does not fail, it makes a layer quiet, which is
-/// how the inject layer went inaudible. So the graph is asserted on.
 #[test]
 fn the_inject_layer_is_mixed_after_the_duck_and_the_beds_are_not() {
     let sc = "sidechaincompress=threshold=0.02:ratio=6:attack=20:release=400";
@@ -1773,13 +1615,11 @@ fn the_inject_layer_is_mixed_after_the_duck_and_the_beds_are_not() {
     let tail2 = format!("[0:a][duck]amix=inputs=2:normalize=0[mixed];[mixed]{lim}");
     let tail3 = format!("[0:a][duck][3:a]amix=inputs=3:normalize=0[mixed];[mixed]{lim}");
     // Beds only: they sum, they duck, they mix with the voice, and the sum
-    // is limited. No third input.
     let g = layer_graph(2, false, sc, None);
     assert!(g.contains("[1:a][2:a]amix=inputs=2"), "{g}");
     assert!(g.contains(&ducked), "{g}");
     assert!(g.ends_with(&tail2), "{g}");
     // With an inject track, it is input 3 and it enters *after* the duck:
-    // never inside `[under]`, or the voice's own compressor eats it.
     let g = layer_graph(2, true, sc, None);
     assert!(
         g.contains("[1:a][2:a]amix=inputs=2:normalize=0[under]"),
@@ -1806,8 +1646,6 @@ fn the_inject_layer_is_mixed_after_the_duck_and_the_beds_are_not() {
     );
     assert!(!g.contains("sidechain"), "{g}");
     // ...but the limiter is on every arm. The ceiling is the contract, and
-    // nothing else in the path holds it: ch9 measured -0.11 dBFS with the
-    // inject layer switched off entirely.
     for (b, i) in [
         (0usize, true),
         (1, false),
@@ -1826,9 +1664,6 @@ fn the_inject_layer_is_mixed_after_the_duck_and_the_beds_are_not() {
 }
 
 /// The headline is the one place the beds are meant to arrive, so the key
-/// is held down there, and it is held down on a *copy* of the voice: the
-/// voice that reaches the mix must be the one that was rendered, not a key
-/// with a level edit on it.
 #[test]
 fn the_headline_is_exempt_from_the_duck() {
     let sc = "sidechaincompress=threshold=0.05:ratio=3:attack=20:release=400";
@@ -1844,7 +1679,6 @@ fn the_headline_is_exempt_from_the_duck() {
         "the voice is the copy nothing attenuated: {g}"
     );
     // A key taken as-is is the graph every chapter used to get, byte for
-    // byte, no split, no volume filter, nothing to explain.
     let plain = layer_graph(2, false, sc, Some((7.4, 1.0)));
     assert!(!plain.contains("asplit"), "{plain}");
     assert!(!plain.contains("volume"), "{plain}");
@@ -1853,13 +1687,10 @@ fn the_headline_is_exempt_from_the_duck() {
         "{plain}"
     );
     // And no headline at all (a chapter that opens on a scene) is the same
-    // graph as a key taken as-is.
     assert_eq!(plain, layer_graph(2, false, sc, None));
 }
 
 /// The headline is the opening turn with neither a place nor a mood. The
-/// test is on that pairing, not on "the first slot": a chapter that opens
-/// on a scene keeps its duck from the first line.
 #[test]
 fn the_headline_is_the_first_turn_with_no_place_and_no_mood() {
     let headline = |end: f64| Slot {
@@ -1880,26 +1711,21 @@ fn the_headline_is_the_first_turn_with_no_place_and_no_mood() {
     );
     assert_eq!(headline_end(&[]), None);
     // The default is the exemption, because that is what makes the layer's
-    // own fade-in audible at all.
     assert_eq!(Duck::default().head_key, 0.0);
     // ...and a map that predates the field gets it.
     assert_eq!(scene_map().duck.head_key, 0.0);
 }
 
 /// A loop is only worth making if the arithmetic is right: too few copies
-/// leave silence at the end of the window, too many waste decode time, and
-/// a seam that overlaps too far is audible as a pump.
 #[test]
 fn loop_copies_solves_for_the_window_and_refuses_a_single_play() {
     // A 6.86 s bed in a 7 s window: one more copy covers it.
     assert_eq!(loop_copies(7.0, 6.86, 0.25), Some(2));
     // A window no longer than the clip is not a loop at all, this is the
-    // path a bed with no `stop` takes, and it must stay a single play.
     assert_eq!(loop_copies(6.86, 6.86, 0.25), None);
     assert_eq!(loop_copies(3.0, 6.86, 0.25), None);
     assert_eq!(loop_copies(7.0, 0.0, 0.25), None);
     // 142 s of kitchen out of a 6.86 s clip. n copies run
-    // n*6.86 - (n-1)*0.25 >= 142, so n = 22.
     let n = loop_copies(142.0, 6.86, 0.25).unwrap();
     assert_eq!(n, 22, "{n}");
     assert!(
@@ -1935,23 +1761,15 @@ fn loop_filter_crossfades_every_seam_and_ends_on_the_volume() {
 }
 
 /// The music layer loops too, and for the same reason — a 2-minute bed
-/// under a 20-minute chapter is ten seams. Pinned here because the music
-/// path is the one place that used to butt-join, and a butt-join is
-/// invisible in a test and audible every two minutes.
 #[test]
 fn the_music_loop_crossfades_and_keeps_the_pause_lift() {
     // Under one clip length: no loop at all, which is the path that must
-    // not change for a run that already fits.
     assert_eq!(loop_copies(140.0, 150.0, 2.0), None);
     // Over it: a crossfaded loop, and the number of copies is what the
-    // same solver the inject layer already used gives.
     let k = loop_copies(600.0, 150.0, 2.0).unwrap();
     assert!(k >= 4, "{k} copies for 600s out of a 150s track");
 
     // The gain rides on the loop's tail, not before the crossfades: a
-    // `volume` placed ahead of the fade would duck the seam instead of the
-    // track, and a time-varying expression is the only way a run lifts
-    // inside a planned pause.
     let expr = "0.160000 + 0.040000*clip((t-1.000)/0.600,0,1)";
     let g = loop_filter_with_tail(k, 2.0, &format!("volume=volume='{expr}':eval=frame"));
     assert_eq!(g.matches("acrossfade=").count(), k - 1, "{g}");
@@ -1969,14 +1787,6 @@ fn the_music_loop_crossfades_and_keeps_the_pause_lift() {
 }
 
 /// The inject pool must state `looped` on every entry.
-///
-/// `Sound::looped` defaults to `true` because the *effect* pool is mostly
-/// beds and the default is what makes a hand-written rule work. The inject
-/// pool is the opposite, mostly one-shots, so the same default silently
-/// turns an entry that forgot the key into a looping bed. The shipped pool
-/// states it everywhere, and this is what keeps that true: read the raw JSON
-/// rather than the parsed pool, because the parsed one cannot tell "absent"
-/// from "true".
 #[test]
 fn every_shipped_inject_entry_states_looped_explicitly() {
     let dir = fixture_live("looped");
@@ -2000,7 +1810,6 @@ fn every_shipped_inject_entry_states_looped_explicitly() {
 }
 
 /// Every shipped inject sound resolves to a real take, or the registry is
-/// decoration the prompt offers anyway.
 #[test]
 fn every_shipped_inject_sound_has_takes_and_a_length() {
     let dir = fixture_live("takes-length");
@@ -2036,12 +1845,6 @@ fn every_shipped_inject_sound_has_takes_and_a_length() {
 }
 
 /// A hold is silence *inserted* into the chapter, and inserting it makes
-/// every later slot start later. Every layer, the effects, the music and
-/// the injects themselves, is placed by reading `Slot::start`/`end`, so a
-/// clock that did not move puts them all on top of speech that has shifted
-/// out from under them. That is not a near miss: it is the difference
-/// between a blood spatter in the silence reserved for it and the same
-/// spatter buried under the last six words of the chapter.
 #[test]
 fn a_hit_hold_moves_every_later_slot_and_the_layers_with_it() {
     let pool = inject_pool();
@@ -2056,7 +1859,6 @@ fn a_hit_hold_moves_every_later_slot_and_the_layers_with_it() {
     assert_eq!(slots[0].gap_ms, 300 + 1100, "the hit's whole clip");
     assert_eq!(slots[0].inject_ms, 1100);
     // The clock moved with it: slot 1 starts after the silence, not after
-    // the gap that was there before the hold was written.
     assert!(
         (slots[1].start - 2.4).abs() < 1e-9,
         "slot 1 starts at {:.3}, not 1.3 — the hold is real audio",
@@ -2064,7 +1866,6 @@ fn a_hit_hold_moves_every_later_slot_and_the_layers_with_it() {
     );
     assert!((slots[1].end - 3.3).abs() < 1e-9, "{:?}", slots[1]);
     // And the slot's own duration is untouched, a hold is silence *after*
-    // a line, never a change to the line.
     assert!((slots[1].end - slots[1].start - 0.9).abs() < 1e-9);
     // An overlap costs no time, so nothing moves.
     let mut quiet = vec![

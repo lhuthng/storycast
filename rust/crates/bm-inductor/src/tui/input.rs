@@ -50,8 +50,6 @@ pub(crate) fn dispatch(
     };
     let name = job.label();
     // Read before the job is moved onto the channel. Naming the resource on a
-    // queued row is the whole answer to "why is this not running": a job that
-    // waits says what it waits for.
     let needs = job.resource_label();
     let queued = std::time::Instant::now();
     match job_tx.send(Job::Tracked {
@@ -84,11 +82,6 @@ pub(crate) fn dispatch(
 }
 
 /// Fire a singleton op, refusing a duplicate while one is already running.
-///
-/// Returns whether it was actually dispatched. Callers that set an in-flight
-/// marker of their own **must** branch on this: a refused dispatch sends no
-/// `Done` event, so a marker set regardless is never cleared, and the screen
-/// stays wedged behind a job that does not exist.
 pub(crate) fn dispatch_op(
     app: &mut App,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
@@ -108,23 +101,6 @@ pub(crate) fn dispatch_op(
 }
 
 /// Identity of one op *instance*.
-///
-/// Keyed by what the op acts on, not just by its name: retrying digest:3 and
-/// digest:4 are two different jobs and must not suppress each other, while a
-/// second press of the same key is still refused as a duplicate.
-///
-/// The two widest fields are in the key for the same reason. A `release` that
-/// names one **worker** is not the release of one row, and two `fix-speaker`
-/// ops on one chapter are two different segments — without them here the second
-/// press of either is refused as a duplicate of the first, which is a lie about
-/// work that was never dispatched.
-///
-/// `dispatch`'s direction is in the key for the same reason, and it is the one
-/// where getting it wrong is worst: `:go` and `:hold` share an op and an empty
-/// payload, so without the flag a `:hold` pressed while the `:go` round trip is
-/// still out is refused as "dispatch is already running" — the opposite of what
-/// was asked for, and silent apart from a status line nobody would read as a
-/// refusal to hold.
 pub(crate) fn op_key(req: &OpRequest) -> String {
     format!(
         "{}|{}|{}|{}|{}|{}|{}",
@@ -153,21 +129,9 @@ pub(crate) fn urlencode(s: &str) -> String {
 }
 
 /// What a key or a click asks the event loop to do next.
-///
-/// **Not "was this handled".** Every screen handles its own keys; the only
-/// question that reaches the loop is whether the app should keep running, and
-/// it arrived there through one `bool` every handler had to agree about. They
-/// did not: the first version of the workspace picker returned the opposite of
-/// what the loop reads and closed the app on its first arrow — and a test that
-/// asserted only on `app.screen` after each key could not see it, because the
-/// return value was the whole bug.
-///
-/// So the two answers are named, and the one a screen wants by default is the
-/// one that reads as the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Flow {
     /// Keep running, whatever the key did. Every screen's answer unless the
-    /// operator asked to leave.
     KeepRunning,
     /// Leave the loop: the operator quit.
     Quit,
@@ -180,11 +144,6 @@ pub(crate) async fn handle_key(
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
 ) -> Flow {
     // Tab is the footer's own key: "the other side of the dashboard". A screen
-    // may spend it on something of its own (the sound editor's layer tabs, the
-    // jobs view's own toggle), and the three modal screens swallow every press —
-    // but everywhere else it means what the footer says, and it comes back to
-    // the screen it was pressed on, exactly like the jobs view already did from
-    // the dashboard.
     if key.code == KeyCode::Tab && tab_is_free(&app.screen) {
         let previous = Box::new(app.screen.clone());
         app.screen = Screen::Jobs {
@@ -200,10 +159,6 @@ pub(crate) async fn handle_key(
 }
 
 /// Whether screens have spent `Tab` on something of their own.
-///
-/// The three modal screens are on the list for a different reason: their keys
-/// are a closed set, and a `Tab` that swapped a confirmation for the jobs view
-/// would lose the question it was about to ask.
 fn tab_is_free(screen: &Screen) -> bool {
     !matches!(
         screen,
@@ -226,11 +181,6 @@ fn is_layer(screen: &Screen) -> bool {
 }
 
 /// The `:`-opened windows that are a *step*, not a floor. They behave like
-/// the sound editor's own layers: `Esc` closes them to the screen they were
-/// opened from, so `:script` from Normal goes back to Normal, but the two
-/// Escs *inside* the window are its own before that. Kept out of
-/// [`is_layer`] on purpose: they are not drawn over another screen, and the
-/// `:`-return logic would double-unwrap them.
 fn is_place_with_exit(screen: &Screen) -> bool {
     matches!(
         screen,
@@ -239,29 +189,15 @@ fn is_place_with_exit(screen: &Screen) -> bool {
 }
 
 /// Remember where a layer was opened over, once the key that opened it has run.
-///
-/// **After the handler, not before**, because only the handler knows whether
-/// this keypress opened a layer or cancelled one — and from the outside the two
-/// are the same pair of screens in the same order. So the cancel keys push
-/// nothing (the arm that ran has already popped), a place screen is not a layer
-/// at all, and a layer that was *answered* rather than cancelled pops the entry
-/// it was holding, which is what keeps the stack from drifting away from the
-/// screens actually on it.
 fn note_layer(app: &mut App, before: Screen, code: KeyCode) {
     let after = app.screen.clone();
     // The `:` line ran: the prompt is spent, and what the command opened sits
-    // over the screen the command ran in. Without this, `:m` on the dashboard
-    // would raise its confirmation over a prompt that is no longer on screen,
-    // and cancelling it would bring the dead prompt back.
     if let Some(parent) = app.prompt_spent.take() {
         if is_layer(&after) || is_place_with_exit(&after) {
             // A layer sits over `parent`; a `:`-opened window with its own
-            // internal Esc ladder closes to `parent` when its ladder runs
-            // out. Same entry shape, same one-`back_out` exit.
             app.back.push(parent);
         } else {
             // The command left a place screen on top: the prompt is gone, and
-            // so is the entry it pushed on the way in.
             app.back.pop();
         }
         return;
@@ -279,10 +215,6 @@ fn note_layer(app: &mut App, before: Screen, code: KeyCode) {
 }
 
 /// Route one key to the screen that owns it.
-///
-/// Split from [`handle_key`] so the recursion behind a `:` command — which
-/// presses the key the word names — cannot push a second layer entry for one
-/// keypress. Every key runs exactly one [`note_layer`].
 pub(crate) async fn route(
     app: &mut App,
     key: KeyEvent,

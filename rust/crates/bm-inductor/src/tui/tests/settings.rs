@@ -47,7 +47,6 @@ fn bind_prompt_parses_the_tuple_and_falls_back_to_settings() {
 #[test]
 fn bind_prompt_with_a_missing_key_keeps_the_prompt_open() {
     // The keep-open contract: a mispointed key names the expanded path
-    // instead of dispatching a box that can never provision.
     let mut app = bind_app();
     let home = std::env::var("HOME").unwrap();
     let err = submit_text(
@@ -105,11 +104,6 @@ fn ssh_default_commands_save_validate_and_clear() {
 #[test]
 fn the_models_release_setting_saves_a_repo_and_refuses_one_that_is_not() {
     // The setting decides whether a box fetches 363 MB from a CDN or receives
-    // 668 MB over the operator's uplink, and a typo in it is silent in exactly
-    // the way that matters: the URL 404s, the fetch reports "unreachable", and
-    // the push quietly happens instead. So the shape is checked *here*, by the
-    // same parser the URL is built from, while the operator's typing is still
-    // on screen.
     let dir = std::env::temp_dir().join("bm-models-release-save");
     let _ = std::fs::remove_dir_all(&dir);
     let mut app = App::new("http://x");
@@ -128,16 +122,12 @@ fn the_models_release_setting_saves_a_repo_and_refuses_one_that_is_not() {
     assert_eq!(load().models_release, "lhuthng/storycast");
 
     // Empty is the push, and it has to be reachable without a text editor:
-    // that is the setting every workspace had before this existed.
     let msg = save_app_setting(&app, TextKind::ModelsRelease, "  ").unwrap();
     assert!(msg.contains("push"), "{msg}");
     assert_eq!(load().models_release, "");
 }
 
 /// The pack release setting, and the one thing it deliberately does **not** ask
-/// for: the version. That comes off the load pointer, so the tag a box
-/// resolves and the tag `tools/profile.sh` published are one string rather
-/// than two that have to be kept in step.
 #[test]
 fn the_pack_release_setting_takes_a_repo_and_reads_the_tag_from_the_pointer() {
     let dir = std::env::temp_dir().join(format!("bm-tui-packrelease-{}", std::process::id()));
@@ -147,7 +137,6 @@ fn the_pack_release_setting_takes_a_repo_and_reads_the_tag_from_the_pointer() {
     let load = || bm_core::config::Settings::load(&bm_core::Layout::new(&dir).settings());
 
     // No profile loaded: the repo is still saved, and the message says why
-    // nothing would be fetched yet rather than claiming success.
     let msg = save_app_setting(&app, TextKind::PacksRelease, "lhuthng/storycast").unwrap();
     assert!(!msg.is_empty());
     assert_eq!(load().packs_release, "lhuthng/storycast");
@@ -166,7 +155,6 @@ fn the_pack_release_setting_takes_a_repo_and_reads_the_tag_from_the_pointer() {
     assert!(msg.contains("no version"), "{msg}");
 
     // Versioned: the message names the tag, which is the thing an operator
-    // wants to check against what they published.
     bm_core::profile::write_pointer(
         &dir,
         &bm_core::profile::Pointer {
@@ -201,11 +189,6 @@ fn the_pack_release_setting_takes_a_repo_and_reads_the_tag_from_the_pointer() {
 #[test]
 fn render_batch_parses_its_bounds_and_saves_to_this_workspaces_settings() {
     // The knob's own rules in one place. `0` is the value that would deadlock
-    // the scheduler, an offer of no takes assigns no row, so the chapter never
-    // leaves Pending and nothing anywhere says why, and 64 is where a batch
-    // stops being a batch and becomes a lease held on one box for hours. Both
-    // are refused *while the operator's typing is still on screen*; the
-    // scheduler's clamp is the last resort, not the first answer.
     let dir = std::env::temp_dir().join("bm-renderbatch-save");
     let _ = std::fs::remove_dir_all(&dir);
     let mut app = App::new("http://x");
@@ -249,8 +232,6 @@ fn render_batch_parses_its_bounds_and_saves_to_this_workspaces_settings() {
 #[tokio::test]
 async fn the_batch_command_opens_a_prefilled_prompt_and_enter_saves_it() {
     // End to end through the key chain: the word routes, the prompt opens on
-    // the value actually in force (a compiled default has to read differently
-    // from a number somebody chose), and Enter writes it and closes.
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let dir = std::env::temp_dir().join("bm-renderbatch-prompt");
@@ -440,7 +421,6 @@ async fn cast_opens_only_from_the_command_line() {
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
     // Bare S is inert: the overview is gated behind :S like every other
-    // screen that can dispatch work.
     handle_key(&mut app, key(KeyCode::Char('S')), &http, &job_tx).await;
     assert!(
         matches!(app.screen, Screen::Normal),
@@ -473,7 +453,6 @@ async fn roster_job_shows_disk_first_without_contacting_anyone() {
         .unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
     // Nothing listens on :9, the inductor hop fails fast. The local roster
-    // must already be on the channel: picking never waits for the network.
     super::super::jobs::job_load_roster(tx, "http://127.0.0.1:9".into(), http, layout).await;
     let first = tokio::time::timeout(Duration::from_secs(10), rx.recv())
         .await
@@ -502,7 +481,6 @@ async fn roster_job_shows_disk_first_without_contacting_anyone() {
 #[tokio::test]
 async fn quit_word_quits_from_the_picker_command_line() {
     // The filter owns every letter on picker/cast, so a bare `q` types
-    // but `:quit` must still quit from there, not type another letter.
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();

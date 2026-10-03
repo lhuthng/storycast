@@ -163,11 +163,6 @@ fn resolve_speaker_prefers_exact_then_canon_then_passthrough() {
 #[test]
 fn a_characters_own_name_beats_another_characters_alias_for_it() {
     // The bible contradicts itself routinely: a digest lists an epithet as
-    // one character's alias, then a later chapter introduces it as a
-    // character in its own right. Real shape — `Vân bá` is a character and
-    // also sits in `Lão giả`'s aliases, earlier in the file. With the
-    // passes interleaved, position decided the answer, the cast was keyed
-    // under `Lão giả`, and the chapter would not plan.
     let bible = json!({"characters": [
         {"name": "Lão giả", "proper_aliases": ["Lão giả", "Kim lão", "Vân bá"]},
         {"name": "Vân bá", "proper_aliases": ["Ngao Vân"]}
@@ -249,7 +244,6 @@ fn apply_merges_skips_unknown_names_quietly() {
 #[test]
 fn merge_bible_refuses_bare_generics_as_new_aliases() {
     // ch112's hijack, pinned at the gate: "nữ tử" must never attach to
-    // anyone again, while a name-bearing form still does.
     let mut bible = bible_with("Lạc Lan Tuyết", &["Lạc Lan Tuyết"]);
     let data = json!({
         "new_characters": [],
@@ -318,9 +312,6 @@ fn scrub_drops_legacy_generics_but_keeps_names_and_specifics() {
 #[test]
 fn a_fold_never_re_imports_a_generic_alias() {
     // The hole a scrub could never win through: `apply_merges` copied the
-    // absorbed entry's aliases wholesale, so "Sư phụ" came back onto the
-    // character every reconcile had just removed it from — and
-    // `validate_digest_identity` then read it as exclusive ownership.
     let mut bible = json!({"characters": [
         {"name": "Thanh Sơn lão tổ", "proper_aliases":
             ["Thanh Sơn lão tổ", "Sư phụ", "sư tôn"]},
@@ -348,8 +339,6 @@ fn a_fold_never_re_imports_a_generic_alias() {
 #[test]
 fn merge_bible_heals_an_already_polluted_alias_list() {
     // Nobody presses reconcile on a machine nobody drives, so the legacy
-    // pollution has to be cleaned by the writer that already runs: the
-    // merge on every digest completion.
     let mut bible = json!({"characters": [{
         "name": "Thanh Sơn lão tổ", "personality": "p", "voice_hint": "elderly male",
         "tags": [], "proper_aliases":

@@ -18,26 +18,14 @@ use ratatui::{
 use std::collections::BTreeMap;
 
 /// Step 2's column widths, in characters. Named because the used-by cell is
-/// computed from what is left: these four are the whole of the fixed part, and
-/// a column added here has to be paid for there or the last cell silently
-/// loses its padding.
 const MARKER_W: usize = 2;
 /// A voice name and its tag suffix, `young-male-10`, with room for the
-/// catalogue's accented presets.
 const NAME_W: usize = 20;
 const GENDER_W: usize = 8;
 /// `auditioning…` / `auditioned`, the only two states a row can carry that
-/// the voice itself does not.
 const AUDITION_W: usize = 12;
 
 /// One cell, exactly `width` wide: truncated, then padded.
-///
-/// A cut cell says so with an `…` rather than stopping mid-word, because a
-/// name that runs into the next column reads as one longer name — which is
-/// exactly the bug the fixed widths exist to prevent.
-///
-/// `head_chars` counts characters, and every string in this table is
-/// precomposed single-width text, so the pad lands where the terminal ends it.
 fn pad(text: &str, width: usize) -> String {
     let body = match text.chars().count() {
         0 => String::new(),
@@ -63,7 +51,6 @@ fn plural(n: usize, one: &str) -> String {
 fn group_label(kind: VoiceKind, tags: &str) -> String {
     match kind {
         // A pooled sample with no tags at all is still auto-assignable — it
-        // was vetted when it was added — it just has nothing to group by.
         VoiceKind::AutoAssign if tags.is_empty() => "Auto Assign · untagged".to_string(),
         VoiceKind::AutoAssign => format!("Auto Assign · {tags}"),
         VoiceKind::Unique => "Unique".to_string(),
@@ -101,8 +88,6 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
         .split(inner);
 
     // Filter line. The cursor shows exactly when typing would land:
-    // always on step 1, on step 2 only while the filter is focused
-    // (in audition focus `t` would play, not type).
     let typing = picker.stage == PickStage::Character || picker.filter_focus;
     f.render_widget(
         Paragraph::new(Line::from(vec![
@@ -114,8 +99,6 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
     );
 
     // Provenance: never let a fallback roster masquerade as the live one —
-    // and never hide a usable roster behind a spinner while a live upgrade
-    // is still in flight.
     let provenance = match (&app.roster, &app.roster_error, app.roster_loading) {
         (Some(r), _, _) => {
             let (label, colour) = if r.source == "live" {
@@ -144,8 +127,6 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
     f.render_widget(Paragraph::new(provenance), rows[1]);
 
     // What an audition would play, and what it would replace. Both matter and
-    // neither is guessable from the table: the incumbent is not in the list of
-    // candidates, and a random line is random until you are told which one it is.
     let audition_ctx: Line = match picker.stage {
         PickStage::Character => Line::from(Span::styled(
             "audition with :current :try :another once a character is chosen",
@@ -185,11 +166,8 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
     );
     let colour = app.colour();
     // Which voice is rendering right now. Read from the `App`, not the picker:
-    // the cast overview can start an audition too, so "in flight" is a property
-    // of the process and not of this screen.
     let auditioning = app.audition.clone();
     // Precomputed so the row closures below capture plain data rather than a
-    // borrow of `app`, which is also being borrowed for the roster itself.
     let cast: BTreeMap<String, String> = app
         .roster
         .as_ref()
@@ -256,13 +234,6 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                             if let Some(v) = meta.get(&current) {
                                 spans.push(Span::styled(
                                     // The same `gender_of` as step 2: a pooled
-                                    // sample's roster gender is `unknown`, and
-                                    // its tag already says what it is. Accent
-                                    // and language are gone with it: on an
-                                    // offline roster they read `unknown` and
-                                    // `vi-VN` on every single row, and a column
-                                    // that says one thing on every line is not
-                                    // a column.
                                     gender_of(v).to_string(),
                                     Style::default().fg(Color::DarkGray),
                                 ));
@@ -289,13 +260,8 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                 let mut scroll = picker.scroll;
                 clamp_scroll(picker.cursor, &mut scroll, list.len(), height);
                 // The cursor is a row index and a heading is a row, so it can
-                // be sitting on one; the marker follows the voice it means.
                 let cursor = settle_cursor(&list, picker.cursor);
                 // Every column is a fixed width and the used-by cell is
-                // whatever is left over. A voice name, an accent or a list of
-                // eleven characters must not push the cells after it — that
-                // is what made the columns unreadable and the alignment a
-                // guess.
                 let used_w = (rows[3].width as usize)
                     .saturating_sub(MARKER_W + NAME_W + GENDER_W + AUDITION_W);
                 let items: Vec<Line> = list
@@ -317,7 +283,6 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                             let marker = if selected { "\u{25b8} " } else { "  " };
                             let used = used_by(users, &picker.character);
                             // Green is the incumbent: this is the voice the
-                            // character already speaks with.
                             let (used_text, used_colour) =
                                 if users.iter().any(|u| u == &picker.character) {
                                     (used, Color::Green)

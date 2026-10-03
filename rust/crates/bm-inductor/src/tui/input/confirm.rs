@@ -40,7 +40,6 @@ pub(crate) async fn key_confirm(
                                 force,
                                 settings_key: app.ssh_defaults().key,
                                 // The operator asked for this one by hand, so
-                                // no `B` start's flag may stop it.
                                 cancel: None,
                             },
                         );
@@ -110,13 +109,6 @@ pub(crate) async fn key_confirm(
                 }
                 ConfirmAction::StopBackend => {
                     // Cluster-wide and slow (ssh sweeps) — a background job,
-                    // never inline, so the dashboard keeps drawing. The catch-up
-                    // provisions a `B` handed out are **not** queued behind it
-                    // any more: they hold one box each, the stop holds the
-                    // cluster, and the two run together. So the stop does not
-                    // wait for them; it sets the flag they read before they
-                    // launch a worker, and an in-flight push then finishes and
-                    // stays quiet rather than relaunching what X is killing.
                     if let Some(flag) = app.start_cancel.take() {
                         flag.store(true, Ordering::Relaxed);
                     }
@@ -186,9 +178,6 @@ pub(crate) async fn key_confirm(
                     list,
                 } => {
                     // `beating` *is* the force flag: releasing from a box that
-                    // is still answering is exactly the case the op refuses
-                    // without one, and the dialog the operator just answered is
-                    // where that decision was made.
                     dispatch_op(
                         app,
                         job_tx,
@@ -205,17 +194,12 @@ pub(crate) async fn key_confirm(
                         format!("releasing {count} row(s) from {worker} — watch the ledger"),
                     );
                     // Back to the ledger, not the dashboard: the rows leaving
-                    // *are* the confirmation, and this is the only screen where
-                    // they can be seen leaving. The same reason the sound
-                    // editor's removal returns to its own tab.
                     app.screen = Screen::Tasks(list);
                 }
                 ConfirmAction::SoundRemove(r) => {
                     // Sets the screen itself: answering this dialog returns to
-                    // the pool tab it was asked from, not to the dashboard.
                     if crate::tui::input::sound::apply_removal(app, r.layer, &r.name, r.view) {
                         // A clip left the registry, so a published chapter that
-                        // played it no longer matches the design on disk.
                         dispatch_op(
                             app,
                             job_tx,
@@ -230,10 +214,6 @@ pub(crate) async fn key_confirm(
             }
         }
         // Back to whatever raised the dialog, not to the dashboard. Every
-        // caller that answers `y` returns to its own screen (the sound editor
-        // to its tab, `W` to the ledger), and answering `n` has to land in the
-        // same place — otherwise the two answers to one question leave the
-        // operator in two different rooms.
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
             app.screen = app.back_out();
             app.set_status(Level::Info, "cancelled — nothing changed");

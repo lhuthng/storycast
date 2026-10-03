@@ -1,9 +1,4 @@
 //! Cloud view: what the EC2 account holds, and what the registry has linked.
-//!
-//! Deliberately not merged into the Machines pane. A `Machine` is a linked box
-//! with an ssh key and a provision path; an `AwsInstance` is an EC2 resource
-//! that may be linked to nothing. The mark this view adds — "not in registry" —
-//! is the whole point of showing the two side by side.
 use crate::tui::{
     app::{App, HitTarget, ListTarget},
     model::{clamp_scroll, is_live_state},
@@ -30,7 +25,6 @@ fn address(i: &bm_core::provision::AwsInstance) -> String {
 
 pub(crate) fn draw_cloud(f: &mut ratatui::Frame, app: &mut App, view: &CloudView) {
     // The overlay has its own borders to pay for, so a narrow terminal gets the
-    // whole screen rather than a squeezed table with margins it cannot spare.
     let area = centered_padded(f.area(), 108, 30, 2);
     f.render_widget(Clear, area);
 

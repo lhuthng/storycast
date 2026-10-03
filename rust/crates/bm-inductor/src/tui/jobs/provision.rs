@@ -6,9 +6,6 @@ use super::reqs::Ev;
 use super::*;
 
 /// Run a blocking provision with its log lines streaming into the event pane
-/// as they happen: each step lands with a wall timestamp, so a slow box
-/// reads as progress rather than a stall. The pump drains before returning,
-/// so everything the caller sends afterwards stays in order.
 async fn provision_live(
     tx: &tokio::sync::mpsc::UnboundedSender<Ev>,
     run: impl FnOnce(tokio::sync::mpsc::UnboundedSender<String>) -> crate::ProvisionOutcome
@@ -24,15 +21,11 @@ async fn provision_live(
     });
     let out = tokio::task::spawn_blocking(|| run(live_tx)).await;
     // The run owned the only sender, so its end closes the channel: awaiting
-    // the pump flushes every line before the caller continues.
     let _ = pump.await;
     out
 }
 
 /// Elapsed-push stamp for the provision launch line (`4s`, `3m41s`): the
-/// reason a box's `worker started` can land minutes after faster boxes are
-/// already beating. Same shape as the jobs screen's label, kept beside its
-/// only caller rather than shared.
 fn push_label(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
@@ -42,13 +35,6 @@ fn push_label(secs: u64) -> String {
 }
 
 /// Why a provision run did not leave the box ready, in the operator's terms.
-///
-/// The run's own `stop` wins: the pre-flight steps that fail before a step can
-/// log (`no TTS sidecar binary for …`, `no local profile loaded`) have no
-/// shared vocabulary, and a scanner that only knows "missing"/"not found"/
-/// "failed" silently reduced them to "provision INCOMPLETE", which names no
-/// cause and answers a question the operator never asked. The log scan stays
-/// as the fallback for failures inside the step flow, where the useful line
 /// really is in the log: prefer the inner root cause ("rsync: command not
 /// found") over its wrapper ("agent install failed").
 pub(crate) fn provision_stop_reason(stop: Option<&str>, lines: &[String]) -> String {
@@ -56,7 +42,6 @@ pub(crate) fn provision_stop_reason(stop: Option<&str>, lines: &[String]) -> Str
         return bm_core::util::head_chars(why, 160);
     }
     /// A log line without its `[addr] ` prefix, the pane already shows the
-    /// machine, and the address is the widest part of the note.
     fn body(l: &str) -> &str {
         match l.strip_prefix('[') {
             Some(rest) => match rest.find(']') {
@@ -86,13 +71,9 @@ pub(crate) async fn job_provision(
 ) {
     let addr = machine.addr.clone();
     // Anchor for the launch line below: the push ahead is blocking and slow
-    // on some boxes, so the worker starts minutes after faster boxes are
-    // already beating, the elapsed on that line is what says so.
     let t0 = Instant::now();
     send(&tx, Level::Info, format!("[{addr}] provisioning machine…"));
     // Read before the run: the job stamps `provisioning` below, so the state on
-    // the way in is the only record that this box was still booting. A failed
-    // probe against a box we knew was booting is a wait, not a fault.
     let was_initializing = machine.state == MachineState::Initializing;
     let mut again = machine.clone();
     // The app-wide default fills a keyless box; a box key always wins.
@@ -141,9 +122,6 @@ pub(crate) async fn job_provision(
             force,
             Some(live),
             // `None` reads `models_release` out of the workspace settings, which
-            // is where the run screen writes it — one source of truth for both
-            // front ends rather than a value copied through the TUI and stale
-            // the moment somebody edits the file.
             None,
         )
     })
@@ -152,15 +130,9 @@ pub(crate) async fn job_provision(
         Ok(out) => {
             let ready = out.ready;
             // Lines already streamed live above, `lines` stays for the
-            // reason scan only, never re-sent.
             let fail_reason = provision_stop_reason(out.stop.as_deref(), &out.lines);
             if ready {
                 // `X` landed while this box was being pushed: the box is
-                // provisioned, but giving it a worker now would leave the
-                // cluster running after the stop the operator asked for. The
-                // push itself is not aborted, it is one blocking rsync, and
-                // killing it mid-file is how a box ends up half-configured
-                // so the stop is honoured at the last point that matters.
                 if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
                     let note = "start cancelled (X) — provisioned, worker not launched";
                     send_update(&tx, MachineState::Configured, note);
@@ -183,9 +155,6 @@ pub(crate) async fn job_provision(
                     ),
                 );
                 // Worker half only, never the inductor: a `p` retry
-                // finishes with the box joined, whatever else runs.
-                // One entry point, whatever the box is: the launcher decides
-                // fork-versus-ssh and nothing here asks which it got.
                 let root = layout.root.clone();
                 let boxm = again;
                 match tokio::task::spawn_blocking(move || {
@@ -253,19 +222,12 @@ pub(crate) async fn job_provision(
                 == MachineState::Initializing
             {
                 // It never answered ssh, and we already knew it was booting
-                // so this is a wait, not a fault. Reporting `Error` here would
-                // call a box twenty seconds into its first boot broken, which
-                // is precisely the misreading `initializing` exists to stop.
                 let note = "still booting — nothing to do yet, :prov again in a moment";
                 send_update(&tx, MachineState::Initializing, note);
                 set_machine_state(&api, &layout, &addr, MachineState::Initializing, note).await;
                 send(&tx, Level::Info, format!("[{addr}] {note}"));
             } else {
                 // The note carries the actual failing step, a missing local
-                // build, python missing, an ssh abort, because a bare
-                // "INCOMPLETE" made the machine pane lie about what the box
-                // needs, and ":prov again" is the wrong advice for a failure
-                // that only a build on this machine can fix.
                 let reason = fail_reason;
                 send_update(&tx, MachineState::Error, &reason);
                 set_machine_state(&api, &layout, &addr, MachineState::Error, &reason).await;
@@ -341,7 +303,6 @@ pub(crate) async fn job_add_sample(
     tags: Option<Vec<String>>,
 ) {
     // Off the UI thread: enrollment loads the voice model and takes a
-    // while. Same shape as the provision arm below.
     let for_log = path.clone();
     let out = tokio::task::spawn_blocking(move || {
         bm_core::pool::add_sample(&layout, std::path::Path::new(&path), tags, name)
@@ -353,7 +314,6 @@ pub(crate) async fn job_add_sample(
                 send(&tx, Level::Ok, l);
             }
             // The picker may be showing the pre-sample roster: fetch a
-            // fresh one so the new voice is there without pressing R.
             let _ = tx.send(Ev::Done(DoneKind::ReloadRoster));
         }
         Ok(Err(e)) => {

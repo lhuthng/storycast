@@ -6,9 +6,6 @@ use super::attribution::Continuity;
 use super::attribution::Pass;
 use super::*;
 /// Read the scene map, refusing a map that declares no music palette: without
-/// it the prompt would offer the analyzer an empty vocabulary and every emitted
-/// `music` value would be rejected. One read, feeding both the prompt and the
-/// validator, so the two cannot disagree about what is allowed.
 pub(crate) fn load_map(layout: &Layout) -> Result<crate::ambience::SceneMap> {
     let path = layout.assets().join("scene-map.json");
     let map = crate::ambience::load_map(&path)?;
@@ -23,10 +20,6 @@ pub(crate) fn load_map(layout: &Layout) -> Result<crate::ambience::SceneMap> {
 }
 
 /// The manual context pass: the bible, the chapter, and nothing else.
-///
-/// The automatic path uses [`build_attribution_prompt`] and the immutable
-/// speaker map it returns. This public builder remains the legacy/manual route
-/// so existing workspaces and pasted answers keep their old contract.
 pub fn build_prompt(layout: &Layout, bible: &Value, chapter_text: &str) -> Result<String> {
     let path = layout.prompt();
     let template = std::fs::read_to_string(&path)
@@ -37,11 +30,6 @@ pub fn build_prompt(layout: &Layout, bible: &Value, chapter_text: &str) -> Resul
 }
 
 /// What the context pass found, rendered for the script pass: the cast it must
-/// attribute against and every surface form the chapter uses for them.
-///
-/// Only these two keys: the script pass is handed the answer to the question
-/// the context pass asked, not its whole output. `new_characters` and
-/// `new_aliases` are the bible's business and the script pass never reads them.
 fn cast_context(context: &Value) -> String {
     let mut lean = serde_json::Map::new();
     lean.insert(
@@ -59,14 +47,6 @@ fn cast_context(context: &Value) -> String {
 }
 
 /// The script pass's prompt: the bible, the cast the context pass resolved, and
-/// the chapter.
-///
-/// The vocabularies are rendered from the map and the pools rather than written
-/// into the template, so adding a mood (and the clip that answers it), or a
-/// scene rule (and the words it matches), is one edit to one file. A prompt that
-/// listed its own vocabulary would drift the moment the pool changed, and the
-/// drift would be silent — and a pack cannot edit a prompt at all, so a rule
-/// whose match words the analyzer never sees is a rule that never fires.
 pub fn build_script_prompt(
     layout: &Layout,
     engine: &str,
@@ -98,25 +78,14 @@ pub fn build_script_prompt(
 }
 
 /// Render the bound engine's non-verbal vocabulary into a prompt — or take the
-/// rule out of it.
-///
-/// **The rule is VieNeu's**, so an engine that voices no tags gets *no such
-/// rule* rather than one that says "none": a negated rule still teaches the
-/// model that brackets are a thing it may write, and this engine reads them
-/// aloud. The section is bounded by its own heading and the next rule's — the
-/// same mechanism rules 1–3 use — and a template that has been renumbered is
-/// reported rather than silently left alone.
 fn render_nonverbal(body: &mut String, engine: &str, missed: &mut Vec<String>) {
     // The declaration API, not a name test: whichever engine is bound answers
-    // for itself, and an engine nobody declared answers "none" for the same
-    // reason a tagless one does.
     let tags = crate::voices::nonverbals(engine);
     if tags.is_empty() {
         if !replace_prompt_section(body, NONVERBAL_RULE, MUSIC_RULE, "") {
             missed.push("rule 7 (non-verbal)".into());
         }
         // Backstop for a template numbered differently: a placeholder that
-        // survives to the model is a token it copies.
         for ph in NONVERBAL_PLACEHOLDERS {
             *body = body.replace(ph, "");
         }
@@ -129,7 +98,6 @@ fn render_nonverbal(body: &mut String, engine: &str, missed: &mut Vec<String>) {
 }
 
 /// The non-verbal rule's opening heading, which is also how it is found when it
-/// has to be removed.
 const NONVERBAL_RULE: &str = "7. NON-VERBAL SOUNDS.";
 /// The rule after it: the far bound of the section.
 const MUSIC_RULE: &str = "8. MUSIC:";
@@ -147,16 +115,6 @@ fn vocabulary_block(tags: &[(&str, &str, &str)]) -> String {
 }
 
 /// A deterministic, source-aware view of one chapter.
-///
-/// The preparer never rewrites prose and never asks a model what it means. It
-/// only separates quoted dialogue from surrounding narration and gives both a
-/// stable id. Both automatic passes receive this JSON view; the attribution pass
-/// fixes speakers and the source gate proves every id was consumed once.
-///
-/// `at`/`end` are where the span sits in the sanitized text — the quote gates
-/// use them to say *where* a finding is and to re-read the span **raw**: the
-/// published `text` is trimmed, and a trim would hide exactly the leading
-/// paragraph break that proves a speech swallowed the paragraph after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedEvent {
     pub(crate) id: String,
@@ -170,13 +128,8 @@ pub(crate) struct PreparedEvent {
 pub(crate) struct PreparedChapter {
     pub(crate) events: Vec<PreparedEvent>,
     /// The machine-readable form placed in the attribution and staging prompts.
-    /// It contains the chapter text exactly once, split into ordered events.
     pub(crate) prompt_json: String,
     /// Where a quote delimiter was still open when the text ran out: a byte
-    /// offset into the **sanitized** text, or `None` when every delimiter paired.
-    ///
-    /// Not cosmetic. An unclosed quote makes the scanner treat *every*
-    /// remaining span as one dialogue event, so a chapter that lost a final
     /// `"` upstream is read start-to-finish in a single voice — the mirror of
     /// the no-quotes case below, and just as silent.
     ///
@@ -247,8 +200,6 @@ impl PreparedChapter {
             );
         } else if narration == 0 {
             // Every event landed inside quotes. Legal, and true of a chapter
-            // that is nothing but a system panel — so this asks rather than
-            // claims, and stays a line the operator learns to read.
             s.push_str(
                 " — no narration at all, so the whole chapter will be read as speech. That is \
                  correct for a chapter that is all dialogue or a system panel. If the prose is \
@@ -281,10 +232,6 @@ pub(crate) fn prepared_event(
 }
 
 /// Build the audio-staging pass. Speaker assignment is supplied as immutable
-/// data and the model never returns it; code attaches it after generation.
-///
-/// `continuity` is the part this prompt is for when the chapter was split, and
-/// `None` for a chapter that fits one call — see [`Continuity`].
 pub(crate) fn build_staging_prompt(
     layout: &Layout,
     engine: &str,
@@ -306,10 +253,6 @@ pub(crate) fn build_staging_prompt(
     ));
     let mut missed: Vec<String> = Vec::new();
     // The acting-mood vocabulary, rendered from the one table the mixer reads
-    // (`assemble::MOOD_TAKE`) so the prompt can only offer words `mood_cluster`
-    // resolves. It was previously written into the file's TASK block, which the
-    // override below deletes — so the analyzer saw no mood list at all and any
-    // coined word silently fell back to `neutral`.
     let mood_palette = crate::assemble::mood_palette();
     let mut body = template;
     replace_or_miss(
@@ -338,15 +281,10 @@ pub(crate) fn build_staging_prompt(
     );
     replace_or_miss(&mut body, "{music_palette}", &palette, &mut missed);
     // `{mood_palette}` is new: profiles written before it lack the placeholder
-    // and that is not a miss worth warning about, so it is replaced outright.
     body = body.replace("{mood_palette}", &mood_palette);
     // `{effect_tags}` is deprecated: the effect layer reads `scene` labels, and
-    // rule 9 that used this placeholder is gone. Profiles written before that
-    // still carry it, so it is replaced outright rather than reported as a miss.
     body = body.replace("{effect_tags}", &effects);
     // Same for `{scene_words}`, and for the same reason plus a second: this path
-    // shares its template with the script pass, so a placeholder only the other
-    // one replaced would survive into the prompt as a literal the model copies.
     body = body.replace("{scene_words}", &scene_words);
     replace_or_miss(&mut body, "{inject_sounds}", &injects, &mut missed);
     replace_or_miss(

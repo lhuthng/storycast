@@ -44,8 +44,6 @@ use super::validate::validate_digest_identity;
 use super::*;
 
 /// A bible that knows one character, for the tests that need a named
-/// speaker on the roster: `validate_digest_identity` refuses a roster name
-/// that is neither in the bible nor declared in `new_characters`.
 fn bible_with_phong() -> Value {
     json!({"characters": [
         {"name": "Dịch Phong", "personality": "wry", "voice_hint": "young male",
@@ -54,8 +52,6 @@ fn bible_with_phong() -> Value {
 }
 
 /// The source gate with nothing retracted, which is what every test that
-/// is not *about* the retraction field means. Named rather than spelled
-/// inline so a future test that does retract something has to say so.
 fn validate_source_alignment_no_retractions(
     data: &Value,
     prepared: &PreparedChapter,
@@ -64,9 +60,6 @@ fn validate_source_alignment_no_retractions(
 }
 
 /// The chain the whole program rests on, as one test: **a crawler's output
-/// decides whether the model is asked a question at all.**
-///
-/// `prepare_chapter` decides narration-vs-dialogue from quote marks alone
 /// `"`, `“`, `「`. So a crawler that returns a container with no quote marks
 /// in it, or that picks a site which marks speech some other way, hands the
 /// digest one long run of narration. From there *nothing complains*: the
@@ -88,7 +81,6 @@ fn the_digest_reports_a_chapter_whose_crawler_kept_no_quote_marks() {
     assert!(!s.contains("no dialogue found"), "a false alarm: {s}");
 
     // The broken shape: the same prose with the quote marks gone, which is
-    // what a crawler selecting the wrong container returns.
     let stripped = "Chương 1: Gặp gỡ\n\nHắn đứng đợi. Ừm? hắn hỏi.";
     let p = prepare_chapter(stripped);
     assert_eq!(
@@ -99,12 +91,10 @@ fn the_digest_reports_a_chapter_whose_crawler_kept_no_quote_marks() {
     let s = p.split_summary();
     assert!(s.contains("0 dialogue"), "{s}");
     // …and the line points at the thing to check, because a count on its
-    // own is trivia.
     assert!(s.contains("crawler's container selector"), "{s}");
 }
 
 /// The same line, for a chapter that is legitimately all narration, must
-/// *not* blame the crawler, or it stops being read.
 #[test]
 fn the_split_report_does_not_blame_the_crawler_on_a_quiet_chapter() {
     let p = prepare_chapter("Chương 2: Một cảnh\n\nHắn lật trang sách.");
@@ -112,7 +102,6 @@ fn the_split_report_does_not_blame_the_crawler_on_a_quiet_chapter() {
     let s = p.split_summary();
     assert!(s.contains("0 dialogue"), "{s}");
     // Conditional, because a single-voice chapter is a real thing: the line
-    // has to concede it before naming the alternative.
     assert!(
         s.contains("correct if the chapter really is narration"),
         "the caveat must come before the suggestion: {s}"
@@ -121,7 +110,6 @@ fn the_split_report_does_not_blame_the_crawler_on_a_quiet_chapter() {
 }
 
 /// An empty chapter says so rather than claiming zero dialogue of a chapter
-/// that does not exist.
 #[test]
 fn the_split_report_says_so_when_there_is_nothing_to_split() {
     let p = prepare_chapter("");
@@ -133,9 +121,6 @@ fn the_split_report_says_so_when_there_is_nothing_to_split() {
 }
 
 /// The line as it actually reaches an operator: first entry in the log of
-/// `assemble_outcome`, so it is present for the worker's run *and* for the
-/// by-hand one. Asserted on the log rather than on `split_summary` because
-/// the placement is the part that can silently regress.
 #[test]
 fn the_split_is_the_first_thing_the_digest_log_says() {
     let text = "Chương 1: Gặp gỡ\n\nHắn đứng đợi. \"Ừm?\" hắn hỏi.";
@@ -215,7 +200,6 @@ fn json_repair_settles_quotes_before_control_characters() {
 }
 
 /// The complaint the repair prompt quotes has to say what to write, not
-/// which byte class serde tripped over.
 #[test]
 fn a_json_complaint_carries_its_own_remedy() {
     let err = json_failure(&serde_json::from_str::<Value>("{\"a\":").unwrap_err());
@@ -228,8 +212,6 @@ fn a_json_complaint_carries_its_own_remedy() {
 }
 
 /// A literal newline inside a string is ch79's failure in miniature, and it
-/// is *repaired* rather than reported, the alternative is burning a model
-/// call on output this code can fix.
 #[test]
 fn a_raw_control_character_is_repaired_rather_than_reported() {
     let value = parse_json_repaired("{\"a\": \"one\ntwo\"}").unwrap();
@@ -257,9 +239,6 @@ fn bible_context_is_identity_only() {
 }
 
 /// The staging shape asks for `mood`/`scene`/`music`/`text` only where they
-/// change; code fills the rest. This is the pass that makes the smaller
-/// answer identical to the older, fully-populated one before any validator
-/// or the mixer ever sees it.
 #[test]
 fn omitted_staging_fields_carry_forward_from_the_previous_segment() {
     let prepared = prepare_chapter("\"Một.\"\n\nNàng gật đầu.");
@@ -283,11 +262,9 @@ fn omitted_staging_fields_carry_forward_from_the_previous_segment() {
     assert_eq!(segs[1]["scene"], json!("room"));
     assert_eq!(segs[1]["music"], json!("quiet"));
     // `text` is filled from the prepared event, so the model never re-types
-    // the chapter it was handed.
     assert_eq!(segs[1]["text"], json!(narration));
 
     // A segment that states its own value never inherits the previous one —
-    // this is how a split keeps its two different halves.
     let mut split = json!({
         "segments": [
             {"source_id": "e0001", "text": "Một.", "mood": "calm"},
@@ -303,12 +280,6 @@ fn omitted_staging_fields_carry_forward_from_the_previous_segment() {
 }
 
 /// The head of a chapter whose first bed arrives mid-way.
-///
-/// Rule 8 asks for `music` where it *changes*, so the lines before the
-/// first change carry no value at all — there is nothing to inherit, and the
-/// validator refuses a blank the moment any segment declares a bed. That was
-/// `segment 0: missing music` on ch386, and it is a chapter the prompt told
-/// the model to write exactly as it did.
 #[test]
 fn the_lines_before_the_first_music_declaration_are_none() {
     let prepared = prepare_chapter("Một.\n\nHai.\n\nBa.");
@@ -326,7 +297,6 @@ fn the_lines_before_the_first_music_declaration_are_none() {
     assert_eq!(segs[2]["music"], json!("battle"), "and it still carries on");
 
     // A chapter with no `music` anywhere is left alone: it predates the
-    // field, and the legacy merge path is what reads it.
     let mut legacy = json!({"segments": [
         {"source_id": "e0001", "text": "Một."},
         {"source_id": "e0002", "text": "Hai."}
@@ -341,7 +311,6 @@ fn the_lines_before_the_first_music_declaration_are_none() {
 }
 
 /// A reworded template must surface as a miss, not vanish. This is the
-/// mechanism that let `analyze.txt`'s rule 1 drift out of sync unnoticed.
 #[test]
 fn a_missing_section_marker_is_reported_not_silently_skipped() {
     let mut body = String::from("1. something else entirely\n2. new_characters\n");
@@ -375,11 +344,6 @@ fn load_bible_defaults_when_missing_or_corrupt() {
 }
 
 /// The two prompts and the two renderers must agree.
-///
-/// A placeholder the code never fills reaches the analyzer literally, and a
-/// vocabulary the prompt never names might as well not exist. The split also
-/// has to hold: the cast prompt must carry no sound vocabulary at all, or
-/// the tail it was split away from creeps back in.
 #[test]
 fn the_two_prompts_render_their_own_placeholders() {
     let dir = std::env::temp_dir().join("bm-prompt-tags");
@@ -399,8 +363,6 @@ fn the_two_prompts_render_their_own_placeholders() {
     std::fs::write(
         dir.join("assets/scene-map.json"),
         // A rule whose match word is deliberately NOT a bed tag, because
-        // that is the case the place vocabulary exists for: `palace` is in
-        // no pool, and it still has to reach the prompt.
         r#"{"rules": [{"match": ["palace", "jade pavilion"], "effect": [], "level": 0.0}],
             "music_palette": {"quiet": {"tags": ["soft"], "note": "low"}}}"#,
     )
@@ -413,8 +375,6 @@ fn the_two_prompts_render_their_own_placeholders() {
     std::fs::write(
         dir.join("assets/inject-pool.json"),
         // `looped` stated, like every shipped entry: the struct's default
-        // is `true` (bed-shaped, which is what the effect pool wants), so an
-        // inject entry that omits it silently becomes a looping bed.
         r#"{"coin": {"tags": ["coin", "metal"], "files": ["injects/coin-1.mp3"], "looped": false, "dur_s": 0.6}}"#,
     )
     .unwrap();
@@ -438,8 +398,6 @@ fn the_two_prompts_render_their_own_placeholders() {
     assert!(attribution.contains("---ATTRIBUTION OUTPUT CONTRACT---"));
     assert!(attribution.contains("Dialogue must NEVER map to Narrator"));
     // The contract's language is the adapter's: the vi fixture's checkout
-    // carries no manifest, so the wording stays per-chapter — and no
-    // placeholder may survive to the model.
     assert!(
         attribution.contains("in the chapter's own language"),
         "{attribution}"
@@ -450,14 +408,10 @@ fn the_two_prompts_render_their_own_placeholders() {
     );
     assert!(attribution.contains("Anonymous"));
     // The answerable list is dialogue with nearby source context; narration
-    // ids never enter the answer map.
     assert!(attribution.contains("narration_ids"), "{attribution}");
     assert!(attribution.contains("`dialogue_events`"), "{attribution}");
     assert!(attribution.contains("following_context"), "{attribution}");
     // Folded, because these are content assertions and the contract is
-    // reflowed whenever a rule is added: a phrase that happened to land on a
-    // line break read as a missing rule, which is the assertion testing the
-    // wrapping rather than the prompt.
     let flat = attribution.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         flat.contains("explicit named dialogue tag"),
@@ -474,7 +428,6 @@ fn the_two_prompts_render_their_own_placeholders() {
     assert!(staging.contains("fixed_speakers"));
     assert!(staging.contains("Do not return `speaker`"));
     // The staging path shares its template with the script path, so a
-    // placeholder only one of them replaced would reach the model intact.
     assert!(
         !staging.contains("{scene_words}") && !staging.contains("{effect_tags}"),
         "placeholder leaked into the staging prompt: {staging}"
@@ -485,7 +438,6 @@ fn the_two_prompts_render_their_own_placeholders() {
     assert!(p.contains("quiet (soft; low)"), "{p}");
     assert!(p.contains("night"), "{p}");
     // The PLACE vocabulary reaches the prompt, and `palace` is in no pool,
-    // so it can only have come from the rules.
     assert!(p.contains("jade pavilion, palace"), "{p}");
     // the inject vocabulary renders the clip's own mode first
     assert!(p.contains("coin (hit; coin, metal; 0.6s)"), "{p}");
@@ -617,10 +569,6 @@ fn attribution_normalizes_optional_cast_metadata_without_touching_speakers() {
 }
 
 /// The excerpt is **soft**: whitespace and length are cleaned, never
-/// refused — it is memory for the next chapter, not the product — and on
-/// the merge it is the **last** non-empty part's, because the excerpt
-/// describes the state the chapter *ends* in and only the last part has
-/// seen the whole arc.
 #[test]
 fn the_excerpt_is_soft_on_parse_and_last_part_wins_on_merge() {
     let prepared = prepare_chapter(
@@ -719,7 +667,6 @@ fn anonymous_dialogue_uses_reusable_slots_and_never_becomes_a_character() {
     assert!(!is_anonymous_speaker("anonymous:anon-0"));
     assert!(!is_anonymous_speaker("anonymous:anon-01"));
     // Legacy scripts keep their numbered ids, and the current name is the
-    // bare reserved one.
     assert!(is_anonymous_speaker("anonymous:anon-12"));
     assert!(is_anonymous_speaker(ANONYMOUS_SPEAKER));
     assert!(!is_anonymous_speaker("anonymous"));
@@ -727,8 +674,6 @@ fn anonymous_dialogue_uses_reusable_slots_and_never_becomes_a_character() {
 }
 
 /// ch6's opening: prose, then a street hailing the same phrase twice on two
-/// consecutive lines. Both are dialogue events, and the answer map holds
-/// only them, narration is not the model's to answer.
 #[test]
 fn narration_is_attached_by_code_and_the_map_holds_only_dialogue() {
     let prepared = prepare_chapter(
@@ -768,7 +713,6 @@ fn narration_is_attached_by_code_and_the_map_holds_only_dialogue() {
     assert_eq!(speakers["e0002"], "anonymous:anon-1");
 
     // A model that answers a narration id anyway cannot change who speaks
-    // prose: the id is rewritten rather than trusted.
     data["speakers"]["e0001"] = json!("anonymous:anon-1");
     let speakers = validate_attributions(&data, &bible, &prepared).unwrap();
     assert_eq!(speakers["e0001"], "Narrator");
@@ -792,17 +736,6 @@ fn a_named_tag_after_a_quote_is_attribution_evidence() {
 }
 
 /// ch51, the shape that put a sect elder's line in the mouth of the
-/// disciple he was scolding. Both narrations around the quote name both
-/// characters, and the one that follows ends by handing the floor to her
-/// reply — so "the tag after the quote" picked her, and her name was also
-/// the last one the model read. Which side of the quote the speech verb
-/// sits on is decidable in code, so the view decides it and states it from
-/// the quote's own point of view: `decided_by` is `"previous_context"` here.
-///
-/// The field used to be a boolean *on the narrations*,
-/// `hands_off_to_next_quote`, and read inside a `previous_context` its own
-/// name says "not this one" — the opposite of what it means there. Measured
-/// on this chapter: the answer was right 3 times in 12 prompt samples.
 #[test]
 fn the_quote_that_a_handoff_tag_belongs_to_says_so_itself() {
     let prepared = prepare_chapter(
@@ -820,16 +753,12 @@ fn the_quote_that_a_handoff_tag_belongs_to_says_so_itself() {
         .find(|d| d["text"].as_str().unwrap().contains("Chấn Thiên Thạch"))
         .expect("the elder's question is a dialogue event");
     // The narration before it ends in `hỏi:` and hands the floor to THIS
-    // quote, so this quote's tag is the previous one.
     assert_eq!(
         dialogue["decided_by"],
         json!("previous_context"),
         "{dialogue}"
     );
     // The narration after it ends in `nói:` too, and would read as the same
-    // kind of evidence. It is not: it introduces the next line in the
-    // chapter, which is the line the model was about to hand to her. That
-    // next quote is where it shows up as `decided_by: "following_context"`.
     let next = view["dialogue_events"]
         .as_array()
         .unwrap()
@@ -848,7 +777,6 @@ fn the_quote_that_a_handoff_tag_belongs_to_says_so_itself() {
     );
 
     // And the contract has to say what to do with the field, or it is a
-    // field nobody reads.
     let root = crate::paths::Layout::find_root().unwrap();
     let layout = crate::paths::Layout::resolve(root).unwrap();
     let prompt = build_attribution_prompt(&layout, &json!({}), &prepared, None, None).unwrap();
@@ -865,8 +793,6 @@ fn the_quote_that_a_handoff_tag_belongs_to_says_so_itself() {
 }
 
 /// A narration that reacts to the quote before it is that quote's tag, and
-/// is reported from the quote's side. A narration that ends a full stop
-/// hands the floor to nobody, and neither is a tag anywhere.
 #[test]
 fn a_tag_after_the_quote_is_reported_as_that_quotes_following_tag() {
     let prepared = prepare_chapter(
@@ -881,13 +807,10 @@ fn a_tag_after_the_quote_is_reported_as_that_quotes_following_tag() {
         "`Lạc Lan Tuyết … nói.` reacts to the quote before it: {dialogue}"
     );
     // The prose before the quote is not a tag at all — no speech verb — so
-    // the answer must not come from there.
     assert_eq!(dialogue["previous_context"]["id"], json!("e0001"));
 }
 
 /// A quote with no tag on either side says so, rather than leaving the
-/// model to guess which of two ordinary narrations is a tag. `null` is the
-/// honest answer and the contract tells the model what to do with it.
 #[test]
 fn a_quote_with_no_tag_on_either_side_reports_null() {
     let prepared = prepare_chapter(
@@ -899,17 +822,6 @@ fn a_quote_with_no_tag_on_either_side_reports_null() {
 }
 
 /// The measurement this field's name carries: ch51's elder line was
-/// attributed correctly 5 times in 12 when the deciding field came last in
-/// the event and 12 times in 12 when it came first, with the prompt
-/// byte-for-byte identical otherwise. `serde_json` orders object keys
-/// alphabetically, so "first" is a property of the name — and a rename to
-/// anything sorting after `following_context` would silently give the
-/// accuracy back.
-/// The contract has to be read before the chapter it governs, or a model
-/// answers from the first thing it sees and never reaches the rules. On
-/// ch51's elder line the same prompt scored 3 in 12 with the contract last
-/// and 40 in 40 with it first — the only difference being which end of a
-/// 58KB prompt the reader gets to first.
 #[test]
 fn the_contract_comes_before_the_chapter_it_governs() {
     let root = crate::paths::Layout::find_root().unwrap();
@@ -929,9 +841,6 @@ fn the_contract_comes_before_the_chapter_it_governs() {
         "the rules must be reached before the data they govern"
     );
     // And the view is still whole after it: the contract is inserted, not
-    // swapped for the chapter. The block runs from the marker to the next
-    // one, which is `---PREVIOUSLY---` when there is a chapter before this
-    // one and the end of the prompt when there is not.
     let rest = &prompt[chapter + "---CHAPTER---\n".len()..];
     let end = rest.find("\n---").unwrap_or(rest.len());
     let view: Value = serde_json::from_str(rest[..end].trim())
@@ -961,7 +870,6 @@ fn the_decided_by_field_is_the_first_thing_in_every_event() {
         );
     }
     // And alphabetically it really is first, which is what the serializer
-    // does — asserted on the rendered text, not on the map.
     let at = raw.find("\"decided_by\"").expect("the field is rendered");
     let event = raw.find("\"dialogue_events\"").unwrap();
     assert!(at > event, "{raw}");
@@ -990,15 +898,11 @@ fn staging_cannot_change_the_fixed_speaker() {
     assert_eq!(staging["segments"][0]["speaker"], json!("Narrator"));
     assert_eq!(staging["segments"][1]["speaker"], json!("anonymous:anon-1"));
     // Identity belongs to pass one: the marker the staging model invented
-    // on a spoken line is removed, and the one code owns is written where
-    // the preparer carved a thought.
     assert!(staging["segments"][0].get("kind").is_none());
     assert_eq!(staging["segments"][1]["kind"], json!("thought"));
 }
 
 /// The thought stinger the pack declares is lifted into a sibling sound
-/// item at the thought's seam — after its last segment, once, and never on
-/// top of a sting the answer already wrote.
 #[test]
 fn a_declared_thought_sound_lifts_to_the_thoughts_seam() {
     let mut data = json!({"segments": [
@@ -1028,7 +932,6 @@ fn a_declared_thought_sound_lifts_to_the_thoughts_seam() {
 }
 
 /// Nothing declared, nothing lifted: every pack that has not asked for a
-/// thought sound must prepare byte for byte as before.
 #[test]
 fn thoughts_lift_nothing_without_a_declared_sound() {
     let before = json!({"segments": [
@@ -1042,11 +945,6 @@ fn thoughts_lift_nothing_without_a_declared_sound() {
 }
 
 /// A carved thought is its thinker's and never the Narrator's, and the
-/// `not_speech` escape hatch retracts a false carve exactly as it does for
-/// a quoted title. The live ch1 misfile needed both halves: the carver's
-/// comma rule keeps `But Maomao, … thank you very much, …` out of
-/// `thought_events` altogether, and a marker that still slips through must
-/// be retractable rather than voiced.
 #[test]
 fn a_carved_thought_takes_a_thinker_and_can_be_retracted() {
     let prepared = prepare_chapter(
@@ -1087,8 +985,6 @@ fn a_carved_thought_takes_a_thinker_and_can_be_retracted() {
     assert!(err.to_string().contains("thought"), "{err}");
 
     // A `I`-voiced thought cannot be retracted at all — the retraction is
-    // for the shapes `a_first_person_thought_cannot_be_retracted_as_narration`
-    // pins, and this line is not one of them.
     let retracted = json!({
         "roster": ["Narrator"],
         "not_speech": [thought.clone()],
@@ -1099,10 +995,6 @@ fn a_carved_thought_takes_a_thinker_and_can_be_retracted() {
 }
 
 /// A first-person thought cannot be retracted into narration. The live ch1
-/// run listed `I need to just get this job done.` and `Hope my old man's
-/// eating properly.` in `not_speech`, and the Narrator read Maomao's
-/// thoughts aloud — the escape hatch is for quoted non-speech and for
-/// `we`/`you`-voiced asides to the reader, which still retract.
 #[test]
 fn a_first_person_thought_cannot_be_retracted_as_narration() {
     let prepared = prepare_chapter(
@@ -1130,7 +1022,6 @@ fn a_first_person_thought_cannot_be_retracted_as_narration() {
     let id = aside_event.id.clone();
     assert_eq!(aside_event.kind, "thought", "{:?}", aside.events);
     // One sentence, so one event: the `;` is not a sentence boundary, and
-    // the whole span is the aside the model retracts.
     assert_eq!(aside.events.len(), 1, "{:?}", aside.events);
     let retracted = json!({
         "roster": ["Narrator"],
@@ -1142,9 +1033,6 @@ fn a_first_person_thought_cannot_be_retracted_as_narration() {
 }
 
 /// The thought marker is code-attached, so the source gate is where a hand
-/// edit or a stale script shows up. A marker missing, a marker on prose, and
-/// a thought on the Narrator all refuse rather than fire the pack's stinger
-/// on the wrong line without saying so.
 #[test]
 fn the_source_gate_requires_the_thought_marker_to_agree() {
     let prepared = prepare_chapter("Maomao looked up. I need to just get this job done.");
@@ -1184,9 +1072,6 @@ fn the_source_gate_requires_the_thought_marker_to_agree() {
 }
 
 /// A pack that names a thought sound the inject pool does not have is
-/// refused where the vocabulary is loaded: the lift would otherwise put a
-/// clip nobody owns at every thought's seam, and every digest would stall
-/// on `validate_injects` with no line naming the typo.
 #[test]
 fn a_declared_thought_sound_must_exist_in_the_inject_pool() {
     let dir = std::env::temp_dir().join(format!(
@@ -1237,16 +1122,10 @@ fn a_declared_thought_sound_must_exist_in_the_inject_pool() {
 }
 
 /// The whole thought lane, end to end: the carver prepares an unquoted
-/// first-person sentence as a `thought`, the staging answer's segment comes
-/// out of `parse_staged_script` carrying `"kind": "thought"` with the
-/// pack's declared sound as a sibling item at that seam — and the narration
-/// around it is untouched. This is the shape the mixer reads, so a thought
-/// gets its sting with no downstream code knowing what a thought is.
 #[test]
 fn a_thought_lane_marks_the_segment_and_lifts_the_pack_sound() {
     let (_dir, layout, _) = long_layout("thought-lane", 3);
     // The pack declares `coin` as its thought sound; the fixture inject pool
-    // has that clip, so the lift is allowed to write it.
     let scene = layout.assets().join("scene-map.json");
     let mut map: Value = crate::read_json(&scene).expect("the fixture scene map");
     map["thought"] = json!({"sound": "coin"});
@@ -1338,10 +1217,6 @@ fn source_gate_requires_complete_ordered_attribution() {
 }
 
 /// Chapter 99's rotated script, as the regression case: three consecutive
-/// events came back with their speakers shifted one step — the order's
-/// dialogue on Narrator, the narration on a bystander, the prisoners'
-/// plea on Narrator. Every row of that shape must refuse, so a future
-/// rotation fails the chapter instead of shipping voices on wrong lines.
 #[test]
 fn source_gate_refuses_a_rotated_speaker_row() {
     let prepared = prepare_chapter(
@@ -1354,7 +1229,6 @@ fn source_gate_refuses_a_rotated_speaker_row() {
     assert_eq!(prepared.events[3].kind, "dialogue");
     let line = |id: &str, speaker: &str, text: &str| json!({"source_id": id, "speaker": speaker, "text": text});
     // The rotation, verbatim in shape: dialogue on Narrator, narration on
-    // a character, dialogue on Narrator again.
     let rotated = json!({"segments": [
         line("e0001", "Narrator", "Người đâu, mang ba tên hỗn xược kia lên đây cho ta!"),
         line("e0002", "Narrator", "Diệp Bắc khoát tay nói."),
@@ -1401,10 +1275,6 @@ fn quote_separators_that_are_only_punctuation_are_not_prepared_as_speech() {
 #[test]
 fn an_entity_bearing_chapter_prepares_to_the_decoded_text() {
     // ch79 as crawled by the pre-fix crawler: numeric entities raw on
-    // disk. The model reads `&#x27;` and answers `'`, so the prepared
-    // events must carry the decoded form, or the source gate refuses the
-    // chapter on every racer and it can never digest (the stuck-chapter
-    // shape the inductor log showed for ch79/85/91/93/96/100).
     let prepared = prepare_chapter(
         "Chương 79: Cánh cửa\n\nQuả nhiên, cánh cửa nhỏ &#x27;két&#x27; một tiếng, nhẹ nhàng khẽ mở.",
     );
@@ -1423,12 +1293,6 @@ fn an_entity_bearing_chapter_prepares_to_the_decoded_text() {
 #[test]
 fn the_digest_does_not_edit_a_chapters_words() {
     // The digest used to strip Storya's furniture here, on the way into the
-    // prompt. It does not any more: the crawler owns that, and a stored
-    // chapter is whatever the crawler (or the operator who pasted it) wrote.
-    //
-    // What still has to hold is the *source contract*, every sentence in
-    // the chapter is an event the model must cover, and the alignment gate
-    // below it is unchanged by any of this.
     let prepared = prepare_chapter(
         "Chương 81: Liền phòng ngự\n\nCài đặt đọc\n\nHắn đã hoàn thành nhiệm vụ.\n\nHệ thống thực thể dưới dạng chiếc đỉnh. Truyện đã hoàn thành",
     );
@@ -1440,7 +1304,6 @@ fn the_digest_does_not_edit_a_chapters_words() {
         prepared.prompt_json
     );
     // … and it is *owed*, not skipped: every line is an event, and a
-    // response that quietly left one out is refused by the gate.
     assert_eq!(prepared.events.len(), 3);
     assert_eq!(prepared.events[0].text, "Cài đặt đọc");
     assert_eq!(prepared.events[1].text, "Hắn đã hoàn thành nhiệm vụ.");
@@ -1449,9 +1312,6 @@ fn the_digest_does_not_edit_a_chapters_words() {
 #[test]
 fn a_decoded_quot_becomes_a_dialogue_boundary() {
     // `&quot;` survived the old crawler too, only as raw markup. Decoding
-    // turns it into a real quote delimiter, so prepare_chapter splits the
-    // dialogue out exactly as it would for a properly crawled chapter
-    // and the gate keeps demanding the delimiter-free speech span.
     let prepared =
         prepare_chapter("Chương 1: Gặp gỡ\n\n&quot;Ừm.&quot; hắn đáp, &quot;xong rồi.&quot;");
     assert_eq!(prepared.events.len(), 3);
@@ -1488,7 +1348,6 @@ fn an_unclosed_quote_is_reported_rather_than_read_as_one_voice() {
         "the trailing quote is never closed, so the chapter is unbalanced"
     );
     // Everything after the last matched pair became dialogue, which is the
-    // damage: prose the scanner can no longer see as prose.
     assert!(prepared
         .events
         .iter()
@@ -1501,7 +1360,6 @@ fn an_unclosed_quote_is_reported_rather_than_read_as_one_voice() {
 }
 
 /// A balanced chapter must not be warned about, or the operator learns to
-/// ignore the line on every chapter that is fine.
 #[test]
 fn a_balanced_chapter_says_nothing_about_quotes() {
     let prepared = prepare_chapter("Hắn lật trang sách.\n\n\"Ngươi đọc xong chưa?\" hắn hỏi.");
@@ -1512,8 +1370,6 @@ fn a_balanced_chapter_says_nothing_about_quotes() {
 }
 
 /// The other end of the same blind spot: a chapter that is one quoted
-/// system panel has no narration at all. Legal and real, so it is asked
-/// about rather than refused.
 #[test]
 fn an_all_dialogue_chapter_is_asked_about_not_refused() {
     let prepared = prepare_chapter("\"Ký chủ: Dịch Phong.\"\n\n\"Tuổi tác: 20.\"");
@@ -1530,21 +1386,12 @@ fn an_all_dialogue_chapter_is_asked_about_not_refused() {
 }
 
 /// The defect this field exists for. A quoted title inside narration has
-/// nobody talking, and a span long enough to be a spoken line cannot be
-/// told from a hail by delimiters alone — so it becomes a dialogue event,
-/// which `validate_attributions` then *forbids* from being Narrator. The
-/// only legal answer was a character or `Anonymous`, and 101 spans in this
-/// corpus were read that way: skill names, a panel label, a guqin piece
-/// title, each in a stranger's voice. (A span too short to be speech —
-/// `“rear palace”` — never splits at all; this is the longer shape that
-/// still needs the model.)
 #[test]
 fn a_quoted_title_in_narration_can_be_retracted_to_the_narrator() {
     let prepared = prepare_chapter(
         "Hắn lật ra cuốn sách \"Khải hoàn ca của vương triều\" bất ngờ với nội dung bên trong.\n\nDịch Phong ngẩng đầu.",
     );
     // The preparer calls it dialogue, and that is the whole problem: the
-    // evidence is in the context, not in the words.
     let title = prepared
         .events
         .iter()
@@ -1554,7 +1401,6 @@ fn a_quoted_title_in_narration_can_be_retracted_to_the_narrator() {
     assert_eq!(title.id, "e0002");
 
     // The model retracts it and assigns Narrator: both halves agree, so it
-    // is accepted and the segment is read by the narrator.
     let data = json!({
         "roster": ["Narrator"],
         "not_speech": ["e0002"],
@@ -1573,9 +1419,6 @@ fn a_quoted_title_in_narration_can_be_retracted_to_the_narrator() {
 }
 
 /// A span too short to be speech never becomes a dialogue event at all:
-/// `the “rear palace”` is an appositive inside narration, and splitting
-/// it out makes an island segment the narrator reads in isolation — a
-/// half-second word between pauses that listens like a dropout.
 #[test]
 fn a_short_quoted_term_embedded_in_prose_stays_narration() {
     let prepared =
@@ -1585,7 +1428,6 @@ fn a_short_quoted_term_embedded_in_prose_stays_narration() {
     assert_eq!(prepared.dialogue_count(), 0);
 
     // A longer span in the same position still splits for the model: only
-    // the too-short-to-speak shape is kept, never a line.
     let long = prepare_chapter(
         "the hougong, the “rear palace of the Imperial women in the capital”: the residence.",
     );
@@ -1597,7 +1439,6 @@ fn a_short_quoted_term_embedded_in_prose_stays_narration() {
 }
 
 /// An unquoted first-person sentence carves out of narration as a `thought`
-/// event the attribution pass can give a thinker — and the mixer a sound.
 #[test]
 fn a_first_person_sentence_carves_as_a_thought() {
     let prepared = prepare_chapter(
@@ -1614,9 +1455,6 @@ fn a_first_person_sentence_carves_as_a_thought() {
 }
 
 /// The ch1 sentence behind a live misfile: a marker seated after two
-/// commas is an aside inside the narrator's sentence, not the sentence's
-/// voice, so the passage stays narration and is never offered a thinker.
-/// The attribution pass then cannot hand narration about Maomao to Maomao.
 #[test]
 fn a_marker_under_two_commas_is_narration_not_a_thought() {
     let prepared = prepare_chapter(
@@ -1626,14 +1464,11 @@ fn a_marker_under_two_commas_is_narration_not_a_thought() {
     assert_eq!(prepared.events[0].kind, "narration");
     assert_eq!(prepared.thought_count(), 0);
     // One comma of headroom is still a thought: an adverbial opening does
-    // not bury the voice.
     let opening = prepare_chapter("In that case, I will go.");
     assert_eq!(opening.events[0].kind, "thought", "{:?}", opening.events);
 }
 
 /// A first-person novel is voiced `I` throughout: carving it would turn
-/// the book into dialogue. Intrusions are rare — at a fifth of the
-/// narration thinking aloud nothing carves.
 #[test]
 fn a_first_person_chapter_carves_nothing() {
     let chapter = "I woke up. I ate breakfast. I left the house. I saw him. I ran.";
@@ -1643,7 +1478,6 @@ fn a_first_person_chapter_carves_nothing() {
 }
 
 /// Abbreviations over-split and rejoin: `Mr.` is not a sentence, and the
-/// thought after it still carves.
 #[test]
 fn an_abbreviation_does_not_strand_a_fragment() {
     let prepared = prepare_chapter("He met Mr. Smith. I must go.");
@@ -1654,7 +1488,6 @@ fn an_abbreviation_does_not_strand_a_fragment() {
 }
 
 /// The voice guard counts second person too: a you-voiced chapter is a
-/// narrator, not five thoughts.
 #[test]
 fn second_person_stays_narration() {
     let prepared = prepare_chapter("You walk in. You see him. You run. You hide. You wait.");
@@ -1663,7 +1496,6 @@ fn second_person_stays_narration() {
 }
 
 /// Second-person musing carves like first-person: the thinker is whoever
-/// the `you` belongs to in context.
 #[test]
 fn second_person_musing_carves_as_a_thought() {
     let prepared = prepare_chapter(
@@ -1680,7 +1512,6 @@ fn second_person_musing_carves_as_a_thought() {
 }
 
 /// Vietnamese second person stays out: `bạn` is as often "friend", and
-/// `ngươi` sits inside `con ngươi` (pupil). Both stay narration.
 #[test]
 fn vietnamese_second_person_does_not_carve() {
     for text in [
@@ -1698,7 +1529,6 @@ fn vietnamese_second_person_does_not_carve() {
 }
 
 /// A heading carrying a marker is filtered, not carved: carving runs
-/// after the headline filter, so its pieces never leak past it.
 #[test]
 fn a_heading_with_a_marker_is_still_just_dropped() {
     let prepared = prepare_chapter("Chapter 9: What You Mean\n\nBody here quietly.");
@@ -1708,8 +1538,6 @@ fn a_heading_with_a_marker_is_still_just_dropped() {
 }
 
 /// A narrator aside still matches a marker, so it carves — and the model
-/// retracts it via `not_speech` like a quoted title. Pinned so the carve
-/// stays honest about what it catches.
 #[test]
 fn a_narrator_aside_carves_for_the_model_to_retract() {
     let prepared = prepare_chapter(
@@ -1738,7 +1566,6 @@ fn vietnamese_first_person_carves() {
 }
 
 /// A translated term stays put while a thought beside it carves: the two
-/// rules compose.
 #[test]
 fn a_thought_beside_a_quoted_term_carves_only_the_thought() {
     let prepared = prepare_chapter("the hougong, the “rear palace”: the residence. I need to just get this job done. Maomao picked up the basket.");
@@ -1753,8 +1580,6 @@ fn a_thought_beside_a_quoted_term_carves_only_the_thought() {
 }
 
 /// A long thought after normal prose trips no quote gate: the sentence
-/// before it ends with terminal punctuation, which is how a handover
-/// reads, so Gate 2 stays quiet and no repair loop starts.
 #[test]
 fn a_long_thought_after_prose_trips_no_gate() {
     let thought = "I need to just get this job done as quickly as I possibly can without dropping anything on the flagstones today, she told herself.";
@@ -1780,9 +1605,6 @@ fn a_long_thought_after_prose_trips_no_gate() {
 }
 
 /// A short quote handed over from running prose is still speech: the
-/// merger only fires when a letter or digit touches the opener, never on
-/// a handover mark. This is the live shape — `"Yes," she said` fills this
-/// book — so each handover is pinned, not just described.
 #[test]
 fn a_short_quote_after_a_handover_mark_stays_dialogue() {
     // Punctuation hands over: question, period, comma, colon.
@@ -1814,8 +1636,6 @@ fn a_short_quote_after_a_handover_mark_stays_dialogue() {
 }
 
 /// A headline glued to a quote hands the line over instead of joining it:
-/// without the guard the merged event would start with `Chapter 25:` and
-/// the headline filter would drop the dialogue with it.
 #[test]
 fn a_headline_glued_to_a_quote_does_not_swallow_the_line() {
     let prepared =
@@ -1837,10 +1657,6 @@ fn a_headline_glued_to_a_quote_does_not_swallow_the_line() {
 }
 
 /// The case a keyword list would get wrong, and the reason retraction is
-/// still a model call rather than a list: the *same* words, quoted aloud,
-/// really are dialogue. A short title inside narration never splits, but
-/// a title inside a question is speech. Only the surrounding context tells
-/// them apart, so nothing about "Yêu Đại Giới" itself may decide it.
 #[test]
 fn the_same_words_spoken_aloud_stay_dialogue() {
     let prepared = prepare_chapter(
@@ -1852,7 +1668,6 @@ fn the_same_words_spoken_aloud_stay_dialogue() {
         .find(|e| e.text.contains("Yêu Đại Giới"))
         .expect("the spoken title is a prepared event");
     // The short title in narration is one narration event now, delimiters
-    // and all — never offered a speaker, never an island segment.
     let title = prepared
         .events
         .iter()
@@ -1863,8 +1678,6 @@ fn the_same_words_spoken_aloud_stay_dialogue() {
     assert_eq!(spoken.kind, "dialogue");
 
     // Absent from `not_speech`, the spoken one is ordinary dialogue and is
-    // held to the ordinary rule: somebody on cast has to be speaking it.
-    // The narrated title needs no retraction: it never left narration.
     let data = json!({
         "roster": ["Narrator", "Dịch Phong"],
         "not_speech": [],
@@ -1881,8 +1694,6 @@ fn the_same_words_spoken_aloud_stay_dialogue() {
     assert_eq!(speakers[&spoken.id], "Dịch Phong");
 
     // And retracting *this* one is not a free pass: it would narrate a
-    // real speech, so it has to be claimed as non-speech, which the
-    // context above does not support — the model has to actually say so.
     let retracted = json!({
         "roster": ["Narrator", "Dịch Phong"],
         "not_speech": [spoken.id.clone()],
@@ -1895,11 +1706,6 @@ fn the_same_words_spoken_aloud_stay_dialogue() {
 }
 
 /// A disagreement resolves in favour of the listing, and does not fail the
-/// chapter. This is the live ch161 shape: the model listed four ids, agreed
-/// with itself on three and gave the fourth a character. Requiring
-/// agreement refused the chapter, and the single repair pass made it worse
-/// by dropping an unrelated event — one ambiguous id cost a whole chapter.
-/// The listing wins instead, so the worst case is one narrated span.
 #[test]
 fn a_retraction_wins_over_a_disagreeing_speaker() {
     let prepared =
@@ -1916,7 +1722,6 @@ fn a_retraction_wins_over_a_disagreeing_speaker() {
     );
 
     // Listed with no speaker at all is the same case, and used to be
-    // blamed as a dropped event.
     let orphan = json!({
         "roster": ["Narrator"],
         "not_speech": ["e0002"],
@@ -1927,8 +1732,6 @@ fn a_retraction_wins_over_a_disagreeing_speaker() {
 }
 
 /// Narration still cannot be promoted to dialogue, and an unlisted
-/// dialogue event still cannot be narrated. The retraction moves one way
-/// only, which is what makes it safe to hand the model at all.
 #[test]
 fn the_retraction_is_one_way_only() {
     let prepared = prepare_chapter("Hắn bước ra cửa.\n\n\"Ngươi đi đâu?\" hắn hỏi.");
@@ -1944,9 +1747,6 @@ fn the_retraction_is_one_way_only() {
         .expect("there is dialogue");
 
     // Listing a narration id does not make it answerable as speech. The
-    // speaker it claims is overwritten rather than trusted, exactly as
-    // before this field existed — a model cannot promote prose into a
-    // line somebody has to deliver, however it asks.
     let hoisted = json!({
         "roster": ["Narrator", "Dịch Phong"],
         "not_speech": [narration.id.clone()],
@@ -1963,25 +1763,18 @@ fn the_retraction_is_one_way_only() {
     assert_eq!(speakers[&speech.id], "Dịch Phong");
 
     // And a dialogue id with no retraction and no speaker is still the
-    // old refusal, so an answer that ignores the field entirely behaves
-    // exactly as it did before the field existed.
     let ignored = json!({"roster": ["Narrator"], "speakers": {}});
     let err = validate_attributions(&ignored, &json!({"characters": []}), &prepared).unwrap_err();
     assert!(err.to_string().contains("dropped source event"), "{err}");
 }
 
 /// The complaint is the entire input to the one repair pass, so it has to
-/// carry the line it is complaining about. ch347 failed on this: the model
-/// dropped `e0076`, was told only the bare id, dropped it again, and the
-/// chapter burned every racer in a loop. A label the model cannot look up
-/// is not a repairable instruction.
 #[test]
 fn a_dropped_event_complaint_quotes_the_line_it_names() {
     let prepared = prepare_chapter(
         "Gấu đen rụt đầu vào trong khe.\n\n\"Các ngươi không thấy ta đâu.\"\n\n\"A!\"",
     );
     // One event answered, one dropped, so the complaint is about a known id
-    // rather than whichever happens to come first.
     let short = prepared
         .events
         .iter()
@@ -2010,8 +1803,6 @@ fn a_dropped_event_complaint_quotes_the_line_it_names() {
 }
 
 /// Same for the not-in-roster complaint, which ch347 hit on a second id in
-/// the same chapter. Naming the speaker is not enough; the model has to be
-/// able to see which line it is being asked to re-attribute.
 #[test]
 fn a_roster_complaint_quotes_the_line_too() {
     let prepared = prepare_chapter("Hắn ngồi xuống.\n\n\"Ngươi đi đâu đấy?\" hắn hỏi.");
@@ -2034,8 +1825,6 @@ fn a_roster_complaint_quotes_the_line_too() {
 }
 
 /// A malformed retraction is refused, not skipped. Silently ignoring a
-/// non-string entry would let a model believe it retracted a line when the
-/// code did not.
 #[test]
 fn a_malformed_retraction_is_refused_rather_than_ignored() {
     let prepared = prepare_chapter("Hắn lật ra cuốn sách \"Khải hoàn\" bên trong.");
@@ -2057,8 +1846,6 @@ fn a_malformed_retraction_is_refused_rather_than_ignored() {
 }
 
 /// An absent field means the answer agrees with the preparer, which is
-/// what every script digested before this field existed means. The 345
-/// stored scripts stay valid and nothing re-digests.
 #[test]
 fn an_absent_retraction_field_means_no_retraction() {
     assert!(not_speech_ids(&json!({})).unwrap().is_empty());
@@ -2071,23 +1858,11 @@ fn an_absent_retraction_field_means_no_retraction() {
 }
 
 /// **This is the test that would have caught the field not working.**
-///
-/// The first live run put `not_speech` in the view's `note` and the model
-/// never emitted it. The cause was not the note: the template's own output
 /// contract listed the allowed keys and said "Dialogue must NEVER map to
 /// Narrator" with no exception, and a model reads the contract, not the
-/// footnote. The field was unreachable however the note was worded.
-///
-/// So the retraction is pinned in *both* places, and the one that matters
-/// is the contract — asserted here on the string the model actually reads.
 #[test]
 fn the_prompt_contract_offers_the_retraction_not_only_the_note() {
     // The contract is appended in code, not only in the profile template,
-    // so it has to be asserted on the string the model is actually handed.
-    // Resolved, not built: which tree the prompts come from is the *binding's*
-    // answer now (`adapters/<adapter>/prompts/`), and `Layout::new` knows only
-    // the pre-split one at the root — which is why this reads the real
-    // checkout rather than a fixture.
     let root = crate::paths::Layout::find_root().unwrap();
     let layout = crate::paths::Layout::resolve(root).unwrap();
     let prepared = prepare_chapter("Hắn lật ra cuốn sách \"Khải hoàn\" bên trong.");
@@ -2103,23 +1878,17 @@ fn the_prompt_contract_offers_the_retraction_not_only_the_note() {
          next to it, not in a note"
     );
     // The exception must be an exception and not a replacement: a real
-    // speech still goes to a character, said aloud or not. Matched on
-    // folded whitespace so rewrapping the paragraph cannot silently
-    // un-assert this.
     let flat = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         flat.contains("are real dialogue and stay with a character"),
         "the contract must still forbid Narrator for real speech"
     );
     // Unquoted first-person thoughts are answerable dialogue too, with
-    // their own rule beside the exception.
     assert!(
         prompt.contains("inner thought"),
         "the contract must tell the model what an unquoted first-person passage is"
     );
     // Two live misattributions from ch1 of the apothecary book: passages
-    // naming Maomao in third person voiced as her, and her untagged
-    // musing voiced as a stranger.
     assert!(
         prompt.contains("saying their own name in third"),
         "the contract must forbid voicing a character's third-person self-naming"
@@ -2129,7 +1898,6 @@ fn the_prompt_contract_offers_the_retraction_not_only_the_note() {
         "the contract must give untagged musings to the viewpoint character"
     );
     // And the view's note must not restate the rules, or the two can
-    // disagree — the first live run did exactly that.
     let view: Value = serde_json::from_str(&attribution_view(&prepared)).unwrap();
     let note = view["note"].as_str().unwrap();
     assert!(
@@ -2139,11 +1907,6 @@ fn the_prompt_contract_offers_the_retraction_not_only_the_note() {
 }
 
 /// A chapter whose prose says `Ninh Huyền Vũ` while the bible's canonical
-/// name is `Huyền Vũ lão tổ` cost a whole refused round on ch51: the
-/// answer was right about the person and spelled the speaker the way the
-/// chapter did, the gate refused the alias, and the repair re-asked
-/// everything. The contract has to say which string to copy, because
-/// `canonical character name` alone reads as a description, not a source.
 #[test]
 fn the_contract_says_which_string_a_speaker_is() {
     let root = crate::paths::Layout::find_root().unwrap();
@@ -2164,8 +1927,6 @@ fn the_contract_says_which_string_a_speaker_is() {
 }
 
 /// The prompt has to offer the field, or the model cannot use it. The
-/// `note` is the only place that describes the answer, so this is what
-/// makes the retraction reachable.
 #[test]
 fn the_attribution_view_offers_the_retraction() {
     let prepared = prepare_chapter("Hắn lật ra cuốn sách \"Khải hoàn\" bên trong.");
@@ -2173,7 +1934,6 @@ fn the_attribution_view_offers_the_retraction() {
     let note = view["note"].as_str().unwrap();
     assert!(note.contains("not_speech"), "{note}");
     // And it must keep saying the rest, or the field reads as a licence
-    // to answer nothing at all — for both answerable lists.
     assert!(note.contains("every `dialogue_events`"), "{note}");
     assert!(note.contains("`thought_events` id"), "{note}");
 }
@@ -2187,7 +1947,6 @@ fn a_written_sound_is_collapsed_rather_than_left_beside_its_tag() {
     ]});
     collapse_redundant_sounds(&mut data);
     // The tag and the words it stands for are spoken as one cough, and the
-    // source verbatim is normalized the same way, one door for both.
     for i in [0, 1] {
         assert_eq!(
             data["segments"][i]["text"], "[hắng giọng] ban đầu ta cầm bảo đao.",
@@ -2200,8 +1959,6 @@ fn a_written_sound_is_collapsed_rather_than_left_beside_its_tag() {
 #[test]
 fn written_laughter_is_recognized_wherever_it_sits_in_the_line() {
     // The engine counts `haha`, one word, and a laugh in the middle of a
-    // line. Rule 7 used to describe only "Ha ha" leading a line, which is
-    // how ch22 failed on every racer.
     assert_eq!(
         retag_text("Vài ngày nữa trời lạnh, haha, vừa sạch sẽ."),
         Some("Vài ngày nữa trời lạnh, [cười] vừa sạch sẽ.".into())
@@ -2211,7 +1968,6 @@ fn written_laughter_is_recognized_wherever_it_sits_in_the_line() {
         Some("[hắng giọng] ban đầu ta cầm bảo đao.".into())
     );
     // Ignoring written sound is symmetric now: the stripper runs on both
-    // sides, not on the already-retagged expected alone.
     assert_eq!(
         source_without_written_sound("…cho mình, haha, vừa sạch sẽ."),
         source_without_written_sound("…cho mình, [cười] vừa sạch sẽ.")
@@ -2252,15 +2008,6 @@ fn vietnamese_sigh_quantifiers_normalize_like_the_engine_tag() {
 }
 
 /// The sentence's own period, which went with the sound on the way in.
-///
-/// `retag_text` truncates `"…trượt tay, ha ha."` to `"…trượt tay, [cười]"`,
-/// so a model that writes the line back with its period — the more correct
-/// of the two — differed from the expectation by one mark and was refused
-/// for it. ch386 lost 4 of its 15 attempts to exactly this, and no repair
-/// could act on it: the message asks the model to delete a period it never
-/// added. `written_sound_hint` has always compared the two texts with the
-/// sounds stripped on *both* sides; this is the same courtesy for the mark
-/// the tag swallowed.
 #[test]
 fn a_period_beside_an_engine_tag_is_not_a_source_change() {
     let expected = "Cũng may, cũng may không bị trượt tay, [cười]";
@@ -2276,7 +2023,6 @@ fn a_period_beside_an_engine_tag_is_not_a_source_change() {
         &["Hắn gầm lên, [hắng giọng]!".to_string()]
     ));
     // The tag *and* the words it stands for is still the error it is: only
-    // punctuation around a tag is forgiven, never the text beside it.
     assert!(!source_text_matches(
         expected,
         &["Cũng may, cũng may không bị trượt tay, [cười] ha ha.".to_string()]
@@ -2308,20 +2054,16 @@ fn source_gate_names_a_leftover_written_sound() {
     };
 
     // Hoisting the tag to the head of the line and keeping the words is
-    // refused, and the error names the sound instead of saying only that
-    // the event "was changed".
     let hoisted = answer("[hắng giọng] Khụ khụ khụ, ban đầu ta cầm bảo đao.");
     let err = validate_source_alignment_no_retractions(&hoisted, &prepared).unwrap_err();
     assert!(err.to_string().contains("written sound"), "{err}");
 
     // The same answer passes once it comes through `retag_text`, which is
-    // what `parse_staged_script` does before it validates and persists.
     let mut collapsed = hoisted.clone();
     collapse_redundant_sounds(&mut collapsed);
     validate_source_alignment_no_retractions(&collapsed, &prepared).unwrap();
 
     // A genuine change keeps the honest generic message: the hint fires
-    // only when written sound is the whole disagreement.
     let rewritten = answer("Đêm ấy trời trở gió.");
     let err = validate_source_alignment_no_retractions(&rewritten, &prepared).unwrap_err();
     assert!(err.to_string().contains("changed"), "{err}");
@@ -2329,8 +2071,6 @@ fn source_gate_names_a_leftover_written_sound() {
 }
 
 /// The ch51 shape: right person, the chapter's spelling. It used to cost
-/// the whole round. The rewrite happens before the gate, so the gate is
-/// never weaker — it is simply never asked about a name the bible settles.
 #[test]
 fn an_unambiguous_alias_is_rewritten_before_the_gate_sees_it() {
     let bible = json!({"characters": [
@@ -2362,13 +2102,10 @@ fn an_unambiguous_alias_is_rewritten_before_the_gate_sees_it() {
     );
 
     // What the fix buys: the gate now accepts an answer it used to refuse,
-    // and refuses nothing it used to accept.
     validate_digest_identity(&data, &bible).unwrap();
 }
 
 /// The rewrite must not become a licence. An alias two characters claim is
-/// still ambiguous, and ambiguous still fails — naming one owner would be
-/// guessing, which is exactly what the gate exists to refuse.
 #[test]
 fn an_ambiguous_alias_is_still_refused_and_never_guessed() {
     let bible = json!({"characters": [
@@ -2398,15 +2135,11 @@ fn an_ambiguous_alias_is_still_refused_and_never_guessed() {
 }
 
 /// A name listed as somebody's alias *and* standing as its own canonical
-/// character is canonical: rewriting it would rename a legitimate speaker
-/// into a stranger. `Narrator` and the reserved anonymous speakers are not
-/// bible characters at all, so they are never rewritten either.
 #[test]
 fn canonical_names_and_reserved_speakers_are_never_rewritten() {
     let bible = json!({"characters": [
         {"name": "Lục Thanh Sơn", "proper_aliases": ["Thanh Sơn lão tổ"]},
         // Somebody else also carries the bare name as an alias — a clash the
-        // bible tolerates, and which must not break the canonical owner.
         {"name": "Thanh Sơn", "proper_aliases": []},
     ]});
     let mut data = json!({
@@ -2423,8 +2156,6 @@ fn canonical_names_and_reserved_speakers_are_never_rewritten() {
 }
 
 /// An answer that spells one character both ways collapses to one roster
-/// entry. Left alone it would be refused for a duplicate the rewrite itself
-/// created — a gate failure caused by the fix.
 #[test]
 fn the_rewrite_deduplicates_a_roster_that_named_one_character_twice() {
     let bible = json!({"characters": [
@@ -2440,8 +2171,6 @@ fn the_rewrite_deduplicates_a_roster_that_named_one_character_twice() {
 }
 
 /// ch51's `Được!`: assigned to the reserved crowd speaker, with `Anonymous`
-/// left out of the roster the answer itself returned. The roster is
-/// derivable from the answer, so it is derived instead of refused.
 #[test]
 fn a_used_speaker_missing_from_the_roster_is_added_not_refused() {
     let bible = json!({"characters": [{"name": "Lan", "proper_aliases": []}]});
@@ -2467,14 +2196,11 @@ fn a_used_speaker_missing_from_the_roster_is_added_not_refused() {
         "narration needs its speaker listed"
     );
     // Nothing is duplicated when it was already there, and the answer's own
-    // assignments are untouched.
     assert_eq!(roster.iter().filter(|n| **n == "Lan").count(), 1);
     assert_eq!(data["speakers"]["e0003"], json!("anonymous:anon-1"));
 }
 
 /// The completion must not become an admission: a name nobody in the bible
-/// carries and the answer never declared is still left off the roster, so
-/// the canonical-name check still refuses it.
 #[test]
 fn complete_roster_never_admits_a_stranger() {
     let bible = json!({"characters": [{"name": "Lan", "proper_aliases": []}]});
@@ -2490,7 +2216,6 @@ fn complete_roster_never_admits_a_stranger() {
     );
     assert_eq!(data["roster"], json!(["Narrator"]));
     // And the gate that would have been satisfied by adding it still
-    // refuses: the completion is bookkeeping, not an admission.
     let err = validate_attributions(&data, &bible, &prepared).unwrap_err();
     assert!(err.to_string().contains("Kẻ lạ mặt"), "{err}");
     assert!(
@@ -2499,7 +2224,6 @@ fn complete_roster_never_admits_a_stranger() {
     );
 
     // The contrast that proves the point: the same shape with a name the
-    // bible *does* carry is completed, and then passes.
     let mut known = json!({
         "roster": ["Narrator"],
         "speakers": {"e0002": "Lan"},
@@ -2514,7 +2238,6 @@ fn roster_entry_that_is_a_bible_alias_names_the_canonical_form() {
         {"name": "Vũ Kiệt", "proper_aliases": ["Vu Vũ Kiệt"]},
     ]});
     // The alias has no voice to resolve to: `speaker` is matched against
-    // `roster` and the cast is keyed by the canonical name.
     let aliased = json!({
         "roster": ["Narrator", "Vu Vũ Kiệt"],
         "segments": [{"speaker": "Vu Vũ Kiệt", "text": "Anh nhi, xong chưa?"}],
@@ -2539,8 +2262,6 @@ fn a_mention_may_name_a_character_who_does_not_speak_here() {
         {"name": "Thanh Sơn lão tổ", "proper_aliases": []},
     ]});
     // `roster` is the speaker list, so a character named only in the
-    // narration is genuinely absent from it, and that must not make the
-    // mention illegal.
     let data = json!({
         "roster": ["Narrator", "Thanh Sơn lão tổ"],
         "mentions": {"Vu Vũ Kiệt": "Vũ Kiệt"},
@@ -2591,13 +2312,6 @@ fn source_gate_ignores_repeated_standalone_headlines() {
 }
 
 /// The sound fields come off the lines and become items at their seams.
-///
-/// This is the concession the whole shape rests on, so it is pinned: the
-/// field must never survive onto a line, `text` must never be touched, a
-/// *bad* name must still be lifted so the validator can refuse it, and a
-/// blank must be refused here, a blank is a line nobody decided about, and
-/// it was exactly what the model wrote on all 68 lines of a chapter that
-/// stages six kitchen events.
 #[test]
 fn expand_sound_fields_lifts_the_seam_out_of_the_line() {
     let line = |text: &str| json!({"speaker": "Narrator", "text": text});
@@ -2622,7 +2336,6 @@ fn expand_sound_fields_lifts_the_seam_out_of_the_line() {
     assert_eq!(got[2], b);
 
     // A bed and its stop, both marked, in that order: start then stop, so a
-    // stop can never end up before its own start.
     let mut open = line("Sau một hồi cảm khái, hai người liền đi đến phòng bếp.");
     open["sound_after"] = json!("food-prep");
     let mut close = line("Thanh Sơn lão tổ gật đầu lia lịa như gà mổ thóc.");
@@ -2649,7 +2362,6 @@ fn expand_sound_fields_lifts_the_seam_out_of_the_line() {
     }
 
     // A name outside the vocabulary is lifted anyway, so the validator gets
-    // to refuse it by name rather than the field vanishing silently.
     let mut bogus = line("z");
     bogus["sound_after"] = json!("thunder");
     let got = expand_sound_fields(&[bogus]).unwrap();
@@ -2657,7 +2369,6 @@ fn expand_sound_fields_lifts_the_seam_out_of_the_line() {
 }
 
 /// Both halves of the sound-design gate, on the two answers ch9 actually
-/// produced: no placements at all, and a bed with no stop.
 #[test]
 fn sound_design_gap_catches_an_empty_and_an_unclosed_design() {
     use crate::audio_pool::{ClipPool, Sound};
@@ -2686,7 +2397,6 @@ fn sound_design_gap_catches_an_empty_and_an_unclosed_design() {
     assert!(gap.contains("phòng bếp"), "{gap}");
 
     // ch15 names a cleaver while asking for one to be forged later; an
-    // object mentioned in dialogue is not a chopping action to sound now.
     let chapter15 = "Dịch Phong vươn tay lấy ra con dao phay nói: nhớ lần trước bá mẫu nói qua, nhờ ta rèn một con dao phay lúc rảnh rỗi, giúp ta mang cho họ nhé!";
     let mention_only = json!({"segments": [line(chapter15)]});
     assert!(
@@ -2731,8 +2441,6 @@ fn sound_design_gap_catches_an_empty_and_an_unclosed_design() {
 }
 
 /// The soft-release curve: three blocks, then accept. Pinned because the
-/// loop's termination hangs on it — a curve that never drops below half
-/// is the deadlock back again.
 #[test]
 fn gap_block_p_releases_on_the_fourth_failure() {
     assert!((gap_block_p(0) - 0.9).abs() < 1e-9);
@@ -2742,8 +2450,6 @@ fn gap_block_p_releases_on_the_fourth_failure() {
 }
 
 /// ch262's false positive, pinned: bare `chém` is an idiom
-/// ("muốn chém muốn giết"), not a staged slash, and must not fail a
-/// chapter that places nothing. The compounds still catch real blades.
 #[test]
 fn bare_chem_is_no_sound_cue() {
     use crate::audio_pool::ClipPool;
@@ -2758,11 +2464,6 @@ fn bare_chem_is_no_sound_cue() {
 }
 
 /// The two rounds are stitched by key, and each key has one owner.
-///
-/// Worth a test because the failure mode is quiet: a script round that
-/// helpfully returns its own `title`, or a cast round that echoes back the
-/// `segments` it was shown, would overwrite the other half and nothing
-/// downstream could tell which of the two answers it was reading.
 #[test]
 fn merge_rounds_gives_each_key_to_its_owner() {
     let context = json!({
@@ -2863,8 +2564,6 @@ fn shipped_prompts_render_every_placeholder() {
     assert!(p.contains("blood-spatter (hit; blood"), "{p}");
 
     // The non-verbal vocabulary is VieNeu's, so its tags render — and an
-    // engine that voices none gets the *rule* removed rather than negated:
-    // a rule that says "none" still teaches the model to write brackets.
     assert!(p.contains("[cười] [thở dài] [hắng giọng]"), "{p}");
     let none = build_script_prompt(&layout, "gemini", &bible, &context, &text).unwrap();
     assert!(
@@ -2876,14 +2575,8 @@ fn shipped_prompts_render_every_placeholder() {
 }
 
 /// The manual path's contract, against the fixture.
-///
-/// **The manual rounds are the worker's two prompts, not a second pair.** A
-/// chapter finished by hand must be dramatized by the same contract the
 /// automatic path enforces, or "the same digest with a person standing in for
 /// the model" is not true of it. So this pins the *identity*: round 1 is
-/// `build_attribution_prompt` (dialogue events with source ids to answer),
-/// round 2 is `build_staging_prompt` (the same events, the speaker map fixed,
-/// staging only), and the hand-off between them carries that map.
 #[test]
 fn the_manual_rounds_ask_for_the_right_prompt_and_refuse_a_paste_out_of_order() {
     let dir = std::env::temp_dir().join("bm-manual-fixture");
@@ -2898,8 +2591,6 @@ fn the_manual_rounds_ask_for_the_right_prompt_and_refuse_a_paste_out_of_order() 
     .unwrap();
 
     // Round 1 is the attribution pass, and the fixture's template is a stub
-    // ("production prompts live in the profile"), so the assertions are on
-    // substitution and on the contract appended to it.
     let first = manual_prompt(&layout, "vieneu", 51, None).unwrap();
     assert_eq!(first.round, Round::Attribution);
     assert!(
@@ -2908,7 +2599,6 @@ fn the_manual_rounds_ask_for_the_right_prompt_and_refuse_a_paste_out_of_order() 
         head_chars(&first.text, 120)
     );
     // The chapter arrives as prepared events: the quote is answerable, the
-    // prose around it is evidence, and no raw text is handed over.
     assert!(first.text.contains("dialogue_events"), "{}", first.text);
     assert!(first.text.contains("Ừm!"), "the line it must attribute");
     assert!(
@@ -2922,13 +2612,11 @@ fn the_manual_rounds_ask_for_the_right_prompt_and_refuse_a_paste_out_of_order() 
     );
 
     // A paste for round 2 with no cast is refused by name, rather than
-    // rendering a staging prompt against a cast that does not exist.
     let err =
         manual_accept(&layout, 51, Round::Staging, "{}", None).expect_err("round 2 needs round 1");
     assert!(err.to_string().contains("round 1's cast"), "{err}");
 
     // A garbage paste fails the *worker's* validator, the same one, and
-    // says so in words the operator can paste back into their model.
     let err = manual_accept(&layout, 51, Round::Attribution, "not json at all", None)
         .expect_err("not JSON");
     assert!(err.to_string().contains("not valid JSON"), "{err:#}");
@@ -2952,25 +2640,11 @@ fn the_manual_rounds_ask_for_the_right_prompt_and_refuse_a_paste_out_of_order() 
     }
 
     // A chapter with no text fails by path, so the operator knows which file
-    // the crawl never produced rather than reading a bare "no such file".
     let err = manual_prompt(&layout, "vieneu", 999, None).expect_err("no chapter text");
     assert!(err.to_string().contains("ch999"), "{err:#}");
 }
 
 /// The happy path, end to end, without a model.
-///
-/// Two pastes and a finished chapter, the flow the TUI drives with `c` and
-/// `v` and the backup digestor drives with a model, exercised through
-/// `manual_accept` so the seam between the rounds is real rather than
-/// assumed. What this buys that the per-part tests cannot: it proves the
-/// round-1 answer is *usable* as round 2's input.
-///
-/// The staging answer names **no speaker at all**, it cannot, and saying so
-/// in the fixture is the point: the map round 1 fixed is attached by code,
-/// and the finished script shows both of its decisions (Narrator for the
-/// prose, the anonymous slot for the quote). The `calm` alias must land as
-/// `quiet`, proving the alias is applied on the real manual-validation path
-/// rather than only in the normalization unit test.
 #[test]
 fn a_valid_pair_of_pastes_finishes_the_chapter() {
     let dir = std::env::temp_dir().join("bm-manual-happy");
@@ -2985,7 +2659,6 @@ fn a_valid_pair_of_pastes_finishes_the_chapter() {
     .unwrap();
 
     // Round 1: the attribution answer, one entry per *dialogue* event, in
-    // source order. Narration is not the model's to answer; code owns it.
     let cast = manual_accept(
         &layout,
         51,
@@ -3001,7 +2674,6 @@ fn a_valid_pair_of_pastes_finishes_the_chapter() {
     assert!(cast.get("outcome").is_none(), "and nothing finished");
     assert_eq!(cast["speakers"]["e0002"], json!("Anonymous"));
     // Narration is attached by code, so it is in the map the *next* round
-    // reads even though the model never answered for it.
     assert_eq!(cast["speakers"]["e0001"], json!("Narrator"));
 
     // Round 2: staging, carrying no speaker, checked against that map.
@@ -3025,7 +2697,6 @@ fn a_valid_pair_of_pastes_finishes_the_chapter() {
     assert_eq!(segments[1]["speaker"], json!("Anonymous"));
     assert_eq!(segments[0]["music"], json!("quiet"));
     // The delta is what the inductor merges into the bible, a manual digest
-    // has to produce one, or the next chapter would not know this cast.
     assert!(outcome.delta.get("roster").is_some(), "{:?}", outcome.delta);
     assert!(
         outcome.log.iter().any(|l| l.contains("segments=2")),
@@ -3034,8 +2705,6 @@ fn a_valid_pair_of_pastes_finishes_the_chapter() {
     );
 
     // **And the hand-off is real, not decorative.** A staging answer that
-    // drops an event is refused by round 2, otherwise the source gate is
-    // decorative and a chapter can ship with words the novel never said.
     let err = manual_accept(
         &layout,
         51,
@@ -3051,10 +2720,6 @@ fn a_valid_pair_of_pastes_finishes_the_chapter() {
 }
 
 /// Manual gate, not CI: runs a real digest of ch51 through the analyzer
-/// and prints the resulting script, so a prompt change can be eyeballed
-/// before anything downstream reads the new fields. Writes
-/// `data/script-51.json`, exactly like a worker completion would.
-/// Run with `BM_LIVE_DIGEST=1` and the keys from `.env` in the environment.
 #[tokio::test]
 #[ignore]
 async fn live_digest_ch51_prints_script() {
@@ -3073,16 +2738,8 @@ async fn live_digest_ch51_prints_script() {
 }
 
 // -----------------------------------------------------------------------
-// windows: one chapter staged in more than one call
-// -----------------------------------------------------------------------
 
 /// A chapter long enough to need parts, **built rather than committed**.
-///
-/// The shape is what the tests are about — one paragraph per event, a quoted
-/// line every third paragraph, and no cue word from rule 10's list, so the
-/// sound-design gates stay quiet — and a 40 KB blob in the repository would
-/// only pin the bytes. What it models is the real case: a novel chapter about
-/// three times the length of the longest chapter in the sample corpus.
 fn long_chapter(paragraphs: usize) -> String {
     let mut text = String::new();
     for i in 0..paragraphs {
@@ -3110,8 +2767,6 @@ fn long_layout(tag: &str, paragraphs: usize) -> (std::path::PathBuf, Layout, Str
 }
 
 /// A part's attribution answer as a model would write it: one speaker per
-/// *dialogue* event in the part, a roster naming only who speaks, and the
-/// `summary` a later part is handed.
 fn cast_answer(slice: &PreparedChapter) -> String {
     let speakers: serde_json::Map<String, Value> = slice
         .events
@@ -3139,8 +2794,6 @@ fn cast_answer(slice: &PreparedChapter) -> String {
 }
 
 /// A part's staging answer: every event of the part, once, in source order,
-/// with its own text and no speaker — which is what the contract asks for and
-/// what the source gate proves.
 fn script_answer(slice: &PreparedChapter) -> String {
     let segments: Vec<Value> = slice
         .events
@@ -3161,10 +2814,6 @@ fn staged_part(from: usize, to: usize, context: Value, segments: Value) -> Part 
 }
 
 /// **The parity promise, in bytes.** A chapter that fits one call is asked
-/// the prompt it was always asked — no part note, no plot, and no `summary`
-/// field — so it cannot digest differently because windows exist. The same
-/// chapter asked as a part *does* carry the block, and part 2 is handed what
-/// part 1 said.
 #[test]
 fn a_chapter_that_fits_one_call_is_asked_the_prompt_it_always_was() {
     let (_dir, layout, text) = long_layout("one-call-prompt", 3);
@@ -3211,7 +2860,6 @@ fn a_chapter_that_fits_one_call_is_asked_the_prompt_it_always_was() {
     );
 
     // Staging has its own note, and the rule that matters for it is the bed
-    // that may be closed by the part after this one.
     let cast = json!({"roster": ["Narrator"], "speakers": {"e0001": "Narrator"}});
     let quiet = build_staging_prompt(&layout, "vieneu", &bible, &cast, &prepared, None).unwrap();
     assert!(
@@ -3229,9 +2877,6 @@ fn a_chapter_that_fits_one_call_is_asked_the_prompt_it_always_was() {
 }
 
 /// The one cross-chapter memory: a stored predecessor's excerpt rides
-/// into the attribution prompt as `---PREVIOUSLY---`, and no predecessor
-/// means no block at all — the ordinary first chapter is the pre-excerpt
-/// prompt byte for byte.
 #[test]
 fn the_previous_excerpt_rides_as_a_previously_block() {
     let (_dir, layout, text) = long_layout("excerpt-prompt", 3);
@@ -3266,9 +2911,6 @@ fn the_previous_excerpt_rides_as_a_previously_block() {
 }
 
 /// The chain reads the stored scripts: an excerpt is picked up from
-/// `script(n-1)` the moment it exists, gaps are skipped, and the window
-/// is honored — the default depth of 1 never reaches past the previous
-/// chapter.
 #[test]
 fn previous_excerpts_read_stored_scripts_and_skip_gaps() {
     let (_dir, layout, _text) = long_layout("excerpt-store", 3);
@@ -3283,7 +2925,6 @@ fn previous_excerpts_read_stored_scripts_and_skip_gaps() {
     assert_eq!(got, "CH 41: The stranger is still unnamed.");
 
     // The default window is 1: chapter 43 asks for script(42), which was
-    // never written, and gets nothing — a gap is silence, not an error.
     assert!(previous_excerpts(&layout, 43).is_none());
     assert!(
         previous_excerpts(&layout, 41).is_none(),
@@ -3292,10 +2933,6 @@ fn previous_excerpts_read_stored_scripts_and_skip_gaps() {
 }
 
 /// The excerpt-only prompt asks the digest's own question: the same rule
-/// text the attribution contract carries, the chapter, and — when one
-/// exists — the predecessor's `---PREVIOUSLY---` block, so a backfill feeds
-/// forward exactly as a digest does. Without a predecessor the block is
-/// absent, so nothing is invented for the first chapter.
 #[test]
 fn the_excerpt_only_prompt_asks_the_digests_own_excerpt_rule() {
     let (_dir, layout, text) = long_layout("excerpt-only-prompt", 3);
@@ -3328,8 +2965,6 @@ fn the_excerpt_only_prompt_asks_the_digests_own_excerpt_rule() {
 }
 
 /// One rule, two askers: the attribution contract and the excerpt prompt
-/// must render the same instruction, or a backfilled excerpt would drift
-/// from the one a digest writes.
 #[test]
 fn the_attribution_contract_and_the_excerpt_prompt_share_one_rule() {
     let (_dir, layout, text) = long_layout("excerpt-rule-parity", 3);
@@ -3350,8 +2985,6 @@ fn the_attribution_contract_and_the_excerpt_prompt_share_one_rule() {
 }
 
 /// The answer is read softly: the strict object, the prose a model returns
-/// instead, and nothing for an empty answer. Whitespace is squeezed so a
-/// recovered excerpt matches what the digest would have stored.
 #[test]
 fn an_excerpt_answer_is_read_softly() {
     assert_eq!(
@@ -3367,8 +3000,6 @@ fn an_excerpt_answer_is_read_softly() {
 }
 
 /// Recovering an excerpt must not disturb the script it lands in: the
-/// segments and the cast the render reads stay byte-identical, and only
-/// the one key is set.
 #[test]
 fn write_excerpt_touches_only_the_excerpt() {
     let (_dir, layout, _text) = long_layout("excerpt-write", 3);
@@ -3389,8 +3020,6 @@ fn write_excerpt_touches_only_the_excerpt() {
 }
 
 /// A part has to say what happened in it, because that summary is the whole
-/// of what the parts after it know. A chapter that did not split is validated
-/// exactly as before, which is the other half of the parity promise.
 #[test]
 fn a_part_of_a_chapter_has_to_say_what_happened_in_it() {
     let prepared = prepare_chapter("Hắn gật đầu.\n\n\"Ừm!\"\n");
@@ -3418,7 +3047,6 @@ fn a_part_of_a_chapter_has_to_say_what_happened_in_it() {
 }
 
 /// The merge: source order, one identity per person, and every speaker from
-/// every part in one map.
 #[test]
 fn merging_parts_keeps_the_source_order_and_every_identity() {
     let a = staged_part(
@@ -3460,7 +3088,6 @@ fn merging_parts_keeps_the_source_order_and_every_identity() {
     assert_eq!(segments[1]["source_id"], json!("e0003"));
 
     // The opening part names the chapter and sets its mood; the rest is the
-    // union of what the parts knew.
     assert_eq!(merged["title"], json!("Tiếng Hỏi Trong Sân"));
     assert_eq!(merged["atmosphere"], json!("A courtyard at dusk."));
     assert_eq!(merged["roster"], json!(["Narrator", "Anonymous"]));
@@ -3470,7 +3097,6 @@ fn merging_parts_keeps_the_source_order_and_every_identity() {
     assert_eq!(merged["new_aliases"]["Lão Phong"], json!("Dịch Phong"));
 
     // One character declared twice is one character, and the later part fills
-    // the field the earlier one left blank without overwriting what it said.
     let characters = merged["new_characters"].as_array().unwrap();
     assert_eq!(characters.len(), 1, "{characters:?}");
     assert_eq!(characters[0]["personality"], json!("wry"));
@@ -3478,7 +3104,6 @@ fn merging_parts_keeps_the_source_order_and_every_identity() {
 }
 
 /// Two parts owning one surface form differently is the one thing a union
-/// cannot fix, so it is named rather than swallowed.
 #[test]
 fn two_parts_owning_one_form_differently_is_reported() {
     let part = |owner: &str| {
@@ -3503,8 +3128,6 @@ fn two_parts_owning_one_form_differently_is_reported() {
 }
 
 /// The checkpoint is what makes a sixteen-call chapter survivable: a part is
-/// only in it once it is finished, and it is only honoured while the chapter
-/// text, the bible and the plan still say what they said when it was staged.
 #[test]
 fn the_parts_checkpoint_resumes_what_matches_and_forgets_what_does_not() {
     let (_dir, layout, text) = long_layout("parts-checkpoint", 300);
@@ -3534,7 +3157,6 @@ fn the_parts_checkpoint_resumes_what_matches_and_forgets_what_does_not() {
     assert_eq!(reopened.summaries().len(), 1);
 
     // A different plan is a different chapter's work: the stored parts are
-    // answers to a question nobody is asking any more.
     let chunkier = crate::config::DigestSettings {
         chunk_sentences: 4,
         chunk_chars: 0,
@@ -3573,7 +3195,6 @@ fn the_parts_checkpoint_resumes_what_matches_and_forgets_what_does_not() {
         0
     );
     // And the plan moving under a stored part drops it, rather than staging
-    // a script against events the part never saw.
     let shifted: Vec<Window> = windows
         .iter()
         .skip(1)
@@ -3590,8 +3211,6 @@ fn the_parts_checkpoint_resumes_what_matches_and_forgets_what_does_not() {
 }
 
 /// The gates name the part that owes an answer: the one that opened the
-/// surviving bed, or the one whose own prose stages a cue and whose own
-/// segments place none.
 #[test]
 fn the_gate_names_the_part_that_owes_an_answer() {
     use crate::audio_pool::{ClipPool, Sound};
@@ -3611,8 +3230,6 @@ fn the_gate_names_the_part_that_owes_an_answer() {
     let line = |t: &str| json!({"speaker": "Narrator", "text": t});
 
     // Rule 1 across a part boundary: opened in part 2, never closed. The
-    // part that opened it is the part to re-ask, and the merged check is what
-    // knows the chapter as a whole.
     let quiet = json!({"segments": [line("Trời tối."), {"sound": "coin"}]});
     let opens = json!({"segments": [line("Hai người đến phòng bếp."), {"sound": "food-prep"}, line("Rồi đi ra.")]});
     let scripts = [&quiet, &opens];
@@ -3625,8 +3242,6 @@ fn the_gate_names_the_part_that_owes_an_answer() {
     );
 
     // Rule 2 is per part, and this is why: part 1's prose stages a kitchen
-    // and part 1's segments place nothing, while part 2 did place a sound.
-    // A merged check would have seen a placement and passed the chapter.
     let silent = json!({"segments": [line("Hắn đi đến phòng bếp.")]});
     let placed = json!({"segments": [line("Trời tối."), {"sound": "coin"}]});
     let scripts = [&silent, &placed];
@@ -3642,7 +3257,6 @@ fn the_gate_names_the_part_that_owes_an_answer() {
     assert!(gap.contains("part"), "the message names what it is about");
 
     // A chapter that did not split goes through `sound_design_gap` itself, so
-    // its message still says `chapter`.
     let scripts = [&silent];
     let gap = sound_gap(&scripts, &["Hắn đi đến phòng bếp."], &pool, "chapter")
         .expect("a staged chapter with none");
@@ -3650,21 +3264,6 @@ fn the_gate_names_the_part_that_owes_an_answer() {
 }
 
 /// **The end-to-end proof, without a model.** A 40 KB chapter — three times
-/// the longest chapter in the sample corpus — is planned into parts, and the
-/// whole manual flow is driven over it part by part: round 1, round 2, on to
-/// the next part, until the chapter finishes. What it establishes that the
-/// per-unit tests cannot:
-///
-/// 1. the answer to one call would not have fit (so the split is the reason a
-///    long chapter is digestible at all, not a preference), while every part
-///    fits under the budget with room to spare;
-/// 2. every part's prompt is a fraction of the one the whole chapter would
-///    have needed;
-/// 3. the merged script is the script the single-call digest would have
-///    written: one segment per source event, in source order, nothing dropped
-///    at a part boundary;
-/// 4. the checkpoint exists while the chapter is half-staged and is gone
-///    once it is written.
 #[test]
 fn a_long_chapter_is_staged_in_parts_and_merges_into_one_script() {
     let (_dir, layout, text) = long_layout("manual-parts", 220);
@@ -3679,8 +3278,6 @@ fn a_long_chapter_is_staged_in_parts_and_merges_into_one_script() {
     );
 
     // (1) Why parts exist, in the numbers the backends impose: the answer to
-    // one call is over the hard cap every backend sets, so today it would be
-    // truncated mid-JSON and refused after a repair that fails the same way.
     let whole_chars = weight(&prepared.events);
     assert!(
         tokens(whole_chars) > 16_384,
@@ -3697,14 +3294,11 @@ fn a_long_chapter_is_staged_in_parts_and_merges_into_one_script() {
     }
 
     // (2) The prompt shrinks with the part, which is the truncation being
-    // prevented on the *input* side as well — one backend shares the context
-    // between prompt and answer.
     let bible = load_bible(&layout.bible());
     let whole_prompt = build_attribution_prompt(&layout, &bible, &prepared, None, None).unwrap();
     let checkpoint = layout.data().join(".digest-parts-ch51.json");
 
     // (3) The flow, part by part, exactly as the TUI and the backup runner
-    // drive it.
     let mut cast: Option<Value> = None;
     let mut outcome = None;
     let mut prompts: Vec<ManualPrompt> = Vec::new();
@@ -3783,7 +3377,6 @@ fn a_long_chapter_is_staged_in_parts_and_merges_into_one_script() {
     let outcome = outcome.expect("the last part finishes the chapter");
 
     // Every part's prompt is a fraction of the one the whole chapter would
-    // have needed, and none of them is the whole chapter.
     for (i, prompt) in part_prompts.iter().enumerate() {
         assert!(
             prompt.len() < whole_prompt.len(),
@@ -3795,8 +3388,6 @@ fn a_long_chapter_is_staged_in_parts_and_merges_into_one_script() {
     assert!(!checkpoint.exists(), "the checkpoint is cleared at the end");
 
     // (3) The merged script: one segment per source event, in source order,
-    // with the text of the event it answers. Nothing was dropped or reordered
-    // at a part boundary — which is what makes this the single-call digest.
     let segments = outcome.script["segments"].as_array().unwrap();
     assert_eq!(segments.len(), prepared.events.len());
     for (segment, event) in segments.iter().zip(&prepared.events) {
@@ -3812,7 +3403,6 @@ fn a_long_chapter_is_staged_in_parts_and_merges_into_one_script() {
     assert_eq!(outcome.script["roster"], json!(["Narrator", "Anonymous"]));
 
     // The ledger line says what the chapter cost, part by part — the only
-    // place a sixteen-call chapter is visible as sixteen calls.
     assert!(
         outcome.log.iter().any(|l| l.contains("staged in")),
         "{:?}",
@@ -3829,8 +3419,6 @@ fn a_long_chapter_is_staged_in_parts_and_merges_into_one_script() {
 }
 
 /// A part that leaves a looping bed open is refused **before** the checkpoint
-/// advances, so the operator can paste a better answer for the round they are
-/// on instead of being stuck one part further on.
 #[test]
 fn a_part_that_leaves_a_bed_open_is_refused_without_moving_on() {
     let (_dir, layout, _text) = long_layout("manual-gate", 300);
@@ -3870,23 +3458,15 @@ fn a_part_that_leaves_a_bed_open_is_refused_without_moving_on() {
 }
 
 /// **The severity rule, every cell.** The ladder is only as honest as this
-/// table, and nothing else in the code decides it.
 #[test]
 fn a_failure_is_retried_in_place_or_handed_back_by_whoever_owns_it() {
     // Its own fault: one more ask in place, then the chapter is over.
     assert_eq!(route(Round::Staging, Round::Staging, 0), Route::Retry);
     assert_eq!(route(Round::Staging, Round::Staging, 1), Route::Die);
     // Someone else's fault: never a retry, and **not on the last attempt
-    // either**. This is the cell that is the whole point — a staging answer
-    // that trips over a speaker the cast never assigned cannot be fixed by
-    // staging, so a ladder that asked again would spend a full call per
-    // attempt to learn the same thing the blame already said.
     assert_eq!(route(Round::Attribution, Round::Staging, 0), Route::Back);
     assert_eq!(route(Round::Attribution, Round::Staging, 1), Route::Back);
     // Total, so a blame naming a *later* step is still a hand-back rather
-    // than a panic or a wrong in-place retry. No gate produces one today —
-    // attribution never reads staging's output — and the rule does not need
-    // a guard for a case that cannot arise.
     assert_eq!(route(Round::Staging, Round::Attribution, 0), Route::Back);
 }
 
@@ -3900,7 +3480,6 @@ fn a_gate_says_whose_fault_it_is() {
         .expect("the fixture cast is valid");
 
     // A staging answer handed an event the cast never attributed. Only the
-    // attribution step can write that row, so this is its fault.
     let orphan = script_answer(&prepared);
     let mut orphan: Value = serde_json::from_str(&orphan).unwrap();
     let mut segments = orphan["segments"].as_array().unwrap().clone();
@@ -3916,7 +3495,6 @@ fn a_gate_says_whose_fault_it_is() {
     );
 
     // A staging answer that dropped an event the cast did attribute. That is
-    // the staging model's own choice, so asking again is the remedy.
     let dropped = script_answer(&prepared);
     let mut dropped: Value = serde_json::from_str(&dropped).unwrap();
     let mut segments = dropped["segments"].as_array().unwrap().clone();
@@ -3932,7 +3510,6 @@ fn a_gate_says_whose_fault_it_is() {
     );
 
     // And the attribution gate blames itself for everything, because
-    // nothing downstream can change a roster that names a stranger.
     let complaint = parse_attribution("not json at all", &bible, &prepared, false)
         .expect_err("garbage is refused");
     assert_eq!(complaint.blame, Round::Attribution, "{}", complaint.why);
@@ -3942,7 +3519,6 @@ fn a_gate_says_whose_fault_it_is() {
 fn the_chapter_budget_refuses_rather_than_spending_forever() {
     let mut calls = GCalls::new(7);
     // The phrase pass gets its own three asks; each part then gets four,
-    // which is two calls of floor plus the headroom the gates exist to use.
     assert_eq!(calls.left, 3, "the phrase pass alone");
     calls.allow_parts(2);
     assert_eq!(calls.left, 11);
@@ -3952,7 +3528,6 @@ fn the_chapter_budget_refuses_rather_than_spending_forever() {
         assert_eq!(calls.spent, i + 1);
     }
     // Routing can hand work backwards for ever if nothing stops it. The cap
-    // is what makes the chapter end, with a reason an operator can act on.
     let err = calls
         .spend(Round::Attribution.as_str())
         .expect_err("the cap holds");

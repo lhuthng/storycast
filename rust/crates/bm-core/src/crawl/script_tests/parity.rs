@@ -25,19 +25,6 @@ fn the_bundled_crawlers_reproduce_the_rust_extractors_goldens() {
 }
 
 /// Storya leaves a one-letter stub at the end of some paragraphs, and it must
-/// never reach the digest.
-///
-/// The stub is in the page, not in our extraction: `…cảnh tượng đó. m.` is what
-/// storya.click serves for ch386. The digest's source gate demands every word be
-/// spoken exactly once, a model drops a meaningless fragment on sight, and the
-/// chapter is then refused on every racer for ever — ch386 burned 15 attempts
-/// and was shelved over this one fragment. So the templates strip it, both of
-/// them: the two engines are one behaviour, and a rule in only one of them is a
-/// chapter that crawls clean or not depending on `crawl.engine`.
-///
-/// The page below is the shape the site serves, cut to the parts the extractor
-/// reads. The prose is the real ch386 paragraph, verbatim, so the assertion
-/// about what survives is about the corpus and not about this fixture.
 #[test]
 fn the_storya_engines_drop_the_translators_letter_stub() {
     const PAGE: &str = r#"<html><body><article>
@@ -72,9 +59,6 @@ fn the_storya_engines_drop_the_translators_letter_stub() {
 }
 
 /// A workspace's own crawler shadows the profile's: `crawl/` in the active
-/// workspace is searched before the root and before `assets/`, so a book whose
-/// site needs a different script wins without touching anything shared — and
-/// without the name in `crawl.script` having to change.
 #[test]
 fn the_workspaces_crawler_shadows_the_profiles() {
     let dir = std::env::temp_dir().join(format!("bm-ws-crawl-{}", std::process::id()));
@@ -108,14 +92,6 @@ fn the_workspaces_crawler_shadows_the_profiles() {
 }
 
 /// Every crawler now lives in the global `crawlers/` tree, so a `settings.json`
-/// written before the move spells an old path (`assets/crawl/templates/…`,
-/// `crawl/templates/…`) that no longer exists. It has to keep working: the
-/// failure mode otherwise is "no such file" on the first crawl of a book that
-/// was fine yesterday.
-///
-/// The fallback is by **basename only**, into `crawlers/known/` and
-/// `crawlers/examples/`, and only for a path that missed — so it cannot shadow a
-/// real file and cannot turn a bare name into a bundled one.
 #[test]
 fn a_settings_file_naming_the_pre_move_path_still_finds_its_crawler() {
     let dir = std::env::temp_dir().join(format!("bm-move-{}-{}", std::process::id(), line!()));
@@ -138,7 +114,6 @@ fn a_settings_file_naming_the_pre_move_path_still_finds_its_crawler() {
         assert_eq!(picked, dir.join("crawlers/known/storya.lua"), "{old}");
     }
     // A basename alone is still not a lookup: it must not silently become a
-    // bundled crawler, because a typo would then run someone else's script.
     assert_eq!(resolve_script(&layout, "storya.lua"), None);
     // And a path whose basename is nowhere stays missing rather than guessing.
     assert_eq!(resolve_script(&layout, "assets/crawl/nosuchsite.lua"), None);
@@ -146,8 +121,6 @@ fn a_settings_file_naming_the_pre_move_path_still_finds_its_crawler() {
 }
 
 /// The crawlers are **global** now: `crawlers/` at the checkout root, the same
-/// for every adapter and every workspace. A book's own `crawl/` still shadows
-/// them — that is where a site nobody has written down yet lives.
 #[test]
 fn the_global_crawlers_resolve_from_the_root_and_a_book_can_shadow_them() {
     let dir = std::env::temp_dir().join(format!("bm-global-crawl-{}", std::process::id()));
@@ -164,7 +137,6 @@ fn the_global_crawlers_resolve_from_the_root_and_a_book_can_shadow_them() {
     );
 
     // …and a book's own crawler shadows a global one of the same name, because
-    // `work` is searched before the root.
     std::fs::create_dir_all(dir.join("crawl")).unwrap();
     std::fs::write(dir.join("crawl/site.lua"), "book copy").unwrap();
     assert_eq!(
@@ -175,8 +147,6 @@ fn the_global_crawlers_resolve_from_the_root_and_a_book_can_shadow_them() {
 }
 
 /// A page that is served happily and holds no chapter: the bundled crawler
-/// hands back nothing, and the length guard is what turns that into an `empty`
-/// block rather than a stub three stages downstream.
 #[test]
 fn the_default_crawler_refuses_a_page_with_no_chapter_on_it() {
     let base = fixture::start(vec![("/x".into(), 200, EMPTY_PAGE.to_string())]);
@@ -192,7 +162,6 @@ fn the_default_crawler_refuses_a_page_with_no_chapter_on_it() {
 }
 
 /// A script sees the manifest's URL, its own opaque params, and the attempt
-/// count — the three things that are supposed to reach it and nothing else.
 #[test]
 fn a_script_receives_the_url_params_and_attempt() {
     let html = "x".repeat(400);
@@ -223,7 +192,6 @@ fn a_script_receives_the_url_params_and_attempt() {
 }
 
 /// `none` is a terminal non-failure: a book that ends at 380 must not shelve
-/// twenty rows for the range a careless operator typed.
 #[test]
 fn a_missing_chapter_is_absent_and_a_bot_check_is_a_retryable_block() {
     let base = fixture::start(vec![]);
@@ -251,7 +219,6 @@ fn a_missing_chapter_is_absent_and_a_bot_check_is_a_retryable_block() {
         other => panic!("expected absent, got {other:?}"),
     }
     // And the built-in path classifies HTTP the same way, with the classes that
-    // decide whether another attempt is worth a worker.
     let absent_report = bm_proto::CrawlReport {
         verdict: bm_proto::CrawlVerdict::Absent,
         class: String::new(),
@@ -282,8 +249,6 @@ fn a_missing_chapter_is_absent_and_a_bot_check_is_a_retryable_block() {
 }
 
 /// A page that arrives but is not a chapter fails **at the crawl**, with the
-/// class that says how to treat it, rather than writing a stub the digest then
-/// chokes on.
 #[test]
 fn a_short_page_is_an_empty_block_with_the_length_in_it() {
     let base = fixture::start(vec![(
@@ -305,8 +270,6 @@ fn a_short_page_is_an_empty_block_with_the_length_in_it() {
 }
 
 /// The host has no idea what a Storya chapter is. There is no `clean_storya` to
-/// call, because which element holds the prose is the script's business — and
-/// this is the test that keeps it that way.
 #[test]
 fn the_host_offers_primitives_and_no_site_knowledge() {
     for (engine, file) in [("lua", "nosites.lua"), ("js", "nosites.js")] {
@@ -324,8 +287,6 @@ fn the_host_offers_primitives_and_no_site_knowledge() {
 }
 
 /// `select_text` is the "point at the container" primitive: point a script at
-/// an element and get prose back, paragraphs and all — as opposed to `select`,
-/// which squeezes the same element onto one line.
 #[test]
 fn a_script_can_take_a_container_as_prose() {
     let long = "Hắn bước vào phòng và nhìn quanh một lượt, không thấy một ai cả. ";
@@ -365,8 +326,6 @@ fn a_script_can_take_a_container_as_prose() {
 }
 
 /// A workspace with no script at all can still say which element holds the
-/// chapter. `extract` is the one key the host reads out of `params`, and it is
-/// what makes "the built-in fetcher" something other than a fixed guess.
 #[test]
 fn the_builtin_path_takes_the_container_crawl_params_names() {
     let para = "Hắn bước vào phòng và nhìn quanh một lượt, không thấy một ai cả. ".repeat(2);
@@ -388,7 +347,6 @@ fn the_builtin_path_takes_the_container_crawl_params_names() {
     assert!(!text.contains("navigation"), "{text:.80}");
 
     // A selector that matches nothing falls back to the generic heuristic
-    // rather than failing, and says what it tried on the ledger row.
     let mut s = spec("", "", "");
     s.url_template = format!("{base}/x");
     s.params
@@ -402,7 +360,6 @@ fn the_builtin_path_takes_the_container_crawl_params_names() {
     );
 
     // A selector that is not valid CSS is a configuration error and says so,
-    // instead of quietly guessing.
     let mut s = spec("", "", "");
     s.url_template = format!("{base}/x");
     s.params.insert("extract".into(), serde_json::json!("div["));
@@ -411,8 +368,6 @@ fn the_builtin_path_takes_the_container_crawl_params_names() {
 }
 
 /// The listing site: `discover` runs once for the range, the manifest comes out
-/// of it, and a range that runs past the end of the book is marked absent
-/// instead of enqueued as twenty doomed fetches.
 #[test]
 fn discover_builds_the_index_and_marks_the_tail_absent() {
     let listing = r#"<html><body><div class="content">
@@ -479,12 +434,10 @@ fn discover_builds_the_index_and_marks_the_tail_absent() {
     );
     assert!(!index.is_absent(3));
     // A second call reuses the frozen index rather than walking the listing
-    // again — the shift-proofing this file exists for.
     let again = chapter_index(&layout, &settings, 1, 5, false).expect("index");
     assert_eq!(again.url(2), index.url(2));
 
     // A workspace with neither a template nor a discover has no mapping, and
-    // the error names all three ways to get one.
     let bare = Settings::default();
     let mut bare = bare;
     bare.url_template = String::new();
@@ -499,7 +452,6 @@ fn discover_builds_the_index_and_marks_the_tail_absent() {
 }
 
 /// `async function crawl` is allowed, and a promise that needs a real event loop
-/// is refused with a message saying so — rather than hanging a worker.
 #[test]
 fn an_async_js_crawl_resolves_and_a_never_settling_one_is_refused() {
     let html = "y".repeat(400);

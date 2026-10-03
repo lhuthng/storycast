@@ -1,10 +1,6 @@
 use super::*;
 
 /// List, switch or create a workspace.
-///
-/// The work itself is [`crate::workspace_cmd`], the same function the CLI
-/// runs, one implementation, two presentations. Listing needs no lock (it
-/// reads a pointer and a directory); switching and creating take both.
 pub(crate) async fn job_workspace(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     layout: bm_core::Layout,
@@ -12,7 +8,6 @@ pub(crate) async fn job_workspace(
     req: WorkspaceReq,
 ) {
     // Read before the request is consumed: only a switch moves anything, and
-    // only a switch owes the UI a re-resolve.
     let listing = matches!(req, WorkspaceReq::List);
     let run = |cmd: crate::WorkspaceCmd| {
         let root = layout.root.clone();
@@ -54,8 +49,6 @@ pub(crate) async fn job_workspace(
         Err(e) => send(&tx, Level::Error, format!("workspace: {e:#}")),
     }
     // Every arm owes exactly one Done; see `job_load_lines`. A successful
-    // switch reports `Relayout` so the dashboard re-resolves before its next
-    // frame, a listing changed nothing.
     let _ = tx.send(Ev::Done(if switched {
         DoneKind::Relayout
     } else {
@@ -64,11 +57,6 @@ pub(crate) async fn job_workspace(
 }
 
 /// List, load or pack a profile bundle, through `tools/profile.sh`.
-///
-/// Shell rather than Rust for the same reason ssh and ffmpeg are: tar + zstd +
-/// GitHub releases are the tools, and the script is the one place the bundle
-/// format lives. Its own output is the report, this streams it line by line
-/// instead of re-deriving it.
 pub(crate) async fn job_profile(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     layout: bm_core::Layout,
@@ -83,7 +71,6 @@ pub(crate) async fn job_profile(
         ProfileReq::Pack(name) => ("pack", Some(name.clone())),
     };
     // A load replaces the live tree; a pack only reads it and writes into
-    // profiles/, so it takes no lock.
     let loading = matches!(req, ProfileReq::Load(_));
     if loading {
         if let Some(why) = cluster_busy(&api).await {
@@ -145,7 +132,6 @@ pub(crate) async fn job_profile(
         Err(e) => send(&tx, Level::Error, format!("profile task failed: {e}")),
     }
     // A load changes which profile the live tree claims to be; the UI re-reads
-    // the pointer when it lands. Listing and packing change nothing.
     let _ = tx.send(Ev::Done(if loading {
         DoneKind::Relayout
     } else {

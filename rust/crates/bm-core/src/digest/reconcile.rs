@@ -2,9 +2,6 @@ use super::canon::{canon_key, BibleMerge};
 use serde_json::{json, Value};
 
 /// Parse the reconciler LLM's answer: `{"merges":[{"canonical":..,"absorb":[..]}]}`
-/// (a bare array of the same objects also parses). Unknown names are kept —
-/// the applier skips what is not in the bible. Unparseable input means no
-/// LLM merges, never an error: the deterministic folds still apply.
 pub fn parse_reconcile_merges(text: &str) -> Vec<BibleMerge> {
     let s = text.trim();
     let s = s.strip_prefix("```json").unwrap_or(s);
@@ -46,7 +43,6 @@ pub fn parse_reconcile_merges(text: &str) -> Vec<BibleMerge> {
 }
 
 /// What the reconciler found without asking anyone: certain folds plus the
-/// ambiguous pairs worth one LLM call, with the prompt for it.
 pub struct ReconcilePlan {
     /// Canon-key collisions — same bare name, safe to fold blind.
     pub folds: Vec<BibleMerge>,
@@ -64,7 +60,6 @@ fn first_seen_of(c: &Value) -> String {
 }
 
 /// Presence: how many chapters this entry has appeared in. The dominance
-/// measure for folds — pure over the bible, like everything here.
 fn chapters_seen_of(c: &Value) -> usize {
     c.get("chapters_seen")
         .and_then(|v| v.as_array())
@@ -73,8 +68,6 @@ fn chapters_seen_of(c: &Value) -> usize {
 }
 
 /// Plan a bible reconciliation: deterministic folds first, LLM candidates
-/// second. Pure over the bible value — no I/O, so the inductor never holds
-/// its lock while the LLM thinks.
 pub fn reconcile_plan(bible: &Value) -> ReconcilePlan {
     let chars: &[Value] = bible
         .get("characters")
@@ -87,11 +80,6 @@ pub fn reconcile_plan(bible: &Value) -> ReconcilePlan {
         .collect();
 
     // Group by canonical key: "Sở Cuồng Sư"/"Sở Cuồng sư", titled and
-    // parenthetical variants all land in one bucket. Canonical is the
-    // DOMINANT entry — most chapters seen — because that is the identity the
-    // story (and the audience) knows: folding a 40-chapter "Vân bá" into a
-    // 2-chapter "lão giả" just because the epithet debuted first would throw
-    // away the real voice for a walk-on. Ties go earliest-seen, then shortest.
     let mut groups: std::collections::BTreeMap<String, Vec<usize>> =
         std::collections::BTreeMap::new();
     for (i, n) in names.iter().enumerate() {
@@ -113,7 +101,6 @@ pub fn reconcile_plan(bible: &Value) -> ReconcilePlan {
     }
 
     // Ambiguous pairs: share a word but differ canonically ("Huyền Vũ" vs
-    // "Huyền Vũ Môn"?). Capped — the prompt stays small either way.
     let folded: std::collections::HashSet<String> = folds
         .iter()
         .flat_map(|(c, a)| std::iter::once(c.clone()).chain(a.iter().cloned()))
@@ -181,10 +168,6 @@ pub fn reconcile_plan(bible: &Value) -> ReconcilePlan {
 }
 
 /// Deterministic folds for cast keys that never made it into the bible:
-/// same canon-key as a bible entry (titles, parentheticals, casing).
-/// The DOMINANT bible name is canonical (see `reconcile_plan`). Pure — the
-/// caller applies them through `apply_reconcile`, which records the alias
-/// and rewrites cast + scripts.
 pub fn cast_only_folds(bible: &Value, cast_keys: &[String]) -> Vec<BibleMerge> {
     let chars: &[Value] = bible
         .get("characters")
@@ -313,8 +296,6 @@ mod tests {
     #[test]
     fn the_dominant_entry_wins_the_fold_not_the_earliest() {
         // The epithet debuts first and the person arrives later with forty
-        // chapters: folding the person into the epithet would throw away the
-        // real voice for a walk-on. Presence decides; debut only breaks ties.
         let bible = json!({"characters": [
             {"name": "Lão giả", "personality": "x", "voice_hint": "elderly male",
              "proper_aliases": ["Lão giả"], "first_seen": "04", "chapters_seen": ["04", "05"]},
@@ -327,7 +308,6 @@ mod tests {
              "proper_aliases": ["Sở Cuồng sư"], "first_seen": "09", "chapters_seen": []}
         ]});
         // Different canon keys, so no blind fold — but case twins must still
-        // resolve through the dominant entry either way round.
         let plan = reconcile_plan(&bible);
         assert_eq!(plan.folds.len(), 1, "{:?}", plan.folds);
         assert_eq!(plan.folds[0].0, "Sở Cuồng Sư", "tie: earliest still wins");

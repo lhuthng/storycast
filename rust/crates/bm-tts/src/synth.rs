@@ -1,15 +1,4 @@
 //! One chunk, end to end, and joining chunks into a paragraph.
-//!
-//! The reference keeps the guard inside `infer`, but the pieces are separable and
-//! separating them is what makes each testable: [`Engine`] produces codes,
-//! [`Codec`] produces audio, and the babble guard needs *audio* to decide — so it
-//! can only live above both.
-//!
-//! A chunk is generated, decoded, and judged. If the judge is unhappy it is
-//! generated **again** — and the RNG continues rather than restarting, because
-//! regenerating the identical chunk would make the loop pointless. At most
-//! [`babble::MAX_RETRIES`] times; the best attempt is what survives, which is not
-//! necessarily the last one.
 
 use crate::babble::{self, Verdict};
 use crate::codec::Codec;
@@ -18,7 +7,6 @@ use crate::sample::Rng;
 use anyhow::Result;
 
 /// 48 kHz, the engine's native rate. Not configurable: the codec and the model
-/// are both trained for it, and the reference hard-codes it too.
 pub const SAMPLE_RATE: usize = 48_000;
 
 pub struct Chunk {
@@ -104,7 +92,6 @@ pub const GAP_SENTENCE_S: f64 = 0.50;
 pub const GAP_MINOR_S: f64 = 0.30;
 
 /// Map boundary labels to pause lengths. An unknown label is treated as a
-/// sentence break, like the reference's `.get(g, ...[ "sentence"])`.
 pub fn gaps_to_silence(gaps: &[String]) -> Vec<f64> {
     gaps.iter()
         .map(|g| match g.as_str() {
@@ -116,16 +103,9 @@ pub fn gaps_to_silence(gaps: &[String]) -> Vec<f64> {
 }
 
 /// "This is sound" on a mean-|x| envelope, absolute rather than relative to the
-/// chunk's peak. Chunks from one render are all at a similar level, so an
-/// absolute threshold is stable across them and a relative one would call a quiet
-/// chunk's speech silence.
 const EDGE_THRESH_DB: f32 = -45.0;
 
 /// Samples of leading and trailing silence, on a 10 ms window.
-///
-/// An all-silent waveform returns `(len, 0)` — every sample is lead, nothing is
-/// tail. That asymmetry is in the reference and it matters downstream:
-/// `pause_pad_samples` special-cases it to avoid counting the same silence twice.
 pub fn edge_silence(wav: &[f32], sample_rate: usize) -> (usize, usize) {
     let win = ((0.01 * sample_rate as f32) as usize).max(1);
     let n_win = wav.len() / win;
@@ -148,13 +128,6 @@ pub fn edge_silence(wav: &[f32], sample_rate: usize) -> (usize, usize) {
 }
 
 /// Zeros needed between two chunks so the *real* pause — the previous chunk's
-/// trailing silence, plus zeros, plus the next chunk's leading silence — comes to
-/// `pause_s`. Zero when the chunks already leave that much.
-///
-/// The pause is topped up rather than appended, which is what keeps the rhythm
-/// even: a cloned voice with a short tail gets padded out, a preset with a long
-/// natural tail is left alone. Appending instead makes every pause uneven by
-/// however much silence each chunk happened to carry.
 pub fn pause_pad_samples(prev: &[f32], next: &[f32], sample_rate: usize, pause_s: f64) -> usize {
     let (lead_prev, mut tail) = edge_silence(prev, sample_rate);
     if lead_prev == prev.len() {
@@ -167,10 +140,6 @@ pub fn pause_pad_samples(prev: &[f32], next: &[f32], sample_rate: usize, pause_s
 }
 
 /// Concatenate chunks, inserting only the missing silence at each boundary.
-///
-/// Chunks are **not** trimmed and **not** faded. That is deliberate in the
-/// reference (09/2026): trimming each chunk's edges removes the natural breath a
-/// preset voice ends on.
 pub fn join_with_pauses(chunks: &[Vec<f32>], pauses_s: &[f64], sample_rate: usize) -> Vec<f32> {
     let Some(first) = chunks.first() else {
         return Vec::new();
@@ -202,7 +171,6 @@ mod tests {
     }
 
     /// Both chunks are pure tone, so neither contributes silence and the whole
-    /// pause is inserted.
     #[test]
     fn a_pause_is_inserted_when_the_chunks_have_none() {
         let out = join_with_pauses(&[tone(4800), tone(4800)], &[0.2], 48_000);
@@ -213,7 +181,6 @@ mod tests {
     }
 
     /// A chunk that already ends in silence needs less padding — the point of
-    /// measuring rather than appending.
     #[test]
     fn existing_silence_counts_towards_the_pause() {
         let mut a = tone(4800);
@@ -233,7 +200,6 @@ mod tests {
     fn an_all_silent_previous_chunk_is_counted_once() {
         let silent = vec![0.0f32; 4800];
         // Without the special case, `tail` would be 0 and the pad would ignore
-        // the 100 ms already present.
         let pad = pause_pad_samples(&silent, &tone(4800), 48_000, 0.2);
         assert!((pad as i64 - 4800).abs() < 500, "pad {pad}");
     }

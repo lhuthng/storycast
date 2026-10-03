@@ -1,11 +1,4 @@
 //! The script inspection overlay: the chapter list, one chapter's segments
-//! with their speakers, and the speaker picker over them.
-//!
-//! One box, three depths, the way the digest manager is one box with two
-//! modes. The title names the depth so the operator always knows what `Esc`
-//! will do — the title *is* the breadcrumb, and a window that only shows
-//! "which window am I in" while hiding "how deep am I" would be half a
-//! breadcrumb.
 use crate::tui::{
     app::App,
     screen::{ScriptPick, ScriptView},
@@ -18,8 +11,6 @@ use ratatui::{
 };
 
 /// How many segment rows are visible at once in the chapter view. The
-/// cursor scrolls the window rather than growing the box, so a 90-segment
-/// chapter is navigable in a 20-row terminal.
 const SEG_VISIBLE: usize = 12;
 
 pub(crate) fn draw_script(f: &mut ratatui::Frame, app: &mut App, v: &ScriptView) {
@@ -54,10 +45,6 @@ pub(crate) fn draw_script(f: &mut ratatui::Frame, app: &mut App, v: &ScriptView)
     let dim = Style::default().fg(Color::DarkGray);
 
     // Rows the excerpt's *body* may use. The paragraph below eats one for its top
-    // border, and `draw_excerpt` spends four more on its own chrome — the hint
-    // line, the blank under it, the blank above the footer, and the footer.
-    // Allotting every row to the body pushed the footer off the bottom, which
-    // is where the scroll position is reported.
     let visible = inner.height.saturating_sub(5) as usize;
 
     let mut lines: Vec<Line> = Vec::new();
@@ -65,11 +52,6 @@ pub(crate) fn draw_script(f: &mut ratatui::Frame, app: &mut App, v: &ScriptView)
         draw_pick(&mut lines, app, v, pick, dim);
     } else if v.excerpt_open {
         // The one depth tall enough to scroll, and it windows **itself** the
-        // way `draw_segments` does. It used to hand `excerpt_scroll` to
-        // `Paragraph::scroll` instead, which is wrong here: with wrapping on,
-        // that offset is applied horizontally, so ↑↓ slid the text sideways
-        // instead of moving down the chain. Slicing the rows here makes the
-        // arrows mean rows, with no dependence on how the widget wraps.
         draw_excerpt(&mut lines, v, dim, inner.width as usize, visible);
     } else if v.open.is_some() {
         draw_segments(&mut lines, v, dim);
@@ -86,16 +68,10 @@ pub(crate) fn draw_script(f: &mut ratatui::Frame, app: &mut App, v: &ScriptView)
 }
 
 /// Depth 2b: the open chapter's excerpt chain. The top half is this chapter's
-/// own excerpt — the state its end leaves for the chapter after it; the bottom
-/// half is what this chapter was *fed*, the previous chapters' excerpts the
-/// digest window pulled in, newest first. The window and the skip rules come
-/// from `digest::excerpt_chain`, the same call the prompt makes, so the screen
-/// shows exactly the memory the model was handed.
 fn draw_excerpt(lines: &mut Vec<Line>, v: &ScriptView, dim: Style, width: usize, visible: usize) {
     let ch = v.open.unwrap_or(0);
 
     // The body first, so the window is a slice of it and the header and the
-    // position footer stay pinned — the same shape `draw_segments` has.
     let mut body: Vec<Line> = Vec::new();
     body.push(Line::from(Span::styled(
         "  ── this chapter (the next chapter is fed this) ──",
@@ -128,8 +104,6 @@ fn draw_excerpt(lines: &mut Vec<Line>, v: &ScriptView, dim: Style, width: usize,
 
     let total = body.len();
     // Clamped so the last page shows the end rather than blank rows. `visible`
-    // is zero on a very short terminal; the slice is then empty and the panel
-    // degrades to its chrome rather than panicking on a bad range.
     let first = v.excerpt_scroll.min(total.saturating_sub(visible));
     let last = (first + visible).min(total);
 
@@ -158,8 +132,6 @@ fn push_wrapped(lines: &mut Vec<Line>, text: &str, indent: &str, width: usize) {
 }
 
 /// Wrap `s` to at most `width` columns, breaking on whitespace and
-/// hard-splitting any single run longer than the width so one unbroken token
-/// cannot overflow the box.
 fn wrap_text(s: &str, width: usize) -> Vec<String> {
     let width = width.max(8);
     let mut out: Vec<String> = Vec::new();
@@ -188,8 +160,6 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
 }
 
 /// Depth 1: the chapter grid-as-list. A book is numbers, so the rows are
-/// dense — several chapters a line, the highlight bracketed, dimmed when
-/// the chapter's script is somehow absent (a hand-deleted file).
 fn draw_list(lines: &mut Vec<Line>, v: &ScriptView, dim: Style) {
     lines.push(Line::from(Span::styled(
         "  type to filter (digits) · ↑↓←→ move · Enter open · Esc close",
@@ -207,8 +177,6 @@ fn draw_list(lines: &mut Vec<Line>, v: &ScriptView, dim: Style) {
         return;
     }
     // A window derived from the cursor, never remembered: the highlight is
-    // visible by construction, the same rule the digest grid uses. The width
-    // is the view's own constant — the same one the arrow keys step by.
     let per_row = ScriptView::PER_ROW;
     let total_rows = rows.len().div_ceil(per_row);
     let here_row = v.cursor / per_row;
@@ -248,7 +216,6 @@ fn draw_list(lines: &mut Vec<Line>, v: &ScriptView, dim: Style) {
 /// Depth 2: the open chapter's segments. One line each — number, speaker,
 /// the opening of the sentence — because the operator is scanning for "the
 /// line where the wrong person says that thing", and a speaker column is
-/// how that is found.
 fn draw_segments(lines: &mut Vec<Line>, v: &ScriptView, dim: Style) {
     let ch = v.open.unwrap_or(0);
     lines.push(Line::from(Span::styled(
@@ -274,7 +241,6 @@ fn draw_segments(lines: &mut Vec<Line>, v: &ScriptView, dim: Style) {
                 .add_modifier(Modifier::BOLD)
         } else if seg.speaker.is_empty() {
             // A sound item: no speaker, no take — dimmed, but present, so
-            // the numbers stay the numbers the op takes.
             dim
         } else {
             Style::default()
@@ -308,9 +274,6 @@ fn draw_segments(lines: &mut Vec<Line>, v: &ScriptView, dim: Style) {
 }
 
 /// Depth 3: the speaker picker. The suggestion list is the chapter's own
-/// roster first — the digest's answer to "who is here" — then everyone
-/// else alphabetically. The header names the segment and its current
-/// speaker, so the confirm-carrying `expect` is visible before Enter.
 fn draw_pick(lines: &mut Vec<Line>, app: &App, v: &ScriptView, pick: &ScriptPick, dim: Style) {
     let suggestions = v.suggestions(app, pick);
     lines.push(Line::from(vec![
@@ -338,7 +301,6 @@ fn draw_pick(lines: &mut Vec<Line>, app: &App, v: &ScriptView, pick: &ScriptPick
         return;
     }
     // A derived window of five, the model list's own rule: the cursor
-    // scrolls rather than the box growing.
     let show = ScriptPick::SHOW;
     let cursor = pick.cursor.min(suggestions.len() - 1);
     let start = cursor
@@ -347,7 +309,6 @@ fn draw_pick(lines: &mut Vec<Line>, app: &App, v: &ScriptView, pick: &ScriptPick
     // The roster block is the prefix of the suggestion list by
     // construction, so the tag is "is this name in the pick's own roster
     // cache" — the same data `suggestions` ordered the list from, not a
-    // second copy of the rule.
     let fold = bm_core::util::fold;
     let is_roster = |name: &str| pick.roster_cache.iter().any(|n| fold(n) == fold(name));
     for (i, name) in suggestions.iter().enumerate().skip(start).take(show) {

@@ -1,35 +1,4 @@
 //! Exclusive writes: the surgeries that wait for the work they would
-//! disturb, instead of refusing.
-//!
-//! `op_swap_voice` and friends used to call `ensure_idle`, which refuses
-//! whenever **any** row is assigned or running with a live beat — whatever
-//! its stage. So a swap was refused because a *crawl* was running, work a
-//! swap cannot possibly disturb, and the operator's only move was to keep
-//! retrying by hand until the cluster happened to be quiet. `op_recast`
-//! hand-rolled its own per-chapter guard, and `sound-changed` had no guard
-//! at all.
-//!
-//! The shape now: each surgery declares the chapters it invalidates, and
-//! waits only on those. [`bm_proto::ExclusiveOp`] carries the scope
-//! (`stages` / `blocks`); this module holds the queue, the delivery gate
-//! the scheduler consults, and the executor that runs the surgery when the
-//! way is clear.
-//!
-//! Three properties the whole design hangs on:
-//!
-//! * **Validate at ask time, not run time.** A typo'd voice must fail now,
-//!   where the operator is looking, not five minutes later when the queue
-//!   drains. So enqueueing runs the same checks the surgery will run, and
-//!   only the *waiting* is deferred. The chapter scans themselves are
-//!   re-run by the surgery at run time — its own invalidation loop — so a
-//!   chapter that enters the scope between ask and run is caught by the
-//!   apply, never missed by the gate.
-//! * **One at a time.** Two swaps interleaved, or a swap under a remix, is
-//!   exactly the concurrency the old refusal existed to prevent. A second
-//!   entry lines up behind the first.
-//! * **The gate and the surgery cannot disagree.** The same `ExclusiveOp`
-//!   that pauses delivery decides when it is quiet — there is no second
-//!   list to drift.
 
 use super::Inner;
 use bm_proto::{now_secs, ExclusiveOp, Stage, TaskState};
@@ -40,7 +9,6 @@ pub(crate) struct Exclusive {
     /// The write to run, with its chapter scope already computed.
     pub op: ExclusiveOp,
     /// The operator's own route (`swap-voice`), for messages and for
-    /// `:xdrop swap-voice`.
     pub label: String,
     /// When it was asked, for the status line.
     pub queued: u64,
@@ -48,14 +16,9 @@ pub(crate) struct Exclusive {
 
 impl Inner {
     /// Queue an exclusive write, or run it at once when nothing is in the
-    /// way. Returns the message the operator sees.
     pub fn exclusive_request(&mut self, mut op: ExclusiveOp) -> anyhow::Result<String> {
         let label = op.route().to_string();
         // The chapter scope, computed at ask time from the same predicate
-        // the surgery's own invalidation will use at run time — a swap's
-        // scope is the chapters that hear the speaker, a merge's the
-        // chapters that hear the absorbed names. Nothing blocks on a
-        // chapter the write cannot reach.
         let mut scope: Vec<u32> = Vec::new();
         match &op {
             ExclusiveOp::SwapVoice {
@@ -78,10 +41,6 @@ impl Inner {
                 names.extend(absorbed.iter().cloned());
                 scope = self.chapters_hearing_names(&names);
                 // Plus the digest half of the blast radius: a chapter whose
-                // raw text still names an absorbed name gets a digest whose
-                // prompt was built from the pre-fold bible, so its delta
-                // would resurrect them. The surgery's own guard refuses on
-                // that set; the gate has to see it too.
                 scope.extend(self.chapters_naming_in_text(absorbed));
                 scope.sort_unstable();
                 scope.dedup();
@@ -124,9 +83,6 @@ impl Inner {
             }
             ExclusiveOp::Reconcile { merges, .. } => {
                 // No ask-time name validation: these pairs came from the canon
-                // keys and the cast itself, not from a person typing a name, so
-                // a pair that has since gone is "nothing left to fold" rather
-                // than a typo. The scope is computed the same way `merge`'s is.
                 if merges.is_empty() {
                     anyhow::bail!("reconcile has nothing to fold");
                 }
@@ -148,18 +104,6 @@ impl Inner {
             ExclusiveOp::Remerge | ExclusiveOp::Rerender => {}
             ExclusiveOp::Retag { .. } => {
                 // A retag rewrites **scripts**, so its scope is the chapters it
-                // might touch: every chapter with one on disk. Narrowing to the
-                // chapters that actually hold a retaggable sound means running
-                // the same scan the surgery runs, and that runs at apply time by
-                // design (a chapter that gains a sound between ask and run must
-                // be caught by the apply, not missed by the gate). A superset
-                // here is the safe direction; the apply is what decides the real
-                // list.
-                //
-                // Without this the arm carried an empty `chapters`, and an empty
-                // scope blocks *nothing* — so a retag was never queued at all,
-                // it just ran, and a script rewrite landed under a live render
-                // exactly like the refusal it was meant to replace.
                 scope = self.script_paths().into_iter().map(|(n, _)| n).collect();
             }
         }
@@ -174,13 +118,10 @@ impl Inner {
             *chapters = scope;
         }
         // Way clear? Run now, exactly as the old direct path did — the
-        // queue is the *waiting* half, never a second code path.
         if self.exclusive_clear(&op) {
             return self.apply_exclusive(op);
         }
         // Someone is already queued: line up behind them. FIFO, one at a
-        // time — interleaving two surgeries is the concurrency the old
-        // refusal existed to prevent.
         let behind = self.exclusive.len();
         let describe = op.describe();
         self.exclusive.push(Exclusive {
@@ -203,34 +144,11 @@ impl Inner {
     }
 
     /// Whether `op` blocks **every** stage of `chapter` — which is exactly
-    /// the chapter-scoped surgeries' scope (`recast`, `fix-speaker`,
-    /// `merge`). Only there is a bare beat a blocker: see
-    /// [`Self::exclusive_clear`].
     fn op_owns_whole_chapter(op: &ExclusiveOp, chapter: u32) -> bool {
         Stage::ALL.iter().all(|s| op.blocks(*s, chapter))
     }
 
     /// Whether nothing in the ledger would race `op` right now.
-    ///
-    /// Waits on **live holders only** — the same 30-second beat rule
-    /// `ensure_idle` used — because a wedged box that stopped beating is
-    /// not going to finish, and the queue must never be hostage to it.
-    /// `x` / `X` / `A` on the ledger are how a stuck row is taken back.
-    ///
-    /// Two things a pure "live rows" scan would miss, both of which the
-    /// surgeries' own last line does refuse on, so the gate must see them:
-    ///
-    /// * **A beat with no live row.** A worker's last beat can name the
-    ///   chapter after its row settled (the completion lands between two
-    ///   beats), and the write would edit a chapter a box is still finishing
-    ///   on. Only counted for a chapter-scoped write, where the whole
-    ///   chapter is the scope; a swap's `blocks` says no to a crawl, so a
-    ///   crawl beat never delays one.
-    /// * **A digest assigned within the last two minutes.** Its prompt was
-    ///   built from the pre-fold bible, so the delta it lands resurrects the
-    ///   names a merge just folded — and it has no beat yet to prove it is
-    ///   live. The window is bounded at 120s, like `ensure_mergeable`'s, so
-    ///   a wedged assignment still cannot hold the queue.
     pub(crate) fn exclusive_clear(&self, op: &ExclusiveOp) -> bool {
         let now = now_secs();
         let fresh = |ts: u64| now.saturating_sub(ts) < 30;
@@ -252,7 +170,6 @@ impl Inner {
     }
 
     /// What the gate is waiting on, for the operator's message: the live
-    /// rows in the write's way, by id and holder.
     pub(crate) fn exclusive_blocked_summary(&self, op: &ExclusiveOp) -> String {
         let now = now_secs();
         let fresh = |ts: u64| now.saturating_sub(ts) < 30;
@@ -294,12 +211,6 @@ impl Inner {
     }
 
     /// Run the queued writes whose way is now clear.
-    ///
-    /// Called from beside the idle-latch hook — the places a task lands,
-    /// where the inductor already asks "is anything left". One at a time:
-    /// after the head runs, the next may still be blocked (and a `remix`
-    /// queued behind a `swap` will want the chapters the swap just
-    /// re-opened to finish), so the loop stops at the first blocked head.
     pub fn run_exclusive(&mut self) {
         if self.exclusive.is_empty() {
             return;
@@ -318,11 +229,6 @@ impl Inner {
     }
 
     /// The surgery itself: the same code the direct path always ran, minus
-    /// the cluster-wide guard — the gate above has already cleared exactly
-    /// the chapters and stages this write touches, and re-checking it
-    /// cluster-wide here would error the write over a crawl it cannot
-    /// reach. Each `*_apply` is the direct op's body; nothing here may
-    /// consult the queue.
     fn apply_exclusive(&mut self, op: ExclusiveOp) -> anyhow::Result<String> {
         match op {
             ExclusiveOp::SwapVoice {
@@ -361,7 +267,6 @@ impl Inner {
     }
 
     /// Drop the queued writes: everything, or the ones naming `route`.
-    /// Returns how many went, for the operator's message.
     pub fn exclusive_cancel(&mut self, route: Option<&str>) -> usize {
         let before = self.exclusive.len();
         match route {
@@ -382,10 +287,6 @@ impl Inner {
     }
 
     /// The ask-time half of a swap: the trust rule the surgery itself
-    /// runs, minus the file surgery (`bake_missing_voices` merges the
-    /// store into the bake, which must happen at run time where its
-    /// result is used). A voice that is neither preset nor enrolled is
-    /// refused now, where the operator is looking.
     fn validate_swap(&self, character: &str, voice: &str) -> anyhow::Result<()> {
         let engine = self.settings.engine.clone();
         let policy = bm_core::voices::effective_policy(&engine);
@@ -406,13 +307,11 @@ impl Inner {
         }
         if cast.get(character).is_none() && !character.trim().is_empty() {
             // A speaker the scripts have never heard is still allowed (the
-            // swap just records them); nothing to check there.
         }
         Ok(())
     }
 
     /// The ask-time half of a merge: the bible checks `apply_reconcile`
-    /// runs, done now so a bad name refuses while asked.
     fn validate_merge(&self, survivor: &str, absorbed: &[String]) -> anyhow::Result<()> {
         let bible = bm_core::digest::load_bible(&self.layout.bible());
         let survivor = bm_core::digest::resolve_speaker(&bible, survivor);

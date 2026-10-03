@@ -1,85 +1,19 @@
 //! Splitting one chapter into the windows a single digest answer can hold.
-//!
-//! A window is a **contiguous run of the chapter's prepared events**, and that
-//! is the whole trick: `prepare_chapter` already gives every event a stable id
-//! (`e0001`…), the source gate already proves each id was consumed exactly once
-//! in source order, and both prompts already render from a `PreparedChapter`.
-//! So a window is a `PreparedChapter` holding a slice of the same events with
-//! the *chapter's* ids — the two rounds, the validators and the merge all run
-//! per window unchanged, and no second contract exists to drift from.
-//!
-//! What decides where the cuts fall is `DigestSettings`: an explicit ceiling
-//! (`chunk_sentences`, `chunk_chars`) for an operator who wants windows smaller
-//! than the budget would make them, and `answer_tokens` for the case this
-//! module exists for — a chapter whose answer does not fit under the 16384
-//! tokens every backend caps at, where today the reply is cut mid-JSON and the
-//! chapter is shelved after a repair call that fails the same way.
-//!
-//! Three invariants are worth stating because everything else depends on them:
-//!
-//! 1. **Whole events only.** A window's slice is event-aligned, never a
-//!    character offset, because a segment's `source_id` names a whole event and
-//!    `validate_source_alignment` would refuse a window that halved one.
-//! 2. **Every event exactly once, in order.** The windows partition the
-//!    chapter; `plan_windows` walks the events once and closes as it goes.
-//! 3. **The cut falls at a sentence end when there is one.** Closing after the
-//!    event that ended a sentence keeps a window's prose whole, which is what a
-//!    reader hears: the seam between windows is a seam between sentences.
 
 use super::{PreparedChapter, PreparedEvent};
 use crate::config::DigestSettings;
 use serde_json::{json, Value};
 
 /// Characters of answer the estimate spends per token.
-///
-/// Deliberately pessimistic, and deliberately one number rather than a real
-/// tokenizer: the estimate only has to be safe in **one** direction. Over-
-/// estimating tokens splits a window that would have fit (one extra call),
-/// under-estimating truncates an answer (a repair call, then a shelved
-/// chapter), so the two errors are not symmetric and this errs toward the
-/// cheap one. Vietnamese tokenizes worse than English on every backend in use
-/// — a five-syllable name can be five tokens — which is why this is 2 and not
-/// the 4 an English estimate would use.
-///
-/// Measured, not guessed: the live answer that [`SEGMENT_OVERHEAD`] describes
-/// ran ~3 characters per token, so this charges half again as many tokens as
-/// the backend spent. The margin is the point — the measurement is of *one*
-/// backend, and a model that tokenizes Vietnamese worse would meet the cap
-/// first. This constant and [`SEGMENT_OVERHEAD`] are a **pair**, and the pair is
-/// what was calibrated: see the note there before changing either alone.
 pub(crate) const CHARS_PER_TOKEN: usize = 2;
 
 /// The JSON a segment answering one event costs on top of its own text: the id
-/// it keys on, the mood/scene/music it declares, and the punctuation.
-///
-/// Per *event*, not per window, because it is the segments that scale: a window
-/// of forty one-line paragraphs carries forty of these, while a window of four
-/// paragraphs carries four.
-///
-/// **Calibrated with [`CHARS_PER_TOKEN`], and the pair is what the measurement
-/// validates.** Taken apart on the same live answer (a 40 KB chapter, 219
-/// segments), the JSON around a segment is **131** characters and the answer
-/// spends a token per 3 characters — so this constant under-counts the JSON by
-/// about 2x while the token charge over-counts by about 1.5x, and the two
-/// errors cancel, and the chapter is charged **0.93 tokens per character of its
-/// own text** where the answer spent 0.90 (2.8 characters of answer per
-/// character of chapter, 3.1 characters per token). Raising this alone would
-/// cut chapters that fit in one call into two, which is the one thing the plan
-/// must not do — a chapter under the budget has to be asked the single-call
-/// prompt, byte for byte.
 const SEGMENT_OVERHEAD: usize = 64;
 
 /// The largest a window may grow past its character target while waiting for a
-/// sentence to end at, as a fraction: `chars + chars / 2`.
-///
-/// Without it, a chapter of one unpunctuated paragraph — a crawl that lost its
-/// punctuation, which is a real thing this corpus has seen — would never close
-/// a window at all, because the sentence rule can never fire and the character
-/// rule would be waiting for a sentence end that never comes.
 const OVERSHOOT: usize = 2;
 
 /// One window: a half-open range of the chapter's events, with the counts the
-/// log line quotes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Window {
     /// First event index, inclusive.
@@ -91,22 +25,11 @@ pub(crate) struct Window {
     /// Weighted characters — see [`weight`]. What the budget is spent in.
     pub chars: usize,
     /// Sentence-final marks in this window's text, as counted by
-    /// [`sentence_ends`].
     pub sentences: u32,
 }
 
 impl Window {
     /// This window's events as a `PreparedChapter` of their own, carrying the
-    /// **chapter's** ids.
-    ///
-    /// Ids are not renumbered, and that is the point: the merged script has to
-    /// answer the same `e0007` the chapter's own view named, or the source gate
-    /// on the next pass would be validating a different chapter's ids.
-    ///
-    /// `unbalanced` is false here on purpose. An open quote delimiter is a fact
-    /// about the whole chapter, it is already reported from the whole chapter by
-    /// `split_summary`, and a window that re-reported it would say the same
-    /// thing N times.
     pub(crate) fn prepared(&self, chapter: &PreparedChapter) -> PreparedChapter {
         slice(chapter, self.from, self.to)
     }
@@ -123,11 +46,6 @@ fn slice(chapter: &PreparedChapter, from: usize, to: usize) -> PreparedChapter {
         prompt_json: serde_json::to_string_pretty(&value).unwrap_or_else(|_| "[]".into()),
         events,
         // Parity is a fact about the WHOLE chapter and is decided on the whole
-        // chapter, before the plan cuts it. A window has no say in it: `None`
-        // here keeps a slice from reporting a chapter-wide fault against one
-        // part's text, which is the same local-window blindness the gate exists
-        // to catch. Nothing reads it off a slice — the check runs on the
-        // chapter, in `digest::quote_fault`.
         unbalanced_at: None,
     }
 }
@@ -148,7 +66,6 @@ pub(crate) fn tokens(chars: usize) -> usize {
 }
 
 /// Count the sentence-final marks in `text`, and say whether the text *ends* at
-/// one — after any closing quote or bracket, because a spoken line ends
 /// `…trượt tay."` and the quote is not a sentence.
 ///
 /// A heuristic, and cheap on purpose: it decides where to cut **between** two
@@ -178,29 +95,13 @@ pub(crate) fn sentence_ends(text: &str) -> (u32, bool) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Target {
     /// Close at the first sentence-final event at or after this many sentences.
-    /// `0` = no sentence rule.
     sentences: u32,
     /// Close once the window has spent this many weighted characters.
-    /// `0` = no character rule.
     chars: usize,
 }
 
 impl Target {
     /// Resolve the settings into the budget one chapter is actually cut with.
-    ///
-    /// The character target and the answer budget are two ways of asking the
-    /// same question, so the **smaller** wins: an explicit `chunk_chars` is an
-    /// operator saying "these windows are too big for my reasons", and a budget
-    /// that overwrote it upward would quietly undo the setting.
-    ///
-    /// The budget is spent as an **average**: the number of windows the total
-    /// needs, then that total divided between them. A greedy fill to the last
-    /// character that fits would instead put one window at the budget's edge
-    /// and hand the remainder to a second one — and the remainder is the window
-    /// with the *least* prose and the *most* `PLOT SO FAR`, which is the call
-    /// that can afford it least. The share is where a window starts looking for
-    /// a sentence to end at; a window that is already past it and sees a
-    /// sentence end closes there rather than filling to the last character.
     fn resolve(events: &[PreparedEvent], settings: &DigestSettings) -> Target {
         let sentences = settings.chunk_sentences;
         let mut chars = settings.chunk_chars as usize;
@@ -217,14 +118,6 @@ impl Target {
     }
 
     /// Whether a window holding `sentences`/`chars` and ending at `ends` closes
-    /// here.
-    ///
-    /// Both rules need the **sentence** to be finished, not merely the target
-    /// met: a window that closed the moment it reached its share would end
-    /// mid-sentence half the time, and the seam is what a listener hears. The
-    /// character rule is the one exception, and only after [`OVERSHOOT`] —
-    /// an event that never ends a sentence still has to be able to close a
-    /// window, or a chapter of unpunctuated prose would never split at all.
     fn closes(&self, sentences: u32, chars: usize, ends: bool) -> bool {
         if self.sentences > 0 && sentences >= self.sentences && ends {
             return true;
@@ -236,18 +129,12 @@ impl Target {
     }
 
     /// The hard ceiling: the point past which a window closes even without a
-    /// sentence end.
     fn ceiling(&self) -> usize {
         self.chars + self.chars / OVERSHOOT
     }
 }
 
 /// Cut `chapter` into the windows one digest answer can hold.
-///
-/// One pass, one cut at a time, and always at least one window: an empty
-/// chapter gets a window holding no events rather than no windows, because the
-/// two rounds still have to run and report — which is what the pre-window
-/// digest did with an empty chapter, and this must not change that.
 pub(crate) fn plan_windows(chapter: &PreparedChapter, settings: &DigestSettings) -> Vec<Window> {
     let events = chapter.events.as_slice();
     if events.is_empty() {
@@ -294,8 +181,6 @@ mod tests {
     use std::path::Path;
 
     /// A chapter of `lines` paragraphs, each three sentences. `prepare_chapter`
-    /// splits narration on newlines, so this is one event per line, each ending
-    /// at a sentence — the shape the corpus actually has.
     fn chapter(lines: usize) -> PreparedChapter {
         let text: String = (0..lines)
             .map(|i| format!("Đoạn văn số {i} mở đầu câu chuyện. Câu thứ hai ở đây. Câu thứ ba.\n"))
@@ -304,8 +189,6 @@ mod tests {
     }
 
     /// A chapter of longer paragraphs — the shape real prose has, and the one
-    /// the budget is calibrated against, since it is the *characters* that
-    /// decide a window.
     fn prose(lines: usize) -> PreparedChapter {
         let text: String = (0..lines)
             .map(|i| {
@@ -320,11 +203,8 @@ mod tests {
     }
 
     /// What the default budget does to a chapter of a given size, printed.
-    ///
     /// Not a claim about any one chapter — a table, because "will my chapter
     /// split?" is the question the whole windowing module exists to answer and
-    /// the answer is a step function in the chapter's length. `lines` are
-    /// paragraphs of the `prose` shape, which is what the corpus has.
     #[test]
     fn what_the_default_budget_does_to_a_chapter_of_each_size() {
         let budget_chars = DEFAULT_ANSWER_TOKENS as usize * CHARS_PER_TOKEN;
@@ -365,7 +245,6 @@ mod tests {
     }
 
     /// The invariant every plan must hold, whatever the target was: the windows
-    /// partition the events, in order, with nothing empty and nothing lost.
     fn assert_partitions(chapter: &PreparedChapter, windows: &[Window]) {
         assert!(!windows.is_empty(), "a plan is never empty");
         let mut at = 0;
@@ -397,7 +276,6 @@ mod tests {
         assert!(empty.events.is_empty());
         let windows = plan_windows(&empty, &DigestSettings::default());
         // One, not zero: the two rounds still run and still report, which is
-        // what the pre-window digest did with an empty chapter.
         assert_eq!(windows.len(), 1);
         assert_eq!(
             windows[0],
@@ -414,8 +292,6 @@ mod tests {
     #[test]
     fn a_chapter_under_the_budget_is_one_window() {
         // The parity case, sized against the real corpus: its longest chapter is
-        // ~13.6 KB, and one of these is 15 KB — longer than anything in it — and
-        // still digests in one call, exactly as before.
         let c = prose(75);
         assert!(
             c.events
@@ -434,8 +310,6 @@ mod tests {
     #[test]
     fn no_budget_never_splits_however_long_the_chapter() {
         // `answer_tokens: 0` is the escape hatch back to the single-call path,
-        // which is what makes it usable as a bisect: a chapter that behaves
-        // differently windowed can be compared by changing one number.
         let c = chapter(4000);
         let windows = plan_windows(&c, &settings(0, 0, 0));
         assert_eq!(windows.len(), 1, "{} windows", windows.len());
@@ -451,8 +325,6 @@ mod tests {
         assert!(windows.len() > 1, "{windows:?}");
         assert_partitions(&c, &windows);
         // Every event here is one short paragraph, so a window closes one event
-        // past its share at the most — an event too big to divide is its own
-        // test below, because a window can never cut one.
         let last = windows.len() - 1;
         for (i, w) in windows.iter().enumerate() {
             assert!(
@@ -461,7 +333,6 @@ mod tests {
             );
             if i < last {
                 // Every window but the last reaches the share it was given, so
-                // the *number* of calls is the budget's, not one per paragraph.
                 assert!(w.chars >= share, "a window under its share: {w:?}");
             }
         }
@@ -475,8 +346,6 @@ mod tests {
     #[test]
     fn a_sentence_ceiling_splits_a_chapter_the_budget_would_not() {
         // An operator asking for small windows gets them even when the answer
-        // would have fit: the setting is a ceiling of its own, not a hint to
-        // the budget.
         let c = chapter(30);
         let windows = plan_windows(&c, &settings(6, 0, DEFAULT_ANSWER_TOKENS));
         assert_partitions(&c, &windows);
@@ -493,10 +362,6 @@ mod tests {
     #[test]
     fn a_paragraph_that_never_ends_a_sentence_still_closes_a_window() {
         // A crawl that lost its punctuation is a real shape in this corpus. The
-        // sentence rule can never fire on it, so the character rule's ceiling is
-        // the only thing that keeps windows finite — and a single event larger
-        // than a whole window becomes a window of its own rather than being
-        // split, which would break the source contract.
         let giant = "t".repeat(900);
         let text = format!("{giant}\nđoạn nhỏ một. đoạn nhỏ hai.\n");
         let c = super::super::prepare_chapter(&text);
@@ -515,8 +380,6 @@ mod tests {
     #[test]
     fn windows_carry_the_chapters_own_ids() {
         // The merge depends on this: the script written for a window has to
-        // answer the same ids the chapter's own view named, or the source gate
-        // on the next pass validates a different chapter.
         let c = chapter(40);
         let windows = plan_windows(&c, &settings(6, 0, DEFAULT_ANSWER_TOKENS));
         assert!(windows.len() > 1);
@@ -565,22 +428,12 @@ mod tests {
     // ───────────────────────── a real book, end to end ─────────────────────────
 
     /// A real chapter of the corpus: a live page's capture, shipped beside the
-    /// page as its golden.
-    ///
-    /// Used as the *publisher's* text rather than as a comparison. The question
-    /// this module exists for is "will my chapter split?", and synthetic
-    /// paragraphs of a convenient length answer a question nobody asked — the
-    /// real shape of a chapter is short paragraphs with dialogue in them, and
-    /// that is what decides how many segments it produces.
     const REAL_CHAPTER: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/crawl/truyencom-chapter.txt"
     ));
 
     /// The example EPUB crawler, read from `crawlers/examples/` rather than
-    /// inlined: this test is a gate for that file as much as for the budget. In
-    /// the global tree, because an EPUB is a format and no adapter's sites own
-    /// it.
     fn epub_crawler() -> String {
         std::fs::read_to_string(format!(
             "{}/../../../crawlers/examples/epub.lua",
@@ -590,11 +443,6 @@ mod tests {
     }
 
     /// A book, written as a real ZIP: container, manifest, spine, XHTML.
-    ///
-    /// **Not** shared with `crawl::epub`'s own builder, for the reason
-    /// `crawl::script_tests` gives about its copy: a builder two suites share
-    /// can hold a bug both suites agree with. Here this one is the only thing
-    /// between the test and a claim about books on disk.
     fn book(path: &Path, chapters: &[(&str, String)]) {
         use std::io::Write;
         let file = std::fs::File::create(path).unwrap();
@@ -641,7 +489,6 @@ mod tests {
             .filter(|l| !l.trim().is_empty())
             .map(|l| {
                 // Ampersand first, or the ampersands this introduces are
-                // escaped a second time.
                 format!(
                     "<p>{}</p>",
                     l.trim().replace('&', "&amp;").replace('<', "&lt;")
@@ -651,27 +498,14 @@ mod tests {
     }
 
     /// **The whole path, on a real book, with nothing stubbed.** A ZIP on disk,
-    /// the shipped Lua crawler, the real Lua engine, the shared crawl boundary,
-    /// the digest's own preparer, and the default budget — in that order.
-    ///
     /// The question an operator asking for EPUB support actually has is "what
     /// will this do to my chapters?", and no unit test on either side answers
-    /// it: the crawl tests stop at the text, and the budget tests start at
-    /// prose that never went through a book. The seam between them is exactly
-    /// where a book would be mishandled — a paragraph that survives the ZIP
-    /// walk and then splits differently from a crawled page, or a chapter that
-    /// turns out to need four calls because a book's paragraphs are shorter
-    /// than the fixture's.
     #[test]
     fn what_the_default_budget_does_to_a_chapter_read_out_of_an_epub() {
         let dir = std::env::temp_dir().join(format!("bm-epub-budget-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // Chapter one is a real chapter. Chapters two and three are several of
-        // them welded together, which is what a "chapter" becomes in the books
-        // this pipeline is pointed at when the publisher merged several — and
-        // three copies is deliberately *not* a whole number of windows, so the
-        // cut lands inside a chapter rather than on the seam between copies.
         let one = xhtml(REAL_CHAPTER);
         let copies = |k: usize| (0..k).map(|_| one.clone()).collect::<String>();
         let three = copies(3);
@@ -693,7 +527,6 @@ mod tests {
             .insert("epub".into(), serde_json::json!("book.epub"));
         let provider = Provider::new(&spec);
         // The book knows its own length, so a range can be trimmed before it is
-        // enqueued — the first thing a range this long would get wrong.
         let found = provider.discover(1, 9).unwrap().expect("a book");
         assert_eq!(found.total, Some(3));
         assert_eq!(found.chapters.len(), 3);
@@ -733,9 +566,6 @@ mod tests {
         }
 
         // (1) The headline, and the reason an EPUB does not need a setting of
-        // its own: a real chapter of this corpus is **one** digest call, at
-        // well under half the budget. A book's chapters are no longer than a
-        // site's, because they are the same prose from the same author.
         let (_, real, real_windows) = &plans[0];
         assert_eq!(real_windows.len(), 1, "{real_windows:?}");
         assert!(
@@ -744,14 +574,12 @@ mod tests {
             tokens(real_windows[0].chars)
         );
         // And it is not a chapter of three paragraphs: the prose arrives whole,
-        // and the dialogue inside it is split out as its own events.
         assert!(real.events.len() > 50, "{}", real.events.len());
         assert!(
             real.events.iter().any(|e| e.kind == "dialogue"),
             "a chapter with quoted speech splits it out"
         );
         // And it is text, not markup: the tag stripper ran, or every event would
-        // be one `<p>`-wrapped blob and the digest would be asked to speak it.
         assert!(
             !real
                 .events
@@ -761,8 +589,6 @@ mod tests {
         );
 
         // (2) The cut, on chapters long enough to need one. Every window ends on
-        // a sentence, which is the property that makes a seam between two
-        // windows a seam between two sentences rather than mid-clause.
         for (n, long, windows) in &plans[1..] {
             assert!(windows.len() > 1, "chapter {n} should need a cut");
             println!(
@@ -794,7 +620,6 @@ mod tests {
         }
         let (_, long, _) = &plans[1];
         // (3) What a segment is, since "how many segments" is the operator's
-        // actual question: one per event, keyed by the chapter's own ids.
         println!("\n  the first segments of the long chapter:");
         for e in long.events.iter().take(6) {
             println!(
@@ -814,16 +639,6 @@ mod tests {
     }
 
     /// **A real book, all the way to its segments, when there is one to point
-    /// at.** Skipped unless `BM_BOOK` names an `.epub`, because a test that
-    /// needs a 7 MB file nobody else has is not a test.
-    ///
-    /// Every other test here builds its own prose, which is right for testing
-    /// and useless for looking at: the question an operator has about a book
-    /// is "what will the narrator actually be asked to say", and that is ten
-    /// lines of output on a real chapter and not a number in an assert.
-    ///
-    ///   BM_BOOK=/abs/path/book.epub cargo test -p bm-core --lib \
-    ///     what_the_segments_of_a_real_book_look_like -- --nocapture
     #[test]
     fn what_the_segments_of_a_real_book_look_like() {
         let Ok(book) = std::env::var("BM_BOOK") else {
@@ -906,7 +721,6 @@ mod tests {
                 );
             }
             // The number that decides whether this book can be narrated at all:
-            // how long one segment is, in the only unit a listener has.
             let longest = prepared
                 .events
                 .iter()
@@ -920,8 +734,6 @@ mod tests {
         }
 
         // Every chapter, checked for the scanner's furniture and for a heading
-        // that is still glued to its first sentence. Three chapters showing
-        // clean is a sample; thirty-one is the book.
         if total > 0 {
             let mut dirty = 0usize;
             let mut split = 0usize;
@@ -936,7 +748,6 @@ mod tests {
                     dirty += 1;
                 }
                 // A heading on its own line is a first line of a few dozen
-                // characters; one still glued to prose runs on into the chapter.
                 let first = text.lines().next().unwrap_or_default();
                 if first.len() <= 80 && first.to_lowercase().contains("chapter") {
                     split += 1;

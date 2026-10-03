@@ -125,8 +125,6 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
     }
     section(&mut lines, "Commands");
     // Rendered from the word table, so a word and its explanation cannot
-    // drift apart — add the word (and its aliases) in input/command.rs and
-    // it shows up here with its own line.
     for w in crate::tui::input::command::WORDS
         .iter()
         .filter(|w| w.desc.is_some())

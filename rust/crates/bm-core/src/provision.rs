@@ -1,21 +1,4 @@
 //! Machine onboarding: probe, distribute, verify.
-//!
-//! New in the cluster version — the legacy `swarm` hardcoded one box in three
-//! separate places. Here any machine is reachable by address, and the
-//! provisioner answers the question that matters before doing any work:
-//! *is this box already configured, or do we have to push to it?*
-//!
-//! Everything shells out to `ssh` and `rsync` rather than linking an SSH
-//! library. That keeps the build small, reuses the user's existing keys and
-//! `~/.ssh/config`, and makes the exact command visible in the TUI log.
-//!
-//! One deliberate exception to "reuse the user's ssh setup": **host keys are
-//! not verified, and `known_hosts` is not touched at all.** Every box here is
-//! either an instance launched minutes ago or a worker linked by hand, and
-//! every call is scripted, so `BatchMode=yes` turns the "continue connecting?"
-//! prompt into `exit 255 — Host key verification failed`. The policy, and why
-//! `StrictHostKeyChecking=no` alone is not enough, is documented on
-//! `HOST_KEY_OPTS` in `provision/ssh.rs`.
 
 use anyhow::{Context, Result};
 use bm_proto::{Machine, MachineState};
@@ -24,12 +7,8 @@ use std::path::Path;
 
 mod aws;
 /// Public rather than re-exported: the callers that need it are the CLI's
-/// `aws login` and `aws show`, and `bm_core::provision::aws_credentials::write`
-/// says which file it writes where a bare `write` would not.
 pub mod aws_credentials;
 /// What a worker is handed, selected by its work policy. Public because the
-/// dashboard and the CLI both want to say what a box is *about to* receive
-/// without provisioning it.
 pub mod sources;
 mod ssh;
 mod stamp;
@@ -54,10 +33,6 @@ pub const REMOTE_DIR: &str = "bm-worker";
 pub const TTS_PORT: u16 = 8818;
 
 /// One linked machine: how to reach a box plus everything `provision` needs to
-/// prepare it, stored in `.bm/machines.json` (see `Layout::machines`) so it is
-/// local-only by construction. Keyed by address — addresses are the identity
-/// the ledger, the scheduler and the TUI already join on; the name is a human
-/// handle for `provision --box` and may change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkedBox {
     pub name: String,
@@ -71,23 +46,12 @@ pub struct LinkedBox {
     #[serde(default = "default_role")]
     pub role: String,
     /// Per-machine work policy: which stages this box may run and in what
-    /// order. `None` means the default (all four, merge → render → digest →
-    /// crawl). Lives in `machines.json` beside `role`, for the same reason: it
-    /// is a scheduling decision, not liveness.
     #[serde(default)]
     pub task_policy: Option<Vec<bm_proto::TaskPref>>,
     /// Parked by the operator: takes no new work until switched back on.
-    ///
-    /// Config, not runtime — it sits beside `task_policy` for the same reason:
-    /// it is a decision the operator made about *scheduling*, and it has to
-    /// survive a ledger clear and an inductor restart. `true` on a file written
-    /// before the field existed, so an older `machines.json` does not silently
-    /// park every box.
     #[serde(default = "default_true")]
     pub accepting_work: bool,
     /// ONNX intra-op threads this box's sidecar should open with. Config, like
-    /// `task_policy`: `None` is "no opinion" (the sidecar's own default), and a
-    /// value is pushed to the worker over the sidecar-policy channel.
     #[serde(default)]
     pub tts_threads: Option<u16>,
 }
@@ -127,7 +91,6 @@ impl LinkedBox {
 }
 
 /// Read the linked boxes, or an empty list when nothing is linked yet. A
-/// missing file is not an error — it just means `link` has never run.
 pub fn load_boxes(path: &Path) -> Vec<LinkedBox> {
     std::fs::read_to_string(path)
         .ok()
@@ -136,7 +99,6 @@ pub fn load_boxes(path: &Path) -> Vec<LinkedBox> {
 }
 
 /// Insert or replace one box by address. Writes are atomic; the file stays valid
-/// if the process dies mid-save.
 pub fn save_box(path: &Path, bxo: &LinkedBox) -> Result<()> {
     let mut boxes = load_boxes(path);
     if let Some(slot) = boxes.iter_mut().find(|b| b.addr == bxo.addr) {
@@ -165,9 +127,6 @@ pub fn remove_box(path: &Path, addr: &str) -> Result<()> {
 }
 
 /// What the cluster thinks of a box right now: liveness, probe output,
-/// worker-reported facts. Lives in `ledger.json` under `machine_state`,
-/// keyed by address; everything about *reaching* the box lives in
-/// `machines.json` instead.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MachineRuntime {
     pub state: MachineState,
@@ -182,8 +141,6 @@ pub struct MachineRuntime {
 }
 
 /// Split a joined `Machine` into config (`machines.json`) and runtime
-/// (`ledger.json`). `name` is the box's handle; existing boxes keep theirs,
-/// new ones take the caller's fallback (usually the address or hostname).
 pub fn split_machine(m: &Machine, name: &str) -> (LinkedBox, MachineRuntime) {
     let bxo = LinkedBox {
         name: name.to_string(),
@@ -207,14 +164,10 @@ pub fn split_machine(m: &Machine, name: &str) -> (LinkedBox, MachineRuntime) {
 }
 
 /// Rebuild the `Machine` shape the API and the TUI speak: config fields from
-/// the box, runtime fields from the ledger. A missing runtime means
-/// never-seen (a linked box that has not provisioned yet) — it still joins,
-/// so bound boxes are visible before their first beat.
 pub fn join_machine(bxo: &LinkedBox, rt: Option<&MachineRuntime>) -> Machine {
     let rt = rt.cloned().unwrap_or_default();
     let mut m = Machine::new(&bxo.addr, &bxo.user, bxo.port, bxo.key.clone(), &bxo.role);
     // The one human-chosen handle for this box. `id` stays the address
-    // (map key); everything display reads `name` and falls back to addr.
     m.name = bxo.name.clone();
     m.state = rt.state;
     m.last_seen = rt.last_seen;
@@ -228,8 +181,6 @@ pub fn join_machine(bxo: &LinkedBox, rt: Option<&MachineRuntime>) -> Machine {
 }
 
 /// Join every known box with its runtime, sorted by address. Runtime without
-/// a box (a hand-edited file, an older drop) synthesizes config from the
-/// field defaults rather than silently dropping a machine's liveness.
 pub fn join_all(
     boxes: Vec<LinkedBox>,
     rt: &serde_json::Map<String, serde_json::Value>,
@@ -253,16 +204,6 @@ pub fn join_all(
             .expect("name+addr with serde defaults always parses");
             let mut m = join_machine(&bxo, Some(r));
             // **A box with no config record takes nothing.** The runtime
-            // outlives the config — a `machines.json` replaced wholesale, a
-            // hand-edited file, a box dropped from the list while its
-            // `machine_state` row stayed — and such a box came back with *no*
-            // policy, which `effective_task_policy` reads as the default: all
-            // four stages. It was then offered every stage in turn, including
-            // ones nothing had ever sent it files for (a digest with no prompt
-            // template fails on every retry), while being unprovisionable —
-            // provisioning walks the configured boxes. Nothing enabled says the
-            // truth: the box is here, and it is not working until somebody adds
-            // it and provisions it (`P` enables stages, then `p`).
             m.task_policy = Some(bm_proto::TaskPref::nothing());
             out.push(m);
         }
@@ -274,13 +215,6 @@ pub fn join_all(
 #[cfg(test)]
 mod tests {
     /// A `machines.json` written before parking existed is a set of boxes that
-    /// were all taking work, and it must keep meaning that.
-    ///
-    /// This is the whole reason the flag is `accepting_work: true` rather than
-    /// `paused: false`: serde's default for a missing bool is `false`, so the
-    /// inverted spelling would silently park every box in every existing file —
-    /// and the symptom would be a cluster that stopped working for no reason
-    /// anyone could see in the config, since the field is absent.
     #[test]
     fn a_box_from_before_parking_existed_still_takes_work() {
         let old = r#"{"name":"box-1","addr":"192.168.2.2","user":"thang","port":22}"#;
@@ -288,7 +222,6 @@ mod tests {
         assert!(bxo.accepting_work, "absent must read as awake");
         assert!(bxo.task_policy.is_none(), "and so must an absent policy");
         // And the flag survives the config/runtime split, in both directions —
-        // the machine the scheduler sees and the file it is written back to.
         let mut m = bxo.machine();
         assert!(!m.relaxed());
         m.accepting_work = false;
@@ -301,16 +234,6 @@ mod tests {
     }
 
     /// A box whose config record is gone but whose runtime row stayed must not
-    /// come back able to run everything.
-    ///
-    /// The bug this pins: the synthesized machine carried no policy, which
-    /// `effective_task_policy` reads as the default — all four stages — so the
-    /// scheduler offered a ghost every stage in turn, including ones nothing
-    /// had ever sent it files for. Provisioning walks the *configured* boxes, so
-    /// this one could never be provisioned either: it was asked to run a stage
-    /// and permanently unable to. The live case was a digest on `192.168.2.2`
-    /// (`marmot`) failing on `prompts/analyze.txt: No such file or directory`
-    /// with a `machines.json` that no longer named it.
     #[test]
     fn a_box_with_no_config_record_is_a_box_that_works_on_nothing() {
         let rt = serde_json::json!({
@@ -332,7 +255,6 @@ mod tests {
         );
 
         // A *linked* box with no policy is a different thing entirely: the
-        // operator put it there, so it keeps the default it always had.
         let bxo = super::LinkedBox {
             name: "box-1".into(),
             addr: "10.0.0.5".into(),
@@ -374,7 +296,6 @@ mod tests {
         };
         super::save_box(&path, &bxo).unwrap();
         // Same address re-binds in place (the name may change); a new
-        // address adds a second box.
         let again = super::LinkedBox {
             name: "renamed".into(),
             ..bxo.clone()
@@ -442,7 +363,6 @@ mod tests {
     #[test]
     fn join_carries_the_registry_handle_id_stays_the_address() {
         // The panes can only agree with the provision log if the handle
-        // survives the join. Keys stay addresses: only display reads name.
         let m = bm_proto::Machine::new("192.168.2.2", "thang", 22, None, "worker");
         let (bxo, rt) = super::split_machine(&m, "hawk");
         let joined = super::join_machine(&bxo, Some(&rt));

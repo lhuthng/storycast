@@ -5,9 +5,6 @@ use super::*;
 #[test]
 fn the_cast_overview_hints_name_only_keys_the_screen_handles() {
     // The cast rows used to advertise a bare `v` (a gated `:` command) and a
-    // "Backspace clears it" that only popped one character. The hint must
-    // name what the screen really binds: `:v`, and Backspace-widens/Ctrl-U-
-    // clears, exactly like the task ledger spells it.
     let mut app = App::new("http://127.0.0.1:8901");
     app.roster = Some(roster_fixture());
     app.screen = Screen::Cast(CastView {
@@ -38,10 +35,8 @@ fn the_cast_overview_hints_name_only_keys_the_screen_handles() {
 #[test]
 fn the_cast_and_picker_empty_states_point_at_the_gated_commands() {
     // `t` and `v` were removed from Normal mode; an empty speaker list that
-    // said "run t or v first" sent the operator to a warning status.
     let mut app = App::new("http://127.0.0.1:8901");
     // A roster that loaded but knows no speakers: the state the empty-body
-    // line is written for (a *missing* roster has its own line).
     let mut roster = roster_fixture();
     roster.characters.clear();
     roster.cast.clear();
@@ -63,8 +58,6 @@ fn the_cast_and_picker_empty_states_point_at_the_gated_commands() {
 #[test]
 fn the_cloud_error_names_the_real_command_words() {
     // There are no `aws login` / `aws discover` words, the setup commands
-    // are `:login` and `:discover`, and the hint must send the operator to
-    // the command line that actually has them.
     let mut app = App::new("http://127.0.0.1:8901");
     app.cloud_error = Some("no credentials".into());
     app.screen = Screen::Cloud(CloudView::new());
@@ -79,9 +72,6 @@ fn the_cloud_error_names_the_real_command_words() {
 #[test]
 fn screens_without_a_reload_key_do_not_advertise_one() {
     // Two overlays told the operator to press a key they do not handle:
-    // the Run screen said "press R to retry" (only Enter/e/Esc are live
-    // there) and the Machine screen said "P to configure" (only Esc/Enter/
-    // q/i). Both now name the way back to a screen that has the key.
     let mut app = App::new("http://127.0.0.1:8901");
     app.conn = Conn::Down("boom".to_string());
     app.screen = Screen::Run;
@@ -124,7 +114,6 @@ fn screens_without_a_reload_key_do_not_advertise_one() {
 #[test]
 fn the_task_ledger_hints_the_movement_it_actually_binds() {
     // Letters type into the filter here, so `j`/`k` never moved anything
-    // and the hint said they did.
     let mut app = tasks_app();
     app.screen = Screen::Tasks(TasksView::new());
     let text = render_text(&mut app, 140, 44);
@@ -141,7 +130,6 @@ fn the_task_ledger_hints_the_movement_it_actually_binds() {
 #[test]
 fn split_args_honours_quotes_so_a_speaker_name_is_one_argument() {
     // Everything `:speaker` needs, and the cases a shell would have opinions
-    // about. Deliberately not a shell: no escapes, no expansion.
     assert_eq!(
         split_args("18 67 \"Thanh Sơn lão tổ\" \"Dịch Phong\""),
         vec!["18", "67", "Thanh Sơn lão tổ", "Dịch Phong"]

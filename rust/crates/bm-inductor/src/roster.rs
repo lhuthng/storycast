@@ -1,11 +1,4 @@
 //! Voice roster maintenance.
-//!
-//! Everything here is **local**: it reads and writes files under the repo root
-//! and touches no worker. The worker-facing half of the roster plan — sync,
-//! enrollment, `--purge` — is deliberately absent, because deleting a voice from
-//! a worker means rewriting a voice store a live sidecar is reading, and that
-//! may only happen once the workspace is secured
-//! (`.docs/VOICE_CONFIG_PROPOSAL.md` §3.4, §8.3).
 
 use anyhow::Result;
 use bm_core::cast::{cast_on_disk, read_cast, write_cast};
@@ -21,7 +14,6 @@ pub struct CastMigration {
     /// Entries that carry a catalogue key.
     pub keyed: usize,
     /// Entries with no key — an enrolled clone, or a voice the catalogue has
-    /// dropped. They stay display names, which still resolve.
     pub unmigratable: Vec<String>,
     /// Only the entries whose stored form actually changes, for the report.
     pub changed: Vec<(String, String, String)>,
@@ -36,13 +28,6 @@ impl CastMigration {
 }
 
 /// Rewrite one cast file so its values are catalogue keys.
-///
-/// The cast reader already accepts names and the writer keys the file on its
-/// next save, so this is **not** a prerequisite for anything — a migrated, half
-/// migrated and untouched cast all render. It exists for the operator who wants
-/// the file keyed now, and who wants to see what changed before it changes.
-/// Hence the report and the `.bak`: the file it rewrites is the live cast of a
-/// book that may already be rendered.
 pub fn migrate_cast_file(engine: &str, path: &Path, dry_run: bool) -> Result<CastMigration> {
     // What the file holds right now, verbatim: keys, names, or a mix.
     let raw: bm_core::cast::Cast = std::fs::read_to_string(path)
@@ -60,8 +45,6 @@ pub fn migrate_cast_file(engine: &str, path: &Path, dry_run: bool) -> Result<Cas
             unmigratable.push(format!("{character} -> {name}"));
         }
         // Compare what is stored against what would be stored. Comparing against
-        // the *resolved* name instead would report every already-keyed entry as
-        // a change, and the command would never settle.
         let old = raw.get(character).cloned().unwrap_or_default();
         let new = keyed.get(character).cloned().unwrap_or_default();
         if old != new {
@@ -72,7 +55,6 @@ pub fn migrate_cast_file(engine: &str, path: &Path, dry_run: bool) -> Result<Cas
     let mut written = false;
     if !dry_run && !changed.is_empty() {
         // Copy before write. A bad rewrite is not something to discover from a
-        // re-render, and `data/` is regenerable but not free.
         std::fs::copy(path, backup_for(path))?;
         write_cast(engine, path, &resolved)?;
         written = true;
@@ -94,9 +76,6 @@ fn backup_for(path: &Path) -> PathBuf {
 }
 
 /// Migrate every cast file that exists.
-///
-/// Both engines are visited because both files can be present; each is resolved
-/// against its own engine, so a VieNeu cast can never pick up a Gemini key.
 pub fn migrate_cast(layout: &Layout, dry_run: bool) -> Result<Vec<CastMigration>> {
     let mut out = Vec::new();
     for engine in ["vieneu", "gemini"] {

@@ -8,7 +8,6 @@ use sea_g2p_rs::lang::vi::Normalizer;
 use sea_g2p_rs::punc::apply_punc_norm;
 
 /// Normalize and phonemize one string, the way `SEAPipeline.run` does: `punc_norm`
-/// applies at the **normalizer**, and the G2P is called with its default of off.
 pub struct FrontEnd {
     normalizer: Normalizer,
     g2p: G2PEngine,
@@ -16,7 +15,6 @@ pub struct FrontEnd {
 
 impl FrontEnd {
     /// `dict_path` is the 60 MB `sea_g2p.bin`. The normalizer is deliberately
-    /// built **without** it — see `VENDORED.md`; passing it changes the output.
     pub fn new(dict_path: &str) -> Result<FrontEnd> {
         Ok(FrontEnd {
             normalizer: Normalizer::new("vi", None),
@@ -31,11 +29,6 @@ impl FrontEnd {
     }
 
     /// Phonemize while keeping inline non-verbal cues as emotion tokens.
-    ///
-    /// The fragments *between* cues are phonemized with `punc_norm` off, and the
-    /// whole string gets its final mark once at the end. Normalizing each
-    /// fragment would insert a full stop mid-sentence and lose the intonation the
-    /// cue was there to carry.
     pub fn phonemize_with_emotions(&self, text: &str) -> String {
         if !text.contains('[') && !text.contains("<|emotion_") {
             return self.phonemize(text, true);
@@ -86,7 +79,6 @@ impl FrontEnd {
     }
 
     /// The chunker: `(chunks, gaps)`, where `gaps[i]` describes the boundary
-    /// between `chunks[i]` and `chunks[i + 1]`.
     pub fn chunks(&self, text: &str, max_chars: usize, min_chunk_chars: usize) -> Chunks {
         if text.is_empty() {
             return Chunks::default();
@@ -113,7 +105,6 @@ impl FrontEnd {
 
         chunks = chunks.iter().map(|c| apply_punc_norm(c)).collect();
         // A `para` boundary stays a paragraph; the rest are re-read from the
-        // chunk's own final mark, because `punc_norm` may have changed it.
         gaps = gaps
             .iter()
             .enumerate()
@@ -130,13 +121,6 @@ impl FrontEnd {
     }
 
     /// One synthesis chunk per normalized sentence.
-    ///
-    /// The ordinary [`Self::chunks`] path may pack several short sentences into
-    /// one TTS request. That is efficient, but it gives the autoregressive model
-    /// a paragraph-sized context in which it can repeat the final sentence. The
-    /// render pipeline keeps its source/run order; this method only changes the
-    /// TTS request boundary, so every sentence is spoken and joined with the
-    /// normal sentence pause.
     pub fn chunks_sentence_level(&self, text: &str) -> Chunks {
         if text.is_empty() {
             return Chunks::default();
@@ -160,11 +144,6 @@ impl FrontEnd {
     }
 
     /// Raw text to paragraphs of normalized sentences.
-    ///
-    /// Sentence splitting happens on the **raw** text and normalization after,
-    /// per the module doc. Lengths for packing are measured *after*
-    /// normalization, so a chunk does not grow when the normalizer expands text
-    /// (`100$` becomes `một trăm u s d`).
     fn normalized_sentences_by_para(&self, text: &str, keep_cues: bool) -> Vec<Vec<String>> {
         let mut out = Vec::new();
         for para in text.split(['\r', '\n']).filter(|p| !p.trim().is_empty()) {

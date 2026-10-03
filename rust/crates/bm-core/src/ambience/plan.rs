@@ -10,12 +10,6 @@ pub struct Span {
 }
 
 /// Tile the timeline into spans of identical *place* treatment. Adjacent turns
-/// that resolve to the same rule merge, so a bed is not restarted every line.
-///
-/// Deliberately not keyed on music: the effect layer's windows and the music
-/// layer's cues are independent timelines, and folding a mood change into this
-/// merge would let a change of track cut an effect window short. Music is read
-/// per slot by [`plan_music`].
 pub fn build_spans(slots: &[Slot], cfg: &SceneMap) -> Vec<Span> {
     let mut spans: Vec<Span> = Vec::new();
     for slot in slots {
@@ -42,8 +36,6 @@ pub fn build_spans(slots: &[Slot], cfg: &SceneMap) -> Vec<Span> {
 }
 
 // ---------------------------------------------------------------------------
-// the effect layer's windows
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Window {
@@ -56,15 +48,6 @@ pub struct Window {
 }
 
 /// One effect window as the *report* needs it: the place it came from, when it
-/// plays, and the clip that answered it.
-///
-/// The span index is the whole point. `plan_windows` opens a window at
-/// `span.start.max(free_at)`, so a window can start later than the span it came
-/// from, the previous window's cooldown pushes it. The report used to match
-/// windows to spans by start offset, through a formatted string
-/// (`l.starts_with("[110-")`), so any window the cooldown had pushed read as
-/// "no effect" on its own span. Chapter 13 measured 75 s of night under
-/// `courtyard-evening` that the log claimed was silent.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FxReport {
     pub(crate) span: usize,
@@ -76,15 +59,6 @@ pub(crate) struct FxReport {
 }
 
 /// Which stretches of the chapter carry an effect, and for how long.
-///
-/// Four gates, applied in this order: the span must name effect tags, must be
-/// at least `min_span_s` long, may not start until `cooldown_s` after the
-/// previous window closed, and the chapter's total may not exceed
-/// `max_coverage`. The window is then clipped to `max_window_s`.
-///
-/// The budget is a *stop*, not a trim: once the chapter has spent its share,
-/// later eligible scenes get nothing. Taking a sliver of the budget for a scene
-/// that would only get a few seconds of it is worse than silence.
 pub fn plan_windows(spans: &[Span], cfg: &EffectLayer, total: f64) -> Vec<Window> {
     let mut out: Vec<Window> = Vec::new();
     let budget = total * cfg.max_coverage.max(0.0);
@@ -113,10 +87,6 @@ pub fn plan_windows(spans: &[Span], cfg: &EffectLayer, total: f64) -> Vec<Window
             start,
             end: start + len,
             // The rule's relative balance, scaled by the layer's one master
-            // gain. Read here rather than in `build_spans` so the span merge
-            // still compares raw rule levels, the trim is a property of the
-            // layer, not of a scene, and folding it in earlier would make two
-            // rules that differ only by trim merge as one.
             level: span.level * cfg.trim,
             tags: span.effect.clone(),
             span: i,
@@ -128,55 +98,25 @@ pub fn plan_windows(spans: &[Span], cfg: &EffectLayer, total: f64) -> Vec<Window
 }
 
 // ---------------------------------------------------------------------------
-// the music layer's runs
-// ---------------------------------------------------------------------------
 
 /// A stretch of the clock with one track under it, and the pauses inside it
-/// where the music lifts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MusicRun {
     /// The palette value that chose this track, what the log reports and what
-    /// a re-merge is compared against.
     pub mood: String,
     /// The *sound* the palette resolved to (`soft-relax`). Consecutive slots
-    /// that land on the same sound are one run, because a repeated mood must be
-    /// continuous music rather than a crossfade into the same tune.
     pub sound: String,
     /// The take that answers it. Which of `soft-relax-bg-1/2` plays is an
-    /// implementation detail of the pick, so the mix reads it from here rather
-    /// than looking the sound up a second time, one lookup, one answer.
     pub file: String,
     /// The sound's own trim (`Sound::level`), carried the same way and for the
-    /// same reason as `file`: the mix multiplies it into the layer level, and
-    /// re-looking it up would be a second answer to a question already asked.
     pub level: f64,
     /// Audible coverage ends here; the slice may extend past it into a
-    /// crossfade with the next run. The chapter's first run is the exception at
-    /// the other end: it starts at the head of the timeline, under the headline
-    /// (see [`plan_music`]), and the slice is extended back to meet it.
     pub start: f64,
     pub end: f64,
     pub pauses: Vec<(f64, f64)>,
 }
 
 /// Which track plays when, and where it lifts.
-///
-/// Read per *slot*, not per span: the mood is a property of the line being
-/// spoken, and a cue breaks exactly where the mood changes. The pick is seeded
-/// from the palette *value* rather than its tags, so a change of value is a
-/// change of track by construction; the chapter goes into the seed too, so two
-/// chapters in the same mood still differ.
-///
-/// A slot with no value, with `none`, or whose palette entry names tags nothing
-/// in the pool answers contributes nothing. `none` is a choice; a pool that
-/// has lost its last clip for a mood is a degraded mix, and both are reported
-/// once each.
-///
-/// The chapter's *first* run is pulled back to the head of the timeline (the
-/// slot the headline is spoken in) so the music comes up under the title; every
-/// later cue keeps the offset its own slot gave it. The layer's own knobs
-/// (`level`, `xfade_s`, `ramp_s`) are not read here: they shape how a run is
-/// *rendered*, which is the caller's job.
 pub fn plan_music(
     slots: &[Slot],
     pauses: &[(f64, f64)],
@@ -192,7 +132,6 @@ pub fn plan_music(
             continue;
         }
         // A value outside the palette is a script that never went through the
-        // digest validator, say so rather than silently going quiet.
         let Some(entry) = palette.get(mood) else {
             let msg = format!("{mood} (not a palette value)");
             if !unpooled.contains(&msg) {
@@ -219,9 +158,6 @@ pub fn plan_music(
             .collect();
         match out.last_mut() {
             // Merge on the *sound*, not the take: the seed is derived from the
-            // mood, so a repeated mood resolves to the same sound and the same
-            // take anyway, merging on the sound is what keeps a scene change
-            // inside one mood from cutting the music.
             Some(last) if last.sound == picked.sound => {
                 last.end = slot.end;
                 last.pauses.extend(inside);
@@ -241,13 +177,10 @@ pub fn plan_music(
         eprintln!("music: {m} -> no music there");
     }
     // Pulled back, never pushed forward: `min` against the head keeps a cue
-    // that somehow starts before the first slot where it is.
     if let (Some(first), Some(head)) = (out.first_mut(), slots.first()) {
         first.start = first.start.min(head.start);
     }
     out
 }
 
-// ---------------------------------------------------------------------------
-// injects: script-placed spot effects
 // ---------------------------------------------------------------------------

@@ -7,10 +7,6 @@ use serde_json::Value;
 use std::path::Path;
 
 /// Crash-safe write: write a sibling temp file, then rename over the target.
-///
-/// Ported from `synthesize.atomic_write`. Matters more now than it did on a
-/// single box: other workers poll these same files, so a partially written
-/// script or bible would be read as valid JSON-prefix garbage.
 pub fn atomic_write(path: &Path, text: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -27,13 +23,6 @@ pub fn atomic_write(path: &Path, text: &str) -> Result<()> {
 }
 
 /// Recursively copy a directory tree, creating `to`. Files are **copied**, not
-/// linked: the whole point of a workspace owning its own prompts, crawlers and
-/// clips is that editing one book's copy cannot reach back into the checkout's.
-///
-/// A missing `from` copies nothing and is not an error — the callers are
-/// `workspace new`/`migrate`, where a checkout that simply has no `refs/` yet
-/// should not fail a create. A partial tree is copied as far as it goes; the
-/// caller words the result.
 pub fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     let entries = match std::fs::read_dir(from) {
         Ok(e) => e,
@@ -57,32 +46,6 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// Whether a `segments` item is a sound rather than a line of speech.
-///
-/// A `segments` array is a sequence of items, and an item is one of two kinds:
-/// a line (`speaker` + `text`) or a **sound** (`sound`, or `stop`). The
-/// injection is "half a sentence, the sound, the other half", so a sound is
-/// written as its own item between the two halves and carries no `text` at all
-/// — which is the point, because a renderer is handed the lines and there is no
-/// syntax inside one for it to read.
-///
-/// This lives in `util` rather than beside either caller because the digest
-/// validator and the render planner both need the same answer, and a script
-/// shape two layers disagree about is how a chapter merges with the sound
-/// silently missing.
-///
-/// An item carrying both is malformed — the digest validator refuses it — and
-/// `text` wins here, loudly: losing a line of speech is the worse failure.
-/// Owner-only permissions, where the platform has them.
-///
-/// One implementation because two things now store a secret on disk — the
-/// cluster token and the AWS credentials — and a second copy of a permission
-/// check is a second chance to get it wrong.
-///
-/// Unix-only by construction: the inductor and the workers are macOS and
-/// Linux, and there is no cross-build target that is not. Elsewhere this is a
-/// no-op rather than an error, so a port is a build, not a rewrite — but it
-/// should be revisited, because a secret with default permissions is exactly
-/// the failure this exists to prevent.
 pub fn restrict(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -109,7 +72,6 @@ pub fn is_sound_item(item: &Value) -> bool {
 }
 
 /// Pretty-print JSON without escaping non-ASCII, matching Python's
-/// `json.dumps(..., ensure_ascii=False, indent=1)`.
 pub fn to_pretty_json<T: Serialize>(value: &T) -> Result<String> {
     let mut s = serde_json::to_string_pretty(value)?;
     s.push('\n');
@@ -128,7 +90,6 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 /// Character count, not byte count — the Python code sized everything in
-/// characters and the group/segment caps depend on it.
 pub fn char_len(s: &str) -> usize {
     s.chars().count()
 }
@@ -139,23 +100,16 @@ pub fn squeeze_ws(s: &str) -> String {
 }
 
 /// Whether a string has content the speech pipeline can pronounce.
-///
-/// This distinguishes alphanumeric text (including valid short utterances and
-/// inline emotion cues) from punctuation and whitespace. It is a guard against
-/// punctuation-only render units, not a full phonemizer validation.
 pub fn has_speakable_content(s: &str) -> bool {
     s.chars().any(|c| c.is_alphanumeric())
 }
 
 /// First `n` characters, for log lines. Slicing a `&str` by bytes would panic
-/// on Vietnamese text.
 pub fn head_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
 /// Fold Vietnamese diacritics to ASCII lowercase, so `thai son` matches
-/// `Thái Sơn` and a clone key like `pham-tuyen` meets its display name.
-/// Single source: the TUI filter and the segment-voice matcher both use this.
 pub fn fold_char(c: char) -> char {
     match c {
         'à' | 'á' | 'ạ' | 'ả' | 'ã' | 'â' | 'ầ' | 'ấ' | 'ậ' | 'ẩ' | 'ẫ' | 'ă' | 'ằ' | 'ắ' | 'ặ'
@@ -185,9 +139,6 @@ pub fn fold(s: &str) -> String {
 }
 
 /// Expand a leading `~` to `$HOME`. Prompts and `-i` flags are not a shell,
-/// so neither expands by itself — and ssh handed a literal `~` path fails
-/// with "not accessible" while rsync (which shells out) expands it, giving
-/// one value two behaviours. `~user` is left alone: only the current user.
 pub fn expand_tilde(s: &str) -> std::path::PathBuf {
     if s == "~" || s.starts_with("~/") {
         if let Ok(home) = std::env::var("HOME") {

@@ -1,63 +1,17 @@
 //! Where this app's AWS identity comes from.
-//!
-//! **One source: the IAM user you create for this app.** Not your own machine's
-//! AWS setup — not `AWS_PROFILE`, not SSO, not an instance role, and not
-//! whatever `AWS_ACCESS_KEY_ID` happens to be exported in the shell you ran
-//! from. A pool this tool launches spends real money and destroys real boxes,
-//! and the permissions for that belong to a named user with one key, whose
-//! access can be revoked without touching anyone's laptop.
-//!
-//! So the file is the identity, and its absence is a **refusal**
-//! ([`require`]), never a quiet fallback. That is the whole difference from the
 //! chain this replaced: a fallback is silent, and silence is what makes "why did
 //! it work on my machine" unanswerable.
-//!
-//! The file is **`.bm/aws/credentials`** — 0600, gitignored, written in **AWS's
-//! own INI format**. Not a format of our own: the `aws` CLI already parses that
-//! format and already knows the precedence rules, so this code never parses,
-//! logs or re-serialises a secret. It hands the child process
-//! `AWS_SHARED_CREDENTIALS_FILE` and `AWS_PROFILE` and the CLI does the rest —
-//! and the file stays exactly as portable as `~/.aws/credentials`.
-//!
-//! Credentials are never written to `aws.default.json`, `.bm/aws.json`,
-//! `machines.json`, the ledger, or git. That is what makes the rest of the
-//! pool definition shareable: two people with the same repo and different
-//! accounts each log in as their own IAM user, and neither can commit the
-//! other's key.
-//!
-//! Creating that user — the policy it needs, and the commands that attach it —
-//! is [`POLICY_FILE`] and `docs/AWS-IAM-USER.md`; `bm-inductor aws policy`
-//! prints both.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// The profile name inside our own file.
-///
-/// Distinct from `default` on purpose. The file is ours and
-/// `AWS_SHARED_CREDENTIALS_FILE` points the CLI straight at it, so a collision
-/// is not possible — but a name that *cannot* be confused with a user's own
-/// `default` costs nothing, and an accidental mix should be visible rather
-/// than silent.
 pub const PROFILE: &str = "storycast";
 
 /// The tracked least-privilege policy for the app's IAM user, at the repo root.
-///
-/// Tracked for the same reason `aws.default.json` is: it is not a secret and it
-/// is not personal — it is the answer to "what is this user allowed to do", and
-/// that answer has to travel with the code that makes the calls. `aws policy`
-/// prints it, and `aws iam put-user-policy --policy-document file://…` reads it,
-/// so the document and the commands that install it cannot drift apart.
 pub const POLICY_FILE: &str = "aws-policy.json";
 
 /// Environment variables that would otherwise let *this machine's* identity
-/// shadow the IAM user.
-///
-/// They are removed from every `aws` child process, and that is not hygiene —
-/// it is the mechanism. Env-var keys outrank a shared credentials file in the
-/// CLI's own resolution order, so a stray `AWS_ACCESS_KEY_ID` exported in the
-/// shell would win silently while `aws show` reported the IAM user. A
-/// credential source that can be overridden without saying so is not a source.
 pub const SHADOWING_ENV: &[&str] = &[
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
@@ -72,10 +26,6 @@ pub fn credentials_path(root: &Path) -> PathBuf {
 }
 
 /// The environment every `aws` CLI call must run with.
-///
-/// Empty when there is no file — and that empty answer is not a fallback to
-/// anything: [`require`] has already refused by then. It exists so the
-/// function has an honest answer for the one state it cannot describe, and so
 /// a caller that skipped [`require`] fails loudly at the CLI ("unable to locate
 /// credentials") instead of quietly borrowing this machine's.
 pub fn cli_env(root: &Path) -> Vec<(String, String)> {
@@ -93,11 +43,6 @@ pub fn cli_env(root: &Path) -> Vec<(String, String)> {
 }
 
 /// Refuse to make an AWS call without the app's IAM user.
-///
-/// Called by every path that shells out to `aws`. It checks the mode too,
-/// because a credentials file the rest of the box can read is the one failure
-/// that never announces itself: by the time anyone notices, it has already been
-/// readable for as long as the file has existed.
 pub fn require(root: &Path) -> Result<()> {
     let p = credentials_path(root);
     if !p.is_file() {
@@ -118,18 +63,15 @@ pub fn require(root: &Path) -> Result<()> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialSource {
     /// The IAM user this app was given, naming the key it holds and — when the
-    /// login verified it — who that key belongs to.
     IamUser {
         /// The key id — an identifier, like a username, not a secret.
         key_id: String,
         /// A hash prefix of the secret, so an operator can tell *which* secret
-        /// is loaded without the secret reaching a terminal or a log.
         fingerprint: String,
         /// `sts get-caller-identity` as of the last login, when it answered.
         identity: Option<Identity>,
     },
     /// No file. Nothing to run as — a state to fix, not a state to fall back
-    /// from.
     None,
 }
 
@@ -145,7 +87,6 @@ pub fn source(root: &Path) -> CredentialSource {
             identity: parse_identity(&text),
         },
         // A file we cannot read is not a file we can claim to be using. Say so
-        // rather than reporting an identity that may be half there.
         None => CredentialSource::None,
     }
 }
@@ -192,11 +133,6 @@ pub struct Identity {
 
 impl Identity {
     /// Whether this is an IAM **user** — the only kind of identity this app is
-    /// meant to run as.
-    ///
-    /// `arn:aws:iam::<acct>:root`, `:assumed-role/…` and `:federated-user/…`
-    /// are all *someone else's* identity borrowed for a while, which is exactly
-    /// what a dedicated user exists to replace.
     pub fn is_user(&self) -> bool {
         self.arn.contains(":user/")
     }
@@ -208,10 +144,6 @@ impl Identity {
 }
 
 /// Read `sts get-caller-identity --output json`.
-///
-/// `None` when the payload is not the shape we expect, so the caller can say
-/// "the CLI answered something else" rather than reporting an identity it did
-/// not actually see.
 pub fn parse_identity_json(json: &str) -> Option<Identity> {
     let doc: serde_json::Value = serde_json::from_str(json).ok()?;
     let account = doc.get("Account")?.as_str()?.trim().to_string();
@@ -235,14 +167,6 @@ pub fn fingerprint(secret: &str) -> String {
 }
 
 /// Write the credentials, owner-only.
-///
-/// The secret is written here and nowhere else: not to `argv` (visible in
-/// `ps`), not to a log, not to the pool definition.
-///
-/// `identity` is recorded as comments — AWS's INI ignores them, and it is what
-/// lets `aws show` name the user and the account with no network call at all.
-/// It is not a secret: the ARN and the account id are both public identifiers
-/// within an account.
 pub fn write(
     root: &Path,
     key_id: &str,
@@ -277,10 +201,6 @@ pub fn write(
 }
 
 /// Refuse a credentials file the rest of the box can read.
-///
-/// Checked on the way *in* rather than left to be discovered: a world-readable
-/// secret fails silently, and by the time anyone notices it has already been
-/// readable for as long as the file has existed.
 pub fn check_mode(p: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -306,10 +226,6 @@ pub fn check_mode(p: &Path) -> Result<()> {
 }
 
 /// Pull the key id and secret out of our profile.
-///
-/// A hand-rolled scan rather than a dependency, deliberately: the file holds
-/// exactly the two lines [`write`] put there, and a general INI parser would
-/// also be able to read files this app does not own.
 fn parse_profile(text: &str) -> Option<(String, String)> {
     let mut in_ours = false;
     let mut id = None;
@@ -333,10 +249,6 @@ fn parse_profile(text: &str) -> Option<(String, String)> {
 }
 
 /// The `# iam_user` / `# account` comments [`write`] records, if they are there.
-///
-/// Read outside the profile section on purpose: they describe the file, not the
-/// profile, and a file whose section was hand-edited should still be able to say
-/// whose key it claims to hold.
 fn parse_identity(text: &str) -> Option<Identity> {
     let mut arn = None;
     let mut account = None;
@@ -356,17 +268,6 @@ fn parse_identity(text: &str) -> Option<Identity> {
 }
 
 /// Read the CSV the AWS console downloads when you create an access key.
-///
-/// The console's **Download .csv file** button is the natural handoff: the file
-/// holds exactly the two values this app needs, and it is the one artifact the
-/// console gives you that a terminal would otherwise make you retype. So
-/// `aws login --csv <file>` reads it instead of asking for two pastes.
-///
-/// Deliberately tolerant, because the file is generated by someone else's UI and
-/// has changed shape over the years: a BOM, CRLF line endings, quoted fields,
-/// extra columns, and the two we want in either order are all accepted. The
-/// header row is what identifies the columns — position is not assumed.
-///
 /// `None` when the file does not contain a key pair, so the caller can say "that
 /// is not the file the console downloads" rather than storing half of one.
 pub fn parse_access_key_csv(text: &str) -> Option<(String, String)> {
@@ -389,8 +290,6 @@ pub fn parse_access_key_csv(text: &str) -> Option<(String, String)> {
         };
         match cols {
             // Look for the header. Not every line is it — the console has
-            // shipped a title row above it — so a line without both column
-            // names is skipped rather than ending the parse.
             None => {
                 if let (Ok(id), Ok(secret)) = (find("Access key ID"), find("Secret access key")) {
                     cols = Some((id, secret));
@@ -414,8 +313,6 @@ mod tests {
     use super::*;
 
     /// The crate's own scratch-dir idiom — `bm-core` has no `tempfile`
-    /// dependency, and one `temp_dir` helper per module is cheaper than adding
-    /// one for four tests.
     fn root(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("bm-awscreds-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -444,7 +341,6 @@ mod tests {
             "{text}"
         );
         // The identity rides along as comments: INI ignores them, and it is
-        // what lets `aws show` name the user without a network call.
         assert!(
             text.contains("# iam_user = arn:aws:iam::123456789012:user/storycast-operator"),
             "{text}"
@@ -461,7 +357,6 @@ mod tests {
                 assert_eq!(fingerprint, self::fingerprint("s3cr3t-value"));
                 assert_eq!(identity, Some(an_operator()));
                 // The description identifies the secret; the secret itself is
-                // not in it and must never be.
                 let described = CredentialSource::IamUser {
                     key_id,
                     fingerprint,
@@ -480,8 +375,6 @@ mod tests {
     #[test]
     fn no_file_is_a_refusal_and_never_a_fallback() {
         // The whole point of the module in one test. With nothing stored there
-        // is no identity to run as: the call is refused and told how to fix it,
-        // rather than silently becoming whatever this machine happens to be.
         let d = root("chain");
         assert!(cli_env(&d).is_empty());
         assert_eq!(source(&d), CredentialSource::None);
@@ -497,7 +390,6 @@ mod tests {
     #[test]
     fn only_an_iam_user_is_an_identity_this_app_runs_as() {
         // `:root`, an assumed role and a federated user are all somebody else's
-        // identity borrowed for a while — the thing a dedicated user replaces.
         assert!(an_operator().is_user());
         assert_eq!(an_operator().user_name(), Some("storycast-operator"));
         for arn in [
@@ -514,7 +406,6 @@ mod tests {
             assert_eq!(id.user_name(), None, "{arn}");
         }
         // A role ARN that merely mentions `user/` inside a name is still not a
-        // user; the marker is `:user/`, which this one does not carry.
         let role = Identity {
             account: "1".into(),
             arn: "arn:aws:iam::1:role/user-ops".into(),
@@ -659,8 +550,6 @@ mod tests {
     #[test]
     fn a_csv_that_is_not_the_console_download_is_refused() {
         // Anything we cannot read is `None`, never half a credential — the
-        // caller says "that is not the file the console downloads" instead of
-        // storing a key with no secret.
         assert_eq!(parse_access_key_csv(""), None);
         assert_eq!(parse_access_key_csv("hello,world\n"), None);
         assert_eq!(

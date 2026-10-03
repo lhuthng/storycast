@@ -35,18 +35,6 @@ pub(crate) async fn normal_key(
         }
         KeyCode::Char('?') => app.screen = Screen::Help { scroll: 0 },
         // Hand the mouse back to the terminal.
-        //
-        // While mouse reporting is on, the terminal gives every drag to us
-        // instead of treating it as a selection, so an error message cannot be
-        // highlighted and copied — which is the one thing anybody wants to do
-        // with an error. This is the escape hatch, and it is a toggle rather
-        // than a one-way door because clicking panes is also worth having.
-        //
-        // **`M`, not `m`**: `m` is the documented alias for `:m` (reconcile),
-        // and taking a key that already means something is how a dashboard
-        // grows two spellings for one action. Uppercase `M` is free in both the
-        // bare-key map and the command aliases, and the two sit next to each
-        // other on the keyboard on purpose.
         KeyCode::Char('M') => {
             app.mouse_capture = !app.mouse_capture;
             // The handler has no terminal; the loop owns it and applies this.
@@ -72,8 +60,6 @@ pub(crate) async fn normal_key(
         }
         KeyCode::Char(':') => {
             // Command mode: every operator action behind a prompt, so a stray
-            // keypress can never provision, reconcile or stop anything.
-            // Words first (`:reconcile`), single letters still work (`:m`).
             app.command_return = Some(Screen::Normal);
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::Command,
@@ -85,7 +71,6 @@ pub(crate) async fn normal_key(
         }
         KeyCode::Char('c') => {
             // The crawl view. Lowercase, because uppercase C is the palette
-            // cycle and the two must never trade places silently.
             app.screen = Screen::Crawl {
                 scroll: 0,
                 expanded: false,
@@ -93,8 +78,6 @@ pub(crate) async fn normal_key(
         }
         KeyCode::Char('C') => {
             // The theme cycle: default → dim → mono. The palette itself is
-            // resolved by `style_of`/`themed`, so flipping the theme here is
-            // the whole change — no pane repaints specially.
             let to = theme_next();
             app.theme = Theme::ALL
                 .iter()
@@ -111,15 +94,9 @@ pub(crate) async fn normal_key(
             app.set_status(Level::Ok, "refreshed");
         }
         // Draw the Machines pane as the hub-and-spoke picture, or back to the
-        // table. A view preference only — it touches nothing about the cluster,
-        // and it is not persisted, so a dashboard opened later is the table it
-        // expects. The table stays the complete list: the graph is the glance,
-        // and it says how many boxes it did not fit rather than dropping them.
         KeyCode::Char('g') => {
             app.machines_graph = !app.machines_graph;
             // The rack draws every box with the worker on it, so the Workers
-            // pane is not shown at all in that mode — and focus must not be
-            // left on a pane that has just left the screen.
             if app.machines_graph && app.focused_panel == crate::tui::app::Panel::Workers {
                 app.focused_panel = crate::tui::app::Panel::Machines;
             }
@@ -134,9 +111,6 @@ pub(crate) async fn normal_key(
             app.set_status(level, msg);
         }
         // Walk the rack sideways. The console is anchored at the left, so the
-        // boxes are what moves — and the arrows are the graph's only, because
-        // in the table the cursor moves down a list and there is nothing here
-        // for a sideways press to mean.
         KeyCode::Left if app.machines_graph => app.selected = app.selected.saturating_sub(1),
         KeyCode::Right if app.machines_graph => {
             app.selected = (app.selected + 1).min(app.machines.len().saturating_sub(1))
@@ -159,8 +133,6 @@ pub(crate) async fn normal_key(
             );
         }
         // Up and down walk a *row* of the rack — a whole band of servers — and
-        // a single machine in the table. The step is the pane's own width, which
-        // the drawer publishes; a key handler cannot know it.
         KeyCode::Up | KeyCode::Char('k') => {
             let step = if app.machines_graph {
                 app.graph_cols
@@ -181,9 +153,6 @@ pub(crate) async fn normal_key(
         KeyCode::End => app.selected = app.machines.len().saturating_sub(1),
         KeyCode::PageUp => {
             // A page is a page: the draw publishes the pane's row count, so
-            // one press is one screenful and the walk back to the newest line
-            // costs exactly what the walk out did (or one `G`). The old
-            // fixed 5 made the buffer a hundred presses each way.
             app.scroll_events_older(app.events_rows.max(1));
         }
         KeyCode::PageDown => {
@@ -198,9 +167,6 @@ pub(crate) async fn normal_key(
             Some(m) => app.screen = Screen::Machine(m.addr.clone()),
         },
         // The work policy for the selected box: which stages it may run and in
-        // what order. Read-only keys open screens directly; this one edits
-        // scheduling, but it is per-machine and reversible, so it sits beside
-        // `i` rather than behind a `:` confirmation.
         KeyCode::Char('P') => match app.selected_machine() {
             None => app.set_status(
                 Level::Warn,
@@ -220,23 +186,11 @@ pub(crate) async fn normal_key(
             }
         },
         // Park the selected box, or wake it: no new work, and its sidecar is
-        // let go so the 2.85 GB it holds goes back to the machine.
-        //
-        // On the key rather than behind a `:` confirmation because it is the
-        // most reversible thing here — one press undoes it, nothing is lost, and
-        // a task already running is allowed to finish. That last part is why
-        // this is not `X`: the stop flow is a verdict about the run, this is a
-        // pause on one box, and confusing the two is how somebody parks a box
-        // expecting the cluster to stop.
         KeyCode::Char('z') => match app.selected_machine() {
             None => app.set_status(Level::Warn, "no machine selected"),
             Some(m) => {
                 let (addr, label) = (m.addr.clone(), crate::tui::model::machine_label(&m));
                 // The intent is known now, but the pane renders what the
-                // inductor last reported — so the status line says what was
-                // asked for, and the state column says what is true once a poll
-                // has come back. They can disagree for under a second; a
-                // status line that claimed more than that would be the lie.
                 let (level, msg) = if m.accepting_work {
                     (
                         Level::Info,
@@ -264,14 +218,6 @@ pub(crate) async fn normal_key(
             }
         },
         // The digest manager. Unlike `P` it needs no machine: it is about the
-        // *book*, not a box — every chapter the library knows, and a manual
-        // two-round digest for one of them.
-        //
-        // The chapter list comes from the ledger the panes already hold rather
-        // than a scan — plus the one next chapter past it, when its text is on
-        // disk. A manual report creates its own digest row (see `complete`),
-        // so that next chapter can land; anything further ahead cannot, and is
-        // refused at open time to keep bible deltas landing in order.
         KeyCode::Char('D') => {
             let mut chapters: Vec<u32> = app.tasks.iter().map(|t| t.chapter).collect();
             chapters.sort_unstable();
@@ -291,8 +237,6 @@ pub(crate) async fn normal_key(
         }
         KeyCode::Char('B') => {
             // Backend up now, boxes join in background — a second press
-            // while the first sequence runs would provision everything
-            // twice, so it is refused instead of queued.
             if app.backend_start_outstanding {
                 app.set_status(Level::Warn, "backend start already running — watch events");
             } else {
@@ -328,21 +272,12 @@ pub(crate) async fn normal_key(
             }
         }
         // The task ledger. Capital K so the lowercase `k` can stay "move up" —
-        // and so it reads as the sibling of `R` (run screen) and `S` (cast).
         KeyCode::Char('K') => {
             app.screen = Screen::Tasks(TasksView::new());
         }
         // LLM providers: keys, endpoints, models, and which one digests.
-        // A bare key (not behind `:`) because this is setup an operator
-        // reaches for constantly — new key, model switch, quota hop — and
-        // read-only until an edit key is pressed on purpose.
         KeyCode::Char('L') => crate::tui::input::llm::open_llm(app),
         // The background jobs (what the footer's "N job(s) running" actually
-        // is). `J` is the mnemonic alias (sibling of `K`, capital so lowercase
-        // `j` stays "move down"); `Tab` — the spelling the footer advertises —
-        // is handled once in `input::handle_key`, so it opens the jobs view from
-        // every screen that has not spent the key on something of its own
-        // rather than from this one alone.
         KeyCode::Char('J') => {
             let previous = Box::new(app.screen.clone());
             app.screen = Screen::Jobs {
@@ -351,8 +286,6 @@ pub(crate) async fn normal_key(
             };
         }
         // Operator commands fire from the `:` line only: a stray keypress
-        // must never provision, reconcile or stop anything. This arm catches
-        // every gated key before the fallthrough swallows it silently.
         KeyCode::Char(c)
             if matches!(
                 c,

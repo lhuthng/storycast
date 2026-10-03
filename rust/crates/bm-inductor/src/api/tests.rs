@@ -14,7 +14,6 @@ fn scratch() -> tempfile::TempDir {
 }
 
 /// A stub sidecar: 200 on `/health`, and on `/policy` whatever body the
-/// test hands it. Returns the base URL.
 async fn stub_sidecar(policy_body: &'static str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -56,7 +55,6 @@ async fn sidecar_check_demands_health_plus_policy() {
     let up = stub_sidecar(r#"{"allowed_voices":[]}"#).await;
     assert!(sidecar_serving(&up).await);
     // Healthy but stale (a server from before `/policy` existed): not
-    // serving, the agent would refuse it too, so preview must not use it.
     let stale = stub_sidecar(r#"{"ok":true}"#).await;
     assert!(!sidecar_serving(&stale).await);
     // Nothing there at all: not serving (and fast, no 5-minute wait).
@@ -64,8 +62,6 @@ async fn sidecar_check_demands_health_plus_policy() {
 }
 
 /// A full policy list, as the policy panel sends it: every stage, with
-/// render set to `enabled` and the rest untouched. Used by the
-/// dispatcher's convergence test in `dispatch.rs`.
 #[allow(dead_code)]
 fn render_policy(enabled: bool) -> Vec<bm_proto::TaskPref> {
     bm_proto::Stage::DEFAULT_PRIORITY
@@ -78,10 +74,6 @@ fn render_policy(enabled: bool) -> Vec<bm_proto::TaskPref> {
 }
 
 /// The policy edit persists, config, not runtime, and sends nothing
-/// itself: delivery is the dispatcher's convergence job, which a one-shot
-/// push misses in every state that matters (box down at edit time, box
-/// rebooting into its default, inductor restarted, worker busy behind the
-/// timeout, hand-edited machines.json).
 #[tokio::test]
 async fn a_policy_edit_persists_and_leaves_delivery_to_the_dispatcher() {
     let d = scratch();
@@ -116,7 +108,6 @@ async fn a_policy_edit_persists_and_leaves_delivery_to_the_dispatcher() {
 }
 
 /// A plannable chapter: one run by A, so `0000_Adam.wav` is the whole
-/// expected set.
 fn one_run_layout() -> (tempfile::TempDir, bm_core::Layout) {
     let d = scratch();
     let layout = bm_core::Layout::new(d.path());
@@ -186,7 +177,6 @@ async fn put_segment_rejects_unknown_names_and_bad_sizes() {
     let (status, v) = seg_put(&st, 1, "vieneu", "nope.wav", vec![7u8; 2000]).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
     // Below the completeness threshold and above the unit cap: the merger
-    // would ignore both, so the store refuses them instead.
     let (status, _) = seg_put(&st, 1, "vieneu", "0000_Adam.wav", vec![7u8; 900]).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let over = bm_core::assemble::MAX_SEGMENT_BYTES + 1;
@@ -270,8 +260,6 @@ async fn register_and_heartbeat_flip_a_machine_online() {
 #[tokio::test]
 async fn register_carries_the_registry_handle_to_the_panes() {
     // The hawk hunt, server side: provision logs the registry handle
-    // while beats carry the OS hostname, the panes can only agree if
-    // register keeps the handle on the machine.
     let d = scratch();
     let layout = bm_core::Layout::new(d.path());
     bm_core::provision::save_box(
@@ -317,9 +305,6 @@ async fn register_carries_the_registry_handle_to_the_panes() {
 #[tokio::test]
 async fn a_beating_worker_clears_a_stale_would_not_start_note() {
     // Provision's verdict outlives its launch: the worker did start
-    // (via :B, by hand) but the pane kept saying it would not. The
-    // first beat with a pulse refutes exactly that wording, and a
-    // live note is left alone.
     let d = scratch();
     let layout = bm_core::Layout::new(d.path());
     let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -382,13 +367,6 @@ async fn a_beating_worker_clears_a_stale_would_not_start_note() {
 }
 
 /// Parking writes intent, and intent has to outlive the process.
-///
-/// Two things are worth pinning: it lands in `machines.json` (not the
-/// ledger, which is cleared on a re-provision) and it does **not** disturb
-/// the state, a park is not a phase change, so a box that is `Online` when
-/// it is parked must still be `Online` afterwards. Getting that wrong is how
-/// a parked box would get stamped `Offline` for going quiet, which is the
-/// one thing the operator did not ask for.
 #[tokio::test]
 async fn the_accepting_route_parks_a_box_and_the_park_outlives_a_restart() {
     let d = scratch();
@@ -553,9 +531,6 @@ async fn offline_remix_applies_the_same_invalidation_as_live() {
     std::fs::create_dir_all(layout.output()).unwrap();
     std::fs::write(layout.final_mp3(1), b"old mix").unwrap();
     // A published merge implies a script existed: the design fingerprint is
-    // computed from it, so without one the chapter has no mix to invalidate
-    // and the requeue would be a no-op for a reason that has nothing to do
-    // with the remix.
     std::fs::write(
         layout.script(1),
         r#"{"segments":[{"speaker":"A","text":"Chương 1"}]}"#,
@@ -604,7 +579,6 @@ async fn offline_remix_applies_the_same_invalidation_as_live() {
 }
 
 /// Every entry under `root`, so "the op wrote nothing" can be asserted on
-/// the tree rather than on one path somebody remembered to check.
 fn tree(root: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -627,9 +601,6 @@ fn tree(root: &std::path::Path) -> Vec<String> {
 #[test]
 fn a_rendered_sample_comes_back_as_bytes_and_leaves_no_file() {
     // The complaint this answers: auditioning wrote a clip per voice into
-    // `data/previews/`, so a session of A/B-ing left a directory of wavs
-    // nobody asked for. The audio now rides the wire and the *client* puts
-    // it next to the speaker.
     let d = scratch();
     let layout = bm_core::Layout::new(d.path());
     let before = tree(d.path());
@@ -665,7 +636,6 @@ fn a_rendered_sample_comes_back_as_bytes_and_leaves_no_file() {
 #[test]
 fn an_empty_render_is_a_failure_not_an_empty_sample() {
     // A 200 with no body would otherwise be handed to the client as audio it
-    // cannot play, and the client would blame the speaker.
     let res = audio_result("Adam", "line", b"");
     assert!(!res.ok, "{}", res.message);
     assert!(res.audio_b64.is_none(), "an empty body is not audio");
@@ -698,10 +668,6 @@ async fn shelve(st: &Shared, chapter: u32, stage: bm_proto::Stage) {
 }
 
 /// `Op::Retry` carries three scopes on one request shape, so the *dispatch*
-/// is what decides how much a single call touches. The TUI parses the
-/// argument and the state layer does the work; this is the seam between
-/// them, and it is where a stage with no chapter must refuse rather than
-/// widen to every chapter of that stage.
 #[tokio::test]
 async fn retry_dispatch_narrows_by_scope_and_refuses_a_bare_stage() {
     let (_d, layout) = one_run_layout();
@@ -724,7 +690,6 @@ async fn retry_dispatch_narrows_by_scope_and_refuses_a_bare_stage() {
     };
 
     // A stage on its own: refused, and the refusal is inert. Widening it
-    // would silently requeue every chapter of that stage.
     let res = call(Some(bm_proto::Stage::Render), None, None).await;
     assert!(!res.0.ok, "{}", res.0.message);
     assert!(
@@ -758,7 +723,6 @@ async fn retry_dispatch_narrows_by_scope_and_refuses_a_bare_stage() {
     // Stage + chapter: exactly one task, what the Tasks screen sends.
     // Both of ch24's stages are shelved again so that "one task" and "every
     // shelved stage of the chapter" cannot produce the same ledger: a
-    // chapter-wide dispatch would take `digest:24` too.
     shelve(&st, 24, bm_proto::Stage::Render).await;
     shelve(&st, 24, bm_proto::Stage::Digest).await;
     let res = call(Some(bm_proto::Stage::Render), Some(24), None).await;
@@ -787,8 +751,6 @@ async fn retry_dispatch_narrows_by_scope_and_refuses_a_bare_stage() {
     );
 
     // `force` has to survive the wire, or the Tasks screen's `F` is a plain
-    // requeue and the stale artifact it was meant to clear stays in place.
-    // The message is the observable: only a forced retry says so.
     let res = call(Some(bm_proto::Stage::Render), Some(24), Some(true)).await;
     assert!(res.0.ok, "{}", res.0.message);
     assert!(
@@ -807,8 +769,6 @@ fn dispatch_req(go: bool) -> Json<bm_proto::OpRequest> {
 }
 
 /// `dispatch` says what it did, in both directions, and refuses to invent a
-/// range: a ledger with no rows gets told how to set one up instead of
-/// crawling chapters nobody asked for.
 #[tokio::test]
 async fn dispatch_holds_goes_and_refuses_to_invent_a_range() {
     let d = scratch();
@@ -839,7 +799,6 @@ async fn dispatch_holds_goes_and_refuses_to_invent_a_range() {
 }
 
 /// Going enqueues the remainder: the range is set up once, three chapters
-/// are finished, and `go` queues 4..6 out of rows that already exist.
 #[tokio::test]
 async fn dispatch_queues_the_remainder_of_the_range() {
     let d = scratch();
@@ -876,7 +835,6 @@ async fn dispatch_queues_the_remainder_of_the_range() {
 }
 
 /// `:translate 4 3` authors the range, so the `:go` that follows
-/// distributes *its* remainder — not the range the saved run config holds.
 #[tokio::test]
 async fn translate_authors_the_range_that_go_measures() {
     let d = scratch();
@@ -915,8 +873,6 @@ async fn translate_authors_the_range_that_go_measures() {
 }
 
 /// The dashboard's readout: held-or-going and where the authored range
-/// stands, in one place, because a held cluster and a finished one look
-/// identical in the task table.
 #[tokio::test]
 async fn state_reports_dispatch_and_the_range() {
     use axum::response::IntoResponse;

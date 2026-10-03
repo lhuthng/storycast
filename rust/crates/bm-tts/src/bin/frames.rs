@@ -1,14 +1,4 @@
 //! Generate one chunk's codes, for the parity check against the Python engine.
-//!
-//!     bm-tts-frames <models-dir> --speaker <f32-file> [--ref <json>] [--temp 0]
-//!                    [--seed N] [--no-frame-cap] [--max-frames N] < phonemes.txt
-//!
-//! One JSON array of frames per input line, in the order read. The speaker
-//! anchor and the reference codes come from files rather than from a reference
-//! wav, on purpose: enrollment (fbank → speaker encoder → codec encode) is a
-//! separate path with its own verification, and letting it into this comparison
-//! would mean a mismatch could be either one. Both sides are handed the same
-//! bytes and only the generator is under test.
 
 use anyhow::{bail, Context, Result};
 use bm_tts::codec::Codec;
@@ -21,10 +11,6 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // `--logits <f32>` is a different mode: no model, no phonemes, just the
-    // sampler's filter on a fixed vector. It is the only way to reach the
-    // stochastic branch, which temperature 0 short-circuits — and the draw
-    // itself cannot be compared, so this reports what the filter decided
-    // *before* the draw: the candidate set and its probabilities.
     if let Some(at) = args.iter().position(|a| a == "--logits") {
         let path = args.get(at + 1).context("--logits needs a path")?;
         let logits: Vec<f32> = bm_tts::f32le::read(std::path::Path::new(path))?;
@@ -54,11 +40,8 @@ fn main() -> Result<()> {
     let mut threads = 0usize;
     let mut dump: Option<String> = None;
     // Bypass the speaker projection and use this anchor verbatim. It exists to
-    // separate two questions that look the same at the frame level: is the loop
-    // right, and is the anchor's float rounding all that is left?
     let mut anchor_file: Option<String> = None;
     // Codec dir + an output prefix: with both, each line also writes the
-    // decoded audio as raw f32, which is what the audio comparison needs.
     let mut codec_dir: Option<String> = None;
     let mut wav: Option<String> = None;
 
@@ -124,8 +107,6 @@ fn main() -> Result<()> {
             continue;
         }
         // `--dump` writes the intermediate stages for the *first* line only, so
-        // a divergence can be located at the stage that caused it rather than
-        // argued about at the frame level.
         if let (Some(dir), true) = (&dump, n == 0) {
             let dir = std::path::Path::new(dir);
             std::fs::create_dir_all(dir)?;
@@ -159,8 +140,6 @@ fn main() -> Result<()> {
         req.frame_cap = frame_cap;
         let mut rng = Rng::new(seed);
         // With `--anchor`, the projection is skipped: the value handed to the
-        // model is the one in the file, so the anchor's arithmetic is out of the
-        // comparison entirely.
         req.anchor_override = forced.as_deref();
         req.speaker_emb = Some(&anchor_in);
         req.ref_codes = ref_frames.as_deref();

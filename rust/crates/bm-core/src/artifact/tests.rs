@@ -3,9 +3,6 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 /// Pinned against the *other* implementation: this is the value
-/// `tools/models.sh::manifest_hash` prints for this exact manifest, so the
-/// two definitions of "the same bundle" are known to agree rather than
-/// assumed to.
 #[test]
 fn the_manifest_hash_matches_the_shell_rule() {
     let doc = json!({"files": {
@@ -14,13 +11,11 @@ fn the_manifest_hash_matches_the_shell_rule() {
         "c.bin": {"sha256": "cc", "bytes": 3}
     }});
     // sha256 over: "a.onnx\0aa\0" "b.npz\0bb\0" "c.bin\0cc\0", computed by
-    // python's hashlib rather than by this code.
     assert_eq!(
         manifest_hash(&doc).unwrap(),
         "be11da56be81cc3ed33566e46257e1c7bbcb8d4072b53cbb483c6fe01ecc1da8"
     );
     // The name is a function of the content and the *order* it is read in,
-    // so a reordered manifest hashes the same and a changed file does not.
     let same_reordered = json!({"files": {
         "c.bin": {"sha256": "cc", "bytes": 3},
         "a.onnx": {"sha256": "aa", "bytes": 1},
@@ -75,13 +70,10 @@ fn a_repo_that_is_not_owner_name_is_refused() {
 fn no_repo_configured_means_no_release_not_an_error() {
     assert!(ModelsRelease::resolve(Path::new("/nonexistent"), "  ").is_none());
     // And a repo with no bake beside it resolves to nothing, rather than
-    // erroring: the push is the fallback.
     assert!(ModelsRelease::resolve(Path::new("/nonexistent"), "o/n").is_none());
 }
 
 /// The tree the box ends up with, and the two ways it can be wrong: a file
-/// that does not hash to what the manifest says, and a file the manifest
-/// never mentioned.
 #[test]
 fn a_tree_is_verified_in_both_directions() {
     let dir = tstdir("verify");
@@ -115,8 +107,6 @@ fn a_tree_is_verified_in_both_directions() {
 }
 
 /// The expectation travels from the inductor, so a bundle that verifies
-/// against *its own* manifest still has to be refused when it is a
-/// different bake.
 #[test]
 fn a_self_consistent_bundle_for_another_bake_is_still_refused() {
     let dir = tstdir("other-bake");
@@ -131,8 +121,6 @@ fn a_self_consistent_bundle_for_another_bake_is_still_refused() {
 }
 
 /// The whole point of the exercise, end to end and offline: pack a bundle
-/// the way `tools/models.sh` packs one, land it, and have it replace a
-/// directory that was in use.
 #[test]
 fn a_bundle_lands_and_replaces_what_was_there() {
     let root = tstdir("land");
@@ -152,7 +140,6 @@ fn a_bundle_lands_and_replaces_what_was_there() {
     pack(&bundle, &stage, &doc, &[]);
 
     // A tree already in place, which the landing must not damage on the
-    // way past and must not leave behind afterwards.
     let dest = root.join("models");
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join("voices.json"), b"{\"live\":true}").unwrap();
@@ -162,8 +149,6 @@ fn a_bundle_lands_and_replaces_what_was_there() {
     assert_eq!(landed.tag, tag_for(&want));
     assert_eq!(std::fs::read(dest.join("tts.onnx")).unwrap(), b"graph");
     // The bundle is the manifest plus the weights, and the voice store is
-    // not a bake output — so it is not in the bundle, and the box's own
-    // copy of it is the *inductor's* to push, never the bundle's to carry.
     assert!(!dest.join("voices.json").exists());
     // Nothing left lying about.
     let leftovers: Vec<String> = std::fs::read_dir(&root)
@@ -176,7 +161,6 @@ fn a_bundle_lands_and_replaces_what_was_there() {
 }
 
 /// A bundle that does not match must leave the destination exactly as it
-/// was. This is the failure the readiness check used to be blind to.
 #[test]
 fn a_bundle_that_does_not_verify_leaves_the_old_tree_untouched() {
     let root = tstdir("reject");
@@ -204,19 +188,6 @@ fn a_bundle_that_does_not_verify_leaves_the_old_tree_untouched() {
 }
 
 /// A bundle carrying files its manifest never listed, which is not a
-/// theoretical shape: macOS `tar` writes a `._name` sidecar for every
-/// member carrying an extended attribute and hides them from its own
-/// listing, and the four published `-pack-v0.1.0` releases each carry one
-/// per member (audited 2026-09-29: common 80, xianxia 129, weapons 35,
-/// magic 18) — a Linux box unpacks every one as a real file.
-///
-/// So "nothing unlisted" is not politeness: it is the check that catches a
-/// packer nobody audited, and it has to name the file it found.
-///
-/// The models release is *not* one of them: `models-vdda4efee13df` lists 17
-/// members and carries no sidecars, because a re-cut of it was clobbered
-/// onto the same content-addressed tag. An older note here named it as the
-/// dirty example, which is how a comment outlives the thing it described.
 #[test]
 fn a_member_nobody_listed_is_refused_by_name() {
     let root = tstdir("sidecar");
@@ -240,7 +211,6 @@ fn a_member_nobody_listed_is_refused_by_name() {
 }
 
 /// A bundle that is not a zstd frame, or not a tar, is corrupt bytes — not
-/// an unreachable release, and so not a reason to fall back to the push.
 #[test]
 fn bytes_that_are_not_a_bundle_are_corruption() {
     let root = tstdir("not-a-bundle");
@@ -258,16 +228,10 @@ fn sha_of(bytes: &[u8]) -> String {
 }
 
 // -----------------------------------------------------------------------
-// A profile pack: a manifest beside an `assets/` subtree, verified against
-// the hash of the *live* tree it replaces.
-// -----------------------------------------------------------------------
 
 /// A stage holding the two-file shape every small pack has: a registry and
-/// a clip it names, keyed by where they land (`assets/…`).
 fn pack_stage(root: &Path, files: &[(&str, &[u8])]) -> (PathBuf, BTreeMap<String, String>) {
     // Named `src`, not `stage`: the leftovers assertions below look for
-    // anything a landing left behind, and the test's own staging directory
-    // would be caught by a substring match on "stage".
     let stage = root.join("src");
     std::fs::create_dir_all(&stage).unwrap();
     let mut map = BTreeMap::new();
@@ -281,7 +245,6 @@ fn pack_stage(root: &Path, files: &[(&str, &[u8])]) -> (PathBuf, BTreeMap<String
 }
 
 /// A pack's `manifest.json`, in the shape `bm-inductor profile manifest`
-/// writes — which is the shape that makes the hash equal the pointer's.
 fn pack_manifest(name: &str, version: &str, files: &BTreeMap<String, String>) -> Value {
     serde_json::json!({
         "name": name, "version": version, "piece": "pack", "deps": [],
@@ -298,8 +261,6 @@ fn write_pack_manifest(stage: &Path, doc: &Value) {
 }
 
 /// Tar a pack bundle the way `tools/profile.sh pack` does: the manifest
-/// beside the tree, both under their own names, `COPYFILE_DISABLE` for the
-/// same reason the models helper sets it.
 fn tar_bundle(bundle: &Path, stage: &Path, names: &[String]) {
     let mut all = vec![PACK_MANIFEST.to_string()];
     all.extend(names.iter().cloned());
@@ -320,15 +281,6 @@ fn tar_bundle(bundle: &Path, stage: &Path, names: &[String]) {
 }
 
 /// The whole path, end to end and offline: a pack is packed the way
-/// `tools/profile.sh` packs one, lands over a directory a box was already
-/// using, and the tree it leaves is the tree that was published.
-///
-/// The assertion that matters is the first one. The hash the box is given
-/// comes from the **load pointer**, which is the hash of the live tree on the
-/// inductor — so `manifest_hash` over the bundle's own `files` has to fold
-/// to that number, and it does only because the manifest is keyed by the
-/// paths a pack unpacks to. Change the keying to bare names and this is
-/// where it stops agreeing.
 #[test]
 fn a_pack_bundle_lands_its_assets_subtree_and_agrees_with_the_pointer() {
     let root = tstdir("pack-land");
@@ -362,11 +314,8 @@ fn a_pack_bundle_lands_its_assets_subtree_and_agrees_with_the_pointer() {
         b"a clip"
     );
     // **Replaced, not merged**: the clip the new pack does not carry is
-    // gone. A half-old profile is the failure a box cannot report, because
-    // every file it does hold is one a registry still names.
     assert!(!dest.join("effects/gone-1.mp3").exists());
     // The manifest does not land inside `assets/`: it is the bundle's own
-    // bookkeeping, and a worker resolving its profile must not find one.
     assert!(!dest.join(PACK_MANIFEST).exists());
     assert!(
         !root.join("manifest.json").exists(),
@@ -382,12 +331,8 @@ fn a_pack_bundle_lands_its_assets_subtree_and_agrees_with_the_pointer() {
 }
 
 /// **The update path's landing: the bundle is its own witness.**
-///
 /// A box is handed the hash it must end up at; an update asked for "the
 /// newest release" and has no such number, so the check is the one that
-/// needs nothing outside the bundle — its manifest against its own members,
-/// in both directions — and the hash it folds to comes back, because that is
-/// the number the composition record ends up naming.
 #[test]
 fn an_unpinned_pack_landing_verifies_against_the_bundle_and_answers_its_hash() {
     let root = tstdir("pack-unpinned");
@@ -408,7 +353,6 @@ fn an_unpinned_pack_landing_verifies_against_the_bundle_and_answers_its_hash() {
     assert_eq!(std::fs::read(dest.join("effect-pool.json")).unwrap(), b"{}");
 
     // And the check is real, not skipped for want of an expectation: a
-    // manifest that disagrees with its own members lands nothing at all.
     let bad_root = tstdir("pack-unpinned-bad");
     std::fs::create_dir_all(&bad_root).unwrap();
     let (stage2, mut files2) = pack_stage(&bad_root, &[(names[0], &b"{}"[..])]);
@@ -426,14 +370,6 @@ fn an_unpinned_pack_landing_verifies_against_the_bundle_and_answers_its_hash() {
 }
 
 /// The failure the update path hit on a **real published release**: a bundle
-/// packed by macOS `tar` carries a `._name` sidecar for every member with an
-/// extended attribute, hides those from its own listing, and a box unpacks
-/// each as a real file.
-///
-/// It is refused *by name*, which is the whole difference between a refusal
-/// an operator can act on and one that reads as a mystery: the answer is
-/// re-pack and re-upload under the same tag, and the message has to name a
-/// member the manifest never listed rather than say "hash mismatch".
 #[test]
 fn a_bundle_carrying_appledouble_members_is_refused_by_name() {
     let root = tstdir("pack-appledouble");
@@ -447,7 +383,6 @@ fn a_bundle_carrying_appledouble_members_is_refused_by_name() {
         ],
     );
     // The manifest is written without the sidecar, which is exactly how a
-    // bundle macOS `tar` produced differs from the record beside it.
     files.remove(sidecar);
     write_pack_manifest(&stage, &pack_manifest("common", "0.1.0", &files));
     let bundle = root.join("common.tar.zst");
@@ -463,11 +398,6 @@ fn a_bundle_carrying_appledouble_members_is_refused_by_name() {
 }
 
 /// A release that verifies against *its own* manifest and is a different
-/// pack anyway must be refused, and must leave the box's tree alone.
-///
-/// This is the case a content-addressed check cannot see: `xianxia` and
-/// `a different profile` are both internally consistent, and only the
-/// pointer knows which one this cluster is running.
 #[test]
 fn a_self_consistent_pack_for_another_profile_is_still_refused() {
     let root = tstdir("pack-other");
@@ -499,13 +429,10 @@ fn a_self_consistent_pack_for_another_profile_is_still_refused() {
         "nothing was put in place"
     );
     // …and the same bundle is accepted against its own hash, so the refusal
-    // is the expectation and not a broken archive.
     assert!(land_pack(&bundle, &dest, &its_own, "xianxia-pack-v0.1.0").is_ok());
 }
 
 /// A bundle carrying something outside `assets/` — and a macOS `._name`
-/// sidecar is the shape that actually happens — is refused by name rather
-/// than landed into a profile nobody hashed.
 #[test]
 fn a_member_outside_the_pack_directory_is_refused_by_name() {
     let root = tstdir("pack-stray");
@@ -536,8 +463,6 @@ fn a_member_outside_the_pack_directory_is_refused_by_name() {
 }
 
 /// A language release offered where a pack is expected is refused, because
-/// the two unpack to different places and a box that got one would have a
-/// profile and no `assets/`.
 #[test]
 fn a_language_release_is_not_a_profile_pack() {
     let root = tstdir("pack-piece");
@@ -559,14 +484,6 @@ fn a_language_release_is_not_a_profile_pack() {
 }
 
 /// The pack half of `tools/models.sh`, through the same two binaries the
-/// script uses — `ruzstd` decodes but does not encode, and a hand-rolled
-/// zstd writer in a test would be a second thing to keep correct.
-///
-/// `COPYFILE_DISABLE=1` because that is what the script now sets: without
-/// it macOS `tar` writes a `._name` sidecar for every member carrying an
-/// xattr, and `tar -t` hides them, so the junk is invisible from the
-/// machine that packed it. The four published `-pack-v0.1.0` releases were
-/// cut that way, and this module refuses one for exactly that reason.
 fn pack(bundle: &Path, stage: &Path, doc: &Value, extra: &[&str]) {
     let mut names = vec!["manifest.json".to_string()];
     let mut keys: Vec<&String> = doc["files"].as_object().unwrap().keys().collect();
@@ -590,8 +507,6 @@ fn pack(bundle: &Path, stage: &Path, doc: &Value, extra: &[&str]) {
 }
 
 /// Named temp dirs: bm-core has no `tempfile` dev-dependency, and a test
-/// that leaves a directory behind in a shared `/tmp` is a test that finds
-/// someone else's file.
 fn tstdir(what: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("bm-artifact-{what}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -606,8 +521,6 @@ fn files(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
 }
 
 /// The delta is the whole sync decision: changed paths travel, removed
-/// paths are deleted, untouched paths are never named. Identical maps
-/// diff to nothing, which is the "already exact" short-circuit.
 #[test]
 fn a_manifest_diff_names_only_what_moved() {
     let old = files(&[
@@ -628,7 +541,6 @@ fn a_manifest_diff_names_only_what_moved() {
 }
 
 /// The receipt round-trips through its one spelling: what the fetch path
-/// writes, the provision path reads back, byte for byte.
 #[test]
 fn a_receipt_survives_its_own_spelling() {
     let dir = tstdir("receipt");

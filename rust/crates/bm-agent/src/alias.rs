@@ -1,9 +1,6 @@
 use super::*;
 
 /// Stable display names, one per worker root. The TUI used to hash the worker
-/// id (`host-pid`), so every restart renamed every worker and 16 names
-/// collided constantly. Now the name is drawn once, kept in `worker.alias`,
-/// and reported on every heartbeat.
 pub(crate) const ALIAS_POOL: [&str; 48] = [
     "fox",
     "owl",
@@ -56,8 +53,6 @@ pub(crate) const ALIAS_POOL: [&str; 48] = [
 ];
 
 /// The worker's display name: the kept one, or a fresh draw persisted for
-/// next time. One worker per root is the deployment shape; two sharing a root
-/// would share a name, so don't do that.
 pub(crate) fn worker_alias_for(root: &std::path::Path) -> String {
     let path = root.join("worker.alias");
     if let Ok(saved) = std::fs::read_to_string(&path) {
@@ -82,11 +77,6 @@ pub(crate) fn worker_alias_for(root: &std::path::Path) -> String {
 }
 
 /// The default worker id: stable per root, not per process. The old
-/// `{hostname}-{pid}` minted a new identity on every restart, so the
-/// ledger's caps/workers/beats maps grew a row per restart and events
-/// renamed every worker. The alias is drawn once and kept in
-/// `worker.alias`, so `{hostname}-{alias}` survives restarts; an explicit
-/// `--worker-id` still wins.
 pub(crate) fn default_worker_id(root: &std::path::Path) -> String {
     format!("{}-{}", hostname_simple(), worker_alias_for(root))
 }

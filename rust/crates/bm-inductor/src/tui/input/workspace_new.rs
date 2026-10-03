@@ -20,7 +20,6 @@ fn byte_at(buf: &str, char_idx: usize) -> usize {
 }
 
 /// The single-line editor the two text steps share: insertion at the caret,
-/// delete/backspace, and the readline kills `Ctrl-U` / `Ctrl-W`.
 fn edit(buf: &mut String, cursor: &mut usize, key: &KeyEvent, ctrl: bool, alt: bool) {
     match key.code {
         KeyCode::Backspace => {
@@ -70,7 +69,6 @@ fn edit(buf: &mut String, cursor: &mut usize, key: &KeyEvent, ctrl: bool, alt: b
 }
 
 /// Every preset, keyed for the picker: the label is what a human reads, the id
-/// is what `workspace new --profile` takes.
 pub(crate) fn preset_items(root: &Path) -> Vec<WsItem> {
     match read_presets(root) {
         Ok(map) => map
@@ -86,9 +84,6 @@ pub(crate) fn preset_items(root: &Path) -> Vec<WsItem> {
 }
 
 /// A script's real path: the preset's adapter home first, then the checkout
-/// root (which holds the global `crawlers/…` tree), then the pre-split
-/// `assets/` — the same scopes the crawler resolver walks, so what the picker
-/// offers is what a run will find.
 fn script_path(root: &Path, adapter: &str, script: &str) -> Option<PathBuf> {
     for base in [
         root.join(bm_core::paths::ADAPTERS_DIR).join(adapter),
@@ -104,11 +99,6 @@ fn script_path(root: &Path, adapter: &str, script: &str) -> Option<PathBuf> {
 }
 
 /// The crawler choices for one profile's adapter.
-///
-/// Three kinds, in the order an operator meets them: **none** (a book that will
-/// say later), **local** (an EPUB, no network), the **known sites** whose bundle
-/// is actually on this checkout, and **custom** (a site nobody has written a
-/// crawler for yet).
 fn crawler_items(root: &Path, adapter: &str) -> Vec<WsItem> {
     let mut out = vec![
         WsItem {
@@ -152,22 +142,6 @@ fn build_crawler(
         "none" => None,
         "local-epub" => {
             // The EPUB example is global (`crawlers/examples/epub.lua`): the
-            // book references it in place rather than carrying a copy, so a fix
-            // to the unknown-structure crawler reaches every epub import.
-            // Workspace-scoped, and the workspace's own scratch tree: `tmp/`
-            // is `Layout::scratch()` for a workspace (the checkout root keeps
-            // the legacy `.bm/tmp`). `.bm/tmp` inside a book would be a second
-            // `.bm/`, reading as machine-global state the book does not own.
-            //
-            // The operator's `epub` is the file itself: it is copied to
-            // `tmp/book.epub` at create time (`CrawlerSetup::book`), because
-            // the crawl's read root is the workspace and a path outside it is
-            // refused — a reference would not survive the confinement.
-            // A **folder** is the multi-volume shape: one `.epub` per volume,
-            // copied into the workspace's own `books/` and read via
-            // `crawl.params.books`. A file stays the single-book shape. Which
-            // one it is, is a property of what the operator typed, so the same
-            // step takes either.
             let named = epub.trim();
             let dir = Path::new(named).is_dir();
             let mut params = serde_json::Map::new();
@@ -195,8 +169,6 @@ fn build_crawler(
         }
         "custom" => {
             // A site nobody has written a crawler for: seed the workspace with a
-            // copy of the easy-shape template for the operator to edit. The
-            // book owns it (`crawl/…`), which is what `custom` means.
             Some(CrawlerSetup {
                 source: script_path(root, adapter, bm_core::crawl::DEFAULT_SCRIPT)
                     .unwrap_or_default(),
@@ -217,7 +189,6 @@ fn build_crawler(
                 );
             }
             // Global reference: the resolved path is checked by
-            // `crawler_items`, and `apply_preset` writes the shared spelling.
             Some(CrawlerSetup {
                 script: site.script.to_string(),
                 url_template: site.url_template.to_string(),
@@ -312,7 +283,6 @@ pub(crate) async fn key_workspace_new(
                     ws.url_cursor = 0;
                 } else if item.value == "local-epub" {
                     // The EPUB is a file, so this step asks for it before the
-                    // create job runs — the TUI's "add epub".
                     ws.step = WsStep::Epub;
                     ws.epub.clear();
                     ws.epub_cursor = 0;
@@ -359,7 +329,6 @@ pub(crate) async fn key_workspace_new(
 
     if !created && matches!(app.screen, Screen::WorkspaceNew(_)) {
         // Keep the highlight on screen: a list longer than the dialog scrolls
-        // rather than moving the highlight off the bottom edge.
         let rows = 9usize;
         if ws.cursor < ws.scroll {
             ws.scroll = ws.cursor;

@@ -1,25 +1,4 @@
 //! The HTTP surface, replacing `python/tts_server.py`.
-//!
-//! Six of the seven endpoints on port 8818 keep the same request and response
-//! shapes the Python sidecar served, so `bm-agent/src/tts.rs` — a thin client
-//! that never loads a model — needs no change at all. The seventh, `/shutdown`,
-//! is additive: it exists so the two callers that must not share an 8 GiB box
-//! with a 2.85 GB model can stop one they did not spawn.
-//!
-//! Two things are deliberately *not* re-implemented here:
-//!
-//! * **The accent policy and the roster labels come from `bm-core`.** The
-//!   sidecar is the authority at runtime and `bm-core` is the offline fallback,
-//!   which makes `bm-core` the single definition of both. Restating the voice
-//!   pools in a third place is exactly the defect that rule exists to prevent.
-//! * **`/policy` keeps the Python field names** (`male_voices`, `allowed_voices`,
-//!   …). `bm-agent` probes for `allowed_voices` to decide whether a server is
-//!   current, so renaming a field here would look like an old server and make the
-//!   agent refuse to use it.
-//!
-//! Rendering is serialised behind a mutex. The reference does the same with an
-//! `RLock` around its session — ONNX Runtime sessions are not safely re-entrant
-//! across `run` calls, and the model is the bottleneck anyway.
 
 use crate::codec::to_wav_bytes;
 use crate::engine::Request;
@@ -40,27 +19,14 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Fixed on purpose: two voice samples are only comparable if both say the same
-/// thing. One per engine, because the preview is spoken, and each engine reads
-/// its own language.
 pub const PREVIEW_TEXT_VIENEU: &str = "Xin chào, đây là giọng đọc thử của bộ truyện.";
 pub const PREVIEW_TEXT_POCKET: &str =
     "Hello, this is a storycast voice preview. The narrator reads the chapters.";
 
 /// The HTTP surface's shared state, constructed **empty** and filled once the
-/// model has loaded.
-///
-/// The listener binds before the load, so the port is the single-instance lock
-/// and a second launch dies on it immediately instead of after allocating
-/// ~2.85 GB. `/health` answers 503 until [`Server::fill`] runs, so "starting" is
-/// a distinct, honest state from "absent" — a caller that cannot tell those
-/// apart is the one that spawns a duplicate and OOMs the box.
 pub struct Server {
     inner: OnceLock<Inner>,
     /// Fired by `POST /shutdown`, awaited by `main`. A `Notify` rather than a
-    /// `Child`/signal because the caller is often *not* the spawner: a
-    /// provision-started sidecar is nobody's child, and the two places that must
-    /// not co-reside with it (a merge's ffmpeg pass, a worker exiting) have no
-    /// pid to signal.
     shutdown: tokio::sync::Notify,
 }
 
@@ -69,9 +35,6 @@ struct Inner {
 }
 
 /// The two engines the one HTTP surface serves. The contract — `/infer` in,
-/// wav out — is the engine-independent part; everything an engine owns (its
-/// text front end, its voice store, its sample rate) lives behind this enum,
-/// and nothing outside it branches on which engine is in force.
 #[allow(clippy::large_enum_variant)] // one Backend per process, behind a OnceLock
 pub enum Backend {
     Vieneu {
@@ -80,13 +43,10 @@ pub enum Backend {
         synth: Mutex<Synth>,
     },
     // Absent entirely without the `pocket` feature, so a VieNeu-only build
-    // never mentions the type. Every arm below is gated to match.
     #[cfg(feature = "pocket")]
     Pocket { engine: Box<Mutex<Pocket>> },
 }
 // The size difference between the variants is real but irrelevant: an `Inner`
-// holds exactly one of these behind a `OnceLock` for the life of the process,
-// never in a collection or on a hot stack.
 
 impl Server {
     pub fn new() -> Arc<Server> {
@@ -97,7 +57,6 @@ impl Server {
     }
 
     /// Resolves once [`Server::request_shutdown`] has been called. `Notify`
-    /// stores one permit, so a request that arrives first is not lost.
     pub async fn await_shutdown(&self) {
         self.shutdown.notified().await;
     }
@@ -129,8 +88,6 @@ fn label(name: &str, description: &str) -> String {
 
 impl Inner {
     /// Render one text with one voice, start to finish — whichever engine is
-    /// in force. Each engine is serialised behind its own mutex for the same
-    /// reason the reference holds an `RLock`: ONNX sessions are not re-entrant.
     fn render(
         &self,
         text: &str,
@@ -218,11 +175,9 @@ pub struct InferBody {
     #[serde(default = "default_temperature")]
     pub temperature: f64,
     /// Accepted and ignored, exactly as the reference ignores it on this path:
-    /// the v3 render takes its pauses from the chunk boundaries instead.
     #[serde(default)]
     pub silence_p: Option<f64>,
     /// Accepted and ignored: this server is VieNeu-only, and the reference's
-    /// sidecar ignored it too.
     #[serde(default)]
     pub engine: Option<String>,
 }
@@ -267,7 +222,6 @@ fn validate_infer_text(text: &str) -> std::result::Result<(), &'static str> {
 
 fn failed(e: anyhow::Error) -> Response {
     // Truncated like the reference: a full ONNX traceback in an HTTP body helps
-    // nobody and the log already has it.
     let msg = format!("{e:#}");
     let short: String = msg.chars().take(300).collect();
     (
@@ -278,10 +232,6 @@ fn failed(e: anyhow::Error) -> Response {
 }
 
 /// 503 while the weights are still loading, 200 once they are in.
-///
-/// The distinction is the point: a caller that reads 503 as "starting, wait"
-/// never spawns a duplicate, and one that reads a closed port the same way
-/// cannot tell "starting" from "absent".
 fn loading() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -299,13 +249,6 @@ async fn health(State(s): State<Arc<Server>>) -> Response {
 }
 
 /// Ask the process to exit. **Deliberately works while loading too** — a sidecar
-/// stuck mid-load holding 2.85 GB is exactly the one a worker wants gone before
-/// it runs ffmpeg. Unauthenticated like every other endpoint here (LAN-only,
-/// loopback-bound by `bm-agent`), and the worst a stray caller can do is cost a
-/// model reload.
-///
-/// An older sidecar without this route answers 404; the caller treats any
-/// non-success as "could not ask" and moves on.
 async fn shutdown(State(s): State<Arc<Server>>) -> Response {
     s.request_shutdown();
     Json(serde_json::json!({"ok": true, "exiting": true})).into_response()
@@ -319,9 +262,6 @@ async fn voices(State(s): State<Arc<Server>>) -> Response {
 }
 
 /// The structured roster: name, gender, accent, style, language.
-///
-/// Parsed by `bm-core` from the same labels `/voices` sends, so the two can
-/// never disagree about what a voice is.
 async fn roster(State(s): State<Arc<Server>>) -> Response {
     match s.inner() {
         Some(i) => Json(bm_core::voices::voices_from_labels(
@@ -366,8 +306,6 @@ async fn policy(State(s): State<Arc<Server>>) -> Response {
         male_voices: pools.male,
         female_voices: pools.female,
         // Always empty: the field stays because `bm-agent` probes for it to
-        // tell a serving sidecar from a stale one. Nothing restricts voices
-        // any more — the catalogue is the whole roster.
         allowed_voices: Vec::new(),
         default_cast: cast,
     })
@@ -407,7 +345,6 @@ async fn preview(State(s): State<Arc<Server>>, Json(body): Json<PreviewBody>) ->
 }
 
 /// A per-request seed. The render is stochastic, so two calls should differ —
-/// but a logged seed makes any one of them reproducible.
 fn seed() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -463,7 +400,6 @@ mod tests {
     }
 
     /// The roster is derived from the same labels `/voices` sends, so `bm-core`
-    /// parses them exactly as it parses the Python sidecar's.
     #[test]
     fn the_roster_reads_gender_and_accent_positionally() {
         let dir = tempfile::tempdir().unwrap();
@@ -479,7 +415,6 @@ mod tests {
         assert_eq!(a.accent, "Northern");
         assert_eq!(a.style, "Kể chuyện");
         // "Nam" in the *accent* slot is South, not male — the trap this parsing
-        // exists for.
         let b = v.iter().find(|v| v.name == "B").unwrap();
         assert_eq!(b.gender, "female");
         assert_eq!(b.accent, "South");
@@ -494,8 +429,6 @@ mod tests {
             male_voices: p.male,
             female_voices: p.female,
             // Always empty: the field stays because `bm-agent` probes for it to
-            // tell a serving sidecar from a stale one. Nothing restricts voices
-            // any more — the catalogue is the whole roster.
             allowed_voices: Vec::new(),
             default_cast: Default::default(),
         })

@@ -20,7 +20,6 @@ use std::time::Duration;
 use crate::state::Inner;
 
 /// The TTS sidecar the inductor talks to. LAN-only and unauthenticated, same
-/// as every other sidecar call in this repo.
 const SIDECAR: &str = "http://127.0.0.1:8818";
 
 pub type Shared = Arc<tokio::sync::Mutex<Inner>>;
@@ -33,9 +32,6 @@ struct TaskQuery {
 async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl IntoResponse {
     let mut inner = st.lock().await;
     // A registration is a liveness report with nothing to report yet. It goes
-    // through the same `observe` a beat does, so the two routes into the
-    // ledger cannot drift apart, which is what happened when the bookkeeping
-    // lived in two handlers.
     let beat = Heartbeat {
         worker_id: r.worker_id,
         addr: r.addr,
@@ -69,7 +65,6 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
 async fn heartbeat(State(st): State<Shared>, Json(h): Json<Heartbeat>) -> impl IntoResponse {
     let mut inner = st.lock().await;
     // Whether the report arrived by post or by the dispatcher's poll, it lands
-    // in the same place, see `state::observe`.
     inner.observe(&h);
     inner.save();
     Json(
@@ -91,8 +86,6 @@ async fn task(State(st): State<Shared>, Query(q): Query<TaskQuery>) -> impl Into
 
 async fn complete(State(st): State<Shared>, Json(c): Json<Complete>) -> impl IntoResponse {
     // Shipments first: a Done row's file must already be home when the
-    // ledger says so, on every channel, including the hook's, which has no
-    // collection round trip.
     if !c.unit_files.is_empty() {
         let (layout, engine) = {
             let inner = st.lock().await;
@@ -107,10 +100,6 @@ async fn complete(State(st): State<Shared>, Json(c): Json<Complete>) -> impl Int
 }
 
 /// Store the takes a completion report ships, before the row turns Done.
-///
-/// Same bounds and expected-set check as the upload path; a bad file is
-/// skipped, the completion still applies, a reject must not strand a whole
-/// finished batch over one corrupt name.
 fn store_shipments(
     layout: &bm_core::Layout,
     engine: &str,
@@ -151,13 +140,6 @@ struct SegmentQuery {
 }
 
 /// One rendered unit, uploaded by a non-local worker. The 200 below is the
-/// discard contract: a file is deleted on the worker only after the inductor
-/// returns 200 for that exact file.
-///
-/// The name is validated against the expected set for (chapter, engine), a
-/// worker may not write an arbitrary path into the store, and the body
-/// against the same size bounds the merger enforces (non-trivial, ≤ 8 MB).
-/// Rejects rather than storing a file the merger would ignore.
 async fn put_segment(
     State(st): State<Shared>,
     Query(q): Query<SegmentQuery>,
@@ -212,13 +194,6 @@ async fn put_segment(
 }
 
 /// One rendered unit, pulled by a merge worker that does not hold it.
-///
-/// Same expected-set validation as the upload path, a worker may read only
-/// files the plan names, and the same size floor, so a half-written file is
-/// a 404 rather than a corrupt mix. This is what lets a merge run on any box:
-/// the inductor's store holds every completed take (`collect_units` pulls
-/// each unit home before its completion is applied), so a worker fetches what
-/// it lacks and mixes from a complete set, wherever it runs.
 async fn get_segment(State(st): State<Shared>, Query(q): Query<SegmentQuery>) -> impl IntoResponse {
     let fail = |code: StatusCode, msg: String| {
         (code, Json(serde_json::json!({"ok": false, "error": msg}))).into_response()
@@ -283,9 +258,6 @@ struct AddrQuery {
 }
 
 /// TUI-driven machine phase transitions (provisioning / error / note) while a
-/// box catches up in the background. Register/heartbeat own Online; this owns
-/// everything before the first beat. Unknown addresses are refused, not
-/// created, creation stays with register and the add-machine flow.
 #[derive(Deserialize)]
 struct MachineStateUpdate {
     addr: String,
@@ -293,9 +265,6 @@ struct MachineStateUpdate {
     #[serde(default)]
     note: String,
     /// A whole new work policy for this machine, when the request carries one.
-    /// Absent means "leave the policy alone", the provisioning transitions
-    /// send only state and note. Always a full four-entry list (the policy
-    /// panel sends every stage), so `Some` is a replacement, never a merge.
     #[serde(default)]
     task_policy: Option<Vec<bm_proto::TaskPref>>,
 }
@@ -308,13 +277,9 @@ async fn set_machine_state(
     match inner.machines.get_mut(&u.addr) {
         Some(m) => {
             // Through `set_state` so the transition is stamped: the pane can
-            // then say how long a box has been provisioning, and the boot
-            // deadline can tell a fresh `Initializing` from a stuck one.
             m.set_state(u.state);
             if !u.note.is_empty() {
                 // State flows rewrite the note freely, but an EC2 instance id
-                // on it is the box's one stable identity, relink matches by
-                // it, so a note rewrite may never erase it.
                 m.note = bm_core::provision::preserve_ec2_id(&m.note, &u.note);
             }
             if let Some(p) = &u.task_policy {
@@ -332,17 +297,6 @@ async fn set_machine_state(
 }
 
 /// Replace one machine's work policy. Separate from `set_machine_state`
-/// because a policy edit is a scheduling decision, not a phase transition
-/// it must not drag the machine's state or note along with it.
-///
-/// **The sidecar instruction is deliberately *not* sent from here.** A one-shot
-/// push misses every state that matters: the box down at edit time, the box
-/// that reboots later and comes back with the default, the inductor restarted
-/// since, the worker busy behind its 5 s timeout, the hand-edited
-/// `machines.json`. The dispatcher owns convergence instead, it polls every
-/// box every 2 s and re-tells a worker whenever what it last delivered differs
-/// from the box's policy (see `dispatch::drive`). One mechanism, reachable
-/// from every state, retried for free by the poll that already exists.
 #[derive(Deserialize)]
 struct TaskPolicyUpdate {
     addr: String,
@@ -350,18 +304,6 @@ struct TaskPolicyUpdate {
 }
 
 /// Park a box, or wake it up.
-///
-/// Writes **intent only**, one bool in `machines.json`. Everything that follows
-/// from it is already converged by machinery that exists: `offer` withholds work
-/// because of it (so an in-flight task finishes and nothing new is handed out),
-/// and `dispatch::drive` drops the box's sidecar because of it (so `SIDECAR_IDLE`
-/// later the 2.85 GB is back). Nothing is pushed from here, for exactly the
-/// reason spelled out above `TaskPolicyUpdate`: a one-shot command misses the box
-/// that is down, the inductor that restarts, and the worker busy behind its
-/// timeout.
-///
-/// Idempotent on purpose. The dashboard toggles, so a double-press or a retry
-/// after a failed `POST` must land on a known value rather than flip twice.
 #[derive(Deserialize)]
 struct AcceptingUpdate {
     addr: String,
@@ -388,10 +330,6 @@ async fn set_accepting_work(
 }
 
 /// The per-box ONNX thread count the TUI's `:threads` edits. `None` clears the
-/// override and restores the sidecar's own default (half the cores, capped at
-/// 8). Config, like `task_policy`: written to `machines.json`, and pushed to the
-/// worker by the dispatcher's convergent sidecar-policy channel, so a box that
-/// is down at edit time still converges when it comes back.
 #[derive(Deserialize)]
 struct TtsThreadsUpdate {
     addr: String,
@@ -409,7 +347,6 @@ async fn set_tts_threads(
             m.tts_threads = u.threads;
             let addr = u.addr.clone();
             // Config, not runtime: it belongs in machines.json beside the
-            // box's login, so it survives the ledger being cleared.
             inner.persist_box(&addr, &addr);
             inner.save();
             Json(serde_json::json!({"ok": true, "tts_threads": u.threads}))
@@ -430,7 +367,6 @@ async fn set_task_policy(
             m.task_policy = Some(u.task_policy.clone());
             let addr = u.addr.clone();
             // Config, not runtime: the policy belongs in machines.json beside
-            // the box's login, so it survives the ledger being cleared.
             inner.persist_box(&addr, &addr);
             inner.save();
             Json(serde_json::json!({"ok": true}))
@@ -442,9 +378,6 @@ async fn set_task_policy(
 }
 
 /// Reconcile EC2-launched boxes with the address they carry now. Reads the
-/// account off the async runtime, then applies the drift to the registry; the
-/// same routine runs once at startup. Returns the repair lines so a caller can
-/// surface them in its own log.
 async fn relink(State(st): State<Shared>) -> impl IntoResponse {
     let root = { st.lock().await.layout.root.clone() };
     let pool = tokio::task::spawn_blocking(move || crate::aws_ops::pool(&root)).await;
@@ -468,30 +401,12 @@ async fn drop_machine(State(st): State<Shared>, Query(q): Query<AddrQuery>) -> i
     let mut inner = st.lock().await;
     inner.machines.remove(&q.addr);
     // Config and runtime both go: a config-only box would otherwise rejoin
-    // as Unknown on the next load.
     let _ = bm_core::provision::remove_box(&inner.layout.machines(), &q.addr);
     inner.save();
     Json(serde_json::json!({"ok": true}))
 }
 
 /// `dispatch`'s enqueue: the **remainder** of the authored range, and nothing
-/// else.
-///
-/// Deliberately index-free. `translate` fetches the chapter index because a
-/// range it has never seen has to know which chapters are not on the site; the
-/// remainder of a range that is already in the ledger has been through that once
-/// already, and re-walking a listing page would make `:go` — the control an
-/// operator reaches for when they want the cluster moving *now* — a control that
-/// sometimes waits on a network round trip.
-///
-/// A ledger with no rows at all is the one case it refuses to guess at: there is
-/// no range set up, and enqueueing one blind is how a fresh workspace starts
-/// crawling chapters that may not exist. It says what to do instead.
-///
-/// The two callers are the two spellings of the same control — `Op::Dispatch`
-/// and `serve --go` — so both come up doing exactly the same two things. A flag
-/// that flipped the hold and stopped there would put crawl rows in front of a
-/// manual-mode fleet, which is the failure `enqueue_translate` exists to avoid.
 pub(crate) async fn enqueue_remainder(st: &Shared, go: bool) -> Option<String> {
     if !go {
         return None;
@@ -521,24 +436,16 @@ async fn state(State(st): State<Shared>) -> impl IntoResponse {
         "beats": inner.beats.values().collect::<Vec<_>>(),
         "counts": inner.counts(),
         // Per-worker per-stage completions plus per-stage task averages
-        // the Stats pane's matrix and its TUI-side ETA.
         "stats": inner.stats.summary(),
         // Settings ride along so the TUI can prefill prompts with the values
-        // that are actually in force instead of hardcoded guesses. Provider
-        // keys stay in `.bm/llm.json` (never on this wire); the SSH key is a
-        // path (config, in machines.json and settings.json), not a secret.
         "settings": inner.settings,
         // Scheduler events (task done/fail, retry, orphan reap, …) surfaced in
-        // the TUI's event pane. The TUI deduplicates by event id.
         "events": events,
         // The exclusive-write queue, when an operator has parked one: the
-        // ledger's blocked-by readout and the TUI's queue line both read
-        // this. Empty almost always, so it costs one empty array.
         "exclusive": inner.exclusive_snapshot(),
         // Whether anything is being handed out at all, and where the authored
         // range stands. The footer says so while held — "held · ch4..100 ·
         // 3 done, 97 to go — :go" — because neither is visible from the task
-        // table alone, where a held cluster and a finished one look identical.
         "dispatch": {
             "held": inner.dispatch_held,
             "span": inner.remaining_line(),
@@ -548,9 +455,6 @@ async fn state(State(st): State<Shared>) -> impl IntoResponse {
 }
 
 /// The voice picker's whole data model in one call: roster + cast + speakers.
-///
-/// Deliberately a separate endpoint from `/api/state`: it is only needed when
-/// the operator opens the picker, and it may take a sidecar round trip.
 async fn roster(State(st): State<Shared>) -> Json<Roster> {
     let (layout, engine, characters, cast) = {
         let inner = st.lock().await;

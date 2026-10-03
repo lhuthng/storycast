@@ -1,10 +1,6 @@
 use super::*;
 
 /// Build the client used for every TTS-sidecar call.
-///
-/// `no_proxy` is not optional: the sidecar is a LAN service on loopback, and a
-/// configured `HTTP_PROXY` would otherwise intercept it, which silently
-/// downgrades the roster to the offline fallback and makes previews 502.
 pub(crate) fn sidecar_client(timeout: Duration) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(timeout)
@@ -14,8 +10,6 @@ pub(crate) fn sidecar_client(timeout: Duration) -> reqwest::Client {
 }
 
 /// Health plus capability, mirroring the agent's sidecar gate: the server
-/// must serve the policy endpoint the agent was built against, or a stale
-/// server from a previous deploy answers health but lacks `/preview`.
 pub(crate) async fn sidecar_serving(base: &str) -> bool {
     let Ok(http) = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -45,14 +39,6 @@ pub(crate) async fn sidecar_serving(base: &str) -> bool {
 }
 
 /// Start the local sidecar for audition duty unless one already answers.
-///
-/// Preview/audition is the one path that needs TTS with no render task
-/// running, and since the sidecar's lifecycle went per-task, idle means
-/// down. So the first audition of a quiet cluster boots the server (model
-/// load takes minutes) and leaves it up: stopping it after every sample
-/// would make every audition pay the load again. The binary and argv are
-/// the agent's own (`Layout::sidecar_command`), so the two can never name
-/// different servers.
 pub(crate) async fn ensure_sidecar(layout: &bm_core::Layout) -> anyhow::Result<()> {
     if sidecar_serving(SIDECAR).await {
         return Ok(());
@@ -70,8 +56,6 @@ pub(crate) async fn ensure_sidecar(layout: &bm_core::Layout) -> anyhow::Result<(
         );
     }
     // Detached by dropping the handle: this is audition duty, not a render
-    // task, so no per-task owner exists to reap it. It lives until the box
-    // reboots or `X` sweeps it, exactly like the provision-started one did.
     let _ = tokio::process::Command::new(&bin)
         .args(&args)
         .env("LD_LIBRARY_PATH", layout.tts_lib_dir())
@@ -89,18 +73,6 @@ pub(crate) async fn ensure_sidecar(layout: &bm_core::Layout) -> anyhow::Result<(
 }
 
 /// Render one voice's speech so it can be auditioned before it is assigned.
-///
-/// Without `text` this is the voice *sample*: the sidecar's fixed audition line,
-/// which is the only way two voices are comparable. With `text` it is a real
-/// line from the book, which is what an operator actually wants to hear before
-/// committing a swap.
-///
-/// Either way the bytes come back in `OpResult::audio_b64` and **nothing is
-/// written here**. The inductor never plays anything, it is a server, and the
-/// speaker is on the client's desk, so it is also the wrong machine to put a
-/// file on: a path is useless to a client that does not share this filesystem,
-/// and an audition that lands in `data/` accumulates one clip per voice
-/// auditioned. The client owns the file, because the client owns the speaker.
 pub(crate) async fn op_preview_voice(
     layout: &bm_core::Layout,
     voice: &str,
@@ -111,14 +83,10 @@ pub(crate) async fn op_preview_voice(
         return OpResult::fail("preview needs a voice name");
     }
     // Audition is the one path that needs TTS with no render task running:
-    // boot the sidecar here rather than failing onto an idle box.
     if let Err(e) = ensure_sidecar(layout).await {
         return OpResult::fail(format!("preview {voice}: {e:#}"));
     }
     // Two routes into the sidecar, and the difference is the point. No text
-    // means `/preview`, which speaks the sidecar's fixed audition line, the
-    // only way two voice samples are comparable. Text means `/infer`, which is
-    // how an operator hears a *real* line from the book instead of a sample.
     let line = text.map(str::trim).filter(|t| !t.is_empty());
     let (path, body) = match line {
         Some(t) => ("/infer", serde_json::json!({"voice": voice, "text": t})),
@@ -165,17 +133,9 @@ pub(crate) async fn op_preview_voice(
 }
 
 /// Turn a rendered wav into the op's answer.
-///
-/// Split out from the HTTP call so the contract is testable without a sidecar:
-/// bytes in, base64 out, and **nothing written**. The inductor is the wrong
-/// machine to put a sample on, a path is useless to a client that does not
-/// share this filesystem, and a clip that landed in `data/` would accumulate
-/// one file per voice auditioned, which is exactly what the operator asked it
-/// not to do.
 pub(crate) fn audio_result(voice: &str, what: &str, bytes: &[u8]) -> OpResult {
     if bytes.is_empty() {
         // A 200 with an empty body is not audio. Passing it on would make the
-        // client report a playback failure for a render that produced nothing.
         return OpResult::fail(format!("preview {voice}: the sidecar returned no audio"));
     }
     OpResult::ok(format!(
@@ -189,13 +149,6 @@ pub(crate) fn audio_result(voice: &str, what: &str, bytes: &[u8]) -> OpResult {
 }
 
 /// Serve one already-rendered segment for a voice: no synthesis, just bytes
-/// from this inductor's segment cache.
-///
-/// Only what is on local disk counts. Segments rendered on another box stay
-/// there (merge affinity), and fetching them over ssh would turn a keypress
-/// into a network operation with its own failure modes, the miss says so
-/// instead, and names what would fix it. Discovery lives in `bm_core` so a
-/// disconnected TUI can run the same lookup against its own checkout.
 pub(crate) fn op_segment(
     layout: &bm_core::Layout,
     engine: &str,
@@ -214,17 +167,12 @@ pub(crate) fn op_segment(
         ));
     }
     // An exact line plays that sentence or misses honestly, never a nearby
-    // one. Without it, T triages on a random segment.
     let exact = text.map(str::trim).filter(|t| !t.is_empty());
     if let Some(want) = exact {
         match bm_core::assemble::pick_exact(&cands, character, want) {
             Some(pick) => return serve_segment(pick),
             None => {
                 // The held line never rendered in this voice, the normal
-                // state for a fresh swap, which renders chapter by chapter.
-                // Fall back to one of hers that did, still zero synthesis:
-                // the served sentence is held, so T compares on it rather
-                // than another random pick.
                 match bm_core::assemble::pick_rendered(&cands, character) {
                     Some(pick) => return serve_segment(pick),
                     None => {
@@ -242,7 +190,6 @@ pub(crate) fn op_segment(
 }
 
 /// Turn a picked segment into the op's answer: bytes, plus whose sentence it
-/// is so the client can show and hold it.
 fn serve_segment(pick: &bm_core::assemble::RenderedSegment) -> OpResult {
     let bytes = match pick.read_bytes() {
         Ok(b) => b,

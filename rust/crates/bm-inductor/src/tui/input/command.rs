@@ -16,10 +16,6 @@ use crossterm::event::KeyCode;
 use std::sync::{atomic::AtomicBool, Arc};
 
 /// What a `:` command line request actually runs. Read-only commands map to
-/// `Key` — their single keys still exist in Normal mode, so `:m`-style
-/// recursion presses them as if typed. Operator actions map to the variants
-/// below and run directly, because their single keys were removed: a stray
-/// keypress must never provision, reconcile or stop anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Command {
     Key(KeyCode),
@@ -41,15 +37,9 @@ pub(crate) enum Command {
     /// Stop offering digest work on every machine, remembering what each box had.
     DigestOff,
     /// Put each machine's snapshotted digest policy back — **not** "digest on":
-    /// a box that had it off stays off.
     DigestOn,
     Eta,
     /// Requeue shelved work: everything, one chapter, or one task. `stage`
-    /// and `chapter` together name one task; `chapter` alone narrows to that
-    /// chapter; neither is the whole ledger.
-    /// Point one segment at another speaker: `:speaker 18 67 "Thanh Sơn lão tổ"
-    /// "Dịch Phong"`. `expect` is the check, not decoration, so a wrong segment
-    /// number refuses instead of editing the wrong line.
     FixSpeaker {
         chapter: u32,
         segment: usize,
@@ -57,10 +47,6 @@ pub(crate) enum Command {
         speaker: String,
     },
     /// Fold characters into one by hand: the first name survives (keeps its
-    /// voice and bible entry), the rest are absorbed into its
-    /// `proper_aliases`. Scripts are rewritten and the losers' audio
-    /// invalidated, like a reconcile fold — but the operator names the pair,
-    /// so no canon-key match is needed.
     Merge {
         survivor: String,
         absorbed: Vec<String>,
@@ -77,15 +63,12 @@ pub(crate) enum Command {
     SshPort,
     Advertise,
     /// GitHub `owner/name` hosting the baked model artifact: save-only, like
-    /// the ssh defaults. Empty restores the push.
     ModelsRelease,
     /// Set `packs_release`: the repo a box fetches the profile pack from.
     PacksRelease,
     /// How many of one chapter's takes a single render offer carries. Saved to
-    /// this workspace's settings; applies to offers made from then on.
     RenderBatch,
     /// The selected box's TTS sidecar thread count (`None` opens the prompt,
-    /// `Some` is `:threads <n>` dispatched directly).
     TtsThreads {
         threads: Option<Option<u16>>,
     },
@@ -94,36 +77,24 @@ pub(crate) enum Command {
     Rerender,
     Remerge,
     /// Start or stop distributing work (`:go` / `:hold`).
-    ///
-    /// Going also enqueues the remainder of the authored range, so the answer
-    /// to "where was I" does not have to come from counting rows in the task
-    /// table: a book 3 chapters in distributes 4..N.
     Dispatch {
         go: bool,
     },
     ShutdownWhenIdle,
     /// Drop the queued exclusive write (`:xdrop`), or the whole line with
-    /// a route name.
     ExclusiveCancel {
         route: Option<String>,
     },
     /// Open the script inspection window (`:script`).
     Script,
     /// The workspace prompt, opened by `:ws <name>` with the line already in it.
-    ///
-    /// Bare `:ws` is [`Command::WorkspacePick`] and never comes here: the word
-    /// table carries the same answer, so the two cannot disagree about what the
-    /// word with no argument does. `prefill` is everything after `ws`, verbatim.
     Workspace {
         prefill: String,
     },
     /// `:ws` with nothing after it: the books, with arrows. The prompt it used
-    /// to open answers the same question by asking for a name, and the name is
-    /// the one thing an operator switching books should not have to remember.
     WorkspacePick,
     Profile,
     /// LLM providers: keys, endpoints, models, and which one digests.
-    /// Same screen as the `L` key.
     Llm,
     AuditionCurrent,
     AuditionTry,
@@ -133,30 +104,18 @@ pub(crate) enum Command {
     /// Store the app's IAM user from the console's CSV. Setup, once.
     AwsLogin,
     /// Read the account into the pool definition. Setup, once — and safe to
-    /// re-run, since every field already set is kept.
     AwsDiscover,
     /// Launch `count` EC2 boxes and link what comes back into the registry.
     AwsUp {
         count: u32,
     },
     /// Terminate the live boxes the Cloud view is showing. Destructive, so it
-    /// asks first; `force` skips the in-flight guard, not the confirmation.
     AwsDown {
         force: bool,
     },
 }
 
 /// One `:`-addressable command: its single-char form, its words, and its
-/// one-line explanation.
-///
-/// This table is the whole word layer — parsing (`command_key`) and `:help`
-/// both read it, so a word and its explanation cannot drift apart. The
-/// canonical word comes first; the rest are aliases. `desc` is `None` for
-/// the read-only navigations, which `:help` covers in their own sections.
-///
-/// Deliberate non-aliases, because the words are taken: `:swap` stays the
-/// voice picker and `:sample` stays pool-a-clip, so the auditions are
-/// `:current` / `:try` / `:another` instead.
 pub(crate) struct Word {
     /// `:x` single-char form, if the command has one.
     pub key: Option<char>,
@@ -233,9 +192,6 @@ pub(crate) static WORDS: &[Word] = &[
 ];
 
 /// `:` command line → the command. A single character is a command key
-/// (`:m` is reconcile); longer words are the readable form, aliases
-/// included (`:prov` is provision, `:drain` is shutdown-when-idle).
-/// Unknown input stays an error in the prompt.
 pub(crate) fn command_key(input: &str) -> Option<Command> {
     let word = input.trim();
     if word.chars().count() == 1 {
@@ -244,13 +200,9 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
             return Some(w.cmd.clone());
         }
         // Read-only keys keep their Normal-mode arms, so the command
-        // presses the key and every context behaves like it was typed.
         return Some(Command::Key(KeyCode::Char(c)));
     }
     // Commands that take an argument: `:up 3`, `down force`, and the retry
-    // scopes (`:retry`, `:retry 24`, `:retry render 24`). A bad argument is
-    // `None`, which keeps the prompt open with "unknown command" rather than
-    // running the wrong thing at the wrong scope.
     let mut parts = word.split_whitespace();
     if let Some(head) = parts.next() {
         let rest: Vec<&str> = parts.collect();
@@ -274,8 +226,6 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
                 });
             }
             // Its own splitter, because a speaker name is almost always two or
-            // three words and `:speaker 18 67 Dịch Phong` has no way to say
-            // where the name ends. Quoted, like a shell.
             "speaker" if !rest.is_empty() => {
                 let args = split_args(&rest.join(" "));
                 let [chapter, segment, expect, speaker] = args.as_slice() else {
@@ -294,23 +244,8 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
                 });
             }
             // A name is almost always two or three words, so the arguments
-            // are quoted like a shell: `:merge "Vân Bá" "Vân bá"`. The first
-            // name survives, the rest are absorbed. One name is a no-op
-            // stated as an error rather than a merge that folds nothing.
             "ws" | "workspace" if rest.is_empty() => return Some(Command::WorkspacePick),
             // `:ws <name>` used to arrive here as a bare `:ws`: the argument
-            // matched no arm, fell through to the word list, and opened the
-            // prompt with the name dropped and the *current* workspace in its
-            // place — so the documented recipe typed a name and switched to
-            // whichever book was already live.
-            //
-            // The prompt still opens. A name is a typo often enough, and this
-            // line moves the ledger, the settings and every rendered file, so
-            // what will happen should be readable before it happens. What
-            // changes is that the prompt arrives holding what was typed, which
-            // also carries `new <name>` and `--profile` through untouched —
-            // every word after `ws` is the name, because a book's title has
-            // spaces in it and quoting it would be the wrong price to charge.
             "ws" | "workspace" => {
                 return Some(Command::Workspace {
                     prefill: rest.join(" "),
@@ -343,13 +278,6 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
 }
 
 /// Split a command's arguments on whitespace, except inside double quotes, so
-/// an argument can be a phrase: `:speaker 18 67 "Thanh Sơn lão tổ" "Dịch Phong"`
-/// is four arguments, not eight.
-///
-/// A quote inside a word opens there too (`a"b c"d` is `ab cd`), an unterminated
-/// quote takes the rest of the line rather than being an error, and a doubled
-/// quote inside a quoted run is one literal quote. Deliberately not a shell:
-/// no escapes, no expansion, nothing to explain.
 pub(crate) fn split_args(input: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -380,12 +308,6 @@ pub(crate) fn split_args(input: &str) -> Vec<String> {
 }
 
 /// `:retry <chapter>` / `:retry <stage> <chapter>` → the command that names
-/// them. `rest` is already non-empty.
-///
-/// A stage on its own is refused rather than widened to every chapter of that
-/// stage: `:remerge` and `:rerender` already mean exactly that, and a typo
-/// should not reach them. A chapter of 0, an unknown stage name and a third
-/// argument are all `None`, which leaves the prompt open.
 fn retry_scope(rest: &[&str]) -> Option<Command> {
     let (stage, chapter) = match rest {
         [chapter] => (None, *chapter),
@@ -409,8 +331,6 @@ fn parse_threads_arg(s: &str) -> Option<Option<u16>> {
     }
 }
 /// A stage name as the task ledger spells it (`crawl`, `digest`, `render`,
-/// `merge`). Single letters are deliberately not accepted: they are live keys
-/// on other screens, so `:u r 24` reads as a typo rather than as a scope.
 fn stage_by_name(s: &str) -> Option<Stage> {
     Stage::ALL
         .into_iter()
@@ -418,23 +338,6 @@ fn stage_by_name(s: &str) -> Option<Stage> {
 }
 
 /// A bounded, one-entry list of in-flight tasks for a dialog line.
-///
-/// **Why it is bounded at all.** `Confirm`'s height is `body.len() + 5`, one
-/// entry per body line — but the paragraph *wraps*, so a single long entry costs
-/// visual lines the height calculation never counted and pushes the
-/// `Enter / y confirm` hint out of the box. That was fine while a box held one
-/// task; with `render_batch` a single box can hold sixty-four, and a forced
-/// `:down` would then render a dialog with no visible keys.
-///
-/// **Bounded by width, not by count.** Ids vary in length (`merge:7` against
-/// `render:42:11`), so "show six" is not a width — a count bound that looks
-/// right for one chapter overflows for another. The budget here is the dialog's
-/// own usable width, which is the actual constraint, and the trailer is
-/// recomputed as names are added because its width depends on how many are left.
-///
-/// The count is always exact — only the *names* are elided, and the number left
-/// out is stated, so nothing is hidden. The ledger's event lines cap themselves
-/// the same way (`reap` shows the first eight).
 pub(crate) fn busy_summary(busy: &[String]) -> String {
     /// The dialog is 76 wide with two borders; leave a little slack.
     const WIDTH: usize = 68;

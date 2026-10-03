@@ -2,9 +2,6 @@
 use crate::tui::app::App;
 
 /// What the run screen previews and launches with: the live settings while the
-/// backend answers, the saved file while it doesn't, defaults when neither
-/// exists. The source rides along and is shown — a compiled-in default must
-/// read differently from a range somebody saved.
 pub(crate) struct RunPreview {
     pub(crate) start: u32,
     pub(crate) count: u32,
@@ -12,7 +9,6 @@ pub(crate) struct RunPreview {
     pub(crate) models: Vec<String>,
     pub(crate) engine: String,
     /// Takes per render offer (`:batch`). Shown because it is the one knob that
-    /// changes how *often* a worker is spoken to rather than what it produces.
     pub(crate) render_batch: u32,
     pub(crate) speed: f64,
     pub(crate) effect_volume: f64,
@@ -25,10 +21,6 @@ pub(crate) struct RunPreview {
 
 pub(crate) fn run_preview(app: &App) -> RunPreview {
     // One source, read once: `App::effective_settings` already resolves
-    // live → file → compiled default, so this function is no longer a second
-    // implementation of that precedence with its own two branches to keep in
-    // step. The `live`/`saved` flags are about *provenance* — what to print —
-    // not about which value wins.
     let s = app.effective_settings();
     let saved = !app.layout.root.as_os_str().is_empty() && app.layout.settings().is_file();
     let num = |key: &str, default: f64| s.get(key).and_then(|v| v.as_f64()).unwrap_or(default);
@@ -72,9 +64,6 @@ pub(crate) fn run_preview(app: &App) -> RunPreview {
 }
 
 /// Parse `<start> <count> [analyzer] [models,comma,separated]` — the run
-/// configuration shape. `Err` keeps the prompt open; omitted trailing fields
-/// keep their current values (clearing a model chain is a settings-file edit,
-/// not something a blank field should do by accident).
 pub(crate) type RunConfig = (u32, u32, String, Option<Vec<String>>);
 
 pub(crate) fn parse_run_config(buf: &str, current_analyzer: &str) -> Result<RunConfig, String> {
@@ -83,7 +72,6 @@ pub(crate) fn parse_run_config(buf: &str, current_analyzer: &str) -> Result<RunC
     let analyzer = match tokens.get(2) {
         None => current_analyzer.to_string(),
         // Slots, new vocabulary first (`openai`), retired aliases after
-        // (`openrouter`): both mean the OpenAI-compatible path.
         Some(a) if ["openai", "openrouter", "ollama", "local", "gemini"].contains(a) => match *a {
             "openrouter" => "openai".to_string(),
             "local" => "ollama".to_string(),
@@ -96,8 +84,6 @@ pub(crate) fn parse_run_config(buf: &str, current_analyzer: &str) -> Result<RunC
         }
     };
     // Everything past the analyzer is the model list, rejoined: `3.8-flash,
-    // 3.7-flash` (natural spacing) works exactly like `3.8-flash,3.7-flash`.
-    // A model name never contains a space, so a spaced piece is a typo.
     let models: Option<Vec<String>> = {
         let rest = tokens.get(3..).unwrap_or(&[]).join(" ");
         if rest.trim().is_empty() {
@@ -121,10 +107,6 @@ pub(crate) fn parse_run_config(buf: &str, current_analyzer: &str) -> Result<RunC
 }
 
 /// Parse the `:batch` prompt: one whole number of takes per offer.
-///
-/// Bounded here rather than in the scheduler so the operator learns the range
-/// while their typing is still on screen — the scheduler clamps as a last
-/// resort, not as the first answer. `Err` keeps the prompt open.
 pub(crate) fn parse_render_batch(buf: &str) -> Result<u32, String> {
     let t = buf.trim();
     let n: u32 = t
@@ -143,8 +125,6 @@ pub(crate) fn parse_render_batch(buf: &str) -> Result<u32, String> {
 }
 
 /// Persist the render batch size to this workspace's settings file. Returns a
-/// status line. Save-only: nothing is dispatched, because the value is read
-/// when the next offer is built.
 pub(crate) fn save_render_batch(app: &App, buf: &str) -> Result<String, String> {
     if app.layout.root.as_os_str().is_empty() {
         return Err("no repo root — restart the TUI from a checkout".into());
@@ -162,11 +142,6 @@ pub(crate) fn save_render_batch(app: &App, buf: &str) -> Result<String, String> 
 }
 
 /// Persist run configuration to the settings file. Returns a status line.
-///
-/// The analyzer half is mirrored into `.bm/llm.json` (the `L` screen's file):
-/// that file is what the next offer actually carries, so a model named here
-/// must land there too, or the save would read back a model the digests never
-/// run. `llm.json` wins ties — this only records the intent.
 pub(crate) fn save_run_config(app: &App, buf: &str) -> Result<String, String> {
     let (start, count, analyzer, models) = parse_run_config(buf, &app.setting_str("analyzer", ""))?;
     if app.layout.root.as_os_str().is_empty() {
@@ -175,15 +150,12 @@ pub(crate) fn save_run_config(app: &App, buf: &str) -> Result<String, String> {
     let settings_path = app.layout.settings();
     let mut settings = bm_core::config::Settings::load(&settings_path);
     // Everything on the line is saved: the file is the single source the run
-    // screen previews, the footer shows and the next backend boots with.
     settings.start = start;
     settings.count = count;
     if let Some(m) = models {
         settings.analyze_models = m;
     }
     // Record the resolved provider id, not the typed slot: settings mirror
-    // the pick (`tokenharbor`, never `openrouter`-for-tokenharbor), so the
-    // run screen and the footer name what the offers carry.
     if !analyzer.is_empty() {
         settings.analyzer = resolve_llm_provider(app, &analyzer);
     }
@@ -198,8 +170,6 @@ pub(crate) fn save_run_config(app: &App, buf: &str) -> Result<String, String> {
 }
 
 /// The provider a run line's analyzer names: an id spells itself, a slot
-/// prefers the active provider when it still rides that slot — so re-saving
-/// the prefilled line never hops a custom gateway back to stock.
 fn resolve_llm_provider(app: &App, typed: &str) -> String {
     use bm_core::config::{LlmConfig, LlmKind};
     let cfg = LlmConfig::load(&app.layout.root);
@@ -222,10 +192,6 @@ fn resolve_llm_provider(app: &App, typed: &str) -> String {
 }
 
 /// Record the run line's analyzer+models in `.bm/llm.json`, so the file the
-/// offers read agrees with the file the run screen previews. The active
-/// provider follows the analyzer name; the first model becomes its model. A
-/// key is never invented here — without one the provider stays inactive and
-/// the digest says so, which is the truth about that state.
 fn mirror_analyzer_to_llm(app: &App, settings: &bm_core::config::Settings) {
     use bm_core::config::{LlmConfig, LlmKind};
     let id = settings.analyzer.trim();
@@ -234,9 +200,6 @@ fn mirror_analyzer_to_llm(app: &App, settings: &bm_core::config::Settings) {
     }
     let mut cfg = LlmConfig::load(&app.layout.root);
     // An id saved straight into settings (the synced mirror) addresses its
-    // own entry; a slot name resolves like the run line did. The kind prefers
-    // the slot's legacy meaning — a bare `gemini` with no such entry yet is
-    // Gemini, not "whatever the missing id defaults to".
     let provider = if cfg.providers.contains_key(id) {
         id.to_string()
     } else {
@@ -279,9 +242,6 @@ fn mirror_analyzer_to_llm(app: &App, settings: &bm_core::config::Settings) {
 }
 
 /// Parse `<speed> <effect-volume> <music-volume> <inject-volume>` — the mix
-/// shape. Speed is the story tempo (0.5–2.0, the single-`atempo` range);
-/// volumes are master gains over the scene map's own levels (0.0–2.0, 0 mutes,
-/// 1 as authored).
 pub(crate) type MixConfig = (f64, f64, f64, Option<f64>);
 
 pub(crate) fn parse_mix_config(buf: &str) -> Result<MixConfig, String> {
@@ -314,10 +274,6 @@ pub(crate) fn parse_mix_config(buf: &str) -> Result<MixConfig, String> {
 }
 
 /// Prefill for the `:mix` prompt from the settings in force.
-///
-/// The three-branch dance this used to do (live / the file / the compiled
-/// defaults) now lives in `App::effective_settings`, so this is just the four
-/// reads — and it cannot drift from the run screen's own numbers.
 pub(crate) fn mix_prefill(app: &App) -> String {
     format!(
         "{} {} {} {}",
@@ -329,11 +285,6 @@ pub(crate) fn mix_prefill(app: &App) -> String {
 }
 
 /// Persist one app-wide ssh default to the settings file. Returns a status
-/// line; `Err` keeps the prompt open. Applies to machines bound afterwards
-/// (and to a running inductor after its next restart, like every setting).
-/// Save-only prompts that write app-wide settings and launch nothing: the ssh
-/// defaults and the advertised address. Validated here so a typo keeps the
-/// prompt open with the operator's own typing still in it.
 pub(crate) fn save_app_setting(
     app: &App,
     kind: crate::tui::screen::TextKind,
@@ -381,9 +332,6 @@ pub(crate) fn save_app_setting(
         }
         TextKind::ModelsRelease => {
             // Validated by the same parser the URL builder uses, so a value
-            // that saves is a value that produces a release URL — rather than a
-            // setting that quietly sends every box down the push because the
-            // repo name was wrong.
             let repo = buf.trim();
             if repo.is_empty() {
                 settings.models_release = String::new();
@@ -400,13 +348,6 @@ pub(crate) fn save_app_setting(
         }
         TextKind::PacksRelease => {
             // Same validation as the models repo, for the same reason — a repo
-            // that does not parse is a setting that silently sends every box
-            // down the push.
-            //
-            // The **version is not asked for here**, and that is the point: it
-            // is read off the load pointer, so the tag this produces is the tag
-            // `tools/profile.sh pack --version` published under. Asking for it
-            // too would be a second place for the two to disagree.
             let repo = buf.trim();
             if repo.is_empty() {
                 settings.packs_release = String::new();
@@ -421,8 +362,6 @@ pub(crate) fn save_app_setting(
                         .filter(|p| !p.version.is_empty())
                         .map(|p| p.version.as_str())
                         // An unversioned pointer cannot build a tag, and the
-                        // honest thing to say is which stamp is missing rather
-                        // than to accept a repo that would never fetch.
                         .unwrap_or("0.0.0"),
                     pointer.as_ref().map(|p| p.hash.as_str()).unwrap_or(""),
                 )
@@ -443,7 +382,6 @@ pub(crate) fn save_app_setting(
         }
         TextKind::Advertise => {
             // Empty clears it back to the sentinel, which is the only way to
-            // undo a wrong address without hand-editing settings.json.
             let host = buf.trim();
             if host.is_empty() {
                 settings.advertise = "127.0.0.1".into();
@@ -464,7 +402,6 @@ pub(crate) fn save_app_setting(
 }
 
 /// Parse `<start> <count>` — the shape the `t` prompt takes.
-/// `Err` keeps the prompt open with the problem stated, never a silent default.
 pub(crate) fn parse_range(buf: &str) -> Result<(u32, u32), String> {
     let mut it = buf.split_whitespace();
     let start: u32 = match it.next() {

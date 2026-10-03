@@ -11,7 +11,6 @@ pub(crate) async fn key_jobs(
 ) -> Flow {
     match key.code {
         // Tab closes what Tab opened — the same toggle shape the sound
-        // editor's layer tabs use, so the key behaves the same everywhere.
         KeyCode::Esc | KeyCode::Tab | KeyCode::Char('q') | KeyCode::Char('J') | KeyCode::Enter => {
             app.screen = previous;
         }

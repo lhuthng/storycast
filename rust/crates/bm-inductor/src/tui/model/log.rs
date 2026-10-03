@@ -1,8 +1,6 @@
 use super::*;
 
 ///
-/// The Logs pane filter, stepped with `←/→`: everything, one stage's lines,
-/// or one severity. Stage filters match the stage word in the line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum LogFilter {
     #[default]
@@ -58,9 +56,6 @@ impl LogFilter {
     }
 }
 ///
-/// A log line about one task, when it names one: `[worker] stage:ch …`.
-/// Borrowed slices of the line, so the Logs pane can recolor it without the
-/// backend changing what it stores.
 pub(crate) enum TaskEvent<'a> {
     Done {
         worker: &'a str,
@@ -101,8 +96,6 @@ fn bracket_head(text: &str) -> Option<(&str, &str)> {
 }
 
 /// `[worker] stage:ch done in 14.6s — detail` → [`TaskEvent::Done`], and the
-/// same head with `FAILED[(note)]: reason` → [`TaskEvent::Failed`]. Anything
-/// else is `None` and renders as it always did.
 pub(crate) fn task_event(text: &str) -> Option<TaskEvent<'_>> {
     if let Some((worker, rest)) = bracket_head(text) {
         if let Some((task, tail)) = rest.split_once(" done in ") {

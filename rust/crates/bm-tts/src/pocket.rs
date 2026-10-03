@@ -1,50 +1,4 @@
 //! Kyutai's Pocket TTS — the second engine, and no longer a port.
-//!
-//! **What changed and why.** This engine used to be a hand-written ONNX runtime
-//! for a community export of the model (`pocket-tts-onnx-export`). That export
-//! shipped the *without-voice-cloning* checkpoint and a voice store whose every
-//! entry was a clone of a placeholder reference wav, and the combination
-//! produced inaudible output: every segment landed around −58 dBFS, which is
-//! 28 dB below a normal recording, and every clone source landed ~20 dB below
-//! that again. It was measured, not guessed — the reference Python runtime over
-//! the same bundle produced byte-comparable audio (correlation 0.79, identical
-//! duration and peak), so the port was faithful to a broken export. See the
-//! session notes in `docs/` for the A/B ladder that established this.
-//!
-//! The fix was to stop reimplementing the runtime. `pocket-tts` is a pure-Rust
-//! Candle port of the same model that works, so this module is now a thin,
-//! honest adapter: it loads the checkpoint, resolves voices, and hands text and
-//! a voice state to the crate. Chunking, the tokenizer, the EOS heuristic, the
-//! flow integrator and the Mimi codec all belong to the crate; restating them
-//! here is how the last version drifted.
-//!
-//! **The checkpoint matters, and the wrong one fails silently.** There are two
-//! files named `tts_b6369a24.safetensors` upstream, identical in size and
-//! different in content:
-//!
-//! * `kyutai/pocket-tts-without-voice-cloning` — public. Its `mimi.encoder.*`
-//!   tensors are present but the flow LM was never trained against them, so
-//!   encoding a reference wav yields out-of-distribution conditioning. The
-//!   result is not an error: it is deterministic near-silence (~−56 dBFS), for
-//!   every input wav. This is exactly the failure that produced 78 static
-//!   segments, and it is why `voices.json` now prefers precomputed embeddings.
-//! * `kyutai/pocket-tts` — gated (accept the terms once, then `HF_TOKEN`). Its
-//!   encoder is trained for conditioning and cloning works.
-//!
-//! `engines/pocket/models/pocket.safetensors` is the gated one, vendored, so a
-//! render needs no network and no token. `load` refuses to start if it is
-//! missing rather than reaching for the hub, because silently fetching the
-//! public checkpoint is the bug this file exists to prevent.
-//!
-//! **Why the config is staged in a temp directory.** The crate resolves a
-//! variant's architecture by `find_config_path`, which searches its own crate
-//! directory first and the *current working directory's* `config/<variant>.yaml`
-//! last. The crate ships only `config/b6369a24.yaml`, and that one points at the
-//! gated hub, so this module uses a variant name the crate does not know
-//! (`pocket`) and lays a generated `config/pocket.yaml` — the shipped template
-//! with absolute local paths substituted — into a temp dir, with the cwd moved
-//! there for the duration of the load. The cwd is restored immediately after;
-//! this runs once, at startup, before any request is served.
 
 use anyhow::{bail, Context, Result};
 use candle_core::Device;
@@ -54,20 +8,15 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The variant name handed to the crate. Deliberately *not* `b6369a24`: that
-/// name resolves to the crate's own gated-template config and would bypass the
-/// staged one entirely. Any name the crate does not ship reaches the cwd lookup.
 const VARIANT: &str = "pocket";
 
 /// The checkpoint's architecture, with paths filled in at load.
 const CONFIG_TEMPLATE: &str = include_str!("../pocket-config.yaml");
 
 /// Sampling temperature, fixed at load because the crate's API takes it in the
-/// constructor rather than per call. 0.3 is the value upstream's own
-/// `english.yaml` declares as `default_temperature`.
 const TEMPERATURE: f32 = 0.3;
 
 /// Flow-integration steps. The crate's own default, and what the measured
-/// renders used.
 const LSD_DECODE_STEPS: usize = 1;
 
 /// End-of-speech threshold, from the crate's defaults.
@@ -80,24 +29,9 @@ const WEIGHTS: &str = "pocket.safetensors";
 const TOKENIZER: &str = "tokenizer.model";
 
 /// Target loudness for a rendered segment, in dBFS RMS.
-///
-/// This exists because the engine's raw output level is not stable. Across this
-/// project's first fully rendered chapter (78 segments, one voice) the raw RMS
-/// ranged from −44 to −31 dBFS: a 13 dB spread, with the quiet end inaudible at
-/// ordinary volume. That is the "sometimes inaudible" report, and it is a
-/// property of sampling, not of any one segment.
-///
-/// −23 dBFS is where Kyutai's own prepared voices land, so normalised clones sit
-/// beside the stock catalogue instead of a decade below it.
 const TARGET_RMS_DBFS: f32 = -23.0;
 
 /// The most gain normalization will ever apply.
-///
-/// A segment that is *nearly* silent is a different failure — a bad voice
-/// state, a wrong checkpoint — and the right answer there is to notice it, not
-/// to amplify it 40 dB and ship it as a loud noise. This bounds the correction
-/// to level drift while letting a genuinely dead segment stay visibly wrong in
-/// the measurements.
 const MAX_GAIN_DB: f32 = 30.0;
 
 /// One enrolled voice: a prepared state the crate can condition on.
@@ -114,8 +48,6 @@ struct RawPocketVoice {
     #[serde(default)]
     description: String,
     /// A path relative to the models directory: either a `.safetensors`
-    /// embedding or a wav to clone. Embeddings are strongly preferred — see the
-    /// module docs on the two checkpoints.
     file: String,
 }
 
@@ -138,10 +70,6 @@ pub struct Pocket {
 
 impl Pocket {
     /// Load the checkpoint, then enrol every voice in the store.
-    ///
-    /// `threads` is accepted for symmetry with [`crate::synth::Synth::load`] and
-    /// with [`crate::server::Backend`]; the crate sizes its own rayon pool.
-    /// Blocking, a few seconds.
     pub fn load(models_dir: &Path, voices_path: &Path, threads: usize) -> Result<Pocket> {
         let _ = threads;
         let raw: RawPocketStore = serde_json::from_str(
@@ -181,7 +109,6 @@ impl Pocket {
     }
 
     /// Resolve a requested voice — the same rule as [`crate::voice::Roster`]:
-    /// exact, then folded; unknown is an error, never a fallback.
     pub fn resolve(&self, name: Option<&str>) -> Result<&PocketVoice> {
         let want = name.map(str::trim).filter(|n| !n.is_empty());
         let Some(n) = want else {
@@ -215,12 +142,6 @@ impl Pocket {
     }
 
     /// Text → 24 kHz mono samples, whole.
-    ///
-    /// `temperature` and `seed` are part of the engine interface every caller
-    /// shares. The crate samples at a temperature fixed when the model is
-    /// constructed, and exposes no per-call override, so neither is plumbed
-    /// through here — the value in `TEMPERATURE` is what the rendered audio
-    /// actually used. Passing them on would be a lie in the signature.
     pub fn generate(
         &mut self,
         text: &str,
@@ -230,8 +151,6 @@ impl Pocket {
     ) -> Result<(Vec<f32>, usize)> {
         let _ = (temperature, seed);
         // Cloned out because `resolve` borrows `self` immutably and the crate's
-        // generate takes `&self` too; `ModelState` is Arc-backed tensors, so
-        // this is a handful of refcount bumps, not a copy of the audio.
         let state = self.resolve(Some(voice))?.state.clone();
         let audio = self
             .model
@@ -248,12 +167,6 @@ impl Pocket {
 }
 
 /// Scale a rendered segment to [`TARGET_RMS_DBFS`], staying short of clipping.
-///
-/// Two limits, in order: the gain never exceeds [`MAX_GAIN_DB`], and if the
-/// scaled signal would still cross full scale the whole thing is turned down to
-/// fit. Peak is checked *after* the gain rather than instead of it, so a segment
-/// with one loud transient keeps its intended loudness instead of being dragged
-/// down by that transient.
 fn normalize(pcm: &mut [f32]) {
     if pcm.is_empty() {
         return;
@@ -276,7 +189,6 @@ fn normalize(pcm: &mut [f32]) {
 }
 
 /// Load the vendored checkpoint by staging the config the crate insists on
-/// finding on disk, relative to the working directory.
 fn load_model(models_dir: &Path) -> Result<TTSModel> {
     let weights = models_dir.join(WEIGHTS);
     let tokenizer = models_dir.join(TOKENIZER);
@@ -290,10 +202,6 @@ fn load_model(models_dir: &Path) -> Result<TTSModel> {
         }
     }
     // Absolute from here on. The crate reads the config below *after* the
-    // working directory is moved into the staging dir, so a relative `--models`
-    // baked into it would resolve against the temp dir and the crate would fail
-    // to find the weights it was just handed. Canonicalizing both also proves
-    // the files (not merely their names) exist.
     let weights = weights
         .canonicalize()
         .with_context(|| format!("resolving {}", weights.display()))?;
@@ -314,9 +222,6 @@ fn load_model(models_dir: &Path) -> Result<TTSModel> {
     .context("writing the staged config")?;
 
     // The crate looks for `config/<variant>.yaml` under the process working
-    // directory. This is a process-global change, so it is scoped as tightly as
-    // it can be: load, restore, and never touch it again. `load` runs once at
-    // startup on the main thread, before the server accepts anything.
     let cwd = std::env::current_dir().context("reading the working directory")?;
     std::env::set_current_dir(stage.path()).context("entering the staged config directory")?;
     let loaded = TTSModel::load_with_params_device(
@@ -334,10 +239,6 @@ fn load_model(models_dir: &Path) -> Result<TTSModel> {
 }
 
 /// A voice file → the state the model conditions on.
-///
-/// The extension decides, and an unknown one is an error rather than a guess:
-/// silently treating a `.wav` as prepared embeddings (or the reverse) is how a
-/// wrong-format voice turns into minutes of static that nobody can explain.
 fn voice_state(model: &TTSModel, path: &Path) -> Result<ModelState> {
     let ext = path
         .extension()
@@ -350,17 +251,6 @@ fn voice_state(model: &TTSModel, path: &Path) -> Result<ModelState> {
             .get_voice_state_from_prompt_file(path)
             .with_context(|| format!("loading embeddings {}", path.display())),
         // Clone from raw audio. Requires the with-voice-cloning checkpoint;
-        // against the public one this succeeds and returns near-silence.
-        //
-        // **Denoised first, and that is not cosmetic.** Upstream's README says
-        // it plainly — "the audio quality of the sample is also reproduced" —
-        // and this clone source proves it: a 9.9 s clip with an SNR of about
-        // 20 dB produced segments whose quiet stretches sat 13 dB under speech
-        // instead of 30, heard as hiss under the words. Running the same text
-        // through the same checkpoint from a denoised copy of the same clip
-        // moved those segments from 15-20 dB SNR to 36-42 dB. The model was
-        // faithfully reproducing the noise it was given, so the fix belongs on
-        // the input, not on the output.
         "wav" | "wave" => {
             let (audio, rate) = pocket_tts::audio::read_wav(path)
                 .with_context(|| format!("reading clone source {}", path.display()))?;
@@ -371,7 +261,6 @@ fn voice_state(model: &TTSModel, path: &Path) -> Result<ModelState> {
                 .context("reading the clone source as f32 samples")?;
             let cleaned = denoise(&pcm)?;
             // Through bytes rather than a path: the model's entry point takes a
-            // file, and the denoised samples exist only in memory.
             let wav = crate::codec::to_wav_bytes(&cleaned, rate);
             model
                 .get_voice_state_from_bytes(&wav)
@@ -386,43 +275,22 @@ fn voice_state(model: &TTSModel, path: &Path) -> Result<ModelState> {
 }
 
 /// STFT window and hop for [`denoise`]. 1024/256 at 24 kHz is 43 ms of context
-/// every 11 ms — long enough to resolve a pitch period, short enough to follow
-/// speech.
 const FFT: usize = 1024;
 const HOP: usize = 256;
 
 /// How hard the noise estimate is subtracted. Over-subtracting is the safe
-/// direction: too little leaves hiss, too much leaves a hollow artefact, and
-/// the measured renders took +18 to +21 dB of SNR at this setting.
 const OVER_SUBTRACT: f32 = 2.0;
 
 /// A floor under the subtraction, as a fraction of each frame's own magnitude.
-/// Without it, bins whose estimate dips below the noise profile collapse to
-/// zero and the residual sounds like it is being switched on and off.
 const SPECTRAL_FLOOR: f32 = 0.02;
 
 /// The quietest share of frames, in percent, used as the noise profile.
 const NOISE_FRACTION: usize = 15;
 
 /// Samples of reflected signal prepended and appended before the transform.
-///
-/// Overlap-add assumes every sample is covered by several windows, so that the
-/// error the overlap averages out stays averaged. At the very start and end of
-/// a clip the first and last `FFT - HOP` samples are covered by too few windows,
-/// and the subtraction error that the overlap normally cancels survives as a
-/// burst. Measured on a one-second burst/gap tone: the final gap block came out
-/// at RMS 0.0305 against the input's 0.0057 — five times *louder* than the noise
-/// being removed — while every interior gap fell to 0.0016. Reflecting the ends
-/// before the transform and trimming after brings that block in line (0.0013).
-/// One window's worth of pad covers the coverage deficit.
 const EDGE_PAD: usize = FFT;
 
 /// Remove steady noise from a clone source by spectral subtraction.
-///
-/// The clip is reflected at both ends first (see [`EDGE_PAD`]) so the transform
-/// sees complete window coverage everywhere; the reflection is trimmed off the
-/// result. A clip too short to hold a few whole windows — under about a sixth of
-/// a second — is returned unchanged rather than profiled from almost nothing.
 fn denoise(pcm: &[f32]) -> Result<Vec<f32>> {
     if pcm.len() < FFT * 4 {
         return Ok(pcm.to_vec());
@@ -440,11 +308,6 @@ fn denoise(pcm: &[f32]) -> Result<Vec<f32>> {
 }
 
 /// The transform proper: the noise estimate is the clip's *own* quietest frames,
-/// averaged per bin, so this needs no second recording and no trained model. It
-/// assumes only what a reference clip already is — that its quiet moments are the
-/// noise. The magnitude spectrum is over-subtracted and floored, the original
-/// phase is kept, and the frames are overlap-added back with a Hann window under
-/// a sum-of-squares normalisation.
 fn spectral_subtract(pcm: &[f32]) -> Result<Vec<f32>> {
     use realfft::num_complex::Complex;
     use realfft::RealFftPlanner;
@@ -462,8 +325,6 @@ fn spectral_subtract(pcm: &[f32]) -> Result<Vec<f32>> {
     let mut spec = vec![Complex::new(0f32, 0f32); bins];
 
     // Forward pass: one spectrum per frame, plus the magnitude sum that decides
-    // which frames are the noise. The complex spectra are kept because the
-    // original phase is what goes back into the inverse transform.
     let mut spectra: Vec<Vec<Complex<f32>>> = Vec::with_capacity(frames);
     let mut energy: Vec<(f32, usize)> = Vec::with_capacity(frames);
     for f in 0..frames {
@@ -545,10 +406,8 @@ mod tests {
     #[test]
     fn a_missing_weights_file_is_refused_before_anything_is_loaded() {
         // The point is the *message and the refusal*: this is the guard that
-        // stops the public checkpoint from being reached for over the network.
         let dir = tempfile::tempdir().unwrap();
         // Matched rather than `unwrap_err`ed: `TTSModel` has no `Debug`, so the
-        // `Ok` half of this `Result` cannot be printed by the panic message.
         let err = match load_model(dir.path()) {
             Ok(_) => panic!("a models directory with no checkpoint must not load"),
             Err(e) => e.to_string(),
@@ -571,10 +430,6 @@ mod tests {
     #[test]
     fn denoise_keeps_what_is_loud_and_quiets_what_is_not() {
         // The scaling check, on a signal the algorithm can actually reason about:
-        // loud bursts over a *quieter* bed. A continuous tone cannot stand in
-        // here — it is indistinguishable from a stationary noise floor, so
-        // subtracting that floor is supposed to remove it. The bursts must
-        // survive; the bed must not.
         let sr = 24_000f32;
         let n = 24_000usize;
         let block = n / 10;
@@ -611,7 +466,6 @@ mod tests {
     #[test]
     fn denoise_quietens_the_gaps() {
         // The shape of the real failure: bursts of voice separated by stretches
-        // that should be silent but carry a steady floor.
         let sr = 24_000usize;
         let n = sr;
         let block = sr / 10;
@@ -648,10 +502,6 @@ mod tests {
     #[test]
     fn denoise_quietens_the_final_gap_too() {
         // The regression that the reflection pad exists for. Without it the last
-        // `FFT - HOP` samples are covered by too few windows, the subtraction
-        // error there is not averaged out, and the clip's tail comes out louder
-        // than the noise it was supposed to remove — measured at 5x. The tail
-        // block must end up at least as quiet as the interior gaps.
         let sr = 24_000usize;
         let n = sr;
         let block = sr / 10;
@@ -711,7 +561,6 @@ mod tests {
     #[test]
     fn normalization_never_clips() {
         // A signal whose RMS is low but whose peaks are already near full scale:
-        // raising it to the target on RMS alone would wrap.
         let mut pcm: Vec<f32> = (0..1000)
             .map(|i| if i % 100 == 0 { 0.95 } else { 0.001 })
             .collect();
@@ -723,7 +572,6 @@ mod tests {
     #[test]
     fn digital_silence_is_left_alone() {
         // Not a level problem, and 30 dB of gain on nothing is still nothing,
-        // but the guard is what keeps a NaN-free path for the degenerate case.
         let mut pcm = vec![0f32; 100];
         normalize(&mut pcm);
         assert!(pcm.iter().all(|&s| s == 0.0));
@@ -732,7 +580,6 @@ mod tests {
     #[test]
     fn a_nearly_dead_segment_is_bounded_rather_than_amplified() {
         // 60 dB below target: the cap must stop short, so an actually broken
-        // render stays visibly broken instead of being masked by the fix.
         let mut pcm: Vec<f32> = (0..1000)
             .map(|i| 0.0005 * (i as f32 * 0.05).sin())
             .collect();
@@ -749,7 +596,6 @@ mod tests {
     }
 
     /// The extension dispatch, without a model: this is the branch table that
-    /// decides embeddings-vs-clone, and it is the one users actually hit.
     fn voice_state_ext(ext: &str) -> String {
         match ext {
             "safetensors" | "wav" | "wave" => String::new(),

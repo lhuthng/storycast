@@ -1,21 +1,9 @@
 use super::*;
 
 /// How often the account is read while a launch is in flight.
-///
-/// EC2 assigns a public address within a few seconds of `RunInstances`, so a
-/// fifteen-second tick turns a box into a dialable, onboarded worker within one
-/// or two intervals of it becoming one, and the watch stops entirely once the
-/// last box is settled, so the tick rate costs nothing on a running cluster.
 pub(crate) const AWS_WATCH_SECS: u64 = 15;
 
 /// One account read, folded into the registry: every repair `relink_drifted`
-/// found is pushed to the events pane and the log.
-///
-/// The `aws` CLI is a *process*, so this runs on the blocking pool rather than on
-/// an async worker, a two-second spawn in the runtime would stall every other
-/// task on that thread. A failure is not an error to report: no account
-/// configured, no credentials, or an offline CLI all mean the same thing (the
-/// repairs wait for the next attempt), and `pool()` has already logged the noise.
 pub(crate) async fn relink_once(
     shared: &std::sync::Arc<tokio::sync::Mutex<state::Inner>>,
     root: &std::path::Path,
@@ -32,19 +20,6 @@ pub(crate) async fn relink_once(
 }
 
 /// Pick the binaries matching the target platform. `os`/`arch` are the probe's
-/// normalized values, in Rust's spelling (`linux`/`macos`, `x86_64`/`aarch64`).
-///
-/// A box identical to this machine runs the native build, which is also how a
-/// macOS worker gets its binary with no cross toolchain. Anything else needs
-/// its cross build present; a missing one is a build error naming the exact
-/// command, never a guess that ships the wrong executable.
-///
-/// A staged binary that predates its sources is *used*, with a warning. The
-/// agent's freshness rule forces a rebuild because the version gate would
-/// otherwise ship a stale agent forever; the sidecar carries no version, so
-/// the honest fix is to say the box is running an older sidecar rather than
-/// silently spend a multi-minute release build on every `:prov`. `make tts`
-/// rebuilds it whenever you want.
 pub(crate) fn tts_binary_for(
     os: &str,
     arch: &str,
@@ -63,8 +38,6 @@ pub(crate) fn tts_binary_for(
         }
         Err(staged) => {
             // The cross candidates are buildable, and a `:prov` clicked in the
-            // dashboard should heal the gap rather than send the operator to a
-            // shell.
             if let Some(cand) = buildable_tts_candidates(os, arch, layout)
                 .into_iter()
                 .next()
@@ -81,8 +54,6 @@ pub(crate) fn tts_binary_for(
 }
 
 /// The pick among sidecar binaries already on disk. Platform-pure, no side
-/// effects, the piece tests can exercise without a toolchain, and the error
-/// [`tts_binary_for`] falls back from.
 pub(crate) fn tts_binary_staged(
     os: &str,
     arch: &str,
@@ -104,20 +75,11 @@ pub(crate) fn tts_binary_staged(
 }
 
 /// True when a staged sidecar is older than the workspace sources it was built
-/// from. A warning, never a rebuild, see [`tts_binary_for`] for why.
 pub(crate) fn tts_is_stale(bin: &std::path::Path, layout: &Layout) -> bool {
     !staged_is_fresh_against(bin, &["crates/bm-tts/src"], layout)
 }
 
 /// The sidecar targets this host can actually cross-build: exactly one.
-///
-/// linux/x86_64, because it is the target whose ONNX Runtime `make runtime`
-/// stages, a build that cannot find its runtime library is a build that
-/// cannot happen, and a *wrong* runtime would link a binary that dies on the
-/// box. The native candidate is out (it exists exactly when this host *is* the
-/// target, and `ort`'s own `download-binaries` covers that case without a
-/// cross toolchain), and linux/aarch64 keeps the manual command in the error
-/// until a `runtime-aarch64` target exists to stage its library.
 pub(crate) fn buildable_tts_candidates(
     os: &str,
     arch: &str,
@@ -133,20 +95,12 @@ pub(crate) fn buildable_tts_candidates(
 }
 
 /// Cross-build the sidecar into the exact path a candidate names, staging the
-/// shared ONNX Runtime it links against first.
-///
-/// The runtime is staged by shelling out to `make runtime` rather than
-/// reimplemented here: the URL and the sha256 that pins it live in the
-/// Makefile, and a second copy of a checksum is a checksum that will rot.
 fn build_tts_binary(cand: &std::path::Path, layout: &Layout) -> anyhow::Result<()> {
     let target = cross_target_of(cand)?;
     let rust_dir = workspace_dir_above_target(cand)?;
     // The runtime goes where `tts_runtime_dir` will look for it, so the box
-    // gets pushed the library this binary actually links against.
     let runtime = rust_dir.join("target").join("ort-linux-x64");
     // A staging failure is not fatal on its own: a runtime already sitting
-    // there is all the build needs, and the build's own linker error is the
-    // honest report if it is not. Keep the reason and move on.
     let stage_note = stage_onnx_runtime(layout, &runtime)
         .err()
         .map(|e| e.to_string());
@@ -175,12 +129,6 @@ fn build_tts_binary(cand: &std::path::Path, layout: &Layout) -> anyhow::Result<(
         "bm-tts",
     ]);
     // The engine's own cargo features, or the sidecar is built for the wrong
-    // engine. `pocket` is default-off, so without this the box gets a binary
-    // that boots, answers `/health` and then refuses its model tree on the
-    // first render — the same shape of failure as the missing weights, and
-    // much harder to read. Declared per engine in
-    // `voices::consts::EngineDecl::tts_features`; `make tts` reads the same
-    // fact.
     let engine = bm_core::config::Settings::load(&layout.settings()).engine;
     let features: Vec<&str> = bm_core::voices::tts_features(engine.trim())
         .unwrap_or(&[])
@@ -193,7 +141,6 @@ fn build_tts_binary(cand: &std::path::Path, layout: &Layout) -> anyhow::Result<(
         .env("ORT_LIB_LOCATION", &runtime)
         .env("ORT_PREFER_DYNAMIC_LINK", "1")
         // A GUI launch (or a desktop shortcut) inherits a PATH without
-        // `~/.cargo/bin`, and the linker is looked up by name from there.
         .env("PATH", path_with_shim(shim_dir));
     let out = cmd
         .output()
@@ -222,7 +169,6 @@ fn build_tts_binary(cand: &std::path::Path, layout: &Layout) -> anyhow::Result<(
 }
 
 /// `make runtime`, unless the shared library is already staged. Idempotent in
-/// the Makefile too, this only saves the round trip of spawning it.
 pub(crate) fn stage_onnx_runtime(layout: &Layout, dir: &std::path::Path) -> anyhow::Result<()> {
     if dir.join("libonnxruntime.so").is_file() && dir.join("libonnxruntime.so.1").is_file() {
         return Ok(());
@@ -244,8 +190,6 @@ pub(crate) fn stage_onnx_runtime(layout: &Layout, dir: &std::path::Path) -> anyh
 }
 
 /// Where `make runtime` staged the shared ONNX Runtime to push alongside the
-/// sidecar, `None` where the sidecar is self-contained (macOS links its
-/// runtime statically, so no `.so` travels).
 pub(crate) fn tts_runtime_dir(os: &str, arch: &str, layout: &Layout) -> Option<std::path::PathBuf> {
     match (os, arch) {
         ("linux", "x86_64") => Some(layout.root.join("rust/target/ort-linux-x64")),
@@ -263,15 +207,6 @@ pub(crate) fn agent_binary_for(
         Ok(b) => Ok(b),
         Err(staged) => {
             // The cross targets are cheap to produce on demand (a debug
-            // `bm-agent` links no C toolchain, so `zig cc` needs no runtime
-            // staged), and a `:prov` clicked in the dashboard should heal the
-            // gap itself rather than send the operator to a shell. Only the
-            // cross candidates are buildable, the native fallback exists
-            // exactly when this host is the target, so `cargo build` already
-            // ran and a miss means something is wrong beyond a missing build.
-            // Cross targets only, and at most one per platform, the build
-            // either succeeds (returning the candidate) or its error is the
-            // provision failure.
             if let Some(cand) = buildable_agent_candidates(os, arch, layout)
                 .into_iter()
                 .next()
@@ -285,13 +220,6 @@ pub(crate) fn agent_binary_for(
 }
 
 /// The pick among binaries already on disk. Platform-pure, no side effects
-// the piece tests can exercise without a toolchain. A missing cross build is
-// an error naming the platform; [`agent_binary_for`] may still build it.
-//
-// A present file is only picked when it postdates the sources it was built
-// from: bumping the version (or touching agent code) without rebuilding left
-// 0.2.3 on disk while the inductor demanded 0.2.4, and `:prov` shipped the
-// stale build forever. A stale file reads as missing so the caller builds it.
 pub(crate) fn agent_binary_staged(
     os: &str,
     arch: &str,
@@ -313,8 +241,6 @@ pub(crate) fn agent_binary_staged(
 }
 
 /// Cross candidates only, the native build is never something we can conjure
-/// here: it exists exactly when this host *is* the target, so a miss there is
-/// not a missing cross toolchain but a broken workspace.
 pub(crate) fn buildable_agent_candidates(
     os: &str,
     arch: &str,
@@ -328,9 +254,6 @@ pub(crate) fn buildable_agent_candidates(
 }
 
 /// True when no workspace source the agent builds from is newer than the
-/// staged binary. The agent's in-workspace deps are `bm-core` and `bm-proto`;
-/// third-party crates come from the registry lockfile, which a version bump
-/// already invalidates through the rebuild it forces.
 pub(crate) fn staged_is_fresh(bin: &std::path::Path, layout: &Layout) -> bool {
     staged_is_fresh_against(
         bin,
@@ -344,8 +267,6 @@ pub(crate) fn staged_is_fresh(bin: &std::path::Path, layout: &Layout) -> bool {
 }
 
 /// The same question for a different set of sources, the sidecar is built
-/// from its own crate, not the agent's, and measuring it against the agent's
-/// dirs would call it stale on every unrelated edit.
 pub(crate) fn staged_is_fresh_against(
     bin: &std::path::Path,
     dirs: &[&str],
@@ -386,11 +307,6 @@ fn sources_newer_than(dir: &std::path::Path, built: std::time::SystemTime) -> bo
 }
 
 /// Build the agent binary into the exact path a candidate names, so the
-/// provision flow that asked for it can pick the file straight up. The target
-/// triple is the candidate's grandparent directory (`…/target/<triple>/debug`)
-/// one spelling, one source. Output is captured: the caller's log gets the tail
-/// on failure, and the dashboard never has cargo's progress spew landing
-/// mid-redraw.
 fn build_agent_binary(cand: &std::path::Path) -> anyhow::Result<()> {
     let target = cross_target_of(cand)?;
     let rust_dir = workspace_dir_above_target(cand)?;
@@ -403,8 +319,6 @@ fn build_agent_binary(cand: &std::path::Path) -> anyhow::Result<()> {
     }
     let mut cmd = std::process::Command::new(tool_on_path("cargo-zigbuild").expect("probed above"));
     // The rustup shim dir is missing from a non-login shell's PATH, and `zig cc`
-    // is looked up by name from there, so the dir goes on the PATH of the
-    // build, not just into the existence check.
     let shim_dir = tool_on_path("cargo-zigbuild")
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
         .expect("probed above");
@@ -445,7 +359,6 @@ fn build_agent_binary(cand: &std::path::Path) -> anyhow::Result<()> {
 }
 
 /// This process's PATH with `dir` in front, the shape a build needs when the
-/// linker lives in a rustup shim dir the environment forgot.
 fn path_with_shim(dir: std::path::PathBuf) -> std::ffi::OsString {
     let old = std::env::var_os("PATH").unwrap_or_default();
     let mut dirs = vec![dir];
@@ -454,10 +367,6 @@ fn path_with_shim(dir: std::path::PathBuf) -> std::ffi::OsString {
 }
 
 /// Where a build tool actually is, looking in `~/.cargo/bin` as well as PATH:
-/// a rustup shim dir is missing from a non-login shell's PATH, the same trap
-/// the Makefile's CARGO fallback covers, and the dashboard is often launched
-/// from somewhere that has no PATH at all. Returns the full path, because a
-/// check that accepts a tool the exec cannot find is a check that lies.
 fn tool_on_path(tool: &str) -> Option<std::path::PathBuf> {
     let dirs = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
@@ -472,9 +381,6 @@ fn tool_on_path(tool: &str) -> Option<std::path::PathBuf> {
 }
 
 /// The cross target a candidate names: its grandparent directory under
-/// `target/` (`…/target/<triple>/debug/bm-agent`). A separate pure function so
-/// the inference is testable without running a toolchain, caught live: the
-/// first version took the *parent* and handed zigbuild `debug`.
 pub(crate) fn cross_target_of(cand: &std::path::Path) -> anyhow::Result<String> {
     cand.parent()
         .and_then(|p| p.parent())
@@ -485,8 +391,6 @@ pub(crate) fn cross_target_of(cand: &std::path::Path) -> anyhow::Result<String> 
 }
 
 /// Walk up from a candidate binary to the workspace directory, the candidate
-/// lives under `<repo>/rust/target/<triple>/debug`, so `target`'s parent is
-/// the dir holding `Cargo.toml`, wherever the layout root actually is.
 pub(crate) fn workspace_dir_above_target(
     cand: &std::path::Path,
 ) -> anyhow::Result<std::path::PathBuf> {
@@ -502,7 +406,6 @@ pub(crate) fn workspace_dir_above_target(
 }
 
 /// Cross builds first (they target older glibc and run anywhere), then the
-/// native build when this machine *is* the target platform.
 pub(crate) fn agent_candidates(os: &str, arch: &str, layout: &Layout) -> Vec<std::path::PathBuf> {
     let dir = layout.root.join("rust/target");
     let mut cands = Vec::new();

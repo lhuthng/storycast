@@ -1,9 +1,6 @@
 use super::*;
 
 /// Run a `:` operator command. `Command::Key` never arrives here — the caller
-/// presses those as a live key so a context (task list, picker) reacts the
-/// same as a real keypress. Only the gated actions land in this match, which
-/// is exactly the set of things a stray keypress must never do.
 pub(crate) fn do_command(
     app: &mut App,
     cmd: Command,
@@ -13,8 +10,6 @@ pub(crate) fn do_command(
     match cmd {
         Command::Key(_) => unreachable!("Command::Key is pressed by the caller"),
         // Digest off / on, cluster-wide. **Off takes the snapshot; on is the only
-        // thing that can put it back**, so the two are one feature and neither
-        // touches a box's policy without the other being able to undo it.
         Command::DigestOff | Command::DigestOn => {
             let restore = matches!(cmd, Command::DigestOn);
             if app.machines.is_empty() {
@@ -23,9 +18,6 @@ pub(crate) fn do_command(
             }
             if restore {
                 // A restore with no snapshot would post an empty policy to every
-                // box, which reads as "the default list" — i.e. digest *on*
-                // everywhere. That is the opposite of what was asked, so refuse
-                // and name the editor instead.
                 let path = app.layout.bm_state().join("digest-suspend.json");
                 if !path.is_file() {
                     app.set_status(
@@ -63,8 +55,6 @@ pub(crate) fn do_command(
         }
         Command::AddMachine => {
             // Bind prompt: `addr [user [port [key]]]`, prefilled from the
-            // app-wide ssh defaults. The cursor starts at the front so the
-            // address is typed first and the defaults shift right untouched.
             let def = app.ssh_defaults();
             let mut initial = format!("{} {}", def.user, def.port);
             if let Some(k) = &def.key {
@@ -229,7 +219,6 @@ pub(crate) fn do_command(
         }
         Command::Advertise => {
             // Prefilled with what is in force — including the `127.0.0.1`
-            // sentinel, which reads as "unset" rather than as an address.
             let cur = app.setting_str("advertise", "127.0.0.1");
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::Advertise,
@@ -254,8 +243,6 @@ pub(crate) fn do_command(
         Command::PacksRelease => {
             let cur = app.setting_str("packs_release", "");
             // The prompt says where the *tag* comes from, because the obvious
-            // question is "which release of which pack?" and the answer is the
-            // loaded profile — not a field the operator could get wrong here.
             let which = match bm_core::profile::in_force(&app.layout).map(|b| b.pack) {
                 Ok(p) if !p.version.is_empty() => {
                     format!(
@@ -288,13 +275,6 @@ pub(crate) fn do_command(
         }
         Command::RenderBatch => {
             // Prefilled from `run_preview` — the *same* precedence the run
-            // screen displays: the live settings while the backend answers, the
-            // workspace's own file while it does not, the compiled default when
-            // neither exists. `App::setting_u32` reads the live settings only,
-            // so on a cold start it would show the compiled 10 over a saved 6 —
-            // and a compiled-in default has to read differently from a number
-            // somebody chose. Sharing the helper is also what stops the prompt
-            // and the screen disagreeing about what is in force.
             let cur = run_preview(app).render_batch;
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::RenderBatch,
@@ -339,8 +319,6 @@ pub(crate) fn do_command(
                     return;
                 }
                 // Prefilled with the box's own override, empty when it has
-                // none — so the prompt's starting point is what is in force,
-                // and clearing the line is the visible way back to the default.
                 let cur = m.tts_threads.map(|t| t.to_string()).unwrap_or_default();
                 let label = crate::tui::model::machine_label(&m);
                 app.screen = Screen::Text(TextPrompt::new(
@@ -365,8 +343,6 @@ pub(crate) fn do_command(
         }
         Command::Sound => {
             // The editor is a screen, not a prompt: it reads three registries
-            // and the scripts to know what is safe to remove, which is a
-            // background load rather than something to do between keystrokes.
             app.screen = Screen::Sound(crate::tui::sound::SoundView::new());
             app.load_sound(job_tx);
         }
@@ -375,8 +351,6 @@ pub(crate) fn do_command(
         }
         Command::WorkspacePick => {
             // `:ws` on its own: read the tree and list it. Rows come from the
-            // same inventory `workspace list` prints, so a name offered here is
-            // a name that list would call a workspace.
             app.screen = Screen::WorkspaceList(crate::tui::screen::WsList::read(&app.layout.root));
             app.set_status(
                 Level::Info,
@@ -385,9 +359,6 @@ pub(crate) fn do_command(
         }
         Command::Workspace { prefill } => {
             // Prefilled with what was typed after `:ws`, not with the workspace
-            // in force: that spelling exists so the switch is one Enter away,
-            // and keeping the prompt is what makes it safe enough to offer. The
-            // name is readable and editable before anything moves.
             let initial = prefill.clone();
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::Workspace,
@@ -412,8 +383,6 @@ pub(crate) fn do_command(
         }
         Command::Rerender => {
             // Full re-speak: worth one Enter, like every other destructive
-            // action. Mix-only changes belong on `:mix`, which keeps the
-            // render cache.
             app.screen = Screen::Confirm(Confirm::rerender());
         }
         Command::Voices => {
@@ -433,7 +402,6 @@ pub(crate) fn do_command(
                 app.load_roster(job_tx, http);
             }
             // The audition keys need the line index, and building it takes
-            // seconds — start it while the operator is still on step 1.
             app.ensure_lines(job_tx);
         }
         Command::Cast => {
@@ -442,7 +410,6 @@ pub(crate) fn do_command(
                 app.load_roster(job_tx, http);
             }
             // Start the audition line index now: it is seconds of file reads, and
-            // the operator is about to want it.
             app.ensure_lines(job_tx);
         }
         Command::Eta => {
@@ -491,8 +458,6 @@ pub(crate) fn do_command(
         }
         Command::Dispatch { go } => {
             // The line the inductor answers with is the report: it names the
-            // span it is distributing and what it queued (see `Op::Dispatch`),
-            // so nothing is predicted here that could disagree with the ledger.
             app.set_status(
                 Level::Info,
                 if go {
@@ -514,7 +479,6 @@ pub(crate) fn do_command(
         }
         Command::Remerge => {
             // Same blast radius as `:mix` (finished mp3s rebuild from cache),
-            // so no confirm — unlike `:rerender`, nothing is deleted for good.
             dispatch_op(
                 app,
                 job_tx,
@@ -547,8 +511,6 @@ pub(crate) fn do_command(
         }
         Command::AwsLogin => {
             // The console's download is the whole prompt. Prefilled with where
-            // it actually lands, because the secret must never be typed on a
-            // screen — this is the only login route a dashboard can offer.
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::AwsLogin,
                 "AWS login — the IAM user this app runs as",
@@ -560,9 +522,6 @@ pub(crate) fn do_command(
         }
         Command::AwsDiscover => {
             // Prefilled with the region already in force, so the common re-run
-            // is one keypress. The name-and-path flags are left out on purpose:
-            // an omitted field is kept from the pool, and prefilling them would
-            // suggest they had to be retyped.
             let cfg = bm_core::provision::AwsConfig::load_layered(&app.layout.root);
             let initial = if cfg.region.trim().is_empty() {
                 String::new()
@@ -581,7 +540,6 @@ pub(crate) fn do_command(
         }
         Command::AwsPool => {
             // Open the view first, then fill it: the screen renders its own
-            // "reading…" state, so the operator sees the command was taken.
             app.screen = Screen::Cloud(CloudView::new());
             dispatch(
                 app,
@@ -596,8 +554,6 @@ pub(crate) fn do_command(
         }
         Command::AwsUp { count } => {
             // No confirmation: the CLI's review step is `aws up --dry-run`, and
-            // the launch prints its own argv into the event pane before it runs.
-            // The cap in `.bm/aws.json` is the guard that matters here.
             dispatch(
                 app,
                 job_tx,
@@ -632,8 +588,6 @@ pub(crate) fn do_command(
                 return;
             }
             // The guard the CLI does not have: a box killed mid-render loses
-            // that render, and TTS is stochastic — it cannot be reproduced from
-            // the same inputs, so the loss is not recoverable from the ledger.
             let addrs = instance_addresses(&app.cloud);
             let busy = busy_on(&app.beats, &app.tasks, &addrs, bm_proto::now_secs());
             if !busy.is_empty() && !force {
@@ -659,7 +613,6 @@ pub(crate) fn do_command(
             if !busy.is_empty() {
                 body.push(String::new());
                 // Bounded: one box can hold a whole batch of takes, and the
-                // dialog counts body *entries* while the text wraps.
                 body.push(format!(
                     "FORCED past {} in-flight task(s): {}",
                     busy.len(),
@@ -675,8 +628,6 @@ pub(crate) fn do_command(
         }
         Command::Script => {
             // The window reads the scripts off disk itself, so it works
-            // with the inductor down — the same independence the cast
-            // table's offline half has.
             app.screen = Screen::Script(ScriptView::new(&app.layout));
             let n = match &app.screen {
                 Screen::Script(v) => v.chapters.len(),
@@ -689,7 +640,6 @@ pub(crate) fn do_command(
         }
         Command::ShutdownWhenIdle => {
             // Graceful and reversible (nothing deleted, `:B` brings workers
-            // back), so no confirm — but command-line only, never a key.
             dispatch_op(
                 app,
                 job_tx,
@@ -706,8 +656,6 @@ pub(crate) fn do_command(
         }
         Command::ExclusiveCancel { route } => {
             // Nothing to confirm: dropping a queued write changes nothing
-            // that has already happened — the stages it held simply take
-            // work again.
             dispatch_op(
                 app,
                 job_tx,
@@ -724,7 +672,6 @@ pub(crate) fn do_command(
         }
         Command::Reconcile => {
             // Reconcile rewrites cast + scripts and re-renders losers: worth
-            // one Enter, like every other destructive action.
             app.screen = Screen::Confirm(Confirm {
                 title: "Fold duplicate characters?".into(),
                 danger: false,
@@ -739,8 +686,6 @@ pub(crate) fn do_command(
         }
         Command::Merge { survivor, absorbed } => {
             // The word alone (`:merge` with no names) parses to the
-            // placeholder: refuse with the usage rather than confirming an
-            // empty fold.
             if survivor.trim().is_empty() || absorbed.is_empty() {
                 app.set_status(
                     Level::Warn,
@@ -749,9 +694,6 @@ pub(crate) fn do_command(
                 return;
             }
             // Same bargain as reconcile: worth one Enter. The op itself
-            // validates (survivor in the bible, absorbed known, no
-            // Narrator), queues behind the chapters it rewrites when the
-            // cluster is busy, and snapshots before writing.
             let body = vec![
                 format!(
                     "{} keeps its voice; {} join{} its proper_aliases.",
@@ -775,8 +717,6 @@ pub(crate) fn do_command(
         }
         Command::Backend => {
             // Backend up now, boxes join in background — a second press
-            // while the first sequence runs would provision everything
-            // twice, so it is refused instead of queued.
             if app.backend_start_outstanding {
                 app.set_status(Level::Warn, "backend start already running — watch events");
             } else {

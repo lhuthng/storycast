@@ -5,7 +5,6 @@ pub struct UseOf {
     /// The scene map's rule or palette value, or `ch09` for a script.
     pub by: String,
     /// The tags that reach the sound. Empty for a script, which names the sound
-    /// itself rather than a tag.
     pub tags: Vec<String>,
 }
 
@@ -21,18 +20,8 @@ impl UseOf {
 }
 
 /// Sounds at least one tag set can reach, and the tag sets that reach them.
-///
 /// A scene names *tags*; the pool answers with a *sound*. So "is this sound in
 /// use" is a question about the tag sets the map names, not about the sound's
-/// own name: `wind` is in use because the mountain rule asks for `mountain`,
-/// and the map never says `wind` anywhere. Deleting it would make every
-/// mountain scene score zero and go quiet, the failure the effect pool's own
-/// note warns about, so the editor refuses, and this is what it refuses on.
-///
-/// The test is the weakest one `pick` applies before narrowing: at least one
-/// tag in common. A one-tag sound may lose the overlap contest on most
-/// chapters and still win on a thin one, and a guard that lets you delete
-/// something that sometimes plays is not a guard.
 fn reachable(pool: &ClipPool, sets: impl Iterator<Item = (String, Vec<String>)>) -> Usage {
     let mut out: Usage = BTreeMap::new();
     for (by, tags) in sets {
@@ -78,12 +67,6 @@ pub fn music_usage(map: &SceneMap, pool: &ClipPool) -> Usage {
 }
 
 /// Sound -> the chapters whose script places it.
-///
-/// Unlike the other two layers this one is a direct lookup, because the script
-/// names the *sound*, `{"sound": "coin"}`, rather than a tag. An item is a
-/// sound when it carries `sound` or `stop` and no `text`
-/// ([`crate::util::is_sound_item`]); a `stop` counts, because it is placed for
-/// the same sound and would be left fading nothing.
 pub fn inject_usage(scripts: &[(u32, Value)]) -> BTreeMap<String, Vec<u32>> {
     let mut out: BTreeMap<String, Vec<u32>> = BTreeMap::new();
     for (chapter, doc) in scripts {

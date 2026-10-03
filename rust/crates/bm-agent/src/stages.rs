@@ -1,16 +1,6 @@
 use super::*;
 
 /// Crawl one chapter, through whichever provider the offer named.
-///
-/// The stage itself is now thin on purpose: *how* a chapter is obtained is a
-/// script's business (or the built-in fetcher's), and the only things this
-/// function owns are the ones that are the same for every provider, the
-/// progress line, the artifact write, and the verdict that travels back in the
-/// completion.
-///
-/// **On a blocking thread.** The provider uses a blocking HTTP client and runs
-/// an interpreter, so it cannot live inside the async task: `spawn_blocking`
-/// keeps the heartbeat alive and keeps a nested runtime out of a tokio worker.
 pub(crate) async fn run_crawl(
     layout: &Layout,
     n: u32,
@@ -46,7 +36,6 @@ pub(crate) async fn run_crawl(
             Some(text.clone())
         }
         // Nothing to write: the site has no such chapter. A terminal
-        // non-failure, so no strike and no artifact.
         bm_core::crawl::CrawlOutcome::Absent { reason } => {
             set_progress(shared, 1.0, format!("ch{n} is not on the site: {reason}"));
             None
@@ -82,10 +71,6 @@ pub(crate) async fn run_digest(
             set_progress(&shared2, f, s);
         };
         // Analyze only, never persist: the inductor is the single writer of
-        // the script and the bible. A worker-mode write would land on the
-        // shared disk underneath the winner, a lost digest race's orphaned
-        // thread finishing late would overwrite the applied script with its
-        // own uncanonicalized version. The script travels home in the report.
         let outcome = rt.block_on(bm_core::digest::analyze_chapter(
             &layout2, n, &bible, &settings, &analyzer, &mut cb,
         ))?;
@@ -98,8 +83,6 @@ pub(crate) async fn run_digest(
     }
     if merge_local {
         // Standalone mode keeps legacy behaviour: persist the script and
-        // merge here. Worker mode returns the delta and the inductor merges
-        // as the single writer.
         bm_core::digest::write_script(&layout, n, &outcome.script)?;
         let mut local: Value =
             serde_json::from_str(&std::fs::read_to_string(layout.bible())?).unwrap_or(json!({}));
@@ -116,18 +99,11 @@ pub(crate) async fn run_digest(
 
 /// What a render offer asks for. Pure, so the zero-units arm, "do nothing
 /// and report success", the easiest arm to write as a fall-through, is
-/// pinned by a test instead of by inspection.
-///
-/// The offered list is the chapter's **whole** unit set, not the difference
-/// against the inductor's store: the inductor cannot see this box's disk. What
-/// this box still has to speak is therefore decided against the disk, in
-/// `pending_units`, and not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RenderAction {
     /// Old inductor (no `render_units`): plan from the local script.
     Legacy,
     /// The offer names no units at all, an empty chapter. Report `ok` with
-    /// `units: 0` at once.
     Noop,
     /// Consider these units; speak the ones this box does not already hold.
     Units,
@@ -142,12 +118,6 @@ pub(crate) fn render_action(render_units: Option<&[bm_proto::RenderUnitSpec]>) -
 }
 
 /// The offered units whose file this box does not already hold, plus every
-/// unit the inductor flagged as forced.
-///
-/// Forced names are the ones the inductor's own store lacks, the surgical
-/// set a swap or retag just deleted. They render even when this disk holds a
-/// same-named file, or a warm box keeps serving stale bytes under the new
-/// text. Everything else skips on presence, as before.
 pub(crate) fn pending_units<'a>(
     offered: &'a [bm_proto::RenderUnitSpec],
     force: &[String],
@@ -188,11 +158,6 @@ pub(crate) async fn render_offered_units(
             .infer(&u.text, &u.voice, u.temperature, u.silence_p, engine)
             .await?;
         // The storage tier rides the offer: an `.mp3` name with a bitrate is
-        // stored encoded, everything else is the sidecar's wav under whatever
-        // name it was given. The encode is this box's job because the
-        // sidecar speaks wav, and the name is checked rather than trusted —
-        // a `.mp3` name holding wav bytes would be a lie every reader after
-        // the store pays for.
         let bytes: std::borrow::Cow<[u8]> = if u.name.ends_with(".mp3") && u.mp3_kbps > 0 {
             let kbps = u.mp3_kbps;
             let src = std::env::temp_dir()
@@ -229,7 +194,6 @@ pub(crate) async fn render_offered_units(
 }
 
 /// Legacy path: plan from the local script (old inductor, or no units
-/// offered). Keeps files locally and uploads nothing.
 pub(crate) async fn run_render(
     layout: &Layout,
     n: u32,
@@ -267,18 +231,10 @@ pub(crate) async fn run_render(
     let title = bm_core::assemble::title_speech(layout, n, &cast, first);
     let units = bm_core::assemble::plan_render(&planned, &cast, &seg_dir, local, title.as_ref())?;
     // A take's file is content-addressed, and the chapter's plan is what names
-    // it, so this path owns the plan the way the inductor does when it offers:
-    // build it, reconcile it against the stored one — a first plan adopts an
-    // existing legacy cache, a re-plan trusts the files it recorded — and write
-    // it back. Rendering then covers exactly the takes the diff calls dirty, and
-    // the mixer reads the names this wrote, so a hand-driven render and a
-    // hand-driven merge agree without either recomputing a name.
     std::fs::create_dir_all(&seg_dir)?;
     let plan_path = layout.plan(n);
     let stored = bm_core::assemble::RenderPlan::load(&plan_path);
     // The same setting the inductor plans from, read here because this path
-    // owns the plan on this box: the tier decides the extension the take
-    // names carry.
     let quality =
         bm_core::assemble::TakeQuality::parse(&Settings::load(&layout.settings()).take_quality);
     let up = bm_core::assemble::reconcile(
@@ -299,11 +255,6 @@ pub(crate) async fn run_render(
         .collect();
     let total = todo.len();
     // No accent gate: any voice the sidecar can synthesize is allowed. If the
-    // engine itself rejects a voice, that failure surfaces from /infer.
-    // The render audit log belongs with the rest of the state, not in
-    // `output/`. `output/` holds deliverables and nothing else, a machine
-    // -readable record of TTS calls sitting beside the mp3s is a stray
-    // intermediate in the one directory an operator actually looks at.
     let manifest = layout.bm_state().join("render-manifest.jsonl");
     for (i, (u, dest)) in todo.iter().enumerate() {
         set_progress(
@@ -330,14 +281,11 @@ pub(crate) async fn run_render(
 }
 
 /// The mix a merge runs with: the offer's own settings, or this box's on the
-/// hand-driven path. Grouped because they travel together and because the
-/// take list is the plan's, not something the mixer may recompute.
 pub(crate) struct MergeJob {
     pub(crate) gap_ms: u32,
     pub(crate) speed: f64,
     pub(crate) on: bm_core::ambience::LayerSwitch,
     /// The chapter's take files in mix order. Empty means "no plan", this box
-    /// then names them itself, exactly as before takes were content-addressed.
     pub(crate) takes: Vec<String>,
 }
 
@@ -357,9 +305,6 @@ pub(crate) async fn run_merge(
     } = job;
     set_progress(shared, 0.1, format!("merge ch{n}"));
     // Pieces, not chapters: a merge runs on any box, so it pulls the takes
-    // it lacks from the inductor, whose store holds every completed take
-    // instead of requiring them on local disk. Offer-driven only: the
-    // hand-driven path carries no take list and mixes what is here.
     if !takes.is_empty() {
         if let Some((http, inductor)) = fetch {
             let seg_dir = layout.seg_dir(engine, n);
@@ -388,12 +333,8 @@ pub(crate) async fn run_merge(
         }
     } // Everything the merge writes goes into one per-chapter scratch directory
       // under `.bm/`, never into `output/`. `assemble` hands back the mp3 (or a
-      // wav when ffmpeg is missing) and `publish` renames it out to `output/`,
-      // after which the whole scratch directory can go.
     let scratch = layout.scratch_ch(n);
     // The inductor's plan names the files; a worker that recomputed them would
-    // look for legacy names and find nothing. An empty list is an old inductor:
-    // then `assemble` plans the names itself, exactly as before.
     let takes: Option<Vec<String>> = (!takes.is_empty()).then_some(takes);
     let params = (
         layout.clone(),
@@ -426,13 +367,9 @@ pub(crate) async fn run_merge(
     .await??;
     let final_path = bm_core::assemble::publish(&assembled, layout, n)?;
     // The product is out of scratch now, so the directory goes. Deliberately
-    // left behind when anything above failed: a failed merge's scratch is the
-    // only evidence it leaves, and `bm-inductor gc` sweeps stale ones.
     let _ = std::fs::remove_dir_all(&scratch);
     set_progress(shared, 1.0, format!("merge ch{n} done"));
     Ok(final_path.display().to_string())
 }
 
-// ---------------------------------------------------------------------------
-// worker loop against the inductor API
 // ---------------------------------------------------------------------------

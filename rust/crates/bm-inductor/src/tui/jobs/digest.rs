@@ -10,8 +10,6 @@ pub(crate) async fn job_manual_digest(
     delta: serde_json::Value,
 ) {
     // One report body, shared with the headless backup runner (`manual::report`):
-    // the inductor cannot tell a by-hand chapter from a backup one except by the
-    // `operator` id they both claim it under.
     let ev = crate::manual::report(
         &api,
         &http,
@@ -44,10 +42,6 @@ pub(crate) async fn job_digest_policy(
 }
 
 /// Save every machine's policy, then write back a copy with digest disabled.
-///
-/// The write-back goes through the same `/api/machines/policy` the policy editor
-/// uses, so there is one place a machine's policy is set, and the live inductor
-/// updates its own copy of the registry rather than only the file.
 async fn digest_suspend(
     path: &std::path::Path,
     api: &str,
@@ -72,8 +66,6 @@ async fn digest_suspend(
     let mut off = Vec::new();
     for (addr, policy) in machines {
         // Disable digest in the policy that is *in force*, so a box with no
-        // stored policy gets the default list with digest turned off rather than
-        // a list invented here.
         let mut next = policy
             .clone()
             .unwrap_or_else(bm_proto::TaskPref::default_list);
@@ -117,8 +109,6 @@ pub(crate) async fn digest_restore(
     let mut back = 0;
     for (addr, current) in machines {
         // A machine that is not in the snapshot was added while digest was off.
-        // Leave it alone and say so: restoring it to `None` would silently
-        // re-enable digest on a box the operator never switched off.
         let Some(value) = saved.get(addr) else {
             continue;
         };
@@ -132,7 +122,6 @@ pub(crate) async fn digest_restore(
         back += 1;
     }
     // Only now: a restore that failed half way must leave the snapshot in place,
-    // or the boxes it did not reach have no way back.
     let _ = std::fs::remove_file(path);
     Ok(format!(
         "digest policy restored on {back} machine(s) — each box is back to what it had"

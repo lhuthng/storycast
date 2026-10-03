@@ -16,14 +16,12 @@ use ratatui::{
 pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact: bool) {
     let dim = Style::default().fg(Color::DarkGray);
     // Two lines: one was 161 characters and clipped on every terminal, losing
-    // exactly the keys nobody can guess.
     let keys: Vec<Line> = if compact { KEYS_COMPACT } else { KEYS_FULL }
         .iter()
         .map(|k| Line::from(Span::styled(*k, dim)))
         .collect();
 
     // The status line always reports, in order: what just happened, how many
-    // jobs are still running, whether the inductor is reachable.
     let mut spans = vec![
         Span::styled(
             format!("{} ", app.status.level.glyph()),
@@ -33,9 +31,6 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
     ];
     if app.pending > 0 {
         // The spinner steps at the poll cadence, so "jobs are running" is
-        // visible from across the room even when the job is quiet. The key
-        // rides along with the count: a number nobody knows how to open is
-        // decoration, and Tab is the spelling this footer itself advertises.
         spans.push(Span::styled(
             format!(
                 "   {} {} job(s) running — Tab jobs",
@@ -46,7 +41,6 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
         ));
     }
     // Parked work is invisible in the panes' counts, so it is called out where
-    // the eye already is — with the key that opens the list that can free it.
     let shelved = app
         .tasks
         .iter()
@@ -59,14 +53,6 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
         ));
     }
     // **Held is the answer to "why is the cluster quiet"**, and a quiet cluster
-    // looks exactly like a finished one in every pane: same empty queue, same
-    // idle boxes. It is said here for the same reason the shelved count is —
-    // nobody can infer it from the counts — and `:go` rides along because a
-    // hold nobody can lift is how a working cluster reads as broken.
-    //
-    // Distribution itself is the normal state and gets no marker: something
-    // that is always on screen is something nobody reads, and the range it
-    // would repeat is already in the header strip.
     if let Some(d) = app.dispatch.as_ref().filter(|d| d.held) {
         spans.push(Span::styled(
             format!("   held · {} — :go", d.span),
@@ -77,8 +63,6 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
         Conn::Up => {
             let ago = app.refreshed.map(|t| t.elapsed().as_secs()).unwrap_or(0);
             // The dot breathes: a *moving* live light proves the poll loop
-            // is alive, which a static ● could not (a frozen poll once read
-            // as connected for minutes).
             spans.push(Span::styled(
                 format!("   {} live ({ago}s ago)", pulse(app.tick)),
                 app.style(Color::Green),
@@ -88,9 +72,6 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
         Conn::Unknown => spans.push(Span::styled("   ○ connecting…", app.style(Color::Yellow))),
     }
     // The engine and chapter range moved to the full tier's header strip.
-    // Workspace and profile stay here in the compact tier: there is no header
-    // row at 76×20, and a default nobody looked at is exactly how work lands
-    // in the wrong book.
     if compact {
         spans.push(Span::styled(
             format!("   ws: {}", crate::tui::model::workspace_label(&app.layout)),
@@ -113,7 +94,6 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
     lines.push(Line::from(spans));
     if compact {
         // The Tasks pane is gone in this tier; the roll-up takes its place so
-        // the counts are never simply missing.
         lines.push(task_rollup(&app.counts, app.colour()));
     }
     f.render_widget(

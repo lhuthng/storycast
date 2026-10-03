@@ -1,16 +1,4 @@
 //! Work-policy editor keys: reorder and toggle a machine's stages.
-//!
-//! The gesture is the operator's own: Space picks a row up, the arrows carry it
-//! up or down the priority list, Space drops it. Enter toggles a stage on or
-//! off. Every change is saved at once through the API, so the panel holds no
-//! unsaved decision to lose.
-//!
-//! **Enabling a stage is also a statement about files.** What a box is given is
-//! selected from this policy (`provision::sources`), and the files only move at
-//! the next provision — so a box told it may merge, provisioned when it could
-//! not, will be offered merge work with no clips on it. That does not fail:
-//! the merge degrades a missing clip to one warning and mixes silence. So the
-//! key that widens a policy says so, in the panel, at the moment it happens.
 use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
@@ -70,7 +58,6 @@ pub(crate) async fn key_policy(
                         save = true;
                     }
                     // Already at the top: a grab is not an error, it just
-                    // cannot move further.
                     Some(_) => {}
                     None => v.cursor = v.cursor.saturating_sub(1),
                 }
@@ -94,13 +81,9 @@ pub(crate) async fn key_policy(
     }
     if save {
         // Computed while the view is borrowed, reported after it: `log_at` takes
-        // `&mut app` and the dispatch below still needs the view it was handed.
         let mut widened: Option<String> = None;
         if let Screen::Policy(v) = &app.screen {
             // What the box's files now have to cover, against what it was
-            // provisioned for. The machine in `app.machines` still holds the
-            // *old* policy — the save is a round trip — so this compares the
-            // edit against the truth rather than against itself.
             let old: Vec<bm_proto::Stage> = app
                 .machines
                 .iter()

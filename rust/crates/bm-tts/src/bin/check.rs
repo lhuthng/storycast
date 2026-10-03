@@ -1,14 +1,4 @@
 //! Run the pure-signal helpers against jobs from Python, and print the answers.
-//!
-//!     bm-tts-check <job.json> <out.json>
-//!
-//! The babble guard and the chunk joiner are the parts of the pipeline that read
-//! *audio* rather than tensors, so they cannot be checked by comparing codes. This
-//! exists so `tools/audio-utils-parity.py` can hand both implementations the same
-//! waveforms and diff the answers.
-//!
-//! A JSON contract rather than flags because each job is a list: a hundred
-//! waveforms in, a hundred answers out, one process, one model-free run.
 
 use anyhow::{bail, Context, Result};
 use bm_tts::babble;

@@ -1,18 +1,4 @@
 //! The digest manager's keys: pick a chapter, then run its two rounds by
-//! clipboard.
-//!
-//! The gesture is deliberately tiny. `c` puts the current round's prompt on the
-//! clipboard; the operator pastes it into whatever model they already have open;
-//! `v` brings the answer back. Round 1's answer buys round 2's prompt, round 2's
-//! answer finishes the chapter — so there is never more than one thing to do
-//! next, and the screen says which.
-//!
-//! **Everything goes through the worker's own code.** The prompts come from
-//! `bm_core::digest`, the answers are checked by the same validators, and the
-//! result is reported to `/api/complete` with the same body a worker sends. A
-//! manual digest is the automatic one with a person standing in for the model —
-//! which is why it cannot put a chapter into the library that the worker's path
-//! would have refused.
 use crate::manual::Next;
 use crate::tui::input::command::Command;
 use crate::tui::input::Flow;
@@ -34,15 +20,8 @@ pub(crate) async fn key_digest(
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
 ) -> Flow {
     // "Digested" is one question with one answer, and the list, the filter and
-    // the draw must all ask it the same way: the chapter has a script on disk.
-    // Derived from the layout rather than remembered, so a digest that lands
-    // while the screen is open is reflected on the next keypress.
     let layout = app.layout.clone();
     // Borrowed, not moved: the same `layout` builds prompts and validates
-    // answers a few lines down, and one `Layout` is the whole point — a second
-    // clone here is how two halves of this screen would come to disagree about
-    // which workspace they are looking at. The question itself is
-    // `Layout::digested`, so the filter, the list and the draw cannot diverge.
     let digested = |n: u32| layout.digested(n);
 
     let mut v = view;
@@ -55,11 +34,6 @@ pub(crate) async fn key_digest(
                 return Flow::KeepRunning;
             }
             // **A grid, so the arrows mean what the picture means.** The chapters
-            // are drawn `COLS` to a row, so ←/→ step one chapter and ↑/↓ step a
-            // *row* — twelve. Stepping one chapter on ↑ would move the highlight
-            // sideways, which is the one thing the eye does not expect of it.
-            // `h`/`l` alias the horizontal pair, `j`/`k` the vertical, because
-            // vim hands expect `j`/`k` to move by a line of whatever is on screen.
             KeyCode::Left | KeyCode::Char('h') => {
                 v.cursor = v.cursor.saturating_sub(1);
             }
@@ -75,9 +49,6 @@ pub(crate) async fn key_digest(
                 v.cursor = (v.cursor + COLS).min(rows.saturating_sub(1));
             }
             // The cluster-wide digest switch, on the screen it belongs to. It
-            // runs the *same command* the `:off` / `:on` words run, so there is
-            // one implementation of a snapshot-and-restore and two ways to reach
-            // it — the same shape as `:policy` pressing `P`.
             KeyCode::Char('x') | KeyCode::Char('s') => {
                 let cmd = if key.code == KeyCode::Char('x') {
                     Command::DigestOff
@@ -91,8 +62,6 @@ pub(crate) async fn key_digest(
             KeyCode::Char('f') => {
                 v.hide_done = !v.hide_done;
                 // The cursor indexes the *rows*, so a filter that shrinks the
-                // list can leave it past the end — pointing at nothing while the
-                // screen still highlights a line.
                 let rows = v.rows(&digested).len();
                 v.cursor = v.cursor.min(rows.saturating_sub(1));
                 let total = v.chapters.len();
@@ -109,8 +78,6 @@ pub(crate) async fn key_digest(
             KeyCode::Enter => {
                 if let Some(n) = v.selected(&digested) {
                     // The engine, because round 2's prompt carries the
-                    // engine's own non-verbal vocabulary: a tag the bound
-                    // engine does not implement is read aloud.
                     let engine =
                         app.setting_str("engine", &bm_core::config::Settings::default().engine);
                     match open_chapter(&layout, &engine, n, &digested) {
@@ -135,15 +102,6 @@ pub(crate) async fn key_digest(
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             // Back to the list, keeping the cursor where it was. A chapter that
-            // finished says so in the list; one abandoned mid-round simply loses
-            // its cast, which is the honest outcome of walking away.
-            //
-            // **Returns here rather than falling through to the write-back below**,
-            // and that is the whole fix for "Esc does nothing": the tail sets
-            // `v.open = Some(ch)` for the arms that *mutated* the chapter, so an
-            // arm that closes it would have its work undone one line later. The
-            // view is a clone, so every arm has to write it back — which means the
-            // one arm that clears it has to be the one arm that leaves early.
             v.open = None;
             app.set_status(
                 Level::Info,
@@ -161,8 +119,6 @@ pub(crate) async fn key_digest(
                 app.set_status(Level::Info, format!("ch{}: prompt copied", ch.n));
             }
             // A copy that fails must say so: otherwise the operator pastes a
-            // stale clipboard and reads a validator complaint about text they
-            // never saw, which is a bug report about the wrong component.
             Err(e) => {
                 ch.note = e.clone();
                 app.set_status(Level::Error, e);
@@ -185,8 +141,6 @@ pub(crate) async fn key_digest(
                         }
                         Ok(None) => {
                             // Round 1 landed: round 2's prompt is already on the
-                            // clipboard, so the operator's next move is the same one
-                            // they just made.
                             app.set_status(
                                 Level::Info,
                                 format!("ch{}: cast accepted — script prompt copied", ch.n),
@@ -194,8 +148,6 @@ pub(crate) async fn key_digest(
                         }
                         Err(e) => {
                             // The validator's own words. They are the instruction:
-                            // the operator can paste the complaint back into their
-                            // model and ask for a correction.
                             ch.note = e.clone();
                             app.set_status(Level::Error, format!("ch{}: {e}", ch.n));
                         }
@@ -206,25 +158,12 @@ pub(crate) async fn key_digest(
         _ => {}
     }
     // Arms that mutated the chapter write it back; Esc left early above, which is
-    // why this is safe to do unconditionally *here*.
     v.open = Some(ch);
     app.screen = Screen::Digest(v);
     Flow::KeepRunning
 }
 
 /// Start a chapter: build round 1's prompt and put it on the clipboard.
-///
-/// The copy happens here rather than on the first `c` so that opening a chapter
-/// *is* the gesture — the operator presses Enter and then goes straight to their
-/// model. `c` exists to get it back after a failed paste.
-///
-/// The prompt itself and the refusal for a chapter that is not next come from
-/// [`crate::manual`], the same module the headless backup runner drives: a
-/// manual digest is the worker's digest with a person standing in for the model,
-/// so there is one flow and two ways to carry its prompts.
-///
-/// A re-digest says so in the note: the chapter already has a script, and the
-/// inductor will invalidate the audio built from the old one.
 fn open_chapter(
     layout: &bm_core::Layout,
     engine: &str,
@@ -244,7 +183,6 @@ fn open_chapter(
         note.push_str(" · this chapter is already digested, so finishing will re-render it");
     }
     // A copy that fails still leaves the chapter open with its prompt visible in
-    // the note, so `c` can be retried rather than the whole screen bounced.
     let _ = clipboard::copy(step.text());
     Ok(DigestChapter {
         n,
@@ -258,11 +196,6 @@ fn open_chapter(
 }
 
 /// `part 2/3 · ` in front of a note, and nothing when the chapter fits one
-/// answer.
-///
-/// The operator has to know which round they are pasting into: a forty-thousand
-/// character chapter is sixteen rounds, and a prompt that is round 1 of part 4
-/// looks exactly like round 1 of part 1 without this.
 fn part_note(part: Option<bm_core::digest::ManualPart>) -> String {
     match part {
         Some(part) if part.total > 1 => format!("part {}/{} · ", part.index, part.total),
@@ -271,9 +204,6 @@ fn part_note(part: Option<bm_core::digest::ManualPart>) -> String {
 }
 
 /// Take one pasted answer: validate it, and either ask for round 2 or finish.
-///
-/// `Ok(None)` means round 1 was accepted and round 2 is now on the clipboard.
-/// `Ok(Some(job))` means the chapter is finished and the caller should report it.
 fn accept(
     layout: &bm_core::Layout,
     engine: &str,
@@ -292,9 +222,6 @@ fn accept(
             part,
         } => {
             // A round was accepted and the next one is ready. That is either
-            // round 2 against the cast just validated, or round 1 of the part
-            // after the one whose script just validated — the same hand-off the
-            // worker makes between its own calls, one part boundary further on.
             let copied = match clipboard::copy(&text) {
                 Ok(()) => "prompt copied".to_string(),
                 Err(e) => format!("prompt ready, but the copy failed: {e}"),
@@ -332,9 +259,6 @@ fn accept(
         }
     }
     // Reported as a *worker report*, under the reserved manual id. The inductor
-    // then does everything it does for a worker: merges the bible delta, writes
-    // the script, marks the row Done — and invalidates the chapter's audio if the
-    // script changed, which is what a re-digest needs.
     Ok(Some(Job::ManualDigest {
         api: api.to_string(),
         http: http.clone(),
@@ -351,7 +275,6 @@ mod tests {
     #[test]
     fn manual_digest_refuses_a_chapter_past_the_next_one() {
         // Skipping ahead would merge bible deltas out of order: only the
-        // chapter right after the digested run may be worked by hand.
         let d = tempfile::tempdir().unwrap();
         let layout = bm_core::Layout::new(d.path());
         let err = open_chapter(&layout, "vieneu", 7, &|n| layout.digested(n)).unwrap_err();
@@ -361,7 +284,6 @@ mod tests {
     #[test]
     fn manual_digest_opens_the_chapter_after_the_last_digested_one() {
         // The digest queue's bottleneck case: ch1 done, ch2 fresh — ch2 opens,
-        // ch3 still refused.
         let d = tempfile::tempdir().unwrap();
         bm_core::profile::install_fixture(d.path()).unwrap();
         let layout = bm_core::Layout::new(d.path());

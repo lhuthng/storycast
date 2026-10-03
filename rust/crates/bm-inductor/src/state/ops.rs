@@ -2,12 +2,6 @@ use super::Inner;
 use bm_proto::{now_secs, Stage, Task, TaskState};
 
 /// How long a box may sit in `Initializing` before the inductor stops
-/// believing it is booting.
-///
-/// A stock Ubuntu AMI answers ssh roughly 30–60 s after `RunInstances` returns.
-/// Five minutes is not a wait — it is the point past which "still booting"
-/// stops being a believable explanation, so the state becomes a verdict instead
-/// of a placeholder that never resolves.
 pub const BOOT_DEADLINE_SECS: u64 = 300;
 
 mod apply;
@@ -16,7 +10,6 @@ mod recast;
 mod retry;
 impl Inner {
     /// ETA for the remaining range, from measured throughput divided by
-    /// live workers (heartbeat within the last 90s).
     pub fn op_eta(&self, start: u32, count: u32) -> String {
         let in_range = |t: &Task| t.chapter >= start && t.chapter < start + count;
         let pending = |stage: Stage| {
@@ -32,9 +25,6 @@ impl Inner {
             .count()
             .max(1) as u64;
         // Render's unit is already one take — a pending render task *is* one
-        // TTS call — so it needs no calls-per-chapter scaling any more. That
-        // estimate existed only while a render task was a whole chapter, and
-        // leaving it in place would multiply the render ETA by forty.
         let remaining = [
             (Stage::Crawl, pending(Stage::Crawl)),
             (Stage::Digest, pending(Stage::Digest)),

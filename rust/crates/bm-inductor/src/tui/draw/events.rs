@@ -13,10 +13,6 @@ use ratatui::{
 };
 
 /// A task line, compact: `[T:merge:23] Complete in 14.6s (retrieved)`. The tag
-/// carries the stage hue, the outcome its state hue, the duration its own, and
-/// a remote worker reads `(retrieved)` — the artifact rode home in the report.
-/// The `— detail` tail never renders: on a completion it repeats the stage and
-/// chapter or dumps a path, while a failure keeps its reason (that is news).
 fn push_task_event(
     spans: &mut Vec<Span<'static>>,
     colour: bool,
@@ -77,12 +73,9 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let wrap_w = area.width.saturating_sub(2) as usize;
     let viewport_h = area.height.saturating_sub(2) as usize;
     // Publish the pane's real height so PgUp/PgDn page by exactly what one
-    // screenful shows. The keys are the only place that can know this, and
-    // they run between frames.
     app.events_rows = viewport_h.max(1);
 
     // The filter narrows first, so scroll distances and the buffer edge below
-    // are in filtered lines, not raw ones.
     let shown: Vec<usize> = app
         .events
         .iter()
@@ -92,7 +85,6 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .collect();
     let total = shown.len();
     // Scroll is a distance from the filtered tail, so a filter with fewer
-    // lines cannot leave it pointing past its own top.
     app.events_scroll = app.events_scroll.min(total);
 
     let title = {
@@ -101,9 +93,6 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             format!("{base} · ←→ filter")
         } else if app.events_scroll >= total {
             // The buffer keeps EVENT_CAP lines and drops the rest; the top of the
-            // buffer is a real edge, so the title names it instead of showing a
-            // number that looks stuck. Reading is still one `G` (or one run of
-            // PgDn) from the newest line.
             format!("{base} — oldest kept line · G for newest · ←→ filter")
         } else {
             format!(
@@ -149,7 +138,6 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 ),
             ];
             // A task line renders compact (tag, outcome, duration) instead of
-            // the stored sentence; everything else keeps its head and text.
             if let Some(ev) = task_event(&l.text) {
                 push_task_event(&mut spans, colour, &ev, &app.beats, body_style);
                 return Line::from(spans);
@@ -157,13 +145,6 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             match log_head(&l.text) {
                 Some(id) => {
                     // The reported alias when a beat carries one for this
-                    // worker id — the same name the Workers pane shows.
-                    // Anything else renders VERBATIM, never hashed: an
-                    // address head like `192.168.2.2` once hashed to
-                    // `[hawk]`, a worker that never existed, and the
-                    // operator hunted it across every pane. A box-level
-                    // line stays box-level; the Workers pane links it to
-                    // its worker by address, not by a minted name.
                     let display = reported_alias(&app.beats, id)
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| id.to_string());
@@ -173,8 +154,6 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                         style_of(colour, tint),
                     ));
                     // Name it once: a `[192.168.2.2] …` line already carries
-                    // its head, so repeating it after the display tag reads
-                    // as two names for one thing.
                     let prefix = format!("[{id}] ");
                     spans.push(Span::styled(
                         l.text.strip_prefix(&prefix).unwrap_or(&l.text).to_string(),
@@ -188,8 +167,6 @@ pub(crate) fn draw_events(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .collect();
 
     // Compute the visual row offset so scrolling stays correct even when
-    // wrapped lines change width on resize.  events_scroll counts logical
-    // lines; we convert to display rows here.
     let total_visual: usize = lines
         .iter()
         .map(|l| {

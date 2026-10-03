@@ -1,20 +1,4 @@
 //! End-to-end check of the voice-treatment pass, with the real `ffmpeg` and
-//! `sox` binaries and a synthetic voice.
-//!
-//! Two claims, both of which a unit test that never runs the tools cannot make:
-//!
-//! 1. **A tail is reserved.** Two slots in a cave, whose preset reserves
-//!    2.8 s, produce a mix of exactly `voice + 2.8` — the *longest* preset's
-//!    tail once, not one tail per slot: the decay rings under the next line and
-//!    only the chapter's end is extended.
-//! 2. **The speech does not drift.** Each slot's piece is *placed* at its
-//!    script offset, not concatenated, so the second line's beep still lands at
-//!    its scripted second even though the first line reserved a tail. The old
-//!    concat appended the tail and slid every later line onto the beds.
-//!
-//! It skips (returns) when either tool is missing, so the suite stays green on
-//! a box that cannot merge anyway; run it by hand with `--ignored` where the
-//! tools live.
 
 use bm_core::ambience::{apply_layers, timeline, LayerSwitch, Turn};
 use bm_core::assemble::{read_wav, write_wav, Wav};
@@ -32,7 +16,6 @@ fn tool(bin: &str, probe: &str) -> bool {
 }
 
 /// A mono 48 kHz WAV with a 150 ms 880 Hz burst at each `beeps_at` second,
-/// silence elsewhere.
 fn beeped_wav(path: &Path, seconds: f64, beeps_at: &[f64]) {
     let rate = 48_000usize;
     let n = (seconds * rate as f64) as usize;
@@ -82,7 +65,6 @@ fn rms_at(w: &Wav, at: f64) -> f64 {
 }
 
 /// The four-second peak of the windowed RMS, so a beep can be located without
-/// trusting a fixed time. Coarse (10 ms) — this is a drift check, not a clock.
 fn peak_near(w: &Wav, around: f64) -> f64 {
     let mut best = (f64::MIN, around);
     let mut t = (around - 0.4).max(0.0);
@@ -110,7 +92,6 @@ fn a_cave_tail_is_reserved_and_the_speech_does_not_drift() {
     std::fs::create_dir_all(&assets).unwrap();
 
     // One place, one room. Empty pools: nothing but the voice track is produced,
-    // so the mix IS the treated voice and can be measured directly.
     std::fs::write(
         assets.join("scene-map.json"),
         r#"{

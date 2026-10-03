@@ -5,30 +5,8 @@ use super::prepare::prepare_chapter;
 use super::run::GCalls;
 use super::*;
 /// One structural problem the quote scan found, in coordinates an operator and
-/// a repair prompt can both use.
-///
-/// The kinds, and what each proves:
-///
-/// * `"unclosed quote"` — a delimiter opened and never closed. The **net**
-///   damage: the scanner is still inside a speech when the text ends.
-/// * `"swallowed paragraph"` — one dialogue span contains a paragraph break.
-///   The scanner never splits speech on a newline, so in a healthy chapter a
-///   dialogue span cannot cross one. This is the check that catches what a
-///   quote *count* cannot: two dialogues each missing a single mark keep the
-///   count even, and every window of the text reads fine — but the mispaired
-///   opener still drags a paragraph of narration into a speech, and that
-///   spanning is a local, visible fact.
-/// * `"welded prose"` — a long speech begins right after running prose with no
-///   colon in front of it. Either the opener was never written, or a closer
-///   was lost and prose got welded to the next span; both mis-split the
-///   chapter. Punctuation before the mark (`. ? ! …`) is how a normal sentence
-///   hands over, so only prose itself touching the quote fires this — and only
 ///   for spans longer than a quoted term ever gets, so `Tràng "cuồng phong bạo
 ///   vũ"` mid-sentence stays legal while a swallowed sentence does not.
-///
-/// **Structural facts, not a count** — which is why they survive the
-/// even-count case, and why each one names its paragraph: that is the input the
-/// repair pass needs to fix a mark it cannot otherwise find.
 #[derive(Debug, Clone, PartialEq, Eq)]
 
 pub struct QuoteFinding {
@@ -41,24 +19,14 @@ pub struct QuoteFinding {
 }
 
 /// Scan a chapter for unbalanced quotation structure. Empty means clean.
-///
-/// **A global fact about the whole chapter, which is why it lives in code and
-/// not in a prompt.** A model asked to stage segments cannot see the imbalance —
-/// every local view of a mispaired chapter reads fine — and its answer passes
-/// every validator there is, because swallowing the narration after a mispaired
-/// opener is *consistent* with the text it was given. The scan is the only
-/// place this is catchable, and it costs one linear pass.
 pub fn quote_findings(text: &str) -> Vec<QuoteFinding> {
     let prepared = prepare_chapter(text);
     // `prepare_chapter` sanitizes internally and sanitation is idempotent, so
-    // this is the same string every event offset indexes.
     let clean = crate::crawl::sanitize_chapter_text(text);
     let paragraph_of = |at: usize| {
         let before = &clean[..at.min(clean.len())];
         let mut n = before.lines().filter(|l| !l.trim().is_empty()).count();
         // The partial line the cursor sits in is not a completed paragraph —
-        // and when a span starts right after its opening quote, that partial
-        // line is the paragraph the finding belongs to.
         if !before.is_empty() && !before.ends_with('\n') {
             n -= 1;
         }
@@ -67,8 +35,6 @@ pub fn quote_findings(text: &str) -> Vec<QuoteFinding> {
     let mut findings = Vec::new();
 
     // The net check first: a delimiter still open at the end. Every event after
-    // it is one long speech, so the structural checks below would fire on the
-    // same span anyway — this one names the opener directly.
     if let Some(at) = prepared.unbalanced_at {
         findings.push(QuoteFinding {
             paragraph: paragraph_of(at),
@@ -82,9 +48,6 @@ pub fn quote_findings(text: &str) -> Vec<QuoteFinding> {
             continue;
         }
         // Gate 1 — a speech that contains a paragraph break, read **raw**: the
-        // published text is trimmed, and a leading `\n\n` after the opening
-        // mark is exactly what a swallowed paragraph looks like. In a healthy
-        // chapter the scanner never produces such a span.
         let raw = &clean[event.at..event.end];
         let interior_break = raw
             .split_once('\n')
@@ -98,13 +61,6 @@ pub fn quote_findings(text: &str) -> Vec<QuoteFinding> {
             continue;
         }
         // Gate 2 — prose runs straight into a LONG quote. A real handover is a
-        // colon or sentence punctuation; a word welded to a long span means a
-        // mark is missing. The check steps back OVER the opening delimiter —
-        // `event.at` is inside the span, so the character it must judge sits
-        // one delimiter before it. The length guard keeps legitimate quoted
-        // terms from firing: `Tràng "cuồng phong bạo vũ"` mid-sentence is a
-        // healthy chapter, and only a span a quoted term never reaches is
-        // evidence of a lost mark.
         if event.at > 0 && event.text.chars().count() > 120 {
             let before = clean[..event.at].trim_end();
             let before = before
@@ -130,14 +86,6 @@ pub fn quote_findings(text: &str) -> Vec<QuoteFinding> {
 }
 
 /// The text a chapter's digest should actually read: the sidecar a previous
-/// repair wrote, when that sidecar is present and balanced.
-///
-/// So a repair is paid for once. The original file is never rewritten — it is
-/// crawled source, and the operator's copy of it is worth more than the
-/// convenience — but the second digest of the same chapter reads the balanced
-/// text rather than paying for the repair again. An absent or still-unbalanced
-/// sidecar falls back to the original, which is what sends the chapter to
-/// [`repair_quotes`] once more.
 pub(crate) fn effective_text(layout: &Layout, n: u32, original: &str) -> String {
     let sidecar = repaired_txt(layout, n);
     std::fs::read_to_string(&sidecar)
@@ -152,20 +100,6 @@ pub(crate) fn repaired_txt(layout: &Layout, n: u32) -> PathBuf {
 }
 
 /// The proofread pass, asked only when the gate tripped.
-///
-/// A **separate pass, on purpose**, and not a rule inside the staging
-/// instructions. The staging pass never sees the imbalance — its window reads
-/// fine — so a rule there is advice about a fault the model cannot observe,
-/// which is the thing that already failed. Handed the whole chapter at once,
-/// with the gate's own paragraph, parity is a question the model can actually
-/// check, because the chapter fits in one context.
-///
-/// The prose is `prompts/repair.txt` beside the other two templates, so it is
-/// editable and per-language like everything else. What the code owns is the
-/// part an operator must not soften: the contract appended below, and the
-/// facts only the scan has — which paragraphs are broken and how. A template
-/// that dropped a placeholder still renders, and the miss is warned about
-/// rather than silently costing the model the one thing it needs.
 pub(crate) fn build_repair_prompt(layout: &Layout, text: &str, complaint: &str) -> Result<String> {
     let path = layout.repair_prompt();
     let template = std::fs::read_to_string(&path)
@@ -176,7 +110,6 @@ pub(crate) fn build_repair_prompt(layout: &Layout, text: &str, complaint: &str) 
     replace_or_miss(&mut body, "{chapter_text}", text, &mut missed);
     warn_missing_sections("repair prompt", &missed);
     // Appended, never in the file: the answer is checked by code on return, and
-    // a template that made that optional would make the whole gate optional.
     body.push_str(
         "\n---REPAIR OUTPUT CONTRACT---\nReturn ONE strict JSON object, never markdown or \
          commentary:\n{\"text\": \"the full corrected chapter text\", \"changes\": [\"one short \
@@ -188,30 +121,6 @@ pub(crate) fn build_repair_prompt(layout: &Layout, text: &str, complaint: &str) 
 }
 
 /// The gated proofread ladder, run once per chapter, only when the scan finds
-/// something. Returns the repaired text, or `Ok(None)` to digest the original.
-///
-/// The order is the ladder, not a single ask:
-///
-/// 1. **LLM FIX** — the whole chapter, the scan's findings, one proofread.
-/// 2. **light gate** — the deterministic verifier: parseable JSON, a `text`
-///    field, and every alphanumeric character identical to the input. Most
-///    answers clear it and stop here.
-/// 3. **LLM + Gate 1** — re-ask carrying the complaint, when a speech still
-///    spans a paragraph break.
-/// 4. **LLM + Gate 2** — one more ask if prose is still welded to a speech.
-///
-/// Three answers, not one, because a model handed a complaint about its own
-/// last answer fixes it far more often than a fresh ask guesses. Every
-/// candidate is judged by the same closure — the alphanumeric filter plus the
-/// two structural gates — so a creative model cannot buy its way past a gate by
-/// rewriting, and no round is ever more lenient than the last. A chapter
-/// that still fails after the ladder digests the **original**: a bad read, but
-/// a rewrite is a different book, and the operator is the one who may decide.
-///
-/// `Err` is reserved for a **broken install** — a missing `prompts/repair.txt`.
-/// That is fatal rather than a silent fallback, because digesting an unbalanced
-/// chapter without ever saying so is the exact failure this pass exists to
-/// prevent, and it would do it quietly.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn repair_quotes(
     layout: &Layout,
@@ -243,7 +152,6 @@ pub(crate) async fn repair_quotes(
         })
     };
     // Spent from the chapter's budget like any other G, so the phrase pass's
-    // three rungs are counted against the cap rather than being free calls.
     async fn call(
         layout: &Layout,
         n: u32,
@@ -265,19 +173,15 @@ pub(crate) async fn repair_quotes(
         }
     }
     // The verdict on one answer. `Fixed` ends the ladder; anything else says
-    // exactly which gate the candidate still fails, which is the complaint the
-    // next ask carries.
     enum Verdict {
         /// Accepted text plus the model's own change list, for the sidecar.
         Fixed(String, Value),
         /// The answer was unusable (no JSON) or a rewrite: stop, fall back.
         Reject(String),
         /// Words untouched, but a structural gate still fires: the complaint
-        /// the next ask carries.
         Gated(String),
     }
     // ...and the one place every answer is judged, so the ladder cannot drift
-    // into believing an answer one round and refusing the same shape the next.
     let judge = |raw: &str| -> Verdict {
         let Some(parsed) = parse_json_repaired(raw).ok() else {
             return Verdict::Reject("no usable JSON".to_string());
@@ -294,10 +198,6 @@ pub(crate) async fn repair_quotes(
         }
         let changes = parsed.get("changes").cloned().unwrap_or(Value::Null);
         // Gate 1 (spanning) and Gate 2 (welded prose) on the candidate. The
-        // net check is deliberately NOT here: it has already done its job by
-        // naming the damage, and a candidate that fixed both structural faults
-        // but traded one mark for another is still every word it was given,
-        // correctly split — the digest's own validators say the rest.
         let gated = quote_findings(&fixed)
             .into_iter()
             .filter(|f| f.kind == "swallowed paragraph" || f.kind == "welded prose")
@@ -320,8 +220,6 @@ pub(crate) async fn repair_quotes(
         match verdict {
             Verdict::Fixed(fixed, changes) => {
                 // The sidecar is the audit trail: the repaired text an
-                // operator can diff against the chapter the crawl produced,
-                // and the text the next digest of this chapter reuses.
                 let _ = atomic_write(
                     &repaired_txt(layout, n),
                     &format!(
@@ -436,11 +334,6 @@ pub(crate) async fn repair_quotes(
 }
 
 /// Every alphanumeric character of a text, in order.
-///
-/// The verifier's whole idea. Punctuation and whitespace are what a proofread
-/// is allowed to move, so dropping them leaves the part that must not change —
-/// if this is equal, nothing was rewritten; if it is not, the answer is a
-/// rewrite wearing a proofread's clothes.
 pub(crate) fn strip_punctuation(text: &str) -> String {
     text.chars()
         .filter(|c| c.is_alphanumeric())
@@ -448,30 +341,11 @@ pub(crate) fn strip_punctuation(text: &str) -> String {
 }
 
 /// Whether a narration event ends by handing the floor to the speech that
-/// comes after it — a speech verb and its colon, `…từng chữ từng câu hỏi:`.
-///
-/// Both sides of a quote look alike in the view: a `previous_context` that ends
-/// this way is the tag for the quote in hand, and a `following_context` that
-/// ends this way is the tag for the *next* dialogue event in the chapter. On
-/// ch51 of beyond-myriads the model was handed the second while looking at the
-/// first, and gave the sect elder's line about his own clan's treasure to the
-/// woman being scolded, because the narration after it ended by handing the
-/// floor to her reply. Which side of the quote the verb sits on is knowable
-/// here and not from the text, so it is handed over as a flag rather than left
-/// to the model.
 pub(crate) fn hands_off_to_quote(text: &str) -> bool {
     text.trim_end().ends_with(':')
 }
 
 /// Whether a narration attributes a quote to somebody at all — a speech verb
-/// anywhere in it, `Lạc Lan Tuyết vẻ mặt trịnh trọng nói.` Yes, and `Trời tối
-/// dần.` No.
-///
-/// The distinction matters for the *following* side only, and it is what keeps
-/// [`attribution_view`]'s `decided_by` from calling any narration after a quote
-/// a tag. It is not a tag because it follows; it is a tag because it says
-/// somebody spoke. Prose that merely continues the scene is evidence of nothing
-/// and must not be named as the answer’s source.
 const SPEECH_VERBS: &[&str] = &[
     " nói",
     " hỏi",

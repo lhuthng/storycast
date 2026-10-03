@@ -23,10 +23,6 @@ impl std::fmt::Display for GenError {
 }
 
 /// Which backend actually answered.
-///
-/// Returned alongside the text because the *configured* analyzer and the one
-/// that ran are not the same thing only while a chain walks: the caller must
-/// label its progress with the backend that actually produced the answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     Gemini,
@@ -45,16 +41,8 @@ impl Backend {
 }
 
 /// How long one HTTP attempt against a Gemini model may take.
-///
-/// The digest lease is 1200 s (`bm-inductor/src/state.rs::LEASE_SECS`) and the
-/// chain makes up to three attempts per model, so a per-attempt budget that is
-/// too generous makes the **lease** the deadline that fires first — and a lease
-/// expiry is strike-free, so the task is silently requeued while the request is
-/// still in flight. 180 s keeps a whole chain inside the lease.
 const GEMINI_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(180);
 
-// ---------------------------------------------------------------------------
-// generation backends
 // ---------------------------------------------------------------------------
 
 /// Pull a delay out of a provider error body: `retry in 53.2s` or `"retryDelay": "53s"`.
@@ -84,11 +72,6 @@ pub fn parse_retry_delay(s: &str) -> Option<f64> {
 }
 
 /// The error for a provider key this process does not hold.
-///
-/// The key arrives with the task (`bm_proto::Credentials`): the inductor is
-/// the single machine whose `.bm/llm.json` the operator maintains (TUI: `L`),
-/// and each offer carries the active provider's key to the box that runs it.
-/// A worker has no key file of its own, so "set it where it travels from".
 fn missing_key(var: &str) -> GenError {
     GenError::Fatal(anyhow!(
         "{var} missing — the task carried no key; add one on the inductor with L (:llm) and retry"
@@ -101,16 +84,10 @@ async fn generate_ollama(prompt: &str, settings: &Settings) -> Result<(String, B
         "messages": [{"role": "user", "content": prompt}],
         "stream": false,
         // A schema where the pass has one, else JSON mode. Ollama enforces a
-        // schema in `format`, so a malformed answer is not emitted to repair.
         "format": digest_schema(prompt).unwrap_or_else(|| json!("json")),
         "options": {"temperature": 0, "num_ctx": 16384},
     });
     // NOTE: `ollama_url` is a loopback endpoint by default and this client
-    // honours `HTTP_PROXY`, unlike the sidecar clients (`sidecar_client()` sets
-    // `.no_proxy()`). No failure has been reproduced from that here — reqwest
-    // skips the proxy for loopback — so it is left as it is rather than
-    // "fixed" on a guess. It would matter for an operator who points
-    // `ollama_url` at a LAN box while a proxy is configured.
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(1800))
         .build()
@@ -142,23 +119,16 @@ async fn generate_ollama(prompt: &str, settings: &Settings) -> Result<(String, B
 }
 
 /// The base a path is appended to: trailing slashes go, and so does a
-/// pasted full endpoint (`…/v1/chat/completions` from a provider's docs) —
-/// the code appends the path itself, so keeping it would double it.
 fn normalize_base(url: &str) -> String {
     let u = url.trim_end_matches('/');
     u.strip_suffix("/chat/completions").unwrap_or(u).to_string()
 }
 
 /// The endpoint the Gemini slot talks to: the configured base, or the public
-/// service when nothing is set.
-///
-/// Empty is a real state — a hand-written settings file, or an offer from an
 /// inductor that said nothing — and it means "unset", not "the root of this
 /// host": an empty base builds `/v1beta/models/…`, a relative URL `reqwest`
-/// refuses with an error naming neither the provider nor the field.
 fn gemini_base(settings: &Settings) -> String {
     // `trim` before `normalize_base`, which only strips trailing slashes: a
-    // field holding spaces is unset, not a host called "   ".
     let base = normalize_base(settings.gemini_url.trim());
     if base.is_empty() {
         DEFAULT_GEMINI_URL.to_string()
@@ -184,12 +154,6 @@ async fn generate_openrouter(
         .build()
         .map_err(|e| GenError::Fatal(anyhow!(e)))?;
     // The endpoint is settings, not a constant: the public API by default, a
-    // gateway or a proxy where the key actually lives. The path is appended, so
-    // `API=https://openrouter.ai/api/v1` is the whole address.
-    //
-    // `who` names the provider id for every message below: this one function
-    // serves OpenRouter and every custom gateway, and "OpenRouter error 502"
-    // for a TokenHarbor outage sends the operator to the wrong dashboard.
     let who = settings.analyzer.trim();
     let who = if who.is_empty() { "OpenRouter" } else { who };
     let url = format!(
@@ -211,10 +175,6 @@ async fn generate_openrouter(
         .and_then(|v| v.parse::<f64>().ok());
     let text = resp.text().await.unwrap_or_default();
     // 429 is quota; 502/503/529 is the provider at peak demand — both are
-    // "try again shortly", and the digest sleeps out the provider's own
-    // delay (or a minute) and retries. Anything else is fatal for the round:
-    // a 401 is a dead key, a 400/404 a dead request, and retrying those
-    // strikes the chapter for nothing.
     if matches!(status.as_u16(), 429 | 502 | 503 | 529) {
         let delay = retry_after.map(|d| d + 2.0).unwrap_or(60.0);
         return Err(GenError::RateLimited(format!(
@@ -236,12 +196,6 @@ async fn generate_openrouter(
 }
 
 /// Gemini model chain over REST.
-///
-/// Skipped fast, never retried: 401/403 (the key is wrong for every model)
-/// and 400 (the request itself is bad) — retrying those anywhere is burning
-/// quota for nothing. Everything else walks on: 429s (after sleeping the
-/// provider's own delay), 5xx, transport errors, unknown-model 404s and spent
-/// day-quotas. An exhausted chain is fatal: there is no fallback backend.
 async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<(String, Backend), GenError> {
     let key = std::env::var("GEMINI_API_KEY").map_err(|_| missing_key("GEMINI_API_KEY"))?;
     let base = gemini_base(settings);
@@ -249,7 +203,6 @@ async fn generate_gemini(prompt: &str, settings: &Settings) -> Result<(String, B
     let chain = analyze_chain(settings);
     if chain.is_empty() {
         // Say so rather than falling through with a reason that reads like a
-        // provider fault: an empty chain is a settings mistake.
         return Err(GenError::Fatal(anyhow!(
             "gemini: no models configured — pick one with L (:llm) on the inductor"
         )));
@@ -275,17 +228,9 @@ enum ModelNext {
 }
 
 /// Up to three attempts against one Gemini model.
-///
-/// `base` is the operator's endpoint, not a constant: `gemini` names the
-/// protocol (`kind`, native `:generateContent` REST), and the host belongs to
-/// whoever set the key up. Hardcoding Google's here meant the `L` screen listed
-/// models off the operator's gateway and then every request went to a service
-/// that had never seen the key — the mismatch this argument closes.
 async fn try_gemini_model(prompt: &str, key: &str, base: &str, model: &str) -> ModelNext {
     let url = format!("{base}/v1beta/models/{model}:generateContent");
     // `responseSchema` where the pass has one, so Gemini constrains decoding to
-    // the staging shape instead of merely promising JSON. The schema is built to
-    // Gemini's OpenAPI subset (no `additionalProperties`, no unions).
     let mut config = json!({
         "responseMimeType": "application/json",
         "maxOutputTokens": 16384,
@@ -298,14 +243,12 @@ async fn try_gemini_model(prompt: &str, key: &str, base: &str, model: &str) -> M
         "generationConfig": config,
     });
     // The default client has **no deadline at all** — without the timeout
-    // below a stalled request blocks the worker until the digest lease fires.
     let client = match reqwest::Client::builder()
         .timeout(GEMINI_ATTEMPT_TIMEOUT)
         .build()
     {
         Ok(c) => c,
         // `Abort`, not `Skip`: a client that will not build will not build for
-        // the next model either, and walking the chain would only burn time.
         Err(e) => return ModelNext::Abort(anyhow!(e).context("building the Gemini HTTP client")),
     };
     let mut last = String::from("no attempts ran");
@@ -313,9 +256,6 @@ async fn try_gemini_model(prompt: &str, key: &str, base: &str, model: &str) -> M
         let resp = client
             .post(&url)
             // The key rides a header, never the query string. A URL is logged,
-            // echoed back in errors and visible in a proxy's access log, and
-            // this one carries a credential; `x-goog-api-key` is the same key
-            // in the form Google documents and the compatible gateways accept.
             .header("x-goog-api-key", key)
             .json(&body)
             .send()
@@ -327,8 +267,6 @@ async fn try_gemini_model(prompt: &str, key: &str, base: &str, model: &str) -> M
             }
             Err(e) => {
                 // Logged per attempt rather than only summarised at the end:
-                // three silent timeouts and three silent 503s produce the same
-                // aggregate line, and they are different problems.
                 eprintln!("gemini {model} attempt {}/3 — transport: {e}", attempt + 1);
                 last = format!("transport error: {e}");
                 continue;
@@ -366,7 +304,6 @@ async fn try_gemini_model(prompt: &str, key: &str, base: &str, model: &str) -> M
                 ))
             }
             // Unknown model name or its day quota spent: the next model is
-            // exactly what the chain is for.
             404 => return ModelNext::Skip(format!("{status} ({})", head_chars(text.trim(), 120))),
             _ if text.contains("PerDay") => return ModelNext::Skip("day quota spent".to_string()),
             429 => {
@@ -381,8 +318,6 @@ async fn try_gemini_model(prompt: &str, key: &str, base: &str, model: &str) -> M
             }
             _ => {
                 // A 5xx used to be silent here — the reason only ever appeared in
-                // the aggregate "chain exhausted" line, which is why a 503 storm
-                // read as "nothing happened".
                 eprintln!(
                     "gemini {model} attempt {}/3 — {status}: {}",
                     attempt + 1,
@@ -396,21 +331,6 @@ async fn try_gemini_model(prompt: &str, key: &str, base: &str, model: &str) -> M
 }
 
 /// A decoder-enforced JSON Schema for the staging pass, or `None` for any
-/// prompt that is not one.
-///
-/// Only the staging pass is offered a schema. Its answer is the one with the
-/// repeated per-line keys, and its shape is a plain array of objects with no maps,
-/// so it fits the OpenAPI subset both Ollama and Gemini accept. The attribution
-/// pass carries `mentions`/`speakers` maps, which that subset does not express
-/// portably, so it keeps plain JSON mode.
-///
-/// Selected from the prompt text rather than threaded through every call site:
-/// the automatic and manual paths share [`generate`], and a pass identity it
-/// does not otherwise use would touch all of them to say one bit.
-///
-/// Backends that advertise schema enforcement get it; the free OpenRouter model
-/// documents JSON mode *without* schema enforcement, so a schema sent there
-/// would be ignored at best. Both keep the parse-and-repair path.
 pub fn digest_schema(prompt: &str) -> Option<Value> {
     prompt
         .contains("---STAGING OUTPUT CONTRACT---")
@@ -418,11 +338,6 @@ pub fn digest_schema(prompt: &str) -> Option<Value> {
 }
 
 /// The staging answer's strict schema: `segments` plus `fixes`, the fields the
-/// contract names and nothing else a decoder might invent.
-///
-/// `text`, `mood`, `scene` and `music` are optional on purpose: the contract
-/// asks for them only where they change and the carry-forward pass fills the
-/// rest, so requiring them here would undo the very saving the shape exists for.
 fn staging_schema() -> Value {
     json!({
         "type": "object",
@@ -469,13 +384,6 @@ fn analyze_chain(settings: &Settings) -> Vec<String> {
 }
 
 /// One generation attempt against the configured backend.
-///
-/// `analyzer` is the provider id and names the progress lines only. Routing
-/// reads `settings.analyzer_backend` — the slot the inductor resolved from
-/// the entry's `kind` and sent with the offer. An empty slot means an older
-/// inductor, which is routed off its retired `analyzer` value instead (`gemini`
-/// | `local` | `openrouter`; anything else, including nothing, refuses).
-/// No provider id is matched here, so renaming one never reroutes it.
 pub async fn generate(
     prompt: &str,
     analyzer: &str,
@@ -511,12 +419,6 @@ pub async fn generate(
 }
 
 /// List the models a provider serves, for the `L` screen's picker.
-///
-/// `kind` is the backend slot (`gemini` | `openai` | `ollama`): Google
-/// answers `GET {base}/v1beta/models?key=…`
-/// (`{"models":[{"name":"models/…"}]}`); Ollama answers `GET
-/// {base}/api/tags`; everything else answers the OpenAI-compatible `GET
-/// {base}/models` (`{"data":[{"id":…}]}`).
 pub async fn fetch_models(
     provider: &str,
     kind: &str,
@@ -533,8 +435,6 @@ pub async fn fetch_models(
         .build()?;
     let (url, req): (String, reqwest::RequestBuilder) = if kind == "gemini" {
         // The base is the operator's endpoint (see `try_gemini_model`), and the
-        // key goes in the header here too, so the listing and the generation
-        // that follows it are the same request against the same host.
         let url = format!("{base}/v1beta/models");
         let req = client.get(&url);
         let req = if key.trim().is_empty() {
@@ -611,14 +511,8 @@ mod tests {
     use super::*;
 
     /// A one-shot HTTP fixture on loopback: records each request's head *and*
-    /// body, answers 200 with `response_body`. Returns `(base_url, seen)`.
-    ///
     /// The repo's rule for reaching a network-only arm (ROADMAP §1: "pin the
     /// request shape against a local fixture server"), and the only way to pin
-    /// *which host* a request went to and *where the key sat*: `generate_gemini`
-    /// has no seam to inject a client through, and it should not grow one just
-    /// to be testable. The head is kept, not only the body, because the two
-    /// facts under test are a path and a header.
     fn fixture_server(
         response_body: &'static str,
     ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
@@ -630,7 +524,6 @@ mod tests {
         let sink = seen.clone();
         std::thread::spawn(move || {
             // A fixed budget rather than `incoming()`: with the bug present no
-            // request ever arrives, and an accept loop would sit here forever.
             for stream in listener.incoming().take(4) {
                 let Ok(mut stream) = stream else { continue };
                 let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
@@ -677,9 +570,6 @@ mod tests {
     #[test]
     fn gemini_generation_uses_the_configured_endpoint() {
         // The gate the mission was about: `kind: gemini` names the protocol, so
-        // the host is whatever the operator pointed it at. Hardcoded Google's,
-        // the `L` screen listed models off the operator's gateway and every
-        // generation then went somewhere the key had never been seen.
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("GEMINI_API_KEY").ok();
         std::env::set_var("GEMINI_API_KEY", "k-secret");
@@ -722,7 +612,6 @@ mod tests {
     #[test]
     fn an_unset_gemini_endpoint_is_the_public_service() {
         // Two ways to be unset: a settings file written before the field, and
-        // an offer that said nothing. Neither may build a relative URL.
         let mut s = Settings::default();
         assert_eq!(gemini_base(&s), DEFAULT_GEMINI_URL);
         s.gemini_url = "   ".into();
@@ -735,8 +624,6 @@ mod tests {
     #[test]
     fn the_openai_compatible_path_carries_nothing_branded() {
         // One function serves OpenRouter and every custom gateway, so nothing
-        // of this repo's may ride the request: the `Referer`/`X-Title` pair
-        // named the project and was the last vendor hardcode in this file.
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("OPENROUTER_API_KEY").ok();
         std::env::set_var("OPENROUTER_API_KEY", "or-secret");
@@ -803,8 +690,6 @@ mod tests {
         assert_eq!(schema["type"], json!("object"));
         assert_eq!(schema["properties"]["segments"]["type"], json!("array"));
         // The per-line fields the carry-forward pass fills must stay optional,
-        // or the decoder forces the model to restate them and the saving is
-        // undone at the source.
         let required = schema["properties"]["segments"]["items"]["required"]
             .as_array()
             .expect("items have a required list");
@@ -814,8 +699,6 @@ mod tests {
         assert!(!required.contains(&json!("mood")));
 
         // The attribution answer carries `mentions`/`speakers` maps the OpenAPI
-        // subset cannot express portably, so it keeps plain JSON mode. So does
-        // an old profile with no contract at all.
         assert!(digest_schema("---ATTRIBUTION OUTPUT CONTRACT---").is_none());
         assert!(digest_schema("an old profile with no contract").is_none());
     }
@@ -833,8 +716,6 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("GEMINI_API_KEY missing"), "{err}");
         // The wording is load-bearing: a provisioned worker holds no key file
-        // at all, so the message must name where the key travels from — the
-        // inductor's `L` screen — not a file on the failing box.
         assert!(err.to_string().contains(":llm"), "{err}");
         if let Some(k) = saved {
             std::env::set_var("GEMINI_API_KEY", k);
@@ -844,8 +725,6 @@ mod tests {
     #[test]
     fn both_missing_key_errors_name_their_own_variable() {
         // One helper, two callers: the message must not be able to drift into
-        // blaming the wrong provider, and it must stay short enough for the
-        // TUI's 200-char event line.
         for var in ["GEMINI_API_KEY", "OPENROUTER_API_KEY"] {
             let msg = missing_key(var).to_string();
             assert!(msg.starts_with(var), "{msg}");
@@ -857,8 +736,6 @@ mod tests {
     #[test]
     fn routing_reads_the_slot_never_the_label() {
         // The slot arrives in `analyzer_backend` (the offer's block); the id
-        // only names progress lines. Keyless, each slot fails on its own key
-        // before any I/O — and a mismatched label does not reroute.
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved_g = std::env::var("GEMINI_API_KEY").ok();
         let saved_or = std::env::var("OPENROUTER_API_KEY").ok();
@@ -911,10 +788,6 @@ mod tests {
     #[test]
     fn a_worker_with_no_settings_file_runs_the_inductors_model() {
         // The reported outage, in one assertion. A provisioned box has no
-        // `.bm/settings.json` (provisioning never copies `.bm/`), so
-        // `Settings::load` returns the compiled default — whose `analyze_models`
-        // is the literal below. The operator had switched to `-lite`, the box
-        // kept calling the old model, and the only trace was a 503 naming it.
         let remote_box = Settings::default();
         assert_eq!(
             analyze_chain(&remote_box),
@@ -939,7 +812,6 @@ mod tests {
     #[test]
     fn a_pasted_full_endpoint_is_trimmed_to_its_base() {
         // Providers document the full `…/v1/chat/completions` path; the code
-        // appends it, so keeping it would double it.
         assert_eq!(
             normalize_base("https://tokenharbor.ai/v1/chat/completions"),
             "https://tokenharbor.ai/v1"

@@ -1,21 +1,4 @@
 //! What the host gives a script, and what it refuses to give it.
-//!
-//! One network primitive — `fetch` — with the user agent, the timeout, the
-//! pacing and the size cap owned here rather than by the script. That is the
-//! whole sandbox story for the in-process engines: a crawl script gets bytes
-//! and pure functions, **never** the environment, the filesystem or a shell.
-//! `std::env` keys are not reachable from Lua or JavaScript through this ABI at
-//! all, which is why a scripted crawler is a different risk class from a
-//! user-supplied *program* — and why the bundled scripts can ship in a profile
-//! and be rsynced to workers.
-//!
-//! ## Charset
-//!
-//! Novel sites are not all UTF-8, and a GBK page decoded as UTF-8 is not
-//! "slightly wrong" — it is unreadable prose that passes a length guard and
-//! then fails every downstream stage. So the body is decoded deliberately:
-//! the `Content-Type` charset when the server sends one, otherwise UTF-8, and
-//! otherwise the `<meta charset>` in the document head.
 
 use anyhow::{anyhow, Context, Result};
 use reqwest::blocking::Client;
@@ -31,17 +14,12 @@ pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0";
 /// The old `run_crawl` timeout, kept as the default.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
 /// A page larger than this is not a chapter — it is a mis-fetch (a video, an
-/// archive) and reading it into memory helps nobody.
 pub const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
 
 /// What one task may spend. Enforced here, not asked of the script: a budget a
-/// script can raise is not a budget, and an infinite loop in a listing walk
-/// must cost one task rather than a worker.
 #[derive(Debug, Clone)]
 pub struct Limits {
     /// Network round trips per chapter. A listing walk spends several; a
-    /// single-page crawl spends one. The cap is what stops a bug in a `next`
-    /// link loop from walking a site all afternoon.
     pub max_fetches: u32,
     /// Wall-clock budget for the whole chapter, engine time included.
     pub max_seconds: u64,
@@ -68,18 +46,11 @@ impl Default for Limits {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Page {
     /// The HTTP status. **Not** an error when it is not 2xx: 429 and 403 are
-    /// precisely what a script needs to classify as `rate_limit` or
-    /// `login_required`, and an exception would throw that information away.
     pub status: u16,
     /// Where the response came from (after redirects).
     pub url: String,
     pub body: String,
     /// The response headers, names lowercased.
-    ///
-    /// A script gets these because the status alone is not the whole answer:
-    /// `cf-mitigated: challenge` distinguishes a bot check from a plain 403,
-    /// and `content-type` says whether a body is even a page. A check reads the
-    /// first of those, and so can a script.
     #[serde(default)]
     pub headers: std::collections::BTreeMap<String, String>,
 }
@@ -98,24 +69,13 @@ pub struct FetchOptions {
 /// One chapter's host: a client, a budget, and the log the script wrote.
 pub struct Host {
     /// A **blocking** client, because the engines are blocking: a script's
-    /// `fetch` is a synchronous call, and driving it from an interpreter's
-    /// host function means blocking the thread anyway. The provider is
-    /// responsible for calling this from a blocking thread — see
-    /// [`super::provider`].
     client: Client,
     limits: Limits,
     deadline: Instant,
     fetches: u32,
     /// The script's own log lines, surfaced in the ledger so a walk can say
-    /// what it did without a debugger.
     pub log: Vec<String>,
     /// The one directory a script may read a local book from.
-    ///
-    /// Empty means it may read nothing — the default, and what every caller
-    /// that is not crawling a book gets. `fetch` stays the only way out
-    /// otherwise: `io` and `os` are gone from the sandbox, and this is the
-    /// narrow, checked replacement for the one file-shaped thing a crawl
-    /// legitimately needs.
     read_root: PathBuf,
 }
 
@@ -157,10 +117,6 @@ impl Host {
     }
 
     /// The one directory a script may read a local book from.
-    ///
-    /// A builder rather than a constructor argument so every existing caller
-    /// keeps compiling and gets the empty (refuse everything) default: a
-    /// crawler that was not written for a book has no business reading one.
     pub fn with_read_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.read_root = root.into();
         self
@@ -177,7 +133,6 @@ impl Host {
     }
 
     /// Log one line, for the ledger. Capped: a script that logs inside a walk
-    /// loop must not grow the report without bound.
     pub fn note(&mut self, msg: impl Into<String>) {
         if self.log.len() < 64 {
             self.log.push(msg.into());
@@ -185,7 +140,6 @@ impl Host {
     }
 
     /// Whether the chapter's budget is spent. Called by the engine between
-    /// steps and from its own interrupt hook.
     pub fn budget_ok(&self) -> bool {
         Instant::now() < self.deadline
     }
@@ -207,7 +161,6 @@ impl Host {
     }
 
     /// The budget in force, for an error message that names the number rather
-    /// than only the symptom.
     pub fn limits(&self) -> &Limits {
         &self.limits
     }
@@ -258,8 +211,6 @@ impl Host {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
         // Read before the body: `bytes()` consumes the response, and the
-        // headers are what tell a script (and a check) that a 403 was a bot
-        // check rather than a dead link.
         let headers: std::collections::BTreeMap<String, String> = resp
             .headers()
             .iter()
@@ -290,16 +241,6 @@ impl Host {
 }
 
 /// Decode a response body: UTF-8 when the bytes validate, else the declared
-/// charset, else the document's own `<meta charset>`.
-///
-/// **UTF-8 is asked first, and that is not the naive order.** Bytes that are
-/// valid UTF-8 are UTF-8 in practice — a GBK page whose bytes happen to form a
-/// valid UTF-8 sequence does not occur for real text — whereas a mis-declared
-/// header is common (a site serving UTF-8 with a stale
-/// `charset=gb2312`), and believing it first would turn a perfectly readable
-/// chapter into mojibake. Only bytes that *cannot* be UTF-8 are handed to a
-/// declared encoding, and then the header wins over `<meta>` because it is the
-/// transport's own statement.
 pub fn decode_body(bytes: &[u8], content_type: Option<&str>) -> String {
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
@@ -322,9 +263,6 @@ fn charset_of_label(content_type: &str) -> Option<String> {
     let idx = lower.find("charset")?;
     let rest = &content_type[idx + "charset".len()..];
     // Both `<meta charset="gbk">` and `Content-Type: text/html; charset=gbk`
-    // reach here, and so does `charset = "gb2312"` with its spaces. The quote
-    // strip is load-bearing: without it the value read is the opening quote,
-    // the label lookup fails, and the page falls through to lossy UTF-8.
     let rest = rest.trim_start().strip_prefix('=')?.trim_start();
     let rest = rest
         .strip_prefix('"')
@@ -338,9 +276,6 @@ fn charset_of_label(content_type: &str) -> Option<String> {
 }
 
 /// The `<meta charset>` / `<meta content="…charset=…">` declaration of a page.
-///
-/// Read from a lossy-ASCII view of the first 4 KiB: the declaration is ASCII by
-/// definition, and the surrounding bytes may be any encoding at all.
 fn charset_from_meta(bytes: &[u8]) -> Option<String> {
     let head: String = bytes
         .iter()
@@ -357,9 +292,6 @@ mod tests {
     #[test]
     fn a_declared_charset_decodes_bytes_that_are_not_utf8() {
         // Chinese in GBK, which is not valid UTF-8 — the shape that reaches a
-        // length guard as unreadable prose if nothing decodes it. (Vietnamese
-        // would not do here: GBK cannot encode it, and encoding_rs falls back
-        // to numeric character references, which happen to be valid UTF-8.)
         let gbk = encoding_rs::GBK.encode("第一章 试炼").0;
         assert!(std::str::from_utf8(&gbk).is_err());
         assert_eq!(
@@ -367,7 +299,6 @@ mod tests {
             "第一章 试炼"
         );
         // And the same bytes with no header fall back to the document's own
-        // declaration.
         let mut page = b"<html><head><meta charset=\"gbk\"></head><body>".to_vec();
         page.extend_from_slice(&gbk);
         page.extend_from_slice(b"</body></html>");
@@ -380,7 +311,6 @@ mod tests {
         let utf8 = "Chương 34: Bí ẩn".as_bytes();
         assert_eq!(decode_body(utf8, None), "Chương 34: Bí ẩn");
         // A page that says gbk but is really utf8 stays readable: the header is
-        // believed only when the bytes are not already valid UTF-8.
         assert_eq!(
             decode_body(utf8, Some("text/html; charset=gbk")),
             "Chương 34: Bí ẩn"

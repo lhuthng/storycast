@@ -62,25 +62,13 @@ fn is_laugh_word(w: &str) -> bool {
 
 /// Words that are only laughter in repetition: a lone `hô` is the verb "to
 /// shout" (`hô to`, `xưng hô`), and lone `hắc`/`khà` are unobserved. `ha`
-/// alone is always the scoff — it is not a Vietnamese word otherwise.
 fn needs_company(w: &str) -> bool {
     matches!(w, "hô" | "hắc" | "khà")
 }
 
 /// Rewrite written-out non-verbal sounds into the engine's three tags.
-/// `[cười]` for laughter, `[thở dài]` for Haizz, `[hắng giọng]` for coughs.
-/// A tag replaces the literal, never accompanies it; at most one tag is
-/// introduced per text (a second literal run is left for a human — deleting
-/// spoken content silently is worse than a missed tag). Returns `None` when
-/// nothing changes.
-///
-/// Deliberately untouched: Hừ (contempt — no tag fits), Ừm (a spoken
-/// acknowledgment), exclamations (Ồ, Hả, Trời ơi — spoken words), tongue
-/// clicks, and narration verbs. Only what the prompt's rule 7 names.
 pub fn retag_text(text: &str) -> Option<String> {
     // A tag already present: only trim a matching literal run immediately
-    // after it ("[cười] Ha ha ha..." → "[cười]"). Never add a second tag, and
-    // never trim a different kind (`[hắng giọng] Hừ!` keeps its scoff).
     for (tag, kind) in [("[cười]", 0u8), ("[thở dài]", 1u8), ("[hắng giọng]", 2u8)] {
         if let Some(pos) = text.find(tag) {
             let after = pos + tag.len();
@@ -115,7 +103,6 @@ pub fn retag_text(text: &str) -> Option<String> {
                     .is_empty()
                 {
                     // The whole remainder was the laugh (maybe quoted): drop
-                    // it all rather than stranding a dangling quote.
                     out.truncate(after);
                 } else {
                     out.replace_range(after + rs..after + te, "");
@@ -140,8 +127,6 @@ pub fn retag_text(text: &str) -> Option<String> {
     }
     let (start, len, tag) = best?;
     // Trim spaces before the run (one separates the tag from prose, unless
-    // the run opens the text or follows an opening quote), and punctuation
-    // plus spaces after it (the tag carries the tone now).
     let mut from = start;
     while from > 0 && text[..from].ends_with(' ') {
         from -= 1;
@@ -160,7 +145,6 @@ pub fn retag_text(text: &str) -> Option<String> {
             .unwrap_or(1);
     }
     // The consumed trailing space is gone: re-separate when the remainder
-    // starts with a word character (but never before a closing quote).
     let rest = &text[end..];
     let gap = if rest.is_empty() || rest.starts_with(['"', '”', ')', ']', '?']) {
         ""
@@ -184,13 +168,9 @@ enum Sound {
 }
 
 /// Byte length of the sound run starting at `s` (words only, no trailing
-/// punctuation), or `None`. Word boundaries on both sides: `ha` inside
-/// `hai` (number two) or `aha` (eureka) never matches.
 fn match_sound_run(s: &str, kind: Sound) -> Option<usize> {
     if kind == Sound::Sigh {
         // The corpus spells a sigh both as the engine tag's own name and as a
-        // written action with a quantifier. Match the longest form first so
-        // `một hơi rồi` cannot leave a grammatical stub behind.
         for phrase in [
             "thở dài một hơi rồi",
             "thở dài một tiếng",
@@ -308,7 +288,6 @@ fn byte_idx(chars: &[(usize, char)], b: usize, len: usize) -> usize {
 }
 
 /// Earliest `(byte start, byte len)` of a sound run anywhere in `text`,
-/// with a non-alphabetic boundary (or string edge) on both sides.
 fn find_sound_run(text: &str, kind: Sound) -> Option<(usize, usize)> {
     let bytes = text.as_bytes();
     let mut i = 0usize;

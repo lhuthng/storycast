@@ -13,18 +13,10 @@ use ratatui::{
 };
 
 /// `compact` is the tier, not the width: it decides which **columns** exist.
-/// The box name, cpu and ram columns only appear on the full tier, because
-/// the compact column set is measured against `MIN_W` and there is no room for
-/// them there. Height, by contrast, is this pane's content and is settled by
-/// the caller.
 pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &mut App, area: Rect, compact: bool) {
     // Stale beats stay in state for the reaper's accounting but leave the
-    // pane: a dead worker drawn as an idle row is indistinguishable from a
-    // live one, which is exactly the "two hares" confusion.
     let live = live_beats(&app.beats, bm_proto::now_secs());
     // Ghost rows: the box declared them silent (Offline) after their last
-    // beat. They stay out of the pane — a worker row on an ✗ machine is
-    // exactly the contradiction this filter removes.
     let live: Vec<bm_proto::Heartbeat> = live
         .into_iter()
         .filter(|b| beat_backed(&app.machines, b))
@@ -43,10 +35,6 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &mut App, area: Rect, co
     }
 
     // The pane is already sized to its content by `draw`, so this fills it
-    // rather than carving Tasks/Stats out of it. They are siblings in the root
-    // layout now, which is what lets both of them be visible in the compact
-    // tier — they used to be carved out of here, and the carve was skipped
-    // entirely below 100x32.
     let table_area = inner;
     let body = usize::from(table_area.height.saturating_sub(1));
     app.worker_scroll = app.worker_scroll.min(live.len().saturating_sub(body));
@@ -90,41 +78,25 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &mut App, area: Rect, co
                 let stage_style = style_of(colour, stage_color(&st));
                 let stage_line = Line::from(Span::styled(st.clone(), stage_style));
                 // The bar wears the task's own hue, so a cluster mid-render is a
-                // wall of cyan in the progress column too and not only in the
-                // stage name — the column becomes readable at a glance from
-                // across a room. Only the **filled** part is tinted: the track
-                // stays dim, so the bar reads as progress rather than as a
-                // coloured block with a hole in it.
                 let (done, track) = bar_parts(b.progress, 12);
                 let bar_line = Line::from(vec![
                     Span::styled(done, stage_style),
                     Span::styled(track, style_of(colour, Color::DarkGray)),
                     // The number stays plain: it is the part an operator reads
-                    // exactly, and a hue on a figure buys nothing.
                     Span::raw(format!(" {pct:>3}%")),
                 ]);
                 // The worker's own alias when it reports one (drawn once at
-                // startup, kept across restarts); the id hash otherwise, for older
-                // agents whose every restart renamed them.
                 let name = reported_alias(&app.beats, &b.worker_id)
                     .unwrap_or_else(|| worker_alias(&b.worker_id).0)
                     .to_string();
                 let tint = worker_alias(&name).1;
                 let mut cells = vec![Line::from(Span::styled(name, style_of(colour, tint)))];
                 // The registry handle when the box is known (`hawk`, the same
-                // word the provision log used) — the reported OS hostname
-                // otherwise. Never the raw "localhost" fallback alone next to
-                // a known box: one box, one name on every pane.
                 if !compact {
                     cells.push(cell(machine_name(&app.machines, b).to_string()));
                 }
                 cells.extend([stage_line, cell(ch), bar_line]);
                 // Box load from the heartbeat (`5.2%`, `38% 6.1G`) — a dash
-                // while the agent never measured (older agents, first beat).
-                // Full tier only: the compact tier has no room to spare.
-                // The worker-reported ETA column this replaces always showed
-                // a dash (agents never send it); ETA now lives in Stats,
-                // measured TUI-side from completion history.
                 if !compact {
                     cells.extend([
                         cell(
@@ -152,18 +124,11 @@ pub(crate) fn draw_workers(f: &mut ratatui::Frame, app: &mut App, area: Rect, co
         header.extend(["stage", "ch", "progress"]);
         if !compact {
             // Qualified: these are whole-box load (the agent reports
-            // `global_cpu_usage` / used memory), not the task's share — bare
-            // `cpu`/`ram` next to per-task progress read as the render's cost.
-            // A trailing space on `box cpu`: ratatui places each header cell in a
-            // Length column and truncates at its edge with no pad, so the 7-glyph
-            // word in a 7-wide column drew as `box cp`. The column is 8, and the
-            // space keeps the word clear of the edge even where the two abut.
             header.extend(["box cpu ", "box ram"]);
         }
         header.push("activity");
         if compact {
             // From the constant the compile-time guard checks; the activity column
-            // is the one that absorbs any slack on a wider terminal.
             widths.extend(COMPACT_WORKER_COLS[1..].iter().enumerate().map(|(i, w)| {
                 if i == 3 {
                     Constraint::Min(*w)

@@ -17,11 +17,8 @@ use ratatui::{
 use std::collections::BTreeMap;
 
 /// The whole cast in one table: speaker, voice, that voice's metadata, and how
-/// the assignment stands against the policy and the rest of the cast.
 pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) {
     // In the compact tier the overlay takes the whole screen: a 108-wide table
-    // centred in a 76-column terminal loses 32 columns to margins it cannot
-    // spare.
     let compact = size_class(f.area().width, f.area().height) == Size::Compact;
     let area = if compact {
         f.area()
@@ -44,7 +41,6 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
             Constraint::Length(1), // filter
             Constraint::Min(1),    // table
             // The held line gets its own row only when there is one, so the table
-            // keeps its height on a terminal that has none to spare.
             Constraint::Length(if view.line.is_some() { 3 } else { 2 }), // hints
         ])
         .split(inner);
@@ -93,8 +89,6 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
     }
     if unassigned > 0 {
         // The fix travels with the count, in the one line that is about every
-        // row at once. It used to be repeated on each unassigned row, which is
-        // what a column of identical advice is.
         summary.push(Span::styled(
             format!("  ·  {unassigned} unassigned — :v fills gaps"),
             app.style(Color::Yellow),
@@ -113,7 +107,6 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
     }
     if let Some(r) = &app.roster {
         // Only when there is room: on a narrow terminal the provenance would
-        // push the health summary — the reason the screen exists — off the end.
         if !compact {
             summary.push(Span::styled(
                 format!("   [{} · engine {}]", r.source, r.engine),
@@ -128,7 +121,6 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
             Span::styled("filter: ", Style::default().fg(Color::DarkGray)),
             Span::styled(view.filter.clone(), app.style(Color::White)),
             // The cursor shows exactly when typing would land: only while
-            // the filter is focused (in audition focus `t` would play).
             Span::styled(
                 if view.filter_focus { "▌" } else { "" },
                 app.style(Color::Cyan),
@@ -138,7 +130,6 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
     );
 
     // Header + two borders are inside `rows_area[2]`; only what is left can
-    // hold rows.
     if all.is_empty() {
         let msg = if app.roster.is_none() {
             if app.roster_loading {
@@ -165,7 +156,6 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
     } else if body > 0 {
         let colour = app.colour();
         // Pick the column set from the width the table actually gets, not from
-        // the terminal: the overlay has its own borders to pay for.
         let table_w = rows_area[2].width.saturating_sub(2);
         let wide = table_w >= cols(&CAST_COLS_WIDE);
         let speaker_w = if wide {
@@ -179,7 +169,6 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
             CAST_COLS_NARROW[1]
         } as usize;
         // The count is padded to the column's own width, not the slack the
-        // table gives it, so it sits against the voice it counts for.
         let shared_w = if wide {
             CAST_COLS_WIDE[2]
         } else {
@@ -217,18 +206,12 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
                 ))];
                 cells.push(Line::from(voice_cells));
                 // The last column is a number and nothing else: how many
-                // *other* speakers are on this voice. It was a status column
-                // once, and a fourth of its width was spent on `unknown` and
-                // `vi-VN` — the two values every row had.
                 cells.push(Line::from(Span::styled(
                     format!("{:<width$}", r.shared_with.len(), width = shared_w),
                     style_of(
                         colour,
                         match r.verdict() {
                             // A blocked or unknown voice stays red or yellow
-                            // in the one place the table still has room for it;
-                            // the prose for it was the same three words on
-                            // every row that had it.
                             Verdict::Unknown => Color::Red,
                             _ if r.shared() => Color::Yellow,
                             _ => Color::DarkGray,
@@ -249,8 +232,6 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
             "Cast".to_string()
         };
         // The count is the flexible one, so the table fills whatever the
-        // overlay got instead of stranding three short columns in the middle
-        // of it.
         let mut header = vec!["speaker", "voice"];
         let mut widths: Vec<Constraint> = vec![
             Constraint::Length(CAST_COLS_NARROW[0]),
@@ -303,7 +284,6 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
         ]
     };
     // A random line is random until you are told which one it is. Say it, or the
-    // operator is comparing two voices on a sentence they cannot see.
     if let Some(l) = &view.line {
         hints.push(Line::from(vec![
             Span::styled(

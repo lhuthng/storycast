@@ -12,7 +12,6 @@ fn the_log_pane_has_one_title_aliases_and_local_time() {
     assert!(text.contains("Logs"), "pane renamed:\n{text}");
     assert!(!text.contains("Events"), "no stale title anywhere:\n{text}");
     // Address heads are box-level lines: shown as written, never hashed
-    // into a phantom worker name.
     assert!(
         text.contains("[192.168.2.2]"),
         "machine line verbatim:\n{text}"
@@ -36,7 +35,6 @@ async fn paging_up_past_the_log_stops_at_the_buffers_own_top() {
         app.log_at(Level::Info, format!("line {i}"));
     }
     // A page is a page: the draw publishes the pane height, so the test pins
-    // it to 4 and the walk is in screenfuls, not an arbitrary 5.
     app.events_rows = 4;
 
     // One page back is 4 lines; a page and a half lands on 4's second press…
@@ -55,7 +53,6 @@ async fn paging_up_past_the_log_stops_at_the_buffers_own_top() {
     );
 
     // Far more pages than lines: the buffer's own top is a real edge, not a
-    // number that runs to a thousand.
     for _ in 0..50 {
         handle_key(&mut app, key(KeyCode::PageUp), &http, &job_tx).await;
     }
@@ -74,8 +71,6 @@ async fn paging_up_past_the_log_stops_at_the_buffers_own_top() {
 #[test]
 fn a_new_line_holds_the_reading_position_instead_of_shoving_it() {
     // The scroll offset is a distance from the live tail, so an arriving line
-    // grows that distance and the line under the operator's eyes stays put.
-    // Pinned to newest, the tail simply follows.
     let mut app = App::new("http://x");
     for i in 0..10 {
         app.log_at(Level::Info, format!("line {i}"));
@@ -102,8 +97,6 @@ fn a_new_line_holds_the_reading_position_instead_of_shoving_it() {
 #[test]
 fn log_lines_use_reported_aliases_when_beats_carry_them() {
     // The mismatch: the Workers pane said `marmot` while the log line
-    // said `[hare] [thang-29486]`, the log hashed the raw id instead of
-    // asking the beats.
     let mut app = App::new("http://127.0.0.1:8901");
     app.beats = vec![beat("thang-29486", "192.168.2.2", 2, "marmot")];
     app.log_at(Level::Info, "[thang-29486] heartbeat slow");
@@ -113,8 +106,6 @@ fn log_lines_use_reported_aliases_when_beats_carry_them() {
         "the reported alias wins:\n{text}"
     );
     // ...but an id no beat knows stays itself. Hashing it once minted
-    // `[hawk]` for the address `192.168.2.2`, a worker that never
-    // existed, hunted across every pane.
     app.log_at(Level::Ok, "[ghost-1] render:24 done");
     let text = render_text(&mut app, 140, 44);
     assert!(
@@ -192,8 +183,6 @@ fn task_lines_render_compact_with_their_own_colors() {
 #[test]
 fn an_address_head_never_becomes_a_phantom_worker() {
     // The exact confusion: provision lines are tagged with the box
-    // address while its worker beats as `thang-marmot`. The log must
-    // show the address, not hash it into a third name.
     let mut app = App::new("http://127.0.0.1:8901");
     app.beats = vec![beat("thang-marmot", "192.168.2.2", 2, "marmot")];
     app.log_at(
@@ -231,7 +220,6 @@ fn the_size_guard_replaces_the_dashboard_below_the_floor() {
 fn the_size_guard_does_not_panic_on_a_degenerate_area() {
     let mut app = App::new("http://127.0.0.1:8901");
     // Only the first has room for the full notice; the slivers must simply
-    // not panic, and must never leak a clipped dashboard.
     for (w, h) in [(60u16, 16u16), (1, 1), (0, 0), (200, 3), (3, 200)] {
         let text = render_text(&mut app, w, h);
         assert!(
@@ -292,9 +280,6 @@ fn an_empty_cluster_says_what_to_do_in_every_tier() {
 #[test]
 fn workers_pane_hides_stale_beats_and_shows_reported_aliases() {
     // The "two hares": a dead worker rendered as an idle row next to the
-    // live one. Only fresh beats may draw; the name shown is the worker's
-    // own (kept across restarts), with the id hash as fallback for older
-    // agents that report none.
     let mut app = App::new("http://127.0.0.1:8901");
     app.beats = vec![
         beat("thang-1", "192.168.2.2", 2, "quokka"),
@@ -340,7 +325,6 @@ fn workers_pane_hides_ghosts_of_offline_boxes() {
     let ghost = beat("thang-marmot", "192.168.2.2", 30, "marmot");
     assert!(!beat_backed(&[m.clone()], &ghost));
     // A beat newer than the verdict still counts, one slow poll flickers
-    // the dot without deleting the row.
     m.state_since = m.state_since.saturating_sub(100);
     let fresh = beat("thang-marmot", "192.168.2.2", 2, "marmot");
     assert!(beat_backed(&[m.clone()], &fresh));
@@ -357,7 +341,6 @@ fn workers_pane_hides_ghosts_of_offline_boxes() {
     app.beats = vec![beat("thang-marmot", "192.168.2.2", 30, "marmot")];
     let text = render_text(&mut app, 140, 44);
     // The Workers block only (Stats keeps per-worker history rows, which
-    // legitimately still name the box).
     let workers = text
         .split_once("Workers ·")
         .and_then(|(_, rest)| rest.split_once("╭"))
@@ -454,7 +437,6 @@ fn task_eta_scales_history_by_the_unworked_fraction() {
 #[test]
 fn machines_pane_shows_each_boxs_sidecar_threads_instead_of_the_worker_count() {
     // The column carries `eff/cores`: the `:threads` override (else the
-    // sidecar default) over the beat's cores, `?` where either is unknown.
     let mut app = App::new("http://127.0.0.1:8901");
     let mut local = Machine::new("127.0.0.1", "local", 22, None, "worker");
     local.tts_threads = None;
@@ -620,10 +602,6 @@ fn the_cast_overview_renders_every_speaker_and_flags_shared_voices() {
         "Mới:\n{text}"
     );
     // The table is three columns now: a speaker, its voice, and how many
-    // *other* speakers share it. `gender` and `accent` were a third of the
-    // width repeating `unknown`, and the prose status was four words that said
-    // the same thing on every row that had anything to say — the verdict is
-    // the count's colour and the summary's `1 to fix` above.
     assert!(text.contains("shared"), "the column is named:\n{text}");
     for gone in [
         "accent policy concern",
@@ -637,7 +615,6 @@ fn the_cast_overview_renders_every_speaker_and_flags_shared_voices() {
         );
     }
     // Kiên and Vũ share Adam, so both of their rows count one other — the
-    // number the old `shared with 1 other` was spelling out in six columns.
     let shared_rows: Vec<&str> = text
         .lines()
         .filter(|l| l.contains("Adam"))

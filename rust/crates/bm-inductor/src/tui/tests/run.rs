@@ -7,8 +7,6 @@ async fn run_screen_enters_and_launches_with_previewed_values() {
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
     // `e` opens the config editor prefilled from the preview. The retired
-    // `opencode` value maps to no slot, so the line spells the range only —
-    // and saving it keeps the current analyzer rather than writing a dead one.
     let mut app = App::new("http://x");
     app.settings = Some(serde_json::json!({
         "start": 1, "count": 1, "analyzer": "opencode", "engine": "vieneu",
@@ -49,7 +47,6 @@ async fn run_screen_enters_and_launches_with_previewed_values() {
     }
 
     // A second `:B` while the first sequence runs dispatches nothing;
-    // `StartDone` re-arms it.
     assert!(app.backend_start_outstanding, "B marks the start in flight");
     app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "B"));
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
@@ -60,10 +57,6 @@ async fn run_screen_enters_and_launches_with_previewed_values() {
     app.apply(Ev::Done(DoneKind::StartDone));
     assert!(!app.backend_start_outstanding, "StartDone re-arms B");
     // …but the cancel flag outlives it. `StartDone` used to be the end of the
-    // catch-up; it is now the moment the catch-up *starts*, and the boxes it
-    // handed out are still provisioning. Clearing the flag here would leave `X`
-    // with nothing to set, and a provision mid-push would launch its worker
-    // anyway, a cluster that is not quiet after a stop.
     assert!(
         app.start_cancel.is_some(),
         "the catch-up outlives the start job that made it"
@@ -78,9 +71,6 @@ async fn run_screen_enters_and_launches_with_previewed_values() {
 #[test]
 fn the_start_guard_outlives_the_start_job() {
     // `B` now ends in seconds and hands its boxes to the scheduler. If the guard
-    // were released then, a second `B` a moment later would be allowed and would
-    // queue a duplicate push at every box, exactly the queueing this change
-    // exists to remove. So the flag follows the catch-up, not the start job.
     let mut app = App::new("http://unused");
     app.catchup_jobs = vec![7, 8];
     app.backend_start_outstanding = true;
@@ -112,10 +102,6 @@ fn the_start_guard_outlives_the_start_job() {
 #[test]
 fn cold_start_catches_up_every_box_despite_stale_online_states() {
     // `:X`, restart, `:B`: the machine list is the last live poll's, states
-    // frozen `Online` (`state_failed` keeps the rows), inductor down. The
-    // old skip trusted those states and provisioned nothing, the backend
-    // came up with no workers and only a second `:B` (fresh states, Offline)
-    // brought the boxes.
     use super::super::jobs::split_catchup;
     let stale = || {
         let mut lo = Machine::new("127.0.0.1", "me", 22, None, "worker");
@@ -128,7 +114,6 @@ fn cold_start_catches_up_every_box_despite_stale_online_states() {
     assert_eq!(todo.len(), 2, "cold start provisions everything");
     assert!(online.is_empty(), "nothing is known-online while down");
     // ...and a warm `B` keeps the skip: re-provisioning a beating box is
-    // why `B` on a healthy cluster took minutes.
     let (todo, online) = split_catchup(stale(), true, &|_| None);
     assert!(todo.is_empty(), "nothing to catch up while healthy");
     assert_eq!(online.len(), 2);
@@ -137,11 +122,6 @@ fn cold_start_catches_up_every_box_despite_stale_online_states() {
 #[tokio::test]
 async fn machine_state_falls_back_to_the_workspace_ledger_while_down() {
     // Nothing answers on port 9 (discard): the API post fails fast and
-    // the ledger patch carries the phase instead.
-    //
-    // With a workspace selected the *book's* ledger is the live one. Patching
-    // `<root>/.bm/ledger.json`, which is what a root-only layout did, wrote
-    // a file no scheduler reads, so the phase silently never appeared.
     let d = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(d.path().join(".bm")).unwrap();
     std::fs::create_dir_all(d.path().join("workspaces/beyond-myriads")).unwrap();
@@ -175,13 +155,6 @@ async fn machine_state_falls_back_to_the_workspace_ledger_while_down() {
 #[test]
 fn machine_targets_fall_back_to_the_workspace_ledger_file() {
     // The trap: fresh TUI + dead inductor leaves app.machines empty, and
-    // B used to default to local-only, silently dropping remotes. The
-    // registry file (addr + ssh credentials) stands in instead.
-    //
-    // With a workspace selected that file is the *workspace's* ledger: reading
-    // `<root>/.bm/ledger.json` found nothing, so the fallback quietly returned
-    // local-only and the remotes were dropped again, the same bug, one layer
-    // down.
     let d = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(d.path().join(".bm")).unwrap();
     std::fs::create_dir_all(d.path().join("workspaces/beyond-myriads")).unwrap();
@@ -239,7 +212,6 @@ fn the_run_screen_renders_without_a_roster_or_backend() {
 #[test]
 fn the_run_screen_shows_each_machines_work_split() {
     // Before launching, the operator can see where the work will land: each
-    // box's handle, its kind, and the stage order it will be offered.
     let mut app = App::new("http://127.0.0.1:8901");
     let mut aws = named_machine("52.2.2.2", "box-1");
     aws.note = "EC2 i-0123456789abcdef0 (running)".into();
@@ -287,17 +259,6 @@ fn the_run_screen_shows_each_machines_work_split() {
 #[test]
 fn a_cold_start_names_the_fix_instead_of_reqwest_prose() {
     // The complaint this answers: starting the TUI with no inductor up
-    // logged `inductor unreachable at …: error sending request for url …`
-    // as an ERROR. A refused connection is the normal cold start, so the
-    // poll verdict names `:B` and fits on one line.
-    //
-    // Asserted on the **verdict** rather than through a socket. The socket
-    // version bound an ephemeral port, dropped the listener, and then hoped no
-    // other test was handed that port in between, a race with a real window
-    // that failed once in six full-suite runs and passed 3/3 in isolation. The
-    // trade: reqwest's own classification (`ECONNREFUSED` ⇒ `is_connect`) is no
-    // longer exercised here. That is reqwest's contract rather than this repo's
-    // logic, and it is now the single `refused` argument below.
     let api = "http://127.0.0.1:8901";
 
     let down = unreachable_verdict(api, true, "error sending request for url (http://…)");
@@ -310,8 +271,6 @@ fn a_cold_start_names_the_fix_instead_of_reqwest_prose() {
     );
 
     // Anything that is *not* a refusal keeps the detail: a timeout or a reset
-    // may be a sick inductor rather than an absent one, and telling those two
-    // apart is the whole reason the branches exist.
     let sick = unreachable_verdict(api, false, "operation timed out");
     assert!(sick.contains("unreachable"), "{sick}");
     assert!(

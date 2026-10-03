@@ -2,8 +2,6 @@
 use crate::tui::{
     app::{App, HitTarget, ListTarget},
     // Aliased to the **view's** constant rather than declared here: the arrow
-    // keys navigate by `screen::DIGEST_COLS`, so a draw that picked its own width
-    // would lay the numbers out in rows the keys do not believe in.
     screen::{DigestView, DIGEST_COLS as COLS},
     style::centered,
 };
@@ -14,20 +12,12 @@ use ratatui::{
 };
 
 /// The overlay's own width, named so the draw and the column maths cannot drift
-/// apart — the numbers are laid out in a grid whose row width has to fit inside
-/// this, and a grid wider than `WIDTH - 4` would silently lose its last column.
 const WIDTH: u16 = 76;
 /// One grid cell: the number, right-aligned, plus the gap after it.
 const CELL: usize = 6;
 const _: () = assert!(COLS * CELL <= (WIDTH as usize) - 4);
 
 /// How tall the overlay is, per mode.
-///
-/// **The list grows with the terminal.** A 200-chapter book is seventeen grid
-/// rows and a fixed box scrolled for no reason; leaving two lines behind keeps the
-/// panes visible so the operator still knows where they are. The chapter page
-/// keeps a modest box — it shows one round and one note, and more room buys
-/// nothing.
 fn overlay_height(area: ratatui::layout::Rect, open: bool) -> u16 {
     if open {
         return 18.min(area.height);
@@ -51,9 +41,6 @@ pub(crate) fn draw_digest(f: &mut ratatui::Frame, app: &mut App, v: &DigestView)
     }
     let dim = Style::default().fg(Color::DarkGray);
     // "Digested" is asked of the layout — the same `Layout::digested` the keys
-    // and the filter use, because the cursor indexes the filtered rows and a
-    // predicate that answered differently here would highlight one chapter while
-    // acting on another.
     let digested = |n: u32| app.layout.digested(n);
 
     let mut lines: Vec<Line> = Vec::new();
@@ -81,8 +68,6 @@ pub(crate) fn draw_digest(f: &mut ratatui::Frame, app: &mut App, v: &DigestView)
                     }),
             )
             // Wrapping, so a long validator complaint is readable rather than
-            // clipped — the complaint *is* the instruction, and half of one is
-            // worse than none.
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -96,15 +81,9 @@ fn draw_list(
     height: u16,
 ) {
     // The overlay's two borders, plus the chrome inside it — two hint lines, two
-    // blanks and the footer. What is left is the grid.
     let rows_visible = (height as usize).saturating_sub(7).max(1);
     let rows = v.rows(digested);
     // **These must not wrap.** The overlay's height is computed from a *count* of
-    // chrome lines while the paragraph wraps, so a hint one character too wide
-    // costs a line the height never budgeted for — and what falls off the bottom is
-    // the footer, which is the line that names the selected chapter. The same trap
-    // as the confirm dialog's body. The test that catches it asserts the footer is
-    // *visible*, which is the invariant worth holding.
     lines.push(Line::from(Span::styled(
         "  ←→ chapter · ↑↓ row · Enter open · f filter · Esc close",
         dim,
@@ -122,14 +101,6 @@ fn draw_list(
         return;
     }
     // A grid of numbers, not a table: the operator is looking for a chapter they
-    // already have in mind, and twelve short numbers a line is the densest way to
-    // show a book.
-    //
-    // **The window is derived from the cursor, never remembered.** That is the fix
-    // for "move down past the last row and you cannot see the selection": a stored
-    // scroll offset is one more thing that can disagree with the cursor, and the
-    // only thing it would buy is the ability to scroll the selection off screen.
-    // Deriving it means the selection is visible *by construction*.
     let total_rows = rows.len().div_ceil(COLS);
     let cursor_row = v.cursor / COLS;
     let first_row = cursor_row.saturating_sub(rows_visible.saturating_sub(1));
@@ -147,7 +118,6 @@ fn draw_list(
                     .add_modifier(Modifier::BOLD)
             } else if done {
                 // Dimmed rather than hidden: the filter is opt-in, and seeing what
-                // you are filtering out is how you decide to filter it.
                 dim.add_modifier(Modifier::DIM)
             } else {
                 Style::default()
@@ -165,8 +135,6 @@ fn draw_list(
         format!("{total} chapters")
     };
     // **Say where the selection is.** With a window, the number alone does not tell
-    // the operator where in the book they are — and the one thing they must never
-    // have to guess is which chapter they are about to digest.
     lines.push(Line::from(Span::styled(
         format!(
             "  {counts} · rows {}-{last_row} of {total_rows} · {} selected",
@@ -206,8 +174,6 @@ fn draw_chapter(
     ]));
     lines.push(Line::from(""));
     // What just happened. On a failed paste this is the validator's own words,
-    // which is the whole instruction: paste it back into the model and ask for a
-    // correction.
     let note_style = if ch.done {
         app.style(Color::Green)
     } else if ch.note.contains("failed")
@@ -224,8 +190,6 @@ fn draw_chapter(
     }
     lines.push(Line::from(""));
     // The prompt is tens of kilobytes; the point of showing anything is to let
-    // the operator confirm the *right* prompt is on the clipboard, so show its
-    // opening line and its size rather than a truncated wall of it.
     let first = ch
         .prompt
         .lines()

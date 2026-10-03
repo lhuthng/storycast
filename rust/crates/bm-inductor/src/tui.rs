@@ -1,16 +1,4 @@
 //! Live cluster dashboard: machines, workers, tasks, events.
-//!
-//! The TUI owns no state beyond the screen. It reads `/api/state` and
-//! `/api/roster`, and every operator key pushes a command onto a channel that a
-//! background task executes — so provisioning, roster fetches and voice
-//! previews never freeze the interface.
-//!
-//! Two rules hold throughout:
-//!
-//! * **No silent defaults.** Every prompt is prefilled with the value actually
-//!   in force, and every argument is echoed before it is submitted.
-//! * **No blank panes.** Each pane renders an explicit empty, loading or error
-//!   state that says what to do next.
 
 pub(crate) mod app;
 pub(crate) mod audio;
@@ -59,13 +47,9 @@ pub async fn run(api: &str, layout: Layout) -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     // Enable capture through the initialized backend. Some terminals flush
-    // the alternate-screen transition separately from the mouse mode, so
-    // combining both commands before constructing the backend can leave the
-    // app in raw mode without receiving mouse events.
     execute!(terminal.backend_mut(), EnableMouseCapture)?;
     let result = run_loop(api, layout, &mut terminal).await;
     // Always restore the terminal, even when the loop returned an error —
-    // otherwise a crash leaves the operator in raw mode with no cursor.
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -84,15 +68,10 @@ async fn run_loop(
     let mut app = App::new(api);
     app.layout = layout;
     // Read once here, not per frame: the footer shows it, and the footer is
-    // redrawn on every keystroke.
     app.profile = bm_core::profile::in_force(&app.layout).ok();
     app.http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         // The inductor is a LAN service — loopback for a solo run, a private
-        // address for a cluster. A configured `HTTP_PROXY` would otherwise
-        // intercept every poll and answer with its own body, which surfaces as
-        // "bad state payload" and a dashboard that never connects. Same
-        // reasoning as `api::sidecar_client`.
         .no_proxy()
         .build()?;
     let http = app.http.clone();
@@ -102,17 +81,9 @@ async fn run_loop(
     tokio::spawn(run_jobs(job_rx, tx.clone()));
 
     // Redraw gate: an idle dashboard has nothing new to draw. Redraw on
-    // delivered events, on key or mouse input, and on a one-second heartbeat
-    // so ages and other time-relative labels stay honest. Everything between
-    // (a silent loop with an empty channel) just waits on the input poll
-    // instead of repainting the same frame at the poll rate.
     let mut last_draw = std::time::Instant::now();
 
     // State poller: `/api/state` is fetched off the UI task and delivered over
-    // the same channel as everything else. Polling inline used to freeze the
-    // whole interface for as long as the request took — up to the client's 15s
-    // timeout on a stalled network — with no repaint and no key handling in
-    // between. Now a slow inductor just means the events pane goes quiet.
     let poll_http = http.clone();
     let poll_api = app.api.clone();
     let poll_tx = tx.clone();
@@ -121,7 +92,6 @@ async fn run_loop(
         loop {
             ticker.tick().await;
             // The first tick fires immediately, so the dashboard fills without
-            // waiting for a full period.
             if poll_tx
                 .send(Ev::State(fetch_state(&poll_http, &poll_api).await))
                 .is_err()
@@ -132,19 +102,14 @@ async fn run_loop(
     });
 
     // One blocking fetch before the first draw, so the opening frame shows the
-    // cluster rather than an empty shell. Failures are already tolerated.
     app.refresh(&http).await;
     loop {
         let mut dirty = last_draw.elapsed() >= Duration::from_secs(1);
         while let Ok(ev) = rx.try_recv() {
             dirty = true;
             // A finished add-sample refreshes a showing roster, so the new
-            // voice is in the picker without a manual R. Read before `apply`
-            // moves the event.
             let reload_roster = matches!(ev, Ev::Done(DoneKind::ReloadRoster));
             // A workspace switch or profile load moved the tree under us:
-            // re-resolve before the next frame, or the panes keep showing
-            // the book we just left.
             let relayout = matches!(ev, Ev::Done(DoneKind::Relayout));
             app.apply(ev);
             if reload_roster && app.roster.is_some() {
@@ -163,7 +128,6 @@ async fn run_loop(
                     }
                 }
                 // Terminals that report key release would otherwise fire every
-                // binding twice.
                 Event::Key(key)
                     if key.kind == KeyEventKind::Press
                         && handle_key(&mut app, key, &http, &job_tx).await == Flow::Quit =>
@@ -174,9 +138,6 @@ async fn run_loop(
             }
         }
         // The key handler cannot reach the terminal, so `m` leaves its intent on
-        // the App and the loop — the one place holding the terminal — carries
-        // it out. Cleared unconditionally, including on the failing path, so a
-        // refused toggle cannot be retried for ever.
         if std::mem::take(&mut app.mouse_toggle) {
             let r = if app.mouse_capture {
                 execute!(terminal.backend_mut(), EnableMouseCapture)
@@ -184,21 +145,15 @@ async fn run_loop(
                 execute!(terminal.backend_mut(), DisableMouseCapture)
             };
             // A terminal that refuses the mode change is not a reason to kill a
-            // running dashboard; the status line already said what was asked.
             if let Err(e) = r {
                 app.set_status(Level::Warn, format!("mouse mode unchanged: {e}"));
             }
         }
         app.tick += 1;
         // A `B` start left boxes to catch up. One job each, deliberately: the
-        // start job ends the moment the inductor answers, and every box that
-        // still needs work gets its own row and its own box resource, so they
-        // provision at the same time instead of queueing behind one job that
-        // holds the cluster for the whole catch-up.
         if let Some((machines, cancel)) = app.pending_catchup.take() {
             let settings_key = app.ssh_defaults().key;
             // Read once, before the loop: `dispatch` needs `&mut app`, so the
-            // pieces of the job cannot be borrowed out of it in the call.
             let (layout, api) = (app.layout.clone(), app.api.clone());
             for machine in machines {
                 if dispatch(
@@ -214,36 +169,21 @@ async fn run_loop(
                     },
                 ) {
                     // `dispatch` sets `next_job_id` to the id it just handed
-                    // out, which is the only way to name the job afterwards.
                     app.catchup_jobs.push(app.next_job_id);
                 }
             }
             // The start sequence is not over: those boxes are still joining.
-            // Holding the flag until the last one finishes is what keeps a
-            // second `B` from queueing a duplicate push at every box.
             if !app.catchup_jobs.is_empty() {
                 app.backend_start_outstanding = true;
             }
         }
         // A launched box whose address just arrived onboards itself.
-        //
-        // This is what `:up 3` was missing: `RunInstances` returns before the
-        // instance has an address, the address arrives asynchronously, and
-        // nothing else notices — so a fresh pool used to sit there dialable by
-        // nobody until an operator ran `:relink` and then `:prov` on each box.
-        // The account watch relinks it; this hands it to the same provision job
-        // `:prov` uses, so it is tracked, cancellable and visible in the jobs
-        // screen rather than a special path nobody can see into.
         if !app.pending_onboard.is_empty() {
             let machines = std::mem::take(&mut app.pending_onboard);
             let settings_key = app.ssh_defaults().key;
             let (layout, api) = (app.layout.clone(), app.api.clone());
             for machine in machines {
                 // Recorded before the dispatch, not after: the point of the set
-                // is to survive the next poll, and the poll can arrive between
-                // a successful `dispatch` and this line only if the await
-                // below yields — which it does not, but the ordering costs
-                // nothing and the intent is clearer.
                 app.onboarded.insert(machine.addr.clone());
                 app.set_status(
                     Level::Info,
@@ -264,7 +204,6 @@ async fn run_loop(
             }
         }
         // A `B` start asked for work: fire it once the poller reports the
-        // inductor is up, and only then.
         if app.conn == Conn::Up {
             if let Some((start, count)) = app.pending_enqueue.take() {
                 dispatch_op(
@@ -290,15 +229,10 @@ async fn run_loop(
 }
 
 /// One plain-text snapshot of the cluster, then exit.
-///
-/// The TUI needs an alternate screen, colour and a keyboard, which rules it out
-/// for screen readers, `watch`, CI and shell pipelines. This is the accessible
-/// and scriptable view of exactly the same data.
 pub async fn snapshot(api: &str) -> anyhow::Result<()> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         // Same as the dashboard's client above: the inductor is on loopback or
-        // the LAN, and an ambient `HTTP_PROXY` would answer in its place.
         .no_proxy()
         .build()?;
     let base = api.trim_end_matches('/');

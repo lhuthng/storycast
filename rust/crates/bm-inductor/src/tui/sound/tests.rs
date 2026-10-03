@@ -13,18 +13,11 @@ fn sound(files: &[&str], tags: &[&str]) -> Sound {
 }
 
 /// A checkout with the shipped assets copied in, so `check_files` and
-/// `load` see the real registries without ever writing to the repo.
-///
-/// A `TempDir` rather than a named directory under the system temp root:
-/// twelve of these per run, and a named one is litter the next run has to
-/// remember to clear. The guard comes back with the path, so the caller has
-/// to hold it — dropping it deletes the tree mid-test.
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().to_path_buf();
     bm_core::profile::install_fixture(&dir).expect("fixture profile");
     // Placeholder clips: the editor probes takes for length, so every
-    // listed take exists as an (empty) file without shipping audio.
     for kind in PoolKind::ALL {
         let pool = bm_core::audio_pool::load_pool(&dir.join("assets").join(kind.registry()));
         for sound in pool.values() {
@@ -71,7 +64,6 @@ fn an_entry_nothing_reaches_is_removable_and_one_the_map_reaches_is_not() {
 }
 
 /// The two layers' usage comes from different files and must not be
-/// swapped: a palette value is not a scene rule.
 #[test]
 fn the_music_layer_reads_the_palette_not_the_rules() {
     let (_d, dir) = fixture();
@@ -87,7 +79,6 @@ fn the_music_layer_reads_the_palette_not_the_rules() {
 }
 
 /// A script that places a sound is what makes an inject unremovable, and
-/// the reason names the chapter so the operator can go and look.
 #[test]
 fn a_script_placing_an_inject_is_what_makes_it_unremovable() {
     let (_d, dir) = fixture();
@@ -113,7 +104,6 @@ fn a_script_placing_an_inject_is_what_makes_it_unremovable() {
 }
 
 /// A registry naming a clip that is not there is the failure the merge only
-/// warns about; the screen says it up front.
 #[test]
 fn a_registry_naming_a_missing_clip_is_flagged() {
     let (_d, dir) = fixture();
@@ -144,8 +134,6 @@ fn an_entry_round_trips_through_the_prompt_line() {
             tags: vec!["a".into(), "b".into()],
             files: vec![format!("{}/x-1.mp3", layer.dir())],
             // The music layer has no `looped` flag at all — it always loops
-            // — so a music entry is written with the layer's own default.
-            // The other two carry a one-shot, which has to survive the trip.
             looped: layer == PoolKind::Music,
             dur_s: (layer == PoolKind::Inject).then_some(1.5),
             mode: (layer == PoolKind::Inject).then(|| "trail".into()),
@@ -180,8 +168,6 @@ fn the_prompt_refuses_what_the_mix_would_read_as_something_else() {
 }
 
 /// The name is the pool's key: a script names an inject by it, and a pick
-/// is seeded from it. A rename in place would be a different sound wearing
-/// the old one's references.
 #[test]
 fn renaming_in_place_is_refused_and_keeping_the_name_is_not() {
     let same = parse_entry(
@@ -234,12 +220,6 @@ fn the_music_layer_has_no_looped_flag_and_the_inject_layer_has_a_mode() {
 }
 
 /// A bed does not play at the level its entry carries — the mode takes a
-/// tenth (`InjectMode::gain`), and `render_gain` is what the detail line
-/// under the table says so with.
-///
-/// Both halves are asserted, because the second is a layout decision that is
-/// invisible until someone folds the two back together: `shape` is a
-/// 23-column cell and must not carry the factor.
 #[test]
 fn a_bed_renders_at_a_tenth_and_the_table_cell_does_not_say_so() {
     let row = |mode: Option<&str>, level: Option<f64>| SoundRow {
@@ -260,7 +240,6 @@ fn a_bed_renders_at_a_tenth_and_the_table_cell_does_not_say_so() {
     // No `mode` at all is the mixer's `hit` default: nothing to say.
     assert_eq!(row(None, Some(1.0)).render_gain(), None);
     // And the table cell stays exactly as wide as it was: this is 21 of its
-    // 23 columns, so there is no room for a factor in it.
     assert_eq!(
         row(Some("overlap"), Some(0.8)).shape(PoolKind::Inject),
         "overlap · loops · 51s"
@@ -277,8 +256,6 @@ fn a_level_prompt_accepts_a_number_and_clears_on_empty() {
 }
 
 /// The clip has to exist and to live in the layer's own directory — a
-/// registry line that points at another layer's clips is a category error
-/// that would survive forever.
 #[test]
 fn a_clip_must_exist_and_live_in_its_own_layers_directory() {
     let (_d, dir) = fixture();
@@ -300,9 +277,6 @@ fn a_clip_must_exist_and_live_in_its_own_layers_directory() {
 }
 
 /// Only what an edit *adds* is checked, so an entry whose clip has gone
-/// missing stays editable — it is already flagged in red, and refusing a
-/// tag change because somebody moved a file is how an entry becomes
-/// unfixable from the screen.
 #[test]
 fn an_edit_is_checked_on_what_it_introduces_not_on_what_was_already_there() {
     let (_d, dir) = fixture();
@@ -345,7 +319,6 @@ fn an_edit_is_checked_on_what_it_introduces_not_on_what_was_already_there() {
 }
 
 /// The write path end to end: add, save, reload — and the guard is read off
-/// the reloaded data, so the screen and the file cannot disagree.
 #[test]
 fn a_saved_pool_reloads_with_the_same_rows() {
     let (_d, dir) = fixture();
@@ -371,7 +344,6 @@ fn a_saved_pool_reloads_with_the_same_rows() {
 }
 
 /// `dur_s` is a fact about the clip, so it is probed, not typed. The fixture
-/// clips are the real ones, so this either reads a duration or says so.
 #[test]
 fn the_longest_take_is_probed_rather_than_guessed() {
     let (_d, dir) = fixture();
@@ -409,7 +381,6 @@ fn the_header_shows_the_layers_own_master_knob() {
 }
 
 /// Every layer's own field list is what the parser accepts — the hint, the
-/// refusal message and the parser are one list, not three.
 #[test]
 fn the_field_list_is_the_parser_and_the_hint() {
     for layer in PoolKind::ALL {

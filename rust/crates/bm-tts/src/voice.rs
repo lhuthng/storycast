@@ -1,17 +1,4 @@
 //! The preset voice roster.
-//!
-//! `vieneu/assets/voices_v3_turbo.json` ships 58 preset voices, and each carries
-//! its **speaker embedding and reference codes precomputed** — so a preset needs
-//! no enrollment at all. No fbank, no speaker encoder, no codec encode: read two
-//! arrays and generate.
-//!
-//! Only *cloned* voices, built from a reference wav at provisioning time, need
-//! the encoder path. That is a much smaller problem than it looks from the
-//! reference's API, where both arrive through the same `_resolve_ref`.
-//!
-//! The store is the single source of truth for the roster. `list_preset_voices`
-//! in the reference derives its labels from this file too, so the names here are
-//! the same strings `/voices` and the inductor's cast editor already use.
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -91,14 +78,6 @@ impl Roster {
     }
 
     /// Resolve a requested voice. Exact match first, then a
-    /// case/diacritic/separator-insensitive one (so a key like `minh-duc`
-    /// meets its display name `Minh Đức`).
-    ///
-    /// A named-but-unknown voice is an error, never a fallback: answering
-    /// with the default voice bakes the wrong speaker into renders and
-    /// previews that sound right-length and right-quality, so nobody notices
-    /// until the merge is mixed. Only "no voice asked" (`None`/empty) takes
-    /// the store default.
     pub fn resolve(&self, name: Option<&str>) -> Result<&Voice> {
         let want = name.map(str::trim).filter(|n| !n.is_empty());
         let Some(n) = want else {
@@ -133,7 +112,6 @@ impl Roster {
 }
 
 /// Folded voice id: `bm_core::util::fold` with separators dropped, so store
-/// keys, display names and request values meet whatever form each side uses.
 fn norm(s: &str) -> String {
     bm_core::util::fold(s)
         .chars()
@@ -183,7 +161,6 @@ mod tests {
         let r = Roster::load(&p).unwrap();
         assert_eq!(r.resolve(Some("A")).unwrap().name, "A");
         // No silent fallback: a misnamed voice fails loudly instead of
-        // rendering the wrong speaker into a merge.
         let err = r.resolve(Some("nope")).unwrap_err().to_string();
         assert!(err.contains("unknown voice"), "{err}");
         assert!(err.contains(":prov"), "{err}");
@@ -220,7 +197,6 @@ mod tests {
     }
 
     /// A preset with no speaker embedding could not be conditioned on, so it is
-    /// a broken store rather than a voice to skip silently.
     #[test]
     fn a_preset_with_no_anchor_is_refused_by_name() {
         let dir = tempfile::tempdir().unwrap();

@@ -25,7 +25,6 @@ fn neutral_does_not_fold_to_a_female_marker() {
 fn text_prompt_edits_by_character_not_byte() {
     let mut p = TextPrompt::new(TextKind::AddMachine, "t", "h", "Đức");
     // Three characters, six bytes: a byte-indexed cursor would land inside
-    // 'ứ' and panic on the next edit.
     assert_eq!(p.len(), 3);
     assert_eq!(p.cursor, 3);
     p.left();
@@ -190,7 +189,6 @@ fn run_preview_prefers_live_api_then_file_then_defaults() {
 #[test]
 fn mix_config_parses_ranges_and_rejects_garbage() {
     // The prompt validates; the op itself saves, so a typo keeps the prompt
-    // open and never dispatches.
     assert_eq!(
         parse_mix_config("1.25 1.0 1.0 0.5").unwrap(),
         (1.25, 1.0, 1.0, Some(0.5))

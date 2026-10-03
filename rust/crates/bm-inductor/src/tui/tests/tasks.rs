@@ -60,9 +60,6 @@ fn a_row_is_abandoned_only_when_every_box_holding_it_has_gone_quiet() {
         "a pending row has no holder to have lost"
     );
     // A terminal row is not waiting on anybody, whatever its `assigned_to`
-    // still says — a shelved row that named a box would otherwise show up as
-    // abandoned for good, which is the row the operator has *already* dealt
-    // with.
     let mut shelved = by_id("merge:7");
     shelved.state = TaskState::Shelved;
     assert!(
@@ -71,8 +68,6 @@ fn a_row_is_abandoned_only_when_every_box_holding_it_has_gone_quiet() {
     );
 
     // Racing: one live holder is enough to keep the row out of the list. The
-    // first holder is deliberately the silent one, because that is the shape
-    // the bug would take — reading only `assigned_to` and calling it gone.
     let mut racing = by_id("merge:7");
     racing.state = TaskState::Running;
     racing.racers = vec!["hcm-2".into()];
@@ -91,8 +86,6 @@ fn the_facet_cycle_wraps_and_reaches_every_chip() {
     assert_eq!(Facet::All.step(false), Facet::Abandoned, "back wraps");
     assert_eq!(Facet::Abandoned.step(true), Facet::All, "forward wraps");
     // Stepping forward from `all` visits each chip exactly once: a member of
-    // the array that the cycle skips is a chip nobody can ever select, and a
-    // duplicated one is a keypress that appears to do nothing.
     let mut seen = vec![Facet::All];
     let mut f = Facet::All;
     for _ in 0..Facet::ALL.len() - 1 {
@@ -124,7 +117,6 @@ fn facets_narrow_the_ledger_without_taking_a_letter_away() {
     assert_eq!(n(Facet::Abandoned), 1, "the one row that will not move");
 
     // Both narrowings apply at once, which is what keeps a chapter number
-    // usable next to a chip.
     assert_eq!(filtered_tasks(all, "8", Facet::Render, &live).len(), 1);
     assert_eq!(filtered_tasks(all, "9", Facet::Render, &live).len(), 1);
     assert!(
@@ -178,8 +170,6 @@ async fn the_arrow_keys_step_the_facet_and_the_bar_shows_where_it_is() {
         other => panic!("{other:?}"),
     }
     // Tab is not this screen's to spend any more: it opens the jobs view — the
-    // key the footer advertises — and comes back to the ledger with the cursor
-    // and the facet where they were.
     handle_key(&mut app, key(KeyCode::Tab), &http, &job_tx).await;
     assert!(
         matches!(app.screen, Screen::Jobs { .. }),
@@ -193,9 +183,6 @@ async fn the_arrow_keys_step_the_facet_and_the_bar_shows_where_it_is() {
 #[tokio::test]
 async fn a_dialog_answers_back_to_the_screen_that_asked() {
     // `W` on the ledger: everything one box holds goes back to the pool, behind
-    // one question. Answering `n` used to drop the operator on the dashboard
-    // with the rows they were reading gone — at the exact moment those rows are
-    // the thing worth watching.
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let (mut app, _live) = ledger_with_a_silent_box();
@@ -234,8 +221,6 @@ async fn the_command_line_comes_back_to_the_screen_it_was_typed_in() {
 #[tokio::test]
 async fn a_command_that_raises_a_dialog_never_reopens_the_prompt_under_it() {
     // `:rerender` asks first. That question belongs over the dashboard — the
-    // screen the command ran in — not over a `:` line that has already been
-    // answered, which is what cancelling it used to bring back.
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
@@ -253,10 +238,6 @@ async fn a_command_that_raises_a_dialog_never_reopens_the_prompt_under_it() {
 #[tokio::test]
 async fn esc_walks_a_stack_of_layers_down_one_at_a_time() {
     // Cast → picker → `:` line, all three through the keys that open them, then
-    // three Escs in reverse order. This is the ladder a single saved screen
-    // cannot express, and the one an operator builds without meaning to: start a
-    // swap from the cast table, look up a word on the command line, change your
-    // mind.
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
@@ -286,8 +267,6 @@ async fn esc_walks_a_stack_of_layers_down_one_at_a_time() {
 #[tokio::test]
 async fn the_run_config_editor_closes_back_onto_the_run_screen() {
     // `e` on the system overview opens a prompt that never recorded where it
-    // came from, so Esc landed on `command_return` — the dashboard, or worse,
-    // whatever screen the last `:` line happened to be typed on.
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
@@ -306,12 +285,10 @@ async fn the_run_config_editor_closes_back_onto_the_run_screen() {
 #[tokio::test]
 async fn esc_leaves_the_model_list_before_it_leaves_the_llm_screen() {
     // The fetched list is a step of the screen, like the picker's step 2: Esc
-    // used to walk out of both at once, losing the provider row underneath.
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
     // One provider in `.bm/llm.json`, because an empty roster closes the screen
-    // on any key — there is nothing to come back to.
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join(".bm")).unwrap();
     std::fs::write(
@@ -327,8 +304,6 @@ async fn esc_leaves_the_model_list_before_it_leaves_the_llm_screen() {
     v.picking = true;
     app.screen = Screen::Llm(v);
     // The list belongs to the provider it was fetched for, and the screen drops
-    // it on entry when the id does not match — so make it match, exactly as `f`
-    // leaves it.
     app.llm_models_for = "google".to_string();
 
     handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
@@ -347,7 +322,6 @@ async fn tab_opens_jobs_from_places_but_never_from_a_dialog() {
     let mut app = App::new("http://127.0.0.1:8901");
 
     // A confirmation swallows every press: a Tab that swapped it for the jobs
-    // view would lose the question it was about to ask.
     app.screen = Screen::Confirm(Confirm::rerender());
     handle_key(&mut app, key(KeyCode::Tab), &http, &job_tx).await;
     assert!(
@@ -386,8 +360,6 @@ async fn the_counts_line_names_the_rows_whose_worker_went_quiet() {
     app.tasks = vec![orphaned, working];
     app.tasks.sort_by_key(|t| (t.chapter, t.stage));
     // Only the second box is beating, so chapter 7 is the row to unstick — and
-    // the ledger has to work that out from the beats, not from the row's own
-    // `assigned_to`, which says exactly as much about a live box as a dead one.
     app.beats = vec![beat("hcm-2", "127.0.0.1", 0, "")];
     app.screen = Screen::Tasks(TasksView::new());
 
@@ -400,8 +372,6 @@ async fn the_counts_line_names_the_rows_whose_worker_went_quiet() {
     assert!(text.contains("queued"), "the chip the states cannot spell");
 
     // Step the cycle all the way round to `abandoned`, which is the chip this
-    // whole screen was asked for: eleven presses, and the last one is the one
-    // that narrows to the row that is stuck.
     for _ in 0..Facet::ALL.len() - 1 {
         handle_key(&mut app, key(KeyCode::Right), &http, &job_tx).await;
     }
@@ -452,7 +422,6 @@ async fn x_releases_the_highlighted_row_and_capital_x_overrides_a_live_holder() 
     );
 
     // Down to ch3's render, which w1 holds. The op names the row, not the
-    // whole ledger, and `x` is not the forced form.
     handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
     handle_key(&mut app, key(KeyCode::Char('x')), &http, &job_tx).await;
     let req = last_op(&mut job_rx).expect("x dispatches a release");
@@ -467,7 +436,6 @@ async fn x_releases_the_highlighted_row_and_capital_x_overrides_a_live_holder() 
     );
 
     // `X` on the same row is the same call with the live-holder guard off — a
-    // different op instance, not a duplicate of the one still in flight.
     handle_key(&mut app, key(KeyCode::Char('X')), &http, &job_tx).await;
     let req = last_op(&mut job_rx).expect("X dispatches too");
     assert_eq!(req.stage, Some(Stage::Render));
@@ -488,7 +456,6 @@ async fn w_asks_before_taking_a_whole_boxs_work_and_the_dialog_names_the_box() {
     app.screen = Screen::Tasks(TasksView::new());
 
     // The row that is out with a box is the one `W` means; row 0 is shelved and
-    // has nothing to take back.
     handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
     handle_key(&mut app, key(KeyCode::Char('W')), &http, &job_tx).await;
     assert!(
@@ -539,7 +506,6 @@ async fn a_requeues_every_assignment_whose_worker_went_quiet() {
     app.screen = Screen::Tasks(TasksView::new());
 
     // `A` is the timed twin of `x` — `Op::Requeue`, which had no key in the
-    // TUI at all before this screen grew one.
     handle_key(&mut app, key(KeyCode::Char('A')), &http, &job_tx).await;
     let req = last_op(&mut job_rx).expect("A dispatches");
     assert_eq!(req.op, Op::Requeue);
@@ -580,7 +546,6 @@ async fn tab_opens_jobs_and_tab_closes_it_again() {
     // Regression guard for the key move: Jobs used to live only on `J`, and
     // the footer advertised a key nobody associated with "the other side of
     // the dashboard". Tab opens; Tab closes, the same toggle shape the
-    // sound editor's layer tabs already use.
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
@@ -654,8 +619,6 @@ fn the_jobs_overlay_sorts_running_first_and_spins_only_running_rows() {
 fn the_footer_names_the_ledger_when_work_is_shelved() {
     let mut app = tasks_app();
     // Wide enough that the footer is not clipped: the point is that the
-    // count and the key are *there*, not that they survive an 80-column
-    // terminal (the compact tier keeps them, minus the em-dash detail).
     let text = render_text(&mut app, 200, 44);
     assert!(text.contains("1 shelved — K tasks"), "{text}");
 }

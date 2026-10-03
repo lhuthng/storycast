@@ -1,14 +1,4 @@
 //! The sound-design editor's keys.
-//!
-//! One screen, three tabs, and one rule that shapes all of it: **remove is
-//! unavailable for anything the mix still reaches**. Every letter here is an
-//! action rather than a filter — the pools are 11, 6 and 21 rows, so a filter
-//! would cost more than it saves and would take the letters the actions need.
-//!
-//! Nothing here writes on a single keystroke: `a`, `e` and `l` open a prompt
-//! that has to be submitted, and `d` opens a confirmation. The prompt is
-//! prefilled with the values actually in force, so a mistake is visible before
-//! it is saved rather than after.
 use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
@@ -21,9 +11,6 @@ use bm_core::audio_pool::PoolKind;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// The rows the cursor is on, or a status explaining why there are none.
-///
-/// Every action goes through this, so "nothing selected" is stated once instead
-/// of once per key.
 fn selected(app: &App, view: &SoundView) -> Result<sound::SoundRow, String> {
     loaded(app)?;
     let data = app.sound.as_ref().expect("checked by `loaded`");
@@ -38,7 +25,6 @@ fn selected(app: &App, view: &SoundView) -> Result<sound::SoundRow, String> {
 }
 
 /// Whether the pools are here at all. Separate from [`selected`] because `a`
-/// needs no row — an empty pool is exactly when you want to add one.
 fn loaded(app: &App) -> Result<(), String> {
     if app.sound.is_some() {
         return Ok(());
@@ -78,7 +64,6 @@ pub(crate) async fn key_sound(
         let at = all.iter().position(|k| *k == layer).unwrap_or(0) as i32;
         v.layer = all[(at + step).rem_euclid(all.len() as i32) as usize];
         // The cursor is a row index into a different list now: keeping it would
-        // point at an arbitrary entry on the new tab.
         v.cursor = 0;
         v.scroll = 0;
         app.screen = Screen::Sound(v);
@@ -113,12 +98,8 @@ pub(crate) async fn key_sound(
             app.screen = Screen::Sound(v);
         }
         // `a` — a new sound. The name is required; everything else has the
-        // default the mix would use, stated in the hint.
         KeyCode::Char('a') if !ctrl && !alt => {
             // The add prompt needs no row selected — an empty pool is exactly
-            // when you want one — but it does need the pools to have loaded: an
-            // entry written against an unread registry would drop whatever that
-            // registry holds.
             if let Err(e) = loaded(app) {
                 app.set_status(Level::Warn, e);
             } else {
@@ -156,7 +137,6 @@ pub(crate) async fn key_sound(
             }
         },
         // `d` — remove. The guard is read here, at the keystroke, and again at
-        // the confirmation: between the two the screen may have reloaded.
         KeyCode::Char('d') if !ctrl && !alt => match selected(app, &v) {
             Err(e) => app.set_status(Level::Warn, e),
             Ok(row) if row.in_use() => app.set_status(
@@ -196,10 +176,6 @@ pub(crate) async fn key_sound(
 }
 
 /// Submit one of the editor's three prompts: the whole-entry line, or a level.
-///
-/// Returns the status line to report and the view to come back to — the tab it
-/// was asked from, with the cursor on the entry that was just edited, so the
-/// result of the edit is what you are looking at. `Err` keeps the prompt open.
 pub(crate) fn submit(
     app: &mut App,
     kind: &TextKind,
@@ -226,17 +202,11 @@ pub(crate) fn submit(
         }
         _ => {
             // The layer's own parser, then the filesystem: a name and a shape
-            // that parse but point at a clip that is not there would write a
-            // registry line the merge can only warn about. Only the takes this
-            // edit *adds* are checked — see `sound::check_files`.
             let (name, mut entry) = sound::parse_entry(layer, buf, target)?;
             let old = target.and_then(|n| data.pools[&layer].get(n));
             sound::check_files(&data.root, layer, &sound::introduced(old, &entry))?;
             if layer == PoolKind::Inject {
                 // `dur_s` is a fact about the clip, so it is re-probed on every
-                // inject edit rather than carried along from whatever take set
-                // was there before. A failed probe (no ffprobe) leaves the
-                // value alone rather than replacing it with a guess.
                 if let Some(d) = sound::probe_longest(&data.root, &entry) {
                     entry.dur_s = Some(d);
                 }
@@ -247,7 +217,6 @@ pub(crate) fn submit(
     };
 
     // Cursor onto the entry that was just written, so the change is visible
-    // rather than something the operator has to hunt for.
     let mut view = SoundView::new();
     view.layer = layer;
     view.cursor = app
@@ -259,18 +228,12 @@ pub(crate) fn submit(
 }
 
 /// Carry out a confirmed removal, on the screen it came from.
-///
-/// Returns whether a registry was actually written — the caller uses it to
-/// decide whether to tell the inductor the sound design changed. A refused
-/// removal is not a design change, and a notification for it would be noise.
 pub(crate) fn apply_removal(app: &mut App, layer: PoolKind, name: &str, view: SoundView) -> bool {
     if let Err(e) = loaded(app) {
         app.set_status(Level::Warn, e);
         return false;
     }
     // Re-checked, not assumed: the confirmation is a dialog and the screen
-    // behind it can have been reloaded (or the scene map edited) while it was
-    // open. A guard that only holds at the keystroke is a guard with a hole.
     let in_use = app
         .sound
         .as_ref()

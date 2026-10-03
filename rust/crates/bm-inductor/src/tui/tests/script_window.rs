@@ -3,8 +3,6 @@ use super::*;
 #[tokio::test]
 async fn the_script_window_suggests_the_chapter_roster_first_then_alphabet() {
     // The picker's ordering rule, pinned: the open chapter's own roster is
-    // the prefix, everything else follows folded-alphabetically, and a name
-    // the roster holds is never offered twice.
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
     let dir = tempfile::tempdir().unwrap();
@@ -12,9 +10,6 @@ async fn the_script_window_suggests_the_chapter_roster_first_then_alphabet() {
     app.layout.ensure().unwrap();
     std::fs::create_dir_all(app.layout.script_dir()).unwrap();
     // The script carries a roster that is a *subset* of who actually speaks:
-    // "Lan" is in the segments but missing from the roster array — the shape
-    // a hand-edited or half-migrated chapter has. The universe must still
-    // find her.
     std::fs::write(
         app.layout.script(7),
         r#"{"roster":["Mai","Narrator"],"segments":[
@@ -42,9 +37,6 @@ async fn the_script_window_suggests_the_chapter_roster_first_then_alphabet() {
         "the chapter's roster first: {out:?}"
     );
     // The universe beyond the roster: "Lan" joins because the script's
-    // *segments* name her — a speaker the window is showing but the roster
-    // forgot is exactly who a fix needs. "Mai" and "Narrator" are not
-    // re-offered (fold-deduped).
     assert_eq!(
         out.iter().skip(2).collect::<Vec<_>>(),
         vec!["Lan"],
@@ -65,11 +57,6 @@ async fn the_script_window_suggests_the_chapter_roster_first_then_alphabet() {
 #[tokio::test]
 async fn the_script_window_walks_a_chapter_and_repoints_a_segment() {
     // The full ladder with keys: open the window, filter to a chapter,
-    // Enter, move down a row, `s`, type to filter, Enter — and the request
-    // that lands carries the segment number, the *expected* current
-    // speaker, and the chosen one. That expect is the feature: it is the
-    // guard `op_fix_speaker` checks, so a stale screen refuses instead of
-    // mis-editing.
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
@@ -121,7 +108,6 @@ async fn the_script_window_walks_a_chapter_and_repoints_a_segment() {
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
 
     // The dispatched op is the same one `:speaker 12 2 Lan Narrator` runs;
-    // it arrives wrapped (`Job::Tracked`), so unwrap the tracking first.
     let req = match job_rx.try_recv() {
         Ok(crate::tui::jobs::Job::Tracked { job, .. }) => match *job {
             crate::tui::jobs::Job::Op { req, .. } => req,
@@ -158,17 +144,11 @@ async fn the_script_window_walks_a_chapter_and_repoints_a_segment() {
 #[tokio::test]
 async fn the_script_window_shows_the_excerpt_chain_a_chapter_is_fed() {
     // `e` on an open chapter raises the excerpt panel: the chapter's own
-    // excerpt (what the *next* chapter is fed) and the chain this chapter was
-    // fed, read from the same `excerpt_chain` the prompt is built from. `Esc`
-    // steps back to the segments before it steps back to the list.
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
     let dir = tempfile::tempdir().unwrap();
     // `work` as well as `root`: every data path hangs off `work`, so setting
-    // only `root` leaves reads and writes in the shared, cwd-relative tree a
-    // sibling test also uses — the collision that made this test's script(12)
-    // shadow another test's.
     app.layout.root = dir.path().to_path_buf();
     app.layout.work = dir.path().to_path_buf();
     app.layout.ensure().unwrap();
@@ -231,8 +211,6 @@ async fn the_script_window_shows_the_excerpt_chain_a_chapter_is_fed() {
 #[tokio::test]
 async fn the_script_chapter_list_walks_rows_and_columns_like_it_is_drawn() {
     // The list draws twelve chapters across a row, so the arrows owe the
-    // operator a grid: `↓` a row, `→` a column. Both used to step the cursor by
-    // one, which made `↓` walk sideways and left `←`/`→` unbound entirely.
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
@@ -243,7 +221,6 @@ async fn the_script_chapter_list_walks_rows_and_columns_like_it_is_drawn() {
     std::fs::write(app.layout.bible(), r#"{"characters":[]}"#).unwrap();
     std::fs::create_dir_all(app.layout.script_dir()).unwrap();
     // 25 chapters, so the last row is short — the case a naive `± PER_ROW`
-    // walks off the end of.
     for n in 1..=25u32 {
         std::fs::write(
             app.layout.script(n),
@@ -292,7 +269,6 @@ async fn the_script_chapter_list_walks_rows_and_columns_like_it_is_drawn() {
     handle_key(&mut app, key(KeyCode::Char('l')), &http, &job_tx).await;
     handle_key(&mut app, key(KeyCode::Char('l')), &http, &job_tx).await;
     // Right off the last column wraps to the next row's first. Park on ch12,
-    // the last column of row 0, so the next press is the wrap itself.
     handle_key(&mut app, key(KeyCode::Home), &http, &job_tx).await;
     for _ in 0..per - 1 {
         handle_key(&mut app, key(KeyCode::Char('l')), &http, &job_tx).await;
@@ -310,7 +286,6 @@ async fn the_script_chapter_list_walks_rows_and_columns_like_it_is_drawn() {
     );
 
     // The short last row: Down past the end clamps on the last chapter rather
-    // than running off the list.
     handle_key(&mut app, key(KeyCode::End), &http, &job_tx).await;
     assert_eq!(selected(&app), Some(25));
     handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
@@ -321,7 +296,6 @@ async fn the_script_chapter_list_walks_rows_and_columns_like_it_is_drawn() {
     assert_eq!(selected(&app), Some(25 - per as u32), "↑ walks back up");
 
     // And the order itself: chapter 100 is on screen after 99, not between
-    // 10 and 11. `script_chapters` is what the list is built from.
     for n in [26u32, 99, 100, 101] {
         std::fs::write(
             app.layout.script(n),
@@ -340,9 +314,6 @@ async fn the_script_chapter_list_walks_rows_and_columns_like_it_is_drawn() {
 #[tokio::test]
 async fn esc_closes_the_excerpt_panel_and_the_next_esc_leaves_the_chapter() {
     // The panel's own Esc ladder: one press drops the overlay back onto the
-    // segments, the next steps out to the chapter list. Both are asserted,
-    // because a panel that eats Esc and a panel that leaks it out to the list
-    // are different bugs and the second one looks like the first.
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
@@ -400,9 +371,6 @@ async fn esc_closes_the_excerpt_panel_and_the_next_esc_leaves_the_chapter() {
 #[tokio::test]
 async fn the_excerpt_panel_scrolls_vertically_and_says_when_there_is_nothing_to_scroll() {
     // The bug this pins: the panel used to hand its offset to
-    // `Paragraph::scroll`, which applies it *horizontally* once wrapping is on,
-    // so ↑↓ slid the text sideways instead of down the chain. It windows its own
-    // rows now, and this checks the window through the real renderer.
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = App::new("http://127.0.0.1:8901");
@@ -413,7 +381,6 @@ async fn the_excerpt_panel_scrolls_vertically_and_says_when_there_is_nothing_to_
     std::fs::write(app.layout.bible(), r#"{"characters":[]}"#).unwrap();
     std::fs::create_dir_all(app.layout.script_dir()).unwrap();
     // A chapter whose excerpt is long enough that the body cannot fit the box:
-    // the point of the fixture is rows, not words.
     let long = (0..40)
         .map(|i| format!("sentence number {i} of a chapter end that will not fit one screen"))
         .collect::<Vec<_>>()
@@ -446,8 +413,6 @@ async fn the_excerpt_panel_scrolls_vertically_and_says_when_there_is_nothing_to_
             panic!("{:?}", app.screen)
         };
         // `draw` rather than the script module directly: the overlay is a
-        // private module, and going through the dashboard's own entry point is
-        // what a real frame does anyway.
         terminal.draw(|f| draw(f, app)).unwrap();
         let _ = &v;
         let buf = terminal.backend().buffer().clone();
@@ -473,8 +438,6 @@ async fn the_excerpt_panel_scrolls_vertically_and_says_when_there_is_nothing_to_
     );
 
     // Down moves the window down the rows, and only down. The panel's first body
-    // row is its section heading, so one ↓ pushes *that* off the top — which is
-    // what makes this a row test rather than a text one.
     handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
     let one_down = render(&mut app, 24);
     assert_ne!(one_down, at_top, "↓ must change what is on screen");
@@ -500,8 +463,6 @@ async fn the_excerpt_panel_scrolls_vertically_and_says_when_there_is_nothing_to_
     assert_eq!(render(&mut app, 24), at_top, "Home is the top");
 
     // And the case the operator actually met: an excerpt that fits on one screen
-    // has nothing to scroll. Close and reopen so the panel re-reads the shorter
-    // script — `e` while it is up would toggle it shut.
     std::fs::write(
         app.layout.script(12),
         r#"{"excerpt":"Short.","segments":[{"speaker":"Narrator","text":"Trời hôm nay đẹp."}]}"#,
@@ -518,8 +479,6 @@ async fn the_excerpt_panel_scrolls_vertically_and_says_when_there_is_nothing_to_
 }
 
 /// The gate as the operator meets it: a held cluster says so, in the footer,
-/// because a held cluster is otherwise indistinguishable from a finished one —
-/// same empty queue, same idle boxes, same everything.
 #[test]
 fn the_footer_calls_out_a_held_cluster_and_claims_nothing_else() {
     let mut app = App::new("http://127.0.0.1:8901");
@@ -536,7 +495,6 @@ fn the_footer_calls_out_a_held_cluster_and_claims_nothing_else() {
     );
 
     // Distributing: no marker at all. An indicator that is always on is an
-    // indicator nobody reads, and the range it would repeat is in the header.
     app.apply_state(serde_json::json!({
         "tasks": [],
         "machines": [],
@@ -546,7 +504,6 @@ fn the_footer_calls_out_a_held_cluster_and_claims_nothing_else() {
     assert!(!render_text(&mut app, 160, 44).contains("held ·"));
 
     // An inductor older than the gate sends no `dispatch` key at all, and the
-    // footer must not claim a hold nobody set.
     let mut older = App::new("http://127.0.0.1:8901");
     older.apply_state(serde_json::json!({"tasks": [], "machines": [], "beats": []}));
     assert!(!render_text(&mut older, 160, 44).contains("held ·"));

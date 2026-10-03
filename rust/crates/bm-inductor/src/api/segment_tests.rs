@@ -32,9 +32,6 @@ fn segment_serves_a_rendered_wav_and_its_sentence() {
     );
 
     // The held line never rendered in Adam's voice, but one of Kiên's
-    // did (the fresh-swap state: rendered chapter by chapter). Play
-    // hers, still zero synthesis, and hold it, so T compares on the
-    // same sentence instead of another random pick.
     let fallback = op_segment(
         &layout,
         "vieneu",
@@ -61,8 +58,6 @@ fn segment_serves_a_rendered_wav_and_its_sentence() {
 #[test]
 fn segment_matches_keys_names_and_folds() {
     // Wavs carry whatever the cast held at render time, often a
-    // lowercase key (`adam`) while the operator asks the display name
-    // (`Adam`), or an ASCII slug (`pham-tuyen`) for `Phạm Tuyên`.
     let dir = tempfile::tempdir().unwrap();
     let layout = bm_core::Layout::new(dir.path());
     layout.ensure().unwrap();
@@ -136,7 +131,6 @@ fn segment_prefers_the_characters_own_lines() {
     std::fs::write(seg.join("0001_adam.wav"), b"RIFF-1").unwrap();
 
     // key_for_name("vieneu", "Adam") may or may not know this fixture
-    // voice; either way the raw string still matches.
     let res = op_segment(&layout, "vieneu", "Kiên", "adam", None);
     assert!(res.ok, "{}", res.message);
     assert_eq!(

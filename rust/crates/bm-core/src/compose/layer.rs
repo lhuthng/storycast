@@ -22,7 +22,6 @@ pub(crate) struct Layer {
     pub(crate) file: &'static str,
     pub(crate) text: String,
     /// Members whose value came from a dependency, so a later one may override
-    /// an earlier one while the file's own is never touched.
     pub(crate) filled: BTreeSet<String>,
     pub(crate) filled_keys: BTreeSet<(String, String)>,
     pub(crate) records: BTreeMap<String, String>,
@@ -69,7 +68,6 @@ impl Layer {
     }
 
     /// Forget a member an earlier dependency contributed, so a later one wins
-    /// it outright — the pool rule, one level down.
     fn override_member(&mut self, member: &str) {
         if !self.filled.remove(member) {
             return;
@@ -84,8 +82,6 @@ impl Layer {
     fn fill_whole(&mut self, member: &str, value: &str) {
         if self.has_member(member) {
             // The file's own member wins. A member a *dependency* put there does
-            // not: this pass runs weakest first, so a stronger one has to be able
-            // to take it, the way it takes a keyed name.
             if !self.filled.contains(member) {
                 return;
             }
@@ -101,8 +97,6 @@ impl Layer {
     }
 
     /// A member whose value is an object merges key by key; anything else (a
-    /// licence line is a string) is the member itself, the member's name being
-    /// the key.
     fn fill_keyed(&mut self, member: &str, value: &str) {
         let Some(parent_keys) = crate::audio_pool::scan_entries(value) else {
             self.override_member(member);
@@ -112,10 +106,6 @@ impl Layer {
         // No `override_member` here, deliberately. A keyed member *accumulates*:
         // the file's names win, every dependency's are added, and "a later
         // dependency overrides an earlier one" is per key — see `filled_keys`
-        // below. Replacing the member instead would mean the second dependency to
-        // state `sound` in `tag-aliases.json` silently erased the first one's
-        // whole synonym table, which is what a two-dependency asset did the first
-        // time this ran for real.
         let Some(current) = self.member_value(member) else {
             let run = piece("  ", "", &member_text(member, value));
             let Some(next) = append_inside(&self.text, &run) else {
@@ -125,9 +115,6 @@ impl Layer {
             self.filled.insert(member.to_string());
             for pk in &parent_keys {
                 // Marked as well as recorded: the member arriving created these
-                // names, so a stronger dependency is allowed to take them — and
-                // only one that arrived later is, which is what makes the pass
-                // weakest-first mean anything.
                 self.filled_keys
                     .insert((member.to_string(), pk.key.clone()));
                 self.records.insert(
@@ -152,8 +139,6 @@ impl Layer {
             }
             let one = &value[pk.value_start..pk.value_end];
             // The names the file lacks are *added* to what is already here, never
-            // swapped for it: this member accumulates across dependencies, which
-            // is the whole point of a keyed member in a layered file.
             if filled {
                 merged = remove_member(&merged, &pk.key).unwrap_or(merged);
             }
@@ -187,8 +172,6 @@ impl Layer {
             return;
         }
         // A list never overrides — it accumulates, and each dependency's
-        // entries are its own record (`member+dep`). Which order they arrive in
-        // is [`Layer::fill_lists`]'s business.
         match self.member_value(member) {
             None => {
                 let run = piece("  ", "", &member_text(member, value));
@@ -200,7 +183,6 @@ impl Layer {
             }
             Some(current) => {
                 // The dependency's own inner text, verbatim: its entries, its
-                // layout, its closing indent.
                 let trimmed = value.trim_end();
                 let inner = match trimmed.get(1..trimmed.len().saturating_sub(1)) {
                     Some(i) => i,
@@ -221,11 +203,6 @@ impl Layer {
     }
 
     /// Fold one dependency into this file.
-    ///
-    /// No dependency name: every record this writes is keyed by the member it
-    /// filled, because a member is only ever filled once — the file's own first,
-    /// then the strongest dependency's, and a weaker one is refused. The lists
-    /// are the exception, and they are the ones that carry the name.
     pub(crate) fn fill(&mut self, dir: &Path) {
         let path = dir.join(self.file);
         let Ok(parent) = std::fs::read_to_string(&path) else {
@@ -244,21 +221,12 @@ impl Layer {
                 }
                 Mode::ByKey => self.fill_keyed(&e.key, value),
                 // Folded in by `fill_lists`, after the scalars and strongest
-                // dependency first.
                 Mode::Concat => {}
             }
         }
     }
 
     /// Fold in the members that are *lists*, after the scalars and **strongest
-    /// dependency first**.
-    ///
-    /// A keyed member can say "later in `deps` wins" by replacing a value. A list
-    /// has no key to replace: the only way a stronger dependency can win is to be
-    /// *seen* earlier, because the scene map's rules are matched in order and the
-    /// first match takes the scene. So the lists are appended in reverse `deps`
-    /// order, which leaves the strongest nearest the file's own entries — the
-    /// ones that are already matched first.
     pub(crate) fn fill_lists(&mut self, dir: &Path, dep: &str) {
         let path = dir.join(self.file);
         let Ok(parent) = std::fs::read_to_string(&path) else {
@@ -277,8 +245,6 @@ impl Layer {
     }
 
     /// Take back what a previous resolve put here, and only where nobody has
-    /// edited it since. The marker is what makes a re-resolve regenerate rather
-    /// than duplicate, so this runs before any fill.
     pub(crate) fn withdraw(
         &mut self,
         records: &BTreeMap<String, String>,
@@ -286,11 +252,6 @@ impl Layer {
         adopted: &mut BTreeSet<(String, String)>,
     ) {
         // Lists first, in `deps` order — which is the reverse of the order they
-        // were appended in. The fill adds them strongest-first, so the *weakest*
-        // dependency's entries are the tail, and the tail is what has to come
-        // off first. Taking them off in the wrong order does not fail loudly:
-        // the one whose block is not at the tail reads as "edited here", is
-        // adopted, and its rules are then appended a second time.
         for dep in deps {
             for (member, _) in self
                 .policy()
@@ -323,12 +284,10 @@ impl Layer {
                     .join(",");
                 if text_hash(&tail) != hash {
                     // Edited here: the operator has adopted it, so it stays and
-                    // it stops being tracked.
                     adopted.insert((self.file.to_string(), key));
                     continue;
                 }
                 // Everything the dependency appended was the tail, so what is
-                // left is the file's own — and it keeps its own layout.
                 let head = current[..spans[at].0]
                     .trim_end_matches([',', ' ', '\n'])
                     .to_string();
@@ -374,7 +333,6 @@ impl Layer {
                         .unwrap_or(false)
                     {
                         // Nothing left of it: the member itself came from the
-                        // dependency, so it goes too.
                         remove_member(&self.text, member).unwrap_or(merged)
                     } else {
                         replace_member(&self.text, member, &merged).unwrap_or(merged)

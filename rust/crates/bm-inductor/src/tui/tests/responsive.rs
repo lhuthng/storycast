@@ -28,7 +28,6 @@ fn size_class_picks_a_tier_per_axis() {
 #[test]
 fn compact_columns_fit_a_minimum_width_terminal() {
     // The same totals the compile-time guards prove; asserted here too so a
-    // failure names the pane instead of just refusing to compile.
     let machines = cols(&COMPACT_MACHINE_COLS);
     let workers = cols(&COMPACT_WORKER_COLS);
     assert!(
@@ -44,8 +43,6 @@ fn compact_columns_fit_a_minimum_width_terminal() {
 #[test]
 fn compact_layout_fits_the_hard_minimum() {
     // The **floors**, because that is the case where every pane has nothing to
-    // show and is therefore at its minimum. Longer content takes its rows out
-    // of Logs, which is the pane meant to give them up.
     let panes = COMPACT_MACHINES_MIN_H
         + COMPACT_WORKERS_MIN_H
         + COMPACT_TASKS_MIN_H
@@ -69,11 +66,6 @@ fn compact_layout_fits_the_hard_minimum() {
 }
 
 /// A pane's ceiling must not be so high that one busy pane crowds out the rest.
-///
-/// The ceilings exist so a thirty-machine cluster scrolls instead of pushing
-/// Logs and the footer off the screen. This is the arithmetic behind that: at
-/// the ceiling, **Logs still gets its readable floor** and the footer is never
-/// squeezed out.
 #[test]
 fn a_busy_pane_at_its_ceiling_still_leaves_the_log_and_the_footer_room() {
     let worst = FULL_MACHINES_MAX_H + FULL_WORKERS_MAX_H + FULL_TASKS_MAX_H;
@@ -84,7 +76,6 @@ fn a_busy_pane_at_its_ceiling_still_leaves_the_log_and_the_footer_room() {
          a busy cluster would push the log off the screen"
     );
     // The compact tier is the tighter one and has the smaller ceilings, so it
-    // is the one that actually has to hold.
     let compact_worst = COMPACT_MACHINES_MAX_H + COMPACT_WORKERS_MAX_H + COMPACT_TASKS_MAX_H;
     let compact_rest = compact_worst + COMPACT_EVENTS_MIN_H + COMPACT_FOOTER_H;
     assert!(
@@ -96,7 +87,6 @@ fn a_busy_pane_at_its_ceiling_still_leaves_the_log_and_the_footer_room() {
 #[test]
 fn key_hints_fit_their_tier_without_clipping() {
     // The single 161-character line this replaced was clipped on every
-    // terminal, and the lost tail held the least guessable keys.
     for k in KEYS_FULL {
         assert!(
             width_of(k) <= FULL_W as usize,
@@ -116,7 +106,6 @@ fn key_hints_fit_their_tier_without_clipping() {
 #[test]
 fn the_footer_advertises_jobs_on_tab_in_both_tiers() {
     // The footer is the only map of the dashboard; the key it names must be
-    // the key that works, in both tiers, or the overlay is undiscoverable.
     assert!(KEYS_FULL.iter().any(|k| k.contains("Tab jobs")));
     assert!(KEYS_COMPACT.iter().any(|k| k.contains("Tab jobs")));
 }
@@ -124,10 +113,6 @@ fn the_footer_advertises_jobs_on_tab_in_both_tiers() {
 #[test]
 fn every_dashboard_header_reads_in_full_at_the_100_column_floor() {
     // Regression guard for the two header crops an operator actually read:
-    // the full-tier Workers pane drew `box cp` (7 glyphs in a 6-wide column)
-    // and the Machines table overflowed its 98 interior columns, pushing
-    // `seen` and half of `state` off the pane. Both are rendered here at the
-    // exact terminal where they broke.
     let mut app = stats_app();
     let text = render_text(&mut app, 100, 32);
     for header in ["box cpu", "box ram", "tts-threads", "activity", "seen"] {
@@ -136,11 +121,6 @@ fn every_dashboard_header_reads_in_full_at_the_100_column_floor() {
 }
 
 /// A pane is sized to its content, and the content is what the terminal can
-/// actually show.
-///
-/// This replaced a fixed row count per pane, under which a one-box cluster was
-/// shown an eight-row Machines pane that was mostly border and a ten-worker
-/// cluster had workers clipped with nothing saying so.
 #[test]
 fn every_live_worker_is_visible_on_a_terminal_that_can_hold_them() {
     let mut app = stats_app();
@@ -154,7 +134,6 @@ fn every_live_worker_is_visible_on_a_terminal_that_can_hold_them() {
         ));
     }
     // The pane is sized from the same filtered set the renderer draws, so the
-    // count that drives the layout is the count of rows on screen.
     let live = app.live_workers().len();
     assert_eq!(live, before + 8, "the fixture's own beats count too");
     let text = render_text(&mut app, 140, 44);
@@ -167,11 +146,6 @@ fn every_live_worker_is_visible_on_a_terminal_that_can_hold_them() {
 }
 
 /// Tasks and Stats are drawn in the compact tier too.
-///
-/// They used to be carved out of the Workers pane *only on the full tier*, so
-/// on a 76x24 terminal, the default on most setups, both were simply not
-/// drawn, and the footer carried a roll-up instead. A pane that cannot be seen
-/// is a pane that cannot answer the question you opened the dashboard to ask.
 #[test]
 fn the_compact_tier_still_shows_tasks_and_stats() {
     let mut app = stats_app();
@@ -195,23 +169,14 @@ fn the_compact_tier_still_shows_tasks_and_stats() {
 }
 
 /// The log is the one pane that grows, because a message is the point of it.
-///
-/// Before this change the spare rows went to the worker list, which meant a
-/// terminal with room to spare still showed a five-line log on a failing
-/// cluster. Everything else now takes exactly its content, so whatever is left
-/// lands here.
 #[test]
 fn the_log_takes_the_rows_the_other_panes_do_not_need() {
     // `stats_app` has machines and workers, so the three content panes are all
-    // above their floors and the difference between these two renders is the
-    // log.
     let mut app = stats_app();
     let short = render_text(&mut app, 140, 32);
     let tall = render_text(&mut app, 140, 52);
 
     // Measured from the rendered box itself: the number of rows between the
-    // Logs top border and the footer. Counting lines that look like log lines
-    // would pass whether the pane grew or not.
     let log_height = |t: &str| -> usize {
         let lines: Vec<&str> = t.lines().collect();
         let top = lines
@@ -241,8 +206,6 @@ fn the_log_takes_the_rows_the_other_panes_do_not_need() {
 #[test]
 fn the_workers_headers_fit_their_columns() {
     // Regression guard for the `box cp` crop: the full-tier load columns
-    // must be at least as wide as their headers (the `box cpu` cell carries
-    // a trailing space against the edge, so its column needs 8).
     for (header, w) in [("box cpu ", 8usize), ("box ram", 10), ("progress", 19)] {
         assert!(
             width_of(header) <= w,
@@ -255,8 +218,6 @@ fn the_workers_headers_fit_their_columns() {
 #[test]
 fn the_footer_advertises_the_cast_key_in_both_tiers() {
     // Regression guard: at 80 columns `S cast` fell off the clipped tail of
-    // the old one-line hint, so the feature was undiscoverable exactly
-    // where the terminal was most cramped.
     assert!(
         KEYS_FULL.iter().any(|k| k.contains("S cast")),
         "{KEYS_FULL:?}"

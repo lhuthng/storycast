@@ -34,12 +34,6 @@ async fn machine_with_policy(st: &Shared, addr: &str, port: u16, render_on: Opti
 }
 
 /// A box the account has not given an address yet is tracked, but not
-/// dialed.
-///
-/// Its key is its instance id — a handle for the account read to repair, not
-/// something `http` can answer on — so every poll of it would be a
-/// guaranteed connection failure: noise in the log, and a workers pane full
-/// of boxes that "did not answer" when they were never asked.
 #[tokio::test]
 async fn an_addressless_box_is_tracked_but_never_dialed() {
     use bm_proto::MachineState;
@@ -89,12 +83,6 @@ async fn an_addressless_box_is_tracked_but_never_dialed() {
 }
 
 /// Parked beats the policy, and is expressible *without* one.
-///
-/// The order is the whole content of the function: a box the operator parked
-/// must give up its sidecar whether or not anyone ever edited its stages, and
-/// a box they did not park must keep the answer it had before — including
-/// "no opinion", which is what stops the cluster being told `keep=true`
-/// every two seconds for ever.
 #[test]
 fn parking_a_box_is_how_its_sidecar_gets_let_go() {
     use bm_proto::{MachineState, Stage, TaskPref};
@@ -105,8 +93,6 @@ fn parking_a_box_is_how_its_sidecar_gets_let_go() {
     assert_eq!(desired_sidecar_keep(&m), None);
 
     // No policy, parked: the 2.85 GB comes back anyway. The case a
-    // policy-only rule would miss, and the common one — most boxes never
-    // have their stages edited.
     m.accepting_work = false;
     assert_eq!(
         desired_sidecar_keep(&m),
@@ -115,7 +101,6 @@ fn parking_a_box_is_how_its_sidecar_gets_let_go() {
     );
 
     // Woken with render off: back to the box's own policy, not to `true` —
-    // waking must not turn a feature back on that the operator chose to skip.
     let policy = |render: bool| {
         Some(
             Stage::DEFAULT_PRIORITY
@@ -163,7 +148,6 @@ fn beat(sidecar_keep: Option<bool>) -> Heartbeat {
 }
 
 /// A worker stub that answers 200 and records how many instruction
-/// bodies arrived, plus an optional canned status per request.
 async fn stub_worker(keep_answer_404: bool) -> (u16, Arc<tokio::sync::Mutex<Vec<String>>>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -227,7 +211,6 @@ async fn render_off_tells_the_worker_to_drop_its_sidecar() {
     let (_d, st) = state();
     let (port, seen) = stub_worker(false).await;
     // Loopback: the stub is reachable exactly at the addr the ledger
-    // names, which is the shape a real box has.
     machine_with_policy(&st, "127.0.0.1", port, Some(false)).await;
     let peer = Peer {
         addr: "127.0.0.1".into(),
@@ -238,7 +221,6 @@ async fn render_off_tells_the_worker_to_drop_its_sidecar() {
     let mut book = SidecarBook::default();
 
     // First beat: no stored policy read yet in the book, but desired
-    // comes from the ledger — render off ⇒ keep=false must be pushed.
     converge_sidecar_policy(&st, &http, &peer, &mut book, &beat(None)).await;
     wait_for(&seen, 1).await;
     assert_eq!(seen.lock().await.len(), 1, "the instruction was pushed");
@@ -258,7 +240,6 @@ async fn render_off_tells_the_worker_to_drop_its_sidecar() {
     );
 
     // The box reboots back into its default while machines.json still
-    // says render off: the *reported* belief is what re-drives the push.
     converge_sidecar_policy(&st, &http, &peer, &mut book, &beat(Some(true))).await;
     wait_for(&seen, 2).await;
     assert_eq!(
@@ -289,7 +270,6 @@ async fn no_stored_policy_never_pushes_and_404_gives_up_after_five() {
     );
 
     // An old agent answering 404: five tries, then quiet — the log-spam
-    // trap the tunnel supervisor already documented.
     let (port404, _seen404) = stub_worker(true).await;
     machine_with_policy(&st, "127.0.0.1", port404, Some(false)).await;
     let peer404 = Peer {

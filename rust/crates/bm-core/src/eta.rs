@@ -1,9 +1,6 @@
 //! Throughput measurement and ETA.
-//!
 //! New in the cluster version. The legacy pipeline could not answer "how long
 //! will the rest take?" because a single process had no separation between
-//! measuring and doing. Here every finished task appends one line to
-//! `.bm/stats.jsonl`, and the estimator turns those into a per-stage cost.
 
 use crate::util::atomic_write;
 use anyhow::Result;
@@ -12,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// How many recent samples feed the estimate. Recent behaviour beats history:
-/// the first chapter of a session is slow (model load), later ones are not.
 const WINDOW: usize = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,10 +48,6 @@ pub fn read_stats(path: &Path) -> Vec<StatRecord> {
 }
 
 /// Median of a small sample set. Shared by the per-unit estimator below
-/// and the inductor's per-task averages behind the Stats pane.
-///
-/// Median rather than mean: one chapter that hit a rate limit for 10 minutes
-/// would otherwise poison every estimate after it.
 pub fn median(samples: &[f64]) -> Option<f64> {
     if samples.is_empty() {
         return None;
@@ -92,7 +84,6 @@ pub struct StageEta {
 }
 
 /// Fallback costs (seconds per unit) used before anything has been measured.
-/// Deliberately pessimistic so the first ETA is not a pleasant lie.
 fn fallback_secs_per_unit(stage: Stage) -> f64 {
     match stage {
         Stage::Crawl => 6.0,

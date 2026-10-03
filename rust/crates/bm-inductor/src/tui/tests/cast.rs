@@ -103,10 +103,6 @@ fn cast_rows_carry_the_voice_metadata_through() {
     assert!(narrator.in_roster);
     assert!(!narrator.enrolled);
     // A voice the roster does not list carries no metadata at all, so
-    // anything that renders it has nothing to invent. The table shows none of
-    // this now — the row is the flattened roster, not the table — but the
-    // metadata is what a column would be built from, and losing it here would
-    // mean a round trip to the roster to get it back.
     let ha = rows.iter().find(|r| r.character == "Hà").unwrap();
     assert!(!ha.in_roster);
     assert!(ha.accent.is_empty() && ha.gender.is_empty());

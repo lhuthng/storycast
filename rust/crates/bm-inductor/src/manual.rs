@@ -1,27 +1,4 @@
 //! The manual digest flow, shared by the TUI's `:digest` manager and the
-//! headless backup runner.
-//!
-//! The gesture is two rounds and no more: round 1 asks *who speaks*, round 2
-//! asks *how it sounds*. Between them there is never more than one thing to do
-//! next, and this module is the one place that knows what it is.
-//!
-//! **It is the worker's digest with a person standing in for the analyzer.**
-//! The prompts come from `bm_core::digest::manual_prompt` — the same
-//! source-gated attribution and staging builders the automatic path renders —
-//! and the answers are checked by the same validators. Nothing here invents a
-//! second contract, so a chapter finished by hand cannot land in the library
-//! that the automatic path would have refused.
-//!
-//! The two front-ends differ only in how they carry a prompt to a model and how
-//! they bring the answer back:
-//!
-//! * the TUI puts the prompt on the clipboard and reads the answer back from it;
-//! * [`ask`] sends the prompt through `bm_core::digest::generate` to whatever
-//!   analyzer the settings name.
-//!
-//! Both end at [`report`], which is the same `POST /api/complete` a worker makes
-//! — under the reserved `operator` id, which is what makes the inductor accept
-//! it as authoritative for the chapter.
 
 use bm_core::config::Settings;
 use bm_core::Layout;
@@ -35,12 +12,8 @@ pub(crate) enum Next {
         round: bm_core::digest::Round,
         text: String,
         /// Round 1's validated answer, set on round 2's prompt and nowhere
-        /// else — it is what round 2 was rendered against and what its answer
-        /// must be checked against, so the caller has to carry it forward.
         cast: Option<Value>,
         /// The part of the chapter this round is for, when the chapter is
-        /// longer than one answer carries. Shown, never computed with: the
-        /// round is already labelled, and this only says which of how many.
         part: Option<bm_core::digest::ManualPart>,
     },
     /// Both rounds are in and accepted: this is the finished chapter.
@@ -82,15 +55,6 @@ impl Next {
 }
 
 /// Start a chapter: round 1's prompt, or a refusal.
-///
-/// `engine` is not decoration: round 2's prompt carries the *engine's* non-verbal
-/// vocabulary, so it has to be built against the engine that will speak it. A
-/// tag the engine does not implement is read aloud.
-///
-/// Manual digest re-digests — plus the one next chapter past the digested run,
-/// so the operator can work ahead of a bottlenecked digest queue. Its delta then
-/// lands on top of its predecessor's, which is the bible order the workers keep.
-/// Anything further ahead is refused: skipping would merge deltas out of order.
 pub(crate) fn open(
     layout: &Layout,
     engine: &str,
@@ -113,10 +77,6 @@ pub(crate) fn open(
 }
 
 /// Take one pasted (or generated) answer.
-///
-/// `Ok(Prompt)` means the round was accepted and the next one is ready —
-/// round 1 buys round 2's prompt, which is why the caller must carry `cast`
-/// forward. `Ok(Done)` means the chapter finished.
 pub(crate) fn advance(
     layout: &Layout,
     engine: &str,
@@ -130,8 +90,6 @@ pub(crate) fn advance(
 
     if let Some(context) = answer.cast {
         // Round 1 done. Round 2's prompt is rendered *against this cast*, which
-        // is why the context is carried rather than re-derived — the worker
-        // makes exactly this hand-off between its two calls.
         let step = bm_core::digest::manual_prompt(layout, engine, n, Some(&context))
             .map_err(|e| format!("{e:#}"))?;
         return Ok(Next::Prompt {
@@ -145,9 +103,6 @@ pub(crate) fn advance(
     match answer.outcome {
         Some(outcome) => Ok(Next::Done(outcome)),
         // A part's script was accepted and the chapter has more parts: the next
-        // thing to do is round 1 of the next one, which `manual_accept` has
-        // already built — the part boundary is a second hand-off, and it is the
-        // same shape as the first.
         None => match answer.prompt {
             Some(step) => Ok(Next::Prompt {
                 round: step.round,
@@ -161,11 +116,6 @@ pub(crate) fn advance(
 }
 
 /// Send one prompt to the configured analyzer, retrying rate limits.
-///
-/// The same retry shape the worker's rounds use — a round that gave up sooner
-/// than the other would fail chapters for a reason that has nothing to do with
-/// the round. One attempt per call; the caller decides whether a refused answer
-/// is worth one repair.
 pub(crate) async fn ask(
     prompt: &str,
     analyzer: &str,
@@ -195,10 +145,6 @@ pub(crate) fn repair_prompt(prompt: &str, complaint: &str) -> String {
 }
 
 /// The one line an operator needs when the control API is not up.
-///
-/// Returned rather than waited on: the backend is a **precondition**, the same
-/// way it is for `make tui`. A digest whose report has nowhere to land is work
-/// on nobody's disk, so this says what to enter and stops.
 pub(crate) fn backend_down(api: &str) -> String {
     format!(
         "the inductor at {api} is not answering — start it first (`make serve`, or press :B in \
@@ -207,16 +153,12 @@ pub(crate) fn backend_down(api: &str) -> String {
 }
 
 /// Is the control API answering at all?
-///
-/// `GET /api/state` is the one call that reads nothing and writes nothing, so
-/// it answers "is there an inductor there" without touching a task.
 pub(crate) async fn reachable(api: &str, http: &reqwest::Client) -> bool {
     let url = format!("{}/api/state", api.trim_end_matches('/'));
     matches!(http.get(&url).send().await, Ok(r) if r.status().is_success())
 }
 
 /// The backend must already be up. Checked before the first chapter rather than
-/// after it, so a missing inductor costs a second instead of a whole range.
 pub(crate) async fn require_inductor(api: &str, http: &reqwest::Client) -> Result<(), String> {
     if reachable(api, http).await {
         Ok(())
@@ -226,12 +168,6 @@ pub(crate) async fn require_inductor(api: &str, http: &reqwest::Client) -> Resul
 }
 
 /// Hand a finished digest to a running inductor.
-///
-/// The body is a worker's, field for field — the same `Complete` the agent
-/// posts — so the inductor cannot tell the two apart except by who is claiming
-/// the work, which is the one thing that legitimately differs. The reserved
-/// `operator` id is what makes the report authoritative: the row may be
-/// assigned to a box grinding on the same chapter, and this answer still wins.
 pub(crate) async fn report(
     api: &str,
     http: &reqwest::Client,
@@ -266,10 +202,6 @@ pub(crate) async fn report(
 }
 
 /// Report, and name the remedy when the backend has gone away mid-run.
-///
-/// Same precondition as at startup, checked at the one moment it matters: a
-/// report that cannot land is the difference between a digested chapter and a
-/// model call nobody paid for.
 pub(crate) async fn report_or_stop(
     api: &str,
     http: &reqwest::Client,
@@ -281,7 +213,6 @@ pub(crate) async fn report_or_stop(
     match report(api, http, chapter, script, delta, detail).await {
         Ok(line) => Ok(line),
         // The cause and the remedy, together: "could not reach" alone is a
-        // shrug, and a bare "start the inductor" hides why it went away.
         Err(e) if !reachable(api, http).await => {
             Err(format!("ch{chapter}: {e} — {}", backend_down(api)))
         }
@@ -296,7 +227,6 @@ mod tests {
     #[test]
     fn manual_digest_refuses_a_chapter_past_the_next_one() {
         // Skipping ahead would merge bible deltas out of order: only the
-        // chapter right after the digested run may be worked by hand.
         let d = tempfile::tempdir().unwrap();
         let layout = Layout::new(d.path());
         let err = open(&layout, "vieneu", 7, &|n| layout.digested(n)).unwrap_err();
@@ -306,7 +236,6 @@ mod tests {
     #[test]
     fn manual_digest_opens_the_chapter_after_the_last_digested_one() {
         // The digest queue's bottleneck case: ch1 done, ch2 fresh — ch2 opens,
-        // ch3 still refused.
         let d = tempfile::tempdir().unwrap();
         bm_core::profile::install_fixture(d.path()).unwrap();
         let layout = Layout::new(d.path());

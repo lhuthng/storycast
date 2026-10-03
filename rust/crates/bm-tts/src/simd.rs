@@ -1,26 +1,4 @@
 //! The dot product, which is where a render spends most of its arithmetic.
-//!
-//! One generated frame runs 16 of these against the audio head (1024 x 768) and
-//! one against the text head (419 x 768), so a 124-frame render is ~1.6 billion
-//! multiply-accumulates. At that size the codegen is the whole difference.
-//!
-//! **Why this is hand-written.** The portable form —
-//! `for lane in 0..8 { acc[lane] = row[k + lane].mul_add(x[k + lane], acc[lane]) }`
-//! — gets 285 ms for the render, and the disassembly says why: LLVM keeps eight
-//! *scalar* accumulators and emits six scalar `fmadd` plus one two-lane
-//! `fmla.2s` per eight multiply-accumulates. It will pair lanes but not fill a
-//! register, and the fixed reduction order that makes the result reproducible is
-//! what stops it. Explicit vectors settle the question.
-//!
-//! **The summation order is not the portable one**, so this is a numerical
-//! change, not just a speed one: four accumulators per vector pass, then a
-//! pairwise horizontal add. `tools/frames-parity.py` is the arbiter — at
-//! temperature 0 the codes are an argmax, so a difference either flips a near
-//! tie or vanishes entirely.
-//!
-//! Four accumulators rather than one, on purpose: a single chain serialises on
-//! FMA latency (4 cycles on both targets), which would be slower than the scalar
-//! code it replaces. Four chains is what makes the throughput available.
 
 /// `a · b`. The lengths must match.
 #[inline]
@@ -47,7 +25,6 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Eight independent accumulators, fused. The fallback, and the reference the
-/// vector paths are checked against.
 pub fn portable(a: &[f32], b: &[f32]) -> f32 {
     const LANES: usize = 8;
     let n = a.len().min(b.len());
@@ -164,7 +141,6 @@ mod tests {
     #[test]
     fn the_vector_path_agrees_with_the_portable_one() {
         // Every width in play: 768 (audio head), 419 (text head), and odd ones
-        // so the 16-wide, 4-wide and scalar tails are all exercised.
         for n in [1usize, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 33, 419, 768, 769] {
             let a: Vec<f32> = (0..n)
                 .map(|i| ((i * 37 % 101) as f32 - 50.0) / 50.0)
@@ -175,7 +151,6 @@ mod tests {
             let want = reference(&a, &b);
             let got = dot(&a, &b);
             // Not bit-exact against a naive sum — that is the point of the
-            // reassociation — but it must be a dot product.
             let tol = 1e-4 * want.abs().max(1.0);
             assert!(
                 (got - want).abs() <= tol,

@@ -1,26 +1,4 @@
 //! Pulling a composition's dependencies out of their releases.
-//!
-//! [`bm_core::pack_update`] is the decision — what the closure is, what moved,
-//! and whether anything may be replaced — and it knows nothing about hosts.
-//! This is the half that answers its two questions, and the answer has three
-//! parts: a GitHub release list, the tag convention `<name>-pack-v<version>`,
-//! and `bm_core::artifact`'s verified unpack.
-//!
-//! **The tag is the version**, which is why the lookup is a name match inside
-//! the release list rather than a rolling `latest` tag. `profile.sh pack <name>
-//! --dep --version V` cuts `<name>-pack-vV`, and a box resolves the same string
-//! out of the load pointer — so an update and a provision are two routes to one
-//! release rather than two names to keep in step. A `-latest` tag would answer
-//! faster and be worth less: a version that *changed* is the only thing an
-//! update is permitted to act on, and `gh release create` refusing an existing
-//! tag is what makes that comparison mean "the bytes did not change".
-//!
-//! **It stages inside `_extends/`, not beside it.** The tree the fold will read
-//! has to be on the same filesystem as the directory it replaces, because the
-//! update renames rather than copies, and `assets/_extends/` is the one tree the
-//! profile hash deliberately skips — so a staging directory there cannot drift
-//! the pack. A run that dies leaves `.update.<pid>/` behind, which the next run
-//! wipes and no fold can see.
 
 use anyhow::{bail, Context, Result};
 use bm_core::compose;
@@ -30,17 +8,11 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// The release plane, asked one question at a time.
-///
-/// The listing is fetched once for the whole run: `latest` is called for every
-/// pack in the closure and the page is the same page, so a three-dependency
-/// update costs one API call rather than three — and an unauthenticated caller
-/// has 60 an hour to spend.
 pub struct GitHub {
     repo: String,
     token: Option<String>,
     client: reqwest::blocking::Client,
     /// Where `_extends/` is. Kept rather than the staging path, because the
-    /// staging path is not made until something is actually fetched.
     extends: PathBuf,
     stage: Option<PathBuf>,
     page: Option<Vec<Value>>,
@@ -55,8 +27,6 @@ impl GitHub {
                 .filter(|t| !t.trim().is_empty()),
             client: reqwest::blocking::Client::builder()
                 // Only the connect is bounded, the same rule `artifact::download`
-                // follows: a 60 MB bundle off a slow link is minutes, and a total
-                // timeout that fires mid-transfer is a worse answer than waiting.
                 .connect_timeout(std::time::Duration::from_secs(20))
                 .build()
                 .context("building the HTTP client")?,
@@ -67,11 +37,6 @@ impl GitHub {
     }
 
     /// The staging directory, made on the first fetch and never before.
-    ///
-    /// Lazily, because `--dry-run` promises to write nothing and a directory
-    /// inside the live tree *is* a write — a dry run that left one behind (or
-    /// created `_extends/` on a checkout that had none) would be reporting on a
-    /// tree it had already changed.
     fn stage(&mut self) -> Result<&Path> {
         if self.stage.is_none() {
             let dir = self.extends.join(format!(".update.{}", std::process::id()));
@@ -82,11 +47,6 @@ impl GitHub {
     }
 
     /// `api.github.com/…/releases`, unauthenticated unless `GH_TOKEN` is set.
-    ///
-    /// A failure here is fatal and says so, unlike a box's provision: a box that
-    /// cannot reach a release falls back to the push, but an update *is* the
-    /// fetch, and "the list would not load so nothing moved" is a sentence the
-    /// operator needs rather than a silent no-op that reads as "up to date".
     fn fetch_page(&self) -> Result<Vec<Value>> {
         let url = format!(
             "https://api.github.com/repos/{}/releases?per_page=100",
@@ -114,10 +74,6 @@ impl GitHub {
     }
 
     /// The newest release of `name` this repo holds.
-    ///
-    /// Newest by `created_at`, which is what the release list can actually
-    /// order: a pack version is an operator's string (`0.10.0` and `0.9.0` sort
-    /// the wrong way lexically), so the only honest ordering is when it was cut.
     fn newest(&mut self, name: &str) -> Result<Option<Available>> {
         if self.page.is_none() {
             let page = self.fetch_page()?;
@@ -182,11 +138,6 @@ impl Releases for GitHub {
     }
 
     /// Download, verify against the bundle's own manifest, and hand back its
-    /// unpacked tree for the update to rename into place.
-    ///
-    /// The bytes and the file count are printed here because this is the only
-    /// place they exist: verify-then-swap throws the staging tree away, so a
-    /// caller that wanted to report the transfer would have to do it twice.
     fn fetch(&mut self, release: &Available) -> Result<PathBuf> {
         let dest = self.stage()?.join(&release.name);
         let _ = std::fs::remove_dir_all(&dest);
@@ -195,12 +146,6 @@ impl Releases for GitHub {
         let (landing, hash) = match fetched {
             Ok(pair) => pair,
             // *Corrupt* is the one failure with a known remedy, so it gets it:
-            // the four published `-pack-v0.1.0` releases are all full of `._name`
-            // sidecars (audited 2026-09-29: common 80, xianxia 129, weapons 35,
-            // magic 18), and "a member its manifest never listed" reads as a
-            // mystery until the command is named. *Unreachable* is a different
-            // conversation (no such release, no route) and gets the plain
-            // message.
             Err(bm_core::artifact::FetchError::Corrupt(e)) => bail!(
                 "{tag} does not verify and was not unpacked: {e}\n  \
                  nothing was replaced — the tree is as it was. Re-publish it under the \
@@ -231,7 +176,6 @@ impl Releases for GitHub {
 impl Drop for GitHub {
     fn drop(&mut self) {
         // Whatever is still in the stage was not installed. A dot-directory is
-        // invisible to the fold, but it is still 60 MB of somebody's disk.
         if let Some(stage) = &self.stage {
             let _ = std::fs::remove_dir_all(stage);
         }
@@ -250,11 +194,6 @@ fn asset_url(release: &Value) -> Option<String> {
 }
 
 /// `bm-inductor profile update`: pull the newest release of every dependency.
-///
-/// The report is the point as much as the install is. Doing this by hand is what
-/// left a checkout running a parent nobody remembered to re-fetch, and the two
-/// facts that catch it — which releases are behind, and which trees were edited
-/// here — are printed whether or not anything moves.
 pub fn cmd_update(
     layout: &Layout,
     settings: &Settings,
@@ -273,7 +212,6 @@ pub fn cmd_update(
         );
     }
     // Validated by the release side's own rule, so a setting that a box would
-    // refuse is refused here too rather than turned into an API path.
     let (owner, name) = bm_core::artifact::parse_repo(&repo)?;
     let repo = format!("{owner}/{name}");
 

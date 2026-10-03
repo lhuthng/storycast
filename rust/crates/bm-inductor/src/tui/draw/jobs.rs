@@ -1,9 +1,4 @@
 //! The jobs overlay: one row per background job, live state and elapsed time.
-//!
-//! Tab (or `J`) opens it; the footer's `N job(s) running` is this list, so the
-//! title carries the same split the footer only totals: running against
-//! queued. Running sorts first — the queued tail is history, the running row
-//! is where an operator's eye lands.
 use crate::tui::{
     app::{App, HitTarget, ListTarget},
     style::{centered_padded, spinner},
@@ -41,8 +36,6 @@ pub(crate) fn draw_jobs(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
     let dim = Style::default().fg(Color::DarkGray);
 
     // Newest first, running before queued: the row doing work is the one
-    // worth finding without scrolling, and a fresh queue lands on top where
-    // the eye already is.
     let mut jobs: Vec<&crate::tui::jobs::BackgroundJob> = app.background_jobs.iter().collect();
     jobs.sort_by_key(|j| (j.started.is_none(), std::cmp::Reverse(j.queued)));
     let running = jobs.iter().filter(|j| j.started.is_some()).count();
@@ -55,7 +48,6 @@ pub(crate) fn draw_jobs(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
     };
 
     // The hint lives on the last inner row, where a footer would sit,
-    // instead of over the border.
     let hint_area = Rect {
         y: area.y + area.height - 2,
         height: 1,
@@ -72,8 +64,6 @@ pub(crate) fn draw_jobs(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
                 None => ("queued", Color::Yellow),
             };
             // Only a running job spins: a queued row spinning would claim
-            // work it is not doing — the exact lie the honest state word
-            // exists to prevent.
             let mark = match job.started {
                 Some(_) => format!("{} ", spinner(app.tick)),
                 None => "  ".to_string(),
@@ -103,7 +93,6 @@ pub(crate) fn draw_jobs(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         .border_style(app.style(crate::tui::style::theme_accent()));
     if jobs.is_empty() {
         // A bare table with a header and no rows reads as "loading". All
-        // clear says itself, centred, the way every other pane does.
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "nothing in flight",
@@ -132,8 +121,6 @@ pub(crate) fn draw_jobs(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
     }
 
     // One honest hint line per state of the world: an empty list points at
-    // the two commands that fill it, and a full one names the way out —
-    // Tab, the same key that opened this.
     let hint = if jobs.is_empty() {
         "B starts the backend · :t enqueues chapters"
     } else {

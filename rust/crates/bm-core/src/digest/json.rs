@@ -8,17 +8,6 @@ pub(crate) fn strip_fences(raw: &str) -> &str {
 }
 
 /// Parse model-produced JSON, repairing only a small, well-understood set of
-/// common mistakes before preserving the normal parse error.
-///
-/// Prompt answers occasionally put literal quotation marks inside a Vietnamese
-/// `text` value. The first unescaped quote makes serde treat the rest of the
-/// sentence as JSON source and fail. Feeding each parse error back into the
-/// input is safer than guessing from punctuation: the quote immediately before
-/// the error is escaped, and the next parse confirms the reading. Bounded
-/// retries keep truly malformed output from being rewritten indefinitely.
-///
-/// **The unambiguous repairs run on every pass, not once.** Escaping control
-/// characters requires knowing which quotes open a string, so one unescaped
 /// `"` inside a `text` value puts the scanner outside the string and every
 /// later newline is emitted raw; escaping quotes afterwards moves that
 /// boundary again. Alternating the repairs until neither changes anything is
@@ -32,16 +21,8 @@ pub(crate) fn parse_json_repaired(input: &str) -> Result<Value> {
     //
     // Escaping a control character needs to know which quotes open a string, so
     // an unescaped `"` inside a value puts that scanner outside the string and
-    // every later newline is emitted raw. But fixing that by re-escaping after
     // each quote repair is worse than useless: an escaped quote reads as "a
     // literal quote inside a string", so the scanner never sees the string
-    // *close*, swallows the rest of the document, and turns its newlines into
-    // escapes, which is how a repair pass can turn one broken answer into a
-    // differently broken one. ch79 died of `control character found while
-    // parsing a string` twice over for exactly this reason.
-    //
-    // So: settle the quotes until the complaint stops being about structure,
-    // then escape control characters against that now-correct pairing, once.
     let mut candidate = input.to_string();
     for _ in 0..64 {
         let error = match serde_json::from_str(&candidate) {
@@ -49,14 +30,10 @@ pub(crate) fn parse_json_repaired(input: &str) -> Result<Value> {
             Err(error) => error,
         };
         // A control character is the other half's job; handing it to the quote
-        // walk would only escape an unrelated quote and move the error.
         if error.to_string().contains("control character") {
             break;
         }
         // A **fresh** parse every time, because serde's line and column belong
-        // to the text that produced them: reusing the previous error indexes the
-        // current candidate with stale offsets, which lands mid-character in
-        // Vietnamese text and panics instead of repairing.
         let Some(error_offset) = json_error_offset(&candidate, &error) else {
             return Err(json_failure(&error));
         };
@@ -67,7 +44,6 @@ pub(crate) fn parse_json_repaired(input: &str) -> Result<Value> {
     }
 
     // The scanner treats paired literal quotes as balanced, which is also how
-    // the attached Vietnamese digest presents them.
     let candidate = remove_json_trailing_commas(&escape_json_control_chars(&candidate));
     match serde_json::from_str(&candidate) {
         Ok(value) => Ok(value),
@@ -76,11 +52,6 @@ pub(crate) fn parse_json_repaired(input: &str) -> Result<Value> {
 }
 
 /// The parse error a model can act on.
-///
-/// serde's own wording is precise and useless to the thing that has to fix it:
-/// `control character (\u0000-\u001F) found while parsing a string at line 67`
-/// names a byte class, not a thing to write differently. The remedy goes with
-/// it, because this message is what the repair prompt quotes back.
 pub(crate) fn json_failure(error: &serde_json::Error) -> anyhow::Error {
     let raw = error.to_string();
     let remedy = if raw.contains("control character") {
@@ -100,7 +71,6 @@ pub(crate) fn json_failure(error: &serde_json::Error) -> anyhow::Error {
 }
 
 /// Byte offset reported by serde_json (line and column are one-based; column is
-/// a byte offset within the line).
 fn json_error_offset(input: &str, error: &serde_json::Error) -> Option<usize> {
     let line_start = if error.line() == 1 {
         0
@@ -112,11 +82,6 @@ fn json_error_offset(input: &str, error: &serde_json::Error) -> Option<usize> {
 }
 
 /// The nearest quote before `end` that is worth escaping.
-///
-/// **A quote followed by `:` is a key's closing quote, never the literal one**
-/// inside a value, and escaping it turns `"segments": [...]` into a key that is
-/// no longer a string, `key must be a string`, a new error one step further
-/// from the truth. Skipping those is what keeps the walk on the right quote when
 /// a value holds a raw `"` *and* a raw newline: the scanner is out of sync, so
 /// the first complaint can land anywhere, and the nearest quote is then often
 /// the wrong one.
@@ -215,6 +180,4 @@ fn remove_json_trailing_commas(input: &str) -> String {
     output
 }
 
-// ---------------------------------------------------------------------------
-// the stage entry point
 // ---------------------------------------------------------------------------

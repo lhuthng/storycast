@@ -1,33 +1,4 @@
 //! The Machines pane drawn as a rack: the inductor's console, the boxes it
-//! drives, and the bus between them.
-//!
-//! **The picture is a bus because the transport is.** The inductor dials every
-//! box — `ssh` to push, `http` for `GET /status` and `POST /task` — and nothing
-//! ever dials the inductor, so there is no box-to-box edge to draw. A mesh of
-//! arrows would look more like a cluster diagram and would say the wrong thing.
-//!
-//! **Every box is drawn in a frame, and that is load-bearing.** The first
-//! version hung bare art off a `│`, and the complaint was that the lines were
-//! disconnected and confusing — which was true. A drop that ends in empty space
-//! above a glyph is a stroke, not a connection: the eye has to guess whether
-//! the rail belongs to the box below it. A frame ends it in a corner on a
-//! visible edge, which is the one thing that makes "this is plugged into that"
-//! unambiguous. The frame's side bars also fill the rows beside the art's lower
-//! two thirds, which had nothing in them.
-//!
-//! **It is left-anchored on purpose.** The console sits at a fixed column, so a
-//! wide terminal does not slide it into the middle of an otherwise empty pane
-//! and the boxes scroll past it.
-//!
-//! **It merges the Workers pane rather than repeating it.** A node carries the
-//! animal the box's worker reports — the same word the Workers pane, the event
-//! log and Stats already call it — and the task it is on with the chapter, so
-//! one glance answers "who is working on what".
-//!
-//! The shape lives in [`plan`], and the painter walks it. That is the point of
-//! the indirection: the pane's height and its contents are then one
-//! description seen twice, rather than two arithmetic blocks that have to be
-//! kept equal.
 
 use crate::tui::{
     app::App,
@@ -43,7 +14,6 @@ use ratatui::{
 };
 
 /// The inductor, as a console: a screen on a stand. Four rows by five columns,
-/// so it tiles against a server the way two faces of the same rack do.
 pub(crate) const HUB: [&str; 4] = ["/---\\", "|   |", "|___|", " \\_/ "];
 
 /// A box, as a rack unit. Four rows by five columns.
@@ -51,30 +21,21 @@ pub(crate) const SERVER: [&str; 4] = [" ___ ", "|[_]|", "|+ ;|", "`---'"];
 
 const ART_W: u16 = 5;
 /// Art, a space, then the label. Fourteen, because `digest 12 50%` plus its
-/// leading space is fourteen and a work line that loses its last character is a
-/// percentage that reads as something else.
 const LABEL_W: u16 = 14;
 /// The whole cell, **frame included**: a bar, the art, the label, a bar. The
-/// art is five columns with a space at each end, so it supplies the gap between
-/// itself and the label. The selection background covers exactly this, so the
-/// highlighted box is a rectangle and not a patch around two lines of text.
 const NODE_W: u16 = 1 + ART_W + LABEL_W + 1;
 /// One blank column between two frames, so two boxes never touch.
 const PITCH: u16 = NODE_W + 1;
 /// Where the first node's frame starts, measured from the pane's left edge.
 const COL0: u16 = ART_W + 3;
 /// The bus leaves the hub from the middle of its art — and a node's drop lands on
-/// the middle of the *art*, not the middle of the cell, so the line meets the
-/// machine and not the frame around it.
 const DROP_IN_NODE: u16 = 1 + ART_W / 2;
 /// The bus leaves the hub from the middle of its art.
 const HUB_MID: u16 = ART_W / 2;
 
 /// One band of servers: the rail they hang from, the frame's top edge, four
-/// rows of art, and its bottom edge.
 const BAND_H: u16 = 1 + 1 + 4 + 1;
 /// The console, and the spine that runs down from it. The lean form is the
-/// console's name alone, which is the same picture with the art left off.
 const CHASSIS: u16 = HUB.len() as u16 + 1;
 const LEAN_CHASSIS: u16 = 2;
 
@@ -83,10 +44,6 @@ pub(crate) const FULL_H: u16 = CHASSIS + BAND_H;
 pub(crate) const LEAN_H: u16 = LEAN_CHASSIS + BAND_H;
 
 /// The richest form that fits `avail` interior rows, or `None` for none of them.
-///
-/// `None` is the caller's signal to draw the table instead: a rack with the
-/// servers' legs cut off is worse than a table, and saying so is better than
-/// showing either without comment.
 pub(crate) fn form_for(avail: u16) -> Option<bool> {
     if avail >= FULL_H {
         Some(true)
@@ -98,28 +55,17 @@ pub(crate) fn form_for(avail: u16) -> Option<bool> {
 }
 
 /// How many bands of servers fit in `avail` interior rows. Never zero: a rack
-/// with no servers on it is not a rack, so a pane one row short of a band gets
-/// one and the border gets the clipping.
 pub(crate) fn bands_for(avail: u16, hub_art: bool) -> usize {
     let chassis = if hub_art { CHASSIS } else { LEAN_CHASSIS };
     (avail.saturating_sub(chassis) / BAND_H).max(1) as usize
 }
 
 /// How many nodes fit side by side in `w` interior columns.
-///
-/// Never zero: a node wider than the terminal is still drawn and clipped, so a
-/// narrow window degrades to a list rather than to a blank pane.
 pub(crate) fn columns_for(w: u16) -> usize {
     (w.saturating_sub(COL0) / PITCH).max(1) as usize
 }
 
 /// The window's top band, for a cursor at `selected` in a window at `first`.
-///
-/// Follows the cursor and never runs off the end of the cluster, the same two
-/// rules the table's `clamp_scroll` follows — expressed in bands because a band
-/// is the rack's unit. The window is *stored*, not derived: `←` and `→` move
-/// the cursor and `↑` and `↓` move it by a row, and a window that recomputed
-/// itself from the cursor would jump a whole band on every press down.
 pub(crate) fn first_band(
     selected: usize,
     first: usize,
@@ -139,14 +85,9 @@ pub(crate) fn first_band(
 }
 
 /// One *display* row of the picture, in draw order.
-///
-/// One row, not one cell: the plan is the pane's height as well as its
-/// contents, so it cannot list an art row once per node and then have two
-/// places disagree about how tall the picture is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Row {
     /// One row of the console, or the single line it is replaced by in the lean
-    /// form. The name rides on row 0 either way.
     Hub { row: usize },
     /// The spine under the console, running down to the first band.
     Spine,
@@ -163,7 +104,6 @@ pub(crate) enum Row {
 }
 
 /// The rows the picture is made of — **the single description of its shape**.
-/// Its length is the height, and the painter walks the same list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Plan {
     pub rows: Vec<Row>,
@@ -177,16 +117,10 @@ pub(crate) struct Plan {
 }
 
 /// The picture for a window, in one description.
-///
-/// `avail` is the interior height the pane actually got, so the plan is the
-/// same arithmetic whether the caller is sizing the pane or drawing into it —
-/// which is the only way the two cannot disagree about how tall the rack is.
 pub(crate) fn plan(avail: u16, w: u16, total: usize, first: usize, hub_art: bool) -> Plan {
     let cols = columns_for(w);
     let total_bands = total.div_ceil(cols).max(1);
     // A window shows whole bands and is full whenever there are enough boxes to
-    // fill it: a rack that went half-empty on every scroll would be a rack
-    // reporting on its own padding.
     let bands = bands_for(avail, hub_art).min(total_bands);
     let hub_rows = if hub_art { HUB.len() } else { 1 };
     let mut rows = Vec::with_capacity(PLAN_MAX);
@@ -213,9 +147,6 @@ pub(crate) fn plan(avail: u16, w: u16, total: usize, first: usize, hub_art: bool
         });
     }
     // The window is `bands × cols` boxes whatever the scroll position, so the
-    // count of what is *not on screen* is the same on every page — which is both
-    // honest ("these are the ones you are not looking at") and what keeps the
-    // pane the same height on every page.
     let hidden = total.saturating_sub(bands * cols);
     if hidden > 0 {
         rows.push(Row::More { hidden });
@@ -231,7 +162,6 @@ pub(crate) fn plan(avail: u16, w: u16, total: usize, first: usize, hub_art: bool
 }
 
 /// Room for the longest plan the painter can build, so the rows vector does not
-/// reallocate mid-draw. Bounded by the pane, not by the cluster.
 const PLAN_MAX: usize = 40;
 
 pub(crate) fn draw_graph(
@@ -255,18 +185,12 @@ pub(crate) fn draw_graph(
     let total_bands = total.div_ceil(cols).max(1);
     let bands = bands_for(avail, hub_art).min(total_bands);
     // The window is the painter's to move: the keys only move the cursor, and
-    // the drawer pulls the window along when the cursor would be off screen. Two
-    // owners of one offset is how a pane ends up disagreeing with the keys.
     app.graph_band = first_band(app.selected, app.graph_band, cols, bands, total_bands);
     // Published for `↑` and `↓`, which move the cursor a *row of the rack*, and
-    // cannot know the rack's width from where they run. Same bargain the log's
-    // PageUp already makes with `events_rows`.
     app.graph_cols = cols;
     let p = plan(avail, w, total, app.graph_band, hub_art);
 
     // The spine is one continuous line from the console to the last rail, so
-    // every row between them carries it. Drawing it row by row out of the plan
-    // is how it ends up as a floating `│` beside nothing.
     let spine_from = p.rows.iter().position(|r| *r == Row::Spine);
     let last_rail = p.rows.iter().rposition(|r| matches!(r, Row::Rail { .. }));
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -301,10 +225,6 @@ pub(crate) fn draw_graph(
 }
 
 /// The console, and on its first row the name of the thing driving them all.
-///
-/// The name is the inductor's own, never `127.0.0.1:8901`: a socket is where
-/// this dashboard happens to be pointed, and a picture that labels the
-/// coordinator by its address teaches the reader nothing they can use.
 fn hub_row(app: &App, row: usize, hub_art: bool, colour: bool, w: u16) -> Line<'static> {
     let mut ink = Ink::new();
     if hub_art {
@@ -318,7 +238,6 @@ fn hub_row(app: &App, row: usize, hub_art: bool, colour: bool, w: u16) -> Line<'
             style_bold_of(colour, Color::Cyan),
         );
         // The link's own state, in its own colour, beside the name — never on a
-        // row of its own, which would cost the picture a line it does not have.
         let (mark, level) = match app.conn {
             Conn::Up => ("● up", Color::Green),
             Conn::Unknown => ("○ …", Color::Yellow),
@@ -341,7 +260,6 @@ fn gutter(w: u16, colour: bool) -> Line<'static> {
 }
 
 /// The bus: out of the spine, across to the band's last node, and closed after
-/// it — or carried on down the spine when another band follows.
 fn rail_row(w: u16, p: &Plan, band: usize, last: bool, colour: bool) -> Line<'static> {
     let centres = band_centres(p, band);
     let mut row = vec![' '; w as usize];
@@ -364,7 +282,6 @@ fn rail_row(w: u16, p: &Plan, band: usize, last: bool, colour: bool) -> Line<'st
 }
 
 /// What every row painter needs that is not about the picture's shape: whether
-/// to honour the theme, and whether the spine passes through this row.
 #[derive(Clone, Copy)]
 struct Row2 {
     colour: bool,
@@ -372,11 +289,6 @@ struct Row2 {
 }
 
 /// A frame edge: `┌───┴───┐` across the top of every box in a band, with the
-/// drop arriving on the `┴`, or `└───────┘` along the bottom.
-///
-/// **This is the fix for the lines reading as disconnected.** The drop used to
-/// end in the empty space above a bare glyph; now it ends on a corner of a
-/// drawn edge, and the eye can see the box it is plugged into.
 fn lid_row(w: u16, p: &Plan, band: usize, top: bool, ctx: Row2) -> Line<'static> {
     let (spine, colour) = (ctx.spine, ctx.colour);
     let mut row = vec![' '; w as usize];
@@ -405,7 +317,6 @@ fn lid_row(w: u16, p: &Plan, band: usize, top: bool, ctx: Row2) -> Line<'static>
         }
         if top {
             // The drop lands on the middle of the *art*, so the line meets the
-            // machine rather than the frame hanging around it.
             if let Some(cell) = row.get_mut(x + DROP_IN_NODE as usize) {
                 *cell = '┴';
             }
@@ -418,13 +329,6 @@ fn lid_row(w: u16, p: &Plan, band: usize, top: bool, ctx: Row2) -> Line<'static>
 }
 
 /// One art row of a band, between its frame's edges.
-///
-/// The art takes the box's *stage* colour: a cluster mid-render is a wall of
-/// cyan and a digest is a wall of magenta, carrying the Workers pane's reading
-/// over rather than inventing a second one. A fault outranks it, and idle is
-/// not the same grey as never-contacted. **The selection is a background across
-/// the whole framed cell on every row** — frame bar, art, label and frame bar —
-/// so the marked box is a rectangle, not a patch around two lines of text.
 fn art_row(
     app: &App,
     p: &Plan,
@@ -452,9 +356,6 @@ fn art_row(
         let work = work_label(m);
         let tint = machine_tint(&work, node_stage(&app.machines, &app.beats, &m.addr, now));
         // The label is two lines, on the art's first two rows: which box it is,
-        // and what it is on. The alias is the animal the worker reports — the
-        // word the Workers pane, the log and Stats already use — so one box has
-        // one name everywhere.
         let label = match row {
             0 => format!(
                 "{} {}",
@@ -465,7 +366,6 @@ fn art_row(
             _ => String::new(),
         };
         // The cell is always the full width, so the selection's background is a
-        // rectangle whichever row the eye lands on.
         let cell = format!(
             "│{}{}│",
             SERVER[row],
@@ -489,12 +389,6 @@ fn band_centres(p: &Plan, band: usize) -> Vec<u16> {
 }
 
 /// A row under construction: text placed at absolute columns, with the gaps
-/// filled in as it goes.
-///
-/// Absolute placement is the point — every glyph in this picture is either at a
-/// node's column or at the middle of a node's art, and a painter that counted
-/// characters as it wrote them would drift out of column the moment one name
-/// was longer than the last.
 struct Ink {
     spans: Vec<Span<'static>>,
     at: usize,
@@ -519,7 +413,6 @@ impl Ink {
     }
 
     /// Extend to the pane's width, so a selected cell's background reaches the
-    /// border instead of stopping at the last glyph.
     fn finish(mut self, w: u16) -> Line<'static> {
         if self.at < w as usize {
             self.spans.push(Span::raw(" ".repeat(w as usize - self.at)));
@@ -545,8 +438,6 @@ mod tests {
     #[test]
     fn both_arts_are_the_same_size_so_they_read_as_one_rack() {
         // The console and the server are two faces of the same picture. If one
-        // of them grew a column, the bus would stop meeting the middle of the
-        // node and the whole drawing would lean.
         assert_eq!(HUB.len(), SERVER.len());
         for (h, s) in HUB.iter().zip(SERVER.iter()) {
             assert_eq!(h.chars().count(), s.chars().count(), "{h:?} / {s:?}");
@@ -561,7 +452,6 @@ mod tests {
     #[test]
     fn nodes_tile_across_and_bands_stack_below() {
         // A 120-column pane is five framed boxes, a 74-column compact pane is
-        // three. A terminal too narrow for even one still gets one, clipped.
         assert_eq!(columns_for(118), 5);
         assert_eq!(columns_for(74), 3);
         assert_eq!(columns_for(5), 1);
@@ -572,8 +462,6 @@ mod tests {
             assert!(used <= w || cols == 1, "{cols} nodes need {used} of {w}");
         }
         // Bands are what the extra height buys, and a frame costs a row each
-        // end: eleven is one band, eighteen two, and a pane one row short still
-        // gets a rack rather than a border.
         assert_eq!(bands_for(FULL_H, true), 1);
         assert_eq!(bands_for(FULL_H + BAND_H, true), 2);
         assert_eq!(bands_for(FULL_H + BAND_H - 1, true), 1);
@@ -583,8 +471,6 @@ mod tests {
     #[test]
     fn the_plan_is_the_height_and_the_picture_is_the_plan() {
         // The one property worth holding: the pane's height and the rows it
-        // draws come from one description, so a change to the shape cannot land
-        // in one and miss the other.
         let p = plan(FULL_H + BAND_H, 118, 8, 0, true);
         assert_eq!(p.rows.len() as u16, CHASSIS + 2 * BAND_H, "two bands");
         assert_eq!(p.rows.first(), Some(&Row::Hub { row: 0 }));
@@ -601,7 +487,6 @@ mod tests {
         assert_eq!(p.rows.get(rail + 1), Some(&Row::Lid { band: 0 }));
         assert_eq!(p.rows.get(rail + 2), Some(&Row::Art { band: 0, row: 0 }));
         // The first band carries the bus on; the second closes it. That is the
-        // difference between a spine and a row of dashes.
         assert_eq!(
             p.rows.get(rail + BAND_H as usize),
             Some(&Row::Rail {
@@ -620,7 +505,6 @@ mod tests {
         let one = plan(FULL_H + BAND_H, 118, 2, 0, true);
         assert_eq!(one.rows.len() as u16, CHASSIS + BAND_H);
         // The lean form is the same picture with the console's art replaced by
-        // its name — three rows shorter, and nothing else different.
         let lean = plan(LEAN_H + BAND_H, 118, 3, 0, false);
         assert_eq!(lean.rows.len() as u16, LEAN_CHASSIS + BAND_H);
         assert_eq!(lean.rows[0], Row::Hub { row: 0 });
@@ -630,8 +514,6 @@ mod tests {
     #[test]
     fn the_window_is_full_and_its_leftovers_are_counted() {
         // A window shows whole bands and is full whenever there is enough to
-        // fill it: a rack that went half-empty on every scroll would be a rack
-        // reporting on its own padding.
         let p = plan(FULL_H + BAND_H, 118, 40, 0, true);
         assert_eq!(p.bands, 2, "two bands fill it");
         assert_eq!(p.cols, 5);
@@ -641,7 +523,6 @@ mod tests {
             "ten shown of forty: thirty are not"
         );
         // And the count does not change with the scroll — the window is always
-        // `bands × cols` boxes — so the pane's height is the same on every page.
         let scrolled = plan(FULL_H + BAND_H, 118, 40, 6, true);
         assert_eq!(scrolled.rows.len(), p.rows.len());
         assert_eq!(scrolled.rows.last(), Some(&Row::More { hidden: 30 }));
@@ -659,14 +540,11 @@ mod tests {
     #[test]
     fn the_window_follows_the_cursor_and_stays_in_range() {
         // Sixteen boxes at four columns is four bands, two on screen. Selecting
-        // the last must show it, without running the window off the cluster.
         assert_eq!(first_band(0, 0, 4, 2, 4), 0);
         assert_eq!(first_band(4, 0, 4, 2, 4), 0, "band 2 is on the first page");
         assert_eq!(first_band(8, 0, 4, 2, 4), 1, "one band down");
         assert_eq!(first_band(15, 0, 4, 2, 4), 2, "the last band, not past it");
         // And back up. A cursor already inside the window must not drag it
-        // along — that is what made the earlier, remembered-offset version
-        // unusable: every press down scrolled the rack out from under you.
         assert_eq!(first_band(10, 2, 4, 2, 4), 2, "the window does not jump");
         assert_eq!(first_band(7, 2, 4, 2, 4), 1, "a band up when it must");
         assert_eq!(first_band(0, 2, 4, 2, 4), 0);
@@ -677,15 +555,12 @@ mod tests {
     #[test]
     fn the_richer_form_is_chosen_and_the_table_is_the_fallback() {
         // Twelve interior rows is the console; nine is its name; anything under
-        // that is a rack with the servers' legs cut off, and the caller draws
-        // the table instead of showing either silently broken.
         assert_eq!(form_for(20), Some(true));
         assert_eq!(form_for(FULL_H), Some(true));
         assert_eq!(form_for(FULL_H - 1), Some(false));
         assert_eq!(form_for(LEAN_H), Some(false));
         assert_eq!(form_for(LEAN_H - 1), None);
         // And the height a form asks for is the one that form was chosen for,
-        // so the layout and the painter cannot disagree about the shape.
         for avail in [LEAN_H, LEAN_H + 1, FULL_H, FULL_H + 1, 30] {
             let form = form_for(avail).expect("this row count fits something");
             assert!(
@@ -703,8 +578,6 @@ mod tests {
         assert_eq!(centres.len(), 3, "a node the width promised");
         let bus = rail_row(w, &p, 0, true, false).to_string();
         // `└` at the middle of the console, `┬` over each node, `┘` past the
-        // last. The whole edge is one row, so the bus cannot be misread as
-        // something that goes somewhere else.
         assert_eq!(bus.chars().nth(HUB_MID as usize), Some('└'));
         for c in &centres {
             assert_eq!(bus.chars().nth(*c as usize), Some('┬'), "at {c}");
@@ -712,7 +585,6 @@ mod tests {
         let last = *centres.last().unwrap() as usize;
         assert_eq!(bus.chars().nth(last + 1), Some('┘'));
         // Nothing between the spine and the last node is blank: a gap in the
-        // bus would read as a box that is not connected.
         assert!(
             bus.chars()
                 .skip(HUB_MID as usize)
@@ -721,8 +593,6 @@ mod tests {
             "{bus}"
         );
         // **The drop must end on a drawn edge.** This is the whole point of the
-        // frame: a line that stops in the blank space above a bare glyph reads
-        // as a stroke, not a connection.
         let lid = lid_row(
             w,
             &p,
@@ -748,11 +618,9 @@ mod tests {
                 "the frame's right edge"
             );
             // And the top edge is unbroken either side of the drop, so the box
-            // reads as a box rather than as two brackets.
             assert!(lid.chars().skip(x).take(NODE_W as usize).all(|c| c != ' '));
         }
         // The bottom edge closes where the top one opened, and on the middle of
-        // the art it is a plain bar: the bus has arrived.
         let sill = lid_row(
             w,
             &p,
@@ -780,8 +648,6 @@ mod tests {
     #[test]
     fn every_row_of_a_box_is_the_same_width_so_the_selection_is_a_rectangle() {
         // The bug this replaced: the selection's background covered the label on
-        // the first two rows and stopped dead on the other two, so the marked box
-        // was an L rather than a rectangle. The cell is now written whole.
         let mut app = App::new("http://127.0.0.1:8901");
         app.machines = vec![bm_proto::Machine::new(
             "52.2.2.2", "thang", 4, None, "worker",
@@ -801,8 +667,6 @@ mod tests {
                 },
             );
             // Box-drawing glyphs are three bytes each, so the cell is cut out of
-            // a `Vec<char>` — slicing the string by byte would hand back a
-            // handful of glyphs and call the test a pass.
             let text: Vec<char> = line
                 .spans
                 .iter()

@@ -1,11 +1,4 @@
 //! `L`: LLM providers — keys, endpoints, models, and which one digests.
-//!
-//! The file is `.bm/llm.json` (machine-global, like `machines.json`); every
-//! edit here saves it at once and mirrors the active provider into the
-//! workspace's `settings.json`, so the run screen and the API preview read
-//! the same model the next task offer carries. The offer is the whole sync:
-//! the active key+model travel per task, and switching takes effect on the
-//! next offer with no restart and no second file to keep in step.
 use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
@@ -28,7 +21,6 @@ pub(crate) fn open_llm(app: &mut App) {
 }
 
 /// Save one field of one provider, then mirror the active provider into the
-/// workspace settings. Returns a status line; `Err` keeps the prompt open.
 pub(crate) fn save_llm_field(
     app: &App,
     provider: &str,
@@ -85,14 +77,12 @@ pub(crate) fn save_llm_field(
 }
 
 /// Activate one provider: key (except Ollama) and model must be set, or the
-/// digest would be switched onto a provider that cannot answer.
 pub(crate) fn activate(app: &App, provider: &str) -> Result<String, String> {
     if app.layout.root.as_os_str().is_empty() {
         return Err("no repo root — restart the TUI from a checkout".into());
     }
     let mut cfg = bm_core::config::LlmConfig::load(&app.layout.root);
     // The keyless kind is read off the entry, not the id: any local service
-    // marked `ollama` activates without a key.
     let keyless = cfg.kind_of(provider) == bm_core::config::LlmKind::Ollama;
     let entry = cfg.providers.entry(provider.to_string()).or_default();
     if entry.model.trim().is_empty() {
@@ -126,8 +116,6 @@ pub(crate) fn pick_model(app: &App, provider: &str, model: &str) -> Result<Strin
 }
 
 /// Mirror the active provider into the workspace settings so the run screen,
-/// the footer and the headless CLI read the same model the offers carry. One
-/// direction only: `llm.json` wins, and a failure here never fails the save.
 fn mirror_settings(app: &App, cfg: &bm_core::config::LlmConfig) {
     let path = app.layout.settings();
     let mut settings = bm_core::config::Settings::load(&path);
@@ -152,7 +140,6 @@ pub(crate) async fn key_llm(
     v.cursor = v.cursor.min(ids.len().saturating_sub(1));
     let id = ids[v.cursor].clone();
     // The fetched list belongs to the provider it was fetched for; moving
-    // off it leaves picking rather than offering another row's Enter.
     if v.picking && app.llm_models_for != id {
         v.picking = false;
         v.model_cursor = 0;
@@ -161,8 +148,6 @@ pub(crate) async fn key_llm(
         KeyCode::Esc => {
             if v.picking {
                 // The fetched list is a step of this screen, like the voice
-                // picker's second stage: Esc leaves the list, and only the
-                // next Esc closes the screen. It used to walk out of both.
                 v.picking = false;
                 v.model_cursor = 0;
                 v.note.clear();

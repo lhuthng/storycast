@@ -17,10 +17,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
         bm_proto::Op::Translate => {
             let (start, count) = (req.start.unwrap_or(1), req.count.unwrap_or(1));
             // The chapter index first, and **outside the lock**: building it can
-            // walk a listing page, and a scheduler holding the ledger across a
-            // network round trip is a stalled cluster. This is the one place a
-            // `discover()` runs, once per range, on the inductor, which is
-            // what keeps ten workers from each re-reading the same index.
             let (index, index_note) = {
                 let inner = st.lock().await;
                 if inner.settings.crawl.is_manual() {
@@ -35,7 +31,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
                     {
                         Ok(Ok(idx)) => (Some(idx), String::new()),
                         // A broken crawler is worth knowing about *now*: the
-                        // alternative is N worker tasks failing identically.
                         Ok(Err(e)) => (None, format!("; no chapter index ({e:#})")),
                         Err(_) => (
                             None,
@@ -46,12 +41,8 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
             };
             let mut inner = st.lock().await;
             // Reconcile first: enqueue alone only tops up crawl+digest, so a
-            // range whose render/merge tasks went missing (reset ledger, older
-            // builds) would digest and then idle with nothing offerable.
             inner.reconcile(start, count);
             // The operator just named the range, so from here this process works
-            // on it: `:go` measures the remainder of *this*, not of whatever the
-            // saved run config happens to say (see `set_authored_range`).
             inner.set_authored_range(start, count);
             let absent = index.as_ref().map(|i| inner.apply_index(i)).unwrap_or(0);
             let (crawls, digests) = inner.enqueue_translate(start, count);
@@ -66,7 +57,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
         }
         bm_proto::Op::Import => {
             // Reading a file and rewriting a chapter is local, blocking disk
-            // work, so it runs off the runtime and without the ledger lock.
             let layout = { st.lock().await.layout.clone() };
             let (chapter, paths) = (req.chapter, req.paths.clone());
             let done = match tokio::task::spawn_blocking(move || {
@@ -116,9 +106,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
             }
             let mut inner = st.lock().await;
             // **Queued, not refused.** The op is unchanged for the caller and
-            // what it does is not: `exclusive_request` runs the surgery at once
-            // when the way is clear and parks it when it is not, where the old
-            // `op_swap_voice` refused outright. See the note on the helper.
             match inner.exclusive_request(bm_proto::ExclusiveOp::SwapVoice {
                 character,
                 voice,
@@ -130,15 +117,12 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
         }
         bm_proto::Op::PreviewVoice => {
             // No lock taken: rendering a sample reads no scheduler state, and
-            // holding the lock across a sidecar call would freeze the whole
-            // dashboard for as long as the render takes.
             let layout = st.lock().await.layout.clone();
             let voice = req.voice.clone().unwrap_or_default();
             Json(op_preview_voice(&layout, &voice, req.text.as_deref()).await)
         }
         bm_proto::Op::Segment => {
             // Files only, no lock beyond cloning two small values: the whole
-            // point is serving bytes without synthesis.
             let (layout, engine) = {
                 let inner = st.lock().await;
                 (inner.layout.clone(), inner.settings.engine.clone())
@@ -165,11 +149,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
         bm_proto::Op::Retry => {
             let mut inner = st.lock().await;
             // Three scopes, narrowing in this order. A stage + chapter is one
-            // task, what the Tasks screen sends, so one bad digest never
-            // re-queues the batch. A chapter alone is every shelved stage of it
-            // (`:retry 24`). A stage with no chapter is refused rather than
-            // widened to the whole ledger: silently doing more than was asked
-            // is the failure this shape exists to avoid.
             match (req.stage, req.chapter) {
                 (Some(stage), Some(chapter)) => Json(OpResult::ok(inner.op_retry_task(
                     stage,
@@ -195,11 +174,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
         }
         bm_proto::Op::Release => {
             // Two scopes, exactly one per request, and the refusal keeps them
-            // apart the way `retry`'s stage-without-chapter does: widening a
-            // release to the whole ledger because a field was missing is the
-            // kind of doing-more-than-asked this shape exists to stop. A
-            // worker names every row that box holds; stage + chapter names one
-            // row, which for `render` is every take of it.
             let force = req.force.unwrap_or(false);
             match (req.worker.clone(), req.stage, req.chapter) {
                 (Some(worker), ..) => {
@@ -217,7 +191,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
         }
         bm_proto::Op::Reconcile => {
             // Plan under the lock, think outside it: the LLM call takes
-            // seconds and must never block heartbeats and completions.
             let (layout, settings) = {
                 let inner = st.lock().await;
                 (inner.layout.clone(), inner.settings.clone())
@@ -228,8 +201,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
             let dry_run = req.dry_run.unwrap_or(false);
             let mut inner = st.lock().await;
             // A dry run reads scripts and writes nothing, so it must never park
-            // a write — the operator asked what *would* change, and answering
-            // "queued" would be a lie about work that has not been asked for.
             let outcome = match dry_run {
                 true => inner.op_retag(true),
                 false => inner.exclusive_request(bm_proto::ExclusiveOp::Retag {
@@ -261,9 +232,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
         }
         bm_proto::Op::FixSpeaker => {
             // All three names are required, and the third is the check rather
-            // than decoration: without an `expect` this is `recast` with worse
-            // ergonomics, and the point of the op is that a wrong segment
-            // number cannot edit the wrong line.
             let (chapter, segment, expect, speaker) = (
                 req.chapter,
                 req.segment,
@@ -293,10 +261,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
         }
         bm_proto::Op::Merge => {
             // One survivor, one or more absorbed: the manual form of a
-            // reconcile fold, for a pair the canon key would never match.
-            // Names are validated inside (survivor in the bible, absorbed in
-            // the bible or the cast, no Narrator), so a typo refuses before
-            // anything is rewritten.
             let (survivor, absorbed) = (req.survivor.clone(), req.absorbed.clone());
             match survivor {
                 Some(survivor) if !survivor.trim().is_empty() && !absorbed.is_empty() => {
@@ -319,12 +283,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
         bm_proto::Op::Remix => {
             let mut inner = st.lock().await;
             // The `None` semantics are the direct op's, unchanged. Speed, fx
-            // and music stay **required** — a missing one is still an error, and
-            // defaulting it to 1.0 would quietly reset a book that is mid-mix.
-            // `inject` still defaults to the mix in force rather than to unity.
-            // Resolved here because `ExclusiveOp::Remix` carries final numbers:
-            // that is what lets a parked remix keep the values the operator
-            // asked for rather than a draft they have since edited.
             for (what, v) in [
                 ("speed", req.speed),
                 ("fx volume", req.effect_volume),
@@ -348,8 +306,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
         }
         bm_proto::Op::SoundChanged => {
             // No `ensure_idle`: nothing here writes a voice or a cache. It
-            // reads the registries and requeues merges, which is the ordinary
-            // queue operation the scheduler does all day.
             let mut inner = st.lock().await;
             Json(OpResult::ok(inner.op_sound_changed()))
         }
@@ -377,10 +333,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
         }
         bm_proto::Op::Exclusive => {
             // The write the request already carries its arguments for: swap
-            // fields in their usual slots, remix volumes likewise. Building
-            // the arm here — from the same request — means an enqueued swap
-            // is byte-identical to a direct one, so the runner needs no
-            // second argument vocabulary.
             let Some(mut op) = req.exclusive else {
                 return Json(OpResult::fail("exclusive requires a write to queue"));
             };
@@ -441,10 +393,6 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
 }
 
 /// Fold duplicates: deterministic canon-key folds over the bible AND the cast
-/// (title/casing/parenthetical variants that never entered the bible) apply
-/// immediately; ambiguous pairs go to the analyzer on the next press.
-/// Certain folds never wait on the LLM, that call takes minutes on
-/// rate-limited tiers while the TUI gives up in seconds.
 async fn op_reconcile(
     st: &Shared,
     layout: &bm_core::Layout,
@@ -453,10 +401,6 @@ async fn op_reconcile(
     let bible: serde_json::Value =
         bm_core::read_json(&layout.bible()).unwrap_or(serde_json::json!({"characters": []}));
     // Ambiguous aliases first: bare generics ("nữ tử", "tiền bối", "vị kia")
-    // sitting in `proper_aliases` hijack every future chapter about an
-    // unnamed figure (ch112 went to Lạc Lan Tuyết that way). Alias-only
-    // change, serialized under the ledger lock like completions, so it races
-    // nothing; idempotent, so a second press is a no-op.
     let scrubbed: Vec<String> = {
         let mut inner = st.lock().await;
         let path = inner.layout.bible();
@@ -509,9 +453,6 @@ async fn op_reconcile(
     if !merges.is_empty() {
         let mut inner = st.lock().await;
         // **Queued, not refused**, like every other surgery: the fold waits for
-        // the chapters it rewrites instead of telling the operator to come back
-        // when the cluster happens to be quiet. When the way is already clear
-        // this runs at once and returns the fold's own message, unchanged.
         return match inner.exclusive_request(bm_proto::ExclusiveOp::Reconcile {
             merges,
             chapters: Vec::new(),
@@ -531,8 +472,6 @@ async fn op_reconcile(
         };
     }
     // No certain folds. The ambiguous pairs are listed for a human to judge
-    // the analyzer hallucinates merges for mere token-sharers ("Dịch Phong"
-    // into "Tịnh Vô Phong"), so it no longer auto-applies anything here.
     let pairs: Vec<String> = plan
         .candidates
         .iter()
@@ -545,15 +484,6 @@ async fn op_reconcile(
 }
 
 /// Persist the URL template and prove the crawler works, through the **same
-/// provider a worker will use**.
-///
-/// This used to fetch the chapter itself with its own client and its own copy
-/// of the extraction rules, which made it a fourth fetcher and a probe of
-/// something no worker would ever run: a script-mode workspace could be probed
-/// "OK" while every real task failed. Now it builds the chapter index (so a
-/// script's `discover()` has its say, exactly as `:translate` will ask it) and
-/// runs one crawl through the configured provider, reporting the verdict the
-/// provider reached.
 async fn op_crawl_setup(
     layout: &bm_core::Layout,
     settings: &bm_core::config::Settings,
@@ -575,12 +505,6 @@ async fn op_crawl_setup(
         Ok(match &crawled.outcome {
             bm_core::crawl::CrawlOutcome::Text { text, .. } => {
                 // The text **is** the verdict: it arrived, and it cleared the
-                // provider's own length and size guards, which is the only
-                // definition of a chapter the host has. The headline is printed
-                // because the operator is the one who can say whether it is
-                // their book, a "does this look like a chapter" test in Rust
-                // would be a fact about one site's language, which is exactly
-                // what the script owns now.
                 let first = text.lines().next().unwrap_or("");
                 format!(
                     "probe ch{sample} via {how}: {} bytes, headline {:?} — read it: if that is \
@@ -607,14 +531,10 @@ async fn op_crawl_setup(
     }
 }
 /// Read the sidecar roster and refill the cast's gaps. Falls back to the
-/// offline roster when no sidecar answers.
-/// Distribution to workers rides the next provision sync.
 async fn op_voices(layout: &bm_core::Layout, engine: &str) -> OpResult {
     // Strict, unlike the picker: this op *prunes* the cast, so it refuses
-    // rather than guesses.
     let policy = bm_core::voices::effective_policy(engine);
     // Live roster when a sidecar answers, offline fallback otherwise.
-    // Enrolled clones have bare labels (voice == label).
     let http = sidecar_client(Duration::from_secs(10));
     let mut enrolled: Vec<String> = Vec::new();
     let mut live = false;
@@ -634,7 +554,6 @@ async fn op_voices(layout: &bm_core::Layout, engine: &str) -> OpResult {
     let cast = bm_core::cast::read_cast(engine, &cast_path);
     let filled_from = cast.len();
     // Refill gaps across every script. load_cast never overwrites an existing
-    // assignment, so curated voices survive; newcomers get least-used voices.
     let scripts = layout.scripts();
     for sp in &scripts {
         let installed = bm_core::pool::installed_voices(layout);

@@ -22,7 +22,6 @@ fn resolve_clip_expands_tilde_and_falls_back_to_the_root() {
     }
 
     // Relative, missing from the working directory: found under the root.
-    // (Cargo runs tests with CWD at the crate dir, which has no `in/`.)
     let root = std::env::temp_dir().join("bm-clip-root");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("in")).unwrap();
@@ -186,7 +185,6 @@ fn add_sample_registers_pool_and_enrollment_together() {
 #[test]
 fn venv_order_prefers_the_managed_store() {
     // Enrollment and serving must resolve the same interpreter, or a
-    // fresh voice enrolls into a store nobody reads and previews 500.
     let d = std::env::temp_dir().join("bm-pool-venvs");
     let _ = std::fs::remove_dir_all(&d);
     let managed = d.join("python/.venv/bin/python");
@@ -218,7 +216,6 @@ fn enroll_without_a_venv_defers_to_provisioning() {
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     // Positive path needs model weights and minutes; the skip contract —
-    // Ok, and said out loud — is what pins the fresh-clone behavior.
     let lines = enroll_local(&d, "young-female-1", "refs/young-female-1.mp3").unwrap();
     assert!(
         lines.iter().any(|l| l.contains("next provision")),
@@ -229,8 +226,6 @@ fn enroll_without_a_venv_defers_to_provisioning() {
 #[test]
 fn a_renamed_voice_is_named_not_pooled() {
     // `refs/narrator.mp3 as Narrator`: the registry and the enrollment
-    // answer to the given name — and with no tags it never auto-rolls,
-    // however tag-compatible a character looks.
     let d = std::env::temp_dir().join("bm-pool-rename");
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -281,11 +276,6 @@ fn explicit_tags_still_pool_a_renamed_voice() {
 #[test]
 fn add_sample_enrolls_a_clip_store_and_leaves_vieneus_alone() {
     // `:N` on a pocket workspace: the engine's store takes the clip, and
-    // the VieNeu enrollment is not even attempted — running it wrote this
-    // book's voice into an unrelated engine's store, which is the leak the
-    // declaration closes. A venv is planted but has no `tts_vieneu.py`, so
-    // a fall-through into the preset lane would log its "next provision"
-    // deferral.
     let d = std::env::temp_dir().join("bm-pool-add-pocket");
     let _ = std::fs::remove_dir_all(&d);
     let mut layout = crate::Layout::new(&d);
@@ -302,7 +292,6 @@ fn add_sample_enrolls_a_clip_store_and_leaves_vieneus_alone() {
     crate::assemble::silent_wav(&src, 1.0, 24_000).unwrap();
 
     // Exactly the TUI's `:N` shape: an explicit (empty) tag list, which is
-    // what makes the voice named rather than auto-rolled.
     let log = add_sample(&layout, &src, Some(Vec::new()), Some("Maomao".into())).unwrap();
     assert!(
         log.iter()
@@ -323,8 +312,6 @@ fn add_sample_enrolls_a_clip_store_and_leaves_vieneus_alone() {
 #[test]
 fn bake_merges_only_manifest_voices_missing_from_the_store() {
     // Wolf's box: enrolled in the venv store, absent from the pushed
-    // bake — the warning that never cleared. The bake copies exactly
-    // those, and a second run is a silent no-op.
     let d = std::env::temp_dir().join("bm-pool-bake");
     let _ = std::fs::remove_dir_all(&d);
     let assets = d.join(".venv/lib/python3.12/site-packages/vieneu/assets");
@@ -371,10 +358,6 @@ fn bake_merges_only_manifest_voices_missing_from_the_store() {
 #[test]
 fn bake_never_writes_vieneu_presets_into_another_engines_store() {
     // The pocket shape: `models/voices.json` is a `file` per voice, not a
-    // preset. A VieNeu preset (a `speaker_emb`/`codes` pair the python side
-    // writes) copied into it is a store the sidecar cannot parse — the
-    // crash this guards. The venv store is never even read for pocket, so
-    // the preset's `emb` cannot land here.
     let d = std::env::temp_dir().join("bm-pool-bake-pocket");
     let _ = std::fs::remove_dir_all(&d);
     let assets = d.join(".venv/lib/python3.12/site-packages/vieneu/assets");
@@ -394,7 +377,6 @@ fn bake_never_writes_vieneu_presets_into_another_engines_store() {
     std::fs::write(layout.tts_voices(), store).unwrap();
 
     // The clip `refs/w.mp3` does not exist, so there is nothing to
-    // enroll — and nothing from the venv store is eligible either.
     assert!(bake_missing_voices(&layout).is_empty());
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(layout.tts_voices()).unwrap()).unwrap();
@@ -409,11 +391,6 @@ fn bake_never_writes_vieneu_presets_into_another_engines_store() {
 #[test]
 fn bake_enrolls_a_clip_store_from_the_books_own_refs() {
     // The other half of the same declaration: where a preset store is
-    // merged, a clip store is **filled** — the manifest's clip is copied
-    // into the engine's `models/refs/`, which is the file pocket's sidecar
-    // clones at load. Without this, `:N` on a pocket workspace registered
-    // a voice that no swap could ever accept (`not enrolled in this
-    // machine's voice store`) and no provision could ever fix.
     let d = std::env::temp_dir().join("bm-pool-bake-clips");
     let _ = std::fs::remove_dir_all(&d);
     let mut layout = crate::Layout::new(&d);
@@ -450,8 +427,6 @@ fn bake_enrolls_a_clip_store_from_the_books_own_refs() {
     );
     assert_eq!(store["presets"]["alba"]["file"], "voices/alba.safetensors");
     // Idempotent: the entry is held, so a second run writes nothing and
-    // reports nothing. The store is machine-wide and name-keyed, so an
-    // existing entry is never replaced by another book's clip.
     let before = std::fs::read_to_string(layout.tts_voices()).unwrap();
     assert!(bake_missing_voices(&layout).is_empty());
     assert_eq!(

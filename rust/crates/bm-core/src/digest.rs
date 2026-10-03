@@ -1,14 +1,4 @@
 //! Stage 2, digest a chapter into `script-NN.json`.
-//!
-//! Ported from `analyze.py`. Two behavioural changes are forced by running
-//! across a cluster:
-//!
-//! 1. The worker never writes the authoritative bible. It receives a snapshot
-//!    in its task offer, uses it to build the prompt, and returns a *delta*
-//!    (new characters, new aliases, who spoke) which the inductor merges as the
-//!    single writer. Concurrent digests therefore cannot clobber each other.
-//! 2. The snapshot is mirrored to the worker's local `data/bible.json` so the
-//!    cast assigner can still read voice hints.
 
 use crate::config::Settings;
 use crate::paths::Layout;
@@ -72,8 +62,6 @@ pub struct DigestOutcome {
 }
 
 // ---------------------------------------------------------------------------
-// bible
-// ---------------------------------------------------------------------------
 
 pub fn load_bible(path: &Path) -> Value {
     std::fs::read_to_string(path)
@@ -114,17 +102,6 @@ pub fn write_script(layout: &Layout, n: u32, script: &Value) -> Result<()> {
     atomic_write(&layout.script(n), &serde_json::to_string_pretty(script)?)
 }
 /// Dump a round's raw answer when `BM_DIGEST_RAW` is set.
-///
-/// The digest throws the model's text away once it parses, which is right for a
-/// run and useless for a post-mortem: "the analyzer placed no sounds" is a
-/// symptom, and the raw is the only place the cause is visible, whether it
-/// reasoned about the layer and dropped it, or never considered it at all.
-///
-/// `pub` because the backup digestor asks its own rounds outside the worker's
-/// [`call`], and it is precisely the dry run that has no other record: a
-/// `--dry-run` reported a chapter's segment count and kept nothing, so a
-/// question about what the model actually said could only be answered by
-/// re-spending the call.
 pub fn dump_raw(layout: &Layout, round: &str, raw: &str) {
     if std::env::var("BM_DIGEST_RAW").is_err() {
         return;

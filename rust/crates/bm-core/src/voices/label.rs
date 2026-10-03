@@ -8,10 +8,6 @@ fn preset_meta(name: &str) -> Option<&'static (&'static str, &'static str, &'sta
 }
 
 /// Gender from an SDK label field. Female is tested first: `"female"`
-/// contains `"male"`.
-///
-/// The Vietnamese check is the diacritic form `nữ` only — matching bare `nu`
-/// would make `"neutral"` report as female.
 fn gender_of(field: &str) -> &'static str {
     let f = field.to_lowercase();
     if f.contains("female") || f.contains("nữ") {
@@ -26,10 +22,6 @@ fn gender_of(field: &str) -> &'static str {
 }
 
 /// Accent from an SDK label field.
-///
-/// Positional parsing is what makes this work at all: `"Nam"` means *male* in
-/// the gender slot and *South* in the accent slot. This function only ever
-/// sees the accent slot.
 fn accent_of(field: &str) -> &'static str {
     let f = field.to_lowercase();
     if f.contains("bắc") || f.contains("bac") {
@@ -44,9 +36,6 @@ fn accent_of(field: &str) -> &'static str {
 }
 
 /// Split `"Thái Sơn — Nam · Trung · Kể chuyện"` into its name and fields.
-///
-/// Enrolled clones carry a bare label with no separator, which is exactly how
-/// they are distinguished from presets.
 fn split_label(label: &str) -> (String, Vec<String>) {
     for sep in ['—', '–'] {
         if let Some((name, rest)) = label.split_once(sep) {
@@ -71,26 +60,11 @@ fn split_label(label: &str) -> (String, Vec<String>) {
 }
 
 /// The voice's own name, out of a roster label.
-///
-/// The sidecar composes `/voices` labels as `"<name> — <description>"` for any
-/// voice that has a description, and as the bare name for one that does not —
-/// so a preset arrives as `"Adam — Nam · Nam · Giọng đọc tự nhiên"` and a
-/// hand-enrolled clone as `"Suneo"`. Anything comparing a store entry against a
-/// *name* has to split first, and has to split it the same way [`voice_from_label`]
-/// does, or a voice the picker shows as a preset is declared in one place and
-/// undeclared in another.
-///
-/// Public because there is now a second caller: the provisioning check that asks
-/// whether every voice in a box's store is declared somewhere.
 pub fn voice_name(label: &str) -> String {
     split_label(label).0
 }
 
 /// One voice from an SDK `(label, id)` pair.
-///
-/// A bare label (`label == id`) is an enrolled clone: no gender or accent is
-/// claimed, and it is flagged so the picker can distinguish cast members the
-/// operator added by hand from the shipped presets.
 fn voice_from_label(label: &str, id: &str, engine: &str) -> VoiceInfo {
     let (name, fields) = split_label(label);
     let name = if name.is_empty() {
@@ -107,8 +81,6 @@ fn voice_from_label(label: &str, id: &str, engine: &str) -> VoiceInfo {
         String::new()
     };
     // A preset's key comes from the catalogue. An enrolled clone has none until
-    // `roster add` gives it one (stage 3), so the field stays empty rather than
-    // inventing a slug that the next rename would silently invalidate.
     let key = key_for_name(engine, &name).unwrap_or_default();
     VoiceInfo {
         key,
@@ -119,7 +91,6 @@ fn voice_from_label(label: &str, id: &str, engine: &str) -> VoiceInfo {
         language: CONTENT_LANGUAGE.to_string(),
         style,
         // Labels come from the SDK, which knows nothing about the sample
-        // pool; the roster builder fills this in from the registry.
         pool_tags: Vec::new(),
     }
 }
@@ -133,9 +104,6 @@ pub fn voices_from_labels(engine: &str, labels: &[(String, String)]) -> Vec<Voic
 }
 
 /// The bundled roster: policy pools plus the metadata table above.
-///
-/// Used when the TTS sidecar is unreachable, so the picker still shows the
-/// whole cast with whatever is known about each voice.
 pub fn offline_voices(engine: &str) -> Vec<VoiceInfo> {
     let policy = policy_for(engine);
     let mut out: Vec<VoiceInfo> = Vec::new();
@@ -151,7 +119,6 @@ pub fn offline_voices(engine: &str) -> Vec<VoiceInfo> {
             let (accent, style) = match preset_meta(name) {
                 Some((_, accent, style)) => (*accent, *style),
                 // Undeclared: say so rather than appealing to a policy
-                // guarantee that no longer exists.
                 None => ("unknown", ""),
             };
             out.push(VoiceInfo {
@@ -170,10 +137,6 @@ pub fn offline_voices(engine: &str) -> Vec<VoiceInfo> {
 }
 
 /// Operator-enrolled clones, read from `voices.json` (`name -> refs/clip.wav`).
-///
-/// These are part of the cast whether or not the sidecar lists them, so the
-/// picker shows them even when the sidecar is down. The `_note` key is
-/// documentation, not a voice.
 pub fn enrolled_voices(path: &std::path::Path) -> Vec<VoiceInfo> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -188,7 +151,6 @@ pub fn enrolled_voices(path: &std::path::Path) -> Vec<VoiceInfo> {
         .filter(|k| !k.starts_with('_'))
         .map(|name| VoiceInfo {
             // No key: `voices.json` names clones but does not key them. Stage 3
-            // moves this file to `.bm/voices.json` with a declared key per clone.
             key: String::new(),
             name: name.clone(),
             gender: "unknown".into(),
@@ -196,7 +158,6 @@ pub fn enrolled_voices(path: &std::path::Path) -> Vec<VoiceInfo> {
             language: CONTENT_LANGUAGE.into(),
             style: "enrolled clone".into(),
             // Enrolled, but not necessarily pooled: `voices.json` does not say
-            // which samples the cast may roll.
             pool_tags: Vec::new(),
             enrolled: true,
         })
@@ -210,7 +171,6 @@ mod tests {
     #[test]
     fn label_fields_are_positional_so_nam_is_male_then_south() {
         // "Nam" appears twice with two different meanings; only position
-        // disambiguates them.
         let v = voice_from_label("Thái Sơn — Nam · Nam · Kể chuyện", "thai_son", "vieneu");
         assert_eq!(v.name, "Thái Sơn");
         assert_eq!(v.gender, "male");
@@ -282,7 +242,6 @@ mod tests {
             "duc-tri"
         );
         // A label the catalogue does not declare (an enrolled clone) gets no key
-        // rather than a derived slug that the next rename would invalidate.
         let clone = voice_from_label("Suneo", "Suneo", "vieneu");
         assert_eq!(clone.key, "");
         assert!(clone.enrolled);

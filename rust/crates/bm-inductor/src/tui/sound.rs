@@ -1,22 +1,4 @@
 //! Sound design: the three clip pools, what they are for, and what may not be
-//! taken out of them.
-//!
-//! The three layers under the voice are independent — beds chosen by a scene's
-//! *place*, tracks chosen by its *mood*, and spot effects the script places by
-//! name — but they are managed the same way, so they are one screen with three
-//! tabs rather than three screens. Everything here is pure: the file I/O is
-//! [`load`] and [`save`], and the rest is what a key press and a paint need.
-//!
-//! **The rule this module exists for is the removal guard.** A scene names
-//! *tags*; the pool answers with a *sound*. Delete the sound a rule reaches and
-//! the scene does not fail — it scores zero and goes quiet, silently, chapter
-//! after chapter. So an entry something still reaches is not removable, and
-//! [`SoundRow::uses`] is what the screen shows instead of the key doing
-//! nothing. "In use" is always a *reference*: the scene map's rules and palette
-//! for the two tag layers, the scripts for the layer that names sounds
-//! directly. Nothing here consults whether a merge happens to be running —
-//! that is a different question with a different answer, and conflating them
-//! would block editing for the whole of a long run.
 
 use crate::tui::style::Level;
 use bm_core::ambience::{inject_mode, SceneMap, UseOf};
@@ -46,33 +28,20 @@ impl SoundView {
 #[derive(Debug, Clone)]
 pub(crate) struct SoundData {
     /// The checkout these registries came from. Kept so a save and a refresh
-    /// need nothing but this struct — the screen cannot be pointed at a
-    /// different tree from the one it read.
     pub(crate) root: PathBuf,
     pub(crate) pools: BTreeMap<PoolKind, ClipPool>,
     /// The scene map as loaded — its rules and palette are the first two
-    /// layers' usage, and its layer knobs are the master gain the header shows.
     pub(crate) map: SceneMap,
     /// What each pool's entries are still being used for, by layer. Derived,
-    /// never stored: see [`SoundData::refresh`].
     pub(crate) usage: BTreeMap<PoolKind, BTreeMap<String, Vec<UseOf>>>,
     /// Sound -> files the registry names that are not on disk, by layer. The
-    /// merge degrades these to silence with one warning; the editor can say so
-    /// before the chapter is run.
     pub(crate) missing: BTreeMap<PoolKind, BTreeMap<String, Vec<String>>>,
     /// Chapters whose script places each inject sound. Kept so a save can
-    /// recompute the inject usage without re-reading a hundred scripts.
     pub(crate) script_uses: BTreeMap<String, Vec<u32>>,
 }
 
 impl SoundData {
     /// Recompute everything derived from the pools and the map.
-    ///
-    /// Called after every edit, so the removal guard is never read from a
-    /// stale copy: an entry that has just gained a reference must lose its
-    /// remove key in the same frame that added the reference, or the guard is
-    /// theatre. `script_uses` is not re-read — it comes from the scripts, and
-    /// no edit here changes a script.
     pub(crate) fn refresh(&mut self) {
         let layout = bm_core::Layout::new(&self.root);
         self.usage.clear();
@@ -100,7 +69,6 @@ pub(crate) struct SoundRow {
     pub(crate) name: String,
     pub(crate) sound: Sound,
     /// Every rule, palette value or chapter that still reaches this sound.
-    /// Empty means it is removable.
     pub(crate) uses: Vec<UseOf>,
     /// Registry files that are not on disk.
     pub(crate) missing: Vec<String>,
@@ -147,16 +115,6 @@ impl SoundRow {
     }
 
     /// What the mix multiplies this entry's level by, or `None` when it plays at
-    /// the level as written.
-    ///
-    /// A bed renders at a tenth of its registry level ([`InjectMode::gain`]), so
-    /// that number is the *design* value and not the loudness — an operator
-    /// reading `level 0.8` off an `overlap` row is out by 20 dB.
-    ///
-    /// Deliberately not folded into [`Self::shape`]: that string is a table cell
-    /// 23 columns wide, and `overlap · ×0.1 · loops · 51s` would push the
-    /// duration off the end of it. The detail line under the table is full width,
-    /// and it is where an operator looks before pressing `l`.
     pub(crate) fn render_gain(&self) -> Option<f64> {
         inject_mode(self.sound.mode.as_deref().unwrap_or("hit"))
             .map(|m| m.gain())
@@ -164,8 +122,6 @@ impl SoundRow {
     }
 
     /// The compact form, for the table's status column: whether the entry is
-    /// removable, and how much is against it. The column is the scanning
-    /// surface — a full rule list there clips mid-quote and reads as noise.
     pub(crate) fn status(&self) -> (String, Level) {
         if !self.missing.is_empty() {
             return (
@@ -180,16 +136,6 @@ impl SoundRow {
     }
 
     /// The long form, for the sentence under the table: which rules, palette
-    /// values or chapters, and what that means for the remove key.
-    ///
-    /// Deliberately a second rendering rather than the column's text widened:
-    /// the two answer different questions — "is this one safe to touch" and
-    /// "what exactly still reaches it" — and both read `uses`/`missing`, so
-    /// they cannot disagree about the facts, only about how much of them fits.
-    ///
-    /// A missing clip outranks the removal guard in *colour*, not in wording:
-    /// it is the more urgent fact (the merge will go silent on the next run
-    /// whatever the operator does here), and both are shown.
     pub(crate) fn verdict(&self) -> (String, Level) {
         let mut parts: Vec<String> = Vec::new();
         if !self.missing.is_empty() {
@@ -245,8 +191,6 @@ pub(crate) fn rows(data: &SoundData, layer: PoolKind) -> Vec<SoundRow> {
 }
 
 /// The layer's master gain, as the scene map has it. Shown beside the pool so
-/// the operator can see the whole chain a level sits in; the operator's own
-/// multiplier on top of it is `:mix`, and the two are separate knobs on purpose.
 pub(crate) fn master_level(map: &SceneMap, layer: PoolKind) -> f64 {
     match layer {
         PoolKind::Effect => map.layers.effect.trim,
@@ -256,19 +200,8 @@ pub(crate) fn master_level(map: &SceneMap, layer: PoolKind) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
-// loading
-// ---------------------------------------------------------------------------
 
 /// Read every registry, the scene map and the scripts, and work out what each
-/// entry is still used for.
-///
-/// A job rather than a keypress handler: it is three registries, the map and
-/// every `data/script/NN.json` — the same hundred file opens the audition index
-/// makes, and the same reason for keeping them off the UI task.
-///
-/// The layout is passed whole because the two halves are read together: the
-/// registries and the scene map are profile content at the root, the scripts
-/// that say what is still in use are the workspace's.
 pub(crate) fn load(layout: &bm_core::Layout) -> Result<SoundData, String> {
     if layout.root.as_os_str().is_empty() {
         return Err("no repo root — restart the TUI from a checkout".into());
@@ -300,8 +233,6 @@ pub(crate) fn load(layout: &bm_core::Layout) -> Result<SoundData, String> {
 }
 
 /// Chapter -> script, for the inject layer's usage. A script that will not
-/// parse is skipped, like the audition index: one corrupt chapter must not cost
-/// the operator the whole screen.
 fn read_script_uses(layout: &bm_core::Layout) -> BTreeMap<String, Vec<u32>> {
     let mut scripts: Vec<(u32, serde_json::Value)> = Vec::new();
     for path in crate::tui::audition::script_files(layout) {
@@ -316,8 +247,6 @@ fn read_script_uses(layout: &bm_core::Layout) -> BTreeMap<String, Vec<u32>> {
 }
 
 /// The inject usage in the same shape as the other two layers', so the screen
-/// and the removal guard read one type. A chapter is a reason with no tags —
-/// the script names the sound itself.
 fn inject_usage_as_uses(script_uses: &BTreeMap<String, Vec<u32>>) -> BTreeMap<String, Vec<UseOf>> {
     script_uses
         .iter()
@@ -351,13 +280,10 @@ fn missing_files(layout: &bm_core::Layout, pool: &ClipPool) -> BTreeMap<String, 
 }
 
 /// A registry path resolved against `assets/`, where every registry says its
-/// files are relative to.
 pub(crate) fn resolve_clip(layout: &bm_core::Layout, file: &str) -> PathBuf {
     layout.assets().join(file)
 }
 
-// ---------------------------------------------------------------------------
-// editing
 // ---------------------------------------------------------------------------
 
 /// The fields a layer's entry may carry, in the order the prompt shows them.
@@ -372,10 +298,6 @@ pub(crate) fn fields(layer: PoolKind) -> &'static [&'static str] {
 }
 
 /// `name=… files=… tags=…` — the whole entry on one line.
-///
-/// The same shape as `:mix` and the run config: one line, `key=value`, order
-/// free. It is prefilled with the values actually in force, so an edit is a
-/// change to something visible rather than a retype from memory.
 pub(crate) fn describe(name: &str, sound: &Sound, layer: PoolKind) -> String {
     let mut parts = vec![
         format!("name={name}"),
@@ -407,7 +329,6 @@ pub(crate) fn describe(name: &str, sound: &Sound, layer: PoolKind) -> String {
 }
 
 /// What the prompt's hint line lists, so an operator never has to guess which
-/// keys this layer takes.
 pub(crate) fn fields_hint(layer: PoolKind) -> String {
     match layer {
         PoolKind::Effect => {
@@ -421,18 +342,9 @@ pub(crate) fn fields_hint(layer: PoolKind) -> String {
 }
 
 /// A level's legal range. Zero is excluded on purpose: `Sound::level` reads
-/// `0.0` as *unset*, so accepting it here would write a mute that plays at
-/// unity — a knob that lies. Muting is what the layer switch is for.
 pub(crate) const LEVEL_RANGE: (f64, f64) = (0.01, 4.0);
 
 /// Parse one `key=value` line into a sound.
-///
-/// `renaming_from` is the entry being edited, if any. The name is the pool's
-/// key — a script names an inject by it and a re-merge reproduces a pick from
-/// it — so a rename is refused rather than silently performed: remove and add.
-/// Everything else is optional and keeps the default the mix would use; the
-/// music layer has no `looped` flag at all, so a music entry is written with
-/// the one its mixer assumes rather than with a flag nothing reads.
 pub(crate) fn parse_entry(
     layer: PoolKind,
     buf: &str,
@@ -500,8 +412,6 @@ pub(crate) fn parse_entry(
             "level" => level = Some(parse_level(value)?),
             "mode" => {
                 // Asked of the mixer rather than of a list here: a fourth mode
-                // would otherwise have to be added in two crates, and the one
-                // that was forgotten would accept a value the mix then skips.
                 if inject_mode(value).is_none() {
                     return Err(format!(
                         "mode “{value}” unknown — hit (holds the whole clip), overlap (runs under the speech), trail (holds, then ducks). overlap and trail render at a tenth of their level"
@@ -547,7 +457,6 @@ pub(crate) fn parse_entry(
 }
 
 /// A comma-separated list, trimmed, empty pieces dropped. A path never
-/// contains a space, so a spaced token is a typo and the caller says so.
 fn split_list(v: &str) -> Vec<String> {
     v.split(',')
         .map(|t| t.trim())
@@ -597,17 +506,6 @@ pub(crate) fn parse_level_prompt(buf: &str) -> Result<Option<f64>, String> {
 }
 
 /// Check the takes an edit *introduces*, under the layer's own clip directory.
-///
-/// Two separate refusals, and both are worth making: a path outside
-/// `assets/<layer>/` is a category error the file would carry forever, and a
-/// path that is not there is a window the merge degrades to silence with a
-/// warning nobody reads. Caught at the prompt, where it is one keystroke.
-///
-/// Deliberately takes a list rather than a whole `Sound`, so the caller can
-/// hand it only the paths the edit adds. Re-checking a take that was already
-/// registered and has since gone missing would make that entry *uneditable* —
-/// a tag change refused because of a clip somebody moved — and the entry is
-/// already flagged in red on the screen, which is where that belongs.
 pub(crate) fn check_files(root: &Path, layer: PoolKind, files: &[String]) -> Result<(), String> {
     let layout = bm_core::Layout::new(root);
     let prefix = format!("{}/", layer.dir());
@@ -636,7 +534,6 @@ pub(crate) fn check_files(root: &Path, layer: PoolKind, files: &[String]) -> Res
 }
 
 /// The takes an edit adds to an entry, i.e. the ones worth checking. Every take
-/// of a brand-new entry is one of them.
 pub(crate) fn introduced(old: Option<&Sound>, new: &Sound) -> Vec<String> {
     new.files
         .iter()
@@ -661,13 +558,6 @@ pub(crate) fn save(root: &Path, layer: PoolKind, pool: &ClipPool) -> Result<Stri
 }
 
 /// Which take's length an inject's `dur_s` should be: the longest one.
-///
-/// `dur_s` is what the digest prompt renders so the analyzer never `hit`s a
-/// 51-second boil, and what the validator checks a placement against — so it is
-/// a *fact about the clip*, and a typed number drifts from the file the moment
-/// the file is replaced. Probed with ffprobe, the same probe the merge uses.
-/// `None` means nothing could be probed: the field is left as it was rather
-/// than set to a guess.
 pub(crate) fn probe_longest(root: &Path, sound: &Sound) -> Option<f64> {
     let layout = bm_core::Layout::new(root);
     let mut longest: Option<f64> = None;
@@ -713,10 +603,6 @@ pub(crate) fn apply(pool: &mut ClipPool, name: &str, sound: Sound) -> Edit {
 }
 
 /// Write an edited entry to disk and into the screen, in that order.
-///
-/// The file is written first and the in-memory pool is only replaced if that
-/// succeeded: a save that failed must leave the screen showing what is actually
-/// on disk, or the next edit builds on a fiction.
 pub(crate) fn commit(
     data: &mut SoundData,
     layer: PoolKind,
@@ -735,8 +621,6 @@ pub(crate) fn commit(
 }
 
 /// Retune one sound, leaving every other field where it was. `None` clears the
-/// trim back to unity — the one edit that has to be expressible without
-/// restating the whole entry.
 pub(crate) fn set_level(
     data: &mut SoundData,
     layer: PoolKind,
@@ -762,9 +646,6 @@ pub(crate) fn set_level(
 }
 
 /// Take one entry out, on disk and in the screen.
-///
-/// The clip files are left alone: the registry is the pool, and a clip is not
-/// deleted by unregistering it. Re-adding the name brings the same takes back.
 pub(crate) fn remove(data: &mut SoundData, layer: PoolKind, name: &str) -> Result<String, String> {
     let mut pool = data.pools[&layer].clone();
     if pool.remove(name).is_none() {

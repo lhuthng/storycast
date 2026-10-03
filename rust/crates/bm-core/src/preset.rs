@@ -1,42 +1,4 @@
 //! Profile presets: a name for a pack × adapter × engine triple.
-//!
-//! Creating a workspace used to mean inheriting whatever the checkout had
-//! loaded — `.bm/profile` stamped the new book's settings, and a second book
-//! wanting another pack, language or engine had to re-load the checkout first,
-//! create, then load back. A preset is the data that removes the dance:
-//!
-//! ```json
-//! "jnovel-en": { "pack": "", "pack_deps": ["common", "craft",
-//!               "court-mystery"], "adapter": "jnovel-en-US", "engine": "pocket" }
-//! ```
-//!
-//! `bm-inductor workspace new <book> --profile jnovel-en` reads this file and
-//! stamps the workspace's own binding from it — the checkout's pointer is
-//! never touched, so a book being worked on this minute cannot notice.
-//!
-//! The pieces, and what each answers for:
-//!
-//! * **`pack`** — the name the binding's pack piece carries. With
-//!   **`pack_deps`** the workspace composes its OWN pack from those roots
-//!   ([`compose_workspace_pack`]: a `pack.json` naming them, the dependency
-//!   trees linked in from the checkout's `assets/_extends/`, resolved in the
-//!   workspace) — the workspace-pack shape [ROADMAP.md](../../../docs/ROADMAP.md)
-//!   §3 asks for, where two books on one checkout do not share a score. With
-//!   no `pack_deps` the workspace shares the checkout's live pack, which is
-//!   the shape every existing workspace has.
-//! * **`adapter`** — which `adapters/<id>/` home the prompts come from. The
-//!   binding stamps the adapter's *home* hash, the same claim
-//!   `verify_binding` checks; the workspace's caches key on the name.
-//! * **`engine`** — the engine's name. Like every binding, the engine piece is
-//!   a declaration and never a digest: `settings.engine` is the whole fact.
-//! * **`crawler`** — a `{ type, file }` selection, wired into settings, so a
-//!   book that needs no thought about sites (an EPUB, say) still says where its
-//!   chapters come from. `known` picks a site from the global registry, and
-//!   `example` picks the global EPUB crawler; both are **referenced in place**
-//!   (`crawlers/…`), not copied, so an edit reaches every book that selected
-//!   them. `custom` means the book drops its own script into `crawl/`, which
-//!   [`crate::crawl::provider::resolve_script`] searches first and a profile
-//!   release cannot reach.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -47,8 +9,6 @@ use std::path::Path;
 pub const PRESETS_FILE: &str = "presets.json";
 
 /// One named triple. Every field is a claim about what a workspace created
-/// from it will bind; the CLI is the only writer of that binding, so the
-/// struct is read-only data.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Preset {
     /// What a human calls it — printed by the picker, never parsed.
@@ -58,8 +18,6 @@ pub struct Preset {
     #[serde(default)]
     pub pack: String,
     /// The roots the workspace's OWN pack is composed from, weakest first —
-    /// `common` must be in the chain or the pack has no world (see
-    /// ASSET-PACKS.md). Empty means the checkout's live pack is shared.
     #[serde(default)]
     pub pack_deps: Vec<String>,
     /// Which adapter home the prompts come from.
@@ -67,18 +25,11 @@ pub struct Preset {
     /// The engine `settings.engine` names.
     pub engine: String,
     /// The crawler a workspace created from this preset starts with, as a
-    /// `{ type, file }` pair. Absent means no crawler.
     #[serde(default)]
     pub crawler: PresetCrawler,
 }
 
 /// A preset's crawler, as a **type and a file** rather than a path to copy.
-///
-/// The known-site crawlers are global now (`crawlers/`), so a preset selects one
-/// rather than carrying a copy: `{ "type": "known", "file": "storya.click" }`
-/// names the registry entry, `{ "type": "example", "file": "epub.lua" }` names
-/// the unknown-structure crawler, and `{ "type": "custom" }` leaves the book to
-/// drop its own script into `crawl/`. `none` (or an absent block) is no crawler.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct PresetCrawler {
@@ -86,8 +37,6 @@ pub struct PresetCrawler {
     #[serde(rename = "type")]
     pub kind: String,
     /// `known`: the site host (`storya.click`). `example`: the file under
-    /// `crawlers/examples/` (`epub.lua`). `custom`: the file the book owns under
-    /// its own `crawl/` (empty to leave the naming to the operator).
     pub file: String,
 }
 
@@ -99,23 +48,11 @@ impl PresetCrawler {
 }
 
 /// A crawler to install in a new workspace: the script to copy in, the URL
-/// template it runs against, and the fetch budget the site needs.
-///
-/// This is the **guided create** flow's answer, and it is the reason a preset
-/// alone cannot carry it: a preset names one script path, while the picker lets
-/// the operator choose a known site (whose template, params and budget come from
-/// the registry) or a local file, and none of those is a property of the pack ×
-/// adapter × engine triple. Deliberately not `serde`: it never travels further
-/// than the in-process job that builds it and the function that applies it.
 #[derive(Debug, Clone, Default)]
 pub struct CrawlerSetup {
     /// The value to write into `settings.crawl.script`. A global crawler is
-    /// referenced in place (`crawlers/known/storya.lua`); a custom one names the
-    /// workspace's own copy (`crawl/mysite.lua`) and comes with `source` set.
-    /// Empty means "leave the settings' script alone".
     pub script: String,
     /// Absolute path of a script to copy into the workspace's own `crawl/`, for a
-    /// crawler the book owns. Empty for a global crawler that is only referenced.
     pub source: std::path::PathBuf,
     /// The chapter URL template, or empty to leave the settings' alone.
     pub url_template: String,
@@ -128,14 +65,8 @@ pub struct CrawlerSetup {
     /// Absolute path of a local **EPUB** to copy into the new workspace at
     /// `tmp/book.epub`. Set only by the guided create flow's "Local file
     /// (EPUB)" choice, whose script reads `crawl.params.epub`; empty for every
-    /// site crawler. The book is copied, never referenced, because the crawl's
-    /// read root is the workspace — a path outside it is refused.
     pub book: std::path::PathBuf,
     /// Absolute path of a local **directory of volumes**, when the operator
-    /// handed the guided flow a folder instead of one file. Every `.epub`
-    /// inside is copied into the workspace's own `books/`, which is what
-    /// `crawl.params.books` names. Mutually exclusive with [`Self::book`]: one
-    /// is a book, the other is a shelf.
     pub books: std::path::PathBuf,
 }
 
@@ -167,18 +98,6 @@ fn read_presets_str(text: &str) -> Result<BTreeMap<String, Preset>> {
 }
 
 /// Compose the workspace's own pack: `pack.json` naming `deps`, the dependency
-/// trees linked in from the checkout's `assets/_extends/`, and one resolve.
-///
-/// The link is a symlink on purpose. A composition input is never shipped and
-/// never hashed (the manifest skips `_extends/` by name), so copying tens of
-/// megabytes of dependency clips into every book would buy nothing but disk —
-/// the *resolved result* is what the workspace owns, and that is written as
-/// real files by the resolve. A workspace that needs a real tree (to rsync
-/// whole, say) replaces the link with a copy and nothing else changes.
-///
-/// An existing `pack.json` is left alone: creating a workspace twice is
-/// refused before this runs, so the file can only be one this call wrote —
-/// or one an operator replaced, which is theirs to keep.
 pub fn compose_workspace_pack(work: &Path, root_extends: &Path, deps: &[String]) -> Result<()> {
     let assets = work.join("assets");
     std::fs::create_dir_all(&assets)?;
@@ -214,9 +133,6 @@ pub fn compose_workspace_pack(work: &Path, root_extends: &Path, deps: &[String])
 }
 
 /// The workspace pack's content hash: the manifest hash over the resolved
-/// `assets/` tree, exactly the number [`crate::profile::verify_binding`]
-/// computes for a checkout's pack — relative to the *workspace* here, because
-/// the tree is the workspace's.
 pub fn workspace_pack_hash(work: &Path) -> Result<String> {
     let files = crate::profile::files_under(work, &["assets"]);
     anyhow::ensure!(
@@ -292,7 +208,6 @@ mod tests {
         compose_workspace_pack(&work, &root.join("assets/_extends"), &["common".into()]).unwrap();
 
         // The resolve wrote the dependency's registry and clip into the
-        // workspace as real files; the input is the link.
         let assets = work.join("assets");
         assert!(assets.join("effect-pool.json").is_file());
         assert!(assets.join("effects/wind-1.mp3").is_file());
@@ -303,8 +218,6 @@ mod tests {
         assert!(assets.join(crate::compose::MARKER_FILE).is_file());
 
         // The hash is over the RESOLVED tree: the link itself must not be in
-        // it (a copy in place of the link must hash the same), and it must be
-        // stable across a re-resolve.
         let linked = workspace_pack_hash(&work).unwrap();
         std::fs::remove_dir_all(assets.join("effects")).unwrap();
         std::fs::remove_file(assets.join(crate::compose::EXTENDS_DIR)).unwrap();
@@ -330,9 +243,6 @@ mod tests {
             .expect("an unpacked dep composes");
 
         // The world-vocabulary rule — a pack whose chain reaches no `common`
-        // has no place words, no moods, no beds — is a property ASSET-PACKS.md
-        // documents and the pack gate tests; what THIS layer refuses is a
-        // dependency name nobody unpacked, and it names the path it looked at.
         let work2 = root.join("workspaces/book2");
         let err = compose_workspace_pack(&work2, &root.join("assets/_extends"), &["magic".into()])
             .unwrap_err();

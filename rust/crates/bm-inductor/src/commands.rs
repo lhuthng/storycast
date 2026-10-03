@@ -37,7 +37,6 @@ pub(crate) async fn cmd_provision(
     release_repo: Option<String>,
 ) -> anyhow::Result<()> {
     // The blocking SSH/rsync flow runs off the async runtime; registration
-    // afterwards needs the live API client.
     let mut m = Machine::new(&addr, &user, port, key.clone(), "worker");
     m.tts_url = Some("http://127.0.0.1:8818".into());
     carry_task_policy(&mut m, &layout);
@@ -53,8 +52,6 @@ pub(crate) async fn cmd_provision(
         println!("[{addr}] provision INCOMPLETE — fix the errors above and run it again");
     }
     // Register the machine so the scheduler sees it: prefer the live API,
-    // fall back to merging the ledger file (safe only when no inductor runs
-    // the API attempt failing is exactly that signal).
     let api = format!("http://127.0.0.1:{api_port}/api/machines");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -63,10 +60,6 @@ pub(crate) async fn cmd_provision(
         Ok(r) if r.status().is_success() => println!("[{}] registered with live inductor", addr),
         _ => {
             // No live inductor: merge into the ledger file (safe only when no
-            // inductor runs, the API attempt failing is exactly that signal).
-            // New shape is `machine_state` (runtime); a pre-migration file
-            // still carrying the `machines` array gets both, so the boot
-            // migration sees one coherent story.
             let path = layout.bm_state().join("ledger.json");
             let mut doc: serde_json::Value = std::fs::read_to_string(&path)
                 .ok()
@@ -83,7 +76,6 @@ pub(crate) async fn cmd_provision(
             std::fs::create_dir_all(layout.bm_state())?;
             bm_core::atomic_write(&path, &serde_json::to_string_pretty(&doc)?)?;
             // Config side: a provision is a bind, so the box lands in
-            // machines.json under its stored name (or the address, first time).
             let boxes_path = layout.machines();
             let name = bm_core::provision::load_boxes(&boxes_path)
                 .iter()
@@ -109,9 +101,6 @@ pub(crate) fn cmd_roster_add_sample(
     name: Option<String>,
 ) -> anyhow::Result<()> {
     // A reference clip is only useful to an engine that clones from one, and
-    // whether it can is the engine's own declaration rather than an assumption
-    // every caller makes. Refusing here names the engine and the fix, instead
-    // of enrolling a voice no render can ever speak through.
     if !bm_core::voices::clones(&layout.engine) {
         anyhow::bail!(
             "engine '{}' declares no voice cloning — a reference clip has nothing to enrol from; \
@@ -127,7 +116,6 @@ pub(crate) fn cmd_roster_add_sample(
 }
 
 /// Report a `migrate-cast` run: what changed, what could not, and where the
-/// backup went.
 pub(crate) fn cmd_roster_migrate_cast(layout: &Layout, dry_run: bool) -> anyhow::Result<()> {
     let runs = roster::migrate_cast(layout, dry_run)?;
     if runs.is_empty() {
@@ -156,7 +144,6 @@ pub(crate) fn cmd_roster_migrate_cast(layout: &Layout, dry_run: bool) -> anyhow:
             println!("  {character}: {old} -> {new}");
         }
         // Never silent: an entry with no key is a clone, or a voice the
-        // catalogue has dropped, and the operator is the one who can tell which.
         for line in &r.unmigratable {
             println!("  no catalogue key, left as a name: {line}");
         }

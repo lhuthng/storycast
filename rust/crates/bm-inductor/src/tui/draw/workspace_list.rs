@@ -23,7 +23,6 @@ pub(crate) fn draw_workspace_list(f: &mut ratatui::Frame, app: &App, ws: &WsList
         )));
     }
     // Header, then one row per directory: the same `▸` + label + dim note the
-    // guided list draws, so `:ws` and `:ws new` read as one screen.
     body.push(Line::from(vec![
         Span::styled("workspace", dim),
         Span::raw("  "),

@@ -4,8 +4,6 @@ use super::*;
 use bm_proto::Machine;
 
 /// Full onboarding for one machine: probe, then push only what is missing.
-///
-/// Returns the log lines the TUI should show, in order.
 #[allow(clippy::too_many_arguments)]
 pub fn provision(
     m: &Machine,
@@ -18,13 +16,10 @@ pub fn provision(
     initial_probe: Option<Probe>,
     live: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     // `owner/name` of the releases that host the model artifact. `None` reads
-    // it from this workspace's `settings.json`, which is where the operator
-    // sets it; a one-shot provision passes it to override.
     release_repo: Option<&str>,
 ) -> (Probe, Vec<String>) {
     let ssh = Ssh::for_machine(m);
     // Cloned, not moved: the install steps below borrow the original for
-    // their byte-progress streams.
     let mut log = LiveLog::new(live.clone());
 
     let mut probe = match initial_probe {
@@ -45,9 +40,6 @@ pub fn provision(
     }
 
     // Where the weights come from, resolved once: the release named by the
-    // operator, or nothing. A workspace with no `models_release` and no
-    // `--release-repo` keeps the push, which is the safe direction — a box
-    // that cannot reach a release is still a box that can be provisioned.
     let repo = release_repo
         .map(str::to_string)
         .unwrap_or_else(|| crate::config::Settings::load(&layout.settings()).models_release);
@@ -60,22 +52,8 @@ pub fn provision(
     }
 
     // And the profile pack, from the same shape of setting and for the same
-    // reason. **Separate** on purpose: the two artifacts are published
-    // independently and one is far more often absent — a checkout with a
-    // released pack and an unreleased bake of the weights is the ordinary
-    // case, and a setting that could only say both or neither would make the
-    // operator choose a 668 MB push to save a 60 MB one.
-    //
-    // Resolved against the **load pointer**, not a hash of the tree, so a
-    // release is only used when this checkout says which one it is running. A
-    // pointer with no version resolves to nothing, which is the push: every
-    // box provisioned before this existed keeps working.
     let settings = crate::config::Settings::load(&layout.settings());
     // A released pack is the **checkout's** profile: its tag, its manifest and
-    // the tree it lands are all that one directory. A workspace that composes
-    // its own `assets/` is not that checkout — a release pointed at it would put
-    // the wrong book's score on the box while this book runs its own — so the
-    // book's tree travels in the bundle instead.
     let pack = if layout.owns_assets() {
         None
     } else {
@@ -104,21 +82,12 @@ pub fn provision(
     }
 
     // Before anything is pushed: the sources bundle is `tar` + `zstd`, so the
-    // tool that opens it has to be here first. This is the one install attempted
-    // on an already-configured box (see `zstd_script`); a box that cannot get it
-    // still gets a line here, and the push below fails with the remedy in its
-    // own message rather than a shell error naming nothing.
     match ssh.ensure_zstd() {
         Ok(v) => log.push(format!("[{}] {v}", m.id)),
         Err(e) => log.push(format!("[{}] zstd check failed: {e}", m.id)),
     }
 
     // Self-healing enrollment: the manifest may name clones the pushed store
-    // lacks (added or swapped since the last bake). Merging them here, before
-    // the stamp, means the hash drift pushes the fix to workers in this same
-    // run, instead of warning forever no matter how often `:prov` runs.
-    // Voices enrolled nowhere stay missing; the warning below still names
-    // exactly those.
     let baked = crate::pool::bake_missing_voices(layout);
     if !baked.is_empty() {
         log.push(format!(
@@ -130,8 +99,6 @@ pub fn provision(
     }
 
     // What this box's own policy says it may run decides what it must hold. A
-    // box with no stored policy enables all four, so the ordinary case is the
-    // full set and only an explicitly narrowed panel goes lean.
     let stages = super::super::sources::stages_of(&m.effective_task_policy());
     let local_stamp = match compute_provision_stamp(
         layout,
@@ -150,50 +117,27 @@ pub fn provision(
     let remote_stamp = probe.stamp.as_ref();
 
     // **And** the pack. With a release configured the bundle carries no
-    // `assets/`, so two different packs produce the *same* `sources.tar.zst` —
-    // the bundle cannot see the difference, and a gate that read only the
-    // bundle would call a re-pointed profile "in sync" on every box and never
-    // send it. The pack has its own stamp field for exactly this.
     let sources_match = !force
         && remote_stamp
             .map(|s| s.sources_in_sync(&local_stamp) && s.pack_in_sync(&local_stamp))
             .unwrap_or(false);
     // The voice store now travels inside `models/`, so `tts_hash` covers it and
-    // there is no separate voices check. Also verify the remote names: a stamp
-    // written by the old already-configured path could say “in sync” after it
-    // skipped the model push, which is exactly how Narrator 2 stayed missing.
     let manifest = crate::pool::load_manifest(&layout.voices_manifest());
     // An *unknown* roster is not a missing one. The probe cannot read the
     // roster when the sidecar is not answering, and reading that as "this box
     // knows none of the declared voices" would answer a down sidecar with a
-    // 668 MB model push. `voices_hash` is the primary gate now, it compares
-    // the content of `models/voices.json` against ours, and this check is the
-    // backstop for a stamp that lies, so it only ever *adds* a push when it has
-    // something to say.
     let remote_voice_store_complete =
         probe.voices.is_empty() || voice_store_covers(&probe.voices, &manifest);
     let models_match =
         !models_need_push(remote_stamp, &local_stamp, force) && remote_voice_store_complete;
 
     // What the box already is, asked once. This gates the install steps at the
-    // bottom of the function as well as the push steps here: on a box that has
-    // everything, provisioning is a *verification*, and the two package
-    // installs are attempts that can each take minutes and cannot succeed on
-    // the second try any more than the first. That is the difference between a
-    // catch-up that costs a round trip per step and one that costs minutes on a
-    // machine that is already working.
     let already = probe.configured(agent_version) && !force;
     // A voice change is a model-store change. Remember that we pushed the
-    // store so the already-running sidecar is restarted below; otherwise the
-    // new `models/voices.json` is on disk while the old roster stays resident.
     let mut models_pushed = false;
     // And the same flag for the binary itself, which is the one that matters
-    // most: a replaced `bm-tts` on disk does nothing while the old process is
-    // still running it, so a redeploy that does not recycle the sidecar looks
-    // like a successful provision and behaves like no provision at all.
     let mut tts_pushed = false;
     // Read here, beside `already`, so the two cannot disagree about what this
-    // run is allowed to do, see [`may_install`].
     let installs = may_install(probe.configured(agent_version), force);
 
     if already {
@@ -202,9 +146,6 @@ pub fn provision(
             m.id, agent_version
         ));
         // The version string cannot see a rebuild: every dev build between
-        // releases reports the same one, so a same-version binary drift would
-        // otherwise sit on the box for ever. The content hash catches it, and
-        // rsync makes the no-op push cheap when the bytes never moved.
         if !remote_stamp
             .map(|s| s.agent_in_sync(&local_stamp))
             .unwrap_or(false)
@@ -218,11 +159,6 @@ pub fn provision(
             }
         }
         // The sidecar binary, on the same reasoning as the agent above.
-        //
-        // Without this branch a rebuilt `bm-tts` never reached a configured
-        // box: `tts_hash` covers `models/`, not the binary, and the only push
-        // site lived in the `else` below, which an already-configured box never
-        // reaches. The box kept serving the old sidecar for ever, silently.
         if !remote_stamp
             .map(|s| s.tts_bin_in_sync(&local_stamp))
             .unwrap_or(false)
@@ -239,8 +175,6 @@ pub fn provision(
             log.push(format!("[{}] sources in sync (cache match)", m.id));
         } else {
             // One artifact, pushed whole. The hash in the bundle's name is the
-            // same digest `sources_match` just compared, so a box that reaches
-            // this branch is one whose set really differs.
             match ssh.install_sources(layout, &stages, pack.as_ref(), live.as_ref()) {
                 Ok(lines) => {
                     for l in lines {
@@ -252,10 +186,6 @@ pub fn provision(
         }
 
         // The voice store lives in `models/voices.json`, not in `voices.json`.
-        // An already-configured worker still needs the model directory pushed
-        // when a new clone was baked; the old branch only synced sources, so
-        // `:prov` could report success while the worker still answered
-        // `unknown voice "Narrator 2"`.
         if models_match {
             log.push(format!("[{}] models in sync (cache match)", m.id));
         } else {
@@ -324,7 +254,6 @@ pub fn provision(
         }
 
         // 668 MB, and the reason `tts_hash` exists: a re-provision with nothing
-        // changed must not re-send it.
         if models_match {
             log.push(format!("[{}] models in sync (cache match)", m.id));
         } else {
@@ -348,10 +277,6 @@ pub fn provision(
     }
 
     // The cluster token: what lets this worker tell its own inductor from
-    // anything else that can reach its port. Shipped here rather than passed at
-    // launch so the secret never appears in `argv` (and so a rotated token
-    // reaches the box without a manual step). A worker started with
-    // `--serve-tasks` refuses to run without it.
     match crate::token::read(&layout.root) {
         Some(token) => match ssh.write_cluster_token(&token) {
             Ok(()) => log.push(format!(
@@ -368,14 +293,6 @@ pub fn provision(
     }
 
     // The worker's agent gate checks this pointer at startup: sources above
-    // carry the profile content, the pointer says what it claims to be.
-    // Written every provision (one small file) so a re-pointed inductor
-    // cannot leave a worker verifying yesterday's profile.
-    //
-    // The binding **in force**, not the checkout pointer: a workspace's own
-    // pack travels in the bundle above, so a box handed that tree but stamped
-    // with the checkout's `xianxia` would verify against a profile it does not
-    // hold.
     match crate::profile::in_force(layout) {
         Ok(binding) => match ssh.write_profile_pointer(&binding) {
             Ok(()) => log.push(format!(
@@ -393,9 +310,6 @@ pub fn provision(
     }
 
     // Enrollment moved off the worker, it needs the encoder, which is not on a
-    // worker any more. A clone declared in `voices.json` but absent from the
-    // pushed store therefore cannot render anywhere, and the old flow would
-    // have quietly enrolled it on first use. Say so instead.
     {
         let manifest: std::collections::HashMap<String, String> = serde_json::from_str(
             &std::fs::read_to_string(layout.voices_manifest()).unwrap_or_default(),
@@ -429,9 +343,6 @@ pub fn provision(
     }
 
     // The merge stage's encoder. Installed here so a fresh box can merge; a
-    // refusal is a warning, and the worker reports no `merge` capability
-    // (so the scheduler simply never offers it one) rather than failing
-    // three merges and shelving chapters.
     match ssh.ensure_ffmpeg(installs) {
         Ok(v) if v.starts_with("FFMPEG-OK") => log.push(format!("[{}] {v}", m.id)),
         Ok(v) => log.push(format!(
@@ -441,8 +352,6 @@ pub fn provision(
     }
 
     // The merge stage's second engine. The voice treatment (room, character,
-    // decay) runs through sox, and the worker gates `merge` on it, so it is
-    // installed beside ffmpeg rather than discovered at merge time.
     match ssh.ensure_sox(installs) {
         Ok(v) if v.starts_with("SOX-OK") => log.push(format!("[{}] {v}", m.id)),
         Ok(v) => log.push(format!(
@@ -451,8 +360,6 @@ pub fn provision(
         )),        Err(e) => log.push(format!("[{}] sox install check failed: {e}", m.id)),
     }
     // The sidecar loads its voice roster at startup. A models push therefore
-    // has to recycle an already-running sidecar; otherwise the new store is
-    // present on disk but the process keeps serving the old 66-voice roster.
 
     if models_pushed || tts_pushed {
         match ssh.stop_tts() {
@@ -472,12 +379,6 @@ pub fn provision(
     }
 
     // Waits for ready, so this line is a fact and not a hope, see `start_tts`.
-    // A box still loading after the budget is *not* held back here: readiness
-    // is about the binary and the weights (`configured`), and the worker's own
-    // `ensure` now waits for a loading server instead of racing it. Making
-    // `configured` depend on a live sidecar was considered and rejected: it
-    // would deny a registered box over a sidecar restart and drag
-    // `may_install` into re-running package installs on a healthy cluster.
     match ssh.start_tts(&layout.engine) {
         Ok(v) if v.starts_with("TTS-STARTING") => log.push(format!(
             "[{}] {v}, the worker will wait for it rather than start a second one; re-run the probe if renders are slow to begin",
@@ -494,8 +395,6 @@ pub fn provision(
     let after = ssh.probe(&layout.engine);
     log.push(format!("[{}] after provision: {}", m.id, after.summary()));
     // Named on its own line, not just inside the summary: a merge offered to
-    // this box fails after a full render lease, and the operator's next stop is
-    // this log. The fix is one package manager away on every platform.
     if !after.ffmpeg_present {
         log.push(format!(
             "[{}] ffmpeg is not on PATH, this box can crawl/digest/render but every merge it is offered will fail; install it (apt install ffmpeg / dnf install ffmpeg) and force a re-provision",
@@ -503,8 +402,6 @@ pub fn provision(
         ));
     }
     // Same warning for the second engine, and here the capability gate means
-    // the box simply never gets a merge offered — the line exists so the
-    // operator knows *why* this box sits out the merge lane.
     if !after.sox_present {
         log.push(format!(
             "[{}] sox is not on PATH, this box can crawl/digest/render but advertises no merge capability; install it (apt install sox / dnf install sox) and force a re-provision",
@@ -512,8 +409,6 @@ pub fn provision(
         ));
     }
     // Single-source-of-truth check, against the fresh probe: a store holding
-    // voices nothing declares desyncs the cluster silently (renders pass here,
-    // 500 everywhere else). Warn with the fix; never delete.
     {
         let engine = crate::config::Settings::load(&layout.settings()).engine;
         let manifest: std::collections::HashMap<String, String> = serde_json::from_str(

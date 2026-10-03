@@ -5,10 +5,6 @@ use super::*;
 #[test]
 fn command_keys_are_unique_and_operators_stay_off_the_keyboard() {
     // There was no key-uniqueness test at all, so a new binding could quietly
-    // shadow an existing one. Read-only navigations may share their Normal-mode
-    // key (that is the point of `Command::Key`); operator commands may not
-    // they live on the `:` line, and a bare keypress must not launch or
-    // terminate anything.
     let mut seen: Vec<char> = Vec::new();
     for w in WORDS {
         let Some(k) = w.key else { continue };
@@ -19,8 +15,6 @@ fn command_keys_are_unique_and_operators_stay_off_the_keyboard() {
         seen.push(k);
     }
     // The three new cloud keys are gated, not live: a stray `w`/`o`/`l` must not
-    // launch or terminate EC2 instances. (A few older operators, `B`, `X`, do
-    // keep a normal-mode key on purpose; these do not.)
     for k in ['w', 'o', 'l'] {
         assert!(seen.contains(&k), "{k:?} lost its command binding");
         assert!(
@@ -58,7 +52,6 @@ fn cloud_commands_parse_words_keys_and_the_up_count() {
 #[test]
 fn login_and_discover_are_words_with_no_key_of_their_own() {
     // Setup verbs: reachable from the `:` line, never a bare keypress. They are
-    // one-off account work, and a stray letter must not store a credential.
     assert_eq!(command_key("login"), Some(Command::AwsLogin));
     assert_eq!(command_key("LOGIN"), Some(Command::AwsLogin));
     assert_eq!(command_key("discover"), Some(Command::AwsDiscover));
@@ -75,9 +68,6 @@ fn login_and_discover_are_words_with_no_key_of_their_own() {
 #[test]
 fn discover_parses_the_same_flags_the_cli_takes_and_refuses_a_typo() {
     // The dashboard parses through the CLI's own clap definition, so this is a
-    // regression guard against the two front ends drifting apart: a flag the
-    // CLI accepts must parse here, and an unknown one must be an error rather
-    // than silently dropped.
     let toks = |s: &str| -> Vec<String> { s.split_whitespace().map(str::to_string).collect() };
     let args = crate::aws_ops::DiscoverArgs::parse_tokens(&toks(
         "--region eu-central-1 --instance-profile storycast-worker --security-group sg-abc",
@@ -109,7 +99,6 @@ fn the_login_prompt_takes_the_console_csv_and_never_a_typed_secret() {
     let prompt = |buf: &str| TextPrompt::new(TextKind::AwsLogin, "t", "h", buf);
 
     // A bare key id has no secret to go with it, and the secret must not be
-    // typed on a screen, refused with that reason, not half-handled.
     let err = submit_text(&mut app, &prompt("--access-key-id AKIAEXAMPLE")).unwrap_err();
     assert!(err.contains("secret cannot be typed here"), "{err}");
     let err = submit_text(&mut app, &prompt("~/nowhere.csv")).unwrap_err();
@@ -162,8 +151,6 @@ fn the_discover_prompt_expands_a_tilde_pem_and_refuses_a_missing_one() {
 #[tokio::test]
 async fn aws_pool_job_reports_an_unreadable_account_and_never_a_blank_one() {
     // A fresh root with no `.bm/aws.json`: the read fails on the missing region.
-    // The Cloud view must get the reason, an empty account is the one wrong
-    // answer here, because it reads as "nothing is running".
     let dir = tempfile::tempdir().unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
     super::super::jobs::job_aws_pool(
@@ -192,16 +179,6 @@ async fn aws_pool_job_reports_an_unreadable_account_and_never_a_blank_one() {
 #[test]
 fn a_batch_is_visible_to_the_down_guard_and_bounded_in_its_dialog() {
     // Two claims batching could have broken, one held, one did not.
-    //
-    // (a) The guard must still see the box as busy. It reads *rows*, not the
-    //     beat's `task_id`, so every take of a batch counts: batching must not
-    //     be able to hide in-flight work from the one guard that exists to stop
-    //     an operator killing a render.
-    // (b) The dialog line did break. `Confirm`'s height is `body.len() + 5`
-    //     one entry per body line, while the paragraph *wraps*, so a single
-    //     long entry costs visual lines the height never counted and pushes the
-    //     `Enter / y confirm` hint out of the box. One task per box never did
-    //     that; sixty-four takes on one box does.
     let now = bm_proto::now_secs();
     let beat: Heartbeat = serde_json::from_value(serde_json::json!({
         "worker_id": "w1", "addr": "172.31.1.5", "stage": "render",
@@ -209,7 +186,6 @@ fn a_batch_is_visible_to_the_down_guard_and_bounded_in_its_dialog() {
     }))
     .unwrap();
     // One chapter's batch, all on one box. The head names the group; the
-    // members carry no grouping of their own.
     let mut rows: Vec<Task> = (0..12)
         .map(|pos| {
             let mut t = Task::new_take(42, pos);
@@ -230,7 +206,6 @@ fn a_batch_is_visible_to_the_down_guard_and_bounded_in_its_dialog() {
     assert!(busy.contains(&"render:42:11".to_string()), "{busy:?}");
 
     // The line is bounded, and says how many it left out. The list arrives
-    // sorted, so `w1` sorts last and is the one that gets elided.
     let line = busy_summary(&busy);
     assert!(line.starts_with("render:42:0"), "{line}");
     assert!(line.contains("more"), "the remainder is stated: {line}");
@@ -241,7 +216,6 @@ fn a_batch_is_visible_to_the_down_guard_and_bounded_in_its_dialog() {
         line.len()
     );
     // The bound is by width, not by count, so a list of *long* ids is elided
-    // harder than a list of short ones, the property a fixed count gets wrong.
     let long: Vec<String> = (0..12).map(|i| format!("render:1999:{i}")).collect();
     assert!(busy_summary(&long).len() <= 68, "{}", busy_summary(&long));
     let short: Vec<String> = (0..12).map(|i| format!("m:{i}")).collect();
@@ -276,7 +250,6 @@ fn the_down_guard_sees_a_render_in_flight_on_one_of_those_boxes() {
     t.assigned_to = Some("w1".into());
     let tasks = vec![t];
     // Both the public address the registry keys on and the private one the agent
-    // reports name the same box.
     let addrs = vec!["3.76.103.21".to_string(), "172.31.1.5".to_string()];
     let busy = busy_on(&beats, &tasks, &addrs, now);
     assert!(busy.contains(&"render:42".to_string()), "{busy:?}");

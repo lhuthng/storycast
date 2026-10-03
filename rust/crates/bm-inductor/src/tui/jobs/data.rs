@@ -11,7 +11,6 @@ pub(crate) async fn job_op(
     layout: bm_core::Layout,
 ) {
     // Ops can wait on the analyzer for minutes; the shared 15s
-    // client would time them out. Polling keeps the short one.
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
         .build()
@@ -41,8 +40,6 @@ pub(crate) async fn job_op(
         },
         Err(e) => {
             // Swap-voice and remix survive a dead inductor: same mutation
-            // against the files, guarded by inductor-down + no-local-workers.
-            // Every other op genuinely needs the scheduler.
             if op == Op::SwapVoice {
                 match crate::api::offline_swap(
                     &api,
@@ -128,10 +125,6 @@ pub(crate) async fn job_load_roster(
     layout: bm_core::Layout,
 ) {
     // Instant first: every piece the picker needs is on this disk, so show
-    // it now instead of after an inductor hop plus a sidecar round trip.
-    // (That chain cost 35s worst case while the sidecar booted: 15s TUI
-    // timeout, then 20s of server-side sidecar timeouts, then the offline
-    // build anyway.)
     let disk = layout.clone();
     match tokio::task::spawn_blocking(move || crate::api::local_roster(&disk)).await {
         Ok(roster) => {
@@ -142,7 +135,6 @@ pub(crate) async fn job_load_roster(
         }
     }
     // ...then upgrade to live when the inductor answers with a sidecar
-    // behind it. Anything else keeps the local roster already shown.
     if let Ok(r) = http.get(format!("{api}/api/roster")).send().await {
         if let Ok(roster) = r.json::<Roster>().await {
             if roster.source.starts_with("live") {
@@ -154,9 +146,6 @@ pub(crate) async fn job_load_roster(
 }
 
 /// Index every script's lines by speaker, off the UI thread.
-///
-/// `spawn_blocking` because this is a hundred file opens: cheap warm, but it is
-/// I/O, and the UI task is the one thing the TUI is not allowed to stall.
 pub(crate) async fn job_load_lines(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     layout: bm_core::Layout,
@@ -166,15 +155,10 @@ pub(crate) async fn job_load_lines(
         .unwrap_or_else(|e| Err(format!("line index task failed: {e}")));
     let _ = tx.send(Ev::Lines(res));
     // `dispatch` counts every job and only `Done` decrements, so a job that
-    // reports its payload without one leaves the footer claiming a job is
-    // running for the rest of the session, and nothing else ever clears it.
-    // Every arm of `run_job` owes exactly one of these.
     let _ = tx.send(Ev::Done(DoneKind::Other));
 }
 
 /// Read the sound-design pools and what each entry is used for, off the UI
-/// thread. Same `spawn_blocking` reasoning as `job_load_lines`: a hundred file
-/// opens, and the UI task is the one thing the TUI may not stall.
 pub(crate) async fn job_load_sounds(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     layout: bm_core::Layout,
@@ -188,9 +172,6 @@ pub(crate) async fn job_load_sounds(
 }
 
 /// Serve one already-rendered segment without an inductor: the same lookup
-/// `Op::Segment` runs server-side, against this checkout's files. Reports
-/// through `DoneKind::Op` with the same shape, so the Done handler, line
-/// holding, playback, marker release, cannot tell the two paths apart.
 pub(crate) async fn job_segment(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     layout: bm_core::Layout,
@@ -212,8 +193,6 @@ pub(crate) async fn job_segment(
             return Err(msg);
         }
         // An exact line plays that sentence or misses honestly, like the op
-        // with the same fallback to one of hers that did render, so a
-        // fresh swap (rendered chapter by chapter) still auditions.
         let want = text.trim();
         if !want.is_empty() {
             match bm_core::assemble::pick_exact(&cands, &character, want) {
@@ -265,7 +244,6 @@ pub(crate) async fn job_segment(
 }
 
 /// A picked local segment into the job's answer shape: speaker, text, base64
-/// audio and its size for the status line.
 fn serve_local_segment(
     pick: &bm_core::assemble::RenderedSegment,
 ) -> Result<(String, String, String, usize), String> {
@@ -279,8 +257,6 @@ fn serve_local_segment(
 }
 
 /// Synthesize one line with this checkout's venv: the disconnected form of
-/// `Op::PreviewVoice`. Reports through the same `DoneKind::Op`, so playback,
-/// markers and the previewed checklist cannot tell it from a render.
 pub(crate) async fn job_preview_local(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     layout: bm_core::Layout,
@@ -386,10 +362,6 @@ mod tests {
     #[test]
     fn a_provision_stop_names_the_cause_the_run_carried() {
         // The pre-flight failure that started all this: the log line is right
-        // there, and it contains none of the words the old scan looked for, so
-        // the pane said "provision INCOMPLETE" and told the operator to retry
-        // the same click. The run now carries the reason, and the pane shows
-        // it whatever the log happens to say.
         let why = "no TTS sidecar binary for linux/x86_64 at /repo/rust/target/x86_64-unknown-linux-gnu/release/bm-tts (linux/x86_64: `make tts`)";
         let lines = vec![
             "[10.0.0.1] profile: xianxia (6b8d5fc00761)".to_string(),
@@ -397,7 +369,6 @@ mod tests {
         ];
         assert_eq!(provision_stop_reason(Some(why), &lines), why);
         // The scan alone still cannot see it, the honest reason the field
-        // exists, pinned so nobody deletes the field and calls it a cleanup.
         assert_eq!(provision_stop_reason(None, &lines), "provision INCOMPLETE");
     }
 

@@ -1,11 +1,6 @@
 use super::*;
 
 /// **The gate for the templates.** Each one, run over a page captured from the
-/// site it is written for, must produce exactly the text recorded beside it.
-///
-/// Both halves of each pair are checked for *absence* as well as presence,
-/// because a crawler that returns the right prose plus the site's navigation is
-/// not a crawler that works — the extra lines become audio.
 #[test]
 fn the_site_templates_reproduce_their_captured_goldens() {
     let base = fixture::start(vec![
@@ -63,8 +58,6 @@ fn the_site_templates_reproduce_their_captured_goldens() {
             );
         }
         // The prose is paragraphs, not one breath. This is the assertion the
-        // whole truyencom template exists to satisfy: without the CR split the
-        // output is a single 10,000-character line that still "passes".
         let paras = text.matches("\n\n").count() + 1;
         assert!(
             paras > 20,
@@ -81,8 +74,6 @@ fn the_site_templates_reproduce_their_captured_goldens() {
 }
 
 /// The webnovel template's whole reason for existing: `div.chapter_content` is
-/// the container everyone reaches for, and it is not the chapter. Asserting the
-/// absence of the chrome that lives in it is the test.
 #[test]
 fn the_webnovel_template_does_not_return_the_chapter_shell() {
     let base = fixture::start(vec![(
@@ -110,14 +101,11 @@ fn the_webnovel_template_does_not_return_the_chapter_shell() {
         );
     }
     // The 39 KB client-side template that follows the prose on the live page
-    // must not appear either: `strip_tags` drops <script> contents, and this is
-    // what proves it on a page where not dropping it would be spectacular.
     assert!(!text.contains("ejs"), "the EJS template leaked");
     assert!(!text.contains('<'), "a tag survived into the prose");
 }
 
 /// The truyencom tail artifact is dropped in the *script*, because the host's
-/// artifact list knows about Storya's markers and not about this site's.
 #[test]
 fn the_truyencom_template_drops_the_sites_own_end_marker() {
     let base = fixture::start(vec![(
@@ -134,7 +122,6 @@ fn the_truyencom_template_drops_the_sites_own_end_marker() {
         &text[text.len().saturating_sub(80)..]
     );
     // …and the real last paragraph is still there, so the cut was at the
-    // marker and not somewhere earlier in the chapter.
     assert!(
         text.contains("Khâu Bình lại lần nữa tại trong lòng an ủi"),
         "the cut took more than the marker"
@@ -142,7 +129,6 @@ fn the_truyencom_template_drops_the_sites_own_end_marker() {
 }
 
 /// `discover` is mandatory on webnovel (no url_template can produce a slug URL)
-/// and optional on truyencom. Both paths, on the real captured listings.
 #[test]
 fn the_templates_discover_a_whole_index_from_one_page() {
     // ── truyencom: a regular listing, numbers straight out of the href ──
@@ -159,10 +145,6 @@ fn the_templates_discover_a_whole_index_from_one_page() {
     s.params
         .insert("index".into(), serde_json::json!(format!("{base}/index")));
     // One page, deliberately. The captured fixture's pagination links are
-    // absolute to the *real* truyencom.com, so a walk past page 1 would go out
-    // to the live internet — right behaviour for a crawl, wrong for a test that
-    // must be the same on an aeroplane. The walk itself is covered below, on
-    // synthetic pages that stay on the fixture server.
     s.params.insert("max_pages".into(), serde_json::json!(1));
     let found = Provider::new(&s)
         .discover(1, 60)
@@ -175,9 +157,6 @@ fn the_templates_discover_a_whole_index_from_one_page() {
     );
     let ch1 = found.chapters.iter().find(|c| c.n == 1).expect("ch1");
     // The captured hrefs are absolute to the real site, and `abs_url` leaves an
-    // absolute URL alone — which is the whole contract for the two of the three
-    // kinds a listing mixes. The fixture stays verbatim rather than being
-    // rewritten to point at the test server, so the golden is the real page.
     assert_eq!(
         ch1.url.as_deref(),
         Some("https://truyencom.com/nga-thi-nhan-gian-tinh-long-vuong/chuong-1.html")
@@ -186,16 +165,12 @@ fn the_templates_discover_a_whole_index_from_one_page() {
     assert_eq!(
         ch1.title,
         // U+00A0, not a space — the separator the site actually uses, and the
-        // character that has to survive from the `title` attribute all the way
-        // to what the pipeline speaks.
         "Chương 1: \u{a0}Thần giếng Khâu Bình",
         "the title is the attribute, minus the book name"
     );
     // The sidebar of *other* books' chapters is not in the fixture, and this is
-    // the assertion that would notice if the selector ever widened to it.
     assert_eq!(found.chapters.len(), 50);
     // The five pagination <li> in that same container are NOT chapters, and
-    // their link text is a bare number exactly like a chapter's is.
     for bogus in ["Last", "2", "3", "4", "5"] {
         assert!(
             !found.chapters.iter().any(|c| c.title == bogus
@@ -211,8 +186,6 @@ fn the_templates_discover_a_whole_index_from_one_page() {
         "only chapter links may be indexed"
     );
     // Without params.index it declines rather than failing: a site whose URLs
-    // are a function of n does not need a listing walk, and the host has to be
-    // able to hear "fall back to the template".
     let mut s2 = spec("lua", "truyencom.lua", &template("truyencom.lua"));
     s2.url_template = format!("{base}/chuong-{{n}}.html");
     assert!(
@@ -249,7 +222,6 @@ fn the_templates_discover_a_whole_index_from_one_page() {
         "the title is the a[title], not the link text with its timestamp"
     );
     // The href is `/vi/book/…` on the live site: root-relative, and getting this
-    // wrong is the classic listing-walk bug.
     let url = ch1.url.as_deref().expect("a URL");
     assert!(
         url.starts_with(&format!("{base}/vi/book/")),
@@ -265,14 +237,6 @@ fn the_templates_discover_a_whole_index_from_one_page() {
 }
 
 /// An absent `input.url` must reach a script as a real `nil`.
-///
-/// **This is a contract test for a trap, not for a feature.** mlua serialises a
-/// JSON `null` to a `NULL` *userdata* so that nulls round-trip, and in Lua that
-/// sentinel is **truthy**. So `if not input.url then error("no URL for ch" …)`
-/// — the guard every template writes, and the one that keeps a chapter with no
-/// URL from being fetched as garbage — silently did nothing, and the userdata
-/// went into `fetch` instead. Caught by the webnovel template refusing to fail
-/// on a chapter it should have refused.
 #[test]
 fn an_absent_url_reaches_a_lua_script_as_nil() {
     let base = fixture::start(vec![("/x".into(), 200, "z".repeat(400))]);
@@ -301,7 +265,6 @@ fn an_absent_url_reaches_a_lua_script_as_nil() {
     }
 
     // …and a URL that *is* there is still a plain string, so the guard did not
-    // break the happy path.
     let mut s = spec("lua", "nil-url.lua", source);
     s.url_template = format!("{base}/x");
     let got = Provider::new(&s).crawl(1, None, 1).unwrap().outcome;
@@ -311,7 +274,6 @@ fn an_absent_url_reaches_a_lua_script_as_nil() {
     );
 
     // JavaScript gets `null`, which is falsy, so the same guard works there with
-    // no special case — the asymmetry is Lua's alone.
     let mut s = spec(
         "js",
         "nil-url.js",
@@ -325,7 +287,6 @@ fn an_absent_url_reaches_a_lua_script_as_nil() {
 }
 
 /// Long enough to clear the 200-byte chapter floor, so these tests are about the
-/// verdict and not about the length guard.
 const LONG: &str = "no challenge here, and comfortably long enough to clear the \
                     two-hundred-byte chapter floor, so that what is under test \
                     is the verdict rather than the length guard that every crawl \
@@ -340,11 +301,6 @@ fn quoted_long() -> String {
 }
 
 /// `challenge(page)` must answer with a falsy value when there is no challenge.
-///
-/// The same `NULL`-is-truthy trap as above, in the other direction: a host
-/// function that returned mlua's null sentinel would make
-/// `if challenge(r) then return blocked end` refuse **every** page. Found by the
-/// truyencom template refusing the real chapter it was written for.
 #[test]
 fn challenge_answers_falsy_on_a_real_page_in_both_engines() {
     let base = fixture::start(vec![(
@@ -391,7 +347,6 @@ fn challenge_answers_falsy_on_a_real_page_in_both_engines() {
     }
 
     // …and truthy on one that is a challenge, so the function is not simply
-    // always returning nothing.
     let base = fixture::start(vec![(
         "/x".into(),
         200,
@@ -406,13 +361,6 @@ fn challenge_answers_falsy_on_a_real_page_in_both_engines() {
 }
 
 /// ReadNovelFull writes the chapter title **twice** into the body, glued to the
-/// first sentence, while the headline carries the same text without the colon.
-///
-/// Without cutting it every chapter opens with its own title three times over
-/// (twice from the body, once prepended) and the first real sentence is
-/// unreachable. The site's own capture shows the shape, and the golden proves
-/// the cut — but the assertion here is on the *rule*: the prose must start at
-/// the first sentence, and the title must appear exactly once.
 #[test]
 fn the_readnovelfull_template_cuts_the_title_the_site_writes_into_the_body() {
     let base = fixture::start(vec![(
@@ -444,7 +392,6 @@ fn the_readnovelfull_template_cuts_the_title_the_site_writes_into_the_body() {
         "the title is spoken once, as the headline"
     );
     // The site's other shape: a title that appears *inside* the prose is not an
-    // artifact and must survive. The cut is anchored at the start, not anywhere.
     let quoted = r#"<div id="chr-content" class="chr-c"><p>Chapter 9: Echo Echo
            The sign read Chapter 9: Echo and then nothing happened for a while, which
            is the sort of thing that happens in this book often enough to be boring
@@ -464,16 +411,6 @@ fn the_readnovelfull_template_cuts_the_title_the_site_writes_into_the_body() {
 }
 
 /// The rule that makes this site safe: **`total` is only ever the end of the
-/// book**.
-///
-/// ReadNovelFull's book page lists only the first ~30 chapters — a 2730-chapter
-/// book lists 2..30 and stops, with no pagination and no full-list endpoint. So a
-/// `discover` that trusted it would report `total = 30`, the host would mark
-/// chapters 31..2730 **absent** (a terminal verdict), never crawl them, and every
-/// ledger row would look healthy. A long novel becomes a short one silently.
-///
-/// The template walks `next_chap` instead, and this is the test for the
-/// difference between "we reached the end" and "we stopped for another reason".
 #[test]
 fn the_readnovelfull_index_withholds_total_until_the_book_really_ends() {
     // A book page that lists 3 chapters, and a chain that keeps going.
@@ -494,12 +431,6 @@ fn the_readnovelfull_index_withholds_total_until_the_book_really_ends() {
     };
 
     // Case 1: the chain is not routed past chapter 3, so the walk stops on an
-    // HTTP error with the book possibly unfinished. `total` must be withheld.
-    //
-    // Chapter 4 *is* still listed: the site published the `next_chap` link that
-    // names it, and hiding it would be us second-guessing the site. It comes with
-    // no title, because nothing ever fetched its page — and crawl() will go and
-    // get the 404 and mark it absent, which is the truthful outcome.
     let base = fixture::start(vec![
         ("/book".into(), 200, book.into()),
         ("/b/chapter-3-three.html".into(), 200, page(3, Some(4))),
@@ -526,12 +457,10 @@ fn the_readnovelfull_index_withholds_total_until_the_book_really_ends() {
         "a chapter the walk announced but never fetched has no title to claim"
     );
     // And the listed ones kept the titles the book page gave them — the walk must
-    // not overwrite a real title with a headline read off a neighbouring page.
     let c2 = found.chapters.iter().find(|c| c.n == 2).expect("ch2");
     assert_eq!(c2.title, "Chapter 2 Two");
 
     // Case 2: the chain runs to a chapter with no `next_chap` at all, which IS
-    // the site saying the book is finished. Now, and only now, `total`.
     let base = fixture::start(vec![
         ("/book".into(), 200, book.into()),
         ("/b/chapter-3-three.html".into(), 200, page(3, Some(4))),
@@ -555,8 +484,6 @@ fn the_readnovelfull_index_withholds_total_until_the_book_really_ends() {
         "the walk extends past what the book page listed, in order"
     );
     // The chapters the walk found took their titles from their *own* pages, not
-    // from the list — which never mentioned them — and not from the neighbour
-    // the link was read off, which is the off-by-one this rule exists to catch.
     for (n, title) in [(4, "Chapter 4 T4"), (5, "Chapter 5 T5")] {
         let c = found.chapters.iter().find(|c| c.n == n).expect("ch");
         assert_eq!(c.title, title, "chapter {n} carries the wrong headline");
@@ -565,7 +492,6 @@ fn the_readnovelfull_index_withholds_total_until_the_book_really_ends() {
     assert!(c5.url.as_deref().unwrap().ends_with("/b/chapter-5-t5.html"));
 
     // Case 3: the range is satisfied before the end of the book, so the walk
-    // stops on purpose and `total` is still withheld. A later range walks on.
     let found = Provider::new(&s).discover(1, 4).unwrap().unwrap();
     assert_eq!(
         found.total, None,
@@ -576,15 +502,12 @@ fn the_readnovelfull_index_withholds_total_until_the_book_really_ends() {
 }
 
 /// The chain walk spends a fetch per chapter, so the defaults sized for one
-/// chapter are not enough — and the template has to be able to say so rather than
-/// dying mid-walk with a budget error.
 #[test]
 fn the_readnovelfull_walk_is_bounded_by_a_hop_ceiling() {
     let book = r#"<div id="list-chapter"><ul class="list-chapter">
         <li><a href="/b/chapter-1-one.html" title="One">One</a></li>
         </ul></div>"#;
     // A `next_chap` that points at itself: the loop a real site has and a real
-    // walk must not follow for ever.
     let looping = r#"<div id="chr-content" class="chr-c"><p>Body.</p></div>
         <h2><a class="chr-title">Chapter 1 One</a></h2>
         <a id="next_chap" href="/b/chapter-1-one.html">Next</a>"#;
@@ -599,19 +522,12 @@ fn the_readnovelfull_walk_is_bounded_by_a_hop_ceiling() {
     s.max_fetches = 100;
     s.max_seconds = 30;
     // The loop makes the number go nowhere, so the walk stops on the ceiling
-    // rather than spinning, and `total` stays withheld.
     let found = Provider::new(&s).discover(1, 500).unwrap().unwrap();
     assert_eq!(found.total, None, "a looping chain has not found the end");
     assert_eq!(found.chapters.len(), 1, "and it did not invent chapters");
 }
 
 /// A paginated listing is the quietest data-loss bug in the whole stage.
-///
-/// The truyencom book page really is five pages of 50, and a `discover` that
-/// reads page 1 and stops reports `total = 50`. The host believes that: it marks
-/// everything past ch50 **absent**, which is a terminal verdict, so a 250-chapter
-/// book silently becomes a 50-chapter one and every ledger row looks healthy.
-/// This is the test that says the walk follows the page links.
 #[test]
 fn a_paginated_listing_is_walked_to_the_end_not_truncated_at_one_page() {
     // Two pages, 2 chapters each, with the page links shaped like the real ones.
@@ -666,8 +582,6 @@ fn a_paginated_listing_is_walked_to_the_end_not_truncated_at_one_page() {
         ch4.url
     );
     // The page-2 link is root-relative and was resolved against the page it was
-    // found on — the classic listing-walk bug, caught on a URL rather than in a
-    // comment.
     assert!(
         found.chapters.iter().filter(|c| c.n >= 3).all(|c| c
             .url
@@ -680,12 +594,6 @@ fn a_paginated_listing_is_walked_to_the_end_not_truncated_at_one_page() {
 }
 
 /// The real captured Cloudflare challenge, served both ways it is really served.
-///
-///
-/// This is the whole argument for the link check, in test form: the same body
-/// is a `403` with `cf-mitigated: challenge` over one protocol and a plain `200`
-/// over the other, and a crawler has to name both rather than writing an
-/// interstitial into `chNN.txt`.
 #[test]
 fn a_real_cloudflare_challenge_is_a_challenge_either_way_it_arrives() {
     let file = "webnovel.lua";
@@ -711,7 +619,6 @@ fn a_real_cloudflare_challenge_is_a_challenge_either_way_it_arrives() {
     }
 
     // As served over HTTP/1.1 by the same site: 200, no header, challenge body.
-    // Nothing in the status says no — only the body does.
     let base = fixture::start(vec![("/wn-ch1".into(), 200, CLOUDFLARE_403.to_string())]);
     let mut s = spec("lua", file, &template(file));
     s.url_template = format!("{base}/wn-ch1");
@@ -730,7 +637,6 @@ fn a_real_cloudflare_challenge_is_a_challenge_either_way_it_arrives() {
     }
 
     // And the host classifies it too, so a workspace with no script at all
-    // still refuses it rather than storing it.
     assert_eq!(
         crate::crawl::provider::block_for_status(403).unwrap().class,
         BlockedClass::Challenge

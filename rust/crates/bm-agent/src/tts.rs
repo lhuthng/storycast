@@ -1,8 +1,4 @@
 //! Thin HTTP client for the TTS sidecar.
-//!
-//! The agent never loads a model. Every render is one request to whichever
-//! machine runs the sidecar — normally the agent's own, so it is a loopback
-//! call and the audio never crosses the network.
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -33,8 +29,6 @@ impl Tts {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(900))
                 // The sidecar is on loopback, so a proxy must not answer for
-                // it — the same trap `api::sidecar_client` documents, and the
-                // reason a preview can 502 while the sidecar is healthy.
                 .no_proxy()
                 .build()
                 .unwrap_or_default(),
@@ -42,11 +36,8 @@ impl Tts {
     }
 
     /// What a `/health` probe found.
-    ///
-    /// The third state is the one that matters. `bm-tts` binds its port before
     /// loading ~2.85 GB of weights and answers 503 while it does, so "a server
     /// is starting" and "nothing is listening" are different answers — and a
-    /// caller that cannot tell them apart spawns a duplicate and OOMs the box.
     pub async fn probe(&self) -> Health {
         match self
             .http
@@ -57,8 +48,6 @@ impl Tts {
         {
             Ok(r) if r.status().is_success() => Health::Up,
             // Any HTTP answer that is not a success is a server that is up and
-            // still loading (the 503), or a capability mismatch. Either way it
-            // exists; the caller must not spawn another.
             Ok(_) => Health::Loading,
             Err(_) => Health::Absent,
         }
@@ -69,11 +58,6 @@ impl Tts {
     }
 
     /// Ask the sidecar to exit.
-    ///
-    /// The client's 900 s render timeout is deliberately overridden: this call
-    /// must fail fast. A server without the route (an older sidecar, the Python
-    /// one) answers 404, and any non-success is an error the caller reports and
-    /// carries on from — the sweep is the backstop, not an exception handler.
     pub async fn shutdown(&self) -> Result<()> {
         let resp = self
             .http
@@ -107,7 +91,6 @@ impl Tts {
     }
 
     /// Accent policy + roster + default cast. The sidecar is the authority;
-    /// `bm_core::voices` is the offline fallback.
     pub async fn policy(&self) -> Result<serde_json::Value> {
         let resp = self
             .http

@@ -1,25 +1,6 @@
 //! Manual import: supplying a chapter as a file instead of fetching it.
-//!
-//! Not a third crawl *mode* so much as the other supply path for the same slot.
-//! A chapter whose text is already on disk is never fetched — the scheduler
-//! offers a crawl only for a chapter with no `chNN.txt` — which gives the
-//! per-chapter override for free: one broken page in a 500-chapter book is
-//! `:import 217 broken.txt` and nothing else about the run changes.
-//!
-//! ## Numbering is explicit, never positional
-//!
 //! `chNN.txt` has to be dense (the range math, `--through` and every "what is
 //! missing" check depend on it), so the import must establish `n` — and it does
-//! so from the *filename* or from the number the operator typed, **never** from
-//! the order the files arrived in. Guessing by sort order is how chapter 34
-//! silently becomes chapter 33 with 400 chapters after it shifted by one.
-//!
-//! ## The terminal caveat worth knowing
-//!
-//! Most terminals never deliver an OS drag-and-drop: they paste the dropped
-//! file's *path* into the prompt. That is why `import_specs` accepts paths and
-//! literal text alike — a pasted path and a pasted chapter both work — and why
-//! nothing here depends on a drop event that will not arrive.
 
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
@@ -37,11 +18,6 @@ pub struct Imported {
 }
 
 /// Adopt `text` as chapter `n`.
-///
-/// The text passes the **same** boundary the crawler's output does, so an
-/// older workspace's stored chapters and a freshly imported one are cleaned
-/// identically — and a truncated paste fails here, naming the chapter, instead
-/// of at the digest three stages later.
 pub fn import_text(layout: &Layout, n: u32, text: &str) -> Result<Imported> {
     let clean = prepare(layout, n, text)?;
     crate::atomic_write(&layout.chapter_txt(n), &clean)?;
@@ -53,10 +29,6 @@ pub fn import_text(layout: &Layout, n: u32, text: &str) -> Result<Imported> {
 }
 
 /// Everything `import_text` checks, without writing.
-///
-/// Split out so a multi-entry import can be validated **whole** before any of
-/// it lands: a batch that fails on its third file after writing two would leave
-/// a half-imported range and no way to tell which half.
 pub fn prepare(layout: &Layout, n: u32, text: &str) -> Result<String> {
     if n == 0 {
         anyhow::bail!("chapter 0 is not a chapter — the pipeline's index starts at 1");
@@ -70,8 +42,6 @@ pub fn prepare(layout: &Layout, n: u32, text: &str) -> Result<String> {
         );
     }
     // A chapter that already has a script would be left holding the *old*
-    // text: this writes `chNN.txt` and nothing else, and the digest that
-    // produced that script would not run again on its own.
     let script = layout.script(n);
     if script.is_file() {
         anyhow::bail!(
@@ -100,10 +70,6 @@ impl Spec {
 }
 
 /// Interpret the strings an operator handed over.
-///
-/// `explicit` is the number they typed (`:import 34 <path>`). It applies to the
-/// **first** entry only: with several files the rest must carry their own
-/// number, or the import would invent one and shift the book.
 pub fn import_specs(explicit: Option<u32>, inputs: &[String]) -> Result<Vec<Spec>> {
     if inputs.is_empty() {
         anyhow::bail!("nothing to import — give a file path, or paste the chapter text");
@@ -124,16 +90,10 @@ pub fn import_specs(explicit: Option<u32>, inputs: &[String]) -> Result<Vec<Spec
             continue;
         }
         // Not a file. Two very different things look like this: a mistyped or
-        // moved path, and a pasted chapter. Telling them apart matters —
-        // treating a typo'd path as text would import the *path string* as a
-        // chapter — so anything shaped like a path is refused by name, and only
-        // prose is adopted.
         if multiple || looks_like_path(raw) {
             anyhow::bail!("{raw}: no such file");
         }
         // A pasted chapter has no filename, so its number must come from the
-        // operator: there is deliberately no "use the next free number", which
-        // is how an import silently lands on the wrong chapter.
         let n = explicit_here;
         if n.is_none() {
             anyhow::bail!(
@@ -152,7 +112,6 @@ pub fn import_specs(explicit: Option<u32>, inputs: &[String]) -> Result<Vec<Spec
 }
 
 /// Whether a string is a path someone meant to name rather than a chapter
-/// someone pasted.
 fn looks_like_path(s: &str) -> bool {
     !s.contains('\n') && (s.contains('/') || s.ends_with(".txt") || s.ends_with(".md"))
 }
@@ -168,24 +127,15 @@ pub fn read_spec(spec: &Spec) -> Result<String> {
 }
 
 /// The chapter number in a filename: `ch34.txt`, `34.txt`, `chapter-34.txt`,
-/// `034 - Tên chương.txt`.
-///
-/// The **trailing** run of digits wins, because that is where a chapter number
-/// sits in every one of these spellings. Anything without one returns `None`
-/// so the caller refuses rather than guesses — including a decimal bonus
-/// chapter (`chapter-7.5.txt`), whose `7.5` has no place in a dense integer
-/// index and must be given a number explicitly.
 pub fn number_from_name(name: &str) -> Option<u32> {
     let stem = Path::new(name)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(name);
     // The **last** run of digits: that is where the number sits in `ch34`,
-    // `chapter-034` and `034 - Tên chương` alike.
     let digits_start = stem.trim_end_matches(|c: char| c.is_ascii_digit()).len();
     if digits_start == stem.len() {
         // No trailing digits — but `034 - Tên chương` has them in the middle,
-        // so fall back to the last run anywhere in the stem.
         let end = stem.rfind(|c: char| c.is_ascii_digit()).map(|i| i + 1)?;
         let start = stem[..end]
             .trim_end_matches(|c: char| c.is_ascii_digit())
@@ -197,7 +147,6 @@ pub fn number_from_name(name: &str) -> Option<u32> {
         return (n > 0).then_some(n);
     }
     // `chapter-7.5` ends in digits too, and reading that as chapter 5 would
-    // import a real bonus chapter onto an unrelated number.
     if stem[..digits_start].ends_with('.') {
         return None;
     }
@@ -213,8 +162,6 @@ pub fn import_all(
 ) -> Result<(Vec<Imported>, String)> {
     let specs = import_specs(explicit, inputs)?;
     // Two passes, deliberately: resolve and validate everything first, write
-    // second. A batch that fails on its third file after writing two would
-    // leave a half-imported range and no way to tell which half.
     let mut planned = Vec::new();
     for spec in &specs {
         let n = spec.number().ok_or_else(|| {
@@ -276,7 +223,6 @@ mod tests {
             ("prologue.txt", None),
             ("ch0.txt", None),
             // A decimal bonus chapter has no honest place in a dense integer
-            // index, so it is refused rather than rounded onto its neighbour.
             ("chapter-7.5.txt", None),
         ] {
             assert_eq!(number_from_name(name), want, "{name}");
@@ -293,7 +239,6 @@ mod tests {
         let err = import_all(&l, None, &[p.display().to_string()]).unwrap_err();
         assert!(err.to_string().contains("no chapter number"), "{err}");
         // Even alongside a file that does have one: the numberless entry is
-        // named, not silently shifted onto the other's number.
         let q = dir.join("ch12.txt");
         std::fs::write(&q, body("Q")).unwrap();
         let err = import_all(
@@ -312,7 +257,6 @@ mod tests {
     #[test]
     fn a_path_that_does_not_exist_is_refused_instead_of_being_adopted_as_text() {
         // `:import 34 /tmp/typo.txt` must not write the *string* `/tmp/typo.txt`
-        // as chapter 34's text.
         let l = layout("typo");
         let err = import_all(&l, Some(34), &["/tmp/typo-does-not-exist.txt".into()])
             .unwrap_err()
@@ -328,7 +272,6 @@ mod tests {
     #[test]
     fn a_multi_entry_batch_lands_all_or_nothing() {
         // The three-file case: the second is too short to be a chapter. The
-        // first must not have been written by the time the error is raised.
         let l = layout("atomic");
         let dir = l.scratch();
         std::fs::create_dir_all(&dir).unwrap();
@@ -365,7 +308,6 @@ mod tests {
         std::fs::write(&a, body("A")).unwrap();
         std::fs::write(&b, body("B")).unwrap();
         // Two files, one number: the second has no number of its own, so the
-        // import refuses instead of guessing it is 35.
         let err = import_all(
             &l,
             Some(34),
@@ -393,10 +335,6 @@ mod tests {
     fn pasted_text_imports_under_the_number_typed_and_goes_through_the_boundary() {
         let l = layout("paste");
         // The paste carries a raw entity and a stray entity-encoded quote: the
-        // boundary handles those, because they are not about any one site. It
-        // does **not** handle the site's own lines — a paste is whatever the
-        // operator copied, and the operator is the one who decides what a
-        // chapter is.
         let raw = format!(
             "Chương 9: Tên chương\n\n{}&#x27;két&#x27; một tiếng.\n",
             "Nội dung chương này đủ dài để vượt qua ngưỡng kiểm tra. ".repeat(8)
@@ -412,10 +350,6 @@ mod tests {
     #[test]
     fn an_import_does_not_silently_edit_the_operators_words() {
         // The host no longer knows what any site's furniture looks like, so it
-        // cannot remove any. A paste that brought the site's own lines keeps
-        // them: that is the operator's text until they change it, and a
-        // boundary that guesses would delete a line of the novel on a language
-        // nobody wrote a list for.
         let l = layout("verbatim");
         let raw = format!(
             "Chương 9: Tên chương\n\nCài đặt đọc\n\n{}xin chào một tiếng.\n",
@@ -442,7 +376,6 @@ mod tests {
     #[test]
     fn importing_over_a_digested_chapter_is_refused_not_silently_shadowed() {
         // The write would land under a script that still describes the old
-        // text, and the digest would never run again on its own.
         let l = layout("digested");
         crate::atomic_write(&l.script(3), r#"{"segments":[]}"#).unwrap();
         let err = import_text(&l, 3, &body("new")).unwrap_err().to_string();

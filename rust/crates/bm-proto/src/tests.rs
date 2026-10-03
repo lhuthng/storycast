@@ -1,8 +1,6 @@
 use super::*;
 
 /// "Nothing enabled" and "no policy stored" are different answers, and the
-/// difference is load-bearing: the second falls back to the full default, so
-/// a box meant to run nothing would be handed every stage instead.
 #[test]
 fn a_nothing_policy_is_not_an_absent_one() {
     let mut m = Machine::new("10.0.0.5", "thang", 22, None, "worker");
@@ -39,10 +37,6 @@ fn stage_roundtrips_through_strings() {
 }
 
 /// Every variant, so a new one cannot be added without joining the families
-/// below. This list is the test suite's only exhaustive one on purpose: a
-/// hardcoded list *inside* a test is how `AwaitingIp` could have shipped
-/// diverging from its wire form while the test that exists to catch exactly
-/// that kept passing.
 const ALL: [MachineState; 9] = [
     MachineState::Unknown,
     MachineState::AwaitingIp,
@@ -58,23 +52,17 @@ const ALL: [MachineState; 9] = [
 #[test]
 fn every_machine_state_roundtrips_through_its_wire_string() {
     // `as_str` is what the TUI posts to `/api/machines/state` and what the
-    // machines pane renders; the enum is what the API deserializes back.
-    // A state added to one list and not the other would show up as a
-    // machine whose transition silently 422s, so pin both directions.
     for s in ALL {
         let wire = serde_json::to_string(&s).unwrap();
         assert_eq!(wire, format!("\"{}\"", s.as_str()), "serde vs as_str");
         assert_eq!(serde_json::from_str::<MachineState>(&wire).unwrap(), s);
         // One word: the pane's state column is fixed-width, and a word that
-        // wraps or carries punctuation is one the column cannot show. How
-        // wide it may be is the *pane's* business, see `tui/tests.rs`.
         assert!(
             !s.as_str().contains('_') && !s.as_str().contains(' '),
             "{s:?} is one word"
         );
     }
     // The match in `as_str` is exhaustive, so a new variant cannot compile
-    // without a wire name, but it *can* be given a name that collides.
     let mut names: Vec<&str> = ALL.iter().map(|s| s.as_str()).collect();
     names.sort_unstable();
     let before = names.len();
@@ -96,28 +84,22 @@ fn only_online_accepts_work() {
         assert!(!s.accepts_work(), "{s:?} must not be handed work");
     }
     // `Unknown` is "no opinion formed", not "ready", the offer gate
-    // treats it as a separate case on purpose.
     assert!(!MachineState::Unknown.accepts_work());
 }
 
 #[test]
 fn only_an_addressless_box_is_undialable() {
     // The gate on dialing is exact: every other state is *tried*, because a
-    // failure to answer is itself the information (a box that went quiet is
-    // how `Offline` is reached). Exactly one state has no address to try.
     for s in ALL {
         assert_eq!(s.dialable(), s != MachineState::AwaitingIp, "{s:?}");
     }
     // And the addressless wait is a wait, not a verdict: it may not be
-    // stamped `Offline` for not answering when it cannot have been asked.
     assert!(MachineState::AwaitingIp.coming_up());
 }
 
 #[test]
 fn coming_up_covers_every_state_that_is_not_a_verdict() {
     // The dispatcher stamps `Offline` on any box that fails to answer
-    // `/status`. These cannot answer *yet*, and reading a boot as death is
-    // exactly what makes a freshly launched pool look broken.
     for s in [
         MachineState::AwaitingIp,
         MachineState::Initializing,
@@ -138,7 +120,6 @@ fn coming_up_covers_every_state_that_is_not_a_verdict() {
         assert!(!s.coming_up(), "{s:?} is a verdict, not a wait");
     }
     // `ALL` and the four lists above must partition it: every variant is
-    // either coming up or a verdict, and never both.
     for s in ALL {
         assert_eq!(
             s.coming_up(),
@@ -244,15 +225,10 @@ fn audition_carries_text_in_and_audio_bytes_out() {
     assert_eq!(req.voice.as_deref(), Some("Đức Trí"));
 
     // Absent text is not an error: it means the sidecar's fixed sample, which
-    // is what makes two voices comparable. An older caller never sends it.
     let bare: OpRequest = serde_json::from_str(r#"{"op":"preview-voice","voice":"X"}"#).unwrap();
     assert_eq!(bare.text, None);
 
     // An op that rendered no audio still parses, which is what an *older
-    // inductor* looks like on the wire, since it has no such field at all.
-    // The client must be able to tell that apart from audio it failed to
-    // decode, because the two have different next moves (restart the
-    // inductor vs. report a bug).
     let res: OpResult = serde_json::from_str(r#"{"ok":true,"message":"m"}"#).unwrap();
     assert_eq!(res.audio_b64, None);
     let with: OpResult =
@@ -260,7 +236,6 @@ fn audition_carries_text_in_and_audio_bytes_out() {
     assert_eq!(with.audio_b64.as_deref(), Some("UklGRg=="));
 
     // The constructors are the single place `ok` and `audio_b64` are paired,
-    // so a new op cannot forget the field and still compile.
     assert!(OpResult::ok("m").ok && OpResult::ok("m").audio_b64.is_none());
     assert!(!OpResult::fail("m").ok);
     assert_eq!(
@@ -275,7 +250,6 @@ fn audition_carries_text_in_and_audio_bytes_out() {
 #[test]
 fn offer_without_analyzer_means_no_active_provider() {
     // An old inductor never sent `analyzer`; its offers still parse, and
-    // the worker refuses them with "press L" instead of calling anything.
     let o: TaskOffer = serde_json::from_str(
         r#"{"task_id":"digest:1","chapter":1,"stage":"digest","root":"/r",
             "engine":"vieneu","gap_ms":300,"speed":1.25,"ambience":true}"#,
@@ -287,9 +261,6 @@ fn offer_without_analyzer_means_no_active_provider() {
 #[test]
 fn an_offer_without_music_means_no_music_layer() {
     // The rollout: an inductor that predates the music layer sends no
-    // `music`, and the worker must read that as "mix what I always mixed"
-    // rather than as a malformed offer or as music-on. Absent is off, so
-    // neither side needs to know the other's version.
     let o: TaskOffer = serde_json::from_str(
         r#"{"task_id":"merge:1","chapter":1,"stage":"merge","root":"/r",
             "engine":"vieneu","gap_ms":300,"speed":1.25,"ambience":true}"#,
@@ -319,7 +290,6 @@ fn remix_inject_volume_is_optional_and_roundtrips() {
 #[test]
 fn roster_deserialises_with_optional_flags_absent() {
     // The picker must survive a payload from an older inductor that never
-    // learned about `enrolled`/`allowed`.
     let r: Roster = serde_json::from_str(
         r#"{"engine":"vieneu","source":"offline","voices":[
              {"name":"Đức Trí","gender":"male","accent":"Central/South",
@@ -331,7 +301,6 @@ fn roster_deserialises_with_optional_flags_absent() {
     assert_eq!(r.voices[0].name, "Đức Trí");
     assert!(!r.voices[0].enrolled);
     // A payload from an inductor that predates `key` must still parse, and
-    // must not invent one, an empty key means "not a catalogue voice".
     assert_eq!(r.voices[0].key, "");
     assert_eq!(r.cast["Narrator"], "Đức Trí");
 }
@@ -339,7 +308,6 @@ fn roster_deserialises_with_optional_flags_absent() {
 #[test]
 fn task_state_names_match_the_wire_form() {
     // The TUI filters and colours tasks by `as_str`; a divergence from
-    // serde's lowercase rename would make a filter match nothing.
     for st in TaskState::ALL {
         let wire = serde_json::to_value(st).unwrap();
         assert_eq!(wire.as_str(), Some(st.as_str()), "{st:?}");
@@ -362,7 +330,6 @@ fn retry_task_requests_carry_stage_chapter_and_force() {
     assert!(req.start.is_none() && req.voice.is_none() && req.character.is_none());
 
     // An old caller that knows nothing of the new fields still parses, and
-    // the missing keys read as "not specified" rather than as an error.
     let bare: OpRequest = serde_json::from_str(r#"{"op":"retry-task"}"#).unwrap();
     assert_eq!(bare.stage, None);
     assert_eq!(bare.chapter, None);
@@ -560,7 +527,6 @@ fn a_batched_render_offer_survives_the_wire_intact() {
     assert_eq!(row_back.batch, row.batch);
     assert_eq!(row_back.take, Some(0));
     // And a row written before the field existed reads as "no grouping",
-    // which is what keeps a pre-batch ledger loading.
     let old_row: Task = serde_json::from_str(
         r#"{"chapter":7,"stage":"render","state":"done","attempts":0,
             "assigned_to":null,"lease_until":null,"detail":"","updated":1,"take":3}"#,
@@ -573,8 +539,6 @@ fn a_batched_render_offer_survives_the_wire_intact() {
 #[test]
 fn debug_never_prints_a_key() {
     // `TaskOffer` is `Debug` and every offer is a candidate for a log
-    // line. A redaction that is not tested is a redaction that gets
-    // dropped in a refactor.
     let shown = format!("{:?}", both_keys());
     assert!(!shown.contains("g-key"), "{shown}");
     assert!(!shown.contains("o-key"), "{shown}");
@@ -620,8 +584,6 @@ fn debug_never_prints_a_key() {
 #[test]
 fn an_old_inductors_offer_carries_no_credentials() {
     // The staged rollout: an inductor that predates this field sends none,
-    // and the worker must read that as "use your own environment" rather
-    // than as a malformed offer.
     let o: TaskOffer = serde_json::from_str(
         r#"{"task_id":"digest:1","chapter":1,"stage":"digest","root":"/r",
             "engine":"vieneu","gap_ms":300,"speed":1.25,"ambience":true}"#,
@@ -630,10 +592,8 @@ fn an_old_inductors_offer_carries_no_credentials() {
     assert!(o.credentials.is_empty());
     assert!(o.credentials.pairs().is_empty());
     // And it carries no analyzer configuration either, the worker's own
-    // settings stand, exactly as before this block existed.
     assert!(o.analyzer_settings.analyze_models.is_none());
     // And an old *worker* ignores the fields entirely, the serializer
-    // emits them, the parser above proves absence is tolerated.
     let round: TaskOffer = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
     assert_eq!(round.credentials, o.credentials);
     assert_eq!(round.analyzer_settings, o.analyzer_settings);
@@ -656,9 +616,6 @@ fn an_empty_chain_is_not_the_same_as_saying_nothing() {
 #[test]
 fn an_old_inductors_heartbeat_answer_means_stay() {
     // The shutdown latch rides the heartbeat answer. An inductor that
-    // predates it answers just `{"ok": true}`, the missing key must
-    // default to "keep running", which is what makes either side
-    // upgradable on its own.
     let old: HeartbeatAck = serde_json::from_str(r#"{"ok": true}"#).unwrap();
     assert!(old.ok && !old.shutdown);
     let told: HeartbeatAck = serde_json::from_str(r#"{"ok":true,"shutdown":true}"#).unwrap();

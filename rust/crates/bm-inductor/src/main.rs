@@ -35,10 +35,6 @@ use clap::{Parser, Subcommand};
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // The dashboard and `workspace` are the management plane: they must open
-    // on a root whose pointer is *stale*, because re-pointing is exactly how
-    // that gets repaired. Everything else resolves first and refuses. The
-    // problem is carried, not swallowed, the dashboard prints it, and
-    // `workspace list` shows which names are still there.
     let manages = matches!(&cli.cmd, Cmd::Workspace { .. } | Cmd::Tui { .. });
     let (mut layout, mut pointer_problem) = match cli.root {
         Some(r) if manages => Layout::resolve_or_root(r),
@@ -47,16 +43,11 @@ async fn main() -> anyhow::Result<()> {
         None => (Layout::discover()?, None),
     };
     // One-time history migration, before anything resolves a path through the
-    // layout: a language that was flat at the root — `prompts/` plus the pack's
-    // `assets/crawl/` — gets its own home, and the binding is stamped with its
-    // name. Silent and idempotent once done, which is every start after this
-    // one, and it does nothing at all on a checkout that never loaded a profile.
     if let Some(name) = layout.migrate_adapter_tree().unwrap_or(None) {
         println!(
             "adapter '{name}': prompts/ moved under adapters/{name}/ — the language has its own tree now"
         );
         // Re-read: the name the pointer now carries is what every path below
-        // resolves through, including the ones already computed above.
         let (relaid, problem) = Layout::resolve_or_root(layout.root.clone());
         layout = relaid;
         if problem.is_some() {
@@ -65,13 +56,8 @@ async fn main() -> anyhow::Result<()> {
     }
     let settings = Settings::load(&layout.settings());
     // One-time migration: first run after the upgrade seeds `.bm/llm.json`
-    // from the legacy workspace settings + environment, then saves it.
     bm_core::config::LlmConfig::load_or_seed(&layout.root, &settings);
     // `roster` and `workspace` are local file work: requiring ssh/rsync/ffmpeg
-    // to rewrite JSON would make them unusable on exactly the machine that
-    // needs them. Same for `digest`, which is one HTTP call to an analyzer
-    // and touches no worker — and for `crawl`, which is one book lookup or
-    // a few polite HTTP calls and touches no worker either.
     if !matches!(
         &cli.cmd,
         Cmd::Roster { .. }
@@ -105,7 +91,6 @@ async fn main() -> anyhow::Result<()> {
             release_repo,
         } => {
             // A linked box fills every flag it stored; explicit flags win for
-            // the rest. Neither is an error until both are missing an address.
             let linked = r#box
                 .as_deref()
                 .map(|name| {
@@ -121,7 +106,6 @@ async fn main() -> anyhow::Result<()> {
                 .or_else(|| linked.as_ref().map(|b| b.addr.clone()))
                 .ok_or_else(|| anyhow::anyhow!("provision needs --box or --addr"))?;
             // clap's defaults must not shadow a linked value: only an
-            // explicitly passed flag wins over the box.
             let user = if user != "thang" {
                 user
             } else {
@@ -144,8 +128,6 @@ async fn main() -> anyhow::Result<()> {
             dry_run,
         } => {
             // Separate paths: the report hashes every local byte (~100s on a
-            // full store in debug builds), while prune only lists names.
-            // Neither piggybacks on the other.
             if prune {
                 segments::cmd_prune(&layout, &settings, !dry_run)
             } else {
@@ -250,8 +232,6 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Tui { api, once } => {
             // A stale pointer is why this dashboard opened on the root: say so
-            // before the alternate screen takes the terminal, or the operator
-            // sees the wrong book's panes with no explanation.
             if let Some(problem) = &pointer_problem {
                 eprintln!("warning: {problem}");
             }
@@ -304,10 +284,6 @@ async fn main() -> anyhow::Result<()> {
                 repo,
             } => {
                 // `reqwest::blocking` builds a runtime of its own, and dropping
-                // one from inside this one panics, so the update runs on a thread
-                // that is not a runtime worker. It is synchronous, socket-bound
-                // work either way, and the alternative — an async release source —
-                // would be a second implementation of the verified unpack.
                 let layout = layout.clone();
                 let settings = settings.clone();
                 let task = tokio::task::spawn_blocking(move || {
@@ -342,9 +318,6 @@ async fn main() -> anyhow::Result<()> {
                     anyhow::bail!("unknown piece '{piece}' (pack|adapter)");
                 };
                 // The gate first, so a stale tree is refused before anything is
-                // staged: a release is a claim about what it was built on, and
-                // packing one behind a parent that has moved would make that
-                // claim false in the file that exists to record it.
                 let stale = bm_core::profile::stale_dependencies(&layout)?;
                 if !stale.is_empty() && !force {
                     anyhow::bail!(
@@ -353,10 +326,6 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
                 // `--dep` releases a dependency tree itself (`assets/_extends/<dep>`
-                // unpacked to `assets/`), the sanitized self-contained root pack —
-                // content only, no composition inputs, with a generated
-                // `assets/pack.json` for whatever extends it later. Without it,
-                // `name` is the live composition and `piece` picks its trees.
                 let manifest = if dep_manifest {
                     bm_core::profile::compute_dep_manifest(&layout, &name, &version)?
                 } else {
@@ -374,24 +343,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// The adapter, the binding and the engine, as printable lines, plus whether
-/// they agree.
-///
-/// **The lines come back rather than being printed here**, so a test can read
-/// them — the same reason `workspace_cmd` and `aws_cmd` return their output.
-/// The verdict comes back separately for the one thing that cannot be a line:
-/// a disagreement has to print every fact it read *before* the process exits
-/// non-zero, because a check that exits with nothing printed is a check nobody
-/// can act on.
-///
-/// The engine is the one a run will name (`settings.engine`, what every offer
-/// builds on) and the load pointer's own `engines/<name>/` tree is reported
-/// beside it when the two differ, since that is a second, quieter way to get
-/// the wrong voice: the run names one engine while the weights on disk are
-/// another's.
 fn profile_check(layout: &Layout, settings: &Settings) -> anyhow::Result<(Vec<String>, bool)> {
     // The binding **in force**, not the checkout's pointer: a workspace owns
-    // its pack, language and engine, and `profile check` has to answer for the
-    // book that will run rather than the root it sits on.
     let binding = bm_core::profile::in_force(layout)?;
     let declared = bm_core::adapter::in_force(layout)?;
     let verdict = bm_core::adapter::inspect(layout, &binding.pack.name, &settings.engine);

@@ -3,182 +3,61 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 /// Manifest stamp recorded on a target machine to detect whether sources/voices changed.
-///
-/// Written to `~/{REMOTE_DIR}/.provision_stamp.json` at the end of every
-/// provision, and read back by the *next* probe. When the hashes still match,
-/// the slow work is skipped: pushing `models/` (668 MB) and the redundant source
-/// sync. A stale or missing stamp is never an error — it just means the full
-/// path runs, which is what it did before.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProvisionStamp {
     pub agent_version: String,
     pub sources_hash: String,
     pub voices_hash: String,
     /// The sidecar's own artifacts: the baked `models/` directory and the
-    /// `bm-tts` binary. Separate from `sources_hash` so a cast or prompt edit
-    /// does not look like a reason to re-send 668 MB of weights.
-    ///
-    /// This is also what covers the **voice store**, which now travels inside
-    /// `models/voices.json` — enrollment moved off the worker, so there is no
-    /// separate voices step to skip.
-    ///
-    /// `#[serde(default)]` so a stamp written before this field existed still
-    /// parses — an unreadable stamp would force the full slow path on every
-    /// probe, which is the failure this whole mechanism exists to avoid.
     #[serde(default)]
     pub tts_hash: String,
     /// SHA-256 of the `bm-agent` binary bytes the inductor would push.
-    ///
-    /// The version *string* alone cannot detect a rebuild: every dev build
-    /// between releases reports the same `agent_version`, so `:prov` kept
-    /// calling the box "already configured" and never pushed the new binary.
-    /// `#[serde(default)]` so pre-existing stamps parse as "" (drift → one
-    /// reinstall, then the fresh stamp records the hash).
     #[serde(default)]
     pub agent_hash: String,
     /// SHA-256 of the `bm-tts` bytes the inductor would push.
-    ///
-    /// The sidecar had no such field, and the consequence was the same silent
-    /// staleness `agent_hash` exists to prevent, one binary over: `tts_hash`
-    /// covers `models/` and not the binary, and `install_tts_runtime` only ran
-    /// on a box that was *not* already configured. So rebuilding the sidecar
-    /// and re-provisioning a working worker changed nothing — the new binary
-    /// never left this disk while the box kept answering with the old one.
-    ///
-    /// `#[serde(default)]` for the same reason as the two above: an older
-    /// stamp parses as "", which reads as drift once, redeploys, and then
-    /// records the real hash.
     #[serde(default)]
     pub tts_bin_hash: String,
     /// The `(stage, adapter)` slots the bundle on this box covers, from the
-    /// plan it was built for — `digest@vi-VN`, in
-    /// [`super::sources::slot`]'s spelling.
-    ///
-    /// Not a gate — a policy change drifts `sources_hash`, because the slot
-    /// list is part of the manifest — but the one thing that lets a report say
-    /// *which* stages a box holds **and for which language**, and so answer the
-    /// question both a widened policy and a second adapter raise: this box is
-    /// being offered merge work and was handed no clips; this box runs an
-    /// English adapter and its bundle carries only Vietnamese prompts.
-    ///
-    /// The name is history: it was a bare stage list, and a bare stage reads as
-    /// "that stage, whatever adapter" (see [`super::sources::holds`]), so a
-    /// stamp written before the second dimension existed still parses and still
-    /// means what it meant.
-    ///
-    /// `#[serde(default)]`: a stamp written before the field existed at all
-    /// reads as an empty list, which is "unknown", not "nothing shipped".
     #[serde(default)]
     pub sources_stages: Vec<String>,
     /// The profile pack's release identity, when the box takes it from one:
-    /// its content hash, which is the load pointer's.
-    ///
-    /// Its own field rather than a change to `sources_hash`, for the same
-    /// reason `tts_hash` is its own: when the pack is fetched its files are
-    /// **not** in the bundle, so the bundle's manifest is byte-identical whether
-    /// the pack is `xianxia` or `a different profile entirely`. Folding the hash
-    /// into `sources_hash` would have worked and then made every sources push
-    /// pay for a pack re-point — which is the exact coupling the split exists
-    /// to remove, in the other direction.
-    ///
-    /// Empty means the pack travels in the bundle, or that nothing has ever
-    /// named one — the safe direction, and the one every existing box is in.
     #[serde(default)]
     pub pack_release: String,
 }
 
 impl ProvisionStamp {
     /// Whether the baked voice store on this box still matches the one we would
-    /// push.
-    ///
-    /// **Consulted again**, with the field's meaning narrowed to make that
-    /// workable: it is `models/voices.json` by content, and nothing else.
-    ///
-    /// It was once computed over the clone manifest and `refs/` and then never
-    /// read — which is how an edited reference clip shipped nowhere while every
-    /// gate reported "in sync". Both of those are now *inputs to a bake* rather
-    /// than files a box needs: the clone manifest travels in the bundle
-    /// (`sources_hash`) and a reference clip reaches a box encoded, in the store
-    /// this method gates. This field covers the one file the bundle does not
-    /// carry: the store the sidecar loads at startup.
     pub fn voices_in_sync(&self, want: &ProvisionStamp) -> bool {
         self.voices_hash == want.voices_hash
     }
 
     /// Whether the worker's sources (prompts, requirements, casts, assets, and
-    /// the agent build itself) still match ours.
     pub fn sources_in_sync(&self, want: &ProvisionStamp) -> bool {
         self.sources_hash == want.sources_hash && self.agent_version == want.agent_version
     }
 
     /// Whether the Rust sidecar's artifacts still match ours.
-    ///
-    /// An empty hash on either side means "this box does not use them", so a
-    /// worker on the Python path never reports drift here and never gets the
-    /// models pushed at it.
     pub fn tts_in_sync(&self, want: &ProvisionStamp) -> bool {
         self.tts_hash == want.tts_hash
     }
 
     /// Whether the worker's `bm-agent` binary still matches ours.
-    ///
-    /// An empty `want` means the inductor could not hash its own binary, so it
-    /// has no opinion — never drift on that, or every provision would reinstall.
     pub fn agent_in_sync(&self, want: &ProvisionStamp) -> bool {
         want.agent_hash.is_empty() || self.agent_hash == want.agent_hash
     }
 
     /// Whether the box's profile pack is the one we would hand it.
-    ///
-    /// **Consulted before the sources push, and only meaningful with a
-    /// release** — but an empty `want` on *either* side reads as "in sync", so a
-    /// box that was never handed a released pack is not re-pushed every run to
-    /// learn that. Which is the only safe direction for the alternative: this
-    /// gate is what stops a re-pointed pack from being a silent no-op on boxes
-    /// whose bundle happens to be identical.
     pub fn pack_in_sync(&self, want: &ProvisionStamp) -> bool {
         self.pack_release == want.pack_release
     }
 
     /// Whether the worker's `bm-tts` binary still matches ours.
-    ///
-    /// Same "no opinion" rule as [`Self::agent_in_sync`]: an empty `want` means
-    /// this inductor has no sidecar staged, so it never claims drift. Without
-    /// that, a host that only bakes models would try to push a binary that does
-    /// not exist on every provision.
     pub fn tts_bin_in_sync(&self, want: &ProvisionStamp) -> bool {
         want.tts_bin_hash.is_empty() || self.tts_bin_hash == want.tts_bin_hash
     }
 }
 
 /// Compute manifest stamp for detecting changes to sources, voices and sidecars.
-///
-/// Four SHA-256 digests, each over a canonical (sorted, newline-joined) view of
-/// its inputs, so the same inputs produce the same hex string on any machine.
-/// Each one gates a *different push*, and the split is what keeps one kind of
-/// change from paying for another:
-///
-/// * `sources_hash` — the **manifest of the bundle** the push would send: one
-///   sha256 per file, keyed by where it lands on the worker, plus the stage
-///   list it was selected for, plus the agent version so a release bump
-///   redeploys. (A rebuild under the *same* version is `agent_hash`'s job.)
-///   This replaced a walk of `prompts/`, `refs/`, the clip directories and the
-///   crawl scripts: 202 MB of directory signatures on every probe, for a
-///   question that is now answered by the digest of the artifact itself. The
-///   stage list is in there deliberately — widening a box's policy changes
-///   what it must hold, and that has to be drift or the narrowing is silent.
-///   `refs/` is no longer in any digest: no worker reads it (enrollment runs on
-///   the inductor and ships encoded, inside `models/voices.json`), so a new
-///   reference clip reaches a box as a *bake*, through `voices_hash`.
-/// * `tts_hash` — the baked `models/` directory **minus `models/voices.json`**,
-///   by signature, plus `manifest.json` by content. Excluding the store is what
-///   lets a newly enrolled voice ship without re-sending 668 MB of weights, and
-///   the set that remains is exactly the immutable one, so this digest is also
-///   the natural name for a published artifact (see `docs/ARTIFACTS.md`).
-/// * `voices_hash` — `models/voices.json` by content: the store the sidecar
-///   loads at startup, which nothing else covers.
-/// * `tts_bin_hash` — the `bm-tts` bytes, by content, so a rebuild reaches a box
-///   that already has the right models.
 pub fn compute_provision_stamp(
     layout: &crate::Layout,
     stages: &[bm_proto::Stage],
@@ -188,11 +67,8 @@ pub fn compute_provision_stamp(
 ) -> anyhow::Result<ProvisionStamp> {
     let repo_root = layout.root.as_path();
     // The engine's own tree — `engines/<name>/models` — not `root/models`: the
-    // weights have an identity now, and a stamp that hashed a directory no
-    // longer in use would read as permanent drift.
     let models = layout.models_dir();
     // Named in the digest as it reads relative to the root, so the hash both
-    // records which file it read and moves when the engine does.
     let models_rel = models
         .strip_prefix(repo_root)
         .unwrap_or(&models)
@@ -201,8 +77,6 @@ pub fn compute_provision_stamp(
     // What the push would send, hashed as a set. The plan is the same call the
     // push makes — with the same `pack`, which is what makes "the bundle does
     // not carry `assets/`" true of the digest as well as of the tar — so the
-    // digest and the artifact cannot describe different files, which is the one
-    // property this gate exists to have.
     let plan = super::sources::Sources::plan_for(layout, stages, pack)?;
     let sources_manifest = plan.manifest()?;
     let mut sources = Sha256::new();
@@ -211,17 +85,6 @@ pub fn compute_provision_stamp(
     sources.update(super::sources::Sources::hash(&sources_manifest).as_bytes());
     sources.update([0]);
     // The Rust sidecar's *weights*, by directory signature rather than content:
-    // `models/` is 668 MB and reading it would cost more than the provisioning
-    // this digest exists to skip. `manifest.json` is read by content because it
-    // is the authoritative statement of what the models *are* — a swapped file
-    // under an unchanged manifest is exactly the drift worth catching, and the
-    // directory signature only catches it if the mtime moved.
-    //
-    // `models/voices.json` is **excluded by name**, and that exclusion is the
-    // point of this digest rather than a detail: it is the cluster's voice
-    // roster, enrollment rewrites it, it is 492 KB of a 668 MB directory, and
-    // folding it in here would make a single new voice re-send every weight in
-    // the bake. `voices_hash` covers it instead.
     let mut tts = Sha256::new();
     if let Ok(bytes) = std::fs::read(models.join("manifest.json")) {
         tts.update(format!("{models_rel}/manifest.json").as_bytes());
@@ -233,13 +96,6 @@ pub fn compute_provision_stamp(
     tts.update([0]);
 
     // The sidecar *binary*, by content, in a digest of its own.
-    //
-    // Separate from the weights above because the two drift independently: a
-    // rebuild of `bm-tts` has to reach a box that already holds the right
-    // models, and folding the binary in with them would answer a nine-megabyte
-    // binary change with a 668 MB re-push. Absent is not an error — the models
-    // can be baked on a machine that never builds the sidecar — and an empty
-    // `want` reads as "no opinion" (see `tts_bin_in_sync`).
     let mut tts_bin = Sha256::new();
     let mut tts_bin_staged = false;
     for p in tts_bin_candidates(repo_root) {
@@ -259,9 +115,6 @@ pub fn compute_provision_stamp(
     }
 
     // The store the sidecar loads at startup — and nothing else, because the
-    // clone manifest and `refs/` are both `install_sources`' business and live
-    // in `sources_hash` above. Content, not signature: it is 492 KB, and a
-    // roster that changed at all has to reach the box, mtime or not.
     let mut voices = Sha256::new();
     let store = models.join(VOICE_STORE);
     if let Ok(bytes) = std::fs::read(&store) {
@@ -279,18 +132,12 @@ pub fn compute_provision_stamp(
         voices_hash: hex_digest(voices.finalize()),
         tts_hash: hex_digest(tts.finalize()),
         // Empty, not the digest of nothing, when no sidecar is staged: this
-        // field is the one whose "empty means no opinion" rule has to be able
-        // to fire, and a hash of zero inputs is still a hash that no remote
-        // box can match — which would read as permanent drift and push a binary
-        // that does not exist here.
         tts_bin_hash: if tts_bin_staged {
             hex_digest(tts_bin.finalize())
         } else {
             String::new()
         },
         // Content, not signature: the binary is ~100 MB and hashing it costs
-        // ~0.1 s locally, while a stale binary on a worker is silent drift.
-        // Absent locally is not an error (see `agent_in_sync`).
         agent_hash: std::fs::read(agent_binary)
             .map(|bytes| hex_digest(Sha256::digest(&bytes)))
             .unwrap_or_default(),
@@ -298,23 +145,9 @@ pub fn compute_provision_stamp(
 }
 
 /// The one mutable file inside the otherwise immutable `models/` bake: the
-/// cluster's voice roster, rewritten by enrollment. Named once, so the digest
-/// that must avoid it and the digest that must cover it cannot drift apart.
 const VOICE_STORE: &str = "voices.json";
 
 /// The sidecar binaries a provision could push, relative to the repo root.
-///
-/// **Release builds, every target.** A debug binary is never pushed, and the
-/// list this replaces named `debug/bm-tts` while missing both cross paths — so
-/// on the one machine shape that actually provisions a Linux box from a Mac,
-/// the binary that gets pushed was not hashed at all and the field would have
-/// been decorative.
-///
-/// Hashing every target rather than only the one this host serves is coarse on
-/// purpose: `compute_provision_stamp` takes no platform, because one inductor
-/// can drive a mixed pool and does not know the target when it hashes. The
-/// coarseness can only cause an *extra* redeploy — a rebuild of a target this
-/// box does not use — never a missed one, and a missed one is the bug.
 fn tts_bin_candidates(repo_root: &Path) -> Vec<std::path::PathBuf> {
     [
         "rust/target/x86_64-unknown-linux-gnu/release/bm-tts",
@@ -336,22 +169,6 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
 }
 
 /// A cheap, deterministic signature for a directory tree: sorted names plus
-/// each file's length and mtime, recursively. Contents are never read — the one
-/// caller left is `models/`, where 668 MB of weights would cost more to hash
-/// than the provisioning the digest exists to skip, and mtime+size is exactly
-/// the test `copy_dir` and rsync already use to decide "unchanged".
-///
-/// It was also how `prompts/`, the clip directories, the crawl scripts and
-/// `refs/` were covered, before they became a bundle whose manifest hashes each
-/// file by content. This is now the exception, not the rule.
-///
-/// Any entry whose file name is in `extra` is ignored.
-///
-/// `models/` needs it: that directory is a 668 MB immutable bake with exactly
-/// one mutable file inside it, and the two have opposite requirements. Skipping
-/// by *name* rather than by content or by listing what to include keeps the
-/// exclusion honest when the bake grows — a new weight is covered by default,
-/// and only `voices.json` is special.
 fn signature_of_dir_skipping(dir: &Path, extra: &[&str]) -> String {
     const SKIP: [&str; 3] = [".venv", "__pycache__", "target"];
     let mut out = String::new();
@@ -388,23 +205,11 @@ fn signature_of_dir_skipping(dir: &Path, extra: &[&str]) -> String {
 }
 
 /// Parse a stamp payload.
-///
-/// The probe reads the file inside its own ssh round trip (one connection, not
-/// two) and hands the text here; `read_provision_stamp` fetches it on its own.
-/// Both go through this so they can never disagree.
 pub(crate) fn parse_stamp(text: &str) -> Option<ProvisionStamp> {
     serde_json::from_str(text).ok()
 }
 
 /// [`parse_stamp`], plus the exit code the command that produced the text returned.
-///
-/// One place, because the two readers hold different evidence and only one of
-/// them can be wrong in a way that matters: the probe parsed a payload out of
-/// its own output, while `read_provision_stamp` holds whatever a `cat` on the box
-/// left in stdout — and **the stdout of a failed command is whatever the failure
-/// printed**, which must never read as a stamp. A non-zero code is a cache miss
-/// by definition, and saying so here rather than at a call site is what stops a
-/// third reader from forgetting it.
 pub(crate) fn stamp_from(code: i32, stdout: &str) -> Option<ProvisionStamp> {
     if code != 0 {
         return None;

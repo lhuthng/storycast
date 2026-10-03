@@ -1,23 +1,4 @@
 //! The script inspection window: the digested chapters as a list, one open
-//! chapter's segments with their speakers, and `s` to re-point one.
-//!
-//! Three depths, one view, the way the digest manager is one view with two
-//! modes: the chapter list, the open chapter's segments, and the speaker
-//! picker as a panel over the segments. `Esc` means "step back" at every
-//! depth — picker, then segments, then the window closes — and never
-//! lands anywhere the operator did not come from.
-//!
-//! The dispatch on `Enter` in the picker is [`Op::FixSpeaker`] — the same
-//! op `:speaker chapter segment expect speaker` runs — because the check
-//! is the feature: the window shows who the segment speaks as *now*, and
-//! sends exactly that as `expect`, so a stale screen cannot edit the wrong
-//! line. The op refuses on a mismatch and names the neighbours; nothing
-//! here duplicates that.
-//!
-//! The chapter list takes typed digits as its filter — a book is numbers,
-//! and `41` finding chapter 41 is the whole gesture. That is why `q` is
-//! not bound here: the list owns every letter, and the window closes with
-//! `Esc`, the key its title line advertises.
 
 use crate::tui::input::Flow;
 use crate::tui::{
@@ -47,7 +28,6 @@ pub(crate) async fn key_script(
         let mut keep = true;
         match key.code {
             // One Esc closes the picker; the segment list keeps its cursor,
-            // and the next Esc steps back to the chapter list.
             KeyCode::Esc => {
                 app.set_status(Level::Info, "pick cancelled — nothing changed");
                 keep = false;
@@ -78,9 +58,6 @@ pub(crate) async fn key_script(
             }
             KeyCode::Enter => {
                 // The chosen row, clamped: typing may have left the cursor
-                // past the end of the (shorter) filtered list. Whether the
-                // picker stays up is decided by the `keep` flag below — one
-                // store at the bottom, no per-arm bookkeeping.
                 match suggestions.get(pick.cursor.min(last)).cloned() {
                     Some(name) if name == pick.expect => {
                         app.set_status(
@@ -97,9 +74,6 @@ pub(crate) async fn key_script(
                             chapter: v.open,
                             segment: Some(pick.segment),
                             // What the screen showed, not a guess: the op
-                            // re-reads the script and refuses on a mismatch,
-                            // which is the guard that makes a stale window
-                            // refuse instead of mis-edit.
                             expect: Some(pick.expect.clone()),
                             speaker: Some(name.clone()),
                             ..Default::default()
@@ -113,7 +87,6 @@ pub(crate) async fn key_script(
                                 format!("segment {} → {name} — watch the ledger", pick.segment),
                             );
                             // The picker closes: the segment row (re-read on
-                            // the next open) is the confirmation.
                             keep = false;
                         }
                     }
@@ -123,7 +96,6 @@ pub(crate) async fn key_script(
                             "no speaker matches — Backspace widens, Esc cancels",
                         );
                         // Keep the picker up so the filter can be fixed
-                        // rather than retyped from scratch.
                     }
                 }
             }
@@ -135,8 +107,6 @@ pub(crate) async fn key_script(
             _ => {}
         }
         // One store for every keep path, one flag for the two closes (Esc,
-        // and an Enter that dispatched). No per-arm `v.pick` bookkeeping to
-        // get backwards.
         if keep {
             v.pick = Some(pick);
         }
@@ -148,8 +118,6 @@ pub(crate) async fn key_script(
     if let Some(ch) = v.open {
         let seg_last = v.segments.len().saturating_sub(1);
         // The excerpt panel sits over the segments. While it is up the arrows
-        // scroll it, and `Esc`/`e` drops it back onto the segments — `Esc`
-        // still means "step back", one depth at a time, never out.
         if v.excerpt_open {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('e') => {
@@ -160,8 +128,6 @@ pub(crate) async fn key_script(
                     );
                 }
                 // `saturating_*` throughout, because `End` parks the offset at
-                // `usize::MAX` as a "past the end" marker for the draw's
-                // clamp — a plain `+=` off that would overflow.
                 KeyCode::Down | KeyCode::Char('j') => {
                     v.excerpt_scroll = v.excerpt_scroll.saturating_add(1)
                 }
@@ -172,7 +138,6 @@ pub(crate) async fn key_script(
                 KeyCode::PageUp => v.excerpt_scroll = v.excerpt_scroll.saturating_sub(8),
                 KeyCode::Home => v.excerpt_scroll = 0,
                 // The draw clamps the offset to the last page, so `End` can
-                // overshoot harmlessly and never needs the body length here.
                 KeyCode::End => v.excerpt_scroll = usize::MAX,
                 _ => {}
             }
@@ -182,8 +147,6 @@ pub(crate) async fn key_script(
         match key.code {
             KeyCode::Esc => {
                 // Back to the list, cursor where it was. The segments are
-                // re-read on the next open, so a digest that landed while
-                // this chapter was up is picked up for free.
                 v.open = None;
                 v.segments.clear();
                 v.seg_cursor = 0;
@@ -209,8 +172,6 @@ pub(crate) async fn key_script(
             KeyCode::Home => v.seg_cursor = 0,
             KeyCode::End => v.seg_cursor = seg_last,
             // The excerpt chain: the state this chapter ends on, and the
-            // memory it was digested with. Read-only — `e` again, or `Esc`,
-            // closes it.
             KeyCode::Char('e') => {
                 v.open_excerpts(&app.layout, ch);
                 let fed = v.excerpt_fed.len();
@@ -222,8 +183,6 @@ pub(crate) async fn key_script(
                 );
             }
             // The re-point. Only a *line* can be re-attributed; on a sound
-            // row the key says so rather than opening a picker whose Enter
-            // could only fail.
             KeyCode::Char('s') => match v.segments.get(v.seg_cursor) {
                 Some(seg) if !seg.speaker.is_empty() => {
                     // The chapter's own roster, read once at pick-open: it is
@@ -281,16 +240,11 @@ pub(crate) async fn key_script(
     match key.code {
         KeyCode::Esc => {
             // **Return, don't fall through**: the tail below writes
-            // `Screen::Script(v)` back, and an arm that closed the window
-            // would have its close undone one line later — the exact bug the
-            // digest manager's Esc arm documents.
             app.screen = app.back_out();
             app.set_status(Level::Info, "closed the script window");
             return Flow::KeepRunning;
         }
         // Rows and columns, not one step each: the list is a twelve-wide grid, so
-        // `↓` walks down a row and `→` walks across it. Both used to move by
-        // one, which made `↓` slide sideways and left `←`/`→` unbound.
         KeyCode::Up | KeyCode::Char('k') => v.move_cursor(-1, 0),
         KeyCode::Down | KeyCode::Char('j') => v.move_cursor(1, 0),
         KeyCode::Left | KeyCode::Char('h') => v.move_cursor(0, -1),
@@ -332,16 +286,12 @@ pub(crate) async fn key_script(
         },
         KeyCode::Char(c) if !alt => {
             // Digits are the gesture ("41" → chapter 41); every letter is
-            // accepted too because the filter matches on the number's text
-            // anyway, and a stray letter narrowing to nothing is visible in
-            // one keypress, not a mystery.
             v.filter.push(c);
             v.cursor = 0;
         }
         _ => {}
     }
     // The filter is a view concern: the cursor indexes the *filtered* rows,
-    // so a change that shrinks the list can leave it past the end.
     v.cursor = v.cursor.min(v.rows().len().saturating_sub(1));
     app.screen = Screen::Script(v);
     Flow::KeepRunning

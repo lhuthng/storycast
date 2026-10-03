@@ -1,12 +1,4 @@
 //! Voice picker: two-stage filter, arrows-only movement.
-//!
-//! Step 2 opens in audition focus: `t`/`T`/`^T` play and never commit
-//! anything (`Enter` is the only key that changes the cast, locking the
-//! held line rather than picking a new one). Any other letter focuses the
-//! filter instead; while it is focused every letter types — t/T included —
-//! and the audition keys go quiet. `Esc` blurs back, `^R` focuses
-//! explicitly, and the `:current` / `:try` / `:another` words audition
-//! from the command line in either focus.
 use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
@@ -19,9 +11,6 @@ use crate::tui::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Last valid cursor for the rows on screen right now, per stage.
-///
-/// Counts group headings too, because the cursor is a row index and the
-/// draw hit-tests rows; `settle_cursor` is what keeps it off a heading.
 fn list_len(app: &App, p: &Picker) -> usize {
     let n = match p.stage {
         PickStage::Character => filtered_characters(app, &p.filter).len(),
@@ -60,9 +49,6 @@ pub(crate) async fn key_picker(
             }
             PickStage::Character => {
                 // Back to whatever opened the picker — the cast overview, the
-                // ledger, the dashboard. Esc used to land on the dashboard
-                // from all three, which meant a pick started from the cast
-                // table cost two screens to walk back from.
                 app.screen = app.back_out();
                 app.set_status(Level::Info, "cancelled — nothing changed");
             }
@@ -72,8 +58,6 @@ pub(crate) async fn key_picker(
         }
         KeyCode::Char(':') => {
             // The command line works here too — this is where the
-            // `:current` / `:try` / `:another` audition words run in
-            // either focus, and how to audition while filtered.
             app.command_return = Some(Screen::Pick(p));
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::Command,
@@ -95,24 +79,16 @@ pub(crate) async fn key_picker(
                         app.set_status(Level::Error, "pick a character, or type a new name first");
                     } else {
                         // Resume on the locked sentence when this character has
-                        // one — the voice was picked on it once, so A/B starts
-                        // there instead of on another random pick.
                         p.line = app.locked_lines.get(&chosen).cloned();
                         p.character = chosen;
                         p.stage = PickStage::Voice;
                         p.filter.clear();
                         // Row 0 is the first group heading, so opening on 0
-                        // would open on a label with nothing to audition.
                         p.cursor = settle_cursor(&filtered_voices(app, &p.filter), 0);
                         p.scroll = 0;
                         // Step 2 opens in audition focus: t/T/^T play first,
-                        // the filter takes over on the first other letter.
                         p.filter_focus = false;
                         // Step 2 is where auditions run from, and building the
-                        // line index is a hundred file opens. Start it here rather
-                        // than on the word, so the wait happens while the
-                        // operator is reading the list. Deliberately *not* on every
-                        // keystroke: a filter key must never dispatch work.
                         app.ensure_lines(job_tx);
                         app.screen = Screen::Pick(p);
                     }
@@ -126,8 +102,6 @@ pub(crate) async fn key_picker(
                         None => app.set_status(Level::Error, "no voice selected"),
                         Some(v) => {
                             // Lock the speech the voice is picked on: the
-                            // confirm — and every later audition — keeps this
-                            // sentence instead of another random pick.
                             if let Some(l) = &p.line {
                                 app.locked_lines.insert(p.character.clone(), l.clone());
                             }
@@ -157,34 +131,24 @@ pub(crate) async fn key_picker(
             }
         }
         // `t`: the current voice on the shown line, from cache only — what
-        // the operator is about to replace, on the sentence in front of
-        // them. Never follows the cursor; `:try` (render) and Enter (pick)
-        // are for the pointed voice. Audition focus only: while the filter
-        // is focused `t` types like every other letter.
         KeyCode::Char('t') if p.stage == PickStage::Voice && !p.filter_focus && !ctrl && !alt => {
             pick_current(app, job_tx, http, &mut p);
             app.screen = Screen::Pick(p);
         }
         // `T`: the held line, rendered with the voice under the cursor.
-        // The one deliberate generation: the only way to hear two voices
-        // on the same sentence before either is assigned.
         KeyCode::Char('T') if p.stage == PickStage::Voice && !p.filter_focus && !ctrl && !alt => {
             pick_pointed(app, job_tx, http, &mut p, false);
             app.screen = Screen::Pick(p);
         }
         // Movement is arrows only. `j`/`k` used to move too, which meant a
-        // filter for a speaker called "Kiên" silently moved the cursor
-        // instead of typing — and nothing on screen said why.
         KeyCode::Up => {
             // Backwards over a heading, not forwards onto it: from the first
-            // voice of a group the forward settle would land right back on it.
             p.cursor = p.cursor.saturating_sub(1);
             p.cursor = settle_cursor_back(&filtered_voices(app, &p.filter), p.cursor);
             app.screen = Screen::Pick(p);
         }
         KeyCode::Down => {
             // Clamped: the highlight must never leave the list, or Down
-            // past the end silently selects nothing.
             let last = list_len(app, &p);
             p.cursor = (p.cursor + 1).min(last);
             p.cursor = settle_cursor(&filtered_voices(app, &p.filter), p.cursor);
@@ -203,7 +167,6 @@ pub(crate) async fn key_picker(
         }
         KeyCode::Backspace => {
             // Editing the filter focuses it: a blurred Backspace means the
-            // operator wants the filter, not a no-op.
             if p.stage == PickStage::Voice {
                 p.filter_focus = true;
             }
@@ -223,9 +186,6 @@ pub(crate) async fn key_picker(
                     }
                 }
                 // `^R` focuses the filter explicitly — the quiet twin of
-                // typing a letter, for when there is nothing to type yet.
-                // (Bare `R` still reloads the roster.) Case-insensitive:
-                // the terminal may report either case with CONTROL held.
                 'r' | 'R' if p.stage == PickStage::Voice => {
                     p.filter_focus = true;
                     app.set_status(
@@ -237,8 +197,6 @@ pub(crate) async fn key_picker(
                     app.load_roster(job_tx, http);
                 }
                 // `^T`: another line for the pointed voice — one random
-                // pick may be a poor representative, and "random" you
-                // cannot reroll is just an annoyance. Audition focus only.
                 't' | 'T' if p.stage == PickStage::Voice && !p.filter_focus => {
                     pick_pointed(app, job_tx, http, &mut p, true);
                 }
@@ -248,8 +206,6 @@ pub(crate) async fn key_picker(
         }
         KeyCode::Char(c) if !alt => {
             // Any other letter focuses the filter and types: the filter is
-            // where most keypresses want to go, and `t`/`T` above already
-            // claimed theirs in audition focus.
             if p.stage == PickStage::Voice {
                 p.filter_focus = true;
             }

@@ -1,8 +1,4 @@
 //! Stage 3/4 — segment planning, concatenation and the final mix.
-//!
-//! Ported from `synthesize.py`. The WAV handling is native (RIFF PCM 16-bit),
-//! so the only external binary is `ffmpeg`, and only for ambience, tempo and
-//! mp3 encoding — exactly as before.
 
 mod mood;
 mod plan;
@@ -29,8 +25,6 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// ---------------------------------------------------------------------------
-// concatenation and the final mix
 // ---------------------------------------------------------------------------
 
 /// Concatenate WAVs, optionally inserting `gap_ms` of silence between turns.
@@ -75,20 +69,6 @@ pub fn concat_wavs(files: &[PathBuf], out: &Path, gap_ms: u32) -> Result<()> {
 }
 
 /// Concatenate a timeline, honouring each slot's own gap.
-///
-/// [`crate::ambience::timeline`] decided these offsets, so this writes exactly
-/// the silence the layers believe is there. That is the point of the split: the
-/// gap used to be one number read in two places (here and the span builder) and
-/// stayed correct only because it was a constant. A planned beat is not a
-/// constant, and a layers pass that assumed `gap_ms` would slide onto the wrong
-/// turns by the length of every pause before it.
-///
-/// The gap after the last slot is not written: nothing follows it, and the
-/// layer pass sizes its beds from the file it is given, so a trailing silence
-/// would only make the chapter longer than the timeline claims. The one
-/// exception is `Slot::inject_ms` — silence a script-placed inject needs to
-/// play in, which for a hit on the final line is the difference between the
-/// sound and no sound at all.
 pub fn concat_slots(slots: &[crate::ambience::Slot], out: &Path) -> Result<()> {
     let mut params: Option<(u16, u32, u16)> = None;
     let mut frames: Vec<u8> = Vec::new();
@@ -134,17 +114,11 @@ pub fn concat_slots(slots: &[crate::ambience::Slot], out: &Path) -> Result<()> {
 }
 
 /// Whether this host can run the merge stage's encoder. Public so the worker
-/// agent can advertise the `merge` capability truthfully: a box without it
-/// provisions cleanly and then fails every merge it is offered.
 pub fn ffmpeg_available() -> bool {
     tool_available("ffmpeg", "-version")
 }
 
 /// Whether this host can run the merge stage's *voice treatment* engine. The
-/// effect pass shells out to SoX for every slot's room/character, so merge
-/// needs it exactly as much as it needs ffmpeg — and unlike ffmpeg this is a
-/// hard gate on the capability, because a merge without it cannot produce the
-/// voice track at all.
 pub fn sox_available() -> bool {
     tool_available("sox", "--version")
 }
@@ -174,15 +148,6 @@ fn run_ffmpeg(args: &[&str]) -> Result<()> {
 }
 
 /// Encode one take's wav to the storage tier's mp3.
-///
-/// The tier is a stored-representation choice, and the re-encode it buys is
-/// inaudible by construction: the published mix is a 64k mono mp3, so an
-/// intermediate at or above that rate loses nothing a listener could hear —
-/// while the store shrinks roughly tenfold. The house audio shape (`-ac 1
-/// -ar 48000`, metadata stripped) is the pool's, so a take and a pool clip
-/// behave identically in every graph that reads them. `-nostdin` because
-/// ffmpeg otherwise reads standard input for keyboard control, and inside a
-/// render loop that input is the caller's own list.
 pub fn encode_mp3(wav: &Path, mp3: &Path, kbps: u32) -> Result<()> {
     let kbps_arg = format!("{kbps}k");
     let src = wav.to_string_lossy().into_owned();
@@ -213,24 +178,8 @@ pub fn encode_mp3(wav: &Path, mp3: &Path, kbps: u32) -> Result<()> {
 }
 
 /// Decode a stored take into a PCM wav the mixer can read, when the storage
-/// tier stored it encoded.
-///
-/// [`TakeQuality`] lets a take sit on disk as an mp3 (`encode_mp3`), but every
-/// reader downstream of the renderer — the timeline, the concat, the layer
-/// pass — parses PCM with [`read_wav`]. An encoded take is therefore not a take
-/// to the mixer until it is decoded, and a merge that skipped this failed with
-/// `t-c34f70e248807aaf.mp3 is not a RIFF/WAVE file` while the audio sat on
-/// disk.
-///
-/// A take already in PCM is returned **unchanged**, so the `raw` tier costs no
-/// process and no copy; only the encoded default pays one ffmpeg pass per take
-/// it mixes. The decode shape is exactly the shape [`encode_mp3`] encoded at
-/// (mono 48 kHz), so a decoded take is interchangeable with a raw one for the
-/// engines whose sidecar already speaks 48 kHz.
 pub fn decode_take(path: &Path, scratch: &Path) -> Result<PathBuf> {
     // The sniff is the header probe, not the extension: a `.wav` name holding
-    // something else is the lie the tier's naming rule exists to prevent, so
-    // trust the bytes.
     let head = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     if head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WAVE" {
         return Ok(path.to_path_buf());
@@ -263,17 +212,6 @@ pub fn decode_take(path: &Path, scratch: &Path) -> Result<PathBuf> {
 }
 
 /// Pair every wav the renderer produced with the scene, mood and speaker the
-/// layers need.
-///
-/// Built from the same grouping [`expected_wavs`] used, in the same order, so
-/// turn `i` is wav `i` by construction rather than by convention — a mismatch
-/// here would silently slide the whole chapter's sound design onto the wrong
-/// lines, so the count is checked instead of assumed.
-///
-/// The mood is resolved here rather than in the mixer because the grain differs
-/// per engine: the local engine renders one wav per *run*, so a run's mood is
-/// its majority value, while the cloud engine renders one wav per segment. Doing
-/// it here keeps `Turn` a flat statement of fact for the layer pass.
 fn plan_turns(
     planned: &Planned,
     wavs: &[PathBuf],
@@ -285,11 +223,6 @@ fn plan_turns(
     use crate::ambience::Turn;
     let segments = &planned.speech;
     // Count before indexing: the take list is the *recorded* render plan,
-    // which may predate the script (a digest landed after the plan was
-    // built), and indexing first turns that disagreement into a panic inside
-    // a worker task — a shelved chapter with no actionable message. Bail
-    // here so the failure names the disagreement; the inductor heals it by
-    // replanning (see `fail_task`).
     let turns = titled as usize
         + if local {
             planned.runs().len()
@@ -308,8 +241,6 @@ fn plan_turns(
 
     if titled {
         // The headline opens the chapter before any scene is established: the
-        // Narrator speaks it, and it carries no scene tag — so no reverb, no
-        // bed, no music, and a scene change at the first real turn.
         out.push(Turn {
             wav: wavs[0].clone(),
             scene: String::new(),
@@ -330,9 +261,6 @@ fn plan_turns(
                 music: musics[i].clone(),
                 speaker: run.speaker.clone(),
                 // Every directive that fires at a piece of this run, in order.
-                // `runs` splits at a piece carrying any, so in practice only
-                // the last one has them — but the turn does not assume that,
-                // it just anchors everything at the run's end.
                 injects: run
                     .idx
                     .iter()
@@ -380,22 +308,6 @@ fn plan_turns(
 }
 
 /// Assemble cached segments into the chapter deliverable.
-///
-/// `scratch` is a directory the caller owns and may delete afterwards. Every
-/// intermediate — the concat, the layer pass, the tempo pass — is written
-/// there, and only the returned file is meant to survive. Pass
-/// `Layout::scratch_ch(n)` so intermediates never land in `output/`.
-///
-/// Returns the mp3 when ffmpeg is available, otherwise the wav.
-///
-/// `takes` is the **recorded render plan's** file list, in mix order, when the
-/// caller has one (`TaskOffer::merge_takes`). The mixer must read the same
-/// names the renderer wrote, and a take's name is content-addressed — derived
-/// from the voice, the text and the parameters it was spoken with — so
-/// re-deriving it here from the script and the cast is exactly the five-namers
-/// problem this pipeline removed. `None` is the pre-plan caller: the names are
-/// then computed with [`expected_wavs`], which is what the renderer used
-/// before takes were content-addressed.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble(
     layout: &crate::Layout,
@@ -433,9 +345,6 @@ pub fn assemble(
     let local = engine == "vieneu";
     let title = title_speech_for_script(script_path, &cast, &segments);
     // The script as the pipeline plans it: headline dropped, and the sound
-    // items lifted out of the lines they sit between. Built once and handed to
-    // every stage that names a wav — a stage that planned its own would name
-    // other files.
     let planned = Planned::plan(&segments);
 
     let wavs: Vec<PathBuf> = match takes.filter(|t| !t.is_empty()) {
@@ -465,9 +374,6 @@ pub fn assemble(
         .with_context(|| format!("creating scratch {}", scratch.display()))?;
 
     // The storage tier may hold takes encoded (see [`TakeQuality`]); everything
-    // from the timeline on reads PCM, so decode them once into `scratch` here
-    // and use those paths. A raw take is returned as-is, so the `raw` tier pays
-    // nothing for this step.
     let take_scratch = scratch.join("takes");
     let wavs: Vec<PathBuf> = wavs
         .iter()
@@ -475,18 +381,11 @@ pub fn assemble(
         .collect::<Result<_>>()?;
 
     // The scene map is read here, not inside the layer pass, because it decides
-    // two things the *timeline* needs: where the beats go, and what mood each
-    // turn carries. A missing map degrades to "no sound design" rather than
-    // failing a dry merge; a layered merge still fails loudly in `apply_layers`.
     let map = crate::ambience::load_map(&assets.join("scene-map.json")).unwrap_or_default();
     // The inject pool is read here rather than at the mix: a sound's `mode` is a
-    // property of the clip, and the turn planner is where a directive becomes a
-    // placed sound. One read, so the plan and the mix cannot disagree.
     let inj_pool = crate::audio_pool::load_pool(&assets.join("inject-pool.json"));
     let turns = plan_turns(&planned, &wavs, local, title.is_some(), &map, &inj_pool)?;
     // A beat is part of the sound design, so a dry chapter does not get one:
-    // both layers off is an operator asking for a plain read of the text, and
-    // silence inserted between the lines would be an edit they did not ask for.
     let pauses = if on.none() {
         std::collections::BTreeMap::new()
     } else {
@@ -495,10 +394,6 @@ pub fn assemble(
     let mut slots = crate::ambience::timeline(&turns, gap_ms, &pauses)?;
 
     // Inject holds are silence the script asked for, like a planned pause: a
-    // hit needs its whole clip after its line, a trail its hold. Written into
-    // the gaps before the concat, in pre-tempo milliseconds, so `retime`
-    // below keeps them honest. Gated on the effects switch with the rest of
-    // the sound design — a dry read gets no injected silence either.
     let inj_takes = crate::ambience::plan_inject_takes(&slots, &inj_pool, chapter);
     let inj_durs = crate::ambience::probe_inject_durs(&inj_takes, assets);
     if on.effects {
@@ -509,11 +404,6 @@ pub fn assemble(
     concat_slots(&slots, &out_path)?;
 
     // Tempo the SPEECH, then place the layers on the delivered clock.
-    //
-    // `atempo` used to run last, over the finished mix, so it sped the beds and
-    // the music up along with the voice: a rain bed at 1.25x is a different
-    // rain, and a loop stretched to fill its window no longer fits it. The
-    // operator asked for faster *reading*, not a faster world.
     if (speed - 1.0).abs() > f64::EPSILON {
         let sped = scratch.join("voice-sped.wav");
         run_ffmpeg(&[
@@ -528,7 +418,6 @@ pub fn assemble(
         ])?;
         out_path = sped;
         // The layer pass reads `Slot::start`/`end`, so the timeline has to
-        // become the one the listener will actually hear.
         crate::ambience::retime(&mut slots, speed);
     }
 
@@ -556,7 +445,6 @@ pub fn assemble(
 }
 
 /// Rewrite a chapter's title into the output filename, matching the legacy
-/// `Ch.N - Title.mp3` convention.
 pub fn publish(assembled: &Path, layout: &crate::Layout, n: u32) -> Result<PathBuf> {
     let final_path = layout.final_mp3(n);
     if let Some(parent) = final_path.parent() {
@@ -568,13 +456,6 @@ pub fn publish(assembled: &Path, layout: &crate::Layout, n: u32) -> Result<PathB
 }
 
 /// Record a manifest line (JSONL) so every render is auditable, as before.
-///
-/// Appends instead of rewriting the file: a render loop calls this once per
-/// take, and a rewrite made the whole book's rendering quadratic in the number
-/// of takes. The one thing given up is atomicity of the last line: a crash
-/// mid-append can leave a torn line where a rewrite would have left the old
-/// file whole. Every consumer of this log reads it line by line, so a torn
-/// tail costs one record on a machine that just died, not a format change.
 pub fn manifest_append(path: &Path, record: &Value) -> Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
@@ -627,7 +508,6 @@ mod tests {
     }
 
     /// A `raw` take is already PCM, so the merge must not spend a process (or a
-    /// copy) on it — the decode is only the encoded tier's tax.
     #[test]
     fn a_pcm_take_is_returned_untouched() {
         let d = tmpdir("decode-pcm");
@@ -640,9 +520,6 @@ mod tests {
     }
 
     /// The default tier stores takes as mp3; every reader below the timeline
-    /// parses PCM, so an encoded take has to come back as a readable wav. This
-    /// is the merge half of the storage tier — its absence failed a merge with
-    /// `t-….mp3 is not a RIFF/WAVE file`.
     #[test]
     fn an_encoded_take_is_decoded_to_pcm() {
         if !ffmpeg_available() {
@@ -660,14 +537,10 @@ mod tests {
         let w = read_wav(&got).unwrap();
         assert_eq!((w.channels, w.sample_rate), (1, 48_000));
         // mp3 carries encoder padding, so the length is close but not exact —
-        // what matters is that the bytes are PCM the timeline and concat read.
         assert!((w.seconds() - 0.10).abs() < 0.1, "{}", w.seconds());
     }
 
     /// A hit on the chapter's *last* line plays in silence the concat has to
-    /// write, because no line follows it to carry that gap. Before this, the
-    /// event was placed past the end of the mix and dropped, while the plan log
-    /// went on naming it — the sound was reported and never heard.
     #[test]
     fn a_hit_on_the_last_line_gets_its_silence_written() {
         use crate::ambience::{plan_inject_holds, plan_inject_takes, plan_injects, InjectLayer};
@@ -702,7 +575,6 @@ mod tests {
             ),
         ];
         // Lay the clock out by hand: slot 0 spans 0.0-1.0, slot 1 starts after
-        // its gap at 1.3 and ends at 2.2.
         slots[0].end = 1.0;
         slots[1].start = 1.3;
         slots[1].end = 2.2;
@@ -727,10 +599,6 @@ mod tests {
     }
 
     /// The injection is a split sentence, and the thing that makes it one is
-    /// *where the effect lands*: between the two halves, not after the whole
-    /// line. Each link has its own test — the split, the run break, the seam —
-    /// and the seam between them is exactly where this feature has broken
-    /// before, so it gets one of its own.
     #[test]
     fn a_split_sentence_is_two_wavs_and_the_effect_lands_between_them() {
         use crate::ambience::{plan_inject_holds, plan_inject_takes, plan_injects, InjectLayer};
@@ -784,7 +652,6 @@ mod tests {
         let events = plan_injects(&slots, &takes, &durs, &InjectLayer::default());
         assert_eq!(events.len(), 1, "{events:?}");
         // The first half runs 0.0–1.0, so the cut is at 1.0: the effect starts
-        // there, and the second half begins after the 0.5 s it holds.
         assert!((events[0].start - 1.0).abs() < 1e-6, "{:?}", events[0]);
         assert!(
             events[0].end <= total + 1e-6,
@@ -798,10 +665,8 @@ mod tests {
     #[test]
     fn a_stale_take_list_fails_by_name_instead_of_panicking() {
         // A digest that lands after the render plan was built leaves the
-        // recorded take list short of the timeline. Indexing first turned
         // that disagreement into a worker-task panic ("index out of bounds:
         // the len is 33 but the index is 33") — a shelved chapter with no
-        // actionable message. The count is checked up front now.
         let segments = vec![
             serde_json::json!({"speaker": "A", "text": "1"}),
             serde_json::json!({"speaker": "B", "text": "2"}),

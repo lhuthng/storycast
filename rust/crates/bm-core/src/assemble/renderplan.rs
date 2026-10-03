@@ -1,65 +1,16 @@
 //! The recorded render plan: the single namer for a chapter's audio.
-//!
-//! A segment's identity used to be **derived** — `{tag}_{voice}.wav`, a
-//! function of the script, cast, bible and engine — and it was derived again at
-//! every site that cared: the offer, the force-list, the worker's skip check,
-//! the completion gate, and the merge. Five derivations, five chances to
-//! disagree, and a warm box holding a same-named file the gate cannot tell from
-//! the right one.
-//!
-//! This module is the one place that decides. A plan is computed once from the
-//! same [`plan_render`](super::plan_render) the renderer already uses, then
-//! **recorded** (`data/render-NN.json`). Every later question — what is
-//! missing, what is stale, what order the mix is — is read from the plan, never
-//! re-derived.
-//!
-//! ## Two identities
-//!
-//! * [`Take::file`] names the bytes in the store. New takes are
-//!   **content-addressed** (`t-<take_key>.wav`), so the name is a proof of the
-//!   inputs that produced it; a pre-plan cache keeps its legacy
-//!   `{tag}_{voice}.wav` name and is *adopted* instead.
-//! * [`Take::take_key`] hashes those inputs (voice, text, parameters, engine).
-//!   A re-plan diffed against the stored plan therefore yields exactly the
-//!   takes whose audio changed — which is the whole of "invalidate one run"
-//!   and "force a warm box to re-speak".
-//!
-//! ## Adoption, not invalidation
-//!
-//! A chapter that has no stored plan predates this module, and rebuilding one
-//! must not re-speak the library. So a first plan **adopts** every existing wav
-//! it finds and marks only the genuinely absent ones dirty — the same choice
-//! `state::design`'s stamp makes for a merge. From the first real edit onward,
-//! the diff is exact.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Bump when an input stops being included in [`take_key`] or the file-naming
-/// scheme changes. Persisted, so a plan written by an older build is rebuilt
-/// rather than mis-trusted. v2 puts the storage tier's extension on the take
-/// name — a plan naming `.wav` takes must not be trusted by a build storing
-/// `.mp3`, and vice versa.
 pub const PLAN_VERSION: u32 = 2;
 
 /// The extensions a stored take may carry — the one list the namer, the store's
-/// HTTP guard and the planner all read.
-///
-/// The scheme puts the storage tier's extension on the content-addressed take
-/// name (`raw` → `.wav`, every mp3 tier → `.mp3`), so a guard that hardcoded a
-/// single extension silently refused the other the moment the default tier
-/// changed. A new tier adds its extension here and nowhere else.
 pub const TAKE_EXTENSIONS: [&str; 2] = ["wav", "mp3"];
 
 /// How a take is stored, from `settings.take_quality`.
-///
-/// The tier decides the *stored representation* of the sidecar's wav, and so
-/// the extension on the content-addressed name: the name is a claim about its
-/// inputs, and the tier is one of them — a store answering `t-x.wav` with mp3
-/// bytes would be a lie every reader pays for. `Raw` keeps the PCM; the mp3
-/// tiers are one re-encode the final 64k mono mp3 output makes inaudible, at
-/// roughly a tenfold cut in store size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TakeQuality {
     /// The sidecar's own PCM wav, untouched.
@@ -67,7 +18,6 @@ pub enum TakeQuality {
     /// 64k mono mp3 — the published output's own rate.
     Small,
     /// 96k mono mp3 — the default. A casual listener cannot hear it against
-    /// raw through a 64k output.
     Balanced,
     /// 128k mono mp3, for an operator who re-masters from takes.
     High,
@@ -75,8 +25,6 @@ pub enum TakeQuality {
 
 impl TakeQuality {
     /// Parse the setting. An unknown name takes the default rather than
-    /// failing a run over a typo — the tier is cosmetic to everything but
-    /// weight, and the choice is visible in the store's extensions.
     pub fn parse(setting: &str) -> Self {
         match setting.trim().to_ascii_lowercase().as_str() {
             "raw" => Self::Raw,
@@ -95,7 +43,6 @@ impl TakeQuality {
     }
 
     /// The mp3 bitrate in kbps, or `None` for [`TakeQuality::Raw`]. This is
-    /// what travels to the rendering box, which owns the encode.
     pub fn mp3_kbps(&self) -> Option<u32> {
         match self {
             Self::Raw => None,
@@ -107,18 +54,15 @@ impl TakeQuality {
 }
 
 /// Hex characters kept from the SHA-256 take hash. Eight bytes is far past
-/// collision for one book and keeps filenames short.
 const TAKE_KEY_CHARS: usize = 16;
 
 /// The size below which a wav is a half-write, not a take. The same threshold
-/// the renderer, the completion gate and the merger already use.
 const MIN_TAKE_BYTES: u64 = 1000;
 
 /// One unit of render work, fully specified and durably named.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Take {
     /// Position in the mix. [`RenderPlan::takes`] is already in order; this is
-    /// for the UI and for a stable diff.
     pub pos: usize,
     /// Human label — `title`, `0004-0011`. Display and progress only.
     pub tag: String,
@@ -126,24 +70,19 @@ pub struct Take {
     /// The voice as the pipeline speaks it (a display name).
     pub voice: String,
     /// The catalogue key the `take_key` hashes, so renaming a voice does not
-    /// invalidate the library.
     #[serde(default)]
     pub voice_key: String,
     pub text: String,
     pub temperature: f64,
     pub silence_p: f64,
     /// Hash of the inputs that decide the audio. The identity that survives a
-    /// re-plan.
     pub take_key: String,
     /// The name in the store. Content-addressed for a new take; a legacy
-    /// `{tag}_{voice}.wav` for an adopted one.
     pub file: String,
     /// The legacy name this take would have had. Kept so a first plan can adopt
-    /// a pre-migration cache, and so a re-plan can name the file it must delete.
     #[serde(default)]
     pub legacy: Option<String>,
     /// Carried over from a pre-plan cache rather than produced under a
-    /// content-addressed name.
     #[serde(default)]
     pub adopted: bool,
 }
@@ -158,8 +97,6 @@ pub struct RenderPlan {
     #[serde(default)]
     pub generated: u64,
     /// Hash of the voice collection this chapter uses, keyed per speaker. The
-    /// offer ships it so a worker can tell, in one comparison, that its cast is
-    /// current — the "hashed voice collection" half of the request.
     #[serde(default)]
     pub cast_hash: String,
     pub takes: Vec<Take>,
@@ -183,12 +120,6 @@ pub struct PlanUpdate {
 
 impl RenderPlan {
     /// Build the canonical plan for a chapter's planned units.
-    ///
-    /// Takes its input from [`RenderUnit`](super::plan::RenderUnit) — the same
-    /// structs `plan_render` hands the renderer — so the plan and the renderer
-    /// can never disagree about order, grouping or voices. `file` is
-    /// content-addressed by default; [`reconcile`] rewrites it to the legacy
-    /// name when it adopts an existing wav.
     pub fn build(
         chapter: u32,
         engine: &str,
@@ -234,9 +165,6 @@ impl RenderPlan {
     }
 
     /// Read a stored plan. `None` on missing or unparseable, which is "no plan"
-    /// rather than an error — the caller's answer is to build and adopt one.
-    /// A plan written under a different [`PLAN_VERSION`] is also `None`, so it
-    /// is rebuilt rather than mis-trusted.
     pub fn load(path: &Path) -> Option<RenderPlan> {
         let plan: RenderPlan = crate::util::read_json(path).ok()?;
         (plan.plan_version == PLAN_VERSION).then_some(plan)
@@ -261,13 +189,11 @@ impl RenderPlan {
     }
 
     /// Every planned take is on disk. The merge gate, and the render task's
-    /// `Done` condition, both reduce to this.
     pub fn covered(&self, seg_dir: &Path) -> bool {
         self.takes.iter().all(|t| present(seg_dir, &t.file))
     }
 
     /// Whether any planned take carries an input different from `other`'s.
-    /// Used to decide whether a plan is worth writing and offering.
     pub fn differs_from(&self, other: &RenderPlan) -> bool {
         self.takes.len() != other.takes.len()
             || self
@@ -279,28 +205,11 @@ impl RenderPlan {
 }
 
 /// Diff a freshly built plan against the stored one and produce the work.
-///
-/// `old` is `None` for a chapter that has never had a plan. In that case every
-/// existing wav is **adopted** by its legacy name and only the absent takes are
-/// dirty. With a stored plan, `take_key` is the diff: an unchanged key carries
-/// its file and `adopted` flag over untouched; a changed key is dirty and its
-/// old file is stale; a key the new plan no longer contains has a stale file.
-///
-/// Nothing here touches the filesystem beyond a size check — deleting is the
-/// caller's step, so a plan can be inspected before it is applied.
 pub fn reconcile(old: Option<&RenderPlan>, new: RenderPlan, seg_dir: &Path) -> PlanUpdate {
     reconcile_with(old, new, seg_dir, true)
 }
 
 /// [`reconcile`], with adoption under the caller's control.
-///
-/// `adopt = false` is for a caller that **knows an input changed** — a retag, a
-/// voice swap, a re-digest. With no stored plan there is nothing to diff
-/// against, so a legacy file that happens to match the new legacy name is a
-/// coincidence, not evidence: every take is work, and the old bytes are
-/// superseded. Adopting there would answer "the store is current" to a
-/// question nobody can answer, which is exactly the stale-audio bug this module
-/// exists to remove.
 pub fn reconcile_with(
     old: Option<&RenderPlan>,
     new: RenderPlan,
@@ -322,8 +231,6 @@ pub fn reconcile_with(
 
         if let Some(o) = old_by_key.get(&take_key) {
             // Same inputs, same audio: trust the recorded file. If it has since
-            // been deleted, the take is dirty under its recorded name — a
-            // re-render, not a re-plan.
             let (file, was_adopted) = (o.file.clone(), o.adopted);
             plan.takes[i].file = file;
             plan.takes[i].adopted = was_adopted;
@@ -334,8 +241,6 @@ pub fn reconcile_with(
         }
 
         // A new or changed take. Only a *first* plan adopts a legacy file, and
-        // only when the caller asked it to: with a stored plan, a changed key
-        // means the legacy bytes are stale.
         if old.is_none() && adopt {
             if let Some(legacy) = plan.takes[i].legacy.clone() {
                 if present(seg_dir, &legacy) {
@@ -351,7 +256,6 @@ pub fn reconcile_with(
             dirty.push(i);
         }
         // The legacy name is stale whenever it is not the file now in use —
-        // the "same voice, changed text" case a presence check cannot see.
         if let Some(legacy) = plan.takes[i].legacy.clone() {
             if legacy != plan.takes[i].file && present(seg_dir, &legacy) {
                 stale.push(legacy);
@@ -379,11 +283,6 @@ pub fn reconcile_with(
 }
 
 /// The input hash that names a take.
-///
-/// The voice key, not the display name, so a rename is free. Parameters are
-/// formatted at fixed precision so two floats that print the same hash the
-/// same. A version tag prefixes everything, so a future change to what
-/// contributes to the hash cannot silently match an old key.
 pub fn take_key(
     engine: &str,
     voice_key: &str,
@@ -411,16 +310,11 @@ pub fn take_key(
 }
 
 /// The store name for a take: content-addressed, so the name is a claim about
-/// the inputs that can be checked without trusting the plan. The tier's
-/// extension rides the name, so a tier change is a new name and a re-speak —
-/// never a `.wav` name holding mp3 bytes.
 pub fn take_file(take_key: &str, quality: TakeQuality) -> String {
     format!("t-{}.{}", take_key, quality.extension())
 }
 
 /// A hash of the voice collection this plan uses: sorted unique
-/// `(speaker, voice_key)` pairs. Per chapter, so a swap elsewhere changes
-/// nothing here — the same "only what it reaches" rule the design stamp uses.
 fn cast_hash(takes: &[Take]) -> String {
     use sha2::{Digest, Sha256};
     let mut pairs: Vec<(&str, &str)> = takes
@@ -444,7 +338,6 @@ fn cast_hash(takes: &[Take]) -> String {
 }
 
 /// A voice with no catalogue key (an un-enrolled clone) still needs a stable
-/// identity, so its folded display name stands in.
 fn fold_voice(name: &str) -> String {
     crate::util::fold(name)
 }
@@ -539,8 +432,6 @@ mod tests {
         );
         assert_eq!(base.len(), TAKE_KEY_CHARS);
         // The tier rides the name: raw stays `.wav`, every mp3 tier names
-        // `.mp3`, and a tier change is therefore a new file and a re-speak —
-        // never a `.wav` name holding mp3 bytes.
         assert_eq!(take_file(&base, TakeQuality::Raw), format!("t-{base}.wav"));
         assert_eq!(
             take_file(&base, TakeQuality::Balanced),
@@ -562,7 +453,6 @@ mod tests {
     #[test]
     fn a_first_plan_adopts_existing_wavs_and_dirties_none() {
         // The pre-migration case: wavs named the legacy way, no plan on disk.
-        // Rebuilding must re-speak nothing.
         let dir = tmpdir("adopt");
         let c = cast(&[("A", "Đức Trí"), ("B", "Adam")]);
         let segs = vec![
@@ -592,11 +482,6 @@ mod tests {
     #[test]
     fn a_known_change_never_adopts_an_unrecorded_cache() {
         // The invalidation case: the caller *knows* an input moved and there is
-        // no stored plan to diff against. A legacy file whose name still matches
-        // is then a coincidence — its text is exactly what may have changed —
-        // so the take is work and the old bytes are superseded. Adopting here
-        // would answer "the store is current" to a question nobody can answer,
-        // which is the stale-audio bug in its original form.
         let dir = tmpdir("no-adopt");
         let c = cast(&[("A", "Đức Trí")]);
         let plan = plan_of(&[json!({"speaker": "A", "text": "một"})], &c, &dir);
@@ -615,7 +500,6 @@ mod tests {
         assert!(!up.plan.covered(&dir));
 
         // The routine pass over the same store adopts, which is what keeps a
-        // library that predates the plan from being re-spoken.
         let relaxed = plan_of(&[json!({"speaker": "A", "text": "một"})], &c, &dir);
         let up = reconcile(None, relaxed, &dir);
         assert!(up.dirty.is_empty(), "routine adoption re-speaks nothing");
@@ -696,7 +580,6 @@ mod tests {
         let dir = tmpdir("voice-change");
         let before = cast(&[("A", "Đức Trí"), ("B", "Adam")]);
         // A, B, A: three runs, so A owns two takes and B one. Consecutive A
-        // lines would merge into a single run and hide the second.
         let segs = vec![
             json!({"speaker": "A", "text": "một"}),
             json!({"speaker": "B", "text": "ba"}),
@@ -767,7 +650,6 @@ mod tests {
     #[test]
     fn reverting_a_change_reuses_the_content_addressed_file() {
         // A take rendered under content addressing keeps its name if the inputs
-        // come back, so a revert costs nothing.
         let dir = tmpdir("revert");
         let c = cast(&[("A", "Đức Trí")]);
         let plan1 = plan_of(&[json!({"speaker": "A", "text": "một"})], &c, &dir);

@@ -15,7 +15,6 @@ fn the_import_prompt_takes_a_number_and_a_path_but_never_guesses_the_number() {
         other => panic!("{other:?}"),
     }
     // A path alone: the number comes from the filename, later, by the importer
-    // (which is the one place that rule lives), the prompt does not guess one.
     match submit_text(&mut app, &p("/tmp/ch217.txt")).unwrap() {
         Job::Op { req, .. } => {
             assert_eq!(req.chapter, None);
@@ -24,7 +23,6 @@ fn the_import_prompt_takes_a_number_and_a_path_but_never_guesses_the_number() {
         other => panic!("{other:?}"),
     }
     // Several files, comma-separated: every one must carry its own number or be
-    // refused by the importer, so the prompt passes the number to the first.
     match submit_text(&mut app, &p("34 a.txt, b.txt")).unwrap() {
         Job::Op { req, .. } => assert_eq!(req.paths.len(), 2),
         other => panic!("{other:?}"),
@@ -50,19 +48,11 @@ fn crawl_template_takes_a_placeholder_or_nothing_at_all() {
     let p = TextPrompt::new(TextKind::CrawlTemplate, "t", "h", "https://x/chuong-{n}");
     assert!(submit_text(&mut app, &p).is_ok());
     // Empty probes without saving a template: a crawler with a `discover()` has
-    // no chapter-number URL at all, and `:crawl` is the command that has to be
-    // usable for it.
     let p = TextPrompt::new(TextKind::CrawlTemplate, "t", "h", "   ");
     assert!(submit_text(&mut app, &p).is_ok());
 }
 
 /// Pasting a URL we have a crawler for should say which one, and how to get
-/// past the prompt that wants a `{n}`.
-///
-/// The shape that motivates it: ReadNovelFull's chapter URLs carry a title
-/// slug, so the prompt's own rule ("must contain {n}") refuses every URL the
-/// operator could possibly paste, and the refusal, left generic, is a loop.
-/// Naming the crawler turns a dead end into a next step.
 #[test]
 fn a_known_site_url_names_its_crawler_instead_of_only_refusing() {
     let mut app = App::new("http://x");
@@ -88,7 +78,6 @@ fn a_known_site_url_names_its_crawler_instead_of_only_refusing() {
 }
 
 /// A site on the list that is blocked must say so in the dialog, not offer a
-/// crawler that cannot run.
 #[test]
 fn a_blocked_known_site_says_so_rather_than_offering_a_crawler() {
     let mut app = App::new("http://x");
@@ -115,7 +104,6 @@ fn the_known_site_note_tracks_the_buffer_and_only_where_it_belongs() {
         "https://storya.click/truyen/a/chuong-{n}",
     );
     // A template with `{n}` in it is already a mapping; matching it against the
-    // registry would comment on a host it says nothing useful about.
     assert_eq!(p.known_site(), None);
     // An unknown site says nothing, rather than guessing.
     let p = TextPrompt::new(TextKind::CrawlTemplate, "t", "h", "https://example.com/c/1");

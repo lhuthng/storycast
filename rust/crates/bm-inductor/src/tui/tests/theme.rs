@@ -53,11 +53,6 @@ async fn the_theme_cycle_lands_on_the_same_theme_every_time() {
 }
 
 /// The mouse can be handed back to the terminal, so an error can be copied.
-///
-/// While mouse reporting is on the terminal routes every drag to the program
-/// instead of treating it as a selection, which is why an error message could
-/// not be highlighted and copied, the one thing anybody wants to do with an
-/// error. `M` turns reporting off and back on again.
 #[tokio::test]
 async fn the_mouse_can_be_handed_back_to_the_terminal_to_copy_an_error() {
     let mut app = App::new("http://127.0.0.1:8901");
@@ -91,10 +86,6 @@ async fn the_mouse_can_be_handed_back_to_the_terminal_to_copy_an_error() {
 }
 
 /// `M` is a new key, so it must not have been somebody else's.
-///
-/// `m` is the documented alias for `:m` (reconcile) and is deliberately left
-/// alone: two keys one letter apart doing unrelated things is exactly how a
-/// dashboard grows a wrong muscle memory.
 #[tokio::test]
 async fn the_mouse_key_does_not_collide_with_the_reconcile_alias() {
     let (job_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
@@ -104,14 +95,11 @@ async fn the_mouse_key_does_not_collide_with_the_reconcile_alias() {
     assert!(app.mouse_capture, "lowercase m must not toggle the mouse");
     assert!(!app.mouse_toggle);
     // The existing guarantee still holds: a bare m from Normal mode dispatches
-    // nothing and opens nothing.
     assert!(matches!(app.screen, Screen::Normal));
     assert!(rx.try_recv().is_err(), "a bare m must dispatch nothing");
 }
 
 /// The crawl view answers the question the dashboard could not: what will this
-/// crawl, and is anything wrong with it — in three lines, with the whole
-/// configuration one keypress away.
 #[tokio::test]
 async fn the_crawl_key_answers_what_is_in_force() {
     let dir = std::env::temp_dir().join("bm-crawlview-render");
@@ -138,7 +126,6 @@ async fn the_crawl_key_answers_what_is_in_force() {
     );
 
     // The default is the verdict, and the two faults this settings file causes
-    // without saying so anywhere else.
     let text = render_text(&mut app, 120, 44);
     assert!(text.contains("Reading"), "{text}");
     assert!(text.contains("Faults"), "{text}");
@@ -151,8 +138,6 @@ async fn the_crawl_key_answers_what_is_in_force() {
         "pace 0 is a decision, so it is flagged:\n{text}"
     );
     // The configuration nobody edited is **not** on this screen. That is the
-    // change: it was, and it put a screenful of defaults above the two facts
-    // the operator pressed a key to see.
     for noise in ["max_fetches", "timeout_secs", "user_agent"] {
         assert!(
             !text.contains(noise),
@@ -242,7 +227,6 @@ fn the_crawl_view_is_in_the_footer_and_the_help_screen() {
 #[test]
 fn the_mouse_key_is_in_the_footer_and_the_help_screen() {
     // One line a tier is enough, what must not happen is the key being
-    // nowhere in the footer, which is how it is never found.
     for (tier, lines) in [("full", &KEYS_FULL), ("compact", &KEYS_COMPACT)] {
         assert!(
             lines.iter().any(|k| k.contains('M')),
@@ -307,7 +291,6 @@ fn the_log_severity_column_is_fixed_width() {
     app.log_at(Level::Ok, "fine two");
     let text = render_text(&mut app, 140, 44);
     // Both tags start their message at the same column; the old mixed-width
-    // glyphs (`OK`, `ERROR`) left the text ragged.
     for tag in ["err ", " ok "] {
         assert!(text.contains(tag), "fixed-width `{tag}` tag:\n{text}");
     }

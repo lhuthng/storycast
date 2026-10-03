@@ -10,9 +10,6 @@ fn live_fixture(name: &str) -> PathBuf {
 #[test]
 fn concurrent_hashing_matches_hashing_one_at_a_time() {
     // The whole safety argument for the parallel path: the pointer on every
-    // machine was computed sequentially, so a different map is a different
-    // hash — a false "profile drift" on every box at once. Cross-check the
-    // concurrent implementation against the sequential one, same primitive.
     let dir = live_fixture("parallel");
     let files = live_files(&dir);
     assert!(files.len() > 1, "the fixture must have something to spread");
@@ -47,7 +44,6 @@ fn verify_passes_on_a_fresh_tree_and_adopts_drift() {
     assert_eq!(verify(&dir).unwrap().name, "fixture");
 
     // A hand edit (e.g. a `:sound` retune) is adopted, not refused: the
-    // pointer is re-stamped so the next run is clean.
     std::fs::write(dir.join("prompts/analyze.txt"), "tampered").unwrap();
     let adopted = verify(&dir).unwrap();
     assert_eq!(adopted.name, "fixture");
@@ -70,7 +66,6 @@ fn verify_without_a_pointer_names_the_load() {
 #[test]
 fn the_fixture_resolves_from_any_crate() {
     // install_fixture anchors on bm-core's manifest dir, not the
-    // caller's cwd — a bm-inductor test lands in the same fixture.
     let dir = std::env::temp_dir().join("bm-profile-anchor");
     let _ = std::fs::remove_dir_all(&dir);
     install_fixture(&dir).unwrap();
@@ -104,8 +99,6 @@ fn a_pre_split_pointer_becomes_the_pack_piece() {
 }
 
 /// The binding in force is the workspace's, piece by piece — the same
-/// merge `Layout::resolve` gives the adapter and the engine, so the
-/// dashboard, `profile check` and the serve gate all answer with one voice.
 #[test]
 fn the_binding_in_force_merges_the_workspace_and_the_checkout_piece_by_piece() {
     let dir = live_fixture("in-force");
@@ -127,7 +120,6 @@ fn the_binding_in_force_merges_the_workspace_and_the_checkout_piece_by_piece() {
     )
     .unwrap();
     // The workspace names its own pack and engine and leaves the adapter to
-    // the checkout.
     let work = dir.join("workspaces/book");
     std::fs::create_dir_all(&work).unwrap();
     let settings = crate::config::Settings {
@@ -166,9 +158,6 @@ fn the_binding_in_force_merges_the_workspace_and_the_checkout_piece_by_piece() {
 }
 
 /// Running a workspace verifies *its* binding and writes neither side: the
-/// workspace's `settings.json` is the ledger's stamp, so re-stamping it at
-/// load would make the next `serve` refuse a consistent book; and the
-/// checkout's `.bm/profile` is never this workspace's to write.
 #[test]
 fn verify_layout_reads_the_workspace_binding_and_writes_neither_side() {
     let dir = live_fixture("verify-ws");
@@ -257,7 +246,6 @@ fn a_binding_round_trips_and_names_all_three_pieces() {
     assert_eq!(read_binding(&dir).unwrap(), b);
     assert!(!b.is_unset());
     // The legacy view still resolves, and re-stamping the pack keeps the
-    // adapter and engine exactly as they were.
     write_pointer(
         &dir,
         &Pointer {
@@ -301,7 +289,6 @@ fn verify_hashes_each_tree_separately_and_leaves_the_other_alone() {
     assert_eq!(before.engine.name, "vieneu", "named from settings");
 
     // The claim the split exists for: one tree moving does not move the
-    // other, and the piece that moved is the one that gets re-stamped.
     std::fs::write(dir.join("prompts/analyze.txt"), "tampered").unwrap();
     let after = verify_binding(&dir, Some("vieneu")).unwrap();
     assert_eq!(after.pack.hash, before.pack.hash, "the pack did not move");
@@ -311,9 +298,6 @@ fn verify_hashes_each_tree_separately_and_leaves_the_other_alone() {
 }
 
 /// The point of keying a release's manifest by *where it unpacks to*: the
-/// bundle and the live tree it came from hash to the same number, so loading
-/// one never re-stamps a hash it just changed. A language release is only its
-/// own two trees — nothing of the pack's rides along, which is the split.
 #[test]
 fn a_pieces_manifest_hashes_to_what_the_binding_holds() {
     let dir = live_fixture("manifest");
@@ -359,19 +343,10 @@ fn a_pieces_manifest_hashes_to_what_the_binding_holds() {
 }
 
 /// A workspace that composes its own `assets/` is the tree a pack manifest
-/// hashes — not the checkout's.
-///
-/// The manifest is keyed by the paths `push_pack` rsyncs and the receipt a
-/// box diffs against, so a manifest rooted at the checkout while the tree
-/// in force is the workspace's would describe bytes that never travelled:
-/// the pack release gate would compare a box's receipt to the wrong book
-/// and re-push (or skip) forever. This is the same split `sources.rs`
-/// enforces for the bundle, one layer up.
 #[test]
 fn a_workspace_owned_pack_manifests_the_workspace_tree_not_the_checkouts() {
     let root = live_fixture("ws-pack-manifest");
     // The checkout keeps its own `assets/`, so a root-layout manifest is
-    // still buildable — the assertion is that the workspace's is not it.
     let workspace = root.join("workspaces/book");
     std::fs::create_dir_all(workspace.join("assets")).unwrap();
     std::fs::write(workspace.join("assets/scene-map.json"), r#"{"scenes":[]}"#).unwrap();
@@ -401,8 +376,6 @@ fn a_workspace_owned_pack_manifests_the_workspace_tree_not_the_checkouts() {
 }
 
 /// One file per piece, in a directory per piece — so `xianxia` the pack and
-/// `xianxia` the language cannot shadow each other — and the engine, which
-/// is not a bundle at all.
 #[test]
 fn a_release_is_one_file_per_piece_and_the_engine_is_not_one() {
     let root = Path::new("/repo");
@@ -433,8 +406,6 @@ fn a_release_is_one_file_per_piece_and_the_engine_is_not_one() {
 }
 
 /// Editing a parent is what makes a child stale, and the check *names* the
-/// parent: the composition record holds the hash each dependency was folded
-/// in at, so nothing has to be guessed at or re-hashed to answer it.
 #[test]
 fn a_release_is_stale_when_a_dependency_it_was_built_on_has_moved() {
     let dir = live_fixture("stale-deps");
@@ -450,12 +421,10 @@ fn a_release_is_stale_when_a_dependency_it_was_built_on_has_moved() {
     };
     std::fs::write(dep.join("effect-pool.json"), pool("")).unwrap();
     // The record is written by a *resolve*; until then there is nothing to
-    // compare against, and a first sighting is not staleness.
     crate::compose::resolve(&assets, false).unwrap();
     assert!(stale_dependencies(&layout).unwrap().is_empty());
 
     // The parent gains a sound, so this tree is built on something that has
-    // moved — and stays so until it is resolved again.
     std::fs::write(
         dep.join("effect-pool.json"),
         pool(r#","rain":{"tags":["rain"],"files":["effects/rain-1.mp3"]}"#),
@@ -468,10 +437,6 @@ fn a_release_is_stale_when_a_dependency_it_was_built_on_has_moved() {
 }
 
 /// A composition input is not this pack's own content. `assets/_extends/`
-/// holds other assets' whole trees, so hashing them would double the digest
-/// and make a dependency's edit read as this pack's own — while the
-/// *resolved* result, which is what every reader and every worker sees, is
-/// hashed as it always was.
 #[test]
 fn a_dependency_tree_is_not_part_of_the_packs_own_digest() {
     let dir = live_fixture("extends");
@@ -498,9 +463,6 @@ fn a_dependency_tree_is_not_part_of_the_packs_own_digest() {
 }
 
 /// The sanitized dependency release: what a root pack publishes. The
-/// manifest keys are the unpack paths, so `manifest_hash` over them equals
-/// `tree_hash` over the dependency — the exact number the composition
-/// record carries — minus the bookkeeping, which is not content.
 #[test]
 fn a_dependency_release_unpacks_to_the_paths_the_record_hashes() {
     let dir = live_fixture("dep-release");
@@ -514,8 +476,6 @@ fn a_dependency_release_unpacks_to_the_paths_the_record_hashes() {
     )
     .unwrap();
     // The dependency's own bookkeeping, which a resolve would refuse to
-    // inherit and a release must not carry either. (A `pack.json` naming
-    // deps is the composed case below, so this one names none.)
     std::fs::write(
         dep_dir.join("pack.json"),
         r#"{ "_note": "authored elsewhere", "deps": [] }"#,
@@ -540,19 +500,15 @@ fn a_dependency_release_unpacks_to_the_paths_the_record_hashes() {
         ]
     );
     // The identity agrees with the composition record's number: the same
-    // fold over the same file set, computed straight off the release's own
-    // unpack keys (manifest_hash is order-stable, so a refold is a no-op).
     let from_disk = crate::compose::tree_hash(&dep_dir).unwrap();
     let released = manifest_hash(&m.files);
     let mut refold = BTreeMap::new();
     refold.extend(m.files.iter().map(|(k, v)| (k.clone(), v.clone())));
     assert_eq!(manifest_hash(&refold), released, "the fold is the manifest");
     // `tree_hash` reads the tree *with* its bookkeeping; the release drops
-    // it, so the two numbers must differ.
     assert_ne!(released, from_disk, "bookkeeping changes the tree's hash");
 
     // A tree that is itself composed is refused: a dependency release is
-    // one pack, and a dependent names a composition's roots itself.
     std::fs::write(
         dep_dir.join("pack.json"),
         r#"{ "_note": "a preset, not a root", "deps": ["weapons"] }"#,

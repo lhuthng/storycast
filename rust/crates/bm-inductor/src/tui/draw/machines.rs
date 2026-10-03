@@ -23,17 +23,12 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
     let colour = app.colour();
     let selected = app.selected;
     // Which form of the picture this pane's height can hold, decided from the
-    // area it is actually being given — the same question `machines_height`
-    // asked to size it, so the two cannot disagree about what is being drawn.
     let form = if app.machines_graph && !app.machines.is_empty() {
         super::graph::form_for(area.height.saturating_sub(2))
     } else {
         None
     };
     // The title carries the mode *and* the key, so `g` is discoverable from the
-    // pane it acts on rather than only from the help screen — and so a
-    // screenshot of either view says which one it is. A terminal too short for
-    // even the lean picture says why the table is on screen instead.
     let title = match (disconnected, form) {
         (true, _) => "Machines — DISCONNECTED · g toggles",
         (false, None) if app.machines_graph => "Machines — g graph (too short to draw)",
@@ -47,14 +42,11 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
         Style::default()
     };
     // The right-hand title is the cluster count, where an operator checks
-    // "how many boxes am I actually running" without counting rows.
     let block = super::pane_block_for(app, Some(Panel::Machines), title)
         .border_style(border)
         .title_bottom(Line::from(format!("{} up", app.machines.len())).right_aligned());
 
     // The picture needs boxes to draw a cluster out of, and rows to draw them in.
-    // With neither, the table is the more useful answer — and the title above
-    // has already said which of the two is on screen and why.
     if let Some(hub_art) = form {
         super::graph::draw_graph(f, app, area, block, hub_art);
         return;
@@ -65,7 +57,6 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
         match &app.conn {
             Conn::Down(_) => {
                 // The poll verdict is already the log line — the pane only
-                // needs the way back up, which works from right here.
                 body.push("inductor is down — :B to start it".into());
             }
             _ => body.push("type :add to add one by IP or hostname".into()),
@@ -87,9 +78,6 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
             let idx = start + i;
             let cursor = if idx == selected { "▸ " } else { "  " };
             // Name, kind, address: `box-1 · aws · 18.1.2.3` tells an operator
-            // whose box this is, where it came from, and how to reach it —
-            // the address alone never said any of those. `id` is the addr by
-            // construction, so it would only repeat the ip column.
             let mut cells = vec![
                 cell(format!("{cursor}{}", machine_label(m))),
                 cell(machine_kind(m).to_string()),
@@ -103,7 +91,6 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
             let mut row = Row::new(cells);
             if idx == selected {
                 // A faint background keeps the state hue legible on the
-                // cursor line, which REVERSED inverted.
                 row = row.style(Style::default().bg(selection_bg()));
             }
             row
@@ -111,7 +98,6 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
         .collect();
 
     // The cursor column: cells carry `▸ name`, so the header is indented to
-    // match the rows and `machine` no longer sits a column left of its data.
     let mut header = vec![" machine", "kind", "ip", "tts-threads", "policy", "state"];
     let mut widths: Vec<Constraint> = if compact {
         // Taken from the constant the compile-time guard checks.
@@ -121,12 +107,6 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
             .collect()
     } else {
         // Under the 100-column floor's 98 inside the border, so nothing clips.
-        // `policy` gave up two of its eleven columns to `state`, because policy
-        // is fixed-width by construction — `policy_summary` is always the four
-        // stage letters and three `>` (seven) — while `state` is a word of up to
-        // twelve. At thirteen it clipped `initializing` to `initializin` and a
-        // two-word state would have hidden its own noun. A column that truncates
-        // the verdict it exists to show is worse than a column with slack.
         vec![
             Constraint::Length(14),
             Constraint::Length(6),

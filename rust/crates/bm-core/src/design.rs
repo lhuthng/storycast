@@ -1,38 +1,4 @@
 //! Has the sound design changed since a chapter was merged?
-//!
-//! The mix reads four registries and seven knobs, and every one of them can be
-//! edited after a chapter is published: `:mix` writes the knobs, `:sound` writes
-//! the pools, the scene map is a hand-edited file. Nothing about a finished mp3
-//! records which design produced it, so the only way to know whether it is still
-//! current was for the operator to remember — which is a ritual, not a property,
-//! and `:sound` is where the ritual got forgotten.
-//!
-//! So a merge carries a **fingerprint** of the design it was produced under, and
-//! a merge whose fingerprint no longer matches the design on disk is not done.
-//!
-//! ## Only what the chapter reaches
-//!
-//! The fingerprint is per chapter, and it hashes the registry slice that
-//! *that* chapter's own script reaches — its scene labels' resolved rules, the
-//! palette entries its `music` values name, the pool entries `pick` can return
-//! for those tags, and the inject sounds it places. Retuning a clip no chapter
-//! in range uses changes nothing; retuning one a chapter uses changes exactly
-//! that chapter. A global knob (speed, the layer trims, `gap_ms`) is reached by
-//! every chapter, so changing one invalidates everything — which is correct,
-//! because it does change every mix.
-//!
-//! The reachability is a **superset** on purpose: `run_scenes` summarises a run
-//! by majority, so a label a script declares but no run lands on is still
-//! counted here. Over-counting can invalidate a chapter that would have come
-//! out identical; under-counting would leave a stale mp3 looking current, which
-//! is the failure this exists to prevent.
-//!
-//! ## What it deliberately does not cover
-//!
-//! The script's *text*. That is the render's input, and a script rewrite
-//! requeues render + merge through `reconcile` already. The design fields
-//! (`scene`, `music`, the sound items) are here because they change the mix
-//! without changing a single wav.
 
 use crate::ambience::{
     self, Duck, Layers, LegacyMusic, PaletteEntry, PausePlan, SceneMap, SceneRule,
@@ -45,10 +11,6 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// The merge's knobs: everything `assemble` takes that is not a file.
-///
-/// One struct rather than seven arguments so a caller cannot pass them in the
-/// wrong order, and so adding a knob to the mix is an edit here rather than a
-/// forgotten argument at four call sites.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Knobs {
     pub gap_ms: u32,
@@ -58,11 +20,8 @@ pub struct Knobs {
 }
 
 /// The registries a mix reads, loaded once for as many chapters as you like.
-///
 /// Loading never fails. A missing or unparseable registry degrades to "no sound
 /// design", which is exactly what `assemble` does with the scene map — a
-/// fingerprint computed from a degraded read is still a fingerprint, and
-/// refusing to produce one would mean a merge that cannot be stamped at all.
 #[derive(Debug, Clone, Default)]
 pub struct MergeDesign {
     map: SceneMap,
@@ -72,13 +31,10 @@ pub struct MergeDesign {
 }
 
 /// What one chapter's mix actually depends on. Serialized and hashed; every
-/// field is either reached by this chapter or global.
 #[derive(Serialize)]
 struct Reachable<'a> {
     knobs: Knobs,
     /// Scene label -> the rule it resolves to. Keyed by the label so that two
-    /// labels resolving to the same rule are still two entries: which labels a
-    /// script names is part of the design.
     scenes: BTreeMap<String, SceneRule>,
     /// Reverb name -> treatment, for the names those rules reach.
     reverbs: BTreeMap<String, ambience::VoiceFx>,
@@ -94,7 +50,6 @@ struct Reachable<'a> {
     duck: &'a Duck,
     pause: &'a PausePlan,
     /// The migration shim for scripts that predate the `music` field. A chapter
-    /// on disk that reads it is affected by an edit to it like any other input.
     legacy_scene_music: &'a LegacyMusic,
 }
 
@@ -138,7 +93,6 @@ impl MergeDesign {
         }
 
         // The reverb presets those rules name. A preset nothing here reaches is
-        // somebody else's chapter's problem.
         let mut reverbs: BTreeMap<String, ambience::VoiceFx> = BTreeMap::new();
         for rule in scenes.values() {
             if let Some(name) = &rule.reverb {
@@ -149,8 +103,6 @@ impl MergeDesign {
         }
 
         // The clips the mix can land on. Asked through `audio_pool::candidates`,
-        // the same function `pick` uses, so "what this scene can reach" and
-        // "what this scene got" cannot be two different answers.
         let effect_tags: Vec<String> = scenes
             .values()
             .flat_map(|r| r.effect.iter().cloned())
@@ -163,8 +115,6 @@ impl MergeDesign {
         let music_clips = named_candidates(&self.music_pool, &music_tags);
 
         // The inject sounds the script places. `Planned` lifts the sound items
-        // out of the lines and `injects_of` resolves them against the pool —
-        // both the merge's own calls, so this cannot drift from what plays.
         let planned = Planned::plan(&segments);
         let mut injects: BTreeMap<String, Sound> = BTreeMap::new();
         for fires in &planned.fires {
@@ -198,9 +148,6 @@ impl MergeDesign {
             legacy_scene_music: &self.map.legacy_scene_music,
         };
         // Serialization cannot fail for these types (no maps with non-string
-        // keys, no floats that are NaN in a registry a `load` accepted), but an
-        // empty string is the honest fallback: every chapter then hashes the
-        // same, so a design change invalidates all of them rather than none.
         let json = serde_json::to_string(&reachable).unwrap_or_default();
         stamp(&json)
     }
@@ -215,10 +162,6 @@ fn named_candidates(pool: &ClipPool, tags: &[String]) -> BTreeMap<String, Sound>
 }
 
 /// A hash prefix of the serialized design: identity without the whole blob.
-///
-/// Stable across runs and Rust versions — it is persisted on a task, so a hash
-/// that moved when the toolchain did would invalidate a whole library on an
-/// upgrade. `sha2` rather than `DefaultHasher` for exactly that reason.
 fn stamp(json: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -241,7 +184,6 @@ mod tests {
     }
 
     /// `name` keeps two tests from sharing a tree — this repo's `tmpdir`
-    /// convention, since `bm-core` has no `tempfile`.
     fn tmpdir(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("bm-design-{name}"));
         let _ = std::fs::remove_dir_all(&d);
@@ -423,7 +365,6 @@ mod tests {
         let kitchen = design.fingerprint(&kitchen_script(), knobs());
 
         // `gale` answers the same `wind` tag the mountain rule asks for, so it
-        // is in that chapter's candidate set and not in the kitchen's.
         write(
             &root,
             "assets/effect-pool.json",
@@ -485,7 +426,6 @@ mod tests {
         let kitchen = design.fingerprint(&kitchen_script(), knobs());
 
         // The kitchen rule's level, and the reverb preset the mountain rule
-        // names — two different edits, two different chapters.
         write(
             &root,
             "assets/scene-map.json",
@@ -561,10 +501,6 @@ mod tests {
         let kitchen = design.fingerprint(&kitchen_script(), knobs());
 
         // Every chapter's first turn is the headline, and `plan_turns` gives it
-        // `scene: ""` — which `match_scene` resolves through `default`. So
-        // `default` is not "the rule for chapters with no scene tag"; it is the
-        // rule the opening turn of *every* chapter is mixed with, and an edit to
-        // it invalidates the lot. Easy to assume otherwise, so it is pinned.
         write(
             &root,
             "assets/scene-map.json",
@@ -590,8 +526,6 @@ mod tests {
         assert_ne!(after.fingerprint(&kitchen_script(), knobs()), kitchen);
 
         // A chapter that names no scene at all is still distinguishable from
-        // one that does — it reaches fewer rules, and that is the whole point of
-        // a per-chapter stamp.
         let unlabelled = serde_json::json!({
             "segments": [
                 {"speaker": "A", "text": "Chương 3"},
@@ -640,7 +574,6 @@ mod tests {
     #[test]
     fn a_changed_clip_file_or_take_set_is_a_changed_design() {
         // The mix reads a *file* out of the entry, so replacing which takes an
-        // entry names changes the audio even though the tags and level did not.
         let (root, layout) = fixture("take-set");
         let design = MergeDesign::load(&layout);
         let mountain = design.fingerprint(&mountain_script(), knobs());

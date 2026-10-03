@@ -17,7 +17,6 @@ fn planned(segs: &[Value]) -> Planned {
 #[test]
 fn audition_finds_takes_whatever_tier_stored_them() {
     // The mp3 tier changed the default take extension; the audition pool
-    // read only `.wav` and went deaf on every chapter stored since.
     let d = tmpdir("audition-tiers");
     let l = crate::Layout::new(&d);
     std::fs::create_dir_all(l.script_dir()).unwrap();
@@ -103,10 +102,6 @@ fn punctuation_only_segments_are_folded_into_the_previous_line() {
 #[test]
 fn a_sound_between_two_halves_of_a_sentence_is_not_a_line() {
     // The injection IS the split. `say sưa lật xem` sits three words into
-    // the sentence, so the script writes the two halves as two items and
-    // the sound as a third, between them — and the page-turn fires at the
-    // seam, not after the whole line, which is where a tail would have put
-    // it and where nobody asked for it.
     let segs = vec![
         json!({"speaker": "Narrator", "text": "Doãn Lạc Ly cực kỳ vui vẻ, say sưa lật xem."}),
         json!({"sound": "page-turn", "mode": "overlap"}),
@@ -120,14 +115,12 @@ fn a_sound_between_two_halves_of_a_sentence_is_not_a_line() {
     );
     assert_eq!(seg_text(&p.speech[1]), "Rồi nàng cất sách đi.");
     // The sound is nowhere in the speech: the renderer is handed two lines
-    // and can never see the syntax, because there is no syntax to see.
     assert!(!p.speech.iter().any(crate::util::is_sound_item));
     assert!(p.fires_at(0), "the effect fires at the seam");
     assert!(!p.fires_at(1));
     assert_eq!(p.fires[0].len(), 1);
     assert_eq!(p.fires[0][0]["sound"], "page-turn");
     // The two halves are one place and one mood: the split is a seam, not
-    // a change of scene.
     assert_eq!(p.speech[1]["speaker"], p.speech[0]["speaker"]);
     // And it is two TTS calls, so the run breaks there.
     let r = p.runs();
@@ -139,9 +132,6 @@ fn a_sound_between_two_halves_of_a_sentence_is_not_a_line() {
 #[test]
 fn a_sound_at_the_end_of_a_line_cuts_nothing_and_fires_at_the_seam() {
     // "phun ra một ngụm máu tươi." already ends the line, so there is no
-    // second half to write. The spatter still fires at that point — the
-    // same place, reached without an empty item the renderer would have to
-    // skip.
     let segs = vec![
         json!({"speaker": "Narrator", "text": "Hắn gầm lên. Rồi phun ra một ngụm máu tươi."}),
         json!({"sound": "blood-spatter"}),
@@ -152,7 +142,6 @@ fn a_sound_at_the_end_of_a_line_cuts_nothing_and_fires_at_the_seam() {
     assert!(p.fires_at(0));
     assert!(!p.fires_at(1));
     // The run breaks anyway: the sound fires at that line's end, and
-    // inside a multi-line run that offset is unknowable.
     assert_eq!(p.runs().len(), 2);
 }
 
@@ -205,7 +194,6 @@ fn a_sound_leading_the_chapter_is_dropped_not_guessed() {
 #[test]
 fn an_item_with_text_and_a_sound_speaks_the_text_and_drops_the_sound() {
     // Malformed, and the validator refuses it — but the planner must not
-    // turn it into a lost line, because losing speech is the worse failure.
     let segs = vec![json!({"speaker": "A", "text": "Một câu.", "sound": "coin"})];
     let p = planned(&segs);
     assert_eq!(p.speech.len(), 1);
@@ -216,9 +204,6 @@ fn an_item_with_text_and_a_sound_speaks_the_text_and_drops_the_sound() {
 #[test]
 fn the_headline_is_dropped_before_any_sound_is_placed() {
     // `origin` is the post-headline item index — the space `segments` is in
-    // once the headline is gone — so a caller maps back to the raw array
-    // with `origin + 1`, not with `origin` alone. A sound in between shifts
-    // it too, which is why it is a recorded index rather than an offset.
     let segs = vec![
         json!({"speaker": "Narrator", "text": "Chương 7: Kiếm khí xung thiên"}),
         json!({"speaker": "A", "text": "Một."}),
@@ -316,9 +301,6 @@ fn headline_gets_its_own_leading_run_and_cache_file() {
 #[test]
 fn headline_skipped_when_the_digest_kept_its_own() {
     // Its own tag: `tmpdir` does `remove_dir_all` first, and tests run in
-    // parallel threads, so sharing a tag with the test above let one delete
-    // the other's chapter file mid-read — which surfaced as an unrelated
-    // `title_speech(..).unwrap()` on None.
     let (_d, l) = titled_layout("t4", "Chương 7: Kiếm khí xung thiên");
     let mut cast = Cast::new();
     cast.insert("Narrator".into(), "Đức Trí".into());
@@ -351,10 +333,6 @@ fn drop_headline_only_cuts_a_leading_chapter_heading() {
 #[test]
 fn under_title_mode_default_the_headline_is_spoken_even_when_the_prose_names_it() {
     // `Chapter 1: Maomao` is a chapter *about* Maomao, so its first line
-    // names her. The "the first line already said the title" guard must not
-    // read that as a repeat and silence the heading: under `default` the
-    // title IS the headline the planner itself dropped, so nothing has
-    // spoken it yet. The digest's own name for the chapter is ignored here.
     let d = tmpdir("title-default");
     std::fs::create_dir_all(d.join("adapters/jnovel-en-US/prompts")).unwrap();
     std::fs::write(
@@ -388,7 +366,6 @@ fn a_headline_is_recognized_in_both_languages() {
     assert!(is_headline("Chapter 7: Kiếm khí xung thiên"));
     assert!(is_headline("  Chapter 12 — x"));
     // The word must lead and be followed by a digit: prose that merely
-    // mentions the word is content, not a heading.
     assert!(!is_headline("Chapter without digits"));
     assert!(!is_headline("The Chapter 7 was long"));
 }
@@ -413,7 +390,6 @@ fn the_spoken_heading_follows_the_adapters_language() {
     assert_eq!(title.text, "Chapter 7, Kiếm khí xung thiên");
 
     // And the embedded English headline is recognized, so a script that
-    // kept it does not speak the chapter twice.
     let kept = vec![
         json!({"speaker": "Narrator", "text": "Chapter 7: Kiếm khí xung thiên"}),
         json!({"speaker": "A", "text": "mở đầu"}),

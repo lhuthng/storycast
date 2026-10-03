@@ -3,24 +3,14 @@ use std::io::{Read, Seek};
 use std::path::Path;
 
 /// Gemini returns 24 kHz; VieNeu renders at 48 kHz.
-///
-/// Read off the engine declarations rather than spelled a second time: the
-/// number is the engine's own fact (see `voices::EngineDecl`), and this is the
-/// consumer that used to hold the only copy.
 pub const GEMINI_RATE: u32 = crate::voices::GEMINI.sample_rate;
 pub const VIENEU_RATE: u32 = crate::voices::VIENEU.sample_rate;
 
 /// The rate a chapter rendered by `engine` is assembled at.
-///
-/// A name nobody declared is **not** VieNeu's: `output_format` answers with
-/// Gemini's, which is the historical `else` and the safe direction for an
-/// engine whose audio nobody has measured.
 pub fn sample_rate_for(engine: &str) -> u32 {
     crate::voices::output_format(engine).0
 }
 
-// ---------------------------------------------------------------------------
-// minimal RIFF/WAVE
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -138,19 +128,11 @@ pub fn silent_wav(path: &Path, seconds: f64, rate: u32) -> Result<()> {
 }
 
 /// Duration of a WAV in seconds, from the header plus the file length.
-///
-/// Reads kilobytes instead of the whole file: the merge path asks only this of
-/// the mix (the layers' clock, the durations a plan needs), and a chapter's
-/// mix WAV is tens of megabytes. Returns `Err` for a file that is not a WAV or
-/// has no data chunk, exactly as [`read_wav`] would, so callers can fall back
-/// to the full read where they actually need the samples.
 pub fn wav_seconds(path: &Path) -> Result<f64> {
     wav_info(path).map(|i| i.seconds())
 }
 
 /// Header facts of a WAV: the params the concat step matches on, plus the
-/// data length to turn into frames. A full [`read_wav`] copies every sample;
-/// the merge path mostly needs only this.
 pub struct WavInfo {
     pub channels: u16,
     pub sample_rate: u32,

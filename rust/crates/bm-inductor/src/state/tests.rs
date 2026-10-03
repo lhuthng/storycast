@@ -14,12 +14,6 @@ fn fixture() -> (tempfile::TempDir, Inner) {
 }
 
 /// The same fixture, born the way a real process is: **held**.
-///
-/// [`fixture`] deliberately hands back a cluster somebody has started,
-/// because most of the tests below are about work being handed out. The
-/// gate's own tests need the other state, and they ask for it here rather
-/// than reaching into the field, so a change to the default lands in one
-/// place.
 fn held_fixture() -> (tempfile::TempDir, Inner) {
     let d = tempfile::tempdir().unwrap();
     let layout = Layout::new(d.path());
@@ -51,8 +45,6 @@ fn old_shape_doc() -> Value {
 }
 
 /// The caches are keyed by adapter **and** engine, and a workspace from
-/// before the split is renamed into that shape at load rather than
-/// re-rendering every chapter it already spoke.
 #[test]
 fn load_re_keys_a_pre_split_cache_instead_of_orphaning_it() {
     let (_d, mut inner) = fixture();
@@ -144,15 +136,6 @@ fn ledger_splits_config_from_runtime_and_migrates_old_shape() {
 #[test]
 fn a_ledger_written_before_batching_loads_every_row() {
     // **The load path where a new field can destroy the library.** The live
-    // ledger is thousands of rows and none of them carries a `batch` key
-    // the field arrived with batching. `load_new_shape` deserialises with
-    // `if let Ok(task) = from_value::<Task>(..)`, so a field that did *not*
-    // default would not raise anything: it would drop every row, and the
-    // next `save()` would write the empty result back over them. The rows
-    // below are copied verbatim out of `workspaces/beyond-myriads/ledger.json`
-    //, a render row at the current shape, and a crawl row at the oldest
-    // shape (no `take`, no `design`), so this is anchored to the real file
-    // rather than to an imagined one.
     let (_d, mut inner) = fixture();
     let ledger = inner.layout.ledger();
     let rows = serde_json::json!([
@@ -197,7 +180,6 @@ fn a_ledger_written_before_batching_loads_every_row() {
     );
 
     // The write side carries it, so a fresh ledger round-trips instead of
-    // holding the field only in memory.
     inner.save();
     let back: Value = bm_core::read_json(&ledger).unwrap();
     let written = back["tasks"].as_array().unwrap();
@@ -213,11 +195,6 @@ fn a_ledger_written_before_batching_loads_every_row() {
 #[test]
 fn a_ledger_row_this_build_cannot_read_is_kept_not_dropped() {
     // **The failure mode this closes.** `load_new_shape` reads each row with
-    // `if let Ok(task) = from_value::<Task>(..)`, so an unreadable row
-    // disappeared with no error, no event and no count, and then `save()`
-    // wrote the shortened ledger back over the full one. With thousands of
-    // rows in the live library, any future field added to `Task` without
-    // `#[serde(default)]` would delete it on the next start, quietly.
     let (_d, mut inner) = fixture();
     let ledger = inner.layout.ledger();
     let good = serde_json::json!({
@@ -226,8 +203,6 @@ fn a_ledger_row_this_build_cannot_read_is_kept_not_dropped() {
         "updated": 1790069000
     });
     // A state this build does not know, exactly what a newer inductor's row
-    // looks like to an older one. `stage`/`chapter` stay readable, which is
-    // also what lets the event name the row.
     let unknown = serde_json::json!({
         "chapter": 7, "stage": "render", "state": "quarantined", "attempts": 2,
         "assigned_to": "w1", "lease_until": 1790000000, "detail": "from the future",
@@ -273,10 +248,6 @@ fn a_ledger_row_this_build_cannot_read_is_kept_not_dropped() {
     let rows = back["tasks"].as_array().unwrap();
     assert_eq!(rows.len(), 2, "both rows survive the round trip");
     // The two rows are treated differently on purpose, and that is the whole
-    // design: a row this build *understands* is rewritten in the current
-    // schema (it gains `affinity`/`design`/`take`/`batch` if it lacked them),
-    // while a row it does not is preserved untouched. So the assertion is
-    // structural equality only for the one that was never parsed.
     assert!(
         rows.contains(&unknown),
         "the unreadable one, intact: {rows:?}"
@@ -288,7 +259,6 @@ fn a_ledger_row_this_build_cannot_read_is_kept_not_dropped() {
     );
 
     // Reloading must not duplicate it: the preserved set is re-derived from
-    // the file on each load, not accumulated across them.
     let mut again = Inner::distributing(inner.layout.clone(), Settings::default());
     again.load_ledger();
     assert_eq!(
@@ -309,9 +279,6 @@ fn a_ledger_row_this_build_cannot_read_is_kept_not_dropped() {
 #[test]
 fn a_ledger_of_only_unreadable_rows_is_not_an_empty_ledger() {
     // `check_profile` passes an *empty* ledger and lets reconcile adopt the
-    // workspace's profile. Reading a ledger we could not fully parse as
-    // empty would stamp this book's profile over rows that may belong to
-    // another one, the mixing that gate exists to prevent.
     let (_d, mut inner) = fixture();
     inner.settings.profile = ptr("xianxia", "aaa");
     let ledger = inner.layout.ledger();
@@ -346,21 +313,6 @@ fn a_ledger_of_only_unreadable_rows_is_not_an_empty_ledger() {
 }
 
 /// A **real** ledger round-trips through the real load/save path.
-///
-/// The one check that protects the library itself. `load_new_shape` + `save`
-/// is the pair that can shrink a ledger, and a synthetic fixture cannot prove
-/// it on a file with thousands of rows in every shape the project has ever
-/// written, including rows from builds that predate fields this one has.
-///
-/// Opt-in and pointed at a *file*, so it never depends on a checkout's live
-/// state. **Point it at a copy**: it writes through `save()` into the same
-/// directory it read from, which is the point, that is the real path.
-///
-/// ```text
-/// cp workspaces/<name>/ledger.json /tmp/ledger.json
-/// BM_LEDGER_ROUNDTRIP=/tmp/ledger.json cargo test -p bm-inductor \
-///   --bin bm-inductor a_real_ledger_round_trips -- --ignored --nocapture
-/// ```
 #[test]
 #[ignore = "writes through save(); point BM_LEDGER_ROUNDTRIP at a COPY of a real ledger"]
 fn a_real_ledger_round_trips() {
@@ -473,7 +425,6 @@ fn save_writes_runtime_only() {
 #[test]
 fn migration_holds_for_the_live_ledger() {
     // Local-only gate (not CI): point at a copy of the real ledger and
-    // prove the migration loses nothing at real scale.
     let src = std::env::var("BM_REAL_LEDGER").unwrap_or_default();
     if src.is_empty() {
         return;
@@ -564,8 +515,6 @@ fn swap_invalidates_only_the_characters_files() {
     assert!(!inner.render_takes_done(1));
     assert_eq!(inner.tasks["merge:1"].state, TaskState::Pending);
     // The swap's *meaning* is checked through the reader (which resolves
-    // keys back to names), and the stored form is checked directly, the
-    // file persists keys now, so both assertions matter.
     let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
     assert_eq!(cast["A"], "Minh Triết");
     assert_eq!(cast["B"], "Adam", "untouched speakers survive");
@@ -578,10 +527,6 @@ fn swap_invalidates_only_the_characters_files() {
 #[test]
 fn surgical_swap_rerenders_unpinned_and_forces_only_the_stale_set() {
     // The flaw this pins: a swap deleted stale files only locally, the
-    // offer carried the whole chapter, and whichever cold box asked next
-    // re-spoke everything from scratch. Now the re-render is unpinned and
-    // the offer forces only what this store lacks, the swapped voice
-    // so whoever asks speaks one file while untouched voices keep cache.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     std::fs::write(
@@ -670,7 +615,6 @@ fn surgical_swap_rerenders_unpinned_and_forces_only_the_stale_set() {
     );
 
     // The local node takes merges pinned to it, like any box takes its
-    // own pin.
     let t = inner.tasks.get_mut("render:1:0").unwrap();
     t.state = TaskState::Pending;
     t.assigned_to = None;
@@ -683,8 +627,6 @@ fn surgical_swap_rerenders_unpinned_and_forces_only_the_stale_set() {
 #[test]
 fn merge_runs_on_whichever_box_asks_first() {
     // No row is ever pinned: a merge pulls the pieces it lacks from the
-    // inductor, so completions record nothing about who rendered what
-    // and the merge row exists unpinned for whoever asks first.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     std::fs::write(
@@ -702,7 +644,6 @@ fn merge_runs_on_whichever_box_asks_first() {
         .workers
         .insert("remote-w".into(), "192.168.2.2".into());
     // The plan adopts the cache that is already here, so the takes are
-    // `Done`; put the first one back in flight to exercise the report.
     inner.materialize_render_takes(7);
     let mut t = Task::new_take(7, 0);
     t.state = TaskState::Running;
@@ -726,8 +667,6 @@ fn merge_runs_on_whichever_box_asks_first() {
     );
 
     // A renderer with no known machine, a hand-written ledger, or a
-    // report from a worker that never registered. The local node shares
-    // the inductor's store, which is what this always was.
     std::fs::write(
         layout.script(8),
         r#"{"segments":[{"speaker":"A","text":"x"},{"speaker":"B","text":"z"}]}"#,
@@ -757,7 +696,6 @@ fn merge_runs_on_whichever_box_asks_first() {
 #[test]
 fn merge_without_a_payload_needs_the_file_on_disk() {
     // Local nodes ship no mp3_b64; the file itself is the evidence. A
-    // report with neither is a failure, not a silent Done.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     for ch in [8u32, 9] {
@@ -787,9 +725,6 @@ fn merge_without_a_payload_needs_the_file_on_disk() {
 #[test]
 fn render_offer_requires_the_upload_capability() {
     // Staged rollout: an agent without `render-segments` keeps every
-    // other stage but never renders (its report would fail the gate
-    // anyway). Unknown workers are allowed, failing closed would strand
-    // anything that never registered.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     std::fs::write(
@@ -853,18 +788,12 @@ fn beat_with_load(worker: &str, addr: &str, mem_pct: Option<f32>) -> bm_proto::H
 }
 
 /// A beat that says which `(stage, adapter)` slots the box's sources bundle
-/// covers, the adapter being the one this fixture's layout is bound to.
-///
-/// The fixture's caches are keyed by `default` — `Layout::new` reads no
-/// pointer, so that is the adapter in force — which is also what the offer
-/// names on its binding.
 fn beat_with_bundle(worker: &str, addr: &str, stages: &[&str]) -> bm_proto::Heartbeat {
     let slots: Vec<(&str, &str)> = stages.iter().map(|s| (*s, "default")).collect();
     beat_with_slots(worker, addr, &slots)
 }
 
 /// The same, with the adapter spelled out — for the case where the box's
-/// bundle is the *other* language's.
 fn beat_with_slots(worker: &str, addr: &str, slots: &[(&str, &str)]) -> bm_proto::Heartbeat {
     let mut h = beat_with_load(worker, addr, None);
     h.sources_stages = slots
@@ -877,17 +806,6 @@ fn beat_with_slots(worker: &str, addr: &str, slots: &[(&str, &str)]) -> bm_proto
 }
 
 /// **A chapter written in a language nothing here can voice is never
-/// cooked.** The fork line says an adapter has one language and it is both
-/// the source's and the target's, so a digest writes a script in it and a
-/// render bakes audio in it — and both are cached under a content-addressed
-/// name, so a wrong-language chapter is forever. VieNeu declares `vi-VN`;
-/// an `en-US` adapter behind it is a mismatch rather than a setting.
-///
-/// `crawl` and `prepare` are deliberately outside the gate: the crawled
-/// text and the quote split are properties of the *source*, so the two
-/// stages that read the source still run while the language is being
-/// worked out. That half is asserted here too, because a gate that
-/// refused everything would pass a test that only checked the refusal.
 #[test]
 fn a_wrong_language_chapter_is_never_offered_a_digest_or_a_render() {
     let _g = env_lock();
@@ -898,7 +816,6 @@ fn a_wrong_language_chapter_is_never_offered_a_digest_or_a_render() {
     std::fs::write(layout.chapter_txt(2), "Chương 2: Y\n\nbody\n").unwrap();
 
     // An English adapter that declares itself, on a checkout whose engine
-    // is VieNeu.
     let home = layout
         .root
         .join(bm_core::paths::ADAPTERS_DIR)
@@ -917,8 +834,6 @@ fn a_wrong_language_chapter_is_never_offered_a_digest_or_a_render() {
     inner.workers.insert("w".into(), "192.168.2.2".into());
 
     // The digest is withheld — and there is nothing else to hand out, so
-    // the box asks and gets nothing. A gate that let it through would
-    // return `digest:1` here.
     assert!(
         inner.offer("w").is_none(),
         "no digest in a language the bound engine cannot voice"
@@ -930,7 +845,6 @@ fn a_wrong_language_chapter_is_never_offered_a_digest_or_a_render() {
     );
 
     // A crawl still is offered, which is the other half of the fork line:
-    // the source's text and its quote split are not the adapter's language.
     inner
         .tasks
         .insert(Task::new(2, Stage::Crawl).id(), Task::new(2, Stage::Crawl));
@@ -939,12 +853,10 @@ fn a_wrong_language_chapter_is_never_offered_a_digest_or_a_render() {
         .expect("a crawl reads the source, not the language");
     assert_eq!(offer.task_id, "crawl:2");
     // Finished (or re-provisioned away), so the next ask is about the
-    // digest again rather than about this row.
     inner.tasks.get_mut("crawl:2").unwrap().state = TaskState::Done;
     assert!(inner.offer("w").is_none(), "still no digest");
 
     // The engine that declares the language: the same row is offered, which
-    // is what proves the gate reads the engine and not, say, the pack.
     inner.settings.engine = "gemini".into();
     let offer = inner.offer("w").expect("gemini declares en-US");
     assert_eq!(offer.task_id, "digest:1");
@@ -952,8 +864,6 @@ fn a_wrong_language_chapter_is_never_offered_a_digest_or_a_render() {
 }
 
 /// The manifest is the authority over the id, and the id still refuses when
-/// there is none: the pre-manifest adapters shipped today keep exactly the
-/// behaviour they had before this file existed.
 #[test]
 fn the_adapter_manifest_is_believed_over_its_folder_name() {
     let _g = env_lock();
@@ -963,9 +873,6 @@ fn the_adapter_manifest_is_believed_over_its_folder_name() {
     std::fs::write(layout.chapter_txt(1), "Chương 1: X\n\nbody\n").unwrap();
 
     // The folder says `vi-VN`, the declaration says `en-US`. The
-    // declaration is what decides which of the two is the mismatch, and
-    // this is the whole reason the file exists: a name is a convention
-    // and a language is not.
     let home = layout
         .root
         .join(bm_core::paths::ADAPTERS_DIR)
@@ -987,7 +894,6 @@ fn the_adapter_manifest_is_believed_over_its_folder_name() {
         "the folder's vi-VN is not believed over the declaration"
     );
     // The same folder with no manifest at all: `vi-VN` derived from the
-    // id, VieNeu declares it, offered.
     std::fs::remove_file(bm_core::adapter::path(&home)).unwrap();
     assert_eq!(
         inner.offer("w").expect("vi-VN behind VieNeu").task_id,
@@ -996,14 +902,6 @@ fn the_adapter_manifest_is_believed_over_its_folder_name() {
 }
 
 /// **A stage is not a slot.** Every adapter on the inductor ships to every
-/// box, so a box may hold several languages and a bundle that names a stage
-/// does not say which of them it can run — this box holds the other one's
-/// prompts, and a digest offered here writes a script in a language none of
-/// its files are written in.
-///
-/// The pair is the unit, in both directions: the same box is offered the
-/// work the moment its bundle names the adapter the task is for, which is
-/// the half that keeps the gate from being a blanket refusal.
 #[test]
 fn a_slot_is_a_stage_and_its_language() {
     let _g = env_lock();
@@ -1013,7 +911,6 @@ fn a_slot_is_a_stage_and_its_language() {
     std::fs::write(layout.chapter_txt(1), "Chương 1: X\n\nbody\n").unwrap();
 
     // This checkout cooks `vi-VN`: the layout's adapter is what every cache
-    // path is keyed by, and what the offer's binding will name.
     inner.layout.adapter = "xianxia-vi-VN".into();
     inner.settings.profile.pack.name = "xianxia".into();
     inner.settings.engine = "vieneu".into();
@@ -1040,22 +937,12 @@ fn a_slot_is_a_stage_and_its_language() {
     let offer = inner.offer("w").expect("the slot the task is for");
     assert_eq!(offer.task_id, "digest:1");
     // …and the offer says which binding those bytes are made under, which
-    // is the other half of this: the box keys its cast and its segments by
-    // it rather than by whatever it resolved for itself.
     assert_eq!(offer.adapter, "xianxia-vi-VN");
     assert_eq!(offer.pack, "xianxia");
     assert_eq!(offer.engine, inner.settings.engine);
 }
 
 /// **The stage a box has no files for is not offered to it.** ch426's
-/// failure: the box's policy enabled `digest`, its sources bundle had no
-/// `prompts/`, and the stage died on `reading prompt template … No such file
-/// or directory` on every retry while the operator saw an idle worker.
-///
-/// The policy is what the operator asked for; the reported bundle is what
-/// the box was actually handed. Neither alone is enough to schedule on, and
-/// an agent that reports nothing is still trusted — no opinion is not a
-/// verdict, which is the same rule the capability gate follows.
 #[test]
 fn a_stage_the_reported_bundle_does_not_cover_is_withheld() {
     let _g = env_lock();
@@ -1066,7 +953,6 @@ fn a_stage_the_reported_bundle_does_not_cover_is_withheld() {
     inner.enqueue_translate(1, 1);
     inner.workers.insert("w".into(), "192.168.2.2".into());
     // The offer marks the row `Assigned`; put it back so the next case can
-    // be asked the same question.
     let rearm = |inner: &mut Inner| {
         let t = inner.tasks.get_mut("digest:1").unwrap();
         t.state = TaskState::Pending;
@@ -1119,9 +1005,6 @@ fn a_stage_the_reported_bundle_does_not_cover_is_withheld() {
 #[test]
 fn offer_withholds_a_box_the_oom_killer_is_circling() {
     // The guardrail for the boxes this repo actually runs: one TTS sidecar
-    // is ~2.85 GB resident, so a box over the ceiling is one that will not
-    // finish what it is handed. Withheld, not failed, nothing moves and
-    // the same task is offered to the next box that asks.
     let (_d, mut inner) = fixture();
     inner.workers.insert("w1".into(), "192.168.2.2".into());
     inner.caps.insert("w1".into(), vec!["crawl".into()]);
@@ -1137,7 +1020,6 @@ fn offer_withholds_a_box_the_oom_killer_is_circling() {
     };
 
     // No opinion is not a verdict: an agent that never measured (older
-    // agents, a registration) is offered work exactly as before.
     assert!(inner.offer("w1").is_some(), "an unmeasured box still works");
     rearm(&mut inner);
 
@@ -1155,7 +1037,6 @@ fn offer_withholds_a_box_the_oom_killer_is_circling() {
         "a box at 94% gets nothing — it would fail the task and strike the chapter"
     );
     // Untouched, not stranded: still Pending with no assignee, so the next
-    // box that asks can have it, and this one keeps it after it settles.
     let t = inner.tasks.get("crawl:5").unwrap();
     assert_eq!(t.state, TaskState::Pending);
     assert!(t.assigned_to.is_none());
@@ -1164,10 +1045,6 @@ fn offer_withholds_a_box_the_oom_killer_is_circling() {
 #[test]
 fn a_duplicate_sidecar_is_an_event_on_the_edge_not_on_every_beat() {
     // Two `bm-tts` on one box is the OOM this cluster kept taking, and the
-    // count is the one fact it could not see. The dispatcher polls every
-    // couple of seconds, so this must fire on the transition, an event per
-    // poll is a log nobody reads, and one that never fires is why the bug
-    // survived.
     let (_d, mut inner) = fixture();
     let errors = |inner: &Inner| {
         inner
@@ -1203,7 +1080,6 @@ fn a_duplicate_sidecar_is_an_event_on_the_edge_not_on_every_beat() {
     assert_eq!(errors(&inner), 2, "a recurrence is news again");
 
     // An older agent reports nothing; that is not "was fine", so a box
-    // whose first sighting is already wrong still fires.
     let mut fresh = fixture().1;
     let mut old = beat_with_load("w2", "192.168.2.3", None);
     old.sidecars = Some(3);
@@ -1222,10 +1098,6 @@ fn a_duplicate_sidecar_is_an_event_on_the_edge_not_on_every_beat() {
 #[test]
 fn merge_affinity_never_gates_the_local_node() {
     // Affinity is an optimization for remote boxes, not a gate for the
-    // local one: it shares the inductor's segment store, so it takes any
-    // pending merge, pinned to a live box, a ffmpeg-less one, or a dead
-    // one. Otherwise a render on a merge-disabled box strands its merge
-    // pending for ever while merge-enabled machines stand idle.
     let (_d, mut inner) = fixture();
     for stage in [Stage::Crawl, Stage::Digest, Stage::Render] {
         let mut t = Task::new(5, stage);
@@ -1270,7 +1142,6 @@ fn merge_affinity_never_gates_the_local_node() {
 #[test]
 fn offer_marks_the_local_node() {
     // The provisioner's `Ssh.local` and the offer's `local_node` run on
-    // the same predicate, one fact, checked on both sides of the wire.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     std::fs::write(
@@ -1303,8 +1174,6 @@ fn offer_marks_the_local_node() {
 }
 
 /// The two credential tests below mutate the process environment, which is
-/// global while cargo runs tests in threads. Without this they can read
-/// each other's value and flake; with it, each is deterministic.
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -1313,9 +1182,6 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 #[test]
 fn a_digest_offer_carries_the_key_its_analyzer_needs() {
     // The outage: `192.168.2.2` (alias `marmot`) holds no key file —
-    // provisioning never copies `.bm/` — so every digest offered there
-    // died on `GEMINI_API_KEY missing` however carefully this inductor
-    // was set up. The key now rides the offer.
     let _g = env_lock();
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
@@ -1351,9 +1217,6 @@ fn remix_saves_the_mix_and_requeues_only_merges() {
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     // A script is what makes a chapter a chapter: the fingerprint is
-    // computed from it, so without one there is no mix to invalidate and
-    // the merge is left where it is (pinned in
-    // `a_merge_with_no_script_is_left_alone`).
     std::fs::write(
         layout.script(1),
         r#"{"segments":[{"speaker":"A","text":"Chương 1"}]}"#,
@@ -1386,10 +1249,6 @@ fn remix_saves_the_mix_and_requeues_only_merges() {
         (1.5, 0.5, 0.0, 0.25)
     );
     // The published merge comes back and its mp3 goes with it. The render
-    // keeps its cache, tempo and the layer trims apply at merge time, so
-    // no segment is re-spoken. The shelved merge never published anything,
-    // so it has no mix to be wrong about and a knob change does not
-    // un-shelve it.
     let m = &inner.tasks["merge:1"];
     assert_eq!(m.state, TaskState::Pending);
     assert_eq!(m.attempts, 0);
@@ -1416,8 +1275,6 @@ fn remix_saves_the_mix_and_requeues_only_merges() {
 }
 
 /// Two chapters, each in a different scene, and the registries that give
-/// each one a clip of its own, so the fingerprint has something to be
-/// per-chapter *about*.
 fn design_fixture() -> (tempfile::TempDir, Inner) {
     let (d, inner) = fixture();
     let layout = inner.layout.clone();
@@ -1457,7 +1314,6 @@ fn design_fixture() -> (tempfile::TempDir, Inner) {
 }
 
 /// A merge that has published: Done, its mp3 on disk, and stamped under the
-/// design in force, the state `offer` leaves a completed merge in.
 fn published(inner: &mut Inner, chapter: u32) {
     let design = bm_core::design::MergeDesign::load(&inner.layout);
     let stamp = inner
@@ -1475,9 +1331,6 @@ fn published(inner: &mut Inner, chapter: u32) {
 #[test]
 fn a_sound_edit_reaches_only_the_chapters_that_use_it() {
     // The requirement, at the ledger. Retuning one clip requeues the
-    // chapters whose mix can land on it and leaves the rest published
-    // and the fingerprint is what decides the scope, so there is no second
-    // rule to keep in step with the mixer.
     let (_d, mut inner) = design_fixture();
     let layout = inner.layout.clone();
     for ch in [1u32, 2] {
@@ -1511,15 +1364,12 @@ fn a_sound_edit_reaches_only_the_chapters_that_use_it() {
     assert!(layout.final_mp3(2).is_file());
 
     // Idempotent: the requeue wrote the new stamp, so a second look finds
-    // nothing. Without that write every pass would requeue for ever.
     assert!(inner.op_sound_changed().contains("nothing to requeue"));
 }
 
 #[test]
 fn a_master_knob_reaches_every_published_chapter() {
     // A gain is applied to every mix, so it is in every chapter's stamp and
-    // every published merge comes back. The count in the message is the
-    // check that the scope is the library and not one chapter.
     let (_d, mut inner) = design_fixture();
     let layout = inner.layout.clone();
     for ch in [1u32, 2] {
@@ -1542,7 +1392,6 @@ fn a_master_knob_reaches_every_published_chapter() {
         assert!(!layout.final_mp3(ch).is_file(), "ch{ch}");
     }
     // The render is not this pass's business: tempo and the trims apply at
-    // merge time, so no segment is re-spoken and no cache is dropped.
     assert_eq!(inner.tasks["render:1"].state, TaskState::Done);
     assert!(layout.seg_dir("vieneu", 1).join("0000_Adam.wav").is_file());
 }
@@ -1550,10 +1399,6 @@ fn a_master_knob_reaches_every_published_chapter() {
 #[test]
 fn an_unstamped_merge_is_adopted_not_invalidated() {
     // Every merge published before the stamp existed has no stamp. Reading
-    // that as "stale" would re-merge the whole library on the first boot
-    // after the upgrade, and those mp3s are not reproducible, TTS is
-    // stochastic, so re-merging is a re-recording, not a cache miss. So a
-    // routine pass adopts: it writes the stamp and leaves the artifact.
     let (_d, mut inner) = design_fixture();
     let layout = inner.layout.clone();
     published(&mut inner, 1);
@@ -1568,7 +1413,6 @@ fn an_unstamped_merge_is_adopted_not_invalidated() {
     assert!(inner.invalidate_stale_design(true).is_empty());
 
     // A caller that has *just* changed the design is the other case: an
-    // unstamped merge is then by definition one that change invalidated.
     inner.tasks.get_mut("merge:1").unwrap().design = None;
     let msg = inner.op_sound_changed();
     assert!(msg.contains("1 merge(s) requeued"), "{msg}");
@@ -1578,10 +1422,6 @@ fn an_unstamped_merge_is_adopted_not_invalidated() {
 #[test]
 fn reconcile_adopts_the_stamp_without_undoing_a_promotion() {
     // The order in `reconcile` is load-bearing: the promotion loop marks a
-    // merge Done on `has_mp3` alone, so an invalidation that ran before it
-    // would have its deletion undone by the very promotion it was trying to
-    // prevent. Here the merge is Pending with its mp3 already home, the
-    // promotion runs, then the adoption, and the file survives both.
     let (_d, mut inner) = design_fixture();
     let layout = inner.layout.clone();
     let mut t = Task::new(1, Stage::Merge);
@@ -1600,9 +1440,6 @@ fn reconcile_adopts_the_stamp_without_undoing_a_promotion() {
 #[test]
 fn a_merge_with_no_script_is_left_alone() {
     // No script means the chapter cannot be planned, so there is no mix to
-    // be wrong about, and this pass will not delete a published mp3 on the
-    // strength of a read that failed. An unstampable merge is `None`, and
-    // `None` is a skip rather than a verdict.
     let (_d, mut inner) = design_fixture();
     let layout = inner.layout.clone();
     published(&mut inner, 1);
@@ -1619,9 +1456,6 @@ fn a_merge_with_no_script_is_left_alone() {
 #[test]
 fn a_completed_merge_carries_the_design_it_was_mixed_under() {
     // The stamp is written where the merge is marked done, not where it is
-    // offered. A task that never finished has no artifact to make a claim
-    // about, and a stamp taken at offer time would describe a design the
-    // worker may not have mixed with.
     let (_d, mut inner) = design_fixture();
     let layout = inner.layout.clone();
     let mut t = Task::new(1, Stage::Merge);
@@ -1639,7 +1473,6 @@ fn a_completed_merge_carries_the_design_it_was_mixed_under() {
         .expect("a finished merge says which design it was mixed under");
 
     // And it is the design in force, not a placeholder: the next sound edit
-    // has to disagree with it, which is the whole reason to carry it.
     std::fs::write(
         layout.pool(bm_core::audio_pool::PoolKind::Effect),
         r#"{
@@ -1678,8 +1511,6 @@ fn rerender_all_requeues_every_render_with_its_merge() {
     inner.tasks.insert(d.id(), d);
 
     // Through `exclusive_request`, which is the only way the API reaches
-    // it now: an idle cluster runs it at once, so this still asserts the
-    // surgery itself rather than the queue.
     let msg = inner
         .exclusive_request(ExclusiveOp::Rerender)
         .expect("idle rerender");
@@ -1737,12 +1568,6 @@ fn remerge_all_requeues_only_merges_and_keeps_renders() {
 #[test]
 fn a_digest_offer_carries_the_inductors_analyzer_chain() {
     // The other half of the same defect. The backend *name* already
-    // travelled in `analyzer`, but the model chain did not, so a
-    // provisioned box, which has no `.bm/settings.json` to read, because
-    // provisioning copies the sources bundle and never `.bm/`, digested
-    // with the compiled-in `Settings::default()`
-    // and called `gemini-3.5-flash` long after the operator had switched
-    // to `-lite`. No env involved: settings live on `Inner`.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     std::fs::create_dir_all(layout.chapters()).unwrap();
@@ -1767,15 +1592,11 @@ fn a_digest_offer_carries_the_inductors_analyzer_chain() {
 #[test]
 fn a_crawl_offer_carries_no_credentials_at_all() {
     // A crawl reads no provider, so the narrowing is what makes this empty.
-    // The keys are set here on purpose: without them the assertion would
-    // hold for the wrong reason, an environment that happened to be bare
-    // and would keep passing if the narrowing were deleted.
     let _g = env_lock();
     let (_d, mut inner) = fixture();
     inner.settings.analyzer = "gemini".into();
     inner.settings.engine = "gemini".into();
     // The default mode is manual (nothing fetches); this test is about the
-    // crawl offer's contents, so turn the scripted path on.
     inner.settings.crawl.mode = "script".into();
     inner.settings.url_template = "https://site.example/chuong-{n}".into();
     inner.enqueue_translate(1, 1);
@@ -1800,11 +1621,6 @@ fn a_crawl_offer_carries_no_credentials_at_all() {
 #[test]
 fn swap_leaves_a_chapter_the_character_is_not_in_alone() {
     // The narrowing that survives content addressing: **relevance**, not
-    // "the local store looks complete". The old rule read the disk, and the
-    // disk cannot prove that a legacy-named file holds the current text
-    // that is the whole reason takes are content-addressed now. What a swap
-    // can still say for certain is that a chapter this character never
-    // speaks in did not change.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     std::fs::write(
@@ -1842,8 +1658,6 @@ fn swap_leaves_a_chapter_the_character_is_not_in_alone() {
 #[test]
 fn digest_completion_with_a_changed_script_invalidates_render() {
     // A re-digest rewrites run boundaries and voices: the kept render
-    // would speak the old dramatization under the new one. Segments, mp3
-    // and both tasks go; attempts reset because this is new work.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     std::fs::write(
@@ -1878,7 +1692,6 @@ fn digest_completion_with_a_changed_script_invalidates_render() {
     );
     assert_eq!(inner.tasks["merge:12"].state, TaskState::Pending);
     // A known invalidation never adopts: the old bytes are superseded, not
-    // mistaken for the new take because the legacy name happened to match.
     assert!(!seg.join("0000_Adam.wav").exists(), "stale segments go");
     let plan = bm_core::assemble::RenderPlan::load(&layout.plan(12)).unwrap();
     assert!(
@@ -2002,10 +1815,6 @@ fn retag_dry_run_reports_without_writing() {
 #[test]
 fn a_chapter_becomes_one_task_per_take_and_adopts_its_cache() {
     // The unit of render work is a **take**, not a chapter. A local edit
-    // therefore re-speaks one segment instead of shipping the chapter and
-    // hoping the worker re-derives the same names, and the *first* plan
-    // adopts the cache already on disk, so writing one does not re-speak
-    // the library.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     let mut segs = Vec::new();
@@ -2024,7 +1833,6 @@ fn a_chapter_becomes_one_task_per_take_and_adopts_its_cache() {
     let seg = layout.seg_dir("vieneu", 9);
     std::fs::create_dir_all(&seg).unwrap();
     // Alternating speakers = 32 single-line runs, named the legacy way:
-    // 0000..0031. Three of them are missing.
     for i in 0..32u32 {
         if [5, 17, 30].contains(&i) {
             continue;
@@ -2057,7 +1865,6 @@ fn a_chapter_becomes_one_task_per_take_and_adopts_its_cache() {
     assert_eq!(inner.tasks["render:9:4"].state, TaskState::Done);
 
     // The take's offer is self-sufficient: text and voice travel with it,
-    // so the worker needs neither the script nor the cast.
     let (unit, hash, force) = inner.take_spec(9, Some(5)).expect("a spec per take");
     assert_eq!(unit.speaker, "B");
     assert!(!unit.text.is_empty(), "the worker gets text, not a key");
@@ -2087,10 +1894,6 @@ fn a_chapter_becomes_one_task_per_take_and_adopts_its_cache() {
 #[test]
 fn a_render_row_outside_the_reconciled_range_is_materialised_at_startup() {
     // `--start/--count` decides what a run *discovers*; it must not decide
-    // what it is willing to *repair*. A `render:n` row from an earlier run
-    // survives in the ledger, and a take with no plan behind it can only
-    // fail on the box (the plan is what names the take's file). The last
-    // run of a `COUNT=100` default against a 150-chapter ledger offered 15
     // such chapters and failed all 45 attempts with "cannot be planned
     // here", a bookkeeping gap reported as a worker fault.
     let (_d, mut inner) = fixture();
@@ -2128,7 +1931,6 @@ fn a_render_row_outside_the_reconciled_range_is_materialised_at_startup() {
 #[test]
 fn an_unplannable_chapter_names_its_cause() {
     // The generic failure cost this run a diagnosis: 15 chapters reported
-    // "cannot be planned here" and the message said nothing about why.
     let (_d, inner) = fixture();
     let layout = inner.layout.clone();
     let why = inner.why_unplannable(7);
@@ -4744,8 +4546,6 @@ fn fix_speaker_names_where_the_expected_speaker_is_when_the_number_is_wrong() {
 #[test]
 fn fix_speaker_refuses_a_target_who_holds_no_voice_before_writing_anything() {
     // A speaker with no voice is a hard planning error, so the check has to
-    // come first: writing the script and requeueing would leave the chapter
-    // unplannable with a row no box can speak.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     rendered_chapter(
@@ -4771,7 +4571,6 @@ fn fix_speaker_refuses_a_target_who_holds_no_voice_before_writing_anything() {
 #[test]
 fn fix_speaker_treats_the_narrator_as_always_speakable() {
     // The Narrator is not in the cast, so the voice check has to exempt it
-    // the way recast does, or reassigning narration is impossible.
     let (_d, mut inner) = fixture();
     rendered_chapter(
         &mut inner,
@@ -4822,8 +4621,6 @@ fn racing_digest(inner: &mut Inner, chapter: u32) {
 #[test]
 fn an_idle_digest_worker_joins_the_head_digest_instead_of_idling() {
     // The bottleneck racing exists for: the N-1→N chain leaves exactly
-    // one digest offerable, so a second digest worker would sit out a
-    // 20-minute LLM call. It joins as a racer, same row, same snapshot.
     let (_d, mut inner) = fixture();
     racing_digest(&mut inner, 1);
     let first = inner.offer("w1").expect("head digest is offerable");
@@ -4874,7 +4671,6 @@ fn the_first_digest_report_wins_and_the_loser_is_stale_strike_free() {
 #[test]
 fn a_failing_racer_costs_no_strike_while_the_race_runs() {
     // One bad box in a race must not park the chapter: the failure drops
-    // just that holder, and only the last holder's failure strikes.
     let (_d, mut inner) = fixture();
     racing_digest(&mut inner, 1);
     let _ = inner.offer("w1").expect("w1 takes it");
@@ -4901,7 +4697,6 @@ fn digest_shelves_at_fifteen_not_three() {
     racing_digest(&mut inner, 1);
     let _ = inner.offer("w1").expect("w1 takes it");
     // Two ordinary failures: a crawl would be one strike from shelved,
-    // a digest is barely started.
     inner.tasks.get_mut("digest:1").unwrap().attempts = 2;
     let line = inner.complete(&completion("w1", "digest:1", false, "model 503"));
     assert!(line.contains("failed"), "{line}");
@@ -4914,10 +4709,6 @@ fn digest_shelves_at_fifteen_not_three() {
 #[test]
 fn a_merge_that_outruns_its_plan_replans_instead_of_failing_again() {
     // The stale-plan loop: a digest lands after the render plan was
-    // built, so the recorded take list is short of the timeline. Without
-    // a heal the merge fails the same way three times into shelved, and
-    // a retry just re-offers the same stale plan. The failure rebuilds
-    // the plan from the current script instead.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     std::fs::write(
@@ -4963,8 +4754,6 @@ fn a_merge_that_outruns_its_plan_replans_instead_of_failing_again() {
 #[test]
 fn a_render_report_with_missing_files_is_rejected_by_name() {
     // The completion gate: the worker's word is not evidence. Mutate one
-    // wav below the completeness threshold and the `ok` report must fail
-    // naming exactly that file, so the next offer repeats it.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     std::fs::write(
@@ -4978,8 +4767,6 @@ fn a_render_report_with_missing_files_is_rejected_by_name() {
     std::fs::write(seg.join("0000-0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
     std::fs::write(seg.join("0002_Adam.wav"), vec![0u8; 500]).unwrap();
     // The plan is what names the file, so a report about a take whose
-    // bytes never landed fails with *that* name, which the next offer
-    // then repeats, because the plan's diff made exactly it work again.
     let plan = inner.materialize_render_takes(6).expect("plannable");
     let missing = plan.takes[1].file.clone();
     assert!(!missing.is_empty());
@@ -5009,7 +4796,6 @@ fn a_render_report_with_missing_files_is_rejected_by_name() {
 #[test]
 fn a_failed_task_lands_in_the_event_stream_with_its_cause() {
     // The whole point of the event buffer: a digest that dies on a worker
-    // must say *why* in the TUI, not just flip a row back to Pending.
     let (_d, mut inner) = fixture();
     let mut t = Task::new(4, Stage::Digest);
     t.state = TaskState::Running;
@@ -5049,8 +4835,6 @@ fn a_failed_task_lands_in_the_event_stream_with_its_cause() {
 #[test]
 fn the_fifteenth_digest_failure_escalates_to_error_and_names_the_retry_key() {
     // Digest shelves at 15, not 3: two LLM calls plus repairs against a
-    // rate-limited tier fail in ways a stuck ffmpeg does not, and each
-    // racing wave re-proves the prompt before the chapter is parked.
     let (_d, mut inner) = fixture();
     let mut t = Task::new(4, Stage::Digest);
     t.state = TaskState::Running;
@@ -5071,8 +4855,6 @@ fn the_fifteenth_digest_failure_escalates_to_error_and_names_the_retry_key() {
         "fifteen strikes is an error, not a warning"
     );
     // Case-insensitive on purpose: the word is deliberately capitalised in
-    // the event so it stands out from the "will retry" failures beside it,
-    // and the test should pin the meaning rather than the letter case.
     assert!(
         last.text.to_lowercase().contains("shelved"),
         "{}",
@@ -5104,7 +4886,6 @@ fn shutdown_op_latches_the_flag_the_next_heartbeat_reads() {
     assert!(inner.shutdown_requested);
     assert!(msg.contains("shutdown"), "{msg}");
     // In-memory only: the ledger save carries tasks/machines/workers,
-    // so a reboot clears the latch instead of murdering new workers.
     std::fs::create_dir_all(inner.layout.bm_state()).unwrap();
     inner.save();
     let ledger = std::fs::read_to_string(inner.layout.bm_state().join("ledger.json")).unwrap();
@@ -5116,7 +4897,6 @@ fn shutdown_op_latches_the_flag_the_next_heartbeat_reads() {
 fn drain_latch_fires_only_on_an_empty_queue_and_only_once() {
     let (_d, mut inner) = fixture();
     // Armed with nothing unfinished: fires at once (an idle backend has
-    // no completion left to trip it).
     assert_eq!(
         inner.op_shutdown_when_idle(),
         "queue already drained — workers exiting on next beat"
@@ -5148,7 +4928,6 @@ fn drain_latch_fires_only_on_an_empty_queue_and_only_once() {
 fn the_last_completion_trips_the_armed_latch() {
     let (_d, mut inner) = fixture();
     // A merge is the last stage: completing it with its mp3 on disk
-    // leaves nothing unfinished, so the armed latch must fire.
     std::fs::create_dir_all(inner.layout.bm_state()).unwrap();
     let mut t = Task::new(4, Stage::Merge);
     t.state = TaskState::Running;
@@ -5335,11 +5114,6 @@ fn forcing_digest_removes_that_chapters_render_and_merge_rows() {
 #[test]
 fn a_forced_merge_retry_forces_the_render_that_feeds_it() {
     // The failure this exists for: `merge:24 FAILED (shelved, press u to
-    // retry): 42 segments missing in .../segments-vieneu-24: run the render
-    // stage first`. Nothing in the merge stage produces segments, so
-    // re-offering the merge fails again on the same box, and the operator
-    // had to work out that the fix was `F` on a *different* row. Force now
-    // means force the producer.
     let (_d, mut inner) = fixture();
     let engine = inner.settings.engine.clone();
     let seg = inner.layout.seg_dir(&engine, 24);
@@ -5374,7 +5148,6 @@ fn a_forced_merge_retry_forces_the_render_that_feeds_it() {
         "the render cache goes, or the re-offer stays the no-op this fixes"
     );
     // Both stages reach the stream, so the log explains the state change
-    // rather than leaving a render row that moved on its own.
     let evs: Vec<String> = inner
         .recent_events(2)
         .into_iter()
@@ -5387,9 +5160,6 @@ fn a_forced_merge_retry_forces_the_render_that_feeds_it() {
 #[test]
 fn a_merge_retry_cascades_only_when_forced_and_nothing_was_published() {
     // Two guards, both about not deleting more than was asked for: an
-    // unforced retry deletes nothing at all (that is the whole difference
-    // from `F`), and a chapter that already has an mp3 keeps its segments,
-    // because those are that file's provenance.
     let (_d, mut inner) = fixture();
     let engine = inner.settings.engine.clone();
     let seg = inner.layout.seg_dir(&engine, 24);
@@ -5410,7 +5180,6 @@ fn a_merge_retry_cascades_only_when_forced_and_nothing_was_published() {
     assert!(keep.exists());
 
     // Forced, but this chapter is already published: the stale mp3 goes
-    // (it is about to be rebuilt) and the segments stay.
     std::fs::write(inner.layout.final_mp3(24), vec![0u8; 2000]).unwrap();
     let msg = inner.op_retry_task(Stage::Merge, 24, true);
     assert!(!msg.contains("render"), "no cascade to announce: {msg}");
@@ -5429,10 +5198,6 @@ fn a_merge_retry_cascades_only_when_forced_and_nothing_was_published() {
 #[test]
 fn offer_skips_a_merge_whose_segments_are_missing_and_heals_its_render() {
     // The failure this exists for: `merge:24 FAILED (will retry): 42
-    // segments missing in .../segments-vieneu-24: run the render stage
-    // first`. The ledger said `render:Done` but the files were not on
-    // the disk the merge would run against, so the offer, not the
-    // third strike, is where it stops.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     let engine = inner.settings.engine.clone();
@@ -5459,8 +5224,6 @@ fn offer_skips_a_merge_whose_segments_are_missing_and_heals_its_render() {
         .insert(Task::new(9, Stage::Merge).id(), Task::new(9, Stage::Merge));
 
     // One run wav short of the set: the merge is not offered, its render
-    // is requeued, and the worker leaves with the healing render instead
-    // of idling behind a chapter it could not have merged.
     let offer = inner.offer("w1").expect("the render is offerable");
     assert_eq!(offer.task_id, "render:9:1", "not the starved merge");
     assert_eq!(inner.tasks["merge:9"].state, TaskState::Pending);
@@ -5482,7 +5245,6 @@ fn offer_skips_a_merge_whose_segments_are_missing_and_heals_its_render() {
 #[test]
 fn offer_hands_over_a_merge_whose_segments_are_home() {
     // Same chapter complete: the guard is not a veto on merges, only on
-    // merges the box would fail.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     let engine = inner.settings.engine.clone();
@@ -5517,9 +5279,6 @@ fn offer_hands_over_a_merge_whose_segments_are_home() {
 #[test]
 fn a_merge_offer_carries_the_plans_takes_in_mix_order() {
     // The mixer cannot re-derive a content-addressed take name from the
-    // script and the cast, the name is a hash of the inputs, not a
-    // function of them, so the offer has to carry the plan's file list:
-    // the same list the renderer wrote and the completion gate proved.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     std::fs::write(
@@ -5566,9 +5325,6 @@ fn a_merge_offer_carries_the_plans_takes_in_mix_order() {
 #[test]
 fn a_merge_failing_on_missing_segments_requeues_its_render() {
     // The offer guard only sees this disk. A remote that was wiped (or
-    // never rendered the chapter) fails the same way with a healthy disk
-    // here, so the failure heals the render instead of burning three
-    // strikes into shelved and waiting for a manual force.
     let (_d, mut inner) = fixture();
     let mut r = Task::new(9, Stage::Render);
     r.state = TaskState::Done;
@@ -5597,7 +5353,6 @@ fn a_merge_failing_on_missing_segments_requeues_its_render() {
     );
 
     // Published is the veto: then the segments are that mp3's
-    // provenance, not cache, and nothing re-renders on a failure's word.
     std::fs::create_dir_all(inner.layout.final_mp3(9).parent().unwrap()).unwrap();
     std::fs::write(inner.layout.final_mp3(9), vec![0u8; 2000]).unwrap();
     let mut r = Task::new(9, Stage::Render);
@@ -5623,10 +5378,6 @@ fn a_merge_failing_on_missing_segments_requeues_its_render() {
 #[test]
 fn a_merge_that_fails_missing_segments_keeps_its_strike() {
     // A merge pulls the pieces it lacks from the inductor, so `segments
-    // missing` means the render never produced the audio or the inductor
-    // lost it, the chapter's own failure, and the strike stands. The
-    // heal refills local gaps; nothing is re-homed, because nothing is
-    // pinned.
     let (_d, mut inner) = fixture();
     let files = render_chapter(&mut inner, 9, 4);
     for f in &files {
@@ -5680,8 +5431,6 @@ fn a_merge_that_fails_missing_segments_keeps_its_strike() {
 #[test]
 fn stale_pins_gate_nothing() {
     // Rows may still carry affinity from the pinning era (the load
-    // migration releases them, but a test sets them by hand). The offer
-    // ignores pins on every stage, and taking work writes none.
     let (_d, mut inner) = fixture();
     render_chapter(&mut inner, 9, 4);
     for t in inner.tasks.values_mut() {
@@ -5712,8 +5461,6 @@ fn stale_pins_gate_nothing() {
 #[test]
 fn completions_write_no_pins() {
     // Completions used to point the merge at whoever rendered. Now they
-    // record nothing: the merge pulls its pieces, so who spoke what is
-    // scheduling trivia.
     let (_d, mut inner) = fixture();
     let files = render_chapter(&mut inner, 9, 3);
     inner.ensure_task(9, Stage::Merge);
@@ -5759,9 +5506,6 @@ fn completions_write_no_pins() {
 #[test]
 fn a_voice_swap_on_a_split_chapter_leaves_the_rerender_unpinned() {
     // A chapter spoken on two boxes, then a voice swap re-speaks one
-    // take: the re-render is offerable to any box and the merge stays
-    // exactly as it was, scheduling writes no pins, so a split chapter
-    // can never strand work behind a stale one.
     let (_d, mut inner) = fixture();
     let files = render_chapter(&mut inner, 9, 4);
     for t in inner.tasks.values_mut() {
@@ -5778,7 +5522,6 @@ fn a_voice_swap_on_a_split_chapter_leaves_the_rerender_unpinned() {
     );
 
     // 1. The split: the local node takes a take of the chapter, stale
-    //    pins or not, and nothing is rewritten.
     let offer = inner.offer("local").expect("any box takes any take");
     assert!(offer.task_id.starts_with("render:9:"), "{}", offer.task_id);
     let local_take = offer.task_id.clone();
@@ -5789,10 +5532,6 @@ fn a_voice_swap_on_a_split_chapter_leaves_the_rerender_unpinned() {
     );
 
     // 2. Both stores fill: the local take lands here, the rest remotely.
-    //    Every file lands before any report, because the completion gate
-    //    reads the whole chapter, `collect_units` pulls each unit home
-    //    before the completion is applied, and this is that invariant.
-    //    This is the state ch148 was actually in.
     for f in &files {
         land(&inner, 9, f);
     }
@@ -5825,8 +5564,6 @@ fn a_voice_swap_on_a_split_chapter_leaves_the_rerender_unpinned() {
     );
 
     // 3. The voice swap. The cast is rewritten first, that is what a swap
-    //    is, and the invalidation then renames every take the speaker
-    //    produced. Those re-renders stay unpinned: any box speaks them.
     std::fs::write(inner.layout.cast("vieneu"), r#"{"A":"Adam","B":"Adam"}"#).unwrap();
     inner.invalidate_character("vieneu", "A", "Đức Trí");
     let requeued: Vec<String> = inner
@@ -5853,8 +5590,6 @@ fn a_voice_swap_on_a_split_chapter_leaves_the_rerender_unpinned() {
 #[test]
 fn a_swap_on_a_chapter_the_remote_holds_leaves_the_rerender_unpinned() {
     // Takes are independent: a re-render after a swap is offerable to any
-    // box, wherever the chapter was spoken. The merge is unpinned too
-    // it pulls its pieces, wherever it runs.
     let (_d, mut inner) = fixture();
     let files = render_chapter(&mut inner, 9, 4);
     for t in inner.tasks.values_mut() {
@@ -5866,7 +5601,6 @@ fn a_swap_on_a_chapter_the_remote_holds_leaves_the_rerender_unpinned() {
     inner.tasks.get_mut("merge:9").unwrap().affinity = Some("192.168.2.2".into());
 
     // The remote rendered the chapter in full and every unit came home
-    // so this disk is complete, and the remote is still the right box.
     for f in &files {
         land(&inner, 9, f);
     }
@@ -5885,7 +5619,6 @@ fn a_swap_on_a_chapter_the_remote_holds_leaves_the_rerender_unpinned() {
     );
 
     // The swap. A chapter the remote holds whole is still re-spoken by
-    // whoever asks first, no warm-box pin.
     std::fs::write(inner.layout.cast("vieneu"), r#"{"A":"Adam","B":"Adam"}"#).unwrap();
     inner.invalidate_character("vieneu", "A", "Đức Trí");
     let requeued: Vec<String> = inner
@@ -5908,8 +5641,6 @@ fn a_swap_on_a_chapter_the_remote_holds_leaves_the_rerender_unpinned() {
 #[test]
 fn load_releases_every_stale_pin() {
     // The pinning era wrote affinity on render and merge rows; the new
-    // scheduler pins nothing, and loading releases it all so idle boxes
-    // see the work.
     let (_d, mut inner) = fixture();
     for (id, stage) in [
         ("render:1:0", Stage::Render),
@@ -5930,17 +5661,10 @@ fn load_releases_every_stale_pin() {
 #[test]
 fn a_render_offer_freezes_the_voices_it_hands_out() {
     // The filenames a worker writes embed the voice, so a plan that is not
-    // persisted is re-derived later, by the completion gate and by the
-    // merger, from whatever the cast file says then. Assignment is
-    // least-used over the whole file, so any other chapter's write moves
-    // it. That is the whole of "render done, then 20 segments missing":
-    // the audio was on disk under names nothing would look up again.
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();
     let engine = inner.settings.engine.clone();
     // The storage tier is pinned here so the extension assertion below
-    // says something: this test is about the voice freeze, not about
-    // which format the default tier stores.
     inner.settings.take_quality = "raw".into();
     std::fs::write(
         layout.script(187),
@@ -5949,7 +5673,6 @@ fn a_render_offer_freezes_the_voices_it_hands_out() {
     )
     .unwrap();
     // A speaker with no entry: exactly the state the offer path used to
-    // leave behind.
     std::fs::write(layout.cast(&engine), r#"{"Narrator":"Đức Trí"}"#).unwrap();
 
     let plan = inner
@@ -5960,9 +5683,6 @@ fn a_render_offer_freezes_the_voices_it_hands_out() {
     assert!(offered.ends_with(".wav"), "{offered}");
 
     // 1. The decision is on disk, so every later reader sees it. The file
-    // name is content-addressed and so says nothing about the voice, the
-    // take's recorded voice is the claim, and the persist is what makes it
-    // readable by the completion gate later.
     let cast = bm_core::cast::read_cast(&engine, &layout.cast(&engine));
     let voice = cast
         .get("Hám Thiên Khuyết")
@@ -5997,10 +5717,6 @@ fn a_render_offer_freezes_the_voices_it_hands_out() {
 #[test]
 fn a_variant_speaker_name_still_plans() {
     // The bible says `Vân bá` is a character *and* an alias of `Lão giả`,
-    // which sits earlier in the file; and `Nam tử bị thương` is a
-    // case-variant alias of `Quản Vân Bằng`. Both real, both shelved a
-    // chapter with `cast has no voice for ...` while the cast held the
-    // voice under the canonical name.
     let (_d, inner) = fixture();
     let layout = inner.layout.clone();
     let engine = inner.settings.engine.clone();
@@ -6038,7 +5754,6 @@ fn a_variant_speaker_name_still_plans() {
 }
 
 /// A local worker with every capability, so the offer tests exercise the
-/// policy alone and not a capability gate.
 fn offer_fixture(inner: &mut Inner) {
     inner.machines.insert(
         "127.0.0.1".into(),
@@ -6085,7 +5800,6 @@ fn offer_prefers_the_stage_the_policy_lists_first() {
     offer_fixture(&mut inner);
     two_ready_stages(&mut inner);
     // The default policy leads with merge, so the ready merge beats the
-    // equally-ready render, the "finish chapters first" rule.
     let offer = inner.offer("w1").expect("a ready task is offerable");
     assert_eq!(offer.task_id, "merge:2");
 }
@@ -6093,10 +5807,6 @@ fn offer_prefers_the_stage_the_policy_lists_first() {
 #[test]
 fn offer_refuses_a_box_the_inductor_knows_is_not_ready() {
     // The readiness gate. In the inverted protocol `offer` is only reached
-    // after a heartbeat, so this is the invariant *stated* rather than a
-    // live path, and it is worth stating: a task handed to a box that is
-    // booting, being pushed to, or known-broken fails slowly and strikes
-    // the chapter for the inductor's mistake.
     let (_d, mut inner) = fixture();
     offer_fixture(&mut inner);
     two_ready_stages(&mut inner);
@@ -6119,7 +5829,6 @@ fn offer_refuses_a_box_the_inductor_knows_is_not_ready() {
         );
     }
     // Nothing was consumed while the gate held, so the queue is intact and
-    // the one state that works gets it.
     inner
         .machines
         .get_mut("127.0.0.1")
@@ -6132,14 +5841,10 @@ fn offer_refuses_a_box_the_inductor_knows_is_not_ready() {
 #[test]
 fn a_parked_box_is_offered_nothing_and_wakes_on_the_spot() {
     // Relax. The whole feature on the inductor's side is this gate, and the
-    // two things worth pinning are the order of the rules and that waking is
-    // complete.
     let (_d, mut inner) = fixture();
     offer_fixture(&mut inner);
     two_ready_stages(&mut inner);
     // Online, so the *state* gate would happily hand it work, which is the
-    // case that matters: a parked box keeps beating, so anything that relied
-    // on the state to withhold work would keep feeding it.
     inner
         .machines
         .get_mut("127.0.0.1")
@@ -6161,7 +5866,6 @@ fn a_parked_box_is_offered_nothing_and_wakes_on_the_spot() {
         "a parked box is withheld work whatever its state"
     );
     // Nothing was consumed while parked: the queue is intact, not depleted,
-    // which is what makes waking instant rather than a re-plan.
     assert!(
         inner
             .tasks
@@ -6179,9 +5883,6 @@ fn a_parked_box_is_offered_nothing_and_wakes_on_the_spot() {
 #[test]
 fn a_parked_box_outranks_even_the_state_that_has_no_opinion() {
     // `Unknown` is the one state the readiness gate deliberately lets
-    // through. Parking must not be let through with it, otherwise the
-    // legacy pull worker, or a hand-written ledger entry, would be the one
-    // box in the cluster that ignores the operator's pause.
     let (_d, mut inner) = fixture();
     offer_fixture(&mut inner);
     two_ready_stages(&mut inner);
@@ -6193,9 +5894,6 @@ fn a_parked_box_outranks_even_the_state_that_has_no_opinion() {
 #[test]
 fn offer_still_serves_a_machine_with_no_opinion_formed() {
     // `Unknown` is not "not ready", it is "never contacted": a hand-written
-    // ledger, or the legacy pull worker asking before its first beat. Both
-    // were offered work before the gate existed, and a live worker asking
-    // for work is its own evidence the box is up.
     let (_d, mut inner) = fixture();
     offer_fixture(&mut inner);
     two_ready_stages(&mut inner);
@@ -6206,9 +5904,6 @@ fn offer_still_serves_a_machine_with_no_opinion_formed() {
 #[test]
 fn silence_does_not_refute_a_box_that_is_coming_up() {
     // What the dispatcher does with a box that fails to answer `/status`.
-    // A booting box cannot answer, and stamping Offline on it is the
-    // fresh-pool-looks-broken bug: the pane would call a box that is
-    // twenty seconds into its first boot "gone".
     let (_d, mut inner) = fixture();
     for state in [
         MachineState::Initializing,
@@ -6241,9 +5936,6 @@ fn silence_does_not_refute_a_box_that_is_coming_up() {
 #[test]
 fn a_box_that_never_came_up_is_retired_instead_of_left_booting() {
     // `Initializing` is the one state with a deadline. A state with no exit
-    // condition is a lie: a box terminated before it booted, or launched
-    // into a subnet this machine cannot dial, would sit in "initializing"
-    // for ever with the pane implying it is about to work.
     let (_d, mut inner) = fixture();
     let mut m = Machine::new("3.121.112.113", "ubuntu", 22, None, "worker");
     m.set_state(MachineState::Initializing);
@@ -6271,7 +5963,6 @@ fn a_box_that_never_came_up_is_retired_instead_of_left_booting() {
     let m = &inner.machines["3.121.112.113"];
     assert_eq!(m.state, MachineState::Error);
     // The EC2 id is the box's one stable identity, relink matches by it,
-    // so a verdict may never erase it.
     assert!(m.note.contains("i-09def58f197d3092c"), "{}", m.note);
     // One-shot: the next pass has nothing left to retire.
     assert!(inner.expire_initializing().is_empty());
@@ -6280,8 +5971,6 @@ fn a_box_that_never_came_up_is_retired_instead_of_left_booting() {
 #[test]
 fn a_record_from_before_the_stamp_is_adopted_not_expired() {
     // `state_since == 0` means the record predates the field. Reading a
-    // missing timestamp as "infinitely old" would retire a box on the
-    // strength of a gap in the ledger.
     let (_d, mut inner) = fixture();
     let mut m = Machine::new("10.0.0.9", "ubuntu", 22, None, "worker");
     m.state = MachineState::Initializing;
@@ -6303,7 +5992,6 @@ fn offer_skips_a_stage_the_policy_disabled() {
     offer_fixture(&mut inner);
     two_ready_stages(&mut inner);
     // Merge off: the same pending work must route to render instead,
-    // never sit unassigned while a merge-capable box is idle.
     inner.machines.get_mut("127.0.0.1").unwrap().task_policy = Some(vec![
         bm_proto::TaskPref {
             stage: Stage::Merge,
@@ -6327,7 +6015,6 @@ fn offer_skips_a_stage_the_policy_disabled() {
 }
 
 /// Reorder the local box's policy so `first` leads; the rest follow in
-/// their canonical order. Every stage stays enabled.
 fn lead_with(inner: &mut Inner, first: Stage) {
     let mut list: Vec<bm_proto::TaskPref> = Vec::new();
     for s in [
@@ -6432,7 +6119,6 @@ fn relink_folds_a_private_address_ghost() {
     m.note = "EC2 i-0123456789abcdef0 (running)".into();
     inner.machines.insert("52.2.2.2".into(), m);
     // The agent reported its VPC-private address and `observe` minted a
-    // second machine for the same box.
     inner.machines.insert(
         "172.31.21.86".into(),
         Machine::new("172.31.21.86", "unknown", 22, None, "worker"),
@@ -6462,8 +6148,6 @@ fn waiting(id: &str, private: &str) -> Machine {
 #[test]
 fn relink_moves_a_waiting_box_to_its_address_and_hands_it_over() {
     // The whole point of keying a pre-address box by its instance id: there
-    // is a record for the account read to repair. Before this, the entry
-    // either did not exist or sat at an undialable private address for ever.
     let (_d, mut inner) = fixture();
     let mut m = waiting("i-0123456789abcdef0", "172.31.21.86");
     m.name = "box-1".into();
@@ -6510,8 +6194,6 @@ fn relink_moves_a_waiting_box_to_its_address_and_hands_it_over() {
 #[test]
 fn relink_does_not_reonboard_a_box_that_was_already_working() {
     // A box that rotated its address keeps its state, so nothing offers it a
-    // fresh 886 MB push. This is the expensive mistake the marker could
-    // cause if it were written on rotation instead of on address arrival.
     let (_d, mut inner) = fixture();
     let mut m = Machine::new("18.1.1.1", "ubuntu", 22, None, "worker");
     m.note = "EC2 i-0123456789abcdef0 (running)".into();
@@ -6531,7 +6213,6 @@ fn relink_does_not_reonboard_a_box_that_was_already_working() {
 #[test]
 fn a_waiting_box_is_what_makes_the_account_get_read() {
     // The watch's gate. It must be true only while a launch is genuinely in
-    // flight, or the account is read every fifteen seconds for ever.
     let (_d, mut inner) = fixture();
     assert!(
         !inner.has_pending_launch(),
@@ -6558,8 +6239,6 @@ fn a_waiting_box_is_what_makes_the_account_get_read() {
 #[test]
 fn a_box_the_account_never_addresses_does_not_wait_for_ever() {
     // EC2 assigns an address within seconds. Five minutes with none means a
-    // terminated instance or a subnet with no route out, and a row that no
-    // future account read will ever repair is worse than a verdict.
     let (_d, mut inner) = fixture();
     let mut m = waiting("i-0123456789abcdef0", "172.31.21.86");
     m.state_since = bm_proto::now_secs() - (crate::state::ops::BOOT_DEADLINE_SECS + 1);
@@ -6588,11 +6267,8 @@ fn a_box_the_account_never_addresses_does_not_wait_for_ever() {
 }
 
 // -----------------------------------------------------------------
-// Batched render offers (`Settings::render_batch`)
-// -----------------------------------------------------------------
 
 /// A chapter planned to `n` takes, all of them work, with a capable worker
-/// registered. Returns the planned filenames in mix order.
 fn render_chapter(inner: &mut Inner, chapter: u32, n: usize) -> Vec<String> {
     let layout = inner.layout.clone();
     let segs: Vec<String> = (0..n)
@@ -6639,8 +6315,6 @@ fn land(inner: &Inner, chapter: u32, file: &str) {
 #[test]
 fn a_render_offer_carries_one_chapter_slice_of_the_configured_size() {
     // The whole point of the batch: one offer, five takes. The ledger still
-    // holds one row per take, the grouping is recorded on the row the
-    // offer names, so the report has something to settle against.
     let (_d, mut inner) = fixture();
     let files = render_chapter(&mut inner, 1, 25);
 
@@ -6692,8 +6366,6 @@ fn a_render_offer_carries_one_chapter_slice_of_the_configured_size() {
     );
 
     // **Nothing pins.** No take carries affinity, so the next worker to
-    // ask takes the next slice of this chapter instead of opening
-    // another one. See `a_second_worker_deepens_the_chapter_the_first_one_opened`.
     for pos in 0..6 {
         assert_eq!(
             inner.tasks[&format!("render:1:{pos}")].affinity,
@@ -6710,14 +6382,8 @@ fn a_render_offer_carries_one_chapter_slice_of_the_configured_size() {
 #[test]
 fn a_second_worker_deepens_the_chapter_the_first_one_opened() {
     // **The scheduler's whole shape**: takes are never pinned, so the
-    // second worker to ask deepens the chapter the first one opened
-    // instead of opening a new one, and small batches keep every worker
-    // cycling back to the scheduler, where a ready merge outranks the
-    // next render slice.
-    //
     // Two chapters are rendered, because the symptom is not "the second
     // worker idles", it is "the second worker opens a *different* chapter",
-    // and only a second chapter can show that.
     let (_d, mut inner) = fixture();
     render_chapter(&mut inner, 1, 25);
     render_chapter(&mut inner, 2, 25);
@@ -6755,14 +6421,10 @@ fn a_second_worker_deepens_the_chapter_the_first_one_opened() {
 #[test]
 fn a_chapter_spoken_by_two_boxes_needs_no_merge_pin() {
     // The other half of sharing a chapter: completions record nothing
-    // about who rendered what, because the merge pulls the pieces it
-    // lacks from the inductor. The merge row simply exists, unpinned,
-    // for whoever asks first.
     let (_d, mut inner) = fixture();
     let files = render_chapter(&mut inner, 9, 3);
     inner.workers.insert("w2".into(), "192.0.2.9".into());
     // `collect_units` pulls every unit home before a completion is applied,
-    // so by the time either report lands this disk holds the chapter.
     for f in &files {
         land(&inner, 9, f);
     }
@@ -6785,7 +6447,6 @@ fn a_chapter_spoken_by_two_boxes_needs_no_merge_pin() {
     );
 
     // w2 speaks the second. The chapter is now on two stores, and neither
-    // of them is the one that can be proved complete.
     {
         let t = inner.tasks.get_mut("render:9:1").unwrap();
         t.state = TaskState::Running;
@@ -6807,9 +6468,6 @@ fn a_chapter_spoken_by_two_boxes_needs_no_merge_pin() {
 #[test]
 fn digests_chain_in_order() {
     // Chapter N reads the bible chapter N-1 wrote, so digest:N is
-    // offerable only after digest:N-1 is Done. Chapter 1 has no
-    // predecessor; a missing previous row (a range starting here) counts
-    // as satisfied rather than deadlocking work that was never enqueued.
     let (_d, mut inner) = fixture();
     for (ch, stage, state) in [
         (1, Stage::Crawl, TaskState::Done),
@@ -6850,10 +6508,6 @@ fn digests_chain_in_order() {
 #[test]
 fn a_batch_never_spans_two_chapters() {
     // The pin, the merge's affinity, the progress line and the inductor's
-    // unit collection are all keyed by chapter: an offer spanning chapters
-    // would collect one chapter's wavs against another's report. Chapter 1
-    // has fewer takes than the batch size, so the batch stops there rather
-    // than reaching into chapter 2.
     let (_d, mut inner) = fixture();
     render_chapter(&mut inner, 1, 3);
     render_chapter(&mut inner, 2, 20);
@@ -6880,7 +6534,6 @@ fn a_batch_never_spans_two_chapters() {
 #[test]
 fn the_workspace_batch_size_overrides_the_default_in_both_directions() {
     // One is the batch size that means "behave as before"; the cap is what
-    // keeps a typo from holding a chapter on one box for hours.
     let (_d, mut inner) = fixture();
     let files = render_chapter(&mut inner, 1, 70);
     assert_eq!(files.len(), 70, "the chapter plans to seventy takes");
@@ -6894,8 +6547,6 @@ fn the_workspace_batch_size_overrides_the_default_in_both_directions() {
     );
 
     // Hand the chapter back out: an absurd value is clamped, not obeyed,
-    // and not refused, a workspace that cannot run at all is a worse
-    // failure than one that runs slower than it asked.
     for t in inner.tasks.values_mut() {
         if t.stage == Stage::Render {
             t.state = TaskState::Pending;
@@ -6916,9 +6567,6 @@ fn the_workspace_batch_size_overrides_the_default_in_both_directions() {
 #[test]
 fn a_batched_report_settles_every_row_it_covered() {
     // The gate is per file, and the settle is per row: a report that
-    // verified only the take it was named for would leave four rows
-    // Assigned to a worker that has already answered, and their leases
-    // would expire into a second render of takes that landed.
     let (_d, mut inner) = fixture();
     let files = render_chapter(&mut inner, 4, 12);
     let offer = inner.offer("w1").expect("a render is offerable");
@@ -6959,9 +6607,6 @@ fn a_batched_report_settles_every_row_it_covered() {
 #[test]
 fn a_batched_report_with_one_take_missing_fails_the_whole_batch_by_name() {
     // A batch is one answer about one offer: a worker whose fifth unit
-    // never landed did not fail only the first take. And the detail names
-    // the file, so the retry is targeted rather than a re-speak of the
-    // chapter.
     let (_d, mut inner) = fixture();
     render_chapter(&mut inner, 5, 12);
     let offer = inner.offer("w1").expect("a render is offerable");
@@ -6997,8 +6642,6 @@ fn a_batched_report_with_one_take_missing_fails_the_whole_batch_by_name() {
 #[test]
 fn a_batch_that_strikes_out_shelves_every_row_it_held() {
     // Three strikes is the rule; a batch must not shelter sixty rows from
-    // it by never finishing, or the chapter retries for ever instead of
-    // shelving for an operator to look at.
     let (_d, mut inner) = fixture();
     render_chapter(&mut inner, 6, 3);
     for _ in 0..3 {
@@ -7022,12 +6665,8 @@ fn a_batch_that_strikes_out_shelves_every_row_it_held() {
 #[test]
 fn an_offer_that_names_an_unplannable_take_still_reaches_the_gate() {
     // The degenerate case the batch truncation has to preserve: a take this
-    // store cannot resolve gets an empty payload and is assigned alone, so
-    // the completion gate fails it by name instead of the scheduler
-    // skipping it for ever.
     let (_d, mut inner) = fixture();
     // A script with no cast file: `plan_units` cannot name the voices, so
-    // the chapter has no takes at all and keeps its chapter-granular row.
     std::fs::write(
         inner.layout.script(9),
         r#"{"segments":[{"speaker":"A","text":"x"}]}"#,
@@ -7058,8 +6697,6 @@ fn an_offer_that_names_an_unplannable_take_still_reaches_the_gate() {
 }
 
 /// The gate in the shape an operator meets it: a process comes up holding,
-/// an ask gets nothing, and the rows are *withheld, not failed* — nothing
-/// about the work is wrong — until somebody says go.
 #[test]
 fn a_process_born_held_offers_nothing_until_go() {
     let (_d, mut inner) = held_fixture();
@@ -7088,7 +6725,6 @@ fn a_process_born_held_offers_nothing_until_go() {
     );
 
     // A second worker asks while held. `crawl:2` is still `Pending`, so
-    // the `None` below is the gate rather than an empty queue.
     let line = inner.set_dispatch(false);
     assert!(line.starts_with("hold: no task will be offered"), "{line}");
     assert_eq!(inner.tasks["crawl:2"].state, TaskState::Pending);
@@ -7096,8 +6732,6 @@ fn a_process_born_held_offers_nothing_until_go() {
 }
 
 /// The remainder, which is the whole reason the gate has a `go`: a book
-/// three chapters into a hundred reports 4..100, and the operator never has
-/// to read that off a task table.
 #[test]
 fn the_remainder_starts_at_the_first_unmerged_chapter() {
     let (_d, mut inner) = held_fixture();
@@ -7116,11 +6750,6 @@ fn the_remainder_starts_at_the_first_unmerged_chapter() {
 }
 
 /// The range a process is handed beats the one saved on disk.
-///
-/// `serve --start 40 --count 10` over a workspace whose run config says the
-/// whole book is a slice run: this ledger's rows are the slice's, so `:go`
-/// has to measure the slice — and the operator's saved config is not
-/// rewritten on the way past.
 #[test]
 fn the_range_a_process_is_handed_beats_the_saved_one() {
     let (_d, mut inner) = held_fixture();
@@ -7142,8 +6771,6 @@ fn the_range_a_process_is_handed_beats_the_saved_one() {
 }
 
 /// The three answers that keep `:go` from being a guess: a finished range
-/// says so, a range with a hole names the hole, and a parked or failed
-/// chapter is work still owed rather than work that is done.
 #[test]
 fn remaining_counts_merged_chapters_only() {
     let (_d, mut inner) = held_fixture();
@@ -7157,7 +6784,6 @@ fn remaining_counts_merged_chapters_only() {
     assert_eq!(inner.remaining_line(), "ch1..5 · every chapter merged");
 
     // Shelved is parked for an operator, not finished — the same reasoning
-    // that keeps a shelved crawl from satisfying `runnable()`.
     inner.tasks.get_mut("merge:3").unwrap().state = TaskState::Shelved;
     assert_eq!(inner.remaining(), Some((3, 5, 4)));
     assert_eq!(inner.remaining_line(), "ch3..5 · 4 done, 3 to go");
@@ -7169,8 +6795,6 @@ fn remaining_counts_merged_chapters_only() {
 }
 
 /// Held means held for *offers*. The reaper still takes a dead worker's row
-/// back — that is bookkeeping, not distribution — so a held cluster's task
-/// table still reads true while it waits for an operator.
 #[test]
 fn a_held_cluster_still_reaps_an_expired_lease() {
     let (_d, mut inner) = held_fixture();

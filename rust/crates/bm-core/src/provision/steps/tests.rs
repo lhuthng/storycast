@@ -33,8 +33,6 @@ fn configured_requires_a_matching_agent_and_the_tts_sidecar() {
     assert!(!p.configured("0.2.0"));
 
     // A Python virtualenv is no longer a reason to call a box ready. This
-    // is the assertion that changed: the field is still probed and
-    // reported, but it decides nothing.
     p.reachable = true;
     p.tts_bin_present = false;
     p.models_present = false;
@@ -65,9 +63,6 @@ fn a_new_voice_forces_a_model_store_push_on_an_already_configured_box() {
     );
 
     // An enrollment: the store moved, the weights did not. This is the case
-    // that used to slip through the gate entirely, `tts_hash` was the whole
-    // check, and it deliberately excludes `models/voices.json`, so a freshly
-    // enrolled voice sat on the inductor while every log said "in sync".
     let enrolled = ProvisionStamp {
         voices_hash: "store-v2".into(),
         ..local.clone()
@@ -99,7 +94,6 @@ fn the_checksum_list_covers_the_weights_and_not_the_voice_store() {
     );
 
     // Absent or unparseable means "nothing to verify", not a failure:
-    // `install_models` is what refuses an incomplete bake.
     std::fs::remove_file(dir.join("manifest.json")).unwrap();
     assert!(model_checksums(&dir).is_empty());
     let _ = std::fs::remove_dir_all(&dir);
@@ -120,8 +114,6 @@ fn a_matching_stamp_cannot_hide_a_missing_voice() {
 #[test]
 fn only_a_fresh_or_forced_provision_may_install() {
     // The decision the two `ensure_*` call sites read. A configured box
-    // that nobody forced is the case that made a healthy cluster's `B`
-    // cost minutes: it re-ran package installs that could not change.
     assert!(may_install(false, false), "a fresh box installs");
     assert!(may_install(false, true), "force on a fresh box installs");
     assert!(may_install(true, true), "force re-installs on purpose");
@@ -134,10 +126,6 @@ fn only_a_fresh_or_forced_provision_may_install() {
 #[test]
 fn a_configured_box_is_checked_but_never_re_installed() {
     // The waste this exists to stop: `ensure_opencode` can spend ten
-    // minutes in `npm i`, and it ran on *every* provision of *every* box
-    // including the ones whose answer was not going to change. A catch-up
-    // on a working cluster is a verification, so the install half is
-    // reserved for a fresh or forced provision.
     for script in [
         opencode_script(false),
         ffmpeg_script(false),
@@ -166,8 +154,6 @@ fn a_configured_box_is_checked_but_never_re_installed() {
     assert!(sox_script(true).contains("install -y sox"));
 
     // zstd is the deliberate exception to that rule: one second, ~1 MB, and
-    // the very next push cannot proceed without it. Its script installs
-    // unconditionally and still short-circuits when the tool is present.
     let zstd = zstd_script();
     assert!(
         zstd.contains(
@@ -184,7 +170,6 @@ fn a_configured_box_is_checked_but_never_re_installed() {
         "the exception is that this one does not wait for a forced box: {zstd}"
     );
     // A box that already has the tool short-circuits in *both* flavours
-    // the flag only decides what happens when it is missing.
     for script in [opencode_script(true), opencode_script(false)] {
         assert!(script.contains(
             r#"command -v opencode >/dev/null 2>&1 && { echo "OPENCODE-OK (present)"; exit 0; }"#
@@ -193,9 +178,6 @@ fn a_configured_box_is_checked_but_never_re_installed() {
 }
 
 /// The exit code is the whole contract between the box and this function,
-/// so it is pinned here rather than left to a comment in two crates: `3`
-/// falls back to the push, `2` does not, and nothing else is mistaken for
-/// corruption.
 #[test]
 fn a_fetch_exit_code_says_whether_the_push_may_try_again() {
     let tag = "models-vdda4efee13df";
@@ -209,7 +191,6 @@ fn a_fetch_exit_code_says_whether_the_push_may_try_again() {
     assert!(ok.unwrap().contains("models-vdda4efee13df"));
 
     // Absence: the artifact is not published, the network is down, the URL
-    // 404s. The push is a real answer to any of those.
     let absent = classify_fetch(
         EXIT_UNREACHABLE,
         "",
@@ -220,7 +201,6 @@ fn a_fetch_exit_code_says_whether_the_push_may_try_again() {
     assert!(matches!(absent, Err(FetchOutcome::Unreachable(_))));
 
     // Wrong bytes: the one answer that must stop, because pushing the same
-    // bytes again would only hide the disagreement.
     let wrong = classify_fetch(
         EXIT_CORRUPT,
         "",
@@ -234,9 +214,6 @@ fn a_fetch_exit_code_says_whether_the_push_may_try_again() {
     }
 
     // Anything else is absence, not corruption: a box too old to have the
-    // subcommand has not said anything about the bytes. `2` is in this list
-    // deliberately — that is what `clap` exits with on an unrecognised
-    // subcommand, so it is the exact shape of "the agent predates this".
     for code in [1_i32, 2, 126, 127, 255] {
         match classify_fetch(code, "", "", tag, "models") {
             Err(FetchOutcome::Unreachable(m)) => assert!(m.contains(&code.to_string()), "{m}"),
@@ -246,9 +223,6 @@ fn a_fetch_exit_code_says_whether_the_push_may_try_again() {
 }
 
 /// A pack fetch is the same contract as a models fetch, and the reason it
-/// shares the codes is that a box answers them with **one** subcommand: a
-/// second verb would be a second `match` on exit codes, and the day one of
-/// them read `2` as corruption the cluster would stop provisioning.
 #[test]
 fn a_pack_is_fetched_the_same_way_and_read_the_same_way() {
     let release = crate::artifact::PackRelease::for_repo(
@@ -261,8 +235,6 @@ fn a_pack_is_fetched_the_same_way_and_read_the_same_way() {
     assert_eq!(release.tag, "xianxia-pack-v0.1.0");
     let script = pack_fetch_script(&release);
     // The prefix and the destination are the same word on purpose: the
-    // bundle holds `assets/…` and it lands at `assets/`, and a spelling
-    // that let those two drift is a tree nothing can read.
     assert!(script.contains("--strip-prefix assets"), "{script}");
     assert!(script.contains("~/bm-worker/assets"), "{script}");
     assert!(script.contains(&release.hash), "{script}");
@@ -282,7 +254,6 @@ fn a_pack_is_fetched_the_same_way_and_read_the_same_way() {
     );
 
     // A pack that does not verify still classifies as corrupt — the caller
-    // answers it with the push, which carries the very tree it checked.
     assert!(matches!(
         classify_fetch(
             EXIT_CORRUPT,
@@ -307,7 +278,6 @@ fn a_pack_is_fetched_the_same_way_and_read_the_same_way() {
 }
 
 /// A pointer stamped before versions existed must not fetch anything, and
-/// a name that is not URL- and tag-safe must not build a URL at all.
 #[test]
 fn a_pack_release_only_resolves_from_a_versioned_pointer() {
     let root = std::env::temp_dir().join("bm-packrelease-pointer");
@@ -335,7 +305,6 @@ fn a_pack_release_only_resolves_from_a_versioned_pointer() {
     );
 
     // The pointer written before this field existed: no version, so no
-    // release, so the push. This is every checkout in existence.
     crate::profile::write_pointer(
         &root,
         &crate::profile::Pointer {
@@ -351,7 +320,6 @@ fn a_pack_release_only_resolves_from_a_versioned_pointer() {
     );
 
     // The name and the version go into a URL and a git tag, so they are
-    // validated like the repo is.
     for (name, version) in [
         ("", "0.1.0"),
         ("xianxia", ""),
@@ -367,7 +335,6 @@ fn a_pack_release_only_resolves_from_a_versioned_pointer() {
 }
 
 /// The line the box runs, and the one thing that could make it do something
-/// other than fetch: it is a string handed to `sh -c`.
 #[test]
 fn the_fetch_line_asks_for_the_tagged_bundle_and_quotes_the_url() {
     let hash = "dda4efee13df0eb2b30ef45eb548741b5af633f6d55712e30f4da574b357c552";
@@ -388,8 +355,6 @@ fn the_fetch_line_asks_for_the_tagged_bundle_and_quotes_the_url() {
         "the engine name has to be in the fetch destination"
     );
     // Quoted, because the URL is a string in a `sh -c`. A repo the parser
-    // accepts cannot produce a quote today; a helper that only works for
-    // today's input is not a helper.
     assert_eq!(shell_quote("a'b"), "'a'\\''b'");
     assert_eq!(shell_quote("plain"), "'plain'");
 }
@@ -412,8 +377,6 @@ fn the_models_push_leaves_the_transfer_artifact_behind() {
 #[test]
 fn undeclared_voices_names_only_the_strays() {
     // The Suneo outage in one assertion: a hand-enrolled clone the
-    // manifest never learned must be reported; presets, manifest clones
-    // and pool samples must not be.
     let manifest: std::collections::HashMap<String, String> =
         [("Học Trò".to_string(), "refs/hoc-tro.mp3".to_string())]
             .into_iter()
@@ -428,8 +391,6 @@ fn undeclared_voices_names_only_the_strays() {
     );
     let catalogue = vec!["Thái Sơn".to_string(), "Adam".to_string()];
     // Exactly what the sidecar sends, and the difference is the whole test:
-    // a preset carries a description and so arrives as a *label*, while a
-    // clone has none and arrives bare.
     let store = vec![
         "Thái Sơn — Nam · Trung · Kể chuyện".to_string(),
         "Adam — Nam · Nam · Giọng đọc tự nhiên".to_string(),
@@ -448,11 +409,6 @@ fn undeclared_voices_names_only_the_strays() {
 }
 
 /// The false positive this shape caused, in the numbers it produced.
-///
-/// It reported all 23 shipped presets on every single provision and told the
-/// operator to add each one with a `refs/` clip, ~20 MB of audio to clone
-/// voices already present, under names that already exist. Nothing about
-/// those 23 is undeclared: they are the catalogue itself.
 #[test]
 fn a_shipped_preset_is_never_reported_as_undeclared() {
     let catalogue: Vec<String> = crate::voices::offline_voices("vieneu")
@@ -477,7 +433,6 @@ fn a_shipped_preset_is_never_reported_as_undeclared() {
         "23 declared presets, 1 genuine stray"
     );
     // And the same answer whatever the description says, or whether the
-    // label uses an en dash or the ASCII fallback.
     let spelled = vec![
         "Thái Sơn – Nam · Trung".to_string(),
         "Adam - Nam".to_string(),
@@ -494,7 +449,6 @@ fn a_shipped_preset_is_never_reported_as_undeclared() {
 #[test]
 fn probe_summary_counts_voices_instead_of_listing_them() {
     // Fifty enrolled names wrapped the Logs pane for screens. The count
-    // carries the signal; which voices enrolled rides the enroll lines.
     let p = Probe {
         reachable: true,
         hostname: "box".into(),
@@ -509,8 +463,6 @@ fn probe_summary_counts_voices_instead_of_listing_them() {
 #[test]
 fn a_box_without_ffmpeg_says_so_before_a_merge_fails() {
     // The failure this prevents: a box provisions cleanly, is offered a
-    // merge, and shelves the chapter after a full render lease, with
-    // nothing anywhere saying the tool was missing.
     let present = Probe {
         reachable: true,
         hostname: "box".into(),
@@ -533,7 +485,6 @@ fn a_box_without_ffmpeg_says_so_before_a_merge_fails() {
         absent.summary()
     );
     // SoX is the second engine and a hard gate on merge, so it gets its
-    // own line rather than hiding inside the ffmpeg warning.
     let no_sox = Probe {
         sox_present: false,
         ..present.clone()
@@ -554,8 +505,6 @@ fn a_box_without_ffmpeg_says_so_before_a_merge_fails() {
 #[test]
 fn probe_normalizes_uname_spellings_to_rust_platforms() {
     // `arm64` (macOS) and `aarch64` (Linux) are the same chip; `Darwin`
-    // is Rust's `macos`. Anything unknown passes through so a new
-    // platform reads as its own name, never as another platform's binary.
     assert_eq!(super::normalize_arch("arm64"), "aarch64");
     assert_eq!(super::normalize_arch("aarch64"), "aarch64");
     assert_eq!(super::normalize_arch("amd64"), "x86_64");
@@ -584,7 +533,6 @@ fn unreachable_probe_explains_itself() {
 }
 
 /// The sidecar needs *both* the binary and its weights, a binary with no
-/// models cannot render, and reads as ready right up until the first task.
 #[test]
 fn the_tts_sidecar_needs_the_binary_and_the_weights() {
     let mut p = Probe {
@@ -609,8 +557,6 @@ fn the_tts_sidecar_needs_the_binary_and_the_weights() {
 #[test]
 fn a_linux_binary_without_its_runtime_is_not_ready() {
     // Wolf's box: binary + models present, libonnxruntime never landed.
-    // The old gate read that as configured, so `:prov` confirmed a
-    // sidecar that dies on startup instead of repairing it.
     let mut p = Probe {
         reachable: true,
         agent_version: Some("0.2.0".into()),
@@ -632,7 +578,6 @@ fn a_linux_binary_without_its_runtime_is_not_ready() {
 }
 
 /// The two flags are independent, so a box can report both without either
-/// implying the other.
 #[test]
 fn both_sidecars_can_be_present_at_once() {
     let p = Probe {
@@ -645,6 +590,5 @@ fn both_sidecars_can_be_present_at_once() {
     };
     assert!(p.configured("0.2.0"));
     // Rust wins the summary when it is ready, because that is what a switch
-    // would put in charge.
     assert_eq!(p.sidecar(), "rust");
 }

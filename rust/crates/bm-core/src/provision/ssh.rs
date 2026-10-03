@@ -8,21 +8,11 @@ const RSYNC_TIMEOUT_SECS: u64 = 1800;
 const RSYNC_IO_TIMEOUT: &str = "--timeout=120";
 
 /// How many times one transport call is attempted before a blip becomes an
-/// error. Provisioning used to fail a whole box on the first transient ssh
-/// timeout — one flap during `ensure_root` and `:prov` died, then the retry
-/// died on a different step, so re-running never converged.
 const TRANSPORT_ATTEMPTS: u32 = 4;
 /// Sleeps between attempts. The flap this rides out is seconds, not minutes;
-/// backed-off retries plus rsync's delta resume (a re-run only sends what is
-/// still missing) is what lets a 668 MB push converge on a lossy link.
 const TRANSPORT_BACKOFF_SECS: [u64; 3] = [2, 5, 10];
 
 /// True when a failed call smells like the network rather than the command:
-/// running the identical call again can succeed.
-///
-/// ssh reports its own transport failures as 255, rsync as 10/12/30 (or 255
-/// when its ssh dies first). Auth and host-key failures are deliberately NOT
-/// transient — retrying those four times only wastes the backoff.
 fn transient_failure(code: i32, stderr: &str) -> bool {
     let t = stderr.to_lowercase();
     if t.contains("permission denied") || t.contains("host key verification failed") {
@@ -44,17 +34,11 @@ fn transient_failure(code: i32, stderr: &str) -> bool {
 }
 
 /// Run `call` up to [`TRANSPORT_ATTEMPTS`] times, backing off between
-/// attempts while the failure looks transient (see [`transient_failure`).
-/// A success or a non-transient failure returns at once; only the last
-/// transient failure surfaces, annotated with the attempt count.
 fn with_transport_retries<F>(mut call: F) -> Result<(i32, String, String)>
 where
     F: FnMut() -> Result<(i32, String, String)>,
 {
     // A runner-level `Err` is classified as a 255: `run_bounded` only errors
-    // on spawn (a missing local binary — not transient, fails fast) and on
-    // its own stall timeout ("timed out ... stalled mid-command" — transient,
-    // retries like any other blip).
     for attempt in 1..=TRANSPORT_ATTEMPTS {
         let last_attempt = attempt == TRANSPORT_ATTEMPTS;
         match call() {
@@ -87,30 +71,8 @@ fn backoff(attempt: u32) {
 }
 
 /// The host-key policy, written once and used by both transports — `ssh` and
-/// the `ssh` that `rsync` spawns through `-e`.
-///
-/// Every box this reaches is either an instance launched minutes ago or a
-/// worker linked by hand, and every call is scripted: `BatchMode=yes` forbids
-/// the "are you sure you want to continue connecting?" prompt, so a host key
-/// that is not already in `known_hosts` is a hard `exit 255 — Host key
-/// verification failed`. A freshly launched EC2 instance *always* presents a
-/// key nobody has seen before, which is why the first provision of every new
-/// box failed with exactly that message.
-///
-/// So verification is declined and `known_hosts` is neither read nor written
-/// (`/dev/null`). That is not only about first contact: AWS hands the same
-/// public IP to a different box later, and a *remembered* key for a recycled
-/// address is the same failure in a different coat — `StrictHostKeyChecking=no`
-/// accepts an unknown host but still refuses a *changed* one. `/dev/null` also
-/// keeps the tool out of `~/.ssh` entirely, which is the one directory a
-/// sandboxed session may not touch.
-///
-/// `~/.ssh/config` is still read — an `-o` overrides a single option, it does
-/// not replace the file — so Host aliases, `ProxyJump` and `IdentityFile` keep
 /// working. `LogLevel=ERROR` removes the "Permanently added … to the list of
 /// known hosts" line, which is untrue here because nothing is persisted; it
-/// keeps the warnings that carry information, e.g. an identity file that is not
-/// readable (verified against a real box, not assumed).
 const HOST_KEY_OPTS: [&str; 6] = [
     "-o",
     "StrictHostKeyChecking=no",
@@ -133,8 +95,6 @@ pub struct Ssh {
 }
 
 /// Where the winning ssh key came from. Highest wins; `SshDefault` means no
-/// key is configured anywhere and ssh decides (agent, `~/.ssh/config`).
-/// Shown on the machine overlay so a mispointed key names its source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeySource {
     Box,
@@ -153,9 +113,6 @@ impl KeySource {
 }
 
 /// One reader for the key chain: the per-machine value, else the app default,
-/// else ssh decides. `~` expands here, once, for every transport. Empty
-/// strings fall through — clearing the field is how an operator unsets a key.
-/// No validation: that belongs at bind time, where a prompt can complain.
 pub fn resolve_key(
     box_key: Option<&str>,
     settings_key: Option<&str>,
@@ -186,7 +143,6 @@ impl Ssh {
     fn ssh_args(&self) -> Vec<String> {
         let mut args: Vec<String> = vec![
             // Never prompt, never linger: every use is scripted, and a stalled
-            // connection must die instead of hanging a TUI job forever.
             "-n".into(),
             "-o".into(),
             "BatchMode=yes".into(),
@@ -211,32 +167,6 @@ impl Ssh {
     }
 
     /// The argv for a long-lived **reverse** tunnel to this machine:
-    /// `ssh … -N -R {remote_port}:127.0.0.1:{local_port} {target}`.
-    ///
-    /// This is the one channel back from a worker to the inductor (the
-    /// completion hook, `bm-inductor/src/tunnel.rs`), and it exists because
-    /// the direction stays inverted: the *inductor* dials the worker to build
-    /// the tunnel, so the worker never needs a route — it forwards its own
-    /// loopback through the connection the inductor opened. On the worker's
-    /// side the remote bind is loopback-only (no `GatewayPorts`), which keeps
-    /// the hook port closed to the box's network — only local processes may
-    /// use it, and the cluster token gates what it does.
-    ///
-    /// Everything else mirrors [`Self::ssh_args`] — BatchMode, the declined
-    /// host-key verification, the same key expansion — because this is the
-    /// third transport and a policy on two of three is the known bug shape.
-    /// `-n` stays (no stdin, never a prompt), and the keepalives are the
-    /// tunnel's *liveness*, so they matter more than on a command run: a dead
-    /// NAT mapping must kill the client quickly so the supervisor respawns it
-    /// against the fresh route.
-    /// `ExitOnForwardFailure=yes` turns a failed remote bind (a stale tunnel
-    /// from a previous, uncleanly-killed inductor still holding the port) into
-    /// a dead client — the supervisor's respawn loop then retries, instead of
-    /// a zombie client pretending a tunnel that never existed.
-    ///
-    /// `-N` (no remote command) is what makes this a pure pipe: no shell is
-    /// allocated on the box, so there is nothing to escape and nothing to time
-    /// out — the client lives exactly as long as the TCP session does.
     pub fn reverse_hook_args(&self, remote_port: u16, local_port: u16) -> Vec<String> {
         let mut args: Vec<String> = vec![
             // No stdin (never a prompt) and no remote command: a pure pipe.
@@ -245,15 +175,11 @@ impl Ssh {
             "-o".into(),
             "BatchMode=yes".into(),
             // A failed remote bind kills the client — the supervisor's signal
-            // to retry — instead of a live client around a dead forward.
             "-o".into(),
             "ExitOnForwardFailure=yes".into(),
             "-o".into(),
             "ConnectTimeout=10".into(),
             // The tunnel's liveness: keepalives tight enough that a NAT mapping
-            // dying is noticed in seconds, not minutes. Without them a silently
-            // dropped connection leaves a client that forwards nowhere while
-            // looking alive.
             "-o".into(),
             "ServerAliveInterval=5".into(),
             "-o".into(),
@@ -275,15 +201,6 @@ impl Ssh {
     }
 
     /// Run a shell script on the machine. Returns `(exit_code, stdout, stderr)`.
-    ///
-    /// A transport failure is reported as exit code 255 (ssh's own convention)
-    /// so callers can distinguish "box is down" from "the command failed".
-    ///
-    /// `timeout_secs` bounds the whole run, not just the connect phase: ssh's
-    /// own `ConnectTimeout` stops covering us the moment the session is up, and
-    /// an un-bounded `Command::output()` once wedged the TUI's serial job queue
-    /// behind a never-exiting remote launch — starving every job queued after
-    /// it (including the voice roster) forever.
     pub fn run(&self, script: &str, timeout_secs: u64) -> Result<(i32, String, String)> {
         let full = format!("export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH\n{script}");
         let mut cmd = if self.local {
@@ -301,7 +218,6 @@ impl Ssh {
             format!("ssh to {}", self.target)
         };
         // Local shells never flap; remote ones do, and one blip must not fail
-        // a whole `:prov` run that converging retries would have saved.
         if self.local {
             run_bounded(&mut cmd, timeout_secs, &transport)
         } else {
@@ -310,9 +226,6 @@ impl Ssh {
     }
 
     /// The `-e` value rsync reaches the box through. It carries the *same*
-    /// host-key policy as [`Self::ssh_args`]: rsync spawns its own ssh, so
-    /// setting the policy on one transport only would fix the probe and leave
-    /// every push failing with the identical message.
     fn rsync_e(&self) -> String {
         let mut e = format!(
             "ssh -o BatchMode=yes -o ConnectTimeout=10 {} -p {}",
@@ -326,11 +239,6 @@ impl Ssh {
     }
 
     /// Push a local path into the machine's worker root.
-    ///
-    /// `progress` streams throttled `[target] {label}: …% … MB/s` lines while
-    /// the transfer runs — the difference between watching a 668 MB models
-    /// push crawl and wondering whether it stalled. `None` keeps the silent
-    /// push (segment collection, local copies).
     pub fn rsync_push(
         &self,
         src: &Path,
@@ -342,13 +250,6 @@ impl Ssh {
     }
 
     /// A push that leaves named members behind.
-    ///
-    /// For the models tree, whose `models.tar.zst` is a *transfer* artifact that
-    /// happens to sit inside the directory: pushing it costs 380 MB per box for
-    /// a file no box reads, on top of the same weights already going over as
-    /// themselves. Patterns are rsync's own and anchored to the transfer root,
-    /// so `/models.tar.zst` means that file and not a same-named file in a
-    /// subdirectory.
     pub fn rsync_push_excluding(
         &self,
         src: &Path,
@@ -361,11 +262,6 @@ impl Ssh {
     }
 
     /// The same push with rsync's own `-z` left off.
-    ///
-    /// For an artifact that is *already* compressed. `-z` on a `.tar.zst` spends
-    /// CPU deflating incompressible bytes at both ends for nothing; the
-    /// transfer's integrity does not depend on it either way, because rsync
-    /// checksums the bytes it reconstructs whatever the transport does.
     pub fn rsync_push_plain(
         &self,
         src: &Path,
@@ -402,13 +298,11 @@ impl Ssh {
         }
         if progress.is_some() {
             // Per-file `%` (openrsync knows no `progress2`): the tracker
-            // below turns it into throttled file n/N + speed lines.
             args.push("--progress".into());
         }
         args.push("-e".into());
         args.push(self.rsync_e());
         // Directories sync their CONTENTS (trailing slash). Without it rsync
-        // nests: bm-worker/assets/assets — the exact bug this comment prevents.
         let mut src_s = src.to_string_lossy().to_string();
         if src.is_dir() && !src_s.ends_with('/') {
             src_s.push('/');
@@ -446,13 +340,6 @@ impl Ssh {
     }
 
     /// Push exactly the named root-relative paths into the worker root.
-    ///
-    /// The delta half of pack sync: a manifest diff says which `assets/…`
-    /// paths moved, and only those travel — no tree walk, no `--delete`, so
-    /// the preset the box holds is never touched outside the delta. Paths
-    /// come from a manifest diff and are refused unless they stay under the
-    /// root (`..` or absolute), because rsync `--files-from` would otherwise
-    /// follow them off it.
     pub fn rsync_push_files(&self, root: &Path, files: &[String]) -> Result<()> {
         for f in files {
             if f.starts_with('/') || f.split('/').any(|p| p == "..") {
@@ -511,8 +398,6 @@ impl Ssh {
     }
 
     /// Write text to a worker-root-relative path: receipts and checksum lists,
-    /// the files no push owns. Quoted heredoc, so JSON bodies travel byte for
-    /// byte with no shell re-parse.
     pub fn write_remote_file(&self, remote_rel: &str, text: &str) -> Result<()> {
         if remote_rel.starts_with('/') || remote_rel.split('/').any(|p| p == "..") {
             anyhow::bail!("refusing to write {remote_rel:?}: worker paths stay under the root");
@@ -602,17 +487,12 @@ impl Ssh {
 }
 
 /// Live byte-progress for one rsync push: the sender every throttled
-/// `[target] {label}: …` line goes to, plus the human label (`models`,
-/// `agent`, …) those lines carry.
 pub struct RsyncProgress<'a> {
     pub tx: &'a tokio::sync::mpsc::UnboundedSender<String>,
     pub label: &'a str,
 }
 
 /// Turns rsync `--progress` snapshots into throttled status lines. A changed
-/// file-or-band emits (at most every 2 s, so a hundred tiny files don't
-/// flood the pane); an unchanged one re-emits every 30 s as a heartbeat —
-/// frozen values with advancing timestamps are exactly how a stall reads.
 struct ProgressTracker {
     tx: tokio::sync::mpsc::UnboundedSender<String>,
     target: String,
@@ -659,10 +539,6 @@ impl ProgressTracker {
 }
 
 /// The last `--progress` update in a snapshot: `(file, bytes, pct, speed)`.
-/// rsync separates live updates with `\r` and files with `\n`, so both split
-/// the scan; the current file is the last non-progress line. Only the final
-/// line per file carries `(xfer#…)` — intermediate updates are bare
-/// `bytes pct speed eta`, which is why the match is on that shape.
 fn parse_progress(snapshot: &str) -> Option<(String, u64, u8, String)> {
     let mut file = None;
     let mut prog = None;
@@ -681,9 +557,6 @@ fn parse_progress(snapshot: &str) -> Option<(String, u64, u8, String)> {
 }
 
 /// One `--progress` update: `12,345 45% 2.10MB/s 0:01:23` (final line per
-/// file appends `(xfer#5, to-check=120/400)`, parsed the same way).
-/// Four whitespace fields with `%` on the second — a filename matching all
-/// of that exactly is absurd enough to ignore.
 fn parse_progress_line(seg: &str) -> Option<(u64, u8, String)> {
     let mut parts = seg.split_whitespace();
     let bytes: u64 = parts.next()?.replace(',', "").parse().ok()?;
@@ -694,12 +567,6 @@ fn parse_progress_line(seg: &str) -> Option<(u64, u8, String)> {
 }
 
 /// A temp file to hold one child's stdout or stderr, with the path to clean up.
-///
-/// On unix the file is created 0600 and unlinked immediately, so nothing is
-/// left on disk for anything else to read. Windows refuses to unlink a file
-/// with an open handle, so there the path survives until the caller is done
-/// with it; [`run_bounded_live`] removes it, and a push that dies first leaves
-/// one temp file behind rather than a handle nobody holds.
 fn output_file() -> std::io::Result<(std::fs::File, PathBuf)> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     for _ in 0..128 {
@@ -740,10 +607,6 @@ fn run_bounded(
 }
 
 /// Same as [`run_bounded`], plus a watcher that sees stdout/stderr snapshots
-/// while the child runs — the rsync push tails its own `--progress` output
-/// through it. Called at most twice a second; `None` is today's behavior.
-/// Tails a running child's stdout/stderr snapshots into the watcher.
-/// `None` is today's fire-and-collect behavior.
 type OutputWatch<'a> = Option<&'a mut dyn FnMut(&str, &str)>;
 
 fn run_bounded_live(
@@ -772,12 +635,6 @@ fn run_bounded_live(
         .spawn()
         .with_context(|| format!("spawning {transport}"))?;
     // The read closure is defined before the loop so the watcher can reuse
-    // it: output files only grow, and a 50 ms positional read over megabytes
-    // every poll would cost more than the rsync it watches.
-    //
-    // It reads through a clone rather than the file itself, because the
-    // child's handle owns the write cursor and a shared one would drag it
-    // around; the clone has a cursor of its own to seek back to 0.
     let read = |file: &std::fs::File| -> std::io::Result<String> {
         let mut handle = file.try_clone()?;
         let mut bytes = vec![
@@ -803,7 +660,6 @@ fn run_bounded_live(
             Ok(None) => {
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 // One snapshot per half second, not per poll: the files only
-                // grow and the watcher parses from scratch each time.
                 if let Some(w) = watch.as_mut() {
                     if std::time::Instant::now() >= next_watch {
                         next_watch =
@@ -827,7 +683,6 @@ fn run_bounded_live(
         read(&stderr).with_context(|| format!("reading stderr from {transport}"))?,
     );
     // A no-op on unix, where `output_file` already unlinked both. Best effort:
-    // a leftover temp file must not fail a push that otherwise worked.
     let _ = std::fs::remove_file(&stdout_path);
     let _ = std::fs::remove_file(&stderr_path);
     Ok(out)

@@ -5,10 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Prompt-side synonyms for the closed sound vocabularies.
-///
-/// Each target must itself be a canonical palette name, effect-pool tag, or
-/// inject-pool sound. Missing files mean there are no aliases, which keeps
-/// existing profiles working.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct TagAliases {
@@ -78,8 +74,6 @@ fn canonical_tag<'a>(aliases: &'a BTreeMap<String, String>, value: &str) -> Opti
 }
 
 /// Replace known prompt-side synonyms in-place, before any closed-vocabulary
-/// validator sees the script. This keeps the alias decision out of LLM repair
-/// rounds and writes only canonical values to the finished script.
 pub fn apply_tag_aliases(data: &mut Value, aliases: &TagAliases) {
     let Some(segments) = data.get_mut("segments").and_then(Value::as_array_mut) else {
         return;
@@ -106,7 +100,6 @@ pub fn apply_tag_aliases(data: &mut Value, aliases: &TagAliases) {
             }
         }
         // A stop names the same inject vocabulary as its start, so both follow
-        // the same alias map and cannot drift into unmatched names.
         for key in ["sound", "stop"] {
             if let Some(canonical) = segment
                 .get(key)
@@ -120,10 +113,6 @@ pub fn apply_tag_aliases(data: &mut Value, aliases: &TagAliases) {
 }
 
 /// Effect tags are optional scoring hints. Once aliases have run, a tag with
-/// no pooled sound cannot affect the mix, so drop it rather than rejecting the
-/// whole chapter or mapping it to an unrelated ambience. This is deliberately
-/// separate from music/sound validation: those fields choose a required track
-/// and must remain strict.
 pub fn discard_unknown_effect_tags(data: &mut Value, valid_tags: &[String]) {
     let Some(segments) = data.get_mut("segments").and_then(Value::as_array_mut) else {
         return;

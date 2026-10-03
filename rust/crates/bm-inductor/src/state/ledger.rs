@@ -23,7 +23,6 @@ impl Inner {
             shutdown_requested: false,
             shutdown_when_idle: false,
             // Held at birth: see `Inner::dispatch_held`. A process has to be
-            // told to distribute, and a restart is a new process.
             dispatch_held: true,
             stats: super::StatsAgg::default(),
             unreadable_tasks: Vec::new(),
@@ -32,13 +31,6 @@ impl Inner {
     }
 
     /// The same state, already distributing: a **fixture**, and it exists
-    /// because the real default is the point of the feature.
-    ///
-    /// A test that expects work to be offered is modelling a cluster an operator
-    /// has started, so it says so here rather than silently depending on the
-    /// default. Production reaches this state exactly two ways — `--go` at
-    /// startup and `:go` at any time, both through [`Inner::set_dispatch`] — and
-    /// nothing else, so a process cannot come up distributing by accident.
     #[cfg(test)]
     pub(crate) fn distributing(layout: Layout, settings: Settings) -> Self {
         let mut inner = Inner::new(layout, settings);
@@ -67,23 +59,14 @@ impl Inner {
     }
 
     /// Workspace/profile gate: a ledger holding another binding's tasks
-    /// refuses to run here rather than mixing two genres' or two languages'
-    /// output. Empty or unstamped ledgers pass and adopt the workspace profile
-    /// at reconcile.
     pub fn check_profile(&self) -> Result<()> {
         // Preserved-but-unreadable rows count as *held work*: they came from a
-        // ledger, and calling a ledger we could not fully read "empty" would let
-        // reconcile stamp this workspace's profile over rows that may belong to
-        // another book — the mixing this gate exists to prevent.
         if self.tasks.is_empty() && self.unreadable_tasks.is_empty() {
             return Ok(());
         }
         match &self.ledger_profile {
             Some(stamped) if *stamped != self.settings.profile => {
                 // Name the pieces that moved. "another profile" sends an
-                // operator looking for the wrong thing: a changed pack or
-                // adapter is a re-unpack, while a changed engine invalidates
-                // the segment cache and every clip already rendered.
                 let which: Vec<String> =
                     bm_core::profile::pieces_differing(stamped, &self.settings.profile)
                         .iter()
@@ -109,16 +92,6 @@ impl Inner {
     }
 
     /// Bring a pre-split cache into the `(adapter, engine)` shape.
-    ///
-    /// Load time, and not inside `Layout`: `Layout` is a pure path constructor
-    /// with a thousand callers and no error channel, while this is a rename.
-    /// Skipping it is not a crash — it is every chapter already spoken being
-    /// re-synthesised under a name nobody asked for, which is why the old files
-    /// are *moved* rather than abandoned.
-    ///
-    /// Swept for every engine that ever had a pre-split spelling rather than
-    /// only the selected one: which engine spoke a chapter is history, and
-    /// `settings.engine` is a setting somebody can change back.
     pub fn migrate_cache_keys(&mut self) {
         let mut moved = 0;
         for engine in bm_core::paths::LEGACY_CACHE_ENGINES {
@@ -142,16 +115,6 @@ impl Inner {
     }
 
     /// Bring a pre-engine-tree checkout into the `engines/<name>/` shape.
-    ///
-    /// The same load-time, once-only reasoning as [`Inner::migrate_cache_keys`],
-    /// and for a heavier reason: `models/`, `bm-tts` and `libonnxruntime.so.1`
-    /// used to sit at the root and no path points at them there any more, so
-    /// leaving them behind does not merely misname a cache — it makes the
-    /// sidecar unspawnable and the weights unreachable.
-    ///
-    /// The files are VieNeu's whatever this checkout now runs, so the target is
-    /// named by history rather than by `settings.engine`; a second engine never
-    /// had a flat tree to move.
     pub fn migrate_engine_tree(&mut self) {
         let target = self
             .layout
@@ -177,7 +140,6 @@ impl Inner {
     }
 
     /// Registry handle for an address: the stored box name, else the
-    /// fallback. Display only — keys stay addresses everywhere.
     pub fn box_name(&self, addr: &str, fallback: &str) -> String {
         load_boxes(&self.layout.machines())
             .iter()
@@ -187,8 +149,6 @@ impl Inner {
     }
 
     /// Persist one in-memory machine's connection config to `machines.json`.
-    /// `fallback_name` (hostname, address) applies only when the box has no
-    /// stored name yet. Runtime still goes through `save()`.
     pub fn persist_box(&self, addr: &str, fallback_name: &str) {
         let Some(m) = self.machines.get(addr) else {
             return;
@@ -199,43 +159,14 @@ impl Inner {
     }
 
     /// Record the range **this process** was told to work on.
-    ///
-    /// The two callers are the two ways an operator authors a range: `serve
-    /// --start/--count` at startup, and `:translate` at any time. Nothing else
-    /// calls it — and `reconcile` deliberately does not, because the remainder
-    /// path calls `reconcile` with a *narrower* range, and recording there would
-    /// shrink the authored range to the remainder and lose the chapters already
-    /// done.
-    ///
     /// `settings.start/count` is where the range lives (it is the same "chapter
     /// range the cluster is currently working on" the run-config prompt saves),
-    /// and this is a **memory-only** write: a process starting on a workspace
-    /// must not silently rewrite the saved run config, so the file keeps saying
-    /// what the operator last saved while this process works on what it was
-    /// actually handed. The two disagree exactly when somebody starts a slice —
-    /// `serve --start 40 --count 10` over a workspace whose file says the whole
-    /// book — and it is the slice that this ledger's rows are about, which is
-    /// why `:go` must measure it.
     pub fn set_authored_range(&mut self, start: u32, count: u32) {
         self.settings.start = start;
         self.settings.count = count;
     }
 
     /// Where the authored range has actually got to: the first chapter of it
-    /// whose **merge** is not done, the last chapter in it, and how many are
-    /// finished — `(first, end, done)`. `None` when nothing in the range is
-    /// outstanding, which is the honest answer to "what is left".
-    ///
-    /// Merge is the terminal stage, so "merged" is the only definition of
-    /// finished that agrees with the artifact: a chapter is done when its mp3
-    /// is. A chapter with no row at all counts as unfinished — it has not been
-    /// enqueued yet, which is exactly the state of a fresh range — and so does
-    /// one that is shelved or failed, because both are work still owed.
-    ///
-    /// This is what makes `:go` distribute the *remainder* instead of the
-    /// authored range: a book 3 chapters into 100 reports `(4, 100, 3)`, and
-    /// nobody has to count rows in a task table to find that out. The authored
-    /// range stays authored; this is the effective one.
     pub fn remaining(&self) -> Option<(u32, u32, u32)> {
         let (start, count) = (self.settings.start, self.settings.count);
         if count == 0 {
@@ -254,8 +185,6 @@ impl Inner {
     }
 
     /// The same answer as one operator-facing line: `ch4..100 · 3 done, 97 to
-    /// go`, or the finished case. Empty range included, because "nothing to do"
-    /// is a state worth spelling rather than an empty string.
     pub fn remaining_line(&self) -> String {
         let (start, count) = (self.settings.start, self.settings.count);
         if count == 0 {
@@ -272,7 +201,6 @@ impl Inner {
 
     pub fn save(&self) {
         // Runtime only: connection config lives in machines.json and is
-        // written at bind time, never on this hot path.
         let state: HashMap<String, Value> = self
             .machines
             .iter()
@@ -284,9 +212,6 @@ impl Inner {
             })
             .collect();
         // Every row this build understands, **plus every row it does not**.
-        // Appending the raw values is what stops a deserialisation problem from
-        // becoming permanent: without them this write is the moment the library
-        // shrinks. See `Inner::unreadable_tasks`.
         let mut tasks: Vec<Value> = self
             .tasks
             .values()
@@ -309,8 +234,6 @@ impl Inner {
             return;
         };
         // One-way migration: the old shape stored full Machines under
-        // `machines`. Split it once, snapshot both files first, then load
-        // the new shape (the recursive call terminates — the key is gone).
         if doc.get("machines").and_then(|m| m.as_array()).is_some() {
             match self.migrate_ledger(&doc) {
                 Ok(n) => self.push_event(
@@ -329,8 +252,6 @@ impl Inner {
 
     fn load_new_shape(&mut self, doc: &Value) {
         // Cleared first, not appended to: `load_ledger` can run twice (the
-        // migration path recurses), and a second pass over the same file must
-        // not double every preserved row.
         self.unreadable_tasks.clear();
         if let Some(tasks) = doc.get("tasks").and_then(|t| t.as_array()) {
             for t in tasks {
@@ -339,11 +260,6 @@ impl Inner {
                         self.tasks.insert(task.id(), task);
                     }
                     // **Kept, not dropped.** A row this build cannot read is
-                    // carried through `save()` verbatim, so a schema change can
-                    // never silently delete library rows — the failure mode this
-                    // used to have, where `save()` wrote the shortened ledger
-                    // back over the full one. The event is what makes it visible
-                    // rather than merely harmless.
                     Err(e) => {
                         let named = t
                             .get("stage")
@@ -374,9 +290,6 @@ impl Inner {
             );
         }
         // One-way migration: no row is ever pinned — takes are independent
-        // and a merge pulls the pieces it lacks — so a pin from the
-        // pinning era only serialises the cluster behind one box.
-        // Released on load; the next save persists it.
         let released = self.release_pins();
         if released > 0 {
             self.push_event(
@@ -388,10 +301,6 @@ impl Inner {
             .get("profile")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
         // The exclusive-write queue survives restarts the way tasks do: an
-        // operator who asked for a swap and restarted the inductor before it
-        // ran asked for a swap, not for its disappearance. `serde_json::Value`
-        // deserialises as `Null` when the key is absent (old ledgers), which
-        // is an empty queue.
         self.exclusive = doc
             .get("exclusive")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -407,7 +316,6 @@ impl Inner {
             .map(|m| (m.addr.clone(), m))
             .collect();
         // Worker identity survives restarts: without it, completions filed
-        // while the map is cold get attributed to the wrong machine.
         if let Some(w) = doc.get("workers").and_then(|w| w.as_object()) {
             for (k, v) in w {
                 if let Some(addr) = v.as_str() {
@@ -430,9 +338,6 @@ impl Inner {
     }
 
     /// Split an old-shape ledger (`machines` array of full `Machine`s):
-    /// config fields into `machines.json` for any addr not already there,
-    /// runtime into `machine_state`. Idempotent — a second run finds no
-    /// `machines` key and is a no-op. Returns the migrated machine count.
     fn migrate_ledger(&mut self, doc: &Value) -> Result<usize> {
         let ledger_path = self.ledger_path();
         let boxes_path = self.layout.machines();
@@ -452,14 +357,12 @@ impl Inner {
                 n += 1;
                 if !load_boxes(&boxes_path).iter().any(|b| b.addr == mac.addr) {
                     // No names exist yet: the address doubles as the handle
-                    // until `link` renames the box.
                     let (bxo, _) = split_machine(&mac, &mac.addr);
                     save_box(&boxes_path, &bxo)?;
                 }
             }
         }
         // Tasks and workers ride along untouched; `machine_state` is built
-        // here so the file is complete without a second pass.
         let mut state = serde_json::Map::new();
         if let Some(ms) = doc.get("machines").and_then(|m| m.as_array()) {
             for m in ms {
@@ -484,16 +387,10 @@ impl Inner {
     }
 
     /// Expired leases return to the pool with no strike. So do tasks stranded
-    /// on dead workers (no live beat) — automatically, every 10s, with no
-    /// keypress and no lease wait. Returns their ids.
     pub fn reap(&mut self) -> Vec<String> {
         let now = now_secs();
         let mut out = Vec::new();
         // **One liveness set for both passes**, because the two passes need the
-        // same answer to "is the holder still there" — and the expiry pass needs
-        // it for a question the orphan pass never asks: an expiry on a worker
-        // that is *still beating* is a stuck worker, not a lost one, and the
-        // strike-free rule was written for the second of those.
         let live: std::collections::HashSet<String> = self
             .beats
             .values()
@@ -502,7 +399,6 @@ impl Inner {
             .collect();
         let mut expired = Vec::new();
         // A row that expired while its worker was still answering:
-        // `(row, worker, how many times now)`.
         let mut stuck: Vec<(String, String, u32)> = Vec::new();
         for t in self.tasks.values_mut() {
             if matches!(t.state, TaskState::Assigned | TaskState::Running)
@@ -510,9 +406,6 @@ impl Inner {
             {
                 let id = t.id();
                 // Racing rows keep every live holder: drop the dead ones, and
-                // only requeue when nobody is left on it. A row whose racers
-                // are still beating is not stuck — it is a race in progress —
-                // so its lease is extended rather than released.
                 let live_holders: Vec<String> = t
                     .holders()
                     .into_iter()
@@ -537,10 +430,6 @@ impl Inner {
                     continue;
                 }
                 // Counted **only** when the holder was still beating, so the
-                // number means "expired while its worker was alive" — the hang
-                // signature — rather than a tally of every requeue, which is what
-                // the orphan pass above is for. `release` leaves the count alone,
-                // so it survives the requeue it just described.
                 if let Some(w) = t.assigned_to.clone().filter(|w| live.contains(w.as_str())) {
                     t.expiries = t.expiries.saturating_add(1);
                     stuck.push((id.clone(), w, t.expiries));
@@ -551,11 +440,6 @@ impl Inner {
             }
         }
         // Orphan pass: assigned to a worker with no live beat (90s, the same
-        // window the ETA calls live). Workers beat every 2s, so a live one is
-        // never caught here — and the boot grace in `started_at` means a
-        // reboot never mistakes grinding workers for dead ones either.
-        // Racing rows prune dead holders but stay `Assigned` under the live
-        // ones; only a row with nobody left goes back to the pool.
         let mut orphaned = Vec::new();
         if now.saturating_sub(self.started_at) > 120 {
             for t in self.tasks.values_mut() {
@@ -593,8 +477,6 @@ impl Inner {
             }
         }
         // Both passes are silent by design (no strikes), which used to mean an
-        // operator saw a task flip back to Pending with no explanation. The
-        // events are pushed after the loops: the loops hold `tasks` mutably.
         if !expired.is_empty() {
             expired.sort();
             self.push_event(
@@ -628,16 +510,6 @@ impl Inner {
             );
         }
         // **The one that was missing.** An expiry on a *dead* worker is the case
-        // the strike-free rule was written for, and the aggregate line above
-        // covers it. An expiry on a worker that is still beating is a different
-        // event entirely: nothing is lost, the box is healthy, and the task is
-        // simply never going to finish — so it gets its own line, in its own
-        // words, escalating once the loop is established.
-        //
-        // This is what the operator could not see on 2026-09-22: two digest rows
-        // re-queued silently for ~80 minutes while the TUI showed a percentage
-        // that never moved, and the only visible evidence was a `warn` per
-        // expiry that read like routine housekeeping.
         for (id, worker, count) in &stuck {
             let level = if *count >= 2 { "error" } else { "warn" };
             let escalating = if *count >= 2 {
@@ -661,21 +533,12 @@ impl Inner {
     }
 
     /// Release every row a render offer covered, strike-free, because the
-    /// worker refused it on policy (render off for that box). The offer is
-    /// not lost — the rows go back to the pool and other boxes take them —
-    /// but a policy decision must never cost a chapter one of its three
-    /// strikes, so this reads [`Self::release`] rather than `fail_task`.
-    /// Returns the line for the log.
-    ///
-    /// Sibling rows come from [`Self::covered_rows`], so a batch offer is
-    /// released whole, exactly as one report would have settled it whole.
     pub(crate) fn release_render_rows(&mut self, task_id: &str, why: &str) -> String {
         let now = now_secs();
         let rows = self.covered_rows(task_id);
         for id in &rows {
             if let Some(t) = self.tasks.get_mut(id) {
                 // Only rows this offer actually holds: a row moved on since
-                // (another box took it) stays where it is.
                 if matches!(t.state, TaskState::Assigned | TaskState::Running) {
                     Self::release(t, now, why);
                 }
@@ -686,7 +549,6 @@ impl Inner {
     }
 
     /// Return one task to the pool. Attempts are kept — this unsticks, it
-    /// does not forgive strikes.
     pub(crate) fn release(t: &mut Task, now: u64, why: &str) {
         t.state = TaskState::Pending;
         t.clear_holders();
@@ -696,8 +558,6 @@ impl Inner {
     }
 
     /// Drop every row's affinity pin. No row is ever pinned: takes are
-    /// independent and a merge pulls the pieces it lacks, so a stored pin
-    /// only hides work from idle boxes.
     pub(crate) fn release_pins(&mut self) -> usize {
         let mut released = 0;
         for t in self.tasks.values_mut() {
@@ -709,16 +569,6 @@ impl Inner {
     }
 
     /// Refuse voice/cache surgery while workers are mid-play: acting then
-    /// mixes voices and marks stale mp3s done. Only *fresh* evidence counts
-    /// (30s) — stale beats and ghost assignments are the reaper's job, and an
-    /// offline Inner (empty beats) always passes.
-    ///
-    /// **The direct paths only.** The live API posts a surgery to the
-    /// exclusive queue instead (`bm_proto::ExclusiveOp`, run by
-    /// `state/exclusive.rs`), which waits for the rows the write can actually
-    /// reach rather than refusing. What still calls this is the offline
-    /// fallback — `offline_swap` / `offline_remix`, the TUI's route while the
-    /// API is down — where there is no scheduler to wait on at all.
     pub(crate) fn ensure_idle(&self) -> anyhow::Result<()> {
         let now = now_secs();
         let fresh = |ts: u64| now.saturating_sub(ts) < 30;

@@ -6,8 +6,6 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// segment planning
-// ---------------------------------------------------------------------------
 
 /// A consecutive run of lines by one speaker — one TTS call.
 #[derive(Debug, Clone)]
@@ -17,51 +15,20 @@ pub struct Run {
 }
 
 /// The script the pipeline plans against.
-///
-/// Two things happen here, and they are the reason every stage reads this
-/// rather than the raw `segments`:
-///
-/// - the embedded chapter headline is dropped (the synthetic title run speaks
-///   it instead), and
-/// - the script's **sound items are lifted out of the speech**, leaving
-///   `speech` as lines and only lines, and
-/// - detached punctuation-only lines are folded into the previous speech line,
-///   so punctuation stays in the text without getting a TTS take of its own.
-///
-/// A `segments` array is a sequence of *items*, and an item is one of two
-/// kinds. A line carries a `speaker` and a `text`. A **sound** carries neither
-/// — it is its own object, `{"sound": "page-turn", "mode": "overlap"}`, sitting
-/// between the two halves of a line the script split for it. The split is in
 /// the script, not computed here: the injection *is* "half a sentence, the
 /// sound, the other half", and writing it that way is the only shape in which
-/// the TTS can never be handed the syntax — a sound item has no text to feed,
-/// so no renderer can read it as one, by construction rather than by a rule
-/// each renderer has to remember.
 #[derive(Debug, Clone, Default)]
 pub struct Planned {
     /// The lines, in order: one element per TTS call, what the timeline lays
-    /// out, and the index space every wav tag is named in. Sound items are not
-    /// here.
     pub speech: Vec<Value>,
     /// Parallel to `speech`: the sound items that fire at that line's end, in
-    /// the order the script lists them. A sound between two lines lands in the
-    /// earlier one's slot, which is the seam the two halves meet at.
     pub fires: Vec<Vec<Value>>,
     /// Parallel to `speech`: which post-headline `segments` item the line came
-    /// from. The only way back to the item a caller is thinking in, now that
-    /// `speech` and `segments` are no longer the same array.
     pub origin: Vec<usize>,
 }
 
 impl Planned {
     /// Drop the headline, lift sounds out, and fold detached punctuation into
-    /// the previous speech line.
-    ///
-    /// Lenient by construction, like the rest of the merge: a sound with no
-    /// line before it has no seam to fire at and is warned and dropped rather
-    /// than invented into one. A punctuation-only line has no audio of its own;
-    /// its mark is appended to the previous line, and a leading mark with no
-    /// line to attach to is dropped rather than sent to TTS alone.
     pub fn plan(segments: &[Value]) -> Planned {
         let mut out = Planned::default();
         for (i, seg) in drop_headline(segments).iter().enumerate() {
@@ -111,13 +78,6 @@ impl Planned {
     }
 
     /// Group consecutive same-speaker pieces: one TTS call per run.
-    ///
-    /// A piece carrying an inject ends its run. The sound fires at that piece's
-    /// end, and inside a multi-piece run that offset is unknowable — one wav,
-    /// many pieces. Splitting is also the better read: the effect lands in a
-    /// real pause rather than glued mid-breath. Everything downstream (render
-    /// units, expected wavs, merge turns) reads these runs, so the split
-    /// propagates to all of them by construction.
     pub fn runs(&self) -> Vec<Run> {
         let mut out: Vec<Run> = Vec::new();
         let mut prev_fires = false;
@@ -150,13 +110,6 @@ pub(crate) fn seg_text(seg: &Value) -> &str {
 }
 
 /// True when a segment is an embedded chapter headline (`Chương 12: …` or
-/// `Chapter 12: …`). ASCII-prefix scan only — safe on UTF-8 text.
-///
-/// Both spellings are recognized because the word follows the *content
-/// language* (see [`heading_word`]) while a script may carry either: a
-/// translation can keep the source's `Chapter`, and a digest written before a
-/// language was declared can carry the other. Requiring a following digit keeps
-/// prose that merely opens with the word (`Chương pháp này…`) out.
 pub fn is_headline(text: &str) -> bool {
     let t = text.trim_start();
     let rest = match t
@@ -174,8 +127,6 @@ pub fn is_headline(text: &str) -> bool {
 }
 
 /// Drop an embedded headline so it never plans twice: the synthetic title run
-/// (see [`TitleSpeech`]) replaces it everywhere. Idempotent — every planning
-/// entry point applies it to raw input, so all of them always agree.
 pub fn drop_headline(segments: &[Value]) -> &[Value] {
     match segments.first() {
         Some(s) if is_headline(seg_text(s)) => &segments[1..],
@@ -184,7 +135,6 @@ pub fn drop_headline(segments: &[Value]) -> &[Value] {
 }
 
 /// Filenames the renderer is expected to produce. Shared by the renderer, the
-/// completeness check and the merger so they can never disagree.
 pub fn expected_wavs(
     planned: &Planned,
     cast: &Cast,
@@ -237,11 +187,6 @@ pub struct RenderUnit {
 }
 
 /// The spoken chapter headline ("Chương 46, <title>" / "Chapter 46, <title>",
-/// Narrator). Digests
-/// routinely drop the headline and concatenation would glue it to the first
-/// line with no pause — so the headline is its own leading run with its own
-/// cache file (`title_<voice>.wav`, never colliding with numeric tags) and
-/// the normal inter-turn gap after it.
 pub struct TitleSpeech {
     pub voice: String,
     pub text: String,
@@ -258,16 +203,6 @@ pub fn title_speech(
         return None; // no chapter text on disk — nothing truthful to say
     }
     // The planned first line already carries the headline (a second embedded
-    // headline, or narration quoting the title): don't speak it twice.
-    // Callers pass post-drop text; is_headline matches drop_headline exactly.
-    //
-    // The `contains` half is only right under `title_mode: auto`. There the
-    // title is the digest's own name — a phrase, not a word — and a line
-    // mentioning it really is a repeat. Under `default` the title *is* the
-    // crawled headline, which the planner drops itself, so nothing has said it;
-    // the guard would instead fire on any prose mentioning a one-word title
-    // (a chapter headed `Chapter 1: Maomao` is about Maomao) and silence the
-    // heading altogether.
     let auto = crate::config::Settings::load(&layout.settings()).auto_title();
     if is_headline(first_text) || (auto && first_text.contains(title.as_str())) {
         return None;
@@ -280,13 +215,6 @@ pub fn title_speech(
 }
 
 /// The word a chapter's spoken headline is announced with, in the content
-/// language: `Chapter 3, <title>` for English, `Chương 3, <title>` for
-/// Vietnamese.
-///
-/// The language is the adapter's, as its manifest declares it. An adapter that
-/// claims none keeps the checkout's long-standing Vietnamese wording rather
-/// than guessing — and [`is_headline`] matches both spellings regardless, so a
-/// script that carries the other word is still recognized as a headline.
 fn heading_word(layout: &Layout) -> &'static str {
     let language = crate::adapter::in_force(layout)
         .ok()
@@ -301,7 +229,6 @@ fn heading_word(layout: &Layout) -> &'static str {
 }
 
 /// Same, when only the script path is known (merge path): the chapter number
-/// comes from `script-NN.json`, the title from the sibling chapter text.
 pub fn title_speech_for_script(
     script_path: &Path,
     cast: &Cast,
@@ -327,7 +254,6 @@ fn title_unit(seg_dir: &Path, title: &TitleSpeech) -> RenderUnit {
 }
 
 /// Decide what to render, without rendering it. The agent turns each unit into
-/// one call to the TTS sidecar.
 pub fn plan_render(
     planned: &Planned,
     cast: &Cast,
@@ -401,7 +327,6 @@ pub fn plan_render(
 }
 
 /// True if every expected segment wav exists — the renderer's skip check and
-/// the merger's ready check. Read-only.
 pub fn segments_complete(
     layout: &Layout,
     script_path: &Path,
@@ -423,7 +348,6 @@ pub fn segments_complete(
         return false;
     }
     // Same policy the renderer assigned with: the completeness check and the
-    // renderer read one set of names.
     let policy = crate::cast::policy_for_bible(engine, layout);
     let installed = crate::pool::installed_voices(layout);
     let Ok(cast) = crate::cast::load_cast(
@@ -452,9 +376,6 @@ pub fn segments_complete(
 }
 
 /// One segment wav already on disk: who speaks it, in which chapter, where.
-///
-/// The mirror image of `expected_wavs` — that function names files the
-/// renderer must produce, this one reads back files it did produce.
 #[derive(Debug, Clone)]
 pub struct RenderedSegment {
     pub speaker: String,
@@ -464,9 +385,6 @@ pub struct RenderedSegment {
 }
 
 /// Largest single unit the pipeline accepts: ~11 minutes of 48 kHz 16-bit
-/// mono. Runs are speaker-continuous, and narration runs for thousands of
-/// characters (ch63 opens with a 7-minute monologue) — an 8 MB cap shelved
-/// those chapters as "suspicious" when they are merely long.
 pub const MAX_SEGMENT_BYTES: usize = 64 << 20;
 
 impl RenderedSegment {
@@ -484,10 +402,6 @@ impl RenderedSegment {
 }
 
 /// Voice identity for file matching: folded ASCII lowercase with separators
-/// dropped, so a clone key (`pham-tuyen`), its display name (`Phạm Tuyên`)
-/// and a wav tagged with either all meet. Two voices that differ only by
-/// case, diacritics or separators are the same voice for this purpose — the
-/// bible treats them the same way when it folds aliases.
 fn norm_voice(s: &str) -> String {
     crate::util::fold(s)
         .chars()
@@ -496,8 +410,6 @@ fn norm_voice(s: &str) -> String {
 }
 
 /// Whether `character` speaks any line in the local scripts. Answers the miss
-/// question "rendered on another box, or never rendered at all": lines here
-/// with no local wavs means the former.
 pub fn character_has_lines(layout: &Layout, character: &str) -> bool {
     if character.trim().is_empty() {
         return false;
@@ -525,10 +437,6 @@ pub fn character_has_lines(layout: &Layout, character: &str) -> bool {
 }
 
 /// The candidate that speaks exactly `text` (folded comparison — the held
-/// sentence and the script agree up to case, diacritics and whitespace).
-/// Deterministic: replaying a held line replays the same audio, which is what
-/// makes Tab a test instead of another random pick. The character preference
-/// still applies first, so a shared sentence stays with its speaker.
 pub fn pick_exact<'a>(
     cands: &'a [RenderedSegment],
     character: &str,
@@ -554,10 +462,6 @@ pub fn pick_exact<'a>(
 }
 
 /// Miss explanation for a voice with no local renders: lines here with no
-/// local wavs means those chapters rendered on another box (or not yet);
-/// no lines either means the chapters themselves live elsewhere. An exact
-/// request that misses names the render key instead — the line exists, just
-/// not in that voice.
 pub fn segment_miss(layout: &Layout, character: &str, voice: &str, exact: bool) -> String {
     if exact {
         return format!("that line isn't rendered in {voice} yet — T renders it");
@@ -574,14 +478,6 @@ pub fn segment_miss(layout: &Layout, character: &str, voice: &str, exact: bool) 
 }
 
 /// Every rendered segment wav for `voice` in the local cache.
-///
-/// The pool is every line *in that voice*, whoever speaks it; the caller
-/// (`pick_rendered`) prefers the requested character's own lines. Matching
-/// mirrors the renderer: stems are `{idx}_{voice}` or `{a}-{b}_{voice}` where
-/// the voice part is whatever the cast held at render time (a name or a key —
-/// both match), and filename indices count past the headline and past every
-/// sound item, via the same [`Planned::plan`] call. A wav whose script drifted
-/// out from under it still lists; only its text is dropped, never the audio.
 pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<RenderedSegment> {
     let voice = voice.trim();
     if voice.is_empty() {
@@ -590,14 +486,12 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
     let name = crate::voices::resolve_voice_name(engine, voice);
     let key = crate::voices::key_for_name(engine, &name).unwrap_or_else(|| voice.to_string());
     // Normalized once: catalogue keys, display names and wav tags meet after
-    // folding, whatever form each side was written in.
     let want = [voice, &name, &key]
         .iter()
         .map(|s| norm_voice(s))
         .collect::<Vec<_>>();
 
     // Chapters present as scripts, in order. A missing script or seg dir is
-    // skipped, not an error — the range is aspirational, the files are truth.
     let chapters = layout.script_chapters();
 
     let mut out: Vec<RenderedSegment> = Vec::new();
@@ -616,7 +510,6 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
             .cloned()
             .unwrap_or_default();
         // The same plan the render and the merge used, cuts and all: a tag has
-        // to name the piece of text the wav was actually spoken from.
         let planned = Planned::plan(&all);
         let eff = &planned.speech;
         let rd = match std::fs::read_dir(layout.seg_dir(engine, n)) {
@@ -624,8 +517,6 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
             Err(_) => continue,
         };
         // The recorded takes for this chapter, if the cluster renderer wrote
-        // any: take-key files carry no speaker or voice in their names, so
-        // they resolve through this instead of through filename parsing.
         let takes: Vec<Value> = std::fs::read_to_string(layout.plan(n))
             .ok()
             .and_then(|t| serde_json::from_str::<Value>(&t).ok())
@@ -634,7 +525,6 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
         for e in rd.flatten() {
             let fname = e.file_name().to_string_lossy().to_string();
             // Whatever the storage tier stores: the take name's extension is
-            // the tier's, so only these suffixes are takes at all.
             let stem = match super::renderplan::TAKE_EXTENSIONS
                 .iter()
                 .find_map(|ext| fname.strip_suffix(&format!(".{ext}")))
@@ -643,7 +533,6 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
                 None => continue,
             };
             // What the renderer writes now: content-addressed takes. The take
-            // carries its own speaker, voice and text.
             if let Some(key) = stem.strip_prefix("t-") {
                 if let Some(take) = takes
                     .iter()
@@ -694,7 +583,6 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
                 continue;
             }
             // `.get` everywhere: a script edited since the render must cost
-            // the text, never a panic, and never the audio.
             let first = match eff.get(*idxs.first().unwrap()) {
                 Some(s) => s,
                 None => continue,
@@ -730,8 +618,6 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
 }
 
 /// One segment to play: the requested character's own lines first — hearing
-/// *them* is the point — else anything in that voice. Random every call, so
-/// Tab triages instead of repeating itself.
 pub fn pick_rendered<'a>(
     cands: &'a [RenderedSegment],
     character: &str,

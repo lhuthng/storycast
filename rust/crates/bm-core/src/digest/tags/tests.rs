@@ -3,7 +3,6 @@ use super::*;
 use serde_json::json;
 
 /// A stand-in palette: the shipped map's values, which is what the digest
-/// passes in. Tests that care about the music check pass their own.
 fn pal() -> Vec<String> {
     ["quiet", "warm", "busy", "battle", "grand", "none"]
         .iter()
@@ -12,9 +11,6 @@ fn pal() -> Vec<String> {
 }
 
 /// `kind` is code-attached, and `thought` is the only value code writes:
-/// the marker is what the mixer keys the pack's thought sound on, so any
-/// other value — a model invention or a hand edit — is refused where the
-/// digest can still ask for a repair.
 #[test]
 fn only_a_thought_may_carry_a_kind() {
     let bible = json!({"characters": []});
@@ -120,7 +116,6 @@ fn bible_with(name: &str, aliases: &[&str]) -> Value {
 }
 
 /// The cast pass's output for a script under test: the roster it declares.
-/// `validate_script` attributes against this, not against the script itself.
 fn ctx_of(script: &Value) -> Value {
     json!({"roster": script.get("roster").cloned().unwrap_or(json!([]))})
 }
@@ -294,7 +289,6 @@ fn validate_rejects_a_speaker_outside_the_roster() {
 #[test]
 fn validate_ignores_direction_and_rejects_a_bad_voice_hint() {
     // `direction` used to be required ("Say ..."); nothing consumes it, so
-    // it is neither required nor checked now — old scripts keep passing.
     let no_dir = json!({
         "segments": [{"speaker": "Narrator", "text": "hi"}],
         "roster": ["Narrator"]
@@ -326,7 +320,6 @@ fn validate_accepts_a_well_formed_digest() {
         "segments": [{"speaker": "Narrator", "text": "Trời sáng.", "direction": "Say calm in Vietnamese: Trời sáng."}]
     });
     // The cast pass owns identity and the script pass owns the speech, so a
-    // well-formed digest is two answers and each half is checked by its own.
     validate_context(&data, &json!({"characters": []})).unwrap();
     validate_script(&data, &json!({"characters": []}), &ctx_of(&data), &pal()).unwrap();
 }
@@ -377,13 +370,11 @@ fn validate_closes_the_music_vocabulary_and_keeps_old_scripts_mergeable() {
     check("none").unwrap();
 
     // Out of the palette: rejected, and the message names it so the repair
-    // round has something to repair *to*.
     let err = check("melancholy").unwrap_err();
     assert!(err.to_string().contains("palette"), "{err}");
     assert!(err.to_string().contains("quiet"), "{err}");
 
     // Half-declared is rejected: the field is a statement about every
-    // segment, or about none of them.
     let mixed = json!({
         "segments": [
             {"speaker": "Narrator", "text": "x", "music": "quiet"},
@@ -395,7 +386,6 @@ fn validate_closes_the_music_vocabulary_and_keeps_old_scripts_mergeable() {
     assert!(err.to_string().contains("missing `music`"), "{err}");
 
     // No value anywhere: a script from before the field existed. It still
-    // validates, because the scene map's legacy shim gives it a mood.
     let legacy = json!({
         "segments": [{"speaker": "Narrator", "text": "x", "scene": "street-day"}],
         "roster": ["Narrator"]
@@ -408,8 +398,6 @@ fn validate_closes_the_music_vocabulary_and_keeps_old_scripts_mergeable() {
 }
 
 /// ch6's street: two consecutive lines both hail `"Dịch sư phụ."`. They are
-/// two source events and both are spoken, so identical text next door is
-/// legal — only a split that repeats its own event is not.
 #[test]
 fn the_duplicate_line_rule_reads_source_ids_not_adjacency() {
     let bible = json!({"characters": []});
@@ -423,7 +411,6 @@ fn the_duplicate_line_rule_reads_source_ids_not_adjacency() {
     validate_script(&crowd, &bible, &ctx_of(&crowd), &pal()).unwrap();
 
     // One event, both halves the whole line: that is the split the rule is
-    // for, and the message has to name the event the repair must fix.
     let split = json!({
         "segments": [
             {"source_id": "e0002", "speaker": "Anonymous", "text": "Dịch sư phụ."},
@@ -436,7 +423,6 @@ fn the_duplicate_line_rule_reads_source_ids_not_adjacency() {
     assert!(err.to_string().contains("partitions"), "{err}");
 
     // No ids at all — a script from the manual prompt, where nothing else
-    // can catch a line spoken twice.
     let legacy = json!({
         "segments": [
             {"speaker": "Narrator", "text": "Hắn gật đầu."},
@@ -491,7 +477,6 @@ fn validate_injects_accepts_sound_items_and_refuses_bad_names_and_long_hits() {
         .map(|(k, v)| (k.to_string(), v))
         .collect();
     // A line, then the sound items that follow it. Every sound below sits
-    // where the script would have written one: between two halves.
     let doc = |sounds: Value| {
         let mut items = vec![json!({"speaker": "Narrator", "text": "Hắn vung kiếm."})];
         items.extend(sounds.as_array().cloned().unwrap_or_default());
@@ -499,8 +484,6 @@ fn validate_injects_accepts_sound_items_and_refuses_bad_names_and_long_hits() {
         json!({"segments": items, "roster": ["Narrator"]})
     };
     // A sound is a name and nothing else; a stop is a name and nothing else.
-    // The stop has to have something running to fade, so its start comes
-    // first in the array — see the orphan-stop test below.
     validate_injects(
         &doc(json!([{"sound": "boil"}, {"sound": "blood"}, {"stop": "boil"}])),
         &pool,
@@ -518,8 +501,6 @@ fn validate_injects_accepts_sound_items_and_refuses_bad_names_and_long_hits() {
     let err = validate_injects(&doc(json!([{"stop": "thunder"}])), &pool).unwrap_err();
     assert!(err.to_string().contains("thunder"), "{err}");
     // Behaviour is not the script's to set. All three keys, by name — each
-    // one is read by nobody, so a chapter would merge with a behaviour
-    // nobody chose and never say so.
     for key in ["mode", "hold", "level"] {
         let mut item = json!({"sound": "blood"});
         item[key] = if key == "mode" {
@@ -534,7 +515,6 @@ fn validate_injects_accepts_sound_items_and_refuses_bad_names_and_long_hits() {
         );
     }
     // A pool entry that says `hit` on a 51 s clip is a pool bug, and the
-    // message says which file to fix.
     let bad: ClipPool = [("boil", mk(51.0, "hit"))]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
@@ -562,8 +542,6 @@ fn validate_injects_accepts_sound_items_and_refuses_bad_names_and_long_hits() {
     .unwrap_err();
     assert!(err.to_string().contains("seam"), "{err}");
     // The rejected shape, refused by name: a sound field on a line is read
-    // by nobody, so the chapter would merge without the sound and say
-    // nothing — and worse, a renderer could be handed the line as speech.
     let err = validate_injects(
         &json!({"segments": [{"speaker": "Narrator", "text": "x", "sound": "blood"}]}),
         &pool,
@@ -583,11 +561,6 @@ fn validate_injects_accepts_sound_items_and_refuses_bad_names_and_long_hits() {
 }
 
 /// The prompt-side sound fields must not survive onto a written script.
-///
-/// `sound_after` / `stop_after` are how the prompt asks for a sound; the
-/// pipeline lifts them into items. One reaching validation means something
-/// bypassed the expansion, and a field on a line is read by nobody — the
-/// chapter would merge with the sound missing and never say so.
 #[test]
 fn validate_injects_refuses_a_prompt_side_sound_field() {
     use crate::audio_pool::{ClipPool, Sound};
@@ -619,12 +592,6 @@ fn validate_injects_refuses_a_prompt_side_sound_field() {
 }
 
 /// A `stop` for a sound nothing started is silence with extra steps.
-///
-/// This is not a hypothetical: it is the exact shape the analyzer returned
-/// on the first two-round run — `{"stop": "cooking"}` and no start — and it
-/// passed validation, because a stop was only ever checked against the pool.
-/// `stop_actives` skips a sound that is not running, so the chapter merged
-/// with the bed missing and said nothing. A bed is a pair or it is nothing.
 #[test]
 fn validate_injects_refuses_a_stop_with_nothing_to_stop() {
     use crate::audio_pool::{ClipPool, Sound};
@@ -693,14 +660,12 @@ fn validate_title_takes_a_name_and_refuses_the_crawled_headline() {
     validate_title(&doc("Thần Binh Dao Phay")).unwrap();
     validate_title(&doc("Thanh Sơn Kinh Hồn")).unwrap();
     // The two real headlines, refused. Both are word-for-word MT of the
-    // Chinese title with the sentence punctuation still attached.
     let err = validate_title(&doc("Tê! Thật là khủng khiếp dao phay")).unwrap_err();
     assert!(err.to_string().contains("machine-translated"), "{err}");
     let err =
         validate_title(&doc("Tiền bối đối với dao phay yêu cầu đều cao như vậy?")).unwrap_err();
     assert!(err.to_string().contains("machine-translated"), "{err}");
     // Copied through unchanged is still copied through, even when the
-    // headline happens to be punctuated like a name.
     let clean = |t: &str| {
         json!({
             "title": t,
@@ -746,7 +711,6 @@ fn vietnamese_leak_detection_ignores_known_names() {
 #[test]
 fn adjacent_duplicate_lines_are_refused_but_distant_repeats_pass() {
     // ch112's shape: every quoted line emitted twice in a row, once as
-    // narration and once as dialogue, so the mix spoke it in two voices.
     let doubled = json!({
         "segments": [
             {"speaker": "Narrator", "text": "A, đây có một cái đầm nước."},

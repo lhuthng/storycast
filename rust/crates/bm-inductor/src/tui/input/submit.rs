@@ -8,19 +8,13 @@ use crate::tui::{
 use bm_proto::{Machine, Op, OpRequest};
 
 /// Validate and dispatch a submitted text prompt.
-///
-/// Returns `Err(message)` to keep the prompt open with the problem stated,
-/// rather than silently substituting a default.
 pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, String> {
     match prompt.kind {
         // `:` commands run through the key handler, never dispatch: reaching
-        // here means a bug, and the prompt staying open says so.
         TextKind::Command => Err("commands run from the command line, not submit".into()),
         // Save-only prompt, persisted from the run screen's Enter branch:
-        // reaching dispatch would launch without saving, so refuse.
         TextKind::RunConfig => Err("run config is saved from the run screen".into()),
         // Same for the ssh defaults: text.rs saves them on Enter, so
-        // reaching dispatch means a bug, and the prompt staying open says so.
         TextKind::SshKey
         | TextKind::SshUser
         | TextKind::SshPort
@@ -31,13 +25,8 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
         }
         TextKind::Mix => Err("mix saves from the prompt, not submit".into()),
         // Same for the render batch: `:batch` writes this workspace's settings
-        // and dispatches nothing, because the scheduler reads the value when it
-        // builds its next offer.
         TextKind::RenderBatch => Err("render batch saves from the prompt, not submit".into()),
         // One box's sidecar thread count. Dispatched rather than written here:
-        // the value lives in `machines.json` beside the box's login and is
-        // converged onto the box by the dispatcher, so it must go through the
-        // API even when the operator is editing a box that is currently down.
         TextKind::TtsThreads => {
             let m = app
                 .selected_machine()
@@ -69,20 +58,15 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
             })
         }
         // The sound-design prompts write a registry and launch nothing, so
-        // reaching dispatch means a bug — same as the two above.
         TextKind::SoundAdd(_) | TextKind::SoundEdit(..) | TextKind::SoundLevel(..) => {
             Err("sound pools save from the prompt, not submit".into())
         }
         // The LLM prompts write `.bm/llm.json` and launch nothing, so
-        // reaching dispatch means a bug — same as the sound pools above.
         TextKind::LlmKey(_) | TextKind::LlmUrl(_) | TextKind::LlmModel(_) => {
             Err("LLM fields save from the prompt, not submit".into())
         }
         TextKind::AddMachine => {
             // Bind tuple: `addr [user [port [key...]]]` — the key is the
-            // remainder of the line so paths with spaces survive. Missing
-            // fields fall back to the app-wide ssh defaults; no key at all
-            // means ssh decides (agent / ~/.ssh/config).
             let buf = prompt.buf.trim();
             let toks: Vec<&str> = buf.split_whitespace().collect();
             let Some(addr) = toks.first().map(|s| s.to_string()) else {
@@ -97,7 +81,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                     .map_err(|_| format!("port “{p}” is not a number"))?,
             };
             // Byte offset of the fourth field: skip three fields and the gaps
-            // between them. Internal spacing of the key is preserved.
             let key = if toks.len() > 3 {
                 let mut idx = 0;
                 for _ in 0..3 {
@@ -133,8 +116,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
         }
         TextKind::AddSample => {
             // Pooled sample only: the whole buffer is the path, tags come
-            // from the filename. Anything with `as` belongs to N (named) —
-            // say so instead of filing it under a nonsense filename.
             if prompt.buf.contains(" as ") {
                 return Err(
                     "that looks like a named voice — press N and use `path as Name`".into(),
@@ -153,7 +134,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
         }
         TextKind::AddNamed => {
             // `refs/narrator.mp3 as Narrator`: the name is required, the tags
-            // stay empty — a named voice answers by hand, never auto-rolls.
             let (path, name) = match prompt.buf.rsplit_once(" as ") {
                 Some((p, n)) if !p.trim().is_empty() && !n.trim().is_empty() => {
                     (p.trim().to_string(), n.trim().to_string())
@@ -187,22 +167,14 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
         }
         TextKind::CrawlTemplate => {
             // Empty is not an error — it means "probe without saving one".
-            // `:crawl` is also the command that runs a crawler's `discover()`,
-            // and a slug site has **no** chapter-number URL to save: refusing
-            // the empty line would make the one probe command useless for
-            // exactly the shape of site that most needs probing. `None`
-            // (rather than `Some("")`) is what leaves the saved template
-            // alone.
             let template = prompt.buf.trim().to_string();
             let url_template = if template.is_empty() {
                 None
             } else {
                 if !template.contains("{n}") {
                     // A site we have a crawler for is very often a site whose
-                    // URLs cannot be templated — the number is in the URL but
                     // behind a slug nothing can invent. Saying only "must
                     // contain {n}" sends the reader round the same loop, so the
-                    // refusal names the crawler and the way through.
                     if let Some(site) = bm_core::crawl::for_url(&template) {
                         return Err(if site.is_crawlable() {
                             format!(
@@ -241,11 +213,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
             ))
         }
         // `:import` — adopt a chapter the crawler could not fetch.
-        //
-        // `<chapter> <path>`, or just `<path>` when the file is named
-        // `ch34.txt`: the number comes from the operator or from the filename,
-        // **never** from the order things were dropped in, because guessing is
-        // how chapter 34 becomes 33 with four hundred chapters behind it.
         TextKind::Import => {
             let buf = prompt.buf.trim();
             if buf.is_empty() {
@@ -264,7 +231,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                 return Err("chapter 0 is not a chapter — the index starts at 1".into());
             }
             // A lone number is a number with nothing to import: say so here
-            // rather than letting it become a "path" that does not exist.
             if chapter.is_none() && buf.chars().all(|c| c.is_ascii_digit()) {
                 return Err("give the path too — `:import 34 /tmp/ch34.txt`".into());
             }
@@ -272,8 +238,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                 return Err("give the path too — `:import 34 /tmp/ch34.txt`".into());
             }
             // A comma or newline separates several files; anything that is not
-            // a file and not prose is refused by the importer, which is the one
-            // place that rule lives.
             let paths: Vec<String> = rest
                 .split([',', '\n'])
                 .map(str::trim)
@@ -296,8 +260,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
         }
         TextKind::Workspace => {
             // `new <name>` creates and switches; a bare name switches; empty
-            // lists. Parsed here so a typo is refused with the prompt still
-            // open, rather than queued as a job that fails a second later.
             let buf = prompt.buf.trim();
             let req = if buf.is_empty() {
                 WorkspaceReq::List
@@ -305,8 +267,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                 return Err("`new` needs a name — `new <name> [--profile <id>]`".into());
             } else if let Some(rest) = buf.strip_prefix("new ") {
                 // `new <name> --profile <id>`; the id is checked against the
-                // presets here, with the prompt still open, so a typo is a
-                // refused line and not a queued job that fails a second later.
                 let (name, profile) = match rest.split_once("--profile") {
                     Some((name, id)) => {
                         let id = id.trim();
@@ -342,8 +302,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
             })
         }
         // `:login` takes the console's CSV and nothing else. The secret cannot
-        // be typed on a screen — it would be echoed — so a key id alone is
-        // refused with the reason rather than half-handled.
         TextKind::AwsLogin => {
             let raw = prompt.buf.trim();
             if raw.is_empty() {
@@ -354,7 +312,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                 );
             }
             // A bare path is the common case; the flags the CLI takes are
-            // accepted too, through the same definition, so `--csv <path>` works.
             let csv = if raw.starts_with('-') {
                 let toks: Vec<String> = raw.split_whitespace().map(str::to_string).collect();
                 let args =
@@ -370,7 +327,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                     .ok_or_else(|| "pass the console's CSV: `--csv <path>`".to_string())?
             } else {
                 // Tilde is not expanded by a shell here, so do it by hand — the
-                // console's download lands in `~/Downloads`.
                 bm_core::util::expand_tilde(raw)
             };
             if !csv.is_file() {
@@ -386,9 +342,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
             })
         }
         // `:discover` parses the same flags the CLI does, from the same clap
-        // definition, so a flag cannot mean two things depending on the front
-        // end. A path-valued flag is tilde-expanded first: there is no shell
-        // here to do it.
         TextKind::AwsDiscover => {
             let raw = prompt.buf.trim();
             let toks: Vec<String> = raw.split_whitespace().map(str::to_string).collect();
@@ -419,7 +372,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
         }
         TextKind::Profile => {
             // Same grammar: `pack <name>` bundles the live tree, a bare name
-            // loads it, empty lists.
             let buf = prompt.buf.trim();
             let req = if buf.is_empty() {
                 ProfileReq::List
@@ -440,10 +392,6 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
 }
 
 /// A workspace or profile name: one path segment, no escapes.
-///
-/// `workspace_cmd` enforces the same rule, but by then the job is queued and
-/// the prompt is closed — the operator would have to retype it. Refusing here
-/// keeps the prompt open with the name still on screen.
 pub(crate) fn workspace_name(raw: &str) -> Result<String, String> {
     let name = raw.trim();
     if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0') {

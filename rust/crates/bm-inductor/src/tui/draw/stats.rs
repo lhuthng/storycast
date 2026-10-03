@@ -1,10 +1,4 @@
 //! Stats pane: per-worker completions by stage, plus the TUI-side ETA.
-//!
-//! Rows are live workers, columns the four stages; each number is completed
-//! tasks of that stage on that worker. The ETA column is measured here, not
-//! reported: the stage's median task duration scaled by the beat's unworked
-//! fraction. Full tier only — the compact tier already folds Tasks away,
-//! and a six-column matrix cannot survive 76 columns.
 use crate::tui::{
     app::App,
     model::{live_beats, reported_alias, task_eta},
@@ -44,7 +38,6 @@ pub(crate) fn draw_stats(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 .copied()
                 .unwrap_or(0);
             // Tinted by stage so the matrix reads by column as well as row;
-            // zero stays dim, so the eye lands on where work happened.
             cells.push(stage_count_cell(app.colour(), st.as_str(), n));
         }
         let eta = match b.stage {

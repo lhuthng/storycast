@@ -3,17 +3,6 @@ use super::json::strip_fences;
 use super::parse::EXCERPT_CHARS;
 use super::*;
 /// The previous chapters' excerpts chapter `n` is fed, newest first, each
-/// paired with the chapter it summarizes.
-///
-/// `pub` because the TUI's excerpt view draws the same chain the attribution
-/// prompt is built from: one definition of the window, so the screen can never
-/// show a different memory than the model was handed. Depth is
-/// `excerpt_window` from settings — 1 is chapter *n−1* only, 0 is off — and
-/// each excerpt is read from the stored script of the chapter it summarizes. A
-/// chapter with no stored predecessor (the first one, an out-of-order one, a
-/// book digested before the field existed) contributes nothing: fewer entries,
-/// not a failure, the same "if any" the bible's own partial order has always
-/// had.
 pub fn excerpt_chain(layout: &Layout, n: u32) -> Vec<(u32, String)> {
     let window = Settings::load(&layout.settings()).excerpt_window;
     if window == 0 {
@@ -40,8 +29,6 @@ pub fn excerpt_chain(layout: &Layout, n: u32) -> Vec<(u32, String)> {
 }
 
 /// The prompt half of [`excerpt_chain`]: the chain as `CH m: excerpt` lines.
-/// `None` when there is none, which is what keeps a windowless prompt
-/// byte-for-byte the pre-excerpt one.
 pub(crate) fn previous_excerpts(layout: &Layout, n: u32) -> Option<String> {
     let chain = excerpt_chain(layout, n);
     if chain.is_empty() {
@@ -57,17 +44,8 @@ pub(crate) fn previous_excerpts(layout: &Layout, n: u32) -> Option<String> {
 }
 
 /// The language the digest's prose fields are written in.
-///
-/// The contract's language is the ADAPTER's, not a constant: `atmosphere` and
-/// `excerpt` used to say "English sentences" for every book on every checkout,
-/// which was true exactly once and silently wrong for every other adapter — and
-/// a Vietnamese title instruction shipped beside them for a while, which is how
-/// an English book ended up titled in Vietnamese even after its prompts were.
-/// What is declared in `adapter.json` is the one fact the fork line rests on
 /// ("an adapter has one language, and it is both the source's and the
 /// target's"), so that is what the wording follows; an adapter that claims
-/// nothing falls back to the chapter's own language, the same fact said per
-/// chapter instead of per manifest.
 pub(crate) fn content_language(layout: &Layout) -> String {
     crate::adapter::in_force(layout)
         .ok()
@@ -78,11 +56,6 @@ pub(crate) fn content_language(layout: &Layout) -> String {
 }
 
 /// The excerpt instruction, verbatim.
-///
-/// One wording, two callers: the attribution contract embeds it as one field of
-/// the strict JSON it asks for, and [`build_excerpt_prompt`] asks for it alone.
-/// Keeping it a single string is what makes a backfilled excerpt the same field
-/// the digest would have written instead of a second, drifted definition.
 pub(crate) fn excerpt_rule(content_language: &str) -> String {
     format!(
         "2-4 sentences in {content_language} on the state this chapter ENDS in: who is \
@@ -93,21 +66,6 @@ pub(crate) fn excerpt_rule(content_language: &str) -> String {
 }
 
 /// The **excerpt-only** prompt: the attribution pass's excerpt, asked for on its
-/// own.
-///
-/// [`build_attribution_prompt`] asks for the excerpt as one field of a cast
-/// answer and pays for the whole attribution gate to get it. A book digested
-/// before the field existed has scripts but no excerpts, and re-digesting it to
-/// recover a two-sentence memory would re-decide every speaker, invalidate
-/// segments and land a second bible delta. This asks the same question against
-/// the same bible and the same `---PREVIOUSLY---` chain and nothing else, so the
-/// answer is the field the digest would have kept — same instruction, same
-/// window — without touching the cast.
-///
-/// `text` is the raw chapter, the same chapter the attribution pass is handed.
-/// The block order mirrors the pipeline's: context and rules first, the chapter
-/// last, because a model that reads the data before the question has already
-/// answered.
 pub fn build_excerpt_prompt(layout: &Layout, n: u32, text: &str) -> Result<String> {
     let bible = load_bible(&layout.bible());
     let language = content_language(layout);
@@ -133,20 +91,9 @@ pub fn build_excerpt_prompt(layout: &Layout, n: u32, text: &str) -> Result<Strin
 }
 
 /// Read an excerpt answer, tolerantly.
-///
-/// The strict `{"excerpt": "..."}` object is what the prompt asks for, but a
-/// model sometimes returns the prose alone. The field is soft in the digest
-/// (blank or over-long is squeezed and capped, never refused) and it is soft
-/// here for the same reason, so the only failure is an answer with nothing in
-/// it — and that is what `None` says, which is what the caller repairs.
-///
-/// White space is squeezed to single spaces so an excerpt read back from disk
-/// is byte-identical to the one the digest would have stored.
 pub fn parse_excerpt(raw: &str) -> Option<String> {
     let cleaned = strip_fences(raw);
     // `strip_fences` knows ```` ```json ```` and a trailing fence; a bare
-    // opener with no language tag is common enough in a model answer that the
-    // excerpt reader undoes it too, rather than reading the fence as prose.
     let unfenced = match cleaned.strip_prefix("```") {
         Some(rest) => rest.split_once('\n').map(|(_, body)| body).unwrap_or(rest),
         None => cleaned,
@@ -163,12 +110,6 @@ pub fn parse_excerpt(raw: &str) -> Option<String> {
 }
 
 /// Write one chapter's excerpt back into its stored script, and nothing else.
-///
-/// The script holds the segment plan, the cast and the speakers the render
-/// reads; recovering a missing memory must not rewrite any of them. Only the
-/// `excerpt` key is touched, and the write goes through [`write_script`] like
-/// every other script write, so the artifact on disk cannot land differently
-/// from one a digest wrote.
 pub fn write_excerpt(layout: &Layout, n: u32, excerpt: &str) -> Result<()> {
     let path = layout.script(n);
     let mut script =

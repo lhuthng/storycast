@@ -3,7 +3,6 @@ use super::*;
 #[test]
 fn workspace_prompt_parses_list_use_and_new() {
     // One prompt, three verbs, parsed at submit so a typo keeps the prompt
-    // open with the operator's own text still in it.
     let mut app = App::new("http://x");
     let prompt = |buf: &str| TextPrompt::new(TextKind::Workspace, "t", "h", buf);
 
@@ -29,8 +28,6 @@ fn workspace_prompt_parses_list_use_and_new() {
         }) if n == "second-book"
     ));
     // `--profile` selects a preset at creation, and the id is checked against
-    // profiles/presets.json while the prompt is still open — the checkout's
-    // own presets, not a compiled list.
     let presets = app.layout.root.join("profiles/presets.json");
     std::fs::create_dir_all(presets.parent().unwrap()).unwrap();
     std::fs::write(
@@ -66,10 +63,6 @@ fn workspace_prompt_parses_list_use_and_new() {
 #[test]
 fn the_ws_command_line_carries_the_name_to_the_prompt() {
     // `:ws <name>` matched no arm in the splitter, fell through to the word
-    // list, and arrived as a bare `:ws` — so the documented recipe (`:X`, then
-    // `:ws <name>`) opened the prompt with the name dropped and whichever book
-    // was already live sitting in its place. Whatever else changed, the name
-    // has to survive the trip.
     let prefill = |line: &str| match command_key(line) {
         Some(Command::Workspace { prefill }) => prefill,
         other => panic!("`:{line}` gave {other:?}, not the workspace prompt"),
@@ -77,10 +70,8 @@ fn the_ws_command_line_carries_the_name_to_the_prompt() {
 
     assert_eq!(prefill("ws beyond-myriads"), "beyond-myriads");
     // A book's title has spaces in it, so every word after `ws` is the name and
-    // quoting is not the price of using one.
     assert_eq!(prefill("ws beyond myriads"), "beyond myriads");
     // The whole line travels, which is what carries the other two verbs:
-    // creating, and creating with a preset chosen.
     assert_eq!(prefill("ws new second-book"), "new second-book");
     assert_eq!(
         prefill("workspace new second-book --profile jnovel-en"),
@@ -88,8 +79,6 @@ fn the_ws_command_line_carries_the_name_to_the_prompt() {
     );
 
     // Bare `:ws` is the picker — the whole point of it — and the word table
-    // says so too, so the two cannot drift into disagreeing about the word
-    // with no argument.
     assert!(
         matches!(command_key("ws"), Some(Command::WorkspacePick)),
         "{:?}",
@@ -114,8 +103,6 @@ fn the_ws_command_line_carries_the_name_to_the_prompt() {
 #[test]
 fn the_ws_command_line_ends_in_the_workspace_it_named() {
     // The splitter test above proves the name is carried; this proves it is
-    // carried *to somewhere*, since the bug's symptom was a prompt that looked
-    // right and held the wrong book.
     let mut app = App::new("http://x");
     let http = reqwest::Client::new();
     let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
@@ -176,7 +163,6 @@ fn profile_prompt_parses_list_load_and_pack() {
 #[test]
 fn the_footer_names_the_active_workspace_and_the_loaded_profile() {
     // `default` is the implicit root workspace, not a missing name: a fresh
-    // clone with no pointer runs there and the footer has to say so.
     let l = bm_core::Layout::new("/repo");
     assert_eq!(super::model::workspace_label(&l), "default");
     let named = bm_core::Layout {
@@ -186,7 +172,6 @@ fn the_footer_names_the_active_workspace_and_the_loaded_profile() {
     };
     assert_eq!(super::model::workspace_label(&named), "beyond-myriads");
     // No profile is the state every runner refuses to start in, so it is
-    // reported plainly rather than left blank.
     assert_eq!(super::model::profile_label(None), "none");
     let p = bm_core::profile::Binding {
         pack: bm_core::profile::Pointer {

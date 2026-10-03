@@ -71,8 +71,6 @@ pub(crate) fn draw_llm(f: &mut ratatui::Frame, app: &mut App, v: &LlmView) {
             dim,
         )));
         // The fetched list, offered as a pick on its own provider's row.
-        // At most five rows: some providers serve hundreds of models, and
-        // the cursor scrolls the window rather than growing the box.
         if v.picking && i == v.cursor && app.llm_models_for == *id && !app.llm_models.is_empty() {
             const SHOW: usize = 5;
             let total = app.llm_models.len();

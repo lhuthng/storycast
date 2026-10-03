@@ -9,8 +9,6 @@ pub struct Chunks {
 // ── sentence splitting ──────────────────────────────────────────────────────
 
 /// Opening brackets and the closing bracket each expects. Single quotes are
-/// deliberately absent: they double as apostrophes, so they would open a span
-/// that never closes and swallow the rest of the text.
 const OPEN_TO_CLOSE: &[(char, char)] = &[
     ('(', ')'),
     ('[', ']'),
@@ -41,10 +39,6 @@ fn is_trailing_close(c: char) -> bool {
 }
 
 /// Split into sentences, not cutting inside brackets or quotations.
-///
-/// An unbalanced bracket would swallow everything after it into one enormous
-/// sentence, so the scan runs again ignoring brackets if the first pass ends
-/// unbalanced.
 pub fn split_sentences(text: &str) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
@@ -82,10 +76,6 @@ fn scan_sentences(text: &str, quote_aware: bool) -> (Vec<String>, bool) {
                 j += 1; // swallow "?!", "..."
             }
             // A spaced ellipsis (". . .", "? ?") is one trailing mark, not a
-            // run of one-word sentences: fold whitespace-separated end marks
-            // into the same run, so a lone "." never becomes a synthesis chunk
-            // of its own — the model fills ~1.5s of babble for it, and
-            // "Vậy thì. . ." rendered 3.5s of noise for two words.
             loop {
                 let mut k = j;
                 while k < n && chars[k].is_whitespace() {
@@ -104,7 +94,6 @@ fn scan_sentences(text: &str, quote_aware: bool) -> (Vec<String>, bool) {
                 j += 1; // and a closing mark stuck to it
             }
             // Only a boundary when whitespace or the end follows — which is what
-            // keeps "3.5 triệu" and "8.30 sáng" whole.
             if j >= n || chars[j].is_whitespace() {
                 sentences.push(chars[start..j].iter().collect());
                 start = j;
@@ -120,10 +109,6 @@ fn scan_sentences(text: &str, quote_aware: bool) -> (Vec<String>, bool) {
         sentences.push(chars[start..].iter().collect());
     }
     // A punctuation-only fragment (".", "...", ". . .") is not a sentence:
-    // handed to synthesis it becomes ~1s of filler babble with no words in
-    // it. Same check the merge uses before a line may hold audio
-    // (`has_speakable_content`), so the two halves cannot disagree about
-    // what is speakable.
     let cleaned: Vec<String> = sentences
         .into_iter()
         .map(|s| s.trim().to_string())
@@ -160,10 +145,6 @@ fn is_conn_pair(a: &str, b: &str) -> bool {
 }
 
 /// Split on a comma, semicolon, colon or dash followed by whitespace.
-///
-/// The reference uses a lookbehind; Rust's `regex` has none, and the rule is a
-/// scan anyway — split at a whitespace run whose preceding character is one of
-/// those marks, dropping the whitespace.
 fn split_minor_punct(s: &str) -> Vec<String> {
     let chars: Vec<char> = s.chars().collect();
     let mut out = Vec::new();
@@ -191,10 +172,6 @@ fn split_minor_punct(s: &str) -> Vec<String> {
 }
 
 /// Tokens, with every `<en>...</en>` span kept whole.
-///
-/// The reference is `<en>.*?</en>|\S+`. Note the alternation order matters: at a
-/// position that does *not* start a tag, `\S+` matches the whole run, so
-/// `x<en>a</en>` is one token, not three.
 fn tokenize_keep_en(s: &str) -> Vec<String> {
     let chars: Vec<char> = s.chars().collect();
     let mut out = Vec::new();
@@ -245,10 +222,6 @@ fn find_close_en(chars: &[char], from: usize) -> Option<usize> {
 }
 
 /// A cut point that lands on a connector, scanned back from the ceiling.
-///
-/// Scanning backwards prefers the fullest chunk. It stops as soon as the left
-/// piece would be shorter than `min_left`, because a chunk that is too small
-/// loses the benefit of packing at all.
 fn natural_cut(words: &[String], start: usize, end: usize, min_left: usize) -> Option<usize> {
     let mut left: usize = words[start..end]
         .iter()
@@ -424,15 +397,6 @@ fn effective_len(chunk: &str) -> usize {
 }
 
 /// Fold chunks shorter than `min_chars` into a neighbour.
-///
-/// A one- or two-word chunk standing alone leaves the autoregressive model
-/// without enough text to condition on, the stop token misses, and it invents
-/// words. Merging is the cheap fix.
-///
-/// Preference order: a boundary that is **not** a paragraph break, then the
-/// shorter neighbour, then the right-hand one. Merging across a paragraph break
-/// is allowed when nothing else is left, and the paragraph pause gives way to the
-/// sentence break — a deliberate trade to avoid hallucination.
 pub(crate) fn merge_short_chunks(
     mut chunks: Vec<String>,
     mut gaps: Vec<String>,
@@ -446,7 +410,6 @@ pub(crate) fn merge_short_chunks(
             break;
         };
         // (is-not-a-paragraph-break, shorter-neighbour-wins) — compared as a
-        // tuple, exactly like the reference, so "R" wins a full tie by being first.
         let mut sides: Vec<((bool, std::cmp::Reverse<usize>), char)> = Vec::new();
         if i < chunks.len() - 1 {
             sides.push((
@@ -534,7 +497,6 @@ mod tests {
     }
 
     /// A mark *inside* brackets does not end a sentence — that is the whole
-    /// point of tracking depth — so `(Thế à!) Ừ.` stays one sentence.
     #[test]
     fn a_mark_inside_brackets_does_not_end_a_sentence() {
         let s = split_sentences("Thật à? (Thế à!) Ừ.");
@@ -550,8 +512,6 @@ mod tests {
     }
 
     /// A spaced ellipsis is one trailing mark, not three sentences: each lone
-    /// "." used to become a synthesis chunk of its own, which the model reads
-    /// as ~1.5s of filler babble ("Vậy thì. . ." rendered 3.5s of noise).
     #[test]
     fn a_spaced_ellipsis_stays_with_its_sentence() {
         let s = split_sentences("Vậy thì. . .");
@@ -564,8 +524,6 @@ mod tests {
     }
 
     /// A punctuation-only fragment is not a sentence at all: synthesized
-    /// alone it is ~1s of babble, so leading ("... Cứu mạng...") and
-    /// whole-text ("...") marks fall away and the words keep their pause.
     #[test]
     fn a_punctuation_only_fragment_is_not_a_sentence() {
         let s = split_sentences("...");
@@ -582,12 +540,10 @@ mod tests {
     #[test]
     fn the_ceiling_is_relative_not_hard() {
         // 100 characters, then a 10-character sentence: 100 + 1 + 10 = 111 is
-        // past 100 but the addition is within the slack, so it joins.
         assert!(fits(100, 10, 100));
         // A 40-character addition is not, even though 141 <= 100 + 15.
         assert!(!fits(100, 40, 100));
         // An addition longer than the ceiling never fits, empty buffer or not —
-        // the slack is a grace for short tails, not an escape hatch.
         assert!(!fits(0, 500, 256));
     }
 
@@ -633,7 +589,6 @@ mod tests {
         assert_eq!(effective_len("<|emotion_1|>"), 0);
         assert_eq!(effective_len("  <|emotion_1|>  "), 0);
         // Removing the token leaves "xin  chào" — the gap it occupied stays, so
-        // this is 9, not 8. Only the ends are stripped.
         assert_eq!(effective_len("xin <|emotion_2|> chào"), 9);
     }
 
@@ -642,7 +597,6 @@ mod tests {
         let parts = split_emotions("a [cười] b");
         assert_eq!(parts, vec!["a ", "[cười]", " b"]);
         // A cue at the very start keeps its odd index: the empty leading piece
-        // is part of the contract, not noise.
         let parts = split_emotions("[thở dài] Thôi vậy.");
         assert_eq!(parts, vec!["", "[thở dài]", " Thôi vậy."]);
         let parts = split_emotions("<|emotion_2|> xin");
@@ -673,7 +627,6 @@ mod tests {
         let out = merge_short_chunks(chunks, gaps, 20);
         assert_eq!(out.chunks.len(), 2, "{:?}", out.chunks);
         // Both boundaries are non-paragraph, so the shorter *neighbour* decides —
-        // and the right-hand one is shorter, so "ngắn." joins it.
         assert!(out.chunks[1].starts_with("ngắn."), "{:?}", out.chunks);
         assert_eq!(out.gaps.len(), 1);
     }

@@ -12,8 +12,6 @@ use ratatui::{
 
 pub(crate) fn draw_text_prompt(f: &mut ratatui::Frame, app: &App, prompt: &TextPrompt) {
     // The known-site note is drawn *above* the input line, so the dialog grows
-    // upward from the text rather than pushing the text down: a suggestion that
-    // scrolls the cursor out of sight is a suggestion that arrives too late.
     let note: Vec<Line> = match prompt.known_note() {
         None => Vec::new(),
         Some(n) => n
@@ -44,7 +42,6 @@ pub(crate) fn draw_text_prompt(f: &mut ratatui::Frame, app: &App, prompt: &TextP
     body.extend([
         Line::from(""),
         // What is on screen is exactly what will be submitted — the prompt is
-        // the echo, so nothing is sent that the operator did not read back.
         Line::from(vec![
             Span::styled("> ", style_of(app.colour(), Color::Cyan)),
             Span::styled(before, style_of(app.colour(), Color::White)),

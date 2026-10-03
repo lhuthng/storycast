@@ -1,16 +1,4 @@
 //! Where the render time actually goes.
-//!
-//! Written because a claim needed checking. `matvec` was rewritten to break its
-//! floating-point dependency chain on the theory that it was "the whole gap"
-//! against the Python reference — the change was real and made the port ~11%
-//! faster, but the gap only closed from 1.41x to 1.25x. So the theory was wrong
-//! by two thirds, and guessing again would have been the second mistake. This
-//! measures the split instead.
-//!
-//! Always compiled, deliberately: a `cfg`-gated version would mean the profiled
-//! build is not the shipped build, which is the one thing a profiler must not
-//! be. The cost is one `Instant::now()` pair and one uncontended `fetch_add` per
-//! counted operation — tens of nanoseconds against a render measured in seconds.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -18,7 +6,6 @@ use std::time::Duration;
 /// The countable operations, one bucket each. Separate buckets rather than one
 /// `onnx` total because "the ONNX layer is slow" and "one of the three graphs is
 /// slow" call for completely different fixes, and the total cannot tell them
-/// apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Kind {

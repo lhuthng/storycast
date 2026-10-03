@@ -8,23 +8,8 @@ use bm_proto::VoiceInfo;
 use super::consts::{VoicePolicy, CONTENT_LANGUAGE};
 
 // --- the committed catalogue ------------------------------------------------
-//
-// `voices.default.json` is the shipped roster: both engines, their metadata
-// and their default cast, in one place.
-//
-// Stage 1 of `.docs/VOICE_CONFIG_PROPOSAL.md` adds it *alongside* the `const`
-// tables above. Nothing in the render path reads it yet — the tests at the
-// bottom of this file assert the two agree exactly. Stage 5 deletes the consts
-// and makes this file load-bearing, at which point the duplication is gone;
-// until then it is deliberate and checked rather than accidental and drifting.
-// The catalogue itself is committed because the offline guarantee above is
-// load-bearing: a fresh clone with no local config must still render.
 
 /// The committed catalogue, embedded at compile time.
-///
-/// Embedded rather than read at runtime on purpose — the file cannot go
-/// missing, move, or be half-edited at the moment a render needs it. Three hops
-/// up from the manifest directory: `bm-core` -> `crates` -> `rust` -> root.
 pub const CATALOGUE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../voices.default.json"
@@ -34,25 +19,20 @@ pub const CATALOGUE_JSON: &str = include_str!(concat!(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RosterFile {
     /// Schema version. Bumped when a field's *meaning* changes, not when a
-    /// voice is added.
     pub version: u32,
     pub engines: BTreeMap<String, EngineRoster>,
 }
 
 /// One engine's slice of the catalogue.
-///
-/// `Default` is the "engine not declared" answer: no pools, no cast.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngineRoster {
     /// Human-readable description, for the picker header.
     #[serde(default)]
     pub label: String,
     /// Declaration order is meaningful: the offline roster groups by gender in
-    /// this order, so male voices come first, then female, then neutral.
     #[serde(default)]
     pub voices: Vec<RosterVoice>,
     /// character -> voice `key`. Keys, not display names, so renaming a voice
-    /// is a presentation change that touches nothing else.
     #[serde(default)]
     pub default_cast: BTreeMap<String, String>,
 }
@@ -61,8 +41,6 @@ pub struct EngineRoster {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RosterVoice {
     /// ASCII slug, `^[a-z0-9][a-z0-9-]*$`. This is the identity; `name` is
-    /// display only. A slug also cannot contain `/` or `..`, which is what lets
-    /// the audition cache be a path derived from it.
     pub key: String,
     pub name: String,
     /// `male` | `female` | `neutral`.
@@ -78,7 +56,6 @@ pub struct RosterVoice {
 
 impl RosterFile {
     /// Parse a catalogue from JSON. The primitive the embedded copy uses, and
-    /// what tooling calls on the file at `Layout::roster_default()`.
     pub fn parse(json: &str) -> serde_json::Result<Self> {
         serde_json::from_str(json)
     }
@@ -88,9 +65,6 @@ impl RosterFile {
     }
 
     /// The embedded catalogue.
-    ///
-    /// Panics only if the committed file is malformed, which the catalogue
-    /// tests in this module make impossible to merge.
     pub fn catalogue() -> &'static RosterFile {
         static CATALOGUE: OnceLock<RosterFile> = OnceLock::new();
         CATALOGUE.get_or_init(|| {
@@ -117,7 +91,6 @@ impl EngineRoster {
         let mut neutral = self.pool("neutral");
         if neutral.is_empty() {
             // Kept deliberately: VieNeu declares no neutral preset, and an
-            // unknown-gender character has always fallen back to the male pool.
             neutral = male.clone();
         }
         VoicePolicy {
@@ -130,11 +103,6 @@ impl EngineRoster {
     }
 
     /// `character -> name`, resolving each cast key through the voice list.
-    ///
-    /// The catalogue stores keys; `VoicePolicy` still speaks display names until
-    /// stage 2 lands. A key that resolves to nothing is dropped here, and the
-    /// catalogue tests fail on it rather than letting a character reach a render
-    /// with no voice.
     fn resolve_cast(&self) -> Vec<(String, String)> {
         self.default_cast
             .iter()
@@ -148,10 +116,6 @@ impl EngineRoster {
     }
 
     /// The offline roster, built from the catalogue instead of the consts.
-    ///
-    /// Same shape and same ordering as `offline_voices()`: male pool, female
-    /// pool, then neutral, deduplicated — because the neutral pool aliases the
-    /// male pool for VieNeu.
     pub fn to_offline_voices(&self, engine: &str) -> Vec<VoiceInfo> {
         let policy = self.to_policy(engine);
         let mut out: Vec<VoiceInfo> = Vec::new();
@@ -168,7 +132,6 @@ impl EngineRoster {
                 let (accent, style) = match declared {
                     Some(v) => (v.accent.clone(), v.style.clone()),
                     // Undeclared: "unknown", not a policy guarantee — there is
-                    // no longer a policy to guarantee anything.
                     None => ("unknown".to_string(), String::new()),
                 };
                 out.push(VoiceInfo {
@@ -189,9 +152,6 @@ impl EngineRoster {
 }
 
 /// One engine of the catalogue: the single entry point for its declared
-/// voices, with no machine-local overlay. The operator roster
-/// (`.bm/voices.json`) is gone — nothing created it and every path using it is
-/// removed — so the shipped catalogue is the whole roster.
 pub fn effective_engine(engine: &str) -> EngineRoster {
     RosterFile::catalogue()
         .engine(engine)
@@ -210,16 +170,11 @@ pub fn effective_offline_voices(engine: &str) -> Vec<VoiceInfo> {
 }
 
 /// [`effective_engine`], kept for call-site compatibility: catalogue reads do
-/// not fail, so the error half is always `None`.
 pub fn effective_engine_lenient(engine: &str) -> (EngineRoster, Option<String>) {
     (effective_engine(engine), None)
 }
 
 // --- key <-> name resolution ------------------------------------------------
-//
-// `key` is identity and `name` is presentation, so anything *persisted* — the
-// cast file above all — stores keys and resolves them back to names at the
-// boundary. These three functions are that boundary.
 
 /// The catalogue key for a voice's display name.
 pub fn key_for_name(engine: &str, name: &str) -> Option<String> {
@@ -242,16 +197,6 @@ pub fn name_for_key(engine: &str, key: &str) -> Option<String> {
 }
 
 /// The display name for a cast value that may be a **key** or a **name**.
-///
-/// Keys are tried first, because that is what the cast file migrates to and the
-/// form that survives a voice being renamed. A name still resolves, and that is
-/// what makes the migration optional rather than a gate: a fully migrated cast
-/// file, a half-migrated one and an untouched one all render.
-///
-/// A value matching neither comes back unchanged, deliberately. An unknown voice
-/// has to stay visible so the cast overview can flag it (`unknown voice — stale
-/// cast?`); quietly substituting a valid voice would hide a real problem behind
-/// a plausible-sounding render.
 pub fn resolve_voice_name(engine: &str, value: &str) -> String {
     match name_for_key(engine, value) {
         Some(name) => name,
@@ -268,18 +213,11 @@ mod tests {
     #[test]
     fn the_gemini_roster_claims_no_accent_of_its_own() {
         // Google's labels do not encode a region, so every Gemini voice reads
-        // `unknown` — a fact about the engine, not a policy statement.
         let v = offline_voices("gemini");
         assert!(v.iter().all(|x| x.accent == "unknown"));
     }
 
     // --- stage 1: the catalogue must agree with the consts ------------------
-    //
-    // These are the whole point of stage 1. `voices.default.json` is a
-    // transcription of the consts above, nothing reads it yet, and these tests
-    // are what prove the transcription faithful *before* stage 5 deletes the
-    // consts. A failure here means the file and the code have drifted, and
-    // stage 5 would silently change which voice speaks.
 
     fn catalogue_engine(engine: &str) -> &'static EngineRoster {
         RosterFile::catalogue()
@@ -291,9 +229,6 @@ mod tests {
     fn the_embedded_catalogue_parses_and_declares_both_engines() {
         assert_eq!(RosterFile::catalogue().version, 1);
         // 23 = every VieNeu preset the SDK store ships, Northern ones included.
-        // The count is asserted rather than the names because the *completeness*
-        // is the point: the catalogue used to declare only the 10 Central/South
-        // presets, which excluded the other 13 by omission.
         assert_eq!(catalogue_engine("vieneu").voices.len(), 23);
         assert_eq!(catalogue_engine("gemini").voices.len(), 17);
         // Sanity: the embedded copy really is the file on disk.
@@ -304,7 +239,6 @@ mod tests {
     #[test]
     fn catalogue_keys_are_slugs_that_cannot_escape_a_path() {
         // The audition cache is `.bm/voices/samples/<key>.wav`, so a key
-        // containing `/` or `..` would be a traversal.
         for (engine, roster) in &RosterFile::catalogue().engines {
             let mut seen = std::collections::HashSet::new();
             for v in &roster.voices {
@@ -329,8 +263,6 @@ mod tests {
             assert_eq!(got.female, expected.female, "{engine}: female pool");
             assert_eq!(got.neutral, expected.neutral, "{engine}: neutral pool");
             // `default_cast` is order-insensitive at every call site: `cast.rs`
-            // collects it into a map, `state.rs` into a BTreeSet. Compare the
-            // assignments, not the iteration order.
             let as_map = |v: Vec<(String, String)>| v.into_iter().collect::<BTreeMap<_, _>>();
             assert_eq!(
                 as_map(got.default_cast),
@@ -378,11 +310,9 @@ mod tests {
         assert_eq!(key_for_name("vieneu", "Suneo"), None);
         assert_eq!(name_for_key("vieneu", "suneo"), None);
         // Both forms resolve to the same canonical display name, which is what
-        // makes the cast migration optional rather than a gate.
         assert_eq!(resolve_voice_name("vieneu", "duc-tri"), "Đức Trí");
         assert_eq!(resolve_voice_name("vieneu", "Đức Trí"), "Đức Trí");
         // An unknown value is left exactly as it was, so the cast overview can
-        // flag it instead of the pipeline quietly reassigning the speaker.
         assert_eq!(resolve_voice_name("vieneu", "Đã Biến Mất"), "Đã Biến Mất");
     }
 

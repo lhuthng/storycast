@@ -2,12 +2,6 @@ use super::*;
 use bm_proto::TaskPref;
 
 /// A checkout with the tracked fixture profile, a cast file, a crawler, and
-/// one registered *and* one unregistered clip.
-///
-/// A named directory under the system temp root rather than a `TempDir`:
-/// bm-core has no `tempfile`, and every other test in this crate builds its
-/// fixture the same way. Named per test, because the suite runs in parallel
-/// inside one process.
 fn fixture(name: &str) -> crate::Layout {
     let dir = std::env::temp_dir().join(format!("bm-sources-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -18,7 +12,6 @@ fn fixture(name: &str) -> crate::Layout {
         "assets/music/market-bg-1.mp3",
         "assets/injects/coin-1.mp3",
         // In the directory, named by no registry: the file the old
-        // wholesale push sent and the merge could never pick.
         "assets/music/leftover-bg-9.mp3",
     ] {
         let p = l.assets().join(rel.trim_start_matches("assets/"));
@@ -131,8 +124,6 @@ fn a_crawl_box_gets_the_crawlers_and_nothing_else() {
 }
 
 /// Render reads none of these trees — its voice store travels in `models/`
-/// and its cast, script and bible ride in the offer — so a render-only box
-/// is handed the cast, the clone manifest and the prompts.
 #[test]
 fn a_render_box_gets_its_cast_and_no_media() {
     let l = fixture("render");
@@ -153,13 +144,6 @@ fn a_render_box_gets_its_cast_and_no_media() {
 }
 
 /// A checkout with **no adapter home at all** — the pre-split shape, where
-/// a language was two directory names it happened to carry — still ships
-/// its prompts, from the scope that holds them: the workspace's own tree
-/// when it has one, the checkout's otherwise.
-///
-/// The member path is identical either way, which is exactly why the source
-/// has to be the tree *in force*: agreeing on every file name and
-/// disagreeing on every word is the failure this pins.
 #[test]
 fn a_workspace_adapter_ships_its_own_prompts_under_the_same_names() {
     let root = fixture("adapter-prompts");
@@ -183,7 +167,6 @@ fn a_workspace_adapter_ships_its_own_prompts_under_the_same_names() {
     assert_eq!(prompt.base, book, "cut from the adapter's tree");
 
     // The checkout's tree answers when the workspace has none: the
-    // pre-split behaviour, unchanged.
     let bare = Sources::plan(&root, &[Stage::Digest]).unwrap();
     let prompt = bare
         .members
@@ -195,13 +178,6 @@ fn a_workspace_adapter_ships_its_own_prompts_under_the_same_names() {
 }
 
 /// **Every adapter this checkout carries ships**, not only the one in
-/// force, and each lands under the path its own resolver reads.
-///
-/// The alternative — a per-machine adapter set — needs a field, a screen
-/// and an answer to "why is this box not offered the book"; 21 KB of text
-/// against a 59 MB artifact does not pay for any of that, and a box that
-/// holds both languages is a box that can be handed either chapter the
-/// moment the operator switches.
 #[test]
 fn every_adapter_home_ships_and_the_bundle_says_which_languages_it_holds() {
     let l = fixture("adapters-all");
@@ -238,8 +214,6 @@ fn every_adapter_home_ships_and_the_bundle_says_which_languages_it_holds() {
         assert!(got.contains(&want.to_string()), "{want} missing: {got:?}");
     }
     // The flat prompts are *not* beside them: the resolver prefers the home,
-    // so a flat copy would be a stale tree the box silently ignored — and a
-    // prompt edit would stop reaching it.
     assert!(
         !got.contains(&"prompts/analyze.txt".to_string()),
         "the checkout's own prompts travelled beside the homes: {got:?}"
@@ -254,7 +228,6 @@ fn every_adapter_home_ships_and_the_bundle_says_which_languages_it_holds() {
         "{got:?}"
     );
     // …and a book's own crawlers still ride along, which is what keeps a
-    // site-specific script out of the shared tree.
     assert!(got.contains(&"crawl/site.lua".to_string()), "{got:?}");
 
     // The manifest carries the same claim, so the box can report it.
@@ -263,8 +236,6 @@ fn every_adapter_home_ships_and_the_bundle_says_which_languages_it_holds() {
 }
 
 /// The two halves of the gate's vocabulary: the spelling a slot travels
-/// under, and the rule that a bare stage — a report from before the second
-/// dimension — covers it for every adapter.
 #[test]
 fn a_slot_names_its_adapter_and_a_bare_stage_covers_them_all() {
     assert_eq!(slot(Stage::Digest, "vi-VN"), "digest@vi-VN");
@@ -276,7 +247,6 @@ fn a_slot_names_its_adapter_and_a_bare_stage_covers_them_all() {
     );
     assert!(!holds(&slots, Stage::Render, "vi-VN"));
     // A stage with no adapter is the pre-slot spelling, and reads as every
-    // adapter: an old agent is offered work rather than starved.
     let bare = vec!["digest".to_string()];
     assert!(holds(&bare, Stage::Digest, "vi-VN"));
     assert!(holds(&bare, Stage::Digest, "anything-at-all"));
@@ -288,10 +258,6 @@ fn a_slot_names_its_adapter_and_a_bare_stage_covers_them_all() {
 }
 
 /// **The prompt is not a stage's file.** A box can gain `digest` with one
-/// keypress, and a stage that dies on a missing template fails on every
-/// retry until somebody re-provisions — so the 21 KB rides every bundle,
-/// whatever the policy says. This is the assertion that keeps a future
-/// narrowing from taking it back out.
 #[test]
 fn every_bundle_carries_the_prompts_whatever_the_policy() {
     let l = fixture("prompts-always");
@@ -312,14 +278,11 @@ fn every_bundle_carries_the_prompts_whatever_the_policy() {
         }
     }
     // …but a policy that covers no stage is refused outright, because the
-    // delivery this plan describes is a prune first: an empty set would
-    // delete a box's trees and hand it nothing back.
     let err = Sources::plan(&l, &[]).unwrap_err().to_string();
     assert!(err.contains("covers no stage"), "{err}");
 }
 
 /// The whole point of hashing a set rather than a tree: a policy change has
-/// to be drift, or a box keeps a stage it has no files for.
 #[test]
 fn widening_the_policy_changes_the_digest_and_reordering_does_not() {
     let l = fixture("policy");
@@ -375,15 +338,11 @@ fn the_manifest_is_stable_and_moves_with_content() {
 }
 
 /// A workspace that owns its own `assets/` — the shape `workspace new
-/// --profile` writes — must ship **that** tree, and every member's source
-/// must be its landing path under its base. Addressing the workspace's
-/// files relative to the checkout root is what panicked the packer.
 #[test]
 fn a_workspace_owning_assets_ships_its_own_tree_with_a_consistent_base() {
     let dir = std::env::temp_dir().join("bm-sources-ws-assets");
     let _ = std::fs::remove_dir_all(&dir);
     // The checkout has the fixture's assets too, so a wrong base would still
-    // *find* a file and quietly ship the wrong book's score.
     crate::profile::install_fixture(&dir).unwrap();
     let work = dir.join("workspaces/book");
     std::fs::create_dir_all(work.join("assets/effects")).unwrap();
@@ -401,8 +360,6 @@ fn a_workspace_owning_assets_ships_its_own_tree_with_a_consistent_base() {
         ..crate::Layout::new(dir.clone())
     };
     // `debug_assert_eq!` inside `push_member` is the invariant; asserting it
-    // over the whole set here is what makes the failure a message rather
-    // than a panic inside a provision task.
     let s = Sources::plan(&l, &[Stage::Merge]).unwrap();
     for m in &s.members {
         assert_eq!(
@@ -430,12 +387,10 @@ fn a_workspace_owning_assets_ships_its_own_tree_with_a_consistent_base() {
 }
 
 /// A registry naming a clip that is not here is reported, not shipped and
-/// not fatal: the merge already degrades that one sound to silence.
 #[test]
 fn a_registry_naming_an_absent_clip_is_reported_rather_than_shipped() {
     let l = fixture("missing-clip");
     // Self-contained registries: the fixture's own name clips this checkout
-    // does not ship, and the point here is the one line that matters.
     std::fs::write(l.assets().join("effect-pool.json"), "{}").unwrap();
     std::fs::write(l.assets().join("inject-pool.json"), "{}").unwrap();
     std::fs::write(
@@ -454,7 +409,6 @@ fn a_registry_naming_an_absent_clip_is_reported_rather_than_shipped() {
 }
 
 /// A base outside `assets/` is a registry line that would have escaped the
-/// tree the merge resolves against, so it is refused rather than followed.
 #[test]
 fn a_registry_clip_outside_assets_is_refused() {
     let l = fixture("escape");
@@ -486,9 +440,6 @@ fn the_extract_script_prunes_the_trees_it_owns_and_removes_refs() {
 }
 
 /// With a pack release configured the bundle step spares `$D/assets`: the
-/// bundle carries no `assets/` members, so pruning it would delete a tree
-/// the archive cannot restore, and the pack step owns that tree by fetch,
-/// push or delta. Everything else still prunes.
 #[test]
 fn the_pack_extract_spares_assets_and_prunes_the_rest() {
     let s = extract_script_keep_assets();
@@ -505,20 +456,6 @@ fn the_pack_extract_spares_assets_and_prunes_the_rest() {
 }
 
 /// A fetched pack takes the **whole** `assets/` subtree out of the bundle,
-/// and nothing else.
-///
-/// The claim being pinned is that a release is a superset: a pack is
-/// `assets/` minus `assets/_extends/`, so every `assets/`-rooted member the
-/// plan would select is already inside it. If that were ever false the box
-/// would come up missing a registry a stage opens, and the only symptom
-/// would be a merge that degrades one sound to silence — so the two sets
-/// are compared, not assumed equal.
-///
-/// The second assertion is the ownership constraint: the bundle step runs
-/// the assets-sparing extract when a pack is configured, so neither order
-/// deletes the other's tree — the bundle owns every tree it carries and
-/// the pack owns `assets/`. `install_sources` still runs the pack last so
-/// the log reads in delivery order.
 #[test]
 fn a_fetched_pack_takes_the_whole_assets_subtree_out_of_the_bundle() {
     let l = fixture("pack-split");
@@ -544,7 +481,6 @@ fn a_fetched_pack_takes_the_whole_assets_subtree_out_of_the_bundle() {
         "a fetched pack owns the whole subtree"
     );
     // Everything else is untouched: the prompts, the casts, the workspace's
-    // own crawlers. A pack is the genre's art, not the book's.
     assert_eq!(under(&fetched, "prompts/"), under(&pushed, "prompts/"));
     assert_eq!(under(&fetched, "crawl/"), under(&pushed, "crawl/"));
     assert_eq!(fetched.slots(), pushed.slots(), "the policy is unchanged");
@@ -554,15 +490,11 @@ fn a_fetched_pack_takes_the_whole_assets_subtree_out_of_the_bundle() {
     );
 
     // The delivery is a replacement of the trees it owns, `assets/` among
-    // them, so the pack has to land after it.
     let s = extract_script();
     assert!(s.contains(r#""$D/assets""#), "{s}");
 }
 
 /// The bundle and the stamp must describe the same files, and the pack is
-/// half of why: with it, `sources_hash` is the digest of a bundle that
-/// carries no profile at all, which is only true because the stamp plans
-/// with the same `pack` the push does.
 #[test]
 fn a_pack_digest_moves_only_the_pack() {
     let l = fixture("pack-digest");
@@ -586,7 +518,6 @@ fn a_pack_digest_moves_only_the_pack() {
 #[test]
 fn a_bundle_round_trips_through_tar_and_zstd() {
     // Needs the real tools; the whole push path does, and a silent skip
-    // would let a broken packer reach a box.
     let l = fixture("roundtrip");
     let s = Sources::plan(&l, &[Stage::Merge, Stage::Digest]).unwrap();
     let manifest = s.manifest().unwrap();
@@ -631,19 +562,10 @@ fn a_bundle_round_trips_through_tar_and_zstd() {
 }
 
 /// The archive holds the plan and nothing beside it.
-///
-/// "Nothing beside it" is the load-bearing half, and it is not what a `tar
-/// -t` on this machine reports: macOS `tar` *hides* AppleDouble `._name`
-/// members (it reads them as the metadata of the file they name), so the
-/// first push of this bundle looked clean here and unpacked as 115 extra
-/// files on the Linux box, one per member. Hence a header walk rather than
-/// a listing: what a Linux box sees is the question.
 #[test]
 fn the_bundle_holds_exactly_the_plan_and_no_appledouble_junk() {
     let l = fixture("exact");
     // The attribute is what makes libarchive write the sidecar, so the
-    // regression only reproduces with one present. macOS-only, like the
-    // mechanism: a Linux `tar` has no AppleDouble to write.
     #[cfg(target_os = "macos")]
     {
         let marked = l.assets().join("music/market-bg-1.mp3");
@@ -686,9 +608,6 @@ fn the_bundle_holds_exactly_the_plan_and_no_appledouble_junk() {
 }
 
 /// The member names of a `tar` stream, exactly as a Linux box would see
-/// them: 512-byte headers, the name at offset 0, the size in octal at 124,
-/// the body padded to a whole block, two empty blocks to end it. PAX header
-/// entries are metadata, not members.
 fn tar_members(bytes: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let mut at = 0usize;

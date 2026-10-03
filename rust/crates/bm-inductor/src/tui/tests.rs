@@ -40,8 +40,6 @@ fn roster_fixture() -> Roster {
     let voice = |name: &str, gender: &str, accent: &str, enrolled: bool| {
         VoiceInfo {
             // Keys come from the real catalogue, so the fixture cannot drift
-            // from what the picker actually receives, and a name the
-            // catalogue does not declare keeps an empty key, as a clone does.
             key: bm_core::voices::key_for_name("vieneu", name).unwrap_or_default(),
             name: name.to_string(),
             gender: gender.to_string(),
@@ -53,8 +51,6 @@ fn roster_fixture() -> Roster {
         }
     };
     // A pooled sample, as `voice-pool.json` describes it: tags and all. It is
-    // in the roster but in nobody's cast, so the picker's first group is real
-    // without changing a single cast assertion below.
     let pooled = |name: &str, tags: &[&str]| VoiceInfo {
         key: String::new(),
         name: name.to_string(),
@@ -92,10 +88,6 @@ fn roster_fixture() -> Roster {
     }
 }
 /// Render one frame into an in-memory terminal and flatten it to text.
-///
-/// The responsive tiers are pure layout, so they can be checked without a
-/// real terminal, which is also the only way to prove the size guard does
-/// not panic on a degenerate area.
 fn render_text(app: &mut App, w: u16, h: u16) -> String {
     let backend = ratatui::backend::TestBackend::new(w, h);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -111,19 +103,11 @@ fn render_text(app: &mut App, w: u16, h: u16) -> String {
     out
 }
 /// Whether `hint` is on the rendered screen, **as a reader would see it**.
-///
-/// `render_text` returns the buffer row by row, so anything the overlay *wraps* is
-/// split across two of them, and a hint line longer than the overlay's width
-/// wraps by definition. A plain `contains` therefore misses phrases that are
-/// plainly visible on screen, which is a test failing for the wrong reason. This
-/// collapses the whitespace first, so the phrase is looked for as it reads.
 fn hint_visible(text: &str, hint: &str) -> bool {
     let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     flat.contains(hint)
 }
 /// A beat with the fields the panes read, fresh unless told otherwise.
-/// Hostname never echoes the addr: the workers pane falls back to addr
-/// when it is empty, which would muddy addr-counting assertions.
 fn beat(id: &str, addr: &str, age_secs: u64, alias: &str) -> Heartbeat {
     Heartbeat {
         worker_id: id.into(),
@@ -156,7 +140,6 @@ fn named_machine(addr: &str, name: &str) -> Machine {
 }
 fn stats_app() -> App {
     // One worker mid-render (half done), one idle; history says a render
-    // task takes 100s, a digest 40s.
     let mut app = App::new("http://127.0.0.1:8901");
     app.machines = vec![named_machine("192.168.2.2", "hawk")];
     let mut busy = beat("thang-marmot", "192.168.2.2", 2, "marmot");
@@ -175,7 +158,6 @@ fn stats_app() -> App {
     app
 }
 /// A small ledger: a shelved digest carrying a real failure reason, a
-/// render mid-flight, and a finished crawl. Sorted as a snapshot would be.
 fn tasks_app() -> App {
     let mut app = App::new("http://127.0.0.1:8901");
     let mut shelved = Task::new(3, Stage::Digest);
@@ -200,7 +182,6 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 /// A ledger with one row out with a box that has gone quiet, one out with a box
-/// that is answering, and one nobody has taken.
 fn ledger_with_a_silent_box() -> (App, std::collections::BTreeSet<String>) {
     let mut app = App::new("http://127.0.0.1:8901");
     let mut orphaned = Task::new(7, Stage::Merge);
@@ -214,7 +195,6 @@ fn ledger_with_a_silent_box() -> (App, std::collections::BTreeSet<String>) {
     app.tasks = vec![orphaned, working, queued];
     app.tasks.sort_by_key(|t| (t.chapter, t.stage));
     // Only the second box is beating. An empty set would make every assigned
-    // row abandoned and the two cases indistinguishable.
     let live: std::collections::BTreeSet<String> = ["hcm-2".to_string()].into_iter().collect();
     (app, live)
 }
@@ -232,19 +212,10 @@ async fn type_command(
     handle_key(app, key(KeyCode::Enter), http, job_tx).await;
 }
 /// Long enough to clear `MIN_LINE_CHARS`, so the chooser prefers it over
-/// anything shorter a fixture might also offer.
 fn audition_line(tag: &str) -> String {
     format!("{tag} — một câu đủ dài để làm mẫu thử giọng đọc cho nhân vật này nhé")
 }
 /// A picker at step 2 for Narrator (cast to Đức Trí), filtered to a single
-/// candidate so "the highlighted voice" means one thing.
-///
-/// The filter is load-bearing: `filtered_voices` returns roster order, not
-/// relevance order, so an empty filter would highlight whoever happens to be
-/// first in the catalogue rather than the voice the test names.
-///
-/// The index is pre-set rather than loaded, because `ensure_lines` is what the
-/// screens call and a test should not need a `data/` directory.
 fn audition_app() -> App {
     let mut app = App::new("http://127.0.0.1:8901");
     app.conn = Conn::Up;
@@ -268,12 +239,6 @@ fn last_op(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Job>) -> Option<OpReque
     }
 }
 /// Release the in-flight audition slot the way a completed op would.
-///
-/// Deliberately carries no audio: a helper that shipped a wav would start a
-/// real player in every test that calls it, and `cargo test` must not make
-/// noise. The path where audio *does* arrive is covered by
-/// `a_completed_audition_writes_the_sample_next_to_the_speaker`, which
-/// installs a silent player first.
 fn finish_audition(app: &mut App, voice: &str) {
     app.apply(Ev::Done(DoneKind::Op {
         op: Op::PreviewVoice,
@@ -312,12 +277,6 @@ fn bind_machine(app: &mut App, buf: &str) -> Machine {
     }
 }
 /// A checkout holding the fixture scene map and registries, with every clip
-/// they name present as an empty file.
-///
-/// The fixture mirrors production shapes, so the editor guards behave as they
-/// do live; the live tree itself is ignored and may be absent. The clips are
-/// placeholders, nothing in the editor reads their contents, only whether
-/// they are there.
 fn sound_layout(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let layout = bm_core::Layout::new(dir.path());
@@ -337,7 +296,6 @@ fn sound_layout(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     (dir, layout.root.clone())
 }
 /// An app parked on the sound editor with the pools loaded, as the screen
-/// finds them.
 fn sound_app(root: &std::path::Path) -> App {
     let mut app = App::new("http://unused");
     let layout = bm_core::Layout::new(root);
@@ -347,7 +305,6 @@ fn sound_app(root: &std::path::Path) -> App {
     app
 }
 /// A checkout with one chapter's script and one rendered segment in it, for
-/// the paths that read the local cache instead of the API.
 fn local_cache_layout() -> (tempfile::TempDir, bm_core::Layout) {
     let dir = tempfile::tempdir().unwrap();
     let layout = bm_core::Layout::new(dir.path());
@@ -373,7 +330,6 @@ fn job_channel() -> tokio::sync::mpsc::UnboundedSender<Job> {
     tx
 }
 /// A roster with two pool groups and two unique voices, and a cast that
-/// leaves one pooled voice busier than the other.
 fn pooled_roster() -> Roster {
     let mut r = roster_fixture();
     let sample = |name: &str, tags: &[&str]| VoiceInfo {
@@ -412,8 +368,6 @@ fn pooled_roster() -> Roster {
         },
     ];
     // `young-male-10` is the busiest of the two male+young samples, so it must
-    // not lead its group; the tags are declared in opposite orders, so the two
-    // must still land in one group.
     r.cast.insert("Kiên".into(), "young-male-10".into());
     r.cast.insert("Vũ".into(), "young-male-10".into());
     r.cast.insert("Bé Mắt".into(), "old-female-2".into());
@@ -428,7 +382,6 @@ fn voice_app(roster: Roster) -> App {
     p.character = "Narrator".into();
     app.screen = Screen::Pick(p);
     // Auditioning reads the scripts; without a line index `T` has nothing to
-    // play and every key test would pass for the wrong reason.
     app.lines = Some(std::collections::HashMap::from([(
         "Narrator".to_string(),
         vec![audition_line("một"), audition_line("hai")],
@@ -436,7 +389,6 @@ fn voice_app(roster: Roster) -> App {
     app
 }
 /// The list as `(kind, label, name)` triples, so a test can read the whole
-/// order — headings included — in one glance.
 fn listed(app: &App) -> Vec<(Option<VoiceKind>, String, Option<String>)> {
     filtered_voices(app, "")
         .iter()
@@ -447,17 +399,8 @@ fn listed(app: &App) -> Vec<(Option<VoiceKind>, String, Option<String>)> {
         .collect()
 }
 /// The one thing the main loop does with every event, verbatim from `tui.rs`:
-/// apply it, and on `Relayout` re-resolve before the next frame.
-///
-/// A workspace switch has to move the *dashboard*, not just the pointer on
-/// disk. Nothing tested this. `workspace_cmd` had a roundtrip test and
-/// `submit_text` had a parsing test, so the pointer was proved written and the
-/// job was proved built — and the re-resolve that makes a switch visible in a
-/// running dashboard was never exercised at all.
 async fn pump_like_the_main_loop(app: &mut App, rx: &mut tokio::sync::mpsc::UnboundedReceiver<Ev>) {
     // `relayout` re-requests the caches it just dropped, and a receiver that
-    // is already dropped is a legal no-op for that — so this deliberately
-    // passes a dead sender rather than standing up a second channel.
     let (dead_tx, _dead_rx) = tokio::sync::mpsc::unbounded_channel();
     while let Ok(ev) = rx.try_recv() {
         let relayout = matches!(ev, Ev::Done(DoneKind::Relayout));
@@ -468,18 +411,6 @@ async fn pump_like_the_main_loop(app: &mut App, rx: &mut tokio::sync::mpsc::Unbo
     }
 }
 /// The workspace job, with its `cluster_busy` guard left out and everything
-/// else verbatim.
-///
-/// The guard is the one piece of the job a test cannot carry: it asks *this
-/// machine's* own cluster whether a switch would move a live ledger — the
-/// inductor answering on the api port, local workers found by pgrep — and a
-/// test controls neither. On the very box this suite is written on, with the
-/// real cluster up, the real `run_job` refuses every switch and this test
-/// would report a dashboard bug that does not exist. What the pump has to
-/// honor is kept: the switch runs through `workspace_cmd` in a blocking task,
-/// the output travels as log lines, and a landed switch sends exactly one
-/// `Done`, a `Relayout` — the contract `pump_like_the_main_loop` exists to
-/// follow. Every other job still goes through the real `run_job`.
 async fn the_workspace_job_without_its_cluster_guard(
     job: Job,
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
@@ -526,7 +457,6 @@ async fn the_workspace_job_without_its_cluster_guard(
     }
 }
 /// A checkout with two books, one of which is not one, and the pointer on the
-/// first. The shared shape both the picker and `workspace list` read.
 fn two_workspaces_one_bad(name: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!("bm-ws-pick-{name}"));
     let _ = std::fs::remove_dir_all(&root);

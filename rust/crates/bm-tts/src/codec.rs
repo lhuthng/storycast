@@ -1,19 +1,4 @@
 //! The MOSS audio codec, and the wav container the server hands out.
-//!
-//! Decoding is the last step of a render: the backbone produces `(frames, n_vq)`
-//! codes and this turns them into 48 kHz mono samples. It is a port of
-//! `_decode_codes`, which is three lines because the graph does the work:
-//!
-//! ```text
-//! audio_codes (1, T, n_vq) int32  ->  (1, channels, samples)  ->  mean over channels
-//! ```
-//!
-//! The channel mean is not an optimisation, it is part of the contract: the
-//! codec is stereo and the pipeline is mono, so the two channels are averaged
-//! rather than one being taken. Dropping a channel would change the audio.
-//!
-//! `encode` (the other direction, for enrollment reference codes) is deliberately
-//! not here — it belongs with the rest of the enrollment path.
 
 use crate::engine::open_session;
 use anyhow::{bail, Context, Result};
@@ -86,11 +71,6 @@ impl Codec {
 }
 
 /// A 16-bit mono PCM wav, byte for byte what `python/tts_server.py` sends.
-///
-/// Hand-rolled because it is 44 bytes of header and this is the only wav the
-/// server produces; a dependency would be larger than the code. The clipping and
-/// the `32767` scale match the reference's `_wav_bytes` — `32768` would be the
-/// more usual choice and would change the output.
 pub fn to_wav_bytes(pcm: &[f32], sample_rate: u32) -> Vec<u8> {
     let n = pcm.len();
     let data_len = (n * 2) as u32;

@@ -3,10 +3,6 @@ use super::*;
 #[test]
 fn machines_pane_shows_no_address_for_a_box_the_account_has_not_addressed_yet() {
     // The confusion this ends: a launched box keyed by an address nothing can
-    // dial. `RunInstances` answers before the address exists, and the old
-    // fallback printed the *private* address there, a real-looking IP for a box
-    // across the internet, which the scheduler then failed to reach every two
-    // seconds.
     let mut app = App::new("http://127.0.0.1:8901");
     let pending = bm_core::provision::AwsInstance {
         id: "i-0123456789abcdef0".into(),
@@ -36,7 +32,6 @@ fn machines_pane_shows_no_address_for_a_box_the_account_has_not_addressed_yet() 
     );
     assert_eq!(super::model::machine_kind(&m), "aws");
     // The private address is not lost, it is in the note, for the detail panel
-    // and for an operator whose inductor sits in the same VPC.
     assert!(m.note.contains("172.31.21.86"));
 
     let addressed = bm_core::provision::machine_from_instance(
@@ -70,8 +65,6 @@ fn machines_pane_shows_no_address_for_a_box_the_account_has_not_addressed_yet() 
 #[test]
 fn a_box_whose_address_just_arrived_is_queued_for_onboarding_once() {
     // `:up 3` used to end with boxes nobody would ever provision: the address
-    // arrives asynchronously, nothing noticed, and the operator was told to
-    // `:prov` each one by hand. The marker `relink` writes is read here.
     let mut app = App::new("http://x");
     let mut newborn = named_machine("52.2.2.2", "box-1");
     newborn.set_state(MachineState::Initializing);
@@ -86,14 +79,11 @@ fn a_box_whose_address_just_arrived_is_queued_for_onboarding_once() {
     assert_eq!(app.pending_onboard[0].addr, "52.2.2.2");
 
     // The dashboard records the hand-out before dispatching, so the ~800 ms poll
-    // cannot queue a second provision for a box the first job has not reached
-    // yet. Without this the same box would be pushed two or three times.
     app.onboarded.insert("52.2.2.2".into());
     app.apply_state(payload.clone());
     assert!(app.pending_onboard.is_empty(), "not queued twice");
 
     // The provision job clears the marker by rewriting the note, which is why
-    // the trigger is a note and not a field: nothing has to remember to clear it.
     let mut taken = newborn.clone();
     taken.set_state(MachineState::Provisioning);
     taken.note = "provisioning (p) · EC2 i-0123456789abcdef0".into();
@@ -105,7 +95,6 @@ fn a_box_whose_address_just_arrived_is_queued_for_onboarding_once() {
     );
 
     // A box that was already working carries no marker and is never offered
-    // the expensive mistake a marker written on *rotation* would cause.
     let mut working = named_machine("52.2.2.3", "box-2");
     working.set_state(MachineState::Configured);
     working.note = "EC2 i-0ffffffffffffffff (running)".into();
@@ -116,10 +105,6 @@ fn a_box_whose_address_just_arrived_is_queued_for_onboarding_once() {
 #[test]
 fn machines_pane_shows_every_state_word_whole() {
     // A state column that truncates the verdict it exists to show is worse than
-    // one with slack: `initializing` rendered as `initializin`, and the first
-    // two-word state would have hidden the noun that carried the meaning. This
-    // is the test that fails when a state is added and the column is not widened
-    // with it.
     for state in [
         MachineState::Unknown,
         MachineState::AwaitingIp,
@@ -137,8 +122,6 @@ fn machines_pane_shows_every_state_word_whole() {
         app.machines = vec![m];
         let text = render_text(&mut app, 140, 44);
         // The glyph is part of the cell, so this asserts the word is complete
-        // *and* that the pane still renders it with its dot. The trailing space
-        // is what makes it a completeness check rather than a prefix check.
         let needle = format!(" {} ", state.as_str());
         assert!(
             text.contains(&needle),
@@ -151,8 +134,6 @@ fn machines_pane_shows_every_state_word_whole() {
 #[test]
 fn a_parked_machine_reads_relaxed_but_a_fault_still_outranks_it() {
     // The state column is asked "why is nothing happening on this box", and for a
-    // parked box the honest answer is `relaxed`, its real state is `online`,
-    // which says the opposite of what the operator did.
     let mut parked = named_machine("52.2.2.2", "box-1");
     parked.set_state(MachineState::Online);
     parked.accepting_work = false;
@@ -162,8 +143,6 @@ fn a_parked_machine_reads_relaxed_but_a_fault_still_outranks_it() {
     assert_eq!(super::model::work_label(&parked), "online");
 
     // A verdict is news about a box and is not made less true by the park.
-    // Showing `relaxed` over it would hide the one fact worth acting on, on the
-    // box the operator is least likely to look at again.
     for fault in [MachineState::Offline, MachineState::Error] {
         let mut m = parked.clone();
         m.set_state(fault);
@@ -176,7 +155,6 @@ fn a_parked_machine_reads_relaxed_but_a_fault_still_outranks_it() {
     }
 
     // And it reaches the pane, with its own colour and glyph rather than a
-    // clipped state word: `relaxed` is 7 of the column's 13 usable cells.
     let mut app = App::new("http://127.0.0.1:8901");
     let mut relaxed = named_machine("52.2.2.2", "box-1");
     relaxed.set_state(MachineState::Online);
@@ -197,7 +175,6 @@ async fn g_toggles_the_machines_pane_between_the_table_and_the_graph() {
     app.machines = vec![named_machine("52.2.2.2", "box-1")];
 
     // The table is the default, and it says the key that leaves it, the pane
-    // advertises the toggle rather than the help screen being the only way in.
     let table = render_text(&mut app, 140, 44);
     assert!(
         table.contains("Machines · g graph"),
@@ -217,7 +194,6 @@ async fn g_toggles_the_machines_pane_between_the_table_and_the_graph() {
     );
     assert!(graph.contains("box-1"), "the box is a node:\n{graph}");
     // The picture is drawn, not tabulated: a bus out of the console to every box,
-    // and the box itself as art. Neither glyph appears in the table.
     for glyph in ["└", "┬", "|[_]|"] {
         assert!(
             graph.contains(glyph),
@@ -225,7 +201,6 @@ async fn g_toggles_the_machines_pane_between_the_table_and_the_graph() {
         );
     }
     // Lean by design: the state word and the policy column are one `g` away. The
-    // footer names them too, so the check is scoped to the Machines pane itself.
     let pane = graph
         .split_once('╭')
         .and_then(|(_, r)| r.split_once('╮'))
@@ -247,9 +222,6 @@ fn the_graph_marks_are_distinct_and_group_the_coming_up_states() {
     use super::model::graph_mark;
     use bm_proto::MachineState;
     // The graph spends one character on the verdict, so the characters have to
-    // carry it. Colour is the fast path, not the only one: a mono palette and a
-    // colour-blind read still tell the five families apart, which is the same
-    // promise the table's `state` column keeps by spelling the word out.
     let mark = |state: MachineState, relaxed: bool| {
         let mut m = named_machine("52.2.2.2", "box-1");
         m.set_state(state);
@@ -266,7 +238,6 @@ fn the_graph_marks_are_distinct_and_group_the_coming_up_states() {
     let distinct: std::collections::BTreeSet<_> = families.iter().collect();
     assert_eq!(distinct.len(), 5, "a family shares a glyph: {families:?}");
     // The three states that mean `on its way up` share one mark on purpose: the
-    // graph says *coming up*, and which of the three it is is the table's job.
     for s in [
         MachineState::AwaitingIp,
         MachineState::Initializing,
@@ -275,7 +246,6 @@ fn the_graph_marks_are_distinct_and_group_the_coming_up_states() {
         assert_eq!(mark(s, false), families[1], "{s:?} is not its own family");
     }
     // A fault outranks a park here as in the table, and a never-contacted box is
-    // not a parked one.
     assert_eq!(mark(MachineState::Error, true), families[3]);
     assert_eq!(mark(MachineState::Offline, true), families[3]);
     assert_eq!(mark(MachineState::Unknown, true), families[2]);
@@ -303,8 +273,6 @@ fn the_graph_draws_a_parked_box_hollow_and_says_what_it_is_doing() {
 #[test]
 fn the_graph_says_how_many_boxes_it_did_not_fit() {
     // A truncated picture with no notice is the failure mode that matters: the
-    // operator counts the nodes on screen and nothing tells them the cluster is
-    // bigger. The window ends in a count, and the arrows that move it.
     let mut app = App::new("http://127.0.0.1:8901");
     app.machines = (0..30)
         .map(|i| named_machine(&format!("52.2.2.{i}"), &format!("box-{i}")))
@@ -317,9 +285,6 @@ fn the_graph_says_how_many_boxes_it_did_not_fit() {
     );
     assert!(text.contains('←'), "and the keys that reach it:\n{text}");
     // And the picture still draws its window rather than panicking on the boxes
-    // it cannot reach. How many that is depends on the pane's width, so the
-    // exact boundary is held by the plan's own tests; what matters here is that
-    // the rack is drawn and the first box is in it.
     assert!(text.contains("box-0"), "{text}");
     assert!(!text.contains("box-29"), "the window stops short:\n{text}");
 }
@@ -327,9 +292,6 @@ fn the_graph_says_how_many_boxes_it_did_not_fit() {
 #[test]
 fn a_rack_node_says_who_is_working_on_what_and_takes_the_stage_colour() {
     // The rack absorbs the Workers pane: the animal the box's worker reports,
-    // and the task with its chapter. One `machine_alias` and one `node_stage`
-    // feed both, so the rack and the Workers pane cannot call the same box two
-    // things or colour it two ways.
     use super::model::{machine_alias, node_stage};
     use super::style::machine_tint;
     let machines = vec![named_machine("52.2.2.2", "box-1")];
@@ -352,8 +314,6 @@ fn a_rack_node_says_who_is_working_on_what_and_takes_the_stage_colour() {
         "the art wears the stage's colour, not a second palette"
     );
     // Idle and never-contacted are different answers and different greys: a box
-    // up with nothing to do is the cluster working; one nobody has reached is
-    // the thing being hunted.
     assert_ne!(machine_tint("online", None), machine_tint("unknown", None));
     // A fault outranks the stage, exactly as it does the table's state column.
     assert_eq!(machine_tint("error", Some("render")), Color::Red);
@@ -405,8 +365,6 @@ async fn up_and_down_walk_a_whole_row_of_the_rack() {
     assert!(back.contains("box-1"), "{back}");
 
     // The window is the drawer's: it follows the cursor down a band when the
-    // cursor would otherwise be off screen, and stays put when it would not.
-    // Three rows down out of a two-row page is the first press that must move it.
     let bands = app.graph_band;
     assert_eq!(bands, 0, "the first page");
     for _ in 0..8 {
@@ -423,10 +381,6 @@ async fn up_and_down_walk_a_whole_row_of_the_rack() {
 #[test]
 fn the_rack_replaces_the_workers_pane_rather_than_sitting_above_it() {
     // Every box in the rack is drawn with the worker standing on it, the same
-    // animal name, the same task, the same chapter. A second list of the same
-    // facts underneath is the pane arguing with itself, and it costs the rows
-    // the rack wanted most. So in rack mode the Workers pane is not drawn and
-    // its rows go to the rack and the log.
     let mut app = stats_app();
     let table = render_text(&mut app, 140, 44);
     assert!(table.contains("Workers"), "the table mode keeps the list");
@@ -438,7 +392,6 @@ fn the_rack_replaces_the_workers_pane_rather_than_sitting_above_it() {
         "the Workers pane must be gone, not just its header:\n{rack}"
     );
     // And the focus cycle must not park the bright border on a pane that is not
-    // on screen, `f` would then have nowhere to go but back.
     assert_eq!(
         crate::tui::app::Panel::Workers.next_visible(true),
         crate::tui::app::Panel::Machines,
@@ -469,8 +422,6 @@ async fn the_arrows_walk_the_rack_and_the_console_stays_put() {
     assert!(first.contains("box-0"), "{first}");
 
     // Right twice: the window moves with the cursor, and the console does not
-    // it is anchored at the left, so a wide terminal cannot slide it into empty
-    // space and leave the boxes to slide past it.
     for _ in 0..2 {
         handle_key(&mut app, key(KeyCode::Right), &http, &job_tx).await;
     }
@@ -496,7 +447,6 @@ async fn the_arrows_walk_the_rack_and_the_console_stays_put() {
     assert!(render_text(&mut app, 100, 44).contains("box-0"));
 
     // The arrows are the graph's: with the table up they do nothing, rather
-    // than walking a list sideways that has no sideways.
     handle_key(&mut app, key(KeyCode::Char('g')), &http, &job_tx).await;
     handle_key(&mut app, key(KeyCode::Right), &http, &job_tx).await;
     assert_eq!(app.selected, 0, "the table's cursor moves down, not across");
@@ -505,7 +455,6 @@ async fn the_arrows_walk_the_rack_and_the_console_stays_put() {
 #[test]
 fn machines_pane_names_the_kind_and_the_address() {
     // A row reads `box-1 · rmt · 192.168.2.2`, whose box, where it came from,
-    // and how to reach it. The old `role` column said only "worker".
     let mut app = App::new("http://127.0.0.1:8901");
     let mut remote = named_machine("192.168.2.2", "box-1");
     remote.ssh_user = "thang".into();

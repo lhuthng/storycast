@@ -3,35 +3,6 @@ use anyhow::Result;
 
 impl Ssh {
     /// Get the profile pack onto the box: from its release, or over the push.
-    ///
-    /// **Why a pack is worth publishing at all.** It is 60-odd MB of mp3 and
-    /// JSON that is byte-identical on every machine and changes only when the
-    /// operator publishes a new profile — the same argument that took the
-    /// weights off the uplink. Before this, a fresh box paid for the whole
-    /// profile over the operator's connection, once per box, for content that
-    /// was already on a CDN at a hash it could check.
-    ///
-    /// **The split of failures is the models one, and for the same reason.**
-    /// *Unreachable* — no such release, no route, a GitHub incident, an agent
-    /// too old to have the verb — falls back to the push and says so in the
-    /// log. *Corrupt* also falls back to the push, unlike the weights: the
-    /// live tree *is* the expectation the fetch checked against, so pushing it
-    /// lands exactly the bytes the box was asked for. Stopping instead used to
-    /// leave the box with no `assets/` at all — the bundle extract prunes that
-    /// tree before this runs — which is worse than any disagreement the check
-    /// exists to surface. Either way the log names the stale release and how
-    /// to re-publish it, so falling back does not hide it.
-    ///
-    /// What the box ends up with is the same either way. The release is
-    /// verified against the *live* tree's hash, so a pushed `assets/` and a
-    /// fetched one are the same bytes — which is why the stamp records the
-    /// release hash on a box that took the push, and why the next provision
-    /// does not try to fetch what is already there.
-    ///
-    /// Before any of that, the delta: a box whose receipt names this same
-    /// release version gets only what moved — changed files over rsync,
-    /// removed paths deleted, receipt rewritten — and the preset it holds is
-    /// never pruned, re-pushed or re-fetched. See [`Self::install_pack_delta`].
     pub fn install_pack(
         &self,
         layout: &crate::Layout,
@@ -44,9 +15,6 @@ impl Ssh {
         match self.fetch_pack(release, live) {
             Ok(line) => {
                 // The box records its own receipt on landing, but only on a
-                // new agent — so the inductor records it too, best-effort. A
-                // box that cannot record is diffed as unknown next time, never
-                // refused now.
                 let _ = self.write_pack_receipt(layout, release);
                 Ok(line)
             }
@@ -85,17 +53,6 @@ impl Ssh {
         }
     }
     /// Sync the pack by receipt: only what moved travels.
-    ///
-    /// Returns `Ok(None)` when there is no receipt to diff against — missing,
-    /// unparseable, or naming another version — and the caller takes the whole
-    /// tree exactly as before. A receipt is a claim about bytes, so the land
-    /// is verified the same way a fetch is: the receipt is re-read afterwards
-    /// and its hash compared, and anything but a match falls through to the
-    /// whole tree rather than recording a lie.
-    ///
-    /// The delta is capped: more than half the manifest moved means the tree
-    /// was re-cut rather than edited, and a whole fetch is fewer round trips
-    /// than a file list longer than the tree. Same `Ok(None)` fall-through.
     fn install_pack_delta(
         &self,
         layout: &crate::Layout,
@@ -148,8 +105,6 @@ impl Ssh {
             return Ok(None);
         }
         // The pack's `assets/…` paths are relative to the tree **in force's**
-        // parent — the workspace's when it composes its own, the checkout's
-        // otherwise — the same base `push_pack` rsyncs from.
         let base = pack_base(layout);
         let bytes: u64 = delta
             .changed
@@ -173,7 +128,6 @@ impl Ssh {
             return Ok(None);
         }
         // The receipt is a claim: re-read it and check the hash, or the next
-        // provision diffs garbage against a good tree.
         let (code, stdout, _) = self.run(&format!("cat {receipt_path}"), 10)?;
         let verified = code == 0
             && serde_json::from_str::<crate::profile::Manifest>(&stdout)
@@ -226,9 +180,6 @@ impl Ssh {
         Ok(())
     }
     /// Record what a pushed pack holds: the live manifest as the box receipt,
-    /// so the next provision diffs instead of refetching. The fetch path is
-    /// recorded by the box itself on landing; a box that cannot record is
-    /// diffed as unknown next time, never refused now.
     fn write_pack_receipt(
         &self,
         layout: &crate::Layout,
@@ -244,12 +195,6 @@ impl Ssh {
         self.write_remote_file(crate::artifact::PACK_RECEIPT, &text)
     }
     /// Ask the box to fetch the profile pack, and read the answer the same way
-    /// as the weights: `0` landed, `21` fall back to the push, `20` stop.
-    ///
-    /// The timeout is the models one for the same reason, and a pack is the
-    /// *smaller* of the two artifacts, so it is not the transfer that is at
-    /// risk here — it is an agent predating `fetch-artifact`, which answers
-    /// with a usage error and has to read as absence.
     fn fetch_pack(
         &self,
         release: &crate::artifact::PackRelease,
@@ -267,18 +212,6 @@ impl Ssh {
         classify_fetch(code, &stdout, &stderr, &release.tag, "pack")
     }
     /// Put the live `assets/` on the box, for a box that could not fetch the
-    /// release.
-    ///
-    /// The push half of the same decision, and deliberately a **directory**
-    /// push rather than more bundle members: a box whose fetch failed has to
-    /// end up with the profile either way, and re-adding those files to
-    /// `sources.tar.zst` would mean the operator's uplink pays for them on
-    /// every box even when the release works for all the others.
-    ///
-    /// Excludes `assets/_extends/` for the same reason the release does: those
-    /// are composition *inputs*, and a worker resolves a composed pack from the
-    /// flattened tree — shipping them would re-fold into a bundle that is
-    /// supposed to be content.
     pub fn push_pack(&self, layout: &crate::Layout) -> Result<()> {
         self.rsync_push_excluding(
             &layout.assets(),

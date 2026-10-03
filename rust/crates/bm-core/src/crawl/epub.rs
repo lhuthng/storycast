@@ -1,50 +1,6 @@
 //! Reading a chapter out of an EPUB, which is a ZIP of XHTML.
-//!
-//! **Why this is Rust and not a crawl script.** A scripted crawl runs with `io`
-//! and `os` removed — see [`super::engine::lua`], where the sandbox exists so
-//! the documented ABI is the true one — and `fetch` is the only way out. So a
-//! script cannot open a local file even in principle, and an EPUB needs more
-//! than that: it is a ZIP central directory, DEFLATE streams and an XML spine.
-//! Handing that to a script would mean re-implementing inflate in a language
-//! that has no filesystem. So the container is read here, and the script asks
-//! for a chapter by number through one host function.
-//!
-//! **The spine is the reading order, not the chapter list.** Reading in manifest
-//! order would put a book's title page, copyright leaf and table of contents
-//! into the pipeline as chapters 1, 2 and 3 — and the dense index is the
-//! pipeline's, so nothing downstream could tell. The spine is the publisher's
-//! own ordered list of what a reader sees.
-//!
-//! **But a spine entry is not always a chapter, and the host does not guess
-//! which.** The Internet Archive's *Apothecary Diaries* volume 1 has 219 spine
-//! entries and 32 chapters: entry 1 is the navigation document, 2 is the
-//! Archive's own copyright notice, 4 to 7 are decorative pages whose OCR came
-//! back at 23% accuracy, 8 to 11 are the title page, the table of contents, an
-//! illustration list and an app advertisement, and only then — entry 12 —
-//! `Chapter 1: Maomao`. A publisher who scans a book produces *pages*; a
-//! publisher who types one produces *chapters*. Both are valid EPUBs, and only
-//! one of them has a spine that is a chapter list.
-//!
-//! So the host exposes the two halves separately and lets the **script** decide:
-//! [`Epub::index`] reports every spine entry's size and opening words, and
 //! [`Epub::text`] reads a *range* of entries. A rule like "an entry whose text
 //! begins `Chapter 4` starts a chapter" is knowledge about one book, and this
-//! repository's rule is that such knowledge lives in the crawl script, beside
-//! the rest of it — not in Rust, where nobody reviewing the host would expect
-//! to find it.
-//!
-//! **Text goes through the same boundary a crawled page does.** A chapter
-//! fetched from a site and a chapter read out of a book are the same artifact
-//! to everything after the crawl, so they are cleaned by the same function —
-//! entities decoded, blank lines collapsed, one trailing newline. Anything
-//! else and a book would produce chapters shaped differently from a website's
-//! for no reason an operator could see.
-//!
-//! ## What this deliberately does not do
-//!
-//! It does not decide where a chapter ends. See above: that is the script's,
-//! and a host that guessed would be a host that was wrong about somebody's
-//! book.
 
 use anyhow::{anyhow, Context, Result};
 use std::io::Read;
@@ -60,16 +16,10 @@ pub struct EpubChapter {
     /// The chapter's text, already through the shared boundary.
     pub text: String,
     /// The spine item's own title, when the manifest carries one. Display only
-    /// — the chapter's title is the first line of `text`, or the digest's.
     pub title: String,
 }
 
 /// How much of a spine entry [`Epub::index`] reports.
-///
-/// Long enough to hold a chapter heading and the sentence after it, short
-/// enough that an index of three hundred entries is a few tens of kilobytes
-/// rather than the book. The real book's longest heading is 61 characters:
-/// `Chapter 10: The Unsettling Matter of the Spirit (Part One)`.
 const HEAD_CHARS: usize = 160;
 
 /// One spine entry, as far as a script deciding chapter boundaries gets.
@@ -86,19 +36,12 @@ pub struct EpubItem {
 }
 
 /// An EPUB opened once and read from.
-///
-/// The container is parsed on open and the spine kept, because a crawl asks for
-/// chapters one at a time and re-reading `container.xml` and the OPF for each
-/// of three hundred chapters is three hundred redundant ZIP walks.
 pub struct Epub {
     /// The whole archive in memory. EPUBs are a few megabytes of already
-    /// DEFLATE-compressed text; a book that did not fit here would be a
-    /// different kind of file.
     zip: zip::ZipArchive<std::fs::File>,
     /// The publisher's reading order, as `(title, path inside the archive)`.
     spine: Vec<SpineItem>,
     /// Spine entries that named a manifest item the manifest does not list,
-    /// skipped rather than obeyed. See [`spine_of`].
     dangling: Vec<String>,
 }
 
@@ -109,11 +52,6 @@ struct SpineItem {
 }
 
 /// Open a book and read its spine.
-///
-/// Fails loudly on anything that is not an EPUB rather than guessing: a missing
-/// `container.xml` or an OPF with no spine is a file that will not yield a
-/// chapter, and the crawl that has to report it should say which part was
-/// missing.
 pub fn open(path: &Path) -> Result<Epub> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("opening the book {}", path.display()))?;
@@ -141,42 +79,16 @@ pub fn open(path: &Path) -> Result<Epub> {
 
 impl Epub {
     /// How many chapters the spine declares.
-    ///
-    /// The **usable** count: entries that named nothing are not in it, so
-    /// `1..=chapters()` is exactly the range that answers.
     pub fn chapters(&self) -> usize {
         self.spine.len()
     }
 
     /// Spine entries skipped because the manifest does not list them.
-    ///
-    /// Empty on a well-formed book. A real one is not always well-formed, and
-    /// this is how a caller can say "chapter 1 of this book is spine item 2"
-    /// instead of quietly producing a book that is missing its cover and not
-    /// knowing.
     pub fn dangling(&self) -> &[String] {
         &self.dangling
     }
 
     /// Chapter `n`, 1-based, as the shared boundary's text.
-    ///
-    /// **One spine entry, which is one chapter only for a book whose publisher
-    /// made it that way.** For a scanned book this is a *page*; a script that
-    /// wants chapters uses [`Epub::index`] and [`Epub::text`] instead.
-    ///
-    /// `n` past the end is `Ok(None)` rather than an error: a range that runs
-    /// off the end of a book is the ordinary shape of asking for a chapter
-    /// that is not there, and the crawl contract has a word for exactly that
-    /// (`none`, a terminal non-failure that must not cost a strike).
-    ///
-    /// **A spine item with no text in it is the same answer, not an error.**
-    /// Real books carry spine entries that are not prose: the navigation
-    /// document, a cover page, an empty part-divider. The Internet Archive's
-    /// Apothecary Diaries EPUB opens with one — its first usable spine entry is
-    /// `nav.xhtml`, a `epub:type="toc"` shell whose `<ol/>` is empty. Failing
-    /// the book on it was wrong twice over: it is not a failure (retrying it
-    /// cannot make text appear), and it is not a chapter (there is nothing to
-    /// speak). `none` is the contract's word for both.
     pub fn chapter(&mut self, n: u32) -> Result<Option<EpubChapter>> {
         if n == 0 {
             anyhow::bail!("chapter 0 is not a chapter — the pipeline's index starts at 1");
@@ -196,18 +108,6 @@ impl Epub {
     }
 
     /// Every spine entry, as size and opening words — one walk of the book.
-    ///
-    /// This is what a script reads to work out where the chapters are, and the
-    /// reason [`Epub::text`] takes a range. It costs a full decompression pass,
-    /// so a script calls it **once per crawl** and reuses the answer for the
-    /// chapter it is building; calling it per chapter would re-walk the book
-    /// once per chapter.
-    ///
-    /// Entries are in spine order and numbered from 1, so `item.n` is exactly
-    /// what [`Epub::text`] takes. An entry with no prose is reported with
-    /// `chars: 0` rather than dropped, so the numbering cannot shift under a
-    /// script that indexes by position — which is the mistake this module
-    /// exists to make impossible.
     pub fn index(&mut self) -> Result<Vec<EpubItem>> {
         let spine = self.spine.clone();
         let mut out = Vec::with_capacity(spine.len());
@@ -224,12 +124,6 @@ impl Epub {
     }
 
     /// Spine entries `from..=to` inclusive, as one piece of prose.
-    ///
-    /// The range is clamped to the spine rather than refused: a script that has
-    /// worked out that chapter 32 ends at entry 219 should not have to know
-    /// that 219 is the last one. An empty range is an empty string, not an
-    /// error, for the same reason — and the pipeline's own boundary says an
-    /// empty chapter is a chapter.
     pub fn text(&mut self, from: u32, to: u32) -> Result<String> {
         let lo = from.max(1) as usize - 1;
         let hi = (to as usize).min(self.spine.len());
@@ -238,17 +132,6 @@ impl Epub {
         }
         let items: Vec<SpineItem> = self.spine[lo..hi].to_vec();
         // Every part is **already the boundary's output** — `prose` is `text_of`,
-        // which ends in `sanitize_chapter_text` — so the join is a paragraph
-        // break and a trailing newline rather than a second run of the boundary
-        // over characters it has already seen.
-        //
-        // That second run used to be here, and it was not free of consequence:
-        // it was the reason a chapter made of five spine entries paid five
-        // sanitizations plus a sixth over the join plus the provider's own, and
-        // the join was the only part of it that did any work. The output is
-        // byte-for-byte what it was — a `\n` between two entries becomes a
-        // paragraph break either way, because the boundary drops the empty line
-        // that a `\n\n` join would have left and then puts one back.
         let mut out = String::new();
         for item in &items {
             let text = self.prose(item)?;
@@ -288,8 +171,6 @@ impl Epub {
 }
 
 /// A page break is not a paragraph break: a scanned book puts one page per
-/// spine entry, so a sentence runs across entries and joining every entry
-/// with a blank line cuts sentences in half mid-file.
 fn page_continues(prev: &str, next: &str) -> bool {
     if prev.ends_with('-') {
         return true;
@@ -306,10 +187,6 @@ fn page_continues(prev: &str, next: &str) -> bool {
 }
 
 /// The OPF path, from `META-INF/container.xml`'s `rootfile`.
-///
-/// The indirection is the whole reason this is not "look for `content.opf`":
-/// the archive may name it anything, and the container is the only thing that
-/// says where it is.
 fn opf_path(zip: &mut zip::ZipArchive<std::fs::File>) -> Result<String> {
     let xml = read_entry(zip, "META-INF/container.xml")
         .with_context(|| "META-INF/container.xml is missing — this is a ZIP that is not an EPUB")?;
@@ -322,14 +199,6 @@ fn opf_path(zip: &mut zip::ZipArchive<std::fs::File>) -> Result<String> {
 }
 
 /// The value of `attr` on the first `<tag …>` in `xml`.
-///
-/// **quick-xml, not html5ever.** An EPUB's two control files are XML, and the
-/// difference is not academic: reading `<item … />` as HTML treats the solidus
-/// as an ignored self-closing marker, so every `<item>` after the first becomes
-/// a *child* of it. A three-chapter book then yields one, and the spine check
-/// that would have caught it is downstream of the parse that lost them. The
-/// control files are small, so a streaming reader over start/empty elements is
-/// enough and there is no tree to build.
 fn first_attr(xml: &str, tag: &str, attr: &str) -> Option<String> {
     elements(xml)
         .into_iter()
@@ -338,10 +207,6 @@ fn first_attr(xml: &str, tag: &str, attr: &str) -> Option<String> {
 }
 
 /// Every element in `xml` as `(name, attributes)`, self-closing or not.
-///
-/// Collected rather than streamed because the only caller is a control file
-/// of a few kilobytes, and a `Vec` is a return type that needs no lifetime
-/// gymnastics to hand back.
 fn elements(xml: &str) -> Vec<(String, std::collections::BTreeMap<String, String>)> {
     let mut reader = quick_xml::Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -370,7 +235,6 @@ fn attributes(e: &quick_xml::events::BytesStart<'_>) -> std::collections::BTreeM
     for a in e.attributes().flatten() {
         let key = String::from_utf8_lossy(a.key.as_ref()).into_owned();
         // `unescape_value` rather than `value`: a manifest href may carry an
-        // entity, and this is the only place the two differ.
         let val = a
             .unescape_value()
             .map(|v| v.into_owned())
@@ -381,11 +245,6 @@ fn attributes(e: &quick_xml::events::BytesStart<'_>) -> std::collections::BTreeM
 }
 
 /// The reading order: `(id -> (href, title))` from the manifest, then the
-/// spine's `itemref` list walked through it.
-///
-/// Manifest first because the spine holds *ids*, and a script written against
-/// the file order would silently produce a book in whatever order the archive
-/// happened to be built in.
 fn spine_of(opf: &str, opf_dir: &Path) -> Result<(Vec<SpineItem>, Vec<String>)> {
     let all = elements(opf);
     let mut manifest = std::collections::BTreeMap::new();
@@ -423,21 +282,6 @@ fn spine_of(opf: &str, opf_dir: &Path) -> Result<(Vec<SpineItem>, Vec<String>)> 
         };
         let Some((path, title)) = manifest.get(idref) else {
             // A spine entry with no manifest entry is **skipped, and named**.
-            //
-            // This used to be a hard error, on the reasoning that skipping
-            // shifts every later chapter by one. A real book says otherwise: the
-            // Internet Archive's Apothecary Diaries EPUB has 169 spine entries
-            // and its first is `idref="cover"` with no `cover` in the manifest,
-            // and failing the whole book over it made the reader useless on
-            // exactly the books an operator is most likely to have.
-            //
-            // Skipping is not the shift that error was guarding against. The
-            // entry resolves to *nothing*, so there is no position it could
-            // have held; the numbering that follows is the only numbering the
-            // file admits. What would be wrong is skipping *silently*, because
-            // then an operator cannot tell a book's chapter 1 from a book's
-            // chapter 2-because-something-was-dropped — so the names are kept
-            // and `Epub::dangling` reports them.
             dangling.push(idref.clone());
             continue;
         };
@@ -450,10 +294,6 @@ fn spine_of(opf: &str, opf_dir: &Path) -> Result<(Vec<SpineItem>, Vec<String>)> 
 }
 
 /// Resolve a manifest `href` against the OPF's directory.
-///
-/// `href` is relative to the package document, and it may percent-encode or
-/// reach upwards (`../Text/ch1.xhtml`), so it is treated as a path and
-/// normalised — never as a string to paste together.
 fn join_relative(base: &Path, href: &str) -> String {
     let decoded = percent_decode(href);
     let rel = Path::new(&decoded);
@@ -515,7 +355,6 @@ fn read_entry(zip: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Result<St
 }
 
 /// EPUB content is XHTML, which is UTF-8 or declares an encoding; the same
-/// fallback the crawler uses for a page that lies about its charset.
 fn decode_text(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_string(),
@@ -524,20 +363,6 @@ fn decode_text(bytes: &[u8]) -> String {
 }
 
 /// The prose inside a chapter's XHTML.
-///
-/// Not [`super::html::readable`]: that is a heuristic for a *web page*,
-/// weighted toward pulling the main column out of a layout full of chrome. A
-/// chapter file is already only the chapter, so the right move is the
-/// opposite — take the body and keep its paragraphs.
-///
-/// The body's own markup then goes through the crate's own stripper, the same
-/// one `select_text` uses, rather than a second implementation here. Two
-/// ways to decide where a line ends would let the same chapter read
-/// differently depending on which one produced it, which is the one thing a
-/// shared boundary exists to prevent. `<script>` and `<style>` are dropped by
-/// that stripper; `<head>` and the `<title>` in it never arrive, because only
-/// the body is selected — and a chapter's own title is the pipeline's title,
-/// not its prose.
 fn text_of(markup: &str) -> String {
     let doc = Html::parse_document(markup);
     let body = Selector::parse("body")
@@ -549,11 +374,6 @@ fn text_of(markup: &str) -> String {
 }
 
 /// Resolve a path a script named against the root it is allowed to read.
-///
-/// The containment is the same one [`super::provider::resolve_script`] applies
-/// to a crawler path, and for the same reason: a crawl script is trusted the
-/// way configuration is, but the ABI should still be the true one. A book is a
-/// file the operator put in their workspace; `/etc/passwd` is not.
 pub fn confined(root: &Path, named: &str) -> Result<PathBuf> {
     let named = named.trim();
     if named.is_empty() {
@@ -565,8 +385,6 @@ pub fn confined(root: &Path, named: &str) -> Result<PathBuf> {
         root.join(named)
     };
     // Canonicalise both sides: the join can still land outside through a
-    // symlink, and `..` in a name the operator typed should not be the thing
-    // that decides where a file is read from.
     let real = candidate
         .canonicalize()
         .with_context(|| format!("no book at {named:?}"))?;
@@ -583,10 +401,6 @@ pub fn confined(root: &Path, named: &str) -> Result<PathBuf> {
 }
 
 /// Resolve a **directory** a script named, with [`confined`]'s containment.
-///
-/// What a multi-volume library lives in (`crawl.params.books`): the crawl gains
-/// one folder of books, not the filesystem. A path that names a file, or lands
-/// outside the workspace, is refused by the same rule a single book is.
 pub fn confined_dir(root: &Path, named: &str) -> Result<PathBuf> {
     let real = confined(root, named)?;
     if !real.is_dir() {
@@ -596,12 +410,6 @@ pub fn confined_dir(root: &Path, named: &str) -> Result<PathBuf> {
 }
 
 /// The EPUBs directly inside `dir`, sorted by path.
-///
-/// One `.epub` is one *volume*, and only the script decides how their chapters
-/// number together — so the host answers with the list and leaves the tree to
-/// `discover()`. Sorted so the order is a property of the library rather than of
-/// the filesystem's answer order. Anything that is not an `.epub` file is
-/// ignored, not refused: a `books/` directory is a person's own folder.
 pub fn books_in(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut out: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(dir)
@@ -621,8 +429,6 @@ pub fn books_in(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// `Epub` holds a whole archive, and its `Debug` would dump every chapter of
-/// the book into a failing test's output. This says the two things that
-/// actually explain a failure: how big the spine is, and the names in it.
 impl std::fmt::Debug for Epub {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Epub")
@@ -646,10 +452,6 @@ mod tests {
     use std::io::Write;
 
     /// A three-chapter book, written as a real ZIP, so the container walk is
-    /// exercised rather than mocked: `container.xml` naming a **nested** OPF
-    /// path (so a manifest `href` has to resolve against the package document's
-    /// directory rather than the archive root), a manifest, and a spine in the
-    /// publisher's order.
     fn book(path: &Path, chapters: &[(&str, &str)]) {
         let file = std::fs::File::create(path).unwrap();
         let mut w = zip::ZipWriter::new(file);
@@ -719,7 +521,6 @@ mod tests {
         let dir = tmp("spine");
         let p = dir.join("book.epub");
         // Written out of order on purpose: if the reader walked the archive
-        // instead of the spine, chapter 1 would be `three`.
         book(&p, &[("one", "A"), ("two", "B"), ("three", "C")]);
         let mut e = open(&p).unwrap();
         assert_eq!(e.chapters(), 3);
@@ -743,26 +544,15 @@ mod tests {
         assert!(ch.text.contains("Chương one"), "{}", ch.text);
         assert!(ch.text.contains("Dịch Phong nghe."), "{}", ch.text);
         // The `<title>` is the pipeline's title, not its prose, and the `<h1>`
-        // heading *is* prose — so exactly one of the two must be absent.
         assert!(!ch.text.contains("<h1>"), "{}", ch.text);
         assert!(!ch.text.contains("<title>"), "{}", ch.text);
         // The shared boundary owns the edges, and its contract is a trailing
-        // newline with no trailing blank line — the same one a crawled page
-        // gets, which is the whole point of routing both through it.
         assert!(ch.text.ends_with('\n'), "{:?}", ch.text);
         assert!(ch.text.ends_with(".\n"), "{:?}", ch.text);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A ranged read is the same characters the boundary would have produced.
-    ///
-    /// The join used to be run through `sanitize_chapter_text` a second time,
-    /// which was redundant and cost a full extra pass over every chapter of
-    /// every book. Removing work is only safe if the output is provably the
-    /// same, so this asserts it against the construction that was removed —
-    /// with entries that differ in the ways that make the two disagree: one
-    /// with a blank line inside it, one with markup that becomes two
-    /// paragraphs, and one that is nothing but a scan.
     #[test]
     fn a_ranged_read_is_what_re_sanitizing_the_join_would_have_given() {
         let dir = tmp("range");
@@ -778,7 +568,6 @@ mod tests {
         let mut e = open(&p).unwrap();
 
         // What the removed code computed: the entries, each already through
-        // the boundary, trimmed and joined with a single newline.
         let mut parts = Vec::new();
         for n in 1..=3 {
             if let Some(c) = e.chapter(n).unwrap() {
@@ -790,10 +579,6 @@ mod tests {
         let got = e.text(1, 3).unwrap();
         assert_eq!(got, expected, "the join must not change the characters");
         // Pinned, so a change to the boundary is a visible diff and not a
-        // silent one inside a file nobody is looking at. Entry two is the
-        // `<p>  </p>`, and it is **absent** from the join rather than
-        // contributing a blank line — which is the case the old
-        // re-sanitize used to absorb and the new one has to get right itself.
         assert_eq!(
             got,
             "Chương mot\n\nCâu một.\n\nCâu hai.\n\nDịch Phong nghe.\n\n\
@@ -803,7 +588,6 @@ mod tests {
         assert!(!got.contains("\n\n\n"), "no run of blank lines: {got:?}");
         assert!(got.ends_with(".\n") && !got.ends_with("\n\n"));
         // A range is clamped, and an empty one is an empty chapter rather than
-        // an error — the pipeline's own boundary says an empty chapter is one.
         assert_eq!(e.text(99, 120).unwrap(), "");
         assert_eq!(e.text(0, 0).unwrap(), "");
         assert_eq!(e.text(2, 2).unwrap(), "Chương hai\n\nDịch Phong nghe.\n");
@@ -811,8 +595,6 @@ mod tests {
     }
 
     /// A page break is not a paragraph break: a scanned book puts one page
-    /// per spine entry, so entries joined into one chapter must not cut
-    /// sentences in half mid-file.
     #[test]
     fn a_ranged_read_joins_a_sentence_split_across_pages_with_a_space() {
         use std::io::Write;
@@ -913,7 +695,6 @@ mod tests {
             "an absolute path outside the root is refused"
         );
         // A name that climbs out is refused after canonicalising, so a symlink
-        // cannot be what decides where a file is read from.
         let climb = confined(&dir, "../bm-epub-outside/secret.epub");
         assert!(climb.is_err());
         // And a book that is in the workspace is found by bare name.
@@ -925,16 +706,12 @@ mod tests {
     }
 
     /// A books directory is its `.epub` files, in name order — the listing a
-    /// multi-volume `discover` numbers from. Non-books are ignored rather than
-    /// refused (it is a person's own folder), a file is not a directory, and
-    /// the same containment a single book gets applies to the folder.
     #[test]
     fn a_books_directory_is_its_epubs_in_name_order() {
         let dir = tmp("books");
         let shelf = dir.join("books");
         std::fs::create_dir_all(&shelf).unwrap();
         // Written out of order on purpose: the listing is sorted, so volume
-        // order is a property of the names and not of the filesystem.
         book(&shelf.join("vol-02.epub"), &[("two", "B")]);
         book(&shelf.join("vol-01.epub"), &[("one", "A")]);
         std::fs::write(shelf.join("notes.txt"), b"not a book").unwrap();
@@ -954,7 +731,6 @@ mod tests {
     }
 
     /// A chapter long enough to need windows, so the budget has something to
-    /// do — the shape the corpus actually has.
     #[test]
     fn a_long_chapter_still_reads_as_one_artifact() {
         let dir = tmp("long");

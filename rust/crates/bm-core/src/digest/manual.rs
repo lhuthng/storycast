@@ -21,22 +21,6 @@ use super::run::assemble_outcome;
 use super::run::Round;
 use super::*;
 /// Dump a round's raw answer when `BM_DIGEST_RAW` is set.
-///
-/// The digest throws the model's text away once it parses, which is right for a
-/// run and useless for a post-mortem: "the analyzer placed no sounds" is a
-/// symptom, and the raw is the only place the cause is visible, whether it
-/// reasoned about the layer and dropped it, or never considered it at all.
-///
-/// `pub` because the backup digestor asks its own rounds outside the worker's
-/// [`call`], and it is precisely the dry run that has no other record: a
-/// `--dry-run` reported a chapter's segment count and kept nothing, so a
-/// question about what the model actually said could only be answered by
-/// re-spending the call.
-/// Which part of a chapter a manual round is for.
-///
-/// `None` on every chapter that fits one answer, which is what the prompt's
-/// `part` field holds for a short chapter — so a manual digest of a chapter that
-/// did not split is the two-round gesture it has always been.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ManualPart {
     /// 1-based.
@@ -50,8 +34,6 @@ pub struct ManualPrompt {
     pub round: Round,
     pub text: String,
     /// The part this round is for, when the chapter is staged in parts. The
-    /// front end shows it (`part 2/3`), because an operator pasting into a long
-    /// chapter has to know how many rounds it still owes.
     pub part: Option<ManualPart>,
 }
 
@@ -59,31 +41,20 @@ pub struct ManualPrompt {
 #[derive(Debug, Clone)]
 pub struct ManualAnswer {
     /// The next prompt to ask, when there is one: round 2 after a cast answer,
-    /// or round 1 of the next part after a part's script.
     pub prompt: Option<ManualPrompt>,
     /// Round 1's validated cast, set exactly when `prompt` is round 2: it is
-    /// what round 2 was rendered against and what its answer is checked
-    /// against, so the caller has to carry it forward.
     pub cast: Option<Value>,
     /// Every part staged and merged: the finished chapter. Never set together
-    /// with `prompt`.
     pub outcome: Option<DigestOutcome>,
 }
 
 /// The vocabulary the script validators check against, read from the same files
-/// the prompt was rendered from.
-///
-/// One loader for both directions, so what the prompt *offered* and what the
-/// validator *accepts* cannot drift: a tag the prompt listed but the validator
-/// rejected would fail a chapter for a reason nobody could see.
 pub(crate) struct Vocabulary {
     pub(crate) palette: Vec<String>,
     pub(crate) effects: Vec<String>,
     pub(crate) injects: crate::audio_pool::ClipPool,
     pub(crate) aliases: TagAliases,
     /// `scene-map.json`'s `thought.sound`, when the pack declares one. Checked
-    /// against `injects` here so the prompt's vocabulary, the inject validator
-    /// and the lift that writes the item all read the same one name.
     pub(crate) thought_stinger: Option<String>,
 }
 
@@ -106,12 +77,6 @@ pub(crate) fn vocabulary(layout: &Layout) -> Result<Vocabulary> {
 }
 
 /// The pack's declared thought sound, checked against the inject pool.
-///
-/// Checked while the vocabulary is loaded rather than at the lift, for the
-/// same reason the `music` palette is closed: a declared name with no clip
-/// would otherwise be lifted into the script and refused by
-/// `validate_injects` on every attempt, leaving the chapter stalling on a pack
-/// typo instead of one line that names it.
 fn thought_stinger(
     layout: &Layout,
     map: &crate::ambience::SceneMap,
@@ -141,24 +106,6 @@ fn manual_inputs(layout: &Layout, n: u32) -> Result<(Value, String)> {
 }
 
 /// Build the prompt for a manual round.
-///
-/// **The same two prompts the worker's automatic digest builds**, rendered from
-/// the same functions: round 1 is [`build_attribution_prompt`] and round 2 is
-/// [`build_staging_prompt`]. A manual digest is the automatic one with a person
-/// (or a backup model) standing in for the analyzer, so a hand-driven chapter
-/// must not be dramatized by a second, looser contract, that was the legacy
-/// `build_prompt` / `build_script_prompt` pair, which no longer runs here.
-///
-/// `cast` is the validated answer to round 1 and is required for round 2: the
-/// staging prompt is rendered *against that immutable speaker map*, exactly as
-/// the worker's is, so an operator who skipped round 1 gets an error rather than
-/// a prompt that quietly asks for the wrong thing.
-///
-/// A chapter too long for one answer is asked for **one part at a time**, from
-/// the same plan the worker's digest uses. The parts already staged are read
-/// from the worker's own checkpoint, so an operator picking up a chapter the
-/// cluster half-finished continues at the same boundary instead of starting
-/// over — and a chapter the cluster could not finish is one the operator can.
 pub fn manual_prompt(
     layout: &Layout,
     engine: &str,
@@ -202,14 +149,6 @@ pub fn manual_prompt(
 }
 
 /// One chapter as the manual flow needs it: the text, the bible, and the plan —
-/// including the parts the worker's digest may already have staged.
-///
-/// The plan is read from the workspace's `settings.json` rather than handed in,
-/// and that is deliberate: the cuts have to fall where the *worker's* digest put
-/// them, or an operator picking up a half-staged chapter would continue a
-/// different plan from the one the checkpoint was written for. Every front end —
-/// the TUI, the headless backup runner — would otherwise have to thread a knob
-/// that only changes the shape of a prompt.
 struct ManualSession {
     pub(crate) bible: Value,
     pub(crate) text: String,
@@ -223,16 +162,6 @@ impl ManualSession {
     pub(crate) fn open(layout: &Layout, n: u32) -> Result<ManualSession> {
         let (bible, original) = manual_inputs(layout, n)?;
         // The same gate the worker's digest runs, and for the same reason: the
-        // prompts handed to an operator carry the same prepared events the
-        // model gets, so a mispaired quote makes the *manual* rounds stage a
-        // swallowed paragraph too — and by hand that is worse, because nobody
-        // is watching for it.
-        //
-        // No repair call here: the manual path exists so a person stands in
-        // for the model, and spending one on the operator's key behind their
-        // back would make the cost invisible. A repaired sidecar is honoured
-        // (one proofread, already paid for); a still-unbalanced chapter says
-        // so and names the line, which is the part the operator can act on.
         let text = effective_text(layout, n, &original);
         if let Some(f) = quote_findings(&text).first() {
             anyhow::bail!(
@@ -273,8 +202,6 @@ impl ManualSession {
     }
 
     /// The continuity block for a part, or `None` for a chapter that fits one
-    /// answer — which is what keeps a short chapter's prompts the ones the
-    /// single-call digest builds.
     fn continuity<'a>(&self, index: usize, plot: &'a [String]) -> Option<Continuity<'a>> {
         (self.total() > 1).then_some(Continuity {
             index,
@@ -285,19 +212,6 @@ impl ManualSession {
 }
 
 /// Check a pasted answer for one round, and assemble what it yields.
-///
-/// **The same validators the worker's answers go through, and that is the whole
-/// design.** A manual digest is the automatic one with a person standing in for
-/// the model, so an answer the worker's path would have refused is refused here
-/// too, with the validator's own complaint as the message, because the operator
-/// is the one who can act on it.
-///
-/// Nothing is written to the chapter itself. Committing is [`write_script`],
-/// called by the caller, so what lands is one write site rather than two that
-/// could differ. The one file this does write is the **parts checkpoint**, the
-/// same one the worker's digest uses: a part is stored when it is accepted, so a
-/// chapter handed from the cluster to an operator — or the other way round —
-/// continues instead of restarting.
 pub fn manual_accept(
     layout: &Layout,
     n: u32,
@@ -317,11 +231,6 @@ pub fn manual_accept(
     match round {
         Round::Attribution => Ok(ManualAnswer {
             // Round 2's prompt is **not** built here: it carries the engine's
-            // non-verbal vocabulary, and the engine is the caller's to name (the
-            // TUI's manual digest runs against the engine the run screen shows).
-            // The cast comes back instead, and the caller asks for round 2 with
-            // it — which is the hand-off the worker makes between its own two
-            // calls.
             prompt: None,
             cast: Some(parse_attribution(
                 pasted,
@@ -338,8 +247,6 @@ pub fn manual_accept(
             let vocab = vocabulary(layout)?;
             let script = parse_staged_script(pasted, &session.bible, context, &slice, &vocab)?;
             // Every part's own prose, for rule 2 — or the chapter's own text when
-            // it did not split, which is the text the single-call digest has
-            // always scanned.
             let texts: Vec<String> = if session.total() == 1 {
                 vec![session.text.clone()]
             } else {
@@ -355,10 +262,6 @@ pub fn manual_accept(
                 "part"
             };
             // The gates run **before** the part is stored, with the pasted answer
-            // standing in as a part of its own. That ordering is the whole reason
-            // the operator can act on a refusal: the checkpoint has not moved on,
-            // so the complaint is about the answer in their clipboard and they can
-            // paste a better one for the same round.
             let scripts: Vec<&Value> = session
                 .parts
                 .done

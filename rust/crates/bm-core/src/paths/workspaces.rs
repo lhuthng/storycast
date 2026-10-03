@@ -9,8 +9,6 @@ pub fn chapter_of(path: &Path) -> Option<u32> {
 }
 
 /// The `NN.json` files in a chapter directory, in whatever order the
-/// filesystem hands them over. Callers that order the answer ask
-/// [`Layout::scripts`].
 pub(crate) fn chapter_files(dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(dir)
         .map(|rd| {
@@ -23,22 +21,17 @@ pub(crate) fn chapter_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// What a directory under `workspaces/` carries: the config that makes it a
-/// book, or the reason it is not one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceConfig {
     /// `settings.json` is there and parses — the file `workspace new` stamps
-    /// and the first thing every command reads, so this directory is a book.
     Valid,
     /// No `settings.json`: a directory somebody left here, not a workspace.
     Missing,
     /// The file is there and does not parse. Worse than missing, because
-    /// `Settings::load` falls back to defaults rather than refusing — so the
-    /// commands would run against settings nobody wrote.
     Broken,
 }
 
 /// One directory under `workspaces/`: what it is called, whether the pointer
-/// names it, what config it carries, and how far the book has got.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceEntry {
     /// The directory name — what `:ws <name>` and `workspace use <name>` take.
@@ -47,18 +40,11 @@ pub struct WorkspaceEntry {
     pub active: bool,
     pub config: WorkspaceConfig,
     /// Chapters crawled and scripts written: the two numbers that say whether a
-    /// switch is worth making.
     pub chapters: usize,
     pub scripts: usize,
 }
 
 /// Every directory under `workspaces/`, by name, with the pointer marked.
-///
-/// For a *list*, never for a switch — switching is a pointer write, and what a
-/// list has to answer is which directories are books at all. An unusable one is
-/// listed and marked rather than hidden: the usual way to find one is to have
-/// made it by accident, and a row that quietly vanished is how a stale pointer
-/// turns into a mystery.
 pub fn workspaces(root: &Path) -> Vec<WorkspaceEntry> {
     let active = std::fs::read_to_string(Layout::active_workspace_file(root))
         .map(|s| s.trim().to_string())
@@ -91,9 +77,6 @@ pub fn workspaces(root: &Path) -> Vec<WorkspaceEntry> {
 }
 
 /// A workspace's own `settings.json`, or the reason it is not a book. Read
-/// rather than loaded: [`crate::config::Settings::load`] treats a missing file
-/// as defaults, which is right for a command that may legitimately run at the
-/// repo root and wrong for a question about whether a directory is a workspace.
 fn workspace_config(dir: &Path) -> WorkspaceConfig {
     let path = dir.join("settings.json");
     if !path.is_file() {
@@ -109,7 +92,6 @@ fn workspace_config(dir: &Path) -> WorkspaceConfig {
 }
 
 /// How many `*.<ext>` files sit in `dir`. Zero for a directory that is not
-/// there, which is an ordinary state: a book nobody has crawled yet.
 fn files_with_extension(dir: &Path, ext: &str) -> usize {
     std::fs::read_dir(dir)
         .map(|rd| {

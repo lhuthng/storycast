@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 /// Single-quote a shell word. Paths in the wild contain spaces
-/// (`Documents SSD`), and an unquoted redirect target splits in two.
 pub(crate) fn shq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -32,8 +31,6 @@ pub(crate) fn read_pid(path: &Path) -> Option<u32> {
 }
 
 /// The binary to run: this executable itself for `bm-inductor`, its sibling
-/// for `bm-agent`. Resolved from `current_exe` rather than `PATH` so a `/tmp`
-/// copy starts `/tmp` binaries, not whatever happens to be installed.
 pub(crate) fn sibling_bin(name: &str) -> anyhow::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let p = if exe.file_name().map(|n| n == name).unwrap_or(false) {
@@ -51,8 +48,6 @@ pub(crate) fn sibling_bin(name: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// Run `bin args…` detached: immune to hangup, stdio to the log, PID back.
-/// `nohup … & echo $!` prints the background PID and exits at once, so the
-/// TUI never blocks on a server boot that takes seconds.
 pub(crate) fn spawn_one(bin: &Path, args: &[String], log: &Path) -> anyhow::Result<u32> {
     if let Some(parent) = log.parent() {
         std::fs::create_dir_all(parent)?;
@@ -83,15 +78,6 @@ pub(crate) fn spawn_one(bin: &Path, args: &[String], log: &Path) -> anyhow::Resu
 }
 
 /// Args for the spawned inductor. The reconcile is deliberately EMPTY: booting
-/// a backend must never invent work — a default range once auto-ran ch21
-/// uninvited. Chapters arrive only through explicit enqueue (run screen,
-/// `t`, API); a hand-run `serve --start/--count` keeps its own scope.
-/// `bind` is LAN-wide when remote workers exist, loopback for solo runs.
-///
-/// `root` is passed rather than left to discovery: the child inherits this
-/// process's cwd, which is not necessarily the root the operator named with
-/// `--root`, and a backend that resolved a *different* root would reconcile a
-/// different workspace's ledger while this dashboard watched it.
 pub(crate) fn serve_args(root: &Path, port: &str, bind: &str) -> Vec<String> {
     [
         "serve".to_string(),
@@ -119,7 +105,6 @@ pub(crate) fn signal(pid: u32, sig: &str) {
 }
 
 /// Any local worker process alive? The offline-swap guard: a mid-render
-/// worker keeps rendering the old cast even with the inductor down.
 pub fn local_workers_alive() -> bool {
     std::process::Command::new("pgrep")
         .arg("-f")
@@ -151,8 +136,6 @@ mod tests {
     #[test]
     fn spawned_backend_reconciles_nothing() {
         // The empty count is the whole point: boot invents no work, so no
-        // default can ever auto-run chapters again. The root travels with it
-        // for the same reason the count does — the child must not guess.
         assert_eq!(
             serve_args(Path::new("/repo"), "8901", "127.0.0.1"),
             vec![

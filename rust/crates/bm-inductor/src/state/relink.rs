@@ -1,13 +1,4 @@
 //! Auto-relink: keep EC2-launched boxes pointed at the address they carry now.
-//!
-//! An EC2 public address changes on every stop/start and every spot relaunch,
-//! so a registry keyed by address drifts out of date the moment a box cycles.
-//! The instance id is stable for the box's whole life and is stamped in the
-//! machine's note, so the account read is enough to repair the drift without an
-//! operator selecting anything: a box whose public address moved is re-keyed to
-//! the address it has now, and an agent-reported *private*-address ghost of the
-//! same instance is folded into the real entry. Every repair is returned as a
-//! log line so the events pane explains what changed and why.
 
 use super::Inner;
 use bm_core::provision::{ec2_id_from_note, remove_box, save_box, split_machine, AwsInstance};
@@ -15,7 +6,6 @@ use bm_proto::MachineState;
 
 impl Inner {
     /// Reconcile the registry with one account listing. Returns the log lines
-    /// describing every repair (empty when nothing drifted).
     pub fn relink_drifted(&mut self, instances: &[AwsInstance]) -> Vec<String> {
         let mut log = Vec::new();
         for i in instances {
@@ -30,7 +20,6 @@ impl Inner {
                 .find(|(_, m)| ec2_id_from_note(&m.note).as_deref() == Some(i.id.as_str()))
                 .map(|(a, _)| a.clone());
             // The ghost: a machine the agent registered at the instance's
-            // *private* address — the same box seen through a second address.
             let ghost: Option<String> = (!i.private_ip.is_empty())
                 .then(|| {
                     self.machines
@@ -41,7 +30,6 @@ impl Inner {
                 .flatten();
 
             // Adopt a ghost as the real entry when the launch entry is gone
-            // (a hand-edited registry, a dropped box that kept beating).
             let canonical = match canonical {
                 Some(c) => Some(c),
                 None => match &ghost {
@@ -85,14 +73,6 @@ impl Inner {
                         m.name.clone()
                     };
                     // The box was launched by us and has been sitting at its
-                    // instance id waiting for this address. That is not a
-                    // rotation — nothing has ever been pushed to it — so it
-                    // becomes `Initializing` here, which both restarts the boot
-                    // deadline from the moment it could actually be dialed and
-                    // marks it as *new* for the onboarding trigger below. A box
-                    // that was already running keeps its state untouched: it
-                    // rotated, and re-provisioning a working box is 886 MB of
-                    // work nobody asked for.
                     let newborn = m.state == MachineState::AwaitingIp;
                     m.addr = i.public_ip.clone();
                     m.id = i.public_ip.clone();

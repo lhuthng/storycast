@@ -1,51 +1,23 @@
 //! Choosing a real line to audition a voice on.
-//!
-//! A voice *sample* answers "what does this voice sound like". A real line
-//! answers "what will this character sound like", which is the question an
-//! operator is actually asking when they swap a voice. The lines come from the
-//! digested scripts — the same text the renderer will speak.
-//!
-//! The scan is a hundred file opens: measured at 26 ms warm on this repo (1.5 MB
-//! of JSON across 100 scripts), which is not a reason to hide it, but it is I/O
-//! on a path that could just as easily be a network mount. So it runs once per
-//! session, in a background job, and the result is cached on the `App` — never on
-//! the UI thread, and never twice.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// A sample has to be a sentence. `data/script-01.json` really does contain
-/// `{"speaker": "Dịch Phong", "text": "Ừm!"}`, and a two-character grunt says
-/// nothing about how a voice carries a paragraph.
 pub(crate) const MIN_LINE_CHARS: usize = 40;
 
 /// ...and it has to end. A 400-character line is half a minute of audio, which is
-/// not an audition, it is a scene. Lines in the band are preferred; anything
-/// else is used only when a character has nothing in band.
 pub(crate) const MAX_LINE_CHARS: usize = 160;
 
 /// Per-character cap. 4 836 segments across 100 scripts is ~400 KB of text —
-/// small, but a cap keeps one pathological script from being held forever.
 const PER_CHARACTER_CAP: usize = 200;
 
 /// Every `data/script/NN.json` in the workspace, sorted.
-///
-/// Takes the whole [`bm_core::Layout`] rather than a root because the scripts
-/// are the *book's*: `data/` lives in the active workspace, and a root-only
-/// path would index whichever book happened to be at the top of the checkout.
-///
-/// A name for [`Layout::scripts`](bm_core::Layout::scripts), which is the
-/// answer; this exists so the screens say "scripts" rather than reaching for a
-/// path builder.
 pub(crate) fn script_files(layout: &bm_core::Layout) -> Vec<PathBuf> {
     layout.scripts()
 }
 
 /// `speaker -> every line they speak`, deduplicated, in script order.
-///
-/// A script that will not parse is skipped rather than failing the whole index:
-/// a half-digested run still has plenty of usable lines, and refusing to audition
-/// anything because chapter 73 is corrupt would be the wrong trade.
 pub(crate) fn index_lines(
     layout: &bm_core::Layout,
 ) -> Result<HashMap<String, Vec<String>>, String> {
@@ -86,7 +58,6 @@ pub(crate) fn index_lines(
                 continue;
             }
             // The same grunt recurs in every chapter; one copy is enough, and
-            // without this a character's whole bucket can be the same "Hừ."
             let marks = seen.entry(speaker.to_string()).or_default();
             if marks.insert(text.to_string()) {
                 bucket.push(text.to_string());
@@ -104,10 +75,6 @@ pub(crate) fn index_lines(
 }
 
 /// Pick one line for a character.
-///
-/// Prefers lines inside [`MIN_LINE_CHARS`]..=[`MAX_LINE_CHARS`]; falls back to
-/// everything when a character only ever grunts. `None` means they have no lines
-/// at all — a character the digest has not produced a script for yet.
 pub(crate) fn choose_line(lines: Option<&Vec<String>>, seed: u64) -> Option<String> {
     let all = lines?;
     let in_band: Vec<&String> = all
@@ -127,11 +94,6 @@ pub(crate) fn choose_line(lines: Option<&Vec<String>>, seed: u64) -> Option<Stri
 }
 
 /// A line held on a screen, so an A/B plays the *same* sentence in two voices.
-///
-/// The character is part of the value on purpose. A line cached without it would
-/// silently belong to whoever was highlighted a moment ago, and moving the cursor
-/// to another speaker would audition them on a sentence they never say — the
-/// exact failure an audition exists to prevent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuditionLine {
     pub(crate) character: String,
@@ -139,11 +101,6 @@ pub(crate) struct AuditionLine {
 }
 
 /// The line to use for `character`: the held one when it is already theirs, else
-/// a fresh pick.
-///
-/// `held` as `None` forces a re-pick, which is what the reroll key passes.
-/// `None` back means the character has no lines yet — the caller says so rather
-/// than playing silence.
 pub(crate) fn line_for(
     held: Option<&AuditionLine>,
     character: &str,
@@ -163,10 +120,6 @@ pub(crate) fn line_for(
 }
 
 /// A deterministic index into `len`, for a given `seed`.
-///
-/// No RNG dependency: the only requirement is that two sessions pick different
-/// lines and that one seed always picks the same line, so a test can assert the
-/// choice without pinning an RNG's internals. A splitmix-style mix is plenty.
 pub(crate) fn pick_index(len: usize, seed: u64) -> usize {
     if len == 0 {
         return 0;
@@ -194,7 +147,6 @@ mod tests {
     #[test]
     fn a_grunt_never_wins_over_a_sentence() {
         // The real data has "Ừm!" for a main character. If that is ever chosen,
-        // the audition tells the operator nothing.
         let l = lines(&["Ừm!", &long("a"), &long("b")]);
         for seed in 0..64 {
             let picked = choose_line(Some(&l), seed).unwrap();
@@ -216,7 +168,6 @@ mod tests {
     #[test]
     fn a_character_who_only_grunts_still_gets_a_line() {
         // Falling back is better than refusing: "Ừm!" in the right voice still
-        // tells you the timbre, which is more than silence does.
         let l = lines(&["Ừm!", "Hừ."]);
         let picked = choose_line(Some(&l), 7).unwrap();
         assert!(l.contains(&picked), "{picked:?}");
@@ -225,7 +176,6 @@ mod tests {
     #[test]
     fn no_lines_at_all_is_none_not_an_empty_string() {
         // A character the digest has not reached yet. `None` lets the caller say
-        // so; an empty line would render silence and look like a broken voice.
         assert_eq!(choose_line(None, 1), None);
         assert_eq!(choose_line(Some(&vec![]), 1), None);
     }
@@ -249,7 +199,6 @@ mod tests {
     #[test]
     fn a_held_line_is_reused_for_the_same_character_and_replaced_for_another() {
         // The whole point of holding it: play the current voice, then the
-        // candidate, and hear the *same* sentence twice.
         let mut idx = HashMap::new();
         idx.insert("Kiên".to_string(), lines(&[&long("k1"), &long("k2")]));
         idx.insert("Vũ".to_string(), lines(&[&long("v1"), &long("v2")]));
@@ -262,7 +211,6 @@ mod tests {
         );
 
         // Same character, different seed: the held line still wins, because
-        // re-picking here would break the A/B.
         let again = line_for(Some(&held), "Kiên", Some(&idx), 999).unwrap();
         assert_eq!(again, held, "a held line must survive a different seed");
 
@@ -301,7 +249,6 @@ mod tests {
         let layout = bm_core::Layout::new(&root);
         layout.ensure().unwrap();
         // A readable script, a corrupt one, and a file in the script folder
-        // that is not a chapter.
         std::fs::write(
             layout.script(1),
             r#"{"segments":[
@@ -340,16 +287,11 @@ mod tests {
     #[test]
     fn the_real_corpus_yields_a_sentence_for_every_speaker_that_has_one() {
         // Gated on an env var so CI stays hermetic and fast — `data/` is
-        // gitignored and the scan is ~3.8 s. Run it when the scan or the chooser
-        // changes, because a fixture cannot tell you what the real text looks
-        // like:
-        //   BM_REAL_ROOT="$PWD" cargo test -p bm-inductor the_real_corpus -- --nocapture
         let Ok(root) = std::env::var("BM_REAL_ROOT") else {
             return;
         };
         let t0 = std::time::Instant::now();
         // Through the resolver, not `new`: the corpus lives in the active
-        // workspace, and this test is the one that reads the real thing.
         let layout = bm_core::Layout::resolve(&root).expect("BM_REAL_ROOT must resolve");
         let index = index_lines(&layout).expect("the real corpus must index");
         println!(
@@ -364,7 +306,6 @@ mod tests {
         );
 
         // The claim that matters: for a speaker with real dialogue, the chooser
-        // finds a sentence. A grunt would mean the band is wrong for this text.
         for speaker in ["Narrator", "Dịch Phong"] {
             let lines = index
                 .get(speaker)

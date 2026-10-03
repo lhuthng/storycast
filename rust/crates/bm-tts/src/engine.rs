@@ -1,35 +1,4 @@
 //! The generator: prompt build, prefill, and the per-frame decode loop.
-//!
-//! A port of `OnnxV3LiteEngine` from `vieneu/_v3_turbo_engine/onnx_runtime_lite.py`.
-//! The transformer forwards run in ONNX Runtime; everything around them —
-//! embeddings, the speaker anchor, the output heads, sampling, the prompt — is
-//! plain arithmetic, and that is the part that has to be reproduced exactly.
-//!
-//! # Shape of the loop
-//!
-//! One **frame** is one acoustic step, and a frame carries `n_vq` (16) codes —
-//! one per residual-VQ channel. The channels are generated **serially**, each
-//! conditioned on the one before it, so a frame is 16 acoustic-graph calls plus
-//! one decode-step call. That is the whole cost profile of the model: thousands
-//! of tiny calls, not a few large ones.
-//!
-//! ```text
-//! prefill(inputs_embeds)  ->  hidden, present_k_*, present_v_*     (once)
-//!   for each frame:
-//!     acoustic(cond, txt)                 -> hidden[0,1]           channel 0
-//!     acoustic(audio_emb[0][code0])       -> hidden[0,0]           channel 1
-//!     ...                                                           1..15
-//!     decode_step(embed(codes), past)     -> hidden, past_k/v      next frame
-//! ```
-//!
-//! # Why the KV cache is fed back rather than copied
-//!
-//! The cache is an *output* of each step and an *input* to the next, and it is
-//! the largest tensor in play (12 layers x 2 x `[1,4,P,64]`). Copying it into a
-//! fresh `Vec` every frame would move roughly 12 MB per frame at P=500 — several
-//! hundred megabytes of `memcpy` for a chunk. `SessionOutputs::remove` hands back
-//! an owned `DynValue`, and `SessionInputs` accepts a reference to one, so the
-//! tensors are held and re-fed without ever being copied.
 
 use crate::framecap::max_expected_frames;
 use crate::npz::{read_npz, Array};
@@ -43,9 +12,6 @@ use std::path::Path;
 use tokenizers::Tokenizer;
 
 /// `config.json`, narrowed to what the generator reads.
-///
-/// Defaults mirror the reference's `.get(...)` calls rather than serde's, so a
-/// config that omits a field behaves the way Python would.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub n_vq: usize,
@@ -93,24 +59,16 @@ struct Xvec {
 }
 
 /// What to generate. Borrowed rather than owned so a caller can keep a voice
-/// anchor and reference codes across many lines without cloning them.
 pub struct Request<'a> {
     pub phonemes: &'a str,
     pub sampling: Sampling,
     pub max_new_frames: usize,
     /// Cap the frame count by what the phoneme string could plausibly need. The
-    /// reference always has this on; it is off in the parity harness so the two
-    /// sides agree on the ceiling by construction.
     pub frame_cap: bool,
     pub speaker_emb: Option<&'a [f32]>,
     /// Use this anchor verbatim instead of projecting `speaker_emb`.
-    ///
-    /// Not a production path: it exists so the parity harness can hand both
-    /// implementations the *same* anchor and separate "is the loop right" from
-    /// "is the anchor's float rounding all that is left".
     pub anchor_override: Option<&'a [f32]>,
     /// Reference codes from enrollment, `(frames, n_vq)`. `None` for a preset
-    /// voice with no reference audio.
     pub ref_codes: Option<&'a [Vec<i64>]>,
 }
 
@@ -132,7 +90,6 @@ impl<'a> Request<'a> {
 pub struct Frames {
     pub codes: Vec<Vec<i64>>,
     /// True when the loop stopped because it hit the ceiling rather than an
-    /// end-of-speech token. The reference treats this as a suspect chunk.
     pub hit_cap: bool,
     pub cap: usize,
 }
@@ -154,11 +111,6 @@ pub struct Engine {
 
 impl Engine {
     /// Load the backbone from one directory: `config.json`, `tokenizer.json`,
-    /// `vieneu_v3_heads.npz` and the three graphs, all together.
-    ///
-    /// One directory, not the reference's two, because that is the shape the
-    /// bake step produces and the shape provisioning rsyncs. The codec loads
-    /// separately (`crate::codec`) since it is a different repository upstream.
     pub fn load(dir: &Path, threads: usize) -> Result<Engine> {
         let cfg: Config = serde_json::from_str(
             &std::fs::read_to_string(dir.join("config.json"))
@@ -249,11 +201,6 @@ impl Engine {
     }
 
     /// The intra-op thread count the sessions were actually opened with.
-    ///
-    /// It used to recompute `available_parallelism()` on the spot, which is the
-    /// *raw* core count — 10 on a 10-core machine — while the sessions were
-    /// opened with `min(max(cores / 2, 1), 8)` = 5. A getter that names one
-    /// quantity and returns another is worse than no getter.
     pub fn intra_threads(&self) -> usize {
         self.intra
     }
@@ -301,10 +248,6 @@ impl Engine {
     }
 
     /// `(T, n_vq+1)` rows to `(T, H)` embeddings.
-    ///
-    /// The pad id means "no code in this channel", and it is masked rather than
-    /// looked up — index `audio_pad_token_id` (1024) is out of range for a
-    /// 1024-wide table, so an unmasked gather would panic rather than misbehave.
     pub fn embed_rows(&self, rows: &[i64], t: usize, anchor: Option<&[f32]>) -> Vec<f32> {
         let n = self.cfg.n_vq + 1;
         let h = self.hidden;
@@ -337,7 +280,6 @@ impl Engine {
     }
 
     /// The prompt rows: `[style, <tps>, …phones…, <tpe>]` then the reference
-    /// codes, one row per reference frame.
     pub fn build_rows(
         &self,
         phonemes: &str,
@@ -378,12 +320,6 @@ impl Engine {
     }
 
     /// Generate one chunk's codes.
-    ///
-    /// The RNG is the caller's, not the engine's, because a regeneration has to
-    /// *continue* the stream rather than restart it: the reference draws from one
-    /// global generator, so a retry produces a different chunk. Handing in a
-    /// fresh seed each time would regenerate the identical one and the retry
-    /// loop could never converge.
     pub fn generate(&mut self, req: &Request, rng: &mut Rng) -> Result<Frames> {
         let anchor = match req.anchor_override {
             Some(a) => Some(a.to_vec()),
@@ -392,9 +328,6 @@ impl Engine {
         // The text-only length is not what the loop positions against; see below.
         let (rows, _text_len) = self.build_rows(req.phonemes, req.ref_codes)?;
         // `Tprompt` in the reference is `prompt_embeds.shape[1]` — the whole
-        // prompt, reference rows included, not the text-only prefix. Using `t0`
-        // here shifts every decode position by the number of reference frames,
-        // which is silent: the shapes still line up and the audio is wrong.
         let tprompt = rows.len() / (self.cfg.n_vq + 1);
         let prompt = self.embed_rows(&rows, tprompt, anchor.as_deref());
 
@@ -414,9 +347,6 @@ impl Engine {
         let pad = self.cfg.audio_pad_token_id;
 
         // ── prefill ──────────────────────────────────────────────────────────
-        // Scoped so the `&mut self.sess_pre` borrow ends before the loop needs
-        // the other sessions. The outputs are taken out owned, so the cache
-        // outlives the borrow.
         let (hidden, mut past_k, mut past_v) = {
             let t = Tensor::from_array((vec![1i64, tprompt as i64, h as i64], prompt))
                 .context("building inputs_embeds")?;
@@ -442,7 +372,6 @@ impl Engine {
             (hidden, pk, pv)
         };
         // `h` for the first frame is the last prompt position — the last
-        // *reference* row when there is one.
         let mut cond = last_row(&hidden, tprompt)?;
 
         let mut hist = if (req.sampling.repetition_penalty - 1.0).abs() > 1e-9 {
@@ -470,7 +399,6 @@ impl Engine {
             let se = self.embed_rows(&slot, 1, anchor.as_deref());
             let (next_hidden, pk, pv) = {
                 // `into_dyn` so every entry of the feed is the same type; the
-                // cache entries are already dynamic and are borrowed, not moved.
                 let emb = Tensor::from_array((vec![1i64, 1, h as i64], se))?.into_dyn();
                 let pos =
                     Tensor::from_array((vec![1i64, 1], vec![(tprompt + step) as i64]))?.into_dyn();
@@ -516,7 +444,6 @@ impl Engine {
     }
 
     /// One acoustic frame: `n_vq` codes, and whether the end-of-speech token won
-    /// the text head.
     fn acoustic_frame(
         &mut self,
         cond: &[f32],
@@ -530,7 +457,6 @@ impl Engine {
         let mut hist = hist;
 
         // The two-token opening: the backbone's last hidden state, then the
-        // speech-generation start embedding.
         let mut tok = Vec::with_capacity(2 * h);
         tok.extend_from_slice(cond);
         tok.extend_from_slice(
@@ -572,7 +498,6 @@ impl Engine {
         };
 
         // Channel 0 reads the *second* position; the remaining channels read the
-        // single position they were just fed.
         let slot0 = row(&hidden, 0)?;
         let mut vec0 = row(&hidden, 1)?;
         codes.push(sample_channel(
@@ -653,11 +578,6 @@ struct Frame {
 }
 
 /// Open one graph with the settings the reference uses.
-///
-/// The builder's own error type is `ort::Error<SessionBuilder>`, which is
-/// neither `Send` nor `Sync` — it carries the half-built session — so it cannot
-/// become an `anyhow::Error` on its own. Flattening it to its message keeps the
-/// useful part and drops the un-sendable payload.
 pub(crate) fn open_session(path: &Path, intra: usize) -> Result<Session> {
     fn msg<E: std::fmt::Display>(e: E) -> anyhow::Error {
         anyhow!("{e}")
@@ -669,7 +589,6 @@ pub(crate) fn open_session(path: &Path, intra: usize) -> Result<Session> {
     let b = b.with_intra_threads(intra).map_err(msg)?;
     let b = b.with_inter_threads(1).map_err(msg)?;
     // Matches the reference's `intra_op.allow_spinning = 0`: a server rendering
-    // many short chunks would otherwise burn a core idle between them.
     let mut b = b
         .with_config_entry("session.intra_op.allow_spinning", "0")
         .map_err(msg)?;
@@ -724,24 +643,6 @@ fn sample_channel(
 }
 
 /// `x @ table.T` — a row per table entry.
-///
-/// Eight partial accumulators, not one. This is the hot loop of the whole port:
-/// every generated frame does 16 of these against the audio head (1024 rows ×
-/// 768), plus one against the text head, so a render is ~1.2 GFLOP of pure
-/// dot products.
-///
-/// With a single accumulator the adds form a serial dependency chain, and Rust
-/// will not reassociate floating-point addition — so LLVM cannot vectorise it and
-/// the loop runs one scalar multiply-add at a time. Measured against the Python
-/// reference (which does this with BLAS `sgemv`, SIMD and multiple threads) that
-/// alone made the port **1.4x slower end to end**. Eight independent chains give
-/// the vectoriser something to work with while leaving the arithmetic
-/// deterministic and reproducible.
-///
-/// It does change the summation *order* — which is not a regression, because the
-/// reference's own order is BLAS's blocked reduction and mine was never that.
-/// See `tools/frames-parity.py` for the measurement that says whether the
-/// temperature-0 frames still agree.
 fn matvec(x: &[f32], table: &[f32], rows: usize, width: usize) -> Vec<f32> {
     let t0 = std::time::Instant::now();
     let out = matvec_inner(x, table, rows, width);
@@ -751,8 +652,6 @@ fn matvec(x: &[f32], table: &[f32], rows: usize, width: usize) -> Vec<f32> {
 
 fn matvec_inner(x: &[f32], table: &[f32], rows: usize, width: usize) -> Vec<f32> {
     // Establish the bound once: `x` arrives as a slice of unknown length, and
-    // an unchecked `x[k]` inside the row loop is both a bounds check per
-    // element and a barrier to vectorising.
     let x = &x[..width];
     let mut out = vec![0f32; rows];
     for (r, slot) in out.iter_mut().enumerate() {

@@ -3,18 +3,8 @@ use crate::util::squeeze_ws;
 use serde_json::{json, Value};
 
 /// Surface forms that may NEVER join the bible: pronouns, bare role nouns,
-/// titles, self-references and indefinite descriptions. Compared lowercased,
-/// so "Nữ tử" and "nữ tử" are the same trap.
-///
-/// The rule behind the list: an alias is only stored when it identifies its
-/// owner better than chance. A bare generic ("nữ tử", "công tử", "tiền bối",
-/// "sư phụ") matches half the cast, so storing it does not resolve future
-/// chapters — it hijacks them, routing every unnamed woman to whoever owns
-/// "nữ tử" (ch112 went to Lạc Lan Tuyết that way although the sword, the
-/// frost-face and the sect all said Bạch Phiêu Phiêu). Forms carrying a
 /// proper-name token ("Lý cô nương", "Dịch sư phụ", "lão Ngô", "nữ tử áo
 /// trắng") stay: the name does the identifying.
-/// Names themselves are never touched by this list — only `proper_aliases`.
 const ALIAS_STOP: [&str; 75] = [
     "hắn",
     "nàng",
@@ -68,9 +58,6 @@ const ALIAS_STOP: [&str; 75] = [
     "lão giả",
     "lão đầu",
     // Kinship and address: who the word points at is decided by who is
-    // speaking, so storing it hands every future speaker's master, brother or
-    // disciple to whichever character claimed the word first. "sư phụ" was
-    // here already; the rest of the family belongs with it.
     "đồ nhi",
     "đệ tử",
     "sư điệt",
@@ -109,8 +96,6 @@ pub(crate) const VI_DIACRITICS: &str =
 
 /// Honorific/title suffixes that never denote a different person: "Huyền Vũ
 /// lão tổ" is Huyền Vũ addressed with respect, not a debut. Stripped (after
-/// lowercasing) when comparing names, so a suffixed form folds into the bare
-/// name instead of forking a second bible entry with its own voice.
 const TITLE_SUFFIXES: [&str; 13] = [
     "lão tổ",
     "tiền bối",
@@ -128,9 +113,6 @@ const TITLE_SUFFIXES: [&str; 13] = [
 ];
 
 /// Comparison key for character names: squeezed whitespace, no trailing
-/// `(...)` description ("Mao Ý (thanh niên mặc hoa phục)" → "mao ý"), no
-/// title suffix, lowercased ("Sở Cuồng Sư" == "Sở Cuồng sư"). Display forms
-/// are never rewritten — only compared through this.
 pub fn canon_key(name: &str) -> String {
     let mut s = squeeze_ws(name);
     if let Some(open) = s.rfind('(') {
@@ -159,18 +141,6 @@ pub fn canon_key(name: &str) -> String {
 }
 
 /// Canonical bible name for any surface form: exact name, then exact alias,
-/// then the canonical-key fallback over each. Unknown forms come back
-/// untouched — never invent an owner.
-///
-/// The passes are ordered, and that order is load-bearing. A character's own
-/// name is an identity, so it must beat *any* other character's alias for it —
-/// the bible routinely contradicts itself on this, because a digest will list
-/// an epithet as an alias of one character and later introduce it as a
-/// character in its own right. `Vân bá` is exactly that: a character, and also
-/// listed among `Lão giả`'s aliases. A single interleaved pass let whichever
-/// character happened to sit earlier in the file win, so the cast was keyed
-/// under `Lão giả` while every script still said `Vân bá` — and planning that
-/// chapter failed with `cast has no voice for "Vân bá"`.
 pub fn resolve_speaker(bible: &Value, name: &str) -> String {
     let chars: &[Value] = bible
         .get("characters")
@@ -224,9 +194,6 @@ pub fn resolve_speaker(bible: &Value, name: &str) -> String {
 }
 
 /// Rewrite a digest's roster + segment speakers to canonical bible names, in
-/// place. Returns how many speaker slots changed. Run wherever a script is
-/// persisted (worker digest, inductor completion, reconcile) so everything
-/// downstream — cast, render runs, merge — only ever sees one name per person.
 pub fn canonicalize_script(data: &mut Value, bible: &Value) -> usize {
     let mut changed = 0;
     if let Some(roster) = data.get_mut("roster").and_then(|r| r.as_array_mut()) {
@@ -256,7 +223,6 @@ pub fn canonicalize_script(data: &mut Value, bible: &Value) -> usize {
 
 fn alias_owner(form: &str, owner: &str, bible: &Value) -> Option<String> {
     // Compared through the canonical key: "Sở Cuồng sư" is owned by whoever
-    // holds "Sở Cuồng Sư", and a character owns its own variant spellings.
     let (fk, ok) = (canon_key(form), canon_key(owner));
     bible
         .get("characters")
@@ -282,9 +248,6 @@ fn alias_owner(form: &str, owner: &str, bible: &Value) -> Option<String> {
 }
 
 /// Whether a surface form's owner depends on the local scene rather than the
-/// form itself. These are safe to interpret from nearby narration, but unsafe
-/// to store in a chapter-wide map: `Đồ nhi` may address Chung Thanh in one
-/// exchange and Lạc Lan Tuyết in another in the same chapter.
 pub(crate) fn is_scenario_dependent(form: &str) -> bool {
     ALIAS_STOP.contains(&form.trim().to_lowercase().as_str())
 }
@@ -305,8 +268,6 @@ fn promotable(form: &str, owner: &str, bible: &Value, log: &mut Vec<String>) -> 
 }
 
 /// Attach surface forms to an existing character's `proper_aliases`, through
-/// the full promotable check. Shared by the new-character and new-alias
-/// paths so both agree on what may join the bible.
 fn attach_aliases(
     bible: &mut Value,
     owner: &str,
@@ -343,18 +304,6 @@ fn attach_aliases(
 }
 
 /// Drop the stop-listed forms from one character's alias list, keeping the
-/// character's own name even when the words are generic ("Quản gia" is
-/// somebody's name — identity beats ambiguity).
-///
-/// **One implementation, two callers, and that is the point.** A scrub and a
-/// reconcile fold have to agree on what may sit in `proper_aliases`, or the
-/// fold re-imports exactly the generic the scrub just removed. That was the
-/// hole: `apply_merges` copied the absorbed entry's aliases wholesale, so a
-/// scrub could never win — bare "sư phụ" / "tiểu thư" kept coming back onto
-/// the wrong character, and `validate_digest_identity` then read them as
-/// exclusive ownership, failing a *correct* chapter-local resolution
-/// ("sư phụ" is whoever is speaking's own master) as
-/// `mention "sư phụ" is owned by {"Thanh Sơn lão tổ"}, not "Dịch Phong"`.
 fn strip_stopped_aliases(name: &str, aliases: &mut Vec<String>) {
     let name_low = name.trim().to_lowercase();
     aliases.retain(|a| {
@@ -364,16 +313,6 @@ fn strip_stopped_aliases(name: &str, aliases: &mut Vec<String>) {
 }
 
 /// Drop ambiguous surface forms from every character's `proper_aliases`.
-///
-/// The legacy this cleans: `merge_bible` used to attach bare generics before
-/// `ALIAS_STOP` covered them, so entries like "nữ tử" sit on characters today
-/// and hijack every future chapter about an unnamed woman. The check is the
-/// same list `promotable` enforces for new aliases, so a scrubbed bible and a
-/// bible built from scratch agree.
-///
-/// Names are sacred: an entry equal to its own character's name stays even
-/// when the words are generic ("Quản gia" is somebody's name). Everything
-/// else on the list goes, and the log names each removal. Idempotent.
 pub fn scrub_ambiguous_aliases(bible: &mut Value) -> Vec<String> {
     let mut log = Vec::new();
     let Some(chars) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) else {
@@ -415,13 +354,6 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
     let mut log = Vec::new();
 
     // Heal before writing. A bible polluted by an older merge keeps a bare
-    // generic on the wrong character for ever otherwise: the scrub was reachable
-    // only through an operator's `:reconcile` press, and a fold then handed the
-    // same words back, so the entry could never be cleaned and the ownership
-    // check went on failing *correct* chapter-local resolutions. The bible has
-    // exactly one writer, so cleaning it here is the same guarantee the merges
-    // below already have — and it costs nothing on a clean bible, because the
-    // scrub is idempotent.
     log.extend(scrub_ambiguous_aliases(bible));
 
     let new_chars = data
@@ -450,8 +382,6 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
             })
             .unwrap_or_default();
         // A variant spelling of someone already in the bible folds into them —
-        // "Huyền Vũ lão tổ" arriving as a new_character joins Huyền Vũ as an
-        // alias instead of forking a second entry with its own voice.
         let key = canon_key(&name);
         let matched = bible
             .get("characters")
@@ -470,8 +400,6 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
             continue;
         }
         // The name itself always joins (ownership veto only): a character must be
-        // findable by its own name even when the digest emits a stopword/pronoun.
-        // Extra aliases go through the full promotable check as before.
         let mut aliases: Vec<String> = Vec::new();
         if let Some(conflict) = alias_owner(&name, &name, bible) {
             log.push(format!(
@@ -512,7 +440,6 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
     if let Some(map) = data.get("new_aliases").and_then(|a| a.as_object()) {
         for (raw_owner, forms) in map {
             // The owner key goes through the same resolution as speakers: a
-            // variant spelling still lands on the canonical character.
             let owner = resolve_speaker(bible, raw_owner);
             let owns_character = bible
                 .get("characters")
@@ -550,7 +477,6 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
         for s in segs {
             if let Some(sp) = s.get("speaker").and_then(|v| v.as_str()) {
                 // Canonical comparison: a variant speaker still marks its
-                // character as seen.
                 if !spoke.iter().any(|x| canon_key(x) == canon_key(sp)) {
                     spoke.push(sp.to_string());
                 }
@@ -579,18 +505,11 @@ pub fn merge_bible(bible: &mut Value, data: &Value, chapter: &str) -> Vec<String
 }
 
 // ---------------------------------------------------------------------------
-// bible reconciliation — unifying forked characters after the fact
-// ---------------------------------------------------------------------------
 
 /// One proposed fold: every name in `absorb` is the same person as
-/// `canonical` and disappears into them.
 pub type BibleMerge = (String, Vec<String>);
 
 /// Fold absorbed entries into their canonical character: aliases and
-/// chapters_seen union, the absorbed names themselves join `proper_aliases`
-/// (so future digests resolve through them), personality/voice_hint fill in
-/// only when the canonical side is empty. Returns the merges that actually
-/// applied, plus the log.
 pub fn apply_merges(bible: &mut Value, merges: &[BibleMerge]) -> (Vec<BibleMerge>, Vec<String>) {
     let mut log = Vec::new();
     let mut applied: Vec<BibleMerge> = Vec::new();

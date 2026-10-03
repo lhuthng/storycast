@@ -1,44 +1,4 @@
 //! Live check: what a **long chapter** does through the real backend.
-//!
-//! Not part of the suite. The split exists because the staging answer carries
-//! the chapter's own words and every backend caps one answer at 16384 tokens, so
-//! a chapter three times the corpus's longest cannot be answered in one call —
-//! the reply is cut mid-JSON, the parse fails, and the one repair fails the same
-//! way. Two runs, both by hand:
-//!
-//! 1. `digest.answer_tokens = 0` — the single-call digest, i.e. the behaviour
-//!    every release before the split had. Expected to fail on a long chapter, and
-//!    the failure is the evidence that the split is not a preference.
-//! 2. the default settings — planned into parts, staged part by part, merged
-//!    into one script. Expected to land, with the plan in its log.
-//!
-//! The chapter is **built from three real ones** rather than committed: 27.6 KB
-//! of real Vietnamese prose with real dialogue, which is the shape a novel
-//! chapter has and a hand-written fixture cannot fake. `BM_LONG_SOURCES` picks
-//! which chapters — three *different* ones is the harder text, since their three
-//! casts meet inside one digest; one chapter repeated twice is the clean
-//! measurement of the split. The sandbox, once per machine:
-//!
-//! ```sh
-//! mkdir -p tmp/window-live/data/chapters
-//! for n in 238 239 240; do
-//!   ln -sf "$PWD/workspaces/beyond-myriads/data/chapters/ch$n.txt" \
-//!          "tmp/window-live/data/chapters/ch$n.txt"
-//! done
-//! cp workspaces/beyond-myriads/data/bible.json tmp/window-live/data/bible.json
-//! # and `workspaces/beyond-myriads/settings.json` as `tmp/window-live/settings.json`
-//! ```
-//!
-//! Then, from `rust/`, with the keys the digest reads from the environment:
-//!
-//! ```sh
-//! set -a; . ../.env; set +a
-//! cargo test -p bm-core --test live_windows -- --ignored --nocapture
-//! ```
-//!
-//! `root` is the repository, because that is where `assets/` and the adapter's
-//! `prompts/` are; `work` is the sandbox, so every write lands in a copy and the
-//! real workspace is never touched.
 #![allow(clippy::print_stdout)]
 
 use bm_core::config::{DigestSettings, Settings};
@@ -48,15 +8,9 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 /// The chapter the built text is digested under inside the sandbox. Never a
-/// chapter of the real book.
 const LONG: u32 = 51;
 
 /// Three real chapters, concatenated: 27.6 KB, twice the corpus's longest
-/// (ch238, 13.6 KB). Overridable with `BM_LONG_SOURCES=238,238,238`, which is
-/// worth knowing about: three *different* chapters bring three casts into one
-/// digest, and a model that mis-handles the meeting of them fails on the cast
-/// rather than on the length. Repeating one chapter measures the split itself,
-/// with the cast held still.
 const SOURCES: [u32; 3] = [238, 239, 240];
 
 fn sources() -> Vec<u32> {
@@ -118,7 +72,6 @@ async fn the_single_call_path_truncates_a_long_chapter() -> anyhow::Result<()> {
         chunk_sentences: 0,
         chunk_chars: 0,
         // The escape hatch the split ships with: exactly the digest of every
-        // release before windows existed.
         answer_tokens: 0,
     };
     let mut progress = |f: f32, s: String| println!("  [{:.0}%] {s}", f * 100.0);
@@ -145,8 +98,6 @@ async fn a_real_model_stages_a_long_chapter_in_parts() -> anyhow::Result<()> {
     let (mut settings, bible, text) = inputs(&layout)?;
     settings.digest = DigestSettings::default();
     // A clean run, so the numbers are the whole chapter's rather than the tail of
-    // a previous one. (A real operator *wants* the checkpoint; this is a
-    // measurement.)
     let checkpoint = layout.data().join(format!(".digest-parts-ch{LONG}.json"));
     let resumed = checkpoint.exists();
     let _ = std::fs::remove_file(&checkpoint);

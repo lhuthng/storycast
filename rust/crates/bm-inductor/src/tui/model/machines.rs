@@ -1,14 +1,6 @@
 use super::*;
 
 ///
-/// The `ip` column, which is not always an address.
-///
-/// A launched box whose public address the account has not assigned yet is keyed
-/// by its instance id — that is the registry key and the handle the account read
-/// repairs it by, not something ssh can answer on. Printing it under `ip` put a
-/// plausible-looking non-address where an operator looks for one, which is the
-/// confusion the `awaiting-ip` state exists to end. The id is not lost: it is
-/// the row's name (see [`machine_label`]) and it is in the note.
 pub(crate) fn addr_label(m: &Machine) -> String {
     if m.state.dialable() {
         m.addr.clone()
@@ -18,15 +10,6 @@ pub(crate) fn addr_label(m: &Machine) -> String {
 }
 
 /// The `state` column, which is sometimes about intent instead.
-///
-/// A parked box reads `relaxed`, because that is the answer to the question the
-/// column is asked ("why is nothing happening on this box") — and because its
-/// real state is `online`, which would say the opposite.
-///
-/// A verdict still outranks the park. `offline` and `error` are news about a box
-/// and are not made less true by the operator having parked it; showing
-/// `relaxed` over them would hide the one fact worth acting on, on the box the
-/// operator is least likely to look at because they already dealt with it.
 pub(crate) fn work_label(m: &Machine) -> String {
     match m.state {
         MachineState::Offline | MachineState::Error => m.state.as_str().to_string(),
@@ -36,16 +19,6 @@ pub(crate) fn work_label(m: &Machine) -> String {
 }
 
 /// The one-character state mark the Machines **graph** puts on a box.
-///
-/// The graph is lean by design — a word per node costs the row the node needs to
-/// say what it is doing — so the state travels as a mark and a colour. That is
-/// only honest because the marks are distinct without the colour: `●` working,
-/// `◐` on its way up, `○` parked, `✗` broken, `?` never contacted. Mono mode and
-/// a colour-blind read still tell those five apart, which is the rule the table's
-/// `state` column keeps by spelling the word out.
-///
-/// A fault outranks a park, exactly as in [`work_label`]: the box broke, and that
-/// is the fact worth seeing.
 pub(crate) fn graph_mark(m: &Machine) -> &'static str {
     match m.state {
         MachineState::Offline | MachineState::Error => "✗",
@@ -58,19 +31,6 @@ pub(crate) fn graph_mark(m: &Machine) -> &'static str {
 }
 
 /// What one box is doing right now, for a graph node's second line.
-///
-/// The busiest live worker wins, not the first: a box with two workers and one
-/// render at 60% is a box that is rendering. Nothing live reads `—` rather than
-/// `idle`, because "no worker" and "a worker with nothing to do" are different
-/// answers and the graph has room for only one of them.
-///
-/// `×N` is prefixed only when more than one worker is live on the box — the
-/// cluster is one worker per box today, so the prefix stays out of the way until
-/// it is not.
-/// The busiest live worker on `addr` that is actually working on a task.
-///
-/// The one place "what is this box busy with" is decided, so the rack's label
-/// and the rack's *colour* cannot answer differently about the same box.
 fn busiest_task<'a>(
     machines: &[Machine],
     beats: &'a [Heartbeat],
@@ -84,9 +44,6 @@ fn busiest_task<'a>(
 }
 
 /// The stage a box is working on, for the hue of its art in the rack.
-///
-/// `None` is a real answer and not a gap: the box is up and has nothing to do,
-/// or has never been contacted. The caller tells those two apart by state.
 pub(crate) fn node_stage(
     machines: &[Machine],
     beats: &[Heartbeat],
@@ -97,11 +54,6 @@ pub(crate) fn node_stage(
 }
 
 /// The name a box is known by on the Machines **rack**.
-///
-/// The animal its worker reports — the same word the Workers pane, the event
-/// log and Stats already use, so one box has one name on every screen — falling
-/// back to the registry handle when nothing is beating on it, because a box with
-/// no worker is still a box and needs a name.
 pub(crate) fn machine_alias(
     machines: &[Machine],
     beats: &[Heartbeat],
@@ -124,11 +76,6 @@ pub(crate) fn machine_alias(
 }
 
 /// The inductor's own name, for the rack's console.
-///
-/// **Never an address.** `127.0.0.1:8901` is where this dashboard happens to be
-/// pointed — a fact about the session, not about the machine — and a picture
-/// that labels the coordinator by its socket teaches the reader nothing they can
-/// use. The local box's registry handle when there is one, else the word.
 pub(crate) fn inductor_label(machines: &[Machine]) -> String {
     machines
         .iter()
@@ -173,11 +120,6 @@ pub(crate) fn current_work(
 }
 
 /// What kind of box this is, for the Machines pane's `kind` column.
-///
-/// `local` is the inductor's own node; `aws` is an EC2-launched box, told apart
-/// by the instance id stamped in its note; `rmt` is anything reached by ssh.
-/// The distinction matters because `(aws)` tells an operator the address can
-/// rotate under them — the reason relink exists.
 pub(crate) fn machine_kind(m: &Machine) -> &'static str {
     if bm_core::is_local_node(&m.addr) {
         "local"
@@ -189,9 +131,6 @@ pub(crate) fn machine_kind(m: &Machine) -> &'static str {
 }
 
 /// The one-word handle for a box in the Machines pane: the registry name when
-/// it has one (`box-1`, `thang`); `local` for the inductor's own node; the ssh
-/// user for a hand-linked remote; the address otherwise. Pairs with
-/// [`machine_kind`] and the raw address so a row reads `box-1 · aws · 18.1.2.3`.
 pub(crate) fn machine_label(m: &Machine) -> String {
     if !m.name.is_empty() {
         return m.name.clone();
@@ -209,8 +148,6 @@ pub(crate) fn machine_label(m: &Machine) -> String {
 }
 
 /// A one-glance encoding of a machine's work policy for the tables:
-/// `M>R>D>C`, most-preferred first, enabled stages upper-case and disabled
-/// ones lower-case (`m>R>D>C` is "merge is switched off here").
 pub(crate) fn policy_summary(m: &Machine) -> String {
     m.effective_task_policy()
         .iter()
@@ -246,7 +183,6 @@ pub(crate) fn age_secs(updated: u64) -> u64 {
 }
 
 /// One-line task roll-up, rendered in the footer when the terminal is too short
-/// for the Tasks pane. Collapsing the pane must not lose the numbers.
 pub(crate) fn task_rollup(counts: &serde_json::Value, colour: bool) -> Line<'static> {
     let dim = Style::default().fg(Color::DarkGray);
     let Some(obj) = counts.as_object() else {
@@ -295,10 +231,6 @@ pub(crate) fn task_rollup(counts: &serde_json::Value, colour: bool) -> Line<'sta
 }
 
 /// Stats pane data: completed-task counts per worker per stage, plus the
-/// median task seconds per stage the TUI-side ETA averages. Parsed from the
-/// inductor's `stats` key; a missing or partial payload parses to empty —
-/// a fresh backend has no history yet, and the pane shows zeroes and
-/// dashes, not errors.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct WorkerStats {
     pub counts: HashMap<String, HashMap<String, u64>>,
@@ -335,11 +267,6 @@ pub(crate) fn parse_stats(v: Option<&serde_json::Value>) -> WorkerStats {
 }
 
 /// Whether the inductor is handing work out at all, and where the authored
-/// range stands — `/api/state`'s `dispatch` key.
-///
-/// `None` means the payload carried no `dispatch` at all, which is an inductor
-/// older than the gate; the footer then says nothing about distribution rather
-/// than inventing a hold nobody set.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Dispatch {
     pub held: bool,
@@ -360,8 +287,6 @@ pub(crate) fn parse_dispatch(v: Option<&serde_json::Value>) -> Option<Dispatch> 
 }
 
 /// Seconds left on one task, measured TUI-side: the stage's median task
-/// duration scaled by the unworked fraction. `None` means print a dash —
-/// no history for the stage yet, or nothing running on the worker.
 pub(crate) fn task_eta(avg_task_secs: Option<f64>, progress: f32) -> Option<u64> {
     let avg = avg_task_secs.filter(|a| *a > 0.0)?;
     let left = 1.0 - progress.clamp(0.0, 1.0) as f64;

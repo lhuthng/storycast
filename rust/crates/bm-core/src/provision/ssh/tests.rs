@@ -3,15 +3,12 @@ use super::*;
 #[test]
 fn progress_parser_reads_the_last_update_and_its_file() {
     // Real `--progress` bytes (openrsync, piped: `\r` between updates,
-    // and only the final line per file carries `(xfer#…)`). The last
-    // update wins; the file is the last non-progress line.
     let snap = "weights.bin\r         262144  12%  255.37KB/s   00:00:07\r         655360  31%  192.06KB/s   00:00:07\r        2097152 100%  204.68KB/s   00:00:10 (xfer#1, to-check=0/1)\n";
     assert_eq!(
         parse_progress(snap),
         Some(("weights.bin".into(), 2097152, 100, "204.68KB/s".into()))
     );
     // Multi-file: percent resets per file, and the bare intermediate
-    // updates (no xfer suffix) must parse as updates, never as filenames.
     let snap2 = "a.bin\r          100 100%  1.00MB/s   00:00:00 (xfer#1, to-check=1/2)\nb.bin\r           50  25%  1.00MB/s   00:00:01\r";
     assert_eq!(
         parse_progress(snap2),
@@ -24,8 +21,6 @@ fn progress_parser_reads_the_last_update_and_its_file() {
 #[test]
 fn rsync_watch_streams_progress_while_the_child_runs() {
     // A fake slow transfer through the real runner: progress-shaped
-    // stdout for ~1.5 s. First update emits immediately; same-band
-    // repeats inside the 2 s window stay silent.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut tracker = ProgressTracker::new(tx, "t@h".into(), "models".into());
     let mut cmd = std::process::Command::new("sh");
@@ -47,8 +42,6 @@ fn rsync_watch_streams_progress_while_the_child_runs() {
 #[test]
 fn ssh_run_honours_its_timeout_instead_of_blocking_forever() {
     // The swap-voice hang: a never-exiting remote launch wedged the TUI's
-    // serial job queue because `run` ignored `timeout_secs`. `sleep` stands
-    // in for the wedged command; the local path runs the same wait loop.
     let ssh = Ssh {
         target: "local".into(),
         port: 22,
@@ -124,8 +117,6 @@ fn bounded_runner_preserves_transport_context() {
 fn ssh_argv_expands_tilde_in_the_key_for_both_transports() {
     let _env = crate::ENV_LOCK.lock().unwrap();
     // The ledger held `~/.ssh/ssh-key-my-wsl` verbatim; ssh (no shell)
-    // failed it while rsync (shell) expanded it. Both now go through
-    // expand_tilde, so `-i` always names a real path.
     let home = std::env::var("HOME").unwrap();
     let ssh = Ssh {
         target: "thang@192.168.2.2".into(),
@@ -185,7 +176,6 @@ fn resolve_key_prefers_box_then_settings_then_ssh_default() {
 #[test]
 fn ssh_never_prompts_never_lingers() {
     // Every ssh use is scripted: no stdin, no password prompts, and a
-    // stalled connection must die instead of hanging a TUI job forever.
     let args = Ssh::for_machine(&Machine::new("192.168.2.2", "thang", 22, None, "worker"))
         .ssh_args()
         .join(" ");
@@ -203,19 +193,12 @@ fn ssh_never_prompts_never_lingers() {
 #[test]
 fn both_transports_decline_host_key_verification() {
     // The bug this pins: a freshly launched EC2 instance presents a host key
-    // nobody has seen, and `BatchMode=yes` forbids the prompt, so every
-    // first provision died with `exit 255: Host key verification failed`.
-    // The fix has to be on *both* transports — rsync spawns its own ssh, so
-    // a policy on the direct one alone would fix `probe` and leave every
-    // push failing identically.
     let ssh = Ssh::for_machine(&Machine::new("3.121.112.113", "ubuntu", 22, None, "worker"));
 
     let args = ssh.ssh_args().join(" ");
     assert!(args.contains("StrictHostKeyChecking=no"), "{args}");
     assert!(args.contains("UserKnownHostsFile=/dev/null"), "{args}");
     // `~/.ssh/config` must still be read: an -o overrides one option, it
-    // does not replace the file. `-F /dev/null` would silently drop Host
-    // aliases, ProxyJump and IdentityFile.
     assert!(!args.contains("-F /dev/null"), "{args}");
     assert!(!args.contains("-F/dev/null"), "{args}");
 
@@ -258,7 +241,6 @@ fn copy_dir_skips_venv_and_caches() {
 #[test]
 fn ssh_local_agrees_with_is_local_node() {
     // One predicate, one place: the provisioner's `Ssh.local` and the
-    // offer's `local_node` flag must never disagree.
     for addr in ["127.0.0.1", "localhost", "::1", "192.168.2.2", "10.0.0.5"] {
         let m = Machine::new(addr, "u", 22, None, "worker");
         assert_eq!(
@@ -288,9 +270,6 @@ fn ssh_args_include_port_and_key_only_when_set() {
 #[test]
 fn copy_dir_leaves_an_unchanged_signature_alone() {
     // The local fast path compares size+mtime, exactly like rsync. To prove
-    // the skip (a real identical file cannot be told apart anyway), the
-    // destination is given different *content* with the same signature: if
-    // it is copied over, the comparison did not happen.
     let src = std::env::temp_dir().join("bm-copy-skip-src");
     let dst = std::env::temp_dir().join("bm-copy-skip-dst");
     let _ = std::fs::remove_dir_all(&src);
@@ -329,7 +308,6 @@ fn copy_dir_leaves_an_unchanged_signature_alone() {
 #[test]
 fn only_blips_retry_never_auth_or_host_key() {
     // The exact strings a flapping link produces — and the two that must
-    // fail fast instead of burning four attempts of backoff.
     for (code, stderr) in [
         (255, "ssh: connect to host h port 22: Operation timed out"),
         (255, "ssh: connect to host h port 22: Connection refused"),
@@ -353,7 +331,6 @@ fn only_blips_retry_never_auth_or_host_key() {
 #[test]
 fn transport_retries_a_blip_then_returns_success() {
     // One 2 s backoff, then the identical call succeeds — the flap `:prov`
-    // used to die on.
     let mut n = 0;
     let (code, _, _) = with_transport_retries(|| {
         n += 1;

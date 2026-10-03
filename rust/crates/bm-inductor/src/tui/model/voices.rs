@@ -1,11 +1,6 @@
 use super::*;
 
 /// What kind of voice this is — the two halves the picker sorts into.
-///
-/// `AutoAssign` voices are sample-pool members: the cast rolls one out of
-/// `voice-pool.json` by tag, so two characters on one is the pool working,
-/// not a mistake. `Unique` voices are the catalogue presets and hand-added
-/// clones, which a character keeps to itself unless someone says otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VoiceKind {
     AutoAssign,
@@ -13,8 +8,6 @@ pub(crate) enum VoiceKind {
 }
 
 /// The group heading a pooled voice is filed under: its tags, sorted and
-/// deduped, so `young, female` and `female, young` are one group rather than
-/// two.
 fn tag_group(tags: &[String]) -> String {
     let mut t: Vec<&str> = tags.iter().map(String::as_str).collect();
     t.sort_unstable();
@@ -23,16 +16,11 @@ fn tag_group(tags: &[String]) -> String {
 }
 
 /// One line of the picker's voice list.
-///
-/// A `Group` is a heading and not a choice: arrows step over it and Enter
-/// ignores it, so the list is a *row* list again and the cursor arithmetic
-/// that scrolls and hit-tests it stays honest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VoiceRow {
     Group {
         kind: VoiceKind,
         /// The pool tags this group is `AutoAssign` voices of; empty for
-        /// `Unique`, which is one group by definition.
         tags: String,
         /// Voices in the group, so a heading says how much is under it.
         count: usize,
@@ -55,10 +43,6 @@ impl VoiceRow {
 }
 
 /// The row a cursor should really mean.
-///
-/// A heading is a label, not a choice, so a cursor sitting on one moves down
-/// to the first voice under it. Every read of "the pointed voice" goes through
-/// this, which is why a cursor can never audition a heading.
 pub(crate) fn settle_cursor(rows: &[VoiceRow], cursor: usize) -> usize {
     if !matches!(rows.get(cursor), Some(VoiceRow::Group { .. })) {
         return cursor;
@@ -69,15 +53,6 @@ pub(crate) fn settle_cursor(rows: &[VoiceRow], cursor: usize) -> usize {
 }
 
 /// The row an *upward* move really lands on.
-///
-/// [`settle_cursor`] walks forward, which is right for a cursor arriving from
-/// above — opening the screen, a click, a filter change. Up is the one motion
-/// that arrives from *below*, and settling it forward puts the cursor straight
-/// back on the voice it just left: from the first voice of a group, Up would
-/// step onto the heading and then straight back down, which reads as a broken
-/// key. So an upward move steps back over the heading to the previous group's
-/// last voice instead. At the very top there is nothing above — the forward
-/// settle then means "the first voice", not "sit on the heading".
 pub(crate) fn settle_cursor_back(rows: &[VoiceRow], cursor: usize) -> usize {
     if !matches!(rows.get(cursor), Some(VoiceRow::Group { .. })) {
         return cursor;
@@ -89,14 +64,6 @@ pub(crate) fn settle_cursor_back(rows: &[VoiceRow], cursor: usize) -> usize {
 }
 
 /// The picker's voice list, grouped and ordered the way it is chosen from.
-///
-/// Auto-assign voices first, one group per tag set, the groups alphabetical
-/// (`female + old` before `male + young`); inside a group the least-used
-/// sample first, because the point of a pool is to spend its emptiest voices
-/// first and any other order sends the operator back to the voice they just
-/// filled. Unique voices after, by name — nothing to balance there.
-///
-/// Pure, so the ordering is testable without a terminal.
 pub(crate) fn filtered_voices(app: &App, filter: &str) -> Vec<VoiceRow> {
     let Some(r) = &app.roster else {
         return Vec::new();
@@ -120,7 +87,6 @@ pub(crate) fn filtered_voices(app: &App, filter: &str) -> Vec<VoiceRow> {
         }
     }
     // Folded, so a roster of accented names sorts the way it is read rather
-    // than by code point.
     unique.sort_by(|a, b| {
         fold(&a.name)
             .cmp(&fold(&b.name))
@@ -160,13 +126,6 @@ pub(crate) fn filtered_voices(app: &App, filter: &str) -> Vec<VoiceRow> {
 }
 
 /// Who is already speaking with a voice, in the one cell the list has room
-/// for.
-///
-/// The character the swap is for comes first when it is among the users —
-/// that is the voice it already has, and the reason its row is green — and
-/// the rest collapse to a count. A voice eleven characters share is worth one
-/// glance; eleven names are not, and the list they pushed off the screen was
-/// the column saying it.
 pub(crate) fn used_by(users: &[String], character: &str) -> String {
     let Some(first) = users
         .iter()
@@ -182,11 +141,6 @@ pub(crate) fn used_by(users: &[String], character: &str) -> String {
 }
 
 /// What the gender column says.
-///
-/// A pooled sample's roster gender is `unknown`: the registry describes it by
-/// tag, not in the SDK's vocabulary. Reading the tag for what it plainly says
-/// keeps the row from printing `—` two lines under a heading that just said
-/// `female + young`.
 pub(crate) fn gender_of(v: &VoiceInfo) -> &str {
     if !matches!(v.gender.as_str(), "" | "unknown") {
         return gender_label(&v.gender);

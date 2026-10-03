@@ -57,7 +57,6 @@ pub(crate) async fn key_run(
             let cfg = run_preview(app);
             let models = cfg.models.join(",");
             // The line spells slots (`openai`), not ids (`tokenharbor`):
-            // the parser only knows slots, and the save maps back to the id.
             let analyzer = bm_core::config::LlmConfig::load(&app.layout.root)
                 .backend_for(&cfg.analyzer)
                 .unwrap_or_default();

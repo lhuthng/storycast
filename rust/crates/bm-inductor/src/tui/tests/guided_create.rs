@@ -3,8 +3,6 @@ use super::*;
 #[test]
 fn the_workspace_picker_renders_the_books_and_why_one_is_not_one() {
     // Without this the painter never runs: a picker that draws nothing is
-    // indistinguishable, from the dashboard, from a picker with nothing to
-    // list — and this one exists precisely so there is never a name to type.
     let root = two_workspaces_one_bad("draw");
     let mut app = App::new("http://127.0.0.1:8901");
     app.layout = bm_core::Layout::new(&root);
@@ -29,8 +27,6 @@ fn the_workspace_picker_renders_the_books_and_why_one_is_not_one() {
 }
 
 /// The dashboard reads the **workspace's** binding, not the checkout's pointer:
-/// a book created from a preset owns its pack and engine, and the footer must
-/// name the book that will run rather than the root it sits on.
 #[test]
 fn the_dashboard_reads_the_workspace_binding_not_the_checkout_pointer() {
     let root = tempfile::tempdir().unwrap();
@@ -42,7 +38,6 @@ fn the_dashboard_reads_the_workspace_binding_not_the_checkout_pointer() {
     )
     .unwrap();
     // The workspace names its own pack and engine, and leaves the language to
-    // the checkout — the piece-by-piece merge `Layout::resolve` already makes.
     std::fs::create_dir_all(root.path().join("workspaces/book")).unwrap();
     std::fs::write(
         root.path().join("workspaces/book/settings.json"),
@@ -71,7 +66,6 @@ fn the_dashboard_reads_the_workspace_binding_not_the_checkout_pointer() {
 }
 
 /// The guided create flow: name → profile → crawler, then one create job
-/// carrying the chosen preset and the crawler it seeds the book with.
 #[tokio::test]
 async fn the_guided_create_picks_a_profile_and_a_crawler_then_creates() {
     let root = std::env::temp_dir().join(format!("bm-ws-guided-{}", std::process::id()));
@@ -172,8 +166,6 @@ async fn the_guided_create_picks_a_profile_and_a_crawler_then_creates() {
 }
 
 /// Choosing **Local file (EPUB)** asks for the book, and the create job carries
-/// it (`book`) beside the global example script and the workspace-relative
-/// `params.epub` — the TUI's "add epub", with no hand-copied file.
 #[tokio::test]
 async fn the_guided_create_takes_an_epub_path_and_hands_it_to_the_job() {
     let root = std::env::temp_dir().join(format!("bm-ws-guided-epub-{}", std::process::id()));
@@ -257,8 +249,6 @@ async fn the_guided_create_takes_an_epub_path_and_hands_it_to_the_job() {
 }
 
 /// Choosing **Local file (EPUB)** and naming a **folder** is the multi-volume
-/// shape: the create job carries the directory (`books`) and the
-/// workspace-relative `params.books`, and no single book.
 #[tokio::test]
 async fn the_guided_create_takes_a_books_folder_and_hands_it_to_the_job() {
     let root = std::env::temp_dir().join(format!("bm-ws-guided-books-{}", std::process::id()));

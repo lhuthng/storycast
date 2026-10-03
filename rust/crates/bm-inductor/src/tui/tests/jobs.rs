@@ -39,7 +39,6 @@ async fn tracked_jobs_queue_only_behind_a_resource_they_need() {
     };
     assert!(dispatch(&mut app, &job_tx, start));
     // Both name `Res::Cluster`, so the stop still waits for the start, the
-    // pair is the one place "one cluster, one lifecycle" is literally true.
     assert!(dispatch(
         &mut app,
         &job_tx,
@@ -104,9 +103,6 @@ async fn tracked_jobs_queue_only_behind_a_resource_they_need() {
 #[test]
 fn a_queued_row_says_what_it_is_waiting_for() {
     // "causing every later job to be queued" is only actionable if the row
-    // says why. A job that holds something names it; a job on the default lane
-    // has nothing to contend with, and saying so is the honest answer rather
-    // than inventing a reason.
     let mut app = App::new("http://unused");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     super::input::dispatch(
@@ -136,11 +132,6 @@ fn a_queued_row_says_what_it_is_waiting_for() {
 }
 
 /// A job holds the thing it touches and nothing else.
-///
-/// This is the whole difference from the two hardcoded lanes: `aws discover`
-/// used to queue behind a five-minute box push because both were filed under
-/// "lifecycle", and two boxes provisioned one after the other because there was
-/// one queue for all of them.
 #[test]
 fn resources_name_what_a_job_actually_touches() {
     let box_job = |addr: &str| Job::Provision {
@@ -183,7 +174,6 @@ fn resources_name_what_a_job_actually_touches() {
         box_job("10.0.0.6").resources()
     );
     // …and the same box twice is not: a second push would interleave with the
-    // first, so those two do queue.
     assert_eq!(
         box_job("10.0.0.5").resources(),
         box_job("10.0.0.5").resources()
@@ -230,7 +220,6 @@ fn resources_name_what_a_job_actually_touches() {
 }
 
 /// The regression this change exists for: a job whose resources are free starts
-/// *now*, even while a long job holds something else.
 #[tokio::test]
 async fn a_free_job_does_not_wait_for_a_long_one() {
     use super::super::jobs::run_jobs_with;
@@ -299,9 +288,6 @@ async fn a_free_job_does_not_wait_for_a_long_one() {
          lane this replaced ran them one after another"
     );
     // Job 4 names the box job 1 still holds (job 1's runner is parked on the
-    // gate, so the box is held for the whole test), and that is the one job
-    // here that genuinely has to wait. Give the scheduler a beat to prove the
-    // negative rather than reading an empty channel as an answer.
     tokio::time::sleep(Duration::from_millis(150)).await;
     while let Ok(ev) = rx.try_recv() {
         if let Some(id) = started(&ev) {

@@ -9,8 +9,6 @@ async fn current_word_tests_the_current_voice_on_the_shown_line() {
     let mut app = audition_app();
 
     // `:current`: the current voice on the shown line, from cache only. The
-    // cursor sits on Adam, but it never follows it, that is what `:try`
-    // (render) and Enter (pick) are for.
     do_command(&mut app, Command::AuditionCurrent, &http, &job_tx);
     let req = last_op(&mut job_rx).expect(":current must dispatch a segment fetch");
     assert_eq!(req.op, Op::Segment);
@@ -109,7 +107,6 @@ async fn another_word_rerolls_the_pointed_voice_on_another_line() {
     finish_audition(&mut app, "Adam");
 
     // `:another`: the pointed voice again, re-rolled, a render, never a
-    // cache-only segment fetch.
     do_command(&mut app, Command::AuditionAnother, &http, &job_tx);
     let reroll = last_op(&mut job_rx).expect(":another must dispatch");
     assert_eq!(reroll.op, Op::PreviewVoice);
@@ -127,8 +124,6 @@ async fn another_word_rerolls_the_pointed_voice_on_another_line() {
 #[tokio::test]
 async fn audition_without_a_backend_synthesizes_locally() {
     // No inductor, no worker, no sidecar: `:try` still auditions, on this box.
-    // The synthesis itself is not run here (model weights, minutes), the
-    // dispatch shape is the contract, and the job reports honestly alone.
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
@@ -158,8 +153,6 @@ async fn audition_without_a_backend_synthesizes_locally() {
 #[tokio::test]
 async fn controlled_letters_other_than_u_r_do_nothing() {
     // `^U` clears; every other controlled letter must leave the audio and
-    // the filter alone. (`^T` auditions and `^R` focuses, both dispatch
-    // or mark, so they are covered by the focus tests, not here.)
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
@@ -203,8 +196,6 @@ async fn a_second_audition_while_one_renders_is_refused_by_name() {
 #[tokio::test]
 async fn a_refused_audition_does_not_leave_the_screen_wedged() {
     // The bug this guards: the marker used to be set *before* the dispatch, and
-    // a refused dispatch sends no `Done`, so the screen sat behind a render
-    // that never started, and every later key was refused for the same reason.
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
@@ -229,7 +220,6 @@ async fn a_refused_audition_does_not_leave_the_screen_wedged() {
 #[tokio::test]
 async fn plain_o_and_n_still_type_into_the_filter() {
     // Bare letters outside t/T focus the filter and type, o and n stand
-    // in for all of them here (t/T audition in audition focus).
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
@@ -250,7 +240,6 @@ async fn plain_o_and_n_still_type_into_the_filter() {
 #[tokio::test]
 async fn t_still_types_in_picker_step_1() {
     // Picking a character needs every letter, `t` included (and step 2
-    // types everything too, now that auditioning is `:words`).
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
@@ -274,7 +263,6 @@ async fn t_still_types_in_picker_step_1() {
 #[tokio::test]
 async fn audition_focus_plays_t_while_other_letters_filter() {
     // Step 2 opens in audition focus: t/T audition, any other letter
-    // focuses the filter and types.
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
@@ -359,7 +347,6 @@ async fn the_cast_overview_auditions_the_highlighted_speakers_own_voice() {
     app.screen = Screen::Cast(CastView::new());
 
     // Narrator leads the table and is cast to Đức Trí: no candidate voice
-    // exists here, so the word plays what the speaker already has.
     do_command(&mut app, Command::AuditionTry, &http, &job_tx);
     let req = last_op(&mut job_rx).expect(":try must dispatch");
     assert_eq!(req.voice.as_deref(), Some("Đức Trí"));
@@ -448,8 +435,6 @@ async fn the_cast_overview_will_not_audition_an_unassigned_speaker() {
     app.roster = Some(roster_fixture());
     app.screen = Screen::Cast(CastView::new());
     // "Mới" is a known speaker the cast file has never assigned, so the table
-    // shows it with an empty voice. Filtering to it is deterministic; walking
-    // to the last row is not, because the table's order is not the cast's.
     if let Screen::Cast(v) = &mut app.screen {
         v.filter = "moi".into();
     }
@@ -495,10 +480,6 @@ async fn a_failed_line_index_says_which_half_is_out() {
 #[tokio::test]
 async fn every_finished_audition_replaces_the_auditioning_line() {
     // The bug this guards: "auditioning…" is written when the op is
-    // *dispatched*, and it used to be replaced only when the op returned
-    // *and* had audio. Against an inductor older than the TUI, which has no
-    // audio field at all, the bar kept claiming a render was in flight
-    // after it had finished, and nothing else ever clears that line.
     let key = op_key(&OpRequest {
         op: Op::PreviewVoice,
         ..Default::default()
@@ -531,7 +512,6 @@ async fn every_finished_audition_replaces_the_auditioning_line() {
     );
 
     // (2) Failure: the error itself is in the event pane, but the bar must
-    // stop saying a render is in flight.
     let mut app = in_flight();
     app.apply(Ev::Done(done(false, None)));
     assert!(!app.status.text.contains("auditioning"), "{:?}", app.status);
@@ -546,8 +526,6 @@ async fn every_finished_audition_replaces_the_auditioning_line() {
 #[tokio::test]
 async fn a_completed_audition_writes_the_sample_next_to_the_speaker() {
     // Why the wire carries bytes and not a path: the file has to land on the
-    // machine with the speaker, so the inductor's disk stays untouched. The
-    // stand-in player is `true`, it spawns for real and makes no sound.
     let scratch = std::env::temp_dir().join(format!("bmaud-test-{}-play.wav", std::process::id()));
     let _ = std::fs::remove_file(&scratch);
 
@@ -584,7 +562,6 @@ async fn a_completed_audition_writes_the_sample_next_to_the_speaker() {
 #[tokio::test]
 async fn the_line_index_releases_the_in_flight_count() {
     // The bug this guards: `job_load_lines` reported `Ev::Lines` and never
-    // `Ev::Done`, so `App::pending` was +1 from the first screen that
     // auditions until the process exited, a footer reading "1 job(s)
     // running" over a dashboard with nothing running, permanently.
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();

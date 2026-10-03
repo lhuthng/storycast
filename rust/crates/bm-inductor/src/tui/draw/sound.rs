@@ -1,12 +1,4 @@
 //! Sound-design overlay: three pools, one table each, and the guard made
-//! visible.
-//!
-//! The screen has one job beyond listing the entries: **an operator must never
-//! press a key that does nothing and be left guessing why**. So the highlighted
-//! entry's usage is written out in full under the table, the remove key in the
-//! action bar changes colour and gains `✗ in use` when it is dead, and the
-//! status column says which entries are still reached before the cursor gets
-//! near them.
 use crate::tui::{
     app::{App, HitTarget, ListTarget},
     layout::{
@@ -28,8 +20,6 @@ use ratatui::{
 
 pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &mut App, view: &SoundView) {
     // The compact tier takes the whole screen: a `SOUND_OVERLAY_W`-wide table
-    // centred in a 76-column terminal loses a third of its columns to margins
-    // it cannot spare.
     let compact = size_class(f.area().width, f.area().height) == Size::Compact;
     let area = if compact {
         f.area()
@@ -80,8 +70,6 @@ pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &mut App, view: &SoundView
 
     let Some(data) = &app.sound else {
         // Two different nothings: still loading, or refused. An empty pool and
-        // an unreadable one look identical and only one is safe to edit, so
-        // they are never drawn the same way.
         let lines = match &app.sound_error {
             Some(e) => vec![
                 "the pools could not be read, so nothing is shown".to_string(),
@@ -131,9 +119,6 @@ pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &mut App, view: &SoundView
         ));
     }
     // The whole gain chain, so a pool level is read in context rather than as
-    // an absolute: this layer's master, times the operator's `:mix` volume.
-    // Only when there is room — at the minimum width it would push the counts,
-    // which are the reason the line exists, off the end.
     if !compact {
         let master = sound::master_level(&data.map, view.layer);
         let volume = app.setting_f64(
@@ -197,8 +182,6 @@ pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &mut App, view: &SoundView
                 let selected = i == view.cursor;
                 let marker = if selected { "▸ " } else { "  " };
                 // The column gets the short form and the sentence under the
-                // table the long one — a rule list in a 22-column cell clips
-                // mid-quote and reads as noise rather than as a warning.
                 let (status, level) = r.status();
                 let cells = vec![
                     cell(format!(
@@ -264,8 +247,6 @@ pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &mut App, view: &SoundView
     }
 
     // Why the highlighted entry is, or is not, removable. The verdict is the
-    // same text the column above shows, so the two cannot disagree; the two
-    // lines under it are the consequence and the way out.
     let mut why: Vec<Line> = Vec::new();
     match rows.get(view.cursor) {
         None => why.push(Line::from(Span::styled(
@@ -306,10 +287,6 @@ pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &mut App, view: &SoundView
                 }),
             )));
             // A bed does not play at the level the pool gives it, and the level
-            // is the thing the operator is about to change with `l`. Stated on
-            // its own full-width line rather than appended to `shape`: that
-            // string is a 23-column table cell and the factor would push the
-            // duration off the end of it.
             if let Some(g) = r.render_gain() {
                 why.push(Line::from(Span::styled(
                     format!("    renders at ×{g} of that level — a bed is mixed under the speech"),
@@ -321,9 +298,6 @@ pub(crate) fn draw_sound(f: &mut ratatui::Frame, app: &mut App, view: &SoundView
     f.render_widget(Paragraph::new(why), rows_area[3]);
 
     // The action bar. `d` is the one key whose availability is a fact about the
-    // highlighted entry, so it is the one key drawn differently — and it says
-    // why, in the bar itself, rather than only in the status line after it has
-    // been pressed.
     let dim = Style::default().fg(Color::DarkGray);
     let removable = rows.get(view.cursor).map(|r| !r.in_use()).unwrap_or(false);
     let mut keys: Vec<Span> = vec![Span::styled(SOUND_KEYS_HEAD, dim)];

@@ -10,8 +10,6 @@ async fn creating_and_switching_a_workspace_moves_the_dashboard_with_it() {
     let mut app = App::new("http://127.0.0.1:8901");
     app.layout = bm_core::Layout::new(&root);
     // Loaded the way the dashboard would have it: lines and a roster already
-    // in memory. A switch that kept these would show the book we just left,
-    // under the name of the one we joined.
     app.lines = Some(std::collections::HashMap::from([(
         "Narrator".to_string(),
         vec![audition_line("một")],
@@ -20,7 +18,6 @@ async fn creating_and_switching_a_workspace_moves_the_dashboard_with_it() {
     assert_eq!(app.layout.work, root, "it starts on the implicit default");
 
     // One real job at a time, because each run consumes the job channel.
-    // `new` switches as it creates, so the first step is both halves at once.
     {
         let layout = app.layout.clone();
         let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
@@ -57,7 +54,6 @@ async fn creating_and_switching_a_workspace_moves_the_dashboard_with_it() {
     );
 
     // A second workspace, then a switch back — the pair the first test cannot
-    // reach, because `new` always leaves the pointer on the new one.
     std::fs::create_dir_all(root.join("workspaces/book-b")).unwrap();
     {
         let layout = app.layout.clone();
@@ -118,7 +114,6 @@ async fn a_workspace_prompt_lists_the_books_instead_of_demanding_a_name() {
     app.layout = bm_core::Layout::new(&root);
 
     // `:ws` with nothing after it: the operator never has to remember a name,
-    // and a directory that is not a book says so in its own row.
     type_command(&mut app, &http, &job_tx, "ws").await;
     let Screen::WorkspaceList(ws) = app.screen.clone() else {
         panic!(":ws lists the books, got {:?}", app.screen);
@@ -171,7 +166,6 @@ async fn choosing_a_book_switches_it_and_a_directory_that_is_not_one_is_refused(
     type_command(&mut app, &http, &job_tx, "ws").await;
 
     // Down onto the directory that is not a workspace, Enter: refused where it
-    // was asked for, with the reason on the row, and nothing dispatched.
     handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
     let Screen::WorkspaceList(ws) = app.screen.clone() else {
@@ -212,9 +206,6 @@ async fn choosing_a_book_switches_it_and_a_directory_that_is_not_one_is_refused(
 #[tokio::test]
 async fn no_key_on_the_workspace_picker_asks_the_app_to_quit() {
     // `handle_key` answers one question: does the app keep running? A screen
-    // that answers it the other way closes the app on its first arrow — which
-    // is what this one did, and what every earlier test here missed, because all
-    // of them stopped at `app.screen` and never asked what the loop asks.
     use super::input::Flow;
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
@@ -262,7 +253,6 @@ async fn no_key_on_the_workspace_picker_asks_the_app_to_quit() {
     }
 
     // End puts the highlight on the directory that is not a workspace, so this
-    // Enter is the refusal — refused *and* not an exit.
     assert_eq!(
         handle_key(&mut app, key(KeyCode::End), &http, &job_tx).await,
         Flow::KeepRunning
@@ -287,17 +277,6 @@ async fn no_key_on_the_workspace_picker_asks_the_app_to_quit() {
 }
 
 /// Every screen, one battery of keys, one answer: the app keeps running.
-///
-/// The workspace picker proved that a screen can close the app without any of
-/// its own tests going red, because every one of them stopped at `app.screen`
-/// and never asked the question the loop asks. `Flow` makes the wrong answer
-/// hard to spell, but nothing stops a handler from spelling it anyway, so this
-/// holds every screen to `KeepRunning` for the keys a hand presses on a screen
-/// it has never read.
-///
-/// Two keys are outside the battery, both for a reason rather than for
-/// convenience: `q` is the dashboard's own way out and is checked below, and
-/// `r` is the only binding that reaches the network.
 #[tokio::test]
 async fn only_the_dashboards_q_ends_the_app() {
     use super::input::Flow;
@@ -323,8 +302,6 @@ async fn only_the_dashboards_q_ends_the_app() {
     ];
 
     // One screen per row of the `Screen` enum that needs nothing from the
-    // network to exist. The picker has its own test above; the workspace list
-    // is skipped here for the same reason.
     let screens: Vec<(&str, Screen)> = vec![
         ("dashboard", Screen::Normal),
         (
@@ -365,7 +342,6 @@ async fn only_the_dashboards_q_ends_the_app() {
         ),
         ("machine", Screen::Machine("10.0.0.1".into())),
         // A confirm whose action is *not* quitting, so its Enter exercises the
-        // "an answered dialog is still not an exit" half of the rule.
         ("confirm (rerender)", Screen::Confirm(Confirm::rerender())),
     ];
 
@@ -395,7 +371,6 @@ async fn only_the_dashboards_q_ends_the_app() {
     );
 
     // The second: the dialog `q` grows when work is in flight, which reaches
-    // the loop only once the operator says yes — and stays put when they do not.
     let quitting = || {
         Screen::Confirm(Confirm {
             title: "Quit with work in flight?".into(),

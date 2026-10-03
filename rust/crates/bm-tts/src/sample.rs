@@ -1,37 +1,11 @@
 //! Sampling, and the per-codebook repetition history that feeds it.
-//!
-//! A direct port of `_sample` + `RepetitionHistory`. Two properties matter and
-//! neither is obvious from the code:
-//!
-//! * **Top-k runs first.** The reference sorts, softmaxes and draws over the `k`
-//!   candidates rather than the full vocabulary. That is the same distribution
-//!   and a third of the per-frame CPU, but it means the *order* of the filter
-//!   stages is part of the contract — nucleus filtering happens inside the top-k
-//!   set, not before it.
-//! * **Temperature 0 is a different code path, not a limit.** `_sample` returns
-//!   `argmax` before any filtering when temperature is not positive. That branch
-//!   is what makes the port checkable at all: it is the only deterministic
-//!   sampler, so it is the only one that can be diffed against Python.
-//!
-//! Ties. NumPy's `argsort` is introsort, which is not stable, so the reference's
-//! tie order is not reproducible even by NumPy. This sorts stably ascending and
-//! reverses, which is the closest deterministic analogue. It cannot matter at
-//! temperature 0 (argmax takes the first maximum), and above it the draw is
-//! random anyway — but it does mean the *stochastic* path is verified by
-//! distribution and by ear, not bit-for-bit.
 
 use std::collections::{HashMap, VecDeque};
 
 /// ~2.5 s of audio at 25 frame/s. Long enough to break a local loop, short
-/// enough that a vowel which has ended stops being penalised.
 pub const DEFAULT_REP_WINDOW: usize = 64;
 
 /// One codebook's sliding window: a multiset with FIFO eviction.
-///
-/// A plain accumulating set was the old behaviour and it is wrong at this
-/// codebook size — 1024 codes per channel means an unbounded set eventually
-/// penalises most of the vocabulary, including the repeats that are correct
-/// (silence, held vowels), and the voice drifts over a long chunk.
 #[derive(Debug, Clone)]
 pub struct ChannelWindow {
     seen: HashMap<i64, u32>,
@@ -90,9 +64,6 @@ impl RepetitionHistory {
 }
 
 /// SplitMix64: small, well-defined, and seedable, so a render can be reproduced
-/// from a logged seed. The reference draws from NumPy's Mersenne Twister, which
-/// cannot be matched and does not need to be — the *distribution* is what has to
-/// agree, not the sequence.
 #[derive(Debug, Clone)]
 pub struct Rng(u64);
 
@@ -141,8 +112,6 @@ impl Default for Sampling {
 }
 
 /// The candidate set and its probabilities — everything `sample` decides with,
-/// exposed so the filter can be compared against the reference on a fixed
-/// logits vector even though the draw cannot be.
 #[derive(Debug, Clone)]
 pub struct Candidates {
     pub indices: Vec<usize>,
@@ -150,9 +119,6 @@ pub struct Candidates {
 }
 
 /// Apply the repetition penalty in place, exactly as the reference does.
-///
-/// Order is irrelevant here: the penalty touches each index at most once,
-/// because `prev` is a set rather than a sequence.
 pub fn penalise(logits: &mut [f32], rep_pen: f64, prev: &ChannelWindow) {
     if is_one(rep_pen) || prev.is_empty() {
         return;
@@ -171,9 +137,6 @@ pub fn candidates(logits: &[f32], s: &Sampling) -> Candidates {
     let k = s.top_k;
     let mut idx: Vec<usize> = if k > 0 && k < v {
         // The k largest, in index order. `select_nth_unstable` partitions like
-        // NumPy's `argpartition`; which of the k survives is what matters, and
-        // that is determined (the set of k largest is unique unless there are
-        // ties at the boundary, where either answer is valid).
         let mut all: Vec<usize> = (0..v).collect();
         all.select_nth_unstable_by(v - k, |a, b| {
             logits[*a]
@@ -186,7 +149,6 @@ pub fn candidates(logits: &[f32], s: &Sampling) -> Candidates {
     };
 
     // Stable ascending by value, then reversed — the closest deterministic
-    // analogue of `np.argsort(cs)[::-1]`.
     idx.sort_by(|a, b| {
         logits[*a]
             .partial_cmp(&logits[*b])
@@ -195,9 +157,6 @@ pub fn candidates(logits: &[f32], s: &Sampling) -> Candidates {
     idx.reverse();
 
     // f32 throughout, because that is what NumPy does with a float32 array: the
-    // softmax, the cumulative sum and the renormalisation all stay in the
-    // array's dtype. Computing in f64 would be *more* accurate and would not
-    // match — the target is the reference's arithmetic, not the best one.
     let mut p: Vec<f32> = idx.iter().map(|i| logits[*i]).collect();
     let max = p.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0f32;
@@ -213,7 +172,6 @@ pub fn candidates(logits: &[f32], s: &Sampling) -> Candidates {
 
     if s.top_p > 0.0 && s.top_p < 1.0 {
         // `(cumsum(p) - p) < top_p` — the cumulative sum *before* this element,
-        // so the first candidate whose mass would push past top_p is excluded.
         let top_p = s.top_p as f32;
         let mut acc = 0f32;
         for x in p.iter_mut() {
@@ -237,7 +195,6 @@ pub fn candidates(logits: &[f32], s: &Sampling) -> Candidates {
 }
 
 /// Draw an index from `p`, the way `np.random.choice` does: walk the cumulative
-/// sum against a uniform draw.
 fn draw(c: &Candidates, rng: &mut Rng) -> usize {
     // NumPy draws in f64 against the cumulative sum of the (f32) probabilities.
     let u = rng.next_f64();
@@ -249,7 +206,6 @@ fn draw(c: &Candidates, rng: &mut Rng) -> usize {
         }
     }
     // Only reachable on floating-point shortfall; the last candidate is the
-    // right answer because the probabilities sum to one.
     *c.indices.last().expect("empty candidate set")
 }
 
@@ -264,20 +220,11 @@ pub fn sample(
         penalise(logits, s.repetition_penalty, p);
     }
     // The deterministic branch. `not (temperature and temperature > 0)` in the
-    // reference, so 0 and NaN both land here.
-    //
-    // Clippy wants `partial_cmp` or an explicit `is_nan()`. Both are the wrong
-    // tool: the negated comparison is the point. It is true for 0 *and* for NaN,
-    // which is exactly what the reference's `not (temperature > 0)` means, and
-    // spelling it as two conditions would be two branches where the reference
-    // has one. Kept deliberately.
     #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(s.temperature > 0.0) {
         return argmax(logits);
     }
     // Divide, in f32, rather than multiply by a reciprocal: NumPy does
-    // `logits / temperature` with the scalar narrowed to the array's dtype, and
-    // a reciprocal multiply rounds differently in the last place.
     let temp = s.temperature as f32;
     for x in logits.iter_mut() {
         *x /= temp;
@@ -287,7 +234,6 @@ pub fn sample(
 }
 
 /// First maximum, like `np.argmax`. Ties resolve to the lowest index, and that
-/// is not cosmetic: it is the whole reason the temperature-0 comparison is exact.
 pub fn argmax(x: &[f32]) -> usize {
     let mut best = 0;
     for (i, v) in x.iter().enumerate() {
@@ -320,8 +266,6 @@ mod tests {
         };
         let mut rng = Rng::new(1);
         // 1 is the first maximum and the penalty divides it by 1.2 -> 4.16,
-        // leaving 2 the winner. The reference does the same: the penalty is
-        // applied before the temperature check.
         assert_eq!(sample(&mut logits, &s, Some(&h.channels[0]), &mut rng), 2);
     }
 
@@ -343,7 +287,6 @@ mod tests {
             w.add(c);
         }
         // Window holds the last three: 1, 2, 3. The first 1 was evicted but the
-        // second keeps the count above zero, so 1 is still present.
         assert!(w.seen.contains_key(&1));
         w.add(4);
         assert!(!w.seen.contains_key(&1), "both 1s should have aged out");

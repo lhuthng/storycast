@@ -1,6 +1,4 @@
 //! The crawl view's painter. Reads [`crate::tui::crawl::rows`] — or
-//! [`crate::tui::crawl::detail`] when the operator has asked for the whole
-//! configuration — and paints it; it decides nothing about what the rows say.
 use crate::tui::{
     app::{App, HitTarget, ListTarget},
     crawl::{Row, KEY_W},
@@ -13,8 +11,6 @@ use ratatui::{
 };
 
 /// Fold a note to `width`, hanging the continuation under the note's own
-/// indent. Word wrap on whitespace, and a word longer than the line (a URL, a
-/// path) is left whole rather than cut — a cut URL reads as a different URL.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let indent: String = text.chars().take_while(|c| c.is_whitespace()).collect();
     let width = width.max(20);
@@ -55,9 +51,6 @@ pub(crate) fn draw_crawl(f: &mut ratatui::Frame, app: &mut App, scroll: usize, e
     );
 
     // The verdict is the default and the configuration is one keypress away.
-    // Which one is on screen is named in the title bar, because a screen that
-    // hides half of itself without saying so is the same mistake the concise
-    // view was made to fix.
     let settings = app.effective_settings();
     let rows = if expanded {
         crate::tui::crawl::detail(&app.layout, &settings)
@@ -90,9 +83,6 @@ pub(crate) fn draw_crawl(f: &mut ratatui::Frame, app: &mut App, scroll: usize, e
                 lines.push(Line::from(vec![name, body]));
             }
             // Indented continuation of the field above it: a params value, a
-            // site's shape, the caveat under a host. Wrapped here rather than
-            // in the rows, because the width belongs to the terminal — and a
-            // clipped caveat is the same as no caveat.
             Row::Note(n) => {
                 for w in wrap(n, area.width.saturating_sub(2) as usize) {
                     lines.push(Line::from(Span::styled(w, dim)));

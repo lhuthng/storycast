@@ -1,12 +1,4 @@
 //! Voice rosters.
-//!
-//! These mirror the VieNeu preset store and the Gemini pools from the legacy
-//! `synthesize.py`. The TTS sidecar is the authority at runtime — the inductor
-//! asks it for `/policy` — but the workers need a usable fallback so a scheduled
-//! render never depends on the sidecar being up just to decide who speaks.
-//!
-//! **The shipped roster states no preference.** There is no machine-local
-//! overlay: the catalogue is the whole roster.
 
 mod catalogue;
 mod consts;

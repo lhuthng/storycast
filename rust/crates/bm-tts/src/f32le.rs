@@ -1,17 +1,10 @@
 //! Raw little-endian f32, which is what the Python side writes with
-//! `.tofile()`.
-//!
-//! One reader for the tools that load one, because the copies disagreed: one
-//! refused a file whose length was not a whole number of f32 and the rest
-//! dropped the trailing bytes without saying so, which is a wrong answer
-//! rather than an error.
 
 use anyhow::{bail, Context, Result};
 
 /// Decode a whole buffer of f32, refusing a partial trailing element.
 pub fn from_le_bytes(bytes: &[u8]) -> Result<Vec<f32>> {
     // A non-empty remainder is exactly the "not a whole number of f32" case,
-    // so one check does the work of a length test and a chunk walk.
     let (chunks, []) = bytes.as_chunks::<4>() else {
         bail!("{} bytes, not a whole number of f32", bytes.len());
     };
@@ -19,9 +12,6 @@ pub fn from_le_bytes(bytes: &[u8]) -> Result<Vec<f32>> {
 }
 
 /// Read a file of raw f32, naming the path in both failure messages.
-///
-/// Takes `AsRef<Path>` because the callers hold a mix of `&str`, `String` and
-/// `&Path` depending on where the argument came from.
 pub fn read(path: impl AsRef<std::path::Path>) -> Result<Vec<f32>> {
     let path = path.as_ref();
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -42,7 +32,6 @@ mod tests {
     }
 
     /// The case the copies got wrong: a trailing partial element is an error,
-    /// not three f32 and a shrug.
     #[test]
     fn a_partial_trailing_element_is_refused() {
         let mut bytes = Vec::new();

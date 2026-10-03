@@ -17,22 +17,12 @@ pub(crate) fn corrected_source(event: &PreparedEvent, fixes: &[Value]) -> String
         }
     }
     // The prompt permits the three engine voice tags to replace a written
-    // non-verbal sound. That is a rendering transformation, not lost source.
     retag_text(&text).unwrap_or(text)
 }
 fn normalized_source(text: &str) -> String {
     let mut out = text.to_string();
     for tag in ["[cười]", "[thở dài]", "[hắng giọng]"] {
         // The tag, *and the punctuation it swallowed when it took the sound's
-        // place*. `retag_text` truncates `"…trượt tay, ha ha."` to
-        // `"…trượt tay, [cười]"` — the sentence period goes with the sound — so a
-        // model that writes the same line with its period (`"…[cười]."`) differs
-        // by one mark and was refused for it: 4 of ch386's 15 attempts died
-        // here, and the model's version is the more correct one.
-        //
-        // Punctuation only, never the adjacent words: `"…, [cười] ha ha."`
-        // still differs from `"…, [cười]"` after this, which is what keeps
-        // "the tag *and* the words it stands for" the error rule 7 says it is.
         for punct in [",", ";", ":", ".", "…", "!", "?"] {
             out = out.replace(&format!("{tag}{punct}"), " ");
             out = out.replace(&format!("{punct}{tag}"), " ");
@@ -43,17 +33,6 @@ fn normalized_source(text: &str) -> String {
 }
 
 /// Text with every *written* non-verbal sound, and every tag standing in for
-/// one, removed, so two texts can be compared while ignoring how, or whether,
-/// they spell laughter, sighs and coughs.
-///
-/// Longest spellings first: `"thở dài một hơi"` before `"thở dài"`, and a
-/// repeated run before the single word, or a stub survives the pass. The tag
-/// list is in here too so the function is correct on raw text, not only on
-/// input a caller already normalized.
-///
-/// A removed sound takes its punctuation with it: `"…mình, haha, vừa…"` has to
-/// reduce to the words of `"…mình, [cười] vừa…"`, because putting the tag in
-/// the sound's place swallowed the comma after it.
 pub(crate) fn source_without_written_sound(text: &str) -> String {
     let mut out = text.to_lowercase();
     for sound in [
@@ -98,17 +77,11 @@ pub(crate) fn source_text_matches(expected: &str, actual: &[String]) -> bool {
 }
 
 /// The tag whose written sound is still sitting in the text, as the corpus
-/// actually spells it. `retag_text` only trims a literal run *immediately*
-/// after its tag, so a model that hoists the tag to the head of the line
-/// leaves the words behind, this is the shape being named.
 fn leftover_written_sound(text: &str) -> Option<(&'static str, &'static str)> {
     let lower = text.to_lowercase();
     for (tag, spellings) in [
         ("[cười]", &["haha", "ha ha", "hắc hắc", "hô hô"][..]),
         // Longest spelling first, for the same reason the matcher does it: the
-        // sigh the corpus writes out (`thở dài một tiếng`) contains the bare
-        // form, and a hint that named the stub would send the repair to delete
-        // two words of its own sentence.
         (
             "[thở dài]",
             &[
@@ -133,12 +106,6 @@ fn leftover_written_sound(text: &str) -> Option<(&'static str, &'static str)> {
 }
 
 /// Explain a mismatch that is *only* about written non-verbal sound.
-///
-/// This class fails a chapter across every racer, the model adds the tag and
-/// keeps the words it stands for, and the generic "was changed" message gives
-/// the repair nothing to act on. It fires only when the two texts agree once
-/// written sounds are ignored on both sides, so any other disagreement keeps
-/// the honest generic message.
 fn written_sound_hint(expected: &str, actual: &str) -> Option<String> {
     let (tag, literal) = leftover_written_sound(actual)?;
     if source_without_written_sound(expected) != source_without_written_sound(actual) {
@@ -152,10 +119,6 @@ fn written_sound_hint(expected: &str, actual: &str) -> Option<String> {
 }
 
 /// Check the source contract independently of the LLM's interpretation.
-///
-/// `source_id` is deliberately mandatory here, unlike the legacy script
-/// validator. It is the join key that makes a dropped paragraph, a duplicated
-/// quote, or a reordered chapter visible before the script is persisted.
 pub(crate) fn validate_source_alignment(
     data: &Value,
     prepared: &PreparedChapter,
@@ -220,11 +183,6 @@ pub(crate) fn validate_source_alignment(
         }
         let kind = effective_kind(event, not_speech);
         // The thought marker is code-attached (`attach_fixed_speakers`), so a
-        // mismatch here is a hand edit or a stale script — and either way the
-        // mixer would fire the pack's thought stinger on a spoken line, or stay
-        // silent over a thought, without saying anything. Read through the same
-        // effective kind as the speaker rule, so a retracted thought has to be
-        // unmarked like any other narration.
         match (kind, segment.get("kind").and_then(Value::as_str)) {
             ("thought", Some("thought")) => {}
             ("thought", other) => anyhow::bail!(
@@ -247,10 +205,6 @@ pub(crate) fn validate_source_alignment(
             _ => {}
         }
         // A retracted span is narration now, so it is a narration segment and
-        // must not carry a delimiter — same rule, reached through the same
-        // effective kind the speaker check above used. A thought has no
-        // delimiters by definition, so the same check covers it: quote marks
-        // merged into either would be spoken aloud.
         if matches!(kind, "dialogue" | "thought")
             && (text.contains('"') || text.contains('“') || text.contains('”'))
         {

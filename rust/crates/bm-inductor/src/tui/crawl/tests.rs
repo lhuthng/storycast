@@ -21,7 +21,6 @@ fn value_of(rows: &[Row], key: &str) -> String {
 }
 
 /// Everything the view says, flattened — for the assertions that care about
-/// an explanation rather than about which line it landed on.
 fn said(rows: &[Row]) -> String {
     rows.iter()
         .map(|r| match r {
@@ -45,7 +44,6 @@ fn the_view_answers_what_is_in_force_with_defaults_resolved() {
     let settings = bm_core::read_json::<serde_json::Value>(&layout.settings()).unwrap();
     let rows = detail(&layout, &settings);
     // `pace_ms`, `timeout_secs` and the rest are absent from the file and
-    // still answered: this is the *effective* block, not the file's echo.
     assert_eq!(value_of(&rows, "mode"), "manual");
     assert!(value_of(&rows, "pace_ms").contains("750 ms"));
     assert!(value_of(&rows, "max_fetches").contains("64 round trips"));
@@ -55,7 +53,6 @@ fn the_view_answers_what_is_in_force_with_defaults_resolved() {
 #[test]
 fn a_script_that_is_not_there_is_the_line_that_matters() {
     // The silent-failure case: the setting names a crawler, the file does
-    // not exist, and the crawl still runs — against the built-in fetcher.
     let (_tmp, layout) = layout_with_settings(json!({
         "mode": "script",
         "script": "crawl/nosuchsite.lua",
@@ -158,9 +155,6 @@ fn the_book_links_come_from_the_frozen_index() {
 #[test]
 fn a_missing_bundled_tree_is_not_the_same_as_a_book_with_no_crawler() {
     // A workspace with no crawler of its own is normal. The *bundled* tree
-    // being empty is not: `crawl`.`script` then resolves to nothing, and
-    // every crawl quietly runs without selectors. The view has to say which
-    // of the two it is looking at.
     let (_tmp, layout) = layout_with_settings(json!({ "mode": "script" }));
     let settings = bm_core::read_json::<serde_json::Value>(&layout.settings()).unwrap();
     let rows = rows(&layout, &settings);
@@ -202,7 +196,6 @@ fn a_books_param_is_counted_and_its_volumes_named() {
 #[test]
 fn a_books_param_that_is_missing_or_empty_is_a_fault() {
     // The quiet misconfiguration: a shelf that is not there fails at the
-    // first chapter, not here.
     let (_tmp, layout) = layout_with_settings(json!({
         "params": { "books": "books" }
     }));
@@ -215,7 +208,6 @@ fn a_books_param_that_is_missing_or_empty_is_a_fault() {
     );
 
     // And one that exists but holds nothing, which looks even more like a
-    // working configuration.
     std::fs::create_dir_all(layout.work.join("books")).unwrap();
     let empty = rows(&layout, &settings);
     assert!(is_warn(&empty, "books"), "{empty:#?}");
@@ -291,12 +283,9 @@ fn a_book_index_reads_as_volumes_rather_than_as_site_urls() {
     // The breakdown, and where each volume starts.
     assert!(value_of(&rows, "volumes").contains("2 volumes"), "{said}");
     // The chapter numbers, which are what a run is ranged by — the spine
-    // ranges in the locator are the book-internal ones and are shown only
-    // on the per-chapter lines.
     assert!(said.contains("vol 1  books/vol-01.epub · ch 1-2"), "{said}");
     assert!(said.contains("vol 2  books/vol-02.epub · ch 3-4"), "{said}");
     // And the locator decoded: an encoding nobody typed should not be the
-    // thing the view prints.
     assert!(said.contains("ch 1  volume 1 · spine 1-16"), "{said}");
     assert!(
         !said.contains("epub:books/"),
@@ -336,7 +325,6 @@ fn a_site_index_still_reads_as_a_site() {
 #[test]
 fn a_locator_that_is_not_one_is_not_a_crash() {
     // A hand-edited index can hold anything. The decoder is the only place
-    // that could refuse, and refusing is what it must not do.
     assert_eq!(
         locator("epub:books/vol-01.epub#1-1"),
         Some(("books/vol-01.epub", 1, 1))
@@ -351,14 +339,12 @@ fn a_book_with_no_index_is_told_how_to_get_one() {
     let (_tmp, layout) = layout_with_settings(json!({}));
     let settings = bm_core::read_json::<serde_json::Value>(&layout.settings()).unwrap();
     // The concise view leads with it, because nothing else can be counted
-    // until the index exists.
     let concise = rows(&layout, &settings);
     assert!(
         value_of(&concise, "reading").contains(":crawl"),
         "{concise:#?}"
     );
     // And the detail still names the absent file and the command that
-    // makes it.
     let rows = detail(&layout, &settings);
     assert!(value_of(&rows, "index").contains("none"));
     assert!(rows
@@ -367,8 +353,6 @@ fn a_book_with_no_index_is_told_how_to_get_one() {
 }
 
 /// **The screen is a screenful shorter.** This is the whole change, so it is
-/// pinned by what is *absent*: every one of these is a value nobody edited,
-/// and each was between the operator and an answer they already had.
 #[test]
 fn the_default_view_is_the_verdict_and_nothing_else() {
     let (_tmp, layout) = layout_with_settings(json!({}));
@@ -393,7 +377,6 @@ fn the_default_view_is_the_verdict_and_nothing_else() {
     assert!(said.contains("Faults"), "{said}");
     assert!(said.contains("no chapter index yet"), "{said}");
     // Counted in *facts*, not rows: a heading and a blank are layout, and
-    // three facts is what "what will this crawl" is made of.
     let facts = concise
         .iter()
         .filter(|r| matches!(r, Row::Field { .. }))
@@ -466,15 +449,12 @@ fn a_volume_list_longer_than_a_line_is_capped_rather_than_scrolled_away() {
 #[test]
 fn the_missing_bundled_tree_is_not_a_fault_for_a_book_that_reads_no_website() {
     // `crawlers/known/` is empty in this checkout, and the EPUB example
-    // resolves from `examples/`, so the crawl cannot be affected. A fault
-    // about something that cannot affect the thing is noise.
     let (_tmp, layout) = layout_with_settings(json!({
         "mode": "script",
         "script": "crawlers/examples/epub.lua",
         "params": { "epub": "tmp/book.epub" },
     }));
     // The example crawler is present; the site tree is not, and cannot be
-    // reached from a book that reads no website.
     std::fs::create_dir_all(layout.crawlers_dir().join("examples")).unwrap();
     std::fs::write(layout.crawlers_dir().join("examples/epub.lua"), "-- crawl").unwrap();
     let settings = bm_core::read_json::<serde_json::Value>(&layout.settings()).unwrap();
@@ -488,6 +468,5 @@ fn the_missing_bundled_tree_is_not_a_fault_for_a_book_that_reads_no_website() {
         "a local book has no website to fall back from: {said}"
     );
     // The book itself is still the one thing reported, and it is still
-    // reported as missing.
     assert!(said.contains("NOT FOUND"), "{said}");
 }

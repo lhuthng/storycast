@@ -1,8 +1,6 @@
 use super::*;
 
 // ---------------------------------------------------------------------------
-// the sound-design editor
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_sound_editor_marks_remove_unavailable_where_it_is() {
@@ -14,7 +12,6 @@ fn the_sound_editor_marks_remove_unavailable_where_it_is() {
     assert!(text.contains("music 9"), "{text}");
     assert!(text.contains("injects 39"), "{text}");
     // Every shipped effect sound answers a shipped rule, so the first row is
-    // in use and the remove key is drawn as unavailable, with the reason.
     assert!(text.contains("in use"), "{text}");
     assert!(
         text.contains("remove ✗ in use"),
@@ -41,9 +38,6 @@ fn the_sound_editor_marks_remove_unavailable_where_it_is() {
 }
 
 /// The bar that says `d` is dead is the screen's whole warning surface, so it
-/// has to survive every tier, including the 76-column one where the overlay
-/// has no margin to give. The compile-time guard in `layout.rs` predicts this;
-/// this is the render that proves it.
 #[test]
 fn the_editor_renders_at_every_tier_with_the_warning_intact() {
     let (_d, root) = sound_layout("tiers");
@@ -61,7 +55,6 @@ fn the_editor_renders_at_every_tier_with_the_warning_intact() {
         );
     }
     // The gain chain is context, not a warning, and only shows where there is
-    // room for it, at the minimum width the counts win.
     assert!(!render_text(&mut app, 76, 24).contains("layers.effect.trim"));
     assert!(render_text(&mut app, 140, 44).contains("layers.effect.trim"));
 }
@@ -139,7 +132,6 @@ async fn remove_is_refused_by_name_for_an_entry_still_in_use() {
     );
 
     // An entry nothing reaches does open the confirmation, and answering it
-    // removes exactly that one.
     let mut free = sound_app(&root);
     free.screen = Screen::Sound(SoundView {
         layer: bm_core::audio_pool::PoolKind::Inject,
@@ -177,8 +169,6 @@ async fn remove_is_refused_by_name_for_an_entry_still_in_use() {
 }
 
 /// The guard is answered by the *file*, and the dialog is a window in which the
-/// file can change. Re-checking on Enter is what keeps the guard from being a
-/// keystroke's opinion rather than a fact about the mix.
 #[tokio::test]
 async fn the_guard_is_re_read_when_the_confirmation_is_answered() {
     let http = reqwest::Client::new();
@@ -264,7 +254,6 @@ async fn adding_an_entry_writes_the_registry_and_leaves_the_rest_of_it_alone() {
     let after = std::fs::read_to_string(&registry).unwrap();
     assert!(after.contains("\"kettle\""), "{after}");
     // The registry is hand-formatted prose plus entries: adding one must not
-    // reflow the prose or the entries that were already there.
     let note_before = before.lines().find(|l| l.contains("\"_note\"")).unwrap();
     assert!(after.contains(note_before), "the note was rewritten");
     assert!(after.starts_with("{\n  \"_note\":"), "the note moved");
@@ -336,9 +325,6 @@ async fn a_level_edit_touches_only_the_level() {
     ));
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
     // A retune is a sound-design change, and this is the one write the
-    // scheduler does not make, the pool registry is edited from the screen
-    // so the inductor has to be told to look. Without this op the level moves
-    // and every published chapter keeps its old mix for ever.
     match job_rx.try_recv().map(Job::into_bare) {
         Ok(Job::Op { req, .. }) => assert_eq!(req.op, Op::SoundChanged),
         other => panic!("expected a sound-changed op, got {other:?}"),
@@ -429,11 +415,6 @@ fn the_editor_says_why_it_shows_nothing_rather_than_showing_an_empty_pool() {
 }
 
 /// A checkout with one chapter's script and one rendered segment in it, for
-/// the paths that read the local cache instead of the API.
-/// An entry whose clip has gone missing must stay editable: it is already
-/// flagged in red, and refusing a tag change because somebody moved a file is
-/// how an entry becomes unfixable from the screen. A *new* take still has to
-/// exist, that is the typo the check is for.
 #[tokio::test]
 async fn an_entry_whose_clip_is_gone_can_still_be_retagged() {
     let http = reqwest::Client::new();
@@ -494,8 +475,6 @@ async fn an_entry_whose_clip_is_gone_can_still_be_retagged() {
 #[tokio::test]
 async fn an_unrendered_held_line_falls_back_to_one_of_hers() {
     // Fresh swap, rendered chapter by chapter: the held line misses in her
-    // voice, but her voice exists in the cache, play one of hers, still
-    // zero synthesis, and hold it so T compares on the same sentence.
     let (_dir, layout) = local_cache_layout();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
     job_segment(
@@ -530,7 +509,6 @@ async fn an_unrendered_held_line_falls_back_to_one_of_hers() {
 #[tokio::test]
 async fn current_word_while_disconnected_reads_the_local_cache() {
     // No backend: :current serves the same lookup from this checkout's files
-    // instead of the API. Listening needs no :B.
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let (_dir, layout) = local_cache_layout();
@@ -561,7 +539,6 @@ async fn current_word_while_disconnected_reads_the_local_cache() {
     assert_eq!(app.audition.as_deref(), Some("Đức Trí"));
 
     // The worker reports through the same Done shape, so holding and
-    // playback cannot tell the paths apart.
     let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel::<Ev>();
     job_segment(
         tx2,
@@ -624,15 +601,12 @@ async fn current_word_with_no_backend_and_no_checkout_says_so() {
 #[tokio::test]
 async fn down_at_the_last_row_stays_put() {
     // The highlight must never leave the list: Down past the end used to
-    // silently select nothing.
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
     handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
     match &app.screen {
         // One voice in the filter, so Down has nowhere to go. Row 0 is its
-        // group heading now, so the cursor is on row 1 — and what matters is
-        // that it is on the voice, not on the heading it steps over.
         Screen::Pick(p) => assert_eq!(
             filtered_voices(&app, &p.filter)
                 .get(p.cursor)

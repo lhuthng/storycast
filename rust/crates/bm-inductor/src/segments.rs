@@ -1,12 +1,4 @@
 //! Segment inventory across the cluster: report, collect, prune.
-//!
-//! Phase 1 of the inductor-owned-segments migration. The inductor's
-//! `data/audio/` is the authoritative store; this command proves it per
-//! chapter (report, the default — dry-run always) and pulls what remotes hold
-//! that it lacks (`--collect`). Proof is `expected_wavs`
-//! (`assemble::plan`), the single namer the renderer, the completeness check
-//! and the merger already share — never a file count, and never the
-//! completeness boolean, because the migration needs the *missing names*.
 
 use anyhow::{Context, Result};
 use bm_core::provision::{load_boxes, resolve_key, Ssh, REMOTE_DIR};
@@ -22,8 +14,6 @@ struct Target {
 }
 
 /// Every registered machine: linked boxes plus ledger-only addresses (a box
-/// provisioned before `link` existed, or whose link was dropped). Filtered by
-/// `--from` (address or link name) when given.
 fn targets(layout: &Layout, settings: &Settings, only: &[String]) -> Vec<Target> {
     let mut addrs: BTreeMap<String, (String, u16, Option<String>, String)> = BTreeMap::new();
     for b in load_boxes(&layout.machines()) {
@@ -48,7 +38,6 @@ fn targets(layout: &Layout, settings: &Settings, only: &[String]) -> Vec<Target>
         }
     }
     // The inductor's own box is always in scope, even with no link and no
-    // ledger entry yet — its manifest is walked, never ssh'd.
     addrs.entry("127.0.0.1".into()).or_insert_with(|| {
         (
             settings.ssh.user.clone(),
@@ -59,7 +48,6 @@ fn targets(layout: &Layout, settings: &Settings, only: &[String]) -> Vec<Target>
     });
     let filter = |t: &Target| {
         // The local box is always in scope: it is the reference every remote
-        // diffs against, so `--from` only narrows remotes.
         t.ssh.local || only.is_empty() || only.iter().any(|w| w == &t.addr || w == &t.label)
     };
     addrs
@@ -87,9 +75,6 @@ fn chapters(layout: &Layout) -> Vec<u32> {
 }
 
 /// Names the expected set holds that the local store lacks. Empty means the
-/// chapter verifies; the completion gate (`complete()`) treats a non-empty
-/// list as a failed report. `None` when the chapter cannot be planned here at
-/// all — also a failure, with nothing to name.
 pub(crate) fn missing_wavs(layout: &Layout, engine: &str, chapter: u32) -> Option<Vec<String>> {
     let expected = expected_names(layout, engine, chapter)?;
     let dir = layout.seg_dir(engine, chapter);
@@ -107,19 +92,6 @@ pub(crate) fn missing_wavs(layout: &Layout, engine: &str, chapter: u32) -> Optio
 }
 
 /// The file names `(chapter, engine)` must hold.
-///
-/// **The recorded plan first.** A take's name is content-addressed and its
-/// identity is a hash of the inputs that produced it, so the plan is the only
-/// thing that knows what the set is without recomputing it from a script and a
-/// cast that may have moved since — the same reason the renderer no longer
-/// derives names at speak time. A chapter with no stored plan (never
-/// reconciled, or written by an older build) falls back to evaluating
-/// `expected_wavs` against the local script, cast and bible.
-///
-/// `None` when the chapter cannot be planned (unparseable script, uncast
-/// speaker) — callers say so instead of guessing. Shared by the report, the
-/// completion gate and the collect pass, so the writer and the prover can
-/// never disagree about the set.
 pub(crate) fn expected_names(
     layout: &Layout,
     engine: &str,
@@ -203,8 +175,6 @@ fn local_manifest(layout: &Layout) -> Vec<SegmentEntry> {
 }
 
 /// A remote box's manifest, via the box's own agent over the existing ssh
-/// transport. An agent too old to have the subcommand fails loudly here —
-/// that is the staged-rollout signal, not a silent empty.
 fn remote_manifest(ssh: &Ssh) -> Result<Vec<SegmentEntry>> {
     let script = format!("cd $HOME/{REMOTE_DIR} && ./bm-agent segments --json");
     let (code, stdout, stderr) = ssh.run(&script, 120)?;
@@ -218,12 +188,6 @@ fn remote_manifest(ssh: &Ssh) -> Result<Vec<SegmentEntry>> {
 }
 
 /// Delete files in a seg dir that `expected_wavs` never names (stale voices
-/// from swaps the surgical invalidation could not name). Report-only unless
-/// `prune` is passed — this is destructive and gets an explicit flag, never a
-/// side effect. Chapters with a live render task are skipped: a local worker
-/// may be writing into the dir right now.
-///
-/// Prints every path before deleting.
 pub fn cmd_prune(layout: &Layout, settings: &Settings, prune: bool) -> Result<()> {
     let engine = settings.engine.clone();
     // Live renders first: never sweep a directory a worker may be writing.
@@ -286,7 +250,6 @@ pub fn cmd_prune(layout: &Layout, settings: &Settings, prune: bool) -> Result<()
 }
 
 /// Report per chapter per machine, then collect what remotes hold and the
-/// inductor lacks.
 pub fn cmd_segments(
     layout: &Layout,
     settings: &Settings,
@@ -370,8 +333,6 @@ pub fn cmd_segments(
             }
             if c != Coverage::Complete {
                 // Expected names the box does NOT hold: caps the repair
-                // (retry renders exactly these) and explains a partial that
-                // collection alone cannot close.
                 let mut gone: Vec<&String> =
                     expected.iter().filter(|f| !have.contains(*f)).collect();
                 gone.sort();
@@ -386,7 +347,6 @@ pub fn cmd_segments(
             println!();
             if writing && !pull.is_empty() {
                 // Whole-dir pull (the only rsync shape); anything unexpected
-                // it brings along is `--prune`'s job in step 4, not this one's.
                 let rel = format!("data/audio/segments-{engine}-{n:02}/");
                 let dst = layout.seg_dir(&engine, n);
                 match t.ssh.rsync_pull(&rel, &dst) {
@@ -403,7 +363,6 @@ pub fn cmd_segments(
         }
     }
     // Verify what collection claims: completeness per chapter, not file counts.
-    // A half-collected chapter is no cache at all to every consumer.
     if writing {
         for n in chapters(layout) {
             if !bm_core::assemble::segments_complete(

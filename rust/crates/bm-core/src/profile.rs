@@ -1,20 +1,4 @@
 //! Profiles: genre bundles (assets + prompts) as versioned transfer files.
-//!
-//! A profile is `profiles/<name>.tar.zst`: the `assets/` and `prompts/` trees
-//! plus a `manifest.json` (`{name, version, files: {path: sha256}}`). The
-//! bundle is transfer and archive only — day to day the pipeline reads the
-//! unpacked live tree, so no code path reaches through decompression.
-//!
-//! "Loaded" is a pointer file, `.bm/profile` (`{name, hash}`), where `hash`
-//! is the manifest hash recomputed over the live tree. Anything that runs
-//! ([`verify`]) recomputes and compares: a hand-edited live tree, or a tree
-//! unpacked from a different profile, is adopted (the pointer is re-stamped
-//! to the live hash) with a warning, instead of refusing to run. The live
-//! tree is the source of truth — `:sound` retunes it routinely — and
-//! `profile pack <name>` is the verb that saves it back to a bundle.
-//!
-//! Packing and unpacking (tar + zstd) live in `tools/profile.sh` — shell,
-//! like ssh/rsync/ffmpeg. This module only reads pointers and verifies.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -23,27 +7,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The live trees a profile owns, relative to the repo/workspace root.
-///
-/// The union of every piece's trees, kept for the fixture install — which lays
-/// down a whole checkout regardless of which piece owns what — and for the
-/// messages that still name them.
-///
-/// It is **not** what any piece is hashed over: the adapter's trees are the
-/// bundle's (`adapters/<name>/{prompts,crawl}`, see [`adapter_dirs`]) when the
-/// checkout has one, and the flat pair here when it does not. So the names are
-/// the *pre-split* shape, which is also the shape a fresh clone has.
 pub const LIVE_DIRS: [&str; 3] = ["assets", "prompts", "crawl"];
 
 /// One of the three things a checkout is bound to.
-///
-/// A profile used to be one bundle of two trees with one name and one hash.
-/// The trees are the split, and they are split because they change for
-/// different reasons and are shared differently: a genre's art is universal
-/// across languages, a language's prompts are not, and the engine's files are
-/// gigabytes the other two never touch.
-///
-/// `assets/` and `prompts/` were literally [`LIVE_DIRS`]; the engine is named
-/// by `settings.engine` because it has no tree at the root to be found in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Piece {
     /// The genre: `assets/` — music, injects, effects, the scene map, crawlers.
@@ -58,19 +24,6 @@ impl Piece {
     pub const ALL: [Piece; 3] = [Piece::Pack, Piece::Adapter, Piece::Engine];
 
     /// The live trees this piece owns, relative to the root, in the **pre-split
-    /// flat shape** — `assets/`, `prompts/` and the engine's own tree.
-    ///
-    /// The adapter is the one piece whose trees are not settled here: a
-    /// checkout with an adapter bundle keeps its prompts *and* its crawlers
-    /// under `adapters/<name>/`, so what is hashed is answered by
-    /// [`adapter_dirs`] from the binding, not by a constant. This is the
-    /// fallback — the shape every checkout that predates the split has on disk.
-    ///
-    /// Empty for the engine on purpose. It does own a tree now
-    /// (`engines/<name>/`, see `Layout::engine_dir`), but the engine's identity
-    /// is its *declaration* — its name and its roster — and never a digest of
-    /// its bytes: that tree is about a gigabyte of weights, and hashing it on
-    /// every `serve` and `worker` start is the cost the split exists to avoid.
     pub fn trees(self) -> &'static [&'static str] {
         match self {
             Piece::Pack => &["assets"],
@@ -80,7 +33,6 @@ impl Piece {
     }
 
     /// What the piece is called in a message — and in a release: `pack 'xianxia'`,
-    /// `profiles/pack/xianxia.tar.zst`.
     pub fn noun(self) -> &'static str {
         match self {
             Piece::Pack => "pack",
@@ -90,20 +42,12 @@ impl Piece {
     }
 
     /// [`Piece::noun`], parsed back. `None` for a name no piece answers to,
-    /// which a caller must refuse rather than guess at.
     pub fn from_noun(noun: &str) -> Option<Piece> {
         Piece::ALL.into_iter().find(|p| p.noun() == noun)
     }
 }
 
 /// The three pieces a checkout is bound to, each with the name it was loaded
-/// from and the hash of what is on disk now.
-///
-/// `Deserialize` is hand-written so the pre-split shim applies *everywhere* a
-/// binding is read — `settings.json` and the ledger's stamp as well as
-/// `.bm/profile`. A derived impl would turn an old `{name, hash}` into an
-/// empty binding, which reads as "this workspace runs nothing" and trips the
-/// ledger gate on every workspace that exists.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Binding {
     #[serde(default)]
@@ -137,10 +81,6 @@ impl Binding {
     }
 
     /// The adapter name a cache path is keyed by.
-    ///
-    /// The bound adapter, or [`crate::paths::DEFAULT_ADAPTER`] when this
-    /// checkout has not been given one — which is the language it was already
-    /// using, and therefore what its pre-split caches are named after.
     pub fn cache_adapter(&self) -> String {
         if self.adapter.name.is_empty() {
             crate::paths::DEFAULT_ADAPTER.to_string()
@@ -150,10 +90,6 @@ impl Binding {
     }
 
     /// The engine name a cache path and an `engines/<name>/` tree are keyed by.
-    ///
-    /// The bound engine, or [`crate::paths::DEFAULT_ENGINE`] when this checkout
-    /// has never been given one — the engine it was already running before the
-    /// split gave the axis a slot in the binding.
     pub fn cache_engine(&self) -> String {
         if self.engine.name.is_empty() {
             crate::paths::DEFAULT_ENGINE.to_string()
@@ -179,7 +115,6 @@ impl Binding {
 }
 
 /// A binding's own fields, kept out of [`Stored`] so the untagged try-order
-/// cannot recurse through the shim it is standing beside.
 #[derive(Deserialize)]
 struct BindingFields {
     #[serde(default)]
@@ -191,10 +126,6 @@ struct BindingFields {
 }
 
 /// A one-line name for a binding: `xianxia · vi-VN · vieneu`.
-///
-/// Unnamed pieces are skipped rather than printed as blanks, so a checkout
-/// that has not split yet still reads as `xianxia` — the name the operator
-/// knows — instead of `xianxia ·  ·  `.
 pub fn label(binding: &Binding) -> String {
     let mut parts: Vec<String> = Vec::new();
     for piece in Piece::ALL {
@@ -211,11 +142,6 @@ pub fn label(binding: &Binding) -> String {
 }
 
 /// The pieces two bindings disagree on, in `Piece::ALL` order.
-///
-/// The ledger gate names them, because "another profile" does not tell an
-/// operator *what* changed — and the pieces do not carry the same weight: a
-/// different pack or adapter is a re-unpack of files, while a different engine
-/// invalidates the segment cache and every rendered clip.
 pub fn pieces_differing(a: &Binding, b: &Binding) -> Vec<Piece> {
     Piece::ALL
         .into_iter()
@@ -224,26 +150,17 @@ pub fn pieces_differing(a: &Binding, b: &Binding) -> Vec<Piece> {
 }
 
 /// Manifest stored as `manifest.json` at the release root.
-///
-/// The keys in `files` are the paths the release **unpacks to**, relative to the
-/// checkout root — `assets/…` for a pack, `adapters/<name>/…` for a language.
-/// That is not a detail: it is why `manifest_hash` over these keys is the same
-/// number [`verify_binding`] computes for the piece on disk, so a bundle and the
-/// tree it came from agree by construction instead of by a re-stamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub name: String,
     #[serde(default = "default_version")]
     pub version: String,
     /// Which piece this release is ([`Piece::noun`]). A pre-split manifest has
-    /// no field and is therefore a **pack**, which is what the one bundle held
-    /// before the split — the art, with the language riding along uninvited.
     #[serde(default = "default_piece")]
     pub piece: String,
     #[serde(default)]
     pub files: BTreeMap<String, String>,
     /// The assets this one was built on, name and content hash, in the order
-    /// they were folded in. Empty for a language, which is built on nothing.
     #[serde(default)]
     pub deps: Vec<crate::compose::DepRecord>,
 }
@@ -257,20 +174,6 @@ fn default_piece() -> String {
 }
 
 /// The load pointer: which profile the live tree claims to be. Empty
-/// (`Default`) means unset — a workspace that never named one.
-///
-/// [`version`](Self::version) is the **release** version, not a build counter:
-/// the third half of what a release is named by, and the reason a box can be
-/// told which artifact to download instead of only which bytes it must end up
-/// with. `tools/profile.sh pack <name> --version 0.1.0` writes it, and the tag
-/// it produces is the tag the release is cut under — so the pointer and the URL
-/// a box fetches are two readings of one string, never two things to keep in
-/// step.
-///
-/// Empty on a pointer written before this field existed, and empty is the *safe*
-/// direction: [`crate::artifact::PackRelease::resolve`] reads it as "no release",
-/// and a box with no release is pushed the profile exactly as it was before any
-/// of this existed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pointer {
     pub name: String,
@@ -280,20 +183,11 @@ pub struct Pointer {
 }
 
 /// The pre-split bundle: one file holding every piece.
-///
-/// Kept only so a checkout that has one keeps parsing it; a release is per
-/// piece now ([`release_path`]), because the two halves change for different
-/// reasons and a second language should cost a prompt file rather than a second
-/// copy of the art.
 pub fn bundle_path(root: &Path, name: &str) -> PathBuf {
     root.join("profiles").join(format!("{name}.tar.zst"))
 }
 
 /// Where a piece's releases live: `profiles/<piece>/`.
-///
-/// A directory per piece rather than one flat `profiles/`, so `xianxia` the pack
-/// and `xianxia` the language cannot shadow each other — which is the whole
-/// point of the split, and would be the first thing a flat directory broke.
 pub fn release_dir(root: &Path, piece: Piece) -> PathBuf {
     root.join("profiles").join(piece.noun())
 }
@@ -304,10 +198,6 @@ pub fn release_path(root: &Path, piece: Piece, name: &str) -> PathBuf {
 }
 
 /// Build the manifest for one piece of the live tree.
-///
-/// The engine is refused: it is not a bundle. Its tree is gigabytes of weights
-/// fetched from a models release and rsynced, and "pack it into a tar.zst" is
-/// the one thing the engine axis has never done.
 pub fn compute_manifest(
     layout: &crate::paths::Layout,
     piece: Piece,
@@ -316,11 +206,6 @@ pub fn compute_manifest(
 ) -> Result<Manifest> {
     let root = layout.root.as_path();
     // The pack is the tree **in force** — the workspace's own composition when
-    // it has one, the checkout's otherwise — while a language's trees are the
-    // checkout's. `base` is what the manifest keys are relative to, and it has
-    // to be the tree's parent: `push_pack` rsyncs `layout.assets()`, and the
-    // receipt this manifest becomes is diffed against the box, so a manifest
-    // rooted anywhere else describes files the push never sent.
     let (base, dirs): (PathBuf, Vec<String>) = match piece {
         Piece::Pack => (
             layout.assets().parent().unwrap_or(root).to_path_buf(),
@@ -345,7 +230,6 @@ pub fn compute_manifest(
         piece: piece.noun().to_string(),
         files: hash_files(&base, files).context("hashing the live piece")?,
         // Only an asset is built on anything, and the record of what it was
-        // built on is the one composition already keeps.
         deps: match piece {
             Piece::Pack => crate::compose::read_marker(&layout.assets()).deps,
             _ => Vec::new(),
@@ -354,43 +238,6 @@ pub fn compute_manifest(
 }
 
 /// The manifest for a **dependency pack**: the sanitized, self-contained release
-/// of an asset the live tree inherits from.
-///
-/// The live checkout is a composition — `assets/` resolves a preset over its
-/// `deps`, with the dependency trees unpacked at `assets/_extends/<name>/` — and
-/// only the composed preset is runnable. But a root (`common`, `weapons`,
-/// `magic`) is also a pack a fresh checkout can start from, and publishing those
-/// means releasing the *dependency* tree, not the live one. So the release
-/// unpacks the dependency tree **to `assets/`**, where the pack's own resolution
-/// reads it, and carries a generated `assets/pack.json` saying what its
-/// extension point is. That is what "sanitized" means here: pure content, the
-/// files in the folders every worker reads, and no `_extends/` input inside the
-/// bundle — a bundle that did carry it would re-fold composition inputs into
-/// whatever unpacked it.
-///
-/// The manifest's keys are still the paths the release unpacks to, so
-/// [`manifest_hash`] over them is the same number [`tree_hash`] computes for the
-/// dependency on live disk — the hash the composition record (and therefore a
-/// parent's manifest `deps`) names. A release, the live tree and the records
-/// that say what was built on what therefore agree by construction, which is
-/// what keeps them in sync rather than three numbers somebody has to compare.
-/// The dependency's own `pack.json` and `_extends.json`, where it had them, are
-/// bookkeeping and are replaced or refused rather than inherited.
-///
-/// **A composed tree is not a dependency release.** `deps` are unpacked flat —
-/// one directory per pack under `assets/_extends/`, each folded once — so a
-/// dependent that named a *composition* would put a second copy of that
-/// composition's own parents inside the tree, which is the duplication the flat
-/// shape exists to avoid; and `"deps": []` in its manifest would be a false
-/// claim about what it is. The route is to name the composition's **roots** in
-/// the dependent's own `deps`, at the position each should fold at, and let
-/// [`crate::compose::closure`] order them (`assets/_extends.json`'s `tree`
-/// records what it reached and through which pack). A composition is released as
-/// *itself* — the composed pack bundle — and a checkout that extends it names its
-/// roots rather than unpacking it as a dependency.
-///
-/// `Piece::Adapter` is refused: a language is not composed, so it has no
-/// dependency tree to release.
 pub fn compute_dep_manifest(
     layout: &crate::paths::Layout,
     dep: &str,
@@ -423,9 +270,6 @@ pub fn compute_dep_manifest(
             .context("a dependency file escaped its own tree")?;
         let rel = rel.display().to_string();
         // The dependency's own bookkeeping is not content — the same rule
-        // `compose` applies when folding a dependency in. `pack.json` describes
-        // *its* extension point and a consumer writes their own; `_extends.json`
-        // is a record about a resolution that is not travelling with this tree.
         if rel == crate::compose::PACK_FILE || rel == crate::compose::MARKER_FILE {
             continue;
         }
@@ -441,11 +285,6 @@ pub fn compute_dep_manifest(
 }
 
 /// Dependencies the live pack was built against that have since moved.
-///
-/// A comparison, never a guess: the composition record holds each dependency's
-/// tree hash, so an edited or re-unpacked parent is *named* here — and the
-/// asset that was packed against it is stale until it is resolved again. This
-/// is the check that turns "editing a parent" into "rebuilding the children".
 pub fn stale_dependencies(layout: &crate::paths::Layout) -> Result<Vec<String>> {
     Ok(crate::compose::resolve(&layout.assets(), true)?.stale)
 }
@@ -461,10 +300,6 @@ fn file_hash(path: &Path) -> Result<String> {
 }
 
 /// sha256 of some bytes, hex — the one digest everything here is built from.
-///
-/// Shared with [`crate::compose`], which hashes a single registry *value* to
-/// tell an entry it inserted from the same key the operator has since edited.
-/// One primitive, so "the bytes changed" means the same thing in both places.
 pub(crate) fn content_hash(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
@@ -480,13 +315,6 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
 }
 
 /// The manifest hash over the live tree: sha256 of `path + NUL + content-hash`
-/// lines in sorted order. Sorting (BTreeMap) keeps it stable across machines.
-///
-/// Two steps, deliberately: walk, then hash. The walk is a few dozen `readdir`
-/// calls and the hashing is 57 MB of sha256 on this repo — measured at 0.60 s
-/// release and 2.07 s debug, single-threaded, on **every** `serve` and `worker`
-/// start. Splitting them lets the hashing run on every core, which is the one
-/// thing that made that number worth attacking.
 pub fn hash_live(root: &Path) -> Result<BTreeMap<String, String>> {
     hash_files(root, live_files(root))
 }
@@ -497,20 +325,11 @@ fn live_files(root: &Path) -> Vec<PathBuf> {
 }
 
 /// Every file under `dirs`, relative to `root`, sorted.
-///
-/// `.DS_Store` is skipped because OS noise is not content: the pack manifest
-/// skips it too, so a Finder visit must never hash-drift the live tree.
-///
-/// Per `dirs` rather than over [`LIVE_DIRS`] so each piece can be hashed on
-/// its own — which is the point of the split: a prompts edit must move the
-/// adapter without moving the pack.
 pub(crate) fn files_under<S: AsRef<str>>(root: &Path, dirs: &[S]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in dirs {
         let dir = dir.as_ref();
         // An empty entry walks `root` itself, which is what a caller holding a
-        // tree in hand (a composition dependency) wants: `root.join("")` would
-        // prefix every path with `./` and hash the same tree twice over.
         let base = if dir.is_empty() {
             root.to_path_buf()
         } else {
@@ -529,10 +348,6 @@ pub(crate) fn files_under<S: AsRef<str>>(root: &Path, dirs: &[S]) -> Vec<PathBuf
                     continue;
                 }
                 // A composition *input*, not this piece's own content:
-                // `assets/_extends/` holds other assets' whole trees, so
-                // hashing them would both double the pack's digest and make a
-                // dependency's edit read as the child's. What is hashed is the
-                // resolved result, which is what every reader sees.
                 if p.is_dir() && name == Some(crate::compose::EXTENDS_DIR) {
                     continue;
                 }
@@ -549,16 +364,6 @@ pub(crate) fn files_under<S: AsRef<str>>(root: &Path, dirs: &[S]) -> Vec<PathBuf
 }
 
 /// The adapter's trees, relative to `root`, for the binding that names it.
-///
-/// The bundle's pair when the checkout has one —
-/// `adapters/<name>/prompts` and `adapters/<name>/crawl` — else the pre-split
-/// flat `prompts/`, where the crawlers were still the pack's and were therefore
-/// hashed as the pack's.
-///
-/// The **checkout's** scope, not the workspace's: the load pointer lives at the
-/// root (`.bm/profile`), so the hash it holds has to be a claim about the root's
-/// trees. A workspace that carries its own prompts is read through
-/// `Layout::prompts_base` and is deliberately not part of this claim.
 fn adapter_dirs(root: &Path, adapter: &str) -> Vec<String> {
     let dir = crate::paths::ADAPTERS_DIR;
     if root.join(dir).join(adapter).is_dir() {
@@ -572,17 +377,6 @@ fn adapter_dirs(root: &Path, adapter: &str) -> Vec<String> {
 }
 
 /// Hash `files` on as many threads as the machine has cores, and fold them into
-/// the same sorted map the sequential version produced.
-///
-/// The result must be **byte-identical** to hashing one at a time in sorted
-/// order — the pointer on every machine was computed that way, and a different
-/// order would be a different hash, i.e. a false "profile drift" on every box.
-/// A worker takes the next index from an atomic counter, so the assignment is
-/// dynamic and a slow file cannot leave a thread idle; the fold is a BTreeMap,
-/// so insertion order does not matter.
-///
-/// One thread is used when there is one file or one core: spawning a thread to
-/// hash a fixture is slower than doing it.
 pub(crate) fn hash_files(root: &Path, files: Vec<PathBuf>) -> Result<BTreeMap<String, String>> {
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -649,12 +443,6 @@ pub fn manifest_hash(files: &BTreeMap<String, String>) -> String {
 }
 
 /// The manifest hash over an explicit set of trees, relative to `root`.
-///
-/// The number a bundle manifest folds to and a binding's piece hash carries,
-/// computed on demand rather than read from a pointer — which is what lets a
-/// workspace stamp its own binding at creation without a pointer to read.
-/// Refuses an empty set: a hash over nothing is not a claim, it is a blank
-/// that looks like one.
 pub fn trees_hash(root: &Path, dirs: &[String]) -> Result<String> {
     let files = files_under(root, dirs);
     anyhow::ensure!(
@@ -666,13 +454,6 @@ pub fn trees_hash(root: &Path, dirs: &[String]) -> Result<String> {
 }
 
 /// Read a release bundle's `manifest.json` back, and fold it to the one number
-/// that release is named by.
-///
-/// A function rather than a `serde_json` call at each site because the hash is
-/// the *identity* of a release, and every consumer — the box that downloads it,
-/// the publish gate, the provisioner deciding whether a release exists at all —
-/// has to arrive at it by the same route, or a "verified" bundle is only
-/// verified against a differently-computed number.
 pub fn read_manifest_at(path: &Path) -> Result<Manifest> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -685,11 +466,6 @@ pub fn read_manifest_at(path: &Path) -> Result<Manifest> {
 }
 
 /// The stored `.bm/profile`, in either shape.
-///
-/// `Legacy` is the pre-split document — `{name, hash}`, one hash over `assets/`
-/// **plus** `prompts/` — and it has to keep parsing: every checkout that
-/// exists carries one. `Legacy` is tried first and requires both fields, so a
-/// binding document (which has neither) falls through to `Split`.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Stored {
@@ -707,11 +483,6 @@ impl<'de> Deserialize<'de> for Binding {
 }
 
 /// The load pointer, as a binding.
-///
-/// The shim: a legacy document becomes `pack = {name, hash}` with the adapter
-/// and engine unnamed. No per-piece hash can reproduce the old combined one,
-/// so the first [`verify_binding`] re-stamps the pack and the adapter from the
-/// live trees — which is what `verify` has always done on drift.
 pub fn read_binding(root: &Path) -> Result<Binding> {
     let path = pointer_path(root);
     let text = std::fs::read_to_string(&path).with_context(|| {
@@ -723,20 +494,6 @@ pub fn read_binding(root: &Path) -> Result<Binding> {
 }
 
 /// The binding **in force** for a layout: the active workspace's own
-/// `settings.json` binding when it names a piece, the checkout's `.bm/profile`
-/// for every piece it does not.
-///
-/// The merge is piece by piece, not all-or-nothing, because that is what
-/// [`crate::paths::Layout::resolve`] already does for the adapter and the engine:
-/// a workspace made before presets names only its pack, and its language and
-/// engine still come from the checkout. Reading the whole binding from one side
-/// or the other would either lose the workspace's pack or invent an adapter it
-/// never claimed.
-///
-/// This is the one answer to "what is this book bound to", so the dashboard,
-/// `profile check` and the serve gate cannot each arrive at a different one.
-/// The checkout pointer is the fallback; a checkout that has none and a
-/// workspace that names nothing is an unset binding, not an error.
 pub fn in_force(layout: &crate::paths::Layout) -> Result<Binding> {
     if layout.work == layout.root {
         return read_binding(&layout.root);
@@ -761,9 +518,6 @@ pub fn write_binding(root: &Path, binding: &Binding) -> Result<()> {
 }
 
 /// The pack piece: what "the profile" meant before the split.
-///
-/// Still the answer six call sites want — the dashboard's header, the release
-/// path, the provision stamp — so the split does not have to reach them yet.
 pub fn read_pointer(root: &Path) -> Result<Pointer> {
     read_binding(root).map(|b| b.pack)
 }
@@ -776,28 +530,11 @@ pub fn write_pointer(root: &Path, pointer: &Pointer) -> Result<()> {
 }
 
 /// The load gate: the pointer must exist. A drifted live tree (hand edit,
-/// `:sound` retune, different unpack) is adopted, not refused: the piece is
-/// re-stamped to the live hash so the next run is clean, and the operator is
-/// told to `profile pack <name>` to save it back to a bundle. An empty live
-/// tree is still refused — that is a missing unpack, not an edit.
 pub fn verify(root: &Path) -> Result<Pointer> {
     verify_binding(root, None).map(|b| b.pack)
 }
 
 /// [`verify`], one piece at a time.
-///
-/// Each piece is hashed over its own trees, so an edited `prompts/analyze.txt`
-/// moves the adapter and leaves the pack untouched — and the warning names the
-/// piece that moved, which is the whole point of having names for them.
-///
-/// A piece whose tree is absent is left exactly as it is: a checkout that has
-/// not split yet has no adapter bundle, and that is not an error. Both of the
-/// file-backed trees missing *is* — that is a missing unpack.
-///
-/// The engine's hash is not computed here. Its identity is its declaration
-/// (the roster plus the name), not the bytes of its weights: `hash_files`
-/// reads every file, and `models/` is gigabytes. `engine` names the piece
-/// from `settings.engine`, which is where that name lives.
 pub fn verify_binding(root: &Path, engine: Option<&str>) -> Result<Binding> {
     let mut binding = read_binding(root)?;
     if let Some(name) = engine {
@@ -839,20 +576,6 @@ pub fn verify_binding(root: &Path, engine: Option<&str>) -> Result<Binding> {
 }
 
 /// [`verify_binding`], for a layout: the load gate, over the binding **in
-/// force**.
-///
-/// The default root workspace keeps the pre-workspace behaviour exactly — the
-/// checkout's `.bm/profile` is read and a drifted live tree is adopted there.
-/// A real workspace is verified **read-only**: its binding lives in its own
-/// `settings.json`, and that document is also the ledger's stamp (the gate in
-/// [`pieces_differing`]'s caller compares the two), so re-stamping the pack
-/// hash here would make every following `serve` refuse a book whose ledger is
-/// perfectly consistent. Adopting workspace drift is a re-compose or a
-/// reconcile, not a load-time stamp.
-///
-/// What this refuses is unchanged: a binding that names nothing, or a live
-/// `assets/` + `prompts/` that are both missing or empty, is a missing unpack
-/// rather than an edit.
 pub fn verify_layout(layout: &crate::paths::Layout, engine: Option<&str>) -> Result<Binding> {
     if layout.work == layout.root {
         return verify_binding(&layout.root, engine);
@@ -862,8 +585,6 @@ pub fn verify_layout(layout: &crate::paths::Layout, engine: Option<&str>) -> Res
         binding.engine.name = name.to_string();
     }
     // The trees the layout actually reads: the workspace's own `assets/` when
-    // it has one, the checkout's otherwise — the same work-first shape
-    // `Layout::assets` gives every reader.
     let pack = if layout.work.join("assets").is_dir() {
         files_under(&layout.work, &["assets"])
     } else {
@@ -883,18 +604,11 @@ pub fn verify_layout(layout: &crate::paths::Layout, engine: Option<&str>) -> Res
 }
 
 /// Copy the tracked test fixture (`rust/fixtures/profile/`) over `dest`,
-/// creating `assets/` + `prompts/`. The one way tests get a profile: they
-/// must never read the live (ignored, maybe absent) tree.
-///
-/// The path resolves from bm-core's own manifest dir, so callers in other
-/// crates land in the same place.
 pub fn install_fixture(dest: &Path) -> Result<()> {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/profile");
     for dir in LIVE_DIRS {
         let from = src.join(dir);
         // The fixture ships what a test needs, not every name in `LIVE_DIRS`:
-        // a language's crawlers are optional, and most of the suite never
-        // crawls at all.
         if !from.is_dir() {
             continue;
         }

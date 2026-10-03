@@ -44,8 +44,6 @@ pub(crate) fn draw_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
         }
         Some(_) => {
             // Pipeline order with pipeline denominators: each stage over what
-            // the previous one finished, so `digest 3/10` means three of the
-            // ten crawled chapters, not three of a hundred ledger rows.
             for (st, done, denom) in pipeline_counts(&app.tasks) {
                 let failed = app
                     .tasks
@@ -110,8 +108,6 @@ pub(crate) fn draw_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
 /// The Tasks overlay: every task, its state, and the reason it is where it is.
 pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &TasksView) {
     // Like the cast overview: full screen on the compact tier, a wide panel
-    // otherwise. A ledger table squeezed into 76 columns loses the detail
-    // column, which is the one thing this screen exists to show.
     let compact = size_class(f.area().width, f.area().height) == Size::Compact;
     let area = if compact {
         f.area()
@@ -121,11 +117,8 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
     f.render_widget(Clear, area);
 
     // Clone the compact ledger so hit-region bookkeeping can coexist with the
-    // borrowed rows used by the table renderer.
     let all = app.tasks.clone();
     // Who is still answering, read once: the facet filter, the counts and the
-    // row tint below all have to agree about a silent box, and three reads
-    // could catch a beat landing between them.
     let live = app.live_worker_ids();
     let shown = filtered_tasks(&all, &view.filter, view.facet, &live);
     let shelved = all.iter().filter(|t| t.state == TaskState::Shelved).count();
@@ -178,9 +171,6 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
         ));
     }
     // The one number no state column can give: a row that is *out* with a box
-    // that stopped answering. It is not a state — it is a state plus a fact
-    // about somebody else — so it is appended rather than counted as a state,
-    // and only when there is one.
     if abandoned_rows > 0 {
         summary.push(Span::styled(
             format!("  ·  {abandoned_rows} abandoned"),
@@ -198,10 +188,6 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
     );
 
     // The facet bar: the chips `←/→` steps through, in the order it steps
-    // them *and* drawn in that order, because a bar that showed them
-    // differently would lie about where the next keypress goes. The active
-    // chip is bracketed rather than merely coloured, so it survives a theme
-    // with no colour.
     let dim = Style::default().fg(Color::DarkGray);
     let mut facets: Vec<Span> = vec![Span::styled("←→ ", dim)];
     for f in Facet::ALL {
@@ -218,7 +204,6 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
     f.render_widget(Paragraph::new(Line::from(facets)), rows[1]);
 
     // The filter line is always present, like the cast screen's, so an active
-    // filter can never be invisible.
     let filter_line = if view.filter.trim().is_empty() {
         Line::from(Span::styled(
             "filter: (a stage, state or chapter — shelved, digest, 42; combines with the facet)",
@@ -249,8 +234,6 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
         };
         let mut why = vec![format!("no {which}task matches “{}”", view.filter.trim())];
         // Both halves of the narrowing are named, because either one alone can
-        // be the reason the list is empty and the operator is looking at the
-        // one they set three keypresses ago.
         if view.facet != Facet::All {
             why.push("←→ steps the facet · Ctrl-U clears both the facet and the filter".into());
         } else {
@@ -317,11 +300,6 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
                     cell(why_label(&t.detail)),
                 ];
                 // Rank by urgency: an actionable failure outranks a running
-                // task, which outranks finished history. A row held by a box
-                // that has gone quiet outranks both — it is the one state that
-                // will not move on its own, and magenta is the only colour on
-                // this table not already spoken for by a severity the ledger
-                // itself chose.
                 let mut row = if abandoned(t, &live) {
                     Row::new(cells).style(style_bold_of(colour, Color::Magenta))
                 } else {
@@ -340,8 +318,6 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
                 };
                 if idx == cursor {
                     // Tint, not REVERSED: reversing wiped the row's severity
-                    // style, so the highlighted shelved row stopped reading
-                    // red — the one state the operator hunts for.
                     row = row.style(Style::default().bg(selection_bg()));
                 }
                 row
@@ -376,9 +352,6 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
     } else {
         let t = &shown[view.cursor.min(shown.len() - 1)];
         // Only a row that is *out* with someone has anything to release, and
-        // the holder is what `W` names. Suggesting either key on a pending row
-        // would be advice that no-ops, which is how a hint line teaches an
-        // operator to distrust it.
         let held = if matches!(t.state, TaskState::Assigned | TaskState::Running) {
             t.assigned_to
                 .as_deref()
@@ -406,9 +379,6 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
                 ),
             ]),
             // The filter line is one row above and labels itself, so this
-            // line spends its width on the keys instead of repeating it — at
-            // 114 columns `Esc/q close` is the first thing to fall off the
-            // end, and it is the one key on the row nobody can guess.
             Line::from(vec![
                 Span::styled("↑/↓ move · PgUp/PgDn page · ←→ facet · ", dim),
                 release,

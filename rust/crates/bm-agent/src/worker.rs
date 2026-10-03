@@ -14,13 +14,6 @@ pub(crate) async fn worker_loop(
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         // The inductor is loopback or LAN. An ambient `HTTP_PROXY` would
-        // otherwise intercept every register/beat/task/complete and answer in
-        // its place, which surfaces as a 502 from nowhere and a worker that
-        // never joins. Same reasoning as `api::sidecar_client`.
-        //
-        // Deliberately *not* applied to `run_crawl`: a chapter URL is the one
-        // thing here that is genuinely on the internet, and a proxy is exactly
-        // what it should use.
         .no_proxy()
         .build()?;
     let hostname = hostname_simple();
@@ -40,8 +33,6 @@ pub(crate) async fn worker_loop(
     let mut channel: Option<std::sync::Arc<push::Push>> = None;
     if let Some(port) = serve_tasks {
         // A worker with no token refuses to serve rather than serving openly:
-        // "authenticated or off" is the only safe pair of states for a channel
-        // that carries instructions.
         let Some(token) = bm_core::token::read(&layout.root) else {
             anyhow::bail!(
                 "--serve-tasks needs a cluster token at {} — the inductor generates one and provisioning ships it; without it this worker would accept instructions from anything that can reach the port",
@@ -60,15 +51,10 @@ pub(crate) async fn worker_loop(
             last_contact: std::sync::atomic::AtomicU64::new(bm_proto::now_secs()),
             last_task_end: std::sync::atomic::AtomicU64::new(bm_proto::now_secs()),
             // The sidecar is kept by default, the render lifecycle is written
-            // against that, and the inductor's `POST /sidecar-policy` is the
-            // one thing that may clear it (an operator turning render off).
             keep_sidecar: std::sync::atomic::AtomicBool::new(true),
             // No opinion until the inductor pushes one: the sidecar's own
-            // default (or its `BM_TTS_THREADS`) stands.
             tts_threads: std::sync::atomic::AtomicU64::new(push::THREADS_UNSET),
             // Merge data-plane: the hook base *is* the inductor API through
-            // the reverse tunnel. `no_proxy`, like every loopback client
-            // here, an ambient HTTP_PROXY would answer instead of the tunnel.
             fetch_http: reqwest::Client::builder()
                 .no_proxy()
                 .build()
@@ -87,12 +73,6 @@ pub(crate) async fn worker_loop(
     }
 
     // ── Serve-only ──────────────────────────────────────────────────────────
-    // No inductor URL means no scheduling calls home, and that is the whole
-    // guarantee: this worker never asks for work, it holds no address to
-    // ask at. The one dial-out it keeps is data, not scheduling: a merge
-    // pulls the take files it lacks through the reverse tunnel's hook base
-    // (which only works while the inductor holds the tunnel open), exactly
-    // as a render pushes its units there.
     let Some(inductor) = inductor else {
         let Some(push) = channel else {
             anyhow::bail!(
@@ -105,22 +85,14 @@ pub(crate) async fn worker_loop(
             serve_tasks.unwrap_or_default()
         );
         // The warm sidecar is reaped when the box goes idle, so keeping it
-        // across tasks never means holding 2.85 GB indefinitely.
         tokio::spawn(push::sidecar_reaper(push.clone()));
         // The completion hook: a loopback address that **is** the inductor's
-        // control API, the reverse tunnel's far end (bm-inductor's tunnel
-        // supervisor). This still dials nothing on its own: the address only
-        // works while the inductor holds the tunnel open, and the sender
-        // stays silent until the inductor has been silent. The token is the
-        // cluster's own, already held for the instruction channel.
         let hook = hook::Hook::from_base(
             &format!("http://127.0.0.1:{}", bm_proto::DEFAULT_HOOK_PORT),
             &push.token,
         );
         tokio::spawn(hook::supervise(hook, push.clone(), shared.clone()));
         // The worker's own off switch. The inductor's timer covers the normal
-        // case; this covers the inductor dying, where silence is otherwise
-        // indistinguishable from "no work yet".
         idle_watchdog(push, Duration::from_secs(idle_secs(&settings) + 90)).await;
         return Ok(());
     };
@@ -141,7 +113,6 @@ pub(crate) async fn worker_loop(
         version: VERSION.into(),
     };
     // The inductor may not be up yet (or the network may flap): retry
-    // registration forever instead of dying on the first failure.
     loop {
         match http
             .post(format!("{inductor}/api/register"))
@@ -209,15 +180,9 @@ pub(crate) async fn worker_loop(
             },
         };
         // The stage is over as soon as `run_offer` returns. Do not leave its
-        // terminal `... done` activity visible while the completion report is
-        // being retried: from the worker's point of view it is idle, and the
-        // report transport is bookkeeping, not work. The task id is also
-        // cleared here so a status poll cannot mistake the old stage for a
-        // live offer while `/api/complete` is in flight.
         clear_task(&shared);
         println!("[{}] {}", if res.ok { "ok" } else { "FAIL" }, res.detail);
         // Reports must land: a lost merge report strands a finished mp3 on
-        // this machine until the lease expires. Retry, then move on.
         let report = Complete {
             worker_id: worker_id.clone(),
             task_id: offer.task_id.clone(),
@@ -253,15 +218,6 @@ pub(crate) async fn worker_loop(
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
         // **No sweep.** A non-local worker's segment directory used to be
-        // scratch, deleted here once its units had been uploaded and the
-        // report accepted. That stopped being true when the merge moved onto
-        // the renderer: this directory is now the merge's *input*, and the
-        // inductor's copy is the one that is redundant (it exists for the
-        // completion gate and for planning what is still missing). Deleting it
-        // here failed every remote merge a stage later with missing segments.
-        //
-        // Reclaiming it is a job for a `gc` pass that knows the chapter is
-        // finished, not for the worker that just produced it.
         let _ = (offer.render_units.as_deref(), reported);
     }
 }
@@ -273,9 +229,6 @@ pub(crate) fn hostname_simple() -> String {
 }
 
 /// What a hook post that goes nowhere means, said once. When the worker
-/// stashes a completion and the tunnel is down (inductor dead, or older than
-/// the tunnel), every pass would otherwise log the same failure with no
-/// remedy attached, which is how a real problem becomes unreadable noise.
 pub(crate) fn tunnel_missing_hint(task_id: &str, attempt: u64) {
     if attempt.is_multiple_of(12) {
         println!(

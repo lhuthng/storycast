@@ -1,5 +1,4 @@
 //! Cloud view keys: navigate, re-read, close. Nothing destructive here —
-//! `:up`/`:down` stay on the command line, like every other gated action.
 use crate::tui::input::Flow;
 use crate::tui::{
     app::App,

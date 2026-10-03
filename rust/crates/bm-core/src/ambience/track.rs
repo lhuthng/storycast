@@ -20,11 +20,9 @@ pub(crate) fn s(v: impl ToString) -> String {
 }
 
 /// The edge fade every spoken slot gets: a line must not begin or end on a hard
-/// sample. A tenth of a second is a click guard, not an attack.
 pub const FADE_S: f64 = 0.1;
 
 /// `sox`, the second audio engine the merge shells out to. A voice treatment
-/// that names a `sox` chain needs it, exactly as the beds need ffmpeg.
 fn sox(args: &[String]) -> Result<()> {
     let out = Command::new("sox")
         .args(args)
@@ -40,7 +38,6 @@ fn sox(args: &[String]) -> Result<()> {
 }
 
 /// The longest decay any span in this chapter asks for. Zero when nothing
-/// reserves a tail, which is when the mix is exactly as long as the voice.
 pub(crate) fn voice_reserve(spans: &[Span], presets: &BTreeMap<String, VoiceFx>) -> f64 {
     spans
         .iter()
@@ -51,7 +48,6 @@ pub(crate) fn voice_reserve(spans: &[Span], presets: &BTreeMap<String, VoiceFx>)
 }
 
 /// Pad `raw` out to `span_len` and put a [`FADE_S`] fade at each edge. Used for
-/// a slot with no treatment, which still must not start or end on a click.
 fn fade_edges(raw: &Path, out: &Path, span_len: f64) -> Result<()> {
     let af = format!(
         "apad=whole_dur={span_len:.3},atrim=0:{span_len:.3},\
@@ -77,12 +73,6 @@ fn fade_edges(raw: &Path, out: &Path, span_len: f64) -> Result<()> {
 }
 
 /// The whole voice track: every slot's piece treated and placed at its own
-/// offset, then summed.
-///
-/// **Placement, not concatenation.** A concat grew the track by every reserved
-/// tail and slid the speech against the beds; placing each piece where the
-/// script put it keeps the turn fixed, with the decay ringing under the next
-/// line.
 pub(crate) fn build_voice_track(
     voice_wav: &Path,
     slots: &[Slot],
@@ -98,7 +88,6 @@ pub(crate) fn build_voice_track(
             continue;
         }
         // Seek BEFORE the input: `-ss` as an input option seeks (PCM is
-        // sample-accurate for this), so each piece decodes only its own span.
         let raw = work.join(format!("v{n}.raw.wav"));
         ffmpeg(&[
             "-y".into(),
@@ -137,11 +126,6 @@ pub(crate) fn build_voice_track(
 }
 
 /// Run one slot's treatment: the effect, the reserved tail, the edge fades, and
-/// (for the Narrator) a tenth of the depth by blending back toward dry.
-///
-/// `depth` is 1.0 for a character and [`NARRATOR_DEPTH`] for the Narrator: a
-/// blend against the dry piece, because "in the room but not standing in it"
-/// is a mix of two signals rather than a knob the effect has.
 fn apply_voice_fx(
     fx: &VoiceFx,
     depth: f64,
@@ -193,8 +177,6 @@ fn apply_voice_fx(
         }
         FxEngine::Sox => {
             // SoX's `reverb` never extends its own output, so the room has to
-            // ring into silence that already exists: pad the reserved tail on
-            // *first*, run the chain, then land the edges on the result.
             let padded = work.join(format!("{stem}.pad.wav"));
             ffmpeg(&[
                 "-y".into(),
@@ -248,8 +230,6 @@ fn apply_voice_fx(
         return Ok(());
     }
     // The dry leg is the un-treated piece: it is mixed back in for the
-    // Narrator, so it needs the same edge fades the wet piece got, or the
-    // blend would put the click back at full amplitude over a faded tail.
     let dry_len = (span_len - fx.tail_s()).max(0.0);
     let dry_fade_out = (dry_len - FADE_S).max(0.0);
     ffmpeg(&[
@@ -281,7 +261,6 @@ fn apply_voice_fx(
 }
 
 /// Sum the slot pieces at their absolute offsets, then pad the whole track out
-/// to `total` (the voice plus the reserved tail).
 fn place_voice(pieces: &[(PathBuf, f64)], out: &Path, total: f64) -> Result<()> {
     if pieces.is_empty() {
         return ffmpeg(&[

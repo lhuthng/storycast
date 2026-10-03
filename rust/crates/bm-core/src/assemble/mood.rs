@@ -2,7 +2,6 @@ use super::plan::seg_text;
 use serde_json::Value;
 
 /// Mood -> (temperature, silence_p). Calm reads steady; hot moods swing wider
-/// and pause harder. Retune here — filenames do not depend on these values.
 pub const MOOD_TAKE: [(&str, f64, f64); 18] = [
     ("neutral", 0.80, 0.15),
     ("calm", 0.72, 0.12),
@@ -57,13 +56,6 @@ pub fn mood_cluster(mood: &str) -> String {
 }
 
 /// The acting-mood vocabulary rendered for the digest prompt: the canonical
-/// names of [`MOOD_TAKE`], comma separated.
-///
-/// Rendered from the table rather than written into the prompt text, so the
-/// prompt and [`mood_cluster`] cannot drift: every offered token resolves to a
-/// take. The prompt used to carry this list inside a section the Rust override
-/// deleted, so the analyzer saw no list and any coined word silently floored to
-/// `neutral` here.
 pub fn mood_palette() -> String {
     MOOD_TAKE
         .iter()
@@ -81,7 +73,6 @@ pub fn take_for_mood(cluster: &str) -> (f64, f64) {
 }
 
 /// Hottest mood in the run wins — one expressive line should lift the whole breath.
-/// No neutral floor: a uniformly calm run reads calm, not neutral.
 pub fn mood_take(segments: &[Value], idx: &[usize]) -> (f64, f64) {
     let mut best: Option<(f64, f64)> = None;
     for i in idx {
@@ -98,7 +89,6 @@ pub fn mood_take(segments: &[Value], idx: &[usize]) -> (f64, f64) {
 }
 
 /// Plain joined text for local engines (the acting style is baked into the
-/// voice, not the prompt).
 pub fn run_text(segments: &[Value], idx: &[usize]) -> String {
     idx.iter()
         .map(|i| seg_text(&segments[*i]))
@@ -127,12 +117,6 @@ mod tests {
     }
 
     /// **The regression this table's range once caused.** Every temperature here
-    /// is 0.70 or above, and handed to pocket's flow model those come back as a
-    /// fraction of a second of unusable static on some seeds — so a whole chapter
-    /// was merged out of takes that were never speech, while sound effects and
-    /// music (which never pass through here) were fine. `EngineDecl::
-    /// max_temperature` is the clamp, and this asserts it is total for that
-    /// engine and invisible to the ones the table was written for.
     #[test]
     fn every_mood_temperature_is_speakable_by_every_declared_engine() {
         use crate::voices::{clamp_temperature, ENGINES};
@@ -157,7 +141,6 @@ mod tests {
             }
         }
         // And the unknown engine is not the broken one: no ceiling, the way every
-        // other answer in `voices` treats a name it does not declare.
         assert_eq!(clamp_temperature("whoever", 0.9), 0.9);
     }
 }

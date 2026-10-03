@@ -6,7 +6,6 @@ use crate::paths::Layout;
 const BROKEN: &str = "Chương 77: Cô đơn\nHắn nhìn ra cửa sổ.\n\"Ta sẽ đi.\nHắn quay lưng bước đi.";
 
 /// A layout whose `prompts/` tree resolves to the shipped adapter templates,
-/// which is what a real workspace gets.
 fn workspace() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("bm-repair-prompt-{}", std::process::id()))
 }
@@ -14,14 +13,9 @@ fn workspace() -> std::path::PathBuf {
 #[test]
 fn the_repair_pass_renders_from_the_prompt_file_not_a_hardcoded_string() {
     // The template is a file an operator can edit and a language can
-    // translate, like the other two. This pins that: both shipped adapters
-    // carry it, it is rendered with the gate's paragraph, and the contract
-    // the verifier enforces is appended by code regardless.
     for adapter in ["vi-VN", "xianxia-en-US"] {
         let root = workspace().join(adapter);
         // The flat `prompts/` tree, which `prompts_base` falls back to when a
-        // checkout carries no adapter bundle — the shape this test needs,
-        // because the point is the template on disk, not the binding.
         let prompts = root.join("prompts");
         std::fs::create_dir_all(&prompts).unwrap();
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -40,7 +34,6 @@ fn the_repair_pass_renders_from_the_prompt_file_not_a_hardcoded_string() {
         let prompt = build_repair_prompt(&layout, BROKEN, &complaint).unwrap();
 
         // The scan's own finding reaches the model, and the placeholders
-        // are gone rather than left as literal braces.
         assert!(
             prompt.contains(&format!("paragraph {}", findings[0].paragraph)),
             "{prompt}"
@@ -74,9 +67,6 @@ fn the_attribution_contract_speaks_the_adapters_language() {
     // The output contract is code-side, so it is where a hardcoded
     // language could override every template — and did: "3-8 word
     // Vietnamese chapter title" reached an English book's prompt with its
-    // prompts in English. The contract now asks for the language the
-    // adapter declares in `adapter.json`, which is the fork line's own
-    // fact; the no-manifest fallback is pinned by the fixture test above.
     let root = workspace().join("contract-language");
     let home = root.join("adapters/jnovel-en-US");
     let prompts = home.join("prompts");
@@ -111,8 +101,6 @@ fn the_attribution_contract_speaks_the_adapters_language() {
 #[test]
 fn a_missing_template_is_fatal_rather_than_a_silent_fallback() {
     // The failure this pass exists to prevent is a broken chapter digested
-    // without a word. So an install without the template must stop, not
-    // quietly carry on with the unbalanced text.
     let root = workspace().join("no-template");
     std::fs::create_dir_all(root.join("data")).unwrap();
     let layout = Layout::resolve(&root).unwrap();

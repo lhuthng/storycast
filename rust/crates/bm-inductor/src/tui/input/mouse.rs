@@ -1,5 +1,4 @@
 //! Mouse input. Keyboard bindings remain the source of truth; this module maps
-//! visible rows and panes to the same actions without duplicating key parsing.
 
 use super::handle_key;
 use crate::tui::input::Flow;
@@ -42,15 +41,6 @@ pub(crate) async fn handle_mouse(
                     app.focused_panel = panel;
                     // Clicking the log means "I want to read this, and copy
                     // it" — so the click itself hands the mouse back to the
-                    // terminal. Without mouse reporting the drag becomes a
-                    // selection, which is the only way to get a failure out of
-                    // a dashboard.
-                    //
-                    // Sticky, and only `M` brings it back. It cannot be
-                    // "click anywhere else to restore", because once reporting
-                    // is off the app receives no clicks at all — a mid-drag
-                    // restore would also yank the selection out from under the
-                    // pointer. The status line says how, and what was given up.
                     if panel == Panel::Events && app.mouse_capture {
                         app.mouse_capture = false;
                         app.mouse_toggle = true;
@@ -183,7 +173,6 @@ fn list_len(app: &App, kind: ListTarget) -> usize {
         }
         (Screen::Tasks(v), ListTarget::Tasks) => {
             // The same two narrowings the renderer applies, or a click lands on
-            // the row drawn where the *unfiltered* index says it is.
             let live = app.live_worker_ids();
             crate::tui::model::filtered_tasks(&app.tasks, &v.filter, v.facet, &live).len()
         }
@@ -207,8 +196,6 @@ fn set_list_cursor(app: &mut App, kind: ListTarget, requested: usize) {
     let len = list_len(app, kind);
     let mut cursor = if len == 0 { 0 } else { requested.min(len - 1) };
     // A click lands on a row, and in the picker's voice list a group heading
-    // is one. Clicking a heading selects the first voice under it rather than
-    // nothing at all.
     if let (Screen::Pick(p), ListTarget::Picker) = (&app.screen, kind) {
         if p.stage == PickStage::Voice {
             cursor = crate::tui::model::settle_cursor(
@@ -242,8 +229,6 @@ fn scroll(app: &mut App, target: HitTarget, direction: i8) {
             Panel::Machines => {
                 if !app.machines.is_empty() {
                     // Three rows in the table; a whole band of the rack, because
-                    // that is the unit the eye moves in there. The drawer
-                    // publishes the band's width.
                     let stride = if app.machines_graph {
                         app.graph_cols as isize
                     } else {
@@ -255,7 +240,6 @@ fn scroll(app: &mut App, target: HitTarget, direction: i8) {
             }
             Panel::Events => {
                 // The wheel is line-granular, the page keys are a screenful —
-                // both clamped to the buffer by the same two doorways.
                 if direction < 0 {
                     app.scroll_events_older(3);
                 } else {
@@ -392,7 +376,6 @@ mod tests {
     }
 
     /// A helper so each test can say "click here" instead of spelling out a
-    /// whole `MouseEvent`.
     async fn click(app: &mut App, column: u16, row: u16) -> Flow {
         let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel();
         handle_mouse(
@@ -429,7 +412,6 @@ mod tests {
         click(&mut app, 10, 9).await;
 
         // The click itself has to turn reporting off — the user asked for it
-        // by clicking the thing they want to read, not by finding a key.
         assert!(!app.mouse_capture, "the click must release the mouse");
         // And the event loop must be told to act on it, not merely told.
         assert!(app.mouse_toggle, "the event loop needs the release request");
@@ -452,8 +434,6 @@ mod tests {
         let mut app = App::new("http://unused");
         logs_region(&mut app);
         // The app only gets here with reporting already off, so the click
-        // the user makes to "copy" is really the terminal's own selection,
-        // and any second request would be a toggle fighting the user.
         app.mouse_capture = false;
         app.mouse_toggle = false;
 
@@ -488,7 +468,6 @@ mod tests {
     fn wheel_over_logs_moves_toward_older_events() {
         let mut app = App::new("http://unused");
         // The wheel clamps to the buffer, so the pane needs lines for the
-        // scroll to have anywhere to go.
         for i in 0..10 {
             app.log_at(Level::Info, format!("line {i}"));
         }
@@ -520,7 +499,6 @@ mod tests {
             );
         }
         // Ten wheel spins over a one-line log: the title may not claim
-        // "30 line(s) back" against a buffer of 1.
         assert_eq!(app.events_scroll, 1);
     }
 }

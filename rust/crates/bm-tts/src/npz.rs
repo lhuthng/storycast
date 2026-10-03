@@ -1,28 +1,9 @@
 //! Reading `vieneu_v3_heads.npz` — the tied embedding tables and the speaker
-//! projection.
-//!
-//! An `.npz` is a ZIP of `.npy` files, and NumPy writes the `.npy` payloads
-//! **stored** (method 0, no compression): the container exists for grouping, not
-//! for size. So no inflater is needed, and this reads the central directory
-//! directly rather than pulling in a zip crate for one file.
-//!
-//! Anything that is not a stored `.npy` is refused with the reason, never
-//! guessed at. That is safe because this file is a hash-pinned artifact the bake
-//! step ships (see `VENDORED.md` for the dictionary, and the model manifest for
-//! this one) — a silently misread embedding table would not fail, it would just
-//! render the wrong voice.
-//!
-//! The same reader serves any `.npy` payload we need later, including the
-//! single-array case (a bare `.npy` has no ZIP wrapper).
 
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 
 /// A parsed array: row-major `f32`, with the shape NumPy declared.
-///
-/// Everything the engine needs is `f32`; a `f64` table is converted rather than
-/// refused, because a model re-exported at double precision would otherwise look
-/// like a corrupt file.
 #[derive(Debug, Clone)]
 pub struct Array {
     pub shape: Vec<usize>,
@@ -31,9 +12,6 @@ pub struct Array {
 
 impl Array {
     /// Rows of a 2-D array, panicking on a shape mismatch.
-    ///
-    /// A wrong shape here is a corrupt model directory, not a runtime condition:
-    /// there is no sensible fallback, and continuing would index garbage.
     pub fn rows(&self, width: usize) -> &[f32] {
         assert_eq!(
             self.shape.len(),
@@ -74,10 +52,6 @@ pub fn read_npz(path: &std::path::Path) -> Result<HashMap<String, Array>> {
 }
 
 /// `(name, payload)` for every stored entry, read via the central directory.
-///
-/// The central directory is the authoritative index; local headers can be
-/// written with zeroed sizes when a data descriptor follows, so they are used
-/// only to find where the payload starts.
 fn zip_stored_entries(bytes: &[u8]) -> Result<Vec<(String, &[u8])>> {
     let eocd = find_eocd(bytes).context("no end-of-central-directory record; not a zip")?;
     let count = u16::from_le_bytes([bytes[eocd + 10], bytes[eocd + 11]]) as usize;
@@ -151,7 +125,6 @@ fn find_eocd(bytes: &[u8]) -> Option<usize> {
 }
 
 /// One `.npy` payload. Only the shapes and dtypes this model ships are accepted,
-/// each with a message naming what was found.
 pub fn read_npy(bytes: &[u8]) -> Result<Array> {
     if bytes.len() < 10 || &bytes[..6] != b"\x93NUMPY" {
         bail!("not a .npy payload (bad magic)");
@@ -172,7 +145,6 @@ pub fn read_npy(bytes: &[u8]) -> Result<Array> {
         bail!("fortran_order .npy is not supported (descr {descr})");
     }
     // The shape is a tuple, so it contains commas of its own — it has to be read
-    // to its closing paren, not to the next comma, or `(2, 3)` becomes `(2`.
     let shape_s = parenthesised(header, "'shape':").context("npy header has no shape")?;
     let shape: Vec<usize> = shape_s
         .split(',')
@@ -187,9 +159,6 @@ pub fn read_npy(bytes: &[u8]) -> Result<Array> {
                 bail!("truncated: wanted {} bytes, have {}", count * 4, body.len());
             }
             // `as_chunks` rather than `chunks_exact`: the length above already
-            // proved the slice is a whole number of floats, so the remainder is
-            // empty, and each chunk arrives as `[u8; 4]` with no bounds check
-            // per element. It is why the workspace floor is 1.88.
             let (chunks, []) = body[..count * 4].as_chunks::<4>() else {
                 bail!("truncated: wanted {} bytes, have {}", count * 4, body.len());
             };
@@ -297,7 +266,6 @@ mod tests {
     }
 
     /// The same header, with a float64 body. The reader narrows to f32, so this
-    /// is the only thing covering the 8-byte branch.
     fn npy_f64(shape: &[usize], data: &[f64]) -> Vec<u8> {
         npy(shape, "<f8", data.iter().flat_map(|v| v.to_le_bytes()))
     }
@@ -350,8 +318,6 @@ mod tests {
     }
 
     /// Float64 weights are read and narrowed, not refused. The values are
-    /// chosen to be exact in f32 so a byte-order or width mistake cannot hide
-    /// behind a tolerance.
     #[test]
     fn a_float64_member_is_narrowed_to_f32() {
         let a = read_npy(&npy_f64(&[3], &[1.0, -2.5, 0.5])).unwrap();
@@ -360,7 +326,6 @@ mod tests {
     }
 
     /// A float64 header with a body that is not a whole number of doubles is
-    /// truncated, not read as noise.
     #[test]
     fn a_float64_member_short_of_its_count_is_refused() {
         let mut bytes = npy_f64(&[2], &[1.0, 2.0]);
@@ -370,8 +335,6 @@ mod tests {
     }
 
     /// The refusal that matters: a compressed member must not be silently read
-    /// as if it were raw, because the bytes would parse and the numbers would be
-    /// noise.
     #[test]
     fn a_compressed_member_is_refused_by_name() {
         let payload = npy_f32(&[1], &[1.0]);

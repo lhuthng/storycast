@@ -3,8 +3,6 @@ use super::*;
 #[test]
 fn add_machine_rejects_whitespace_addresses() {
     // The bind prompt is a tuple now (`addr [user [port [key]]]`), so a
-    // second token is a user, not an error, only the address itself is
-    // validated.
     let mut app = App::new("http://x");
     let p = TextPrompt::new(TextKind::AddMachine, "t", "h", "192.168.2.7 extra");
     match submit_text(&mut app, &p) {
@@ -55,8 +53,6 @@ fn seen_label_says_never_rather_than_a_fifty_year_uptime() {
 #[test]
 fn state_age_says_unknown_rather_than_a_fifty_year_boot() {
     // The same trap `seen_label` has, one field over: `state_since == 0` means
-    // the record predates the field. Formatting that as an elapsed time would
-    // print "1471228h" and make every old record look permanently stuck.
     let mut m = Machine::new("10.0.0.5", "u", 22, None, "worker");
     assert_eq!(state_age_label(&m), "—", "never stamped is not 0s ago");
 
@@ -74,10 +70,6 @@ fn state_age_says_unknown_rather_than_a_fifty_year_boot() {
 #[test]
 fn a_booting_box_that_never_answered_ssh_is_not_called_broken() {
     // `:prov` seconds after `:up` is the likeliest way to meet a box whose
-    // sshd is not listening yet. The probe learned nothing, it cannot even
-    // tell a booting box from a dead one, so calling it `Error` is the exact
-    // misreading `initializing` exists to prevent. Stay booting; the boot
-    // deadline is what gives up.
     assert_eq!(
         verdict_after_failed_provision(true, false),
         MachineState::Initializing
@@ -87,8 +79,6 @@ fn a_booting_box_that_never_answered_ssh_is_not_called_broken() {
 #[test]
 fn a_box_that_answered_but_failed_a_step_is_broken_even_while_booting() {
     // The boundary that makes the rule above safe rather than a blanket
-    // amnesty: ssh *answered*, so the failure is real, a missing python, a
-    // full disk, a failed push. That is a fault whatever the clock says.
     assert_eq!(
         verdict_after_failed_provision(true, true),
         MachineState::Error
@@ -98,8 +88,6 @@ fn a_box_that_answered_but_failed_a_step_is_broken_even_while_booting() {
 #[test]
 fn an_unreachable_box_we_never_thought_was_booting_is_broken() {
     // The other half of the boundary: without this, every unreachable box
-    // would be forgiven once and sit in `initializing` until the deadline,
-    // turning a plain wrong address into a five-minute wait.
     assert_eq!(
         verdict_after_failed_provision(false, false),
         MachineState::Error
@@ -109,7 +97,6 @@ fn an_unreachable_box_we_never_thought_was_booting_is_broken() {
 #[test]
 fn stages_and_states_have_distinct_palettes() {
     // The old build coloured the Workers stage column with the task-state
-    // palette, which no stage name matched.
     assert_eq!(stage_color("render"), Color::Cyan);
     assert_eq!(state_color("online"), Color::Green);
     assert_ne!(stage_color("render"), state_color("render"));
@@ -167,8 +154,6 @@ fn log_heads_alias_machines_and_workers_but_not_sentences() {
 #[test]
 fn retry_scopes_narrow_by_argument_and_refuse_a_bare_stage() {
     // `:retry` is the only way to aim a requeue at one chapter from the main
-    // panel, so the parser has to be exact: a mistyped scope must leave the
-    // prompt open rather than quietly run the blanket retry.
     fn retry(stage: Option<Stage>, chapter: Option<u32>) -> Option<Command> {
         Some(Command::Retry { stage, chapter })
     }
@@ -194,8 +179,6 @@ fn retry_scopes_narrow_by_argument_and_refuse_a_bare_stage() {
     );
 
     // Refusals. Each would otherwise run something at the wrong scope, and the
-    // blanket retry is the dangerous direction: it forgives every strike in the
-    // ledger, so `:u render` must not reach it.
     assert_eq!(command_key("retry render"), None, "a bare stage is refused");
     assert_eq!(command_key("retry 0"), None, "chapter 0 is not a chapter");
     assert_eq!(command_key("retry ch24"), None, "no `ch` prefix");
@@ -220,7 +203,6 @@ fn command_line_maps_keys_and_words() {
     assert_eq!(command_key("r"), Some(Command::Key(KeyCode::Char('r'))));
     assert_eq!(command_key("reconcile"), Some(Command::Reconcile));
     // The operator's case, verbatim: a character name is three words, so the
-    // quotes are load-bearing and the segment number is 1-based.
     assert_eq!(
         command_key("speaker 18 67 \"Thanh Sơn lão tổ\" \"Dịch Phong\""),
         Some(Command::FixSpeaker {
@@ -231,7 +213,6 @@ fn command_line_maps_keys_and_words() {
         })
     );
     // Single-word names need no quotes, and an unquoted multi-word one is
-    // refused rather than guessed at: four arguments or none.
     assert_eq!(
         command_key("speaker 3 1 A Narrator"),
         Some(Command::FixSpeaker {
@@ -253,7 +234,6 @@ fn command_line_maps_keys_and_words() {
     assert_eq!(command_key("rerender"), Some(Command::Rerender));
     assert_eq!(command_key("remerge"), Some(Command::Remerge));
     // Merge names the pair: first survives, the rest are absorbed. Quotes
-    // for spaces, like :speaker; one name is refused, not a silent no-op.
     assert_eq!(
         command_key("merge \"Huyền Vũ\" \"Huyền Vũ lão tổ\""),
         Some(Command::Merge {
@@ -272,7 +252,6 @@ fn command_line_maps_keys_and_words() {
         assert_eq!(command_key(bad), None, "{bad} must not parse");
     }
     // Bare `:merge` parses to the placeholder and is refused at dispatch
-    // with the usage, not with a confirm on an empty fold.
     assert_eq!(
         command_key("merge"),
         Some(Command::Merge {

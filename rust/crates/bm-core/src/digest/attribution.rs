@@ -5,22 +5,6 @@ use super::quotes::attributes_speech;
 use super::quotes::hands_off_to_quote;
 use super::*;
 /// The attribution prompt's view of the chapter: dialogue and thought events it
-/// must attribute, plus the nearest narration immediately before and after each
-/// one.
-///
-/// Splitting the answerable events from narration keeps the map small. Keeping
-/// the adjacent narration is nevertheless essential: Vietnamese web novels
-/// routinely put the speaker tag *after* the quote (`"Sư tôn..." Lạc Lan Tuyết
-/// ... nói.`). The old view kept narration ids but removed their text, so the
-/// model was explicitly told to use surrounding narration it could not see. On
-/// ch6 it assigned Lạc Lan Tuyết's three tagged lines to Chung Thanh. Context
-/// beside each quote restores that evidence while leaving only dialogue ids in
-/// the answer map.
-///
-/// Thoughts are a list of their own rather than dialogue without quote marks.
-/// The answer for a thought is a *thinker*, not a speaker, and the model can
-/// only know which it is being asked for if the view says so — the same words
-/// in one list are a line to cast and in the other an interior voice to own.
 pub(crate) fn attribution_view(prepared: &PreparedChapter) -> String {
     let mut narration_ids = Vec::new();
     let mut dialogue_events = Vec::new();
@@ -32,10 +16,6 @@ pub(crate) fn attribution_view(prepared: &PreparedChapter) -> String {
         }
 
         // Whether the narration at `at` is *a speech tag handing the floor to
-        // the quote after it*: it ends the way a tag ends, and a quote is
-        // actually there to take the floor. A trailing colon at the end of the
-        // chapter introduces nobody, and calling that a tag would make this a
-        // guess about punctuation rather than a fact about the chapter.
         let hands_off = |at: usize| -> bool {
             prepared.events.get(at).is_some_and(|candidate| {
                 candidate.kind == "narration"
@@ -50,30 +30,10 @@ pub(crate) fn attribution_view(prepared: &PreparedChapter) -> String {
             .position(|candidate| candidate.kind == "narration")
             .map(|offset| i + 1 + offset);
         // **The tag, from THIS event's point of view.** The old field was a
-        // property of the narration — `hands_off_to_next_quote` — and read
-        // inside a `previous_context` its own name says "not this one", which
-        // is the exact opposite of what it means there. On ch51 that was worth
-        // ten answers in twelve. A side of the quote is decidable in code, so it
-        // is decided in code: `previous` is the narration whose speech verb
-        // hands the floor to this quote, `following` is the narration reacting
-        // to it, and `null` is neither.
-        // **Named `decided_by`, and that name is load-bearing twice over.**
-        // First, it spells the answer rather than a code for it: the value is
-        // the *key* of the context to read, so there is no `"previous"` →
-        // `previous_context` hop to get wrong. Second, `serde_json` writes a
-        // `Value`'s object keys **alphabetically**, and `decided_by` sorts
-        // before `following_context`, so this is the first field of every event
-        // the model reads. Order is not cosmetic here: ch51's line was answered
-        // correctly 5 times in 12 with this field last and 12 times in 12 with it
-        // first, byte-for-byte identical otherwise. A test pins the ordering,
-        // because a rename that sorted later would silently undo this.
         let tag_context = if (i > 0) && hands_off(i - 1) {
             json!("previous_context")
         } else if next_narration.is_some_and(|at| {
             // Reacting to this quote *by attributing it*. A narration that only
-            // continues the scene is not evidence about who spoke, and naming
-            // it as this quote's tag would hand the model an answer that is not
-            // there — `"Đi thôi." Trời tối dần.` has no tag at all.
             !hands_off(at)
                 && prepared
                     .events
@@ -114,22 +74,12 @@ pub(crate) fn attribution_view(prepared: &PreparedChapter) -> String {
         "dialogue_events": dialogue_events,
         "thought_events": thought_events,
         // The rules themselves live in the prompt template, where the rest of
-        // the output contract is. This says only what the JSON is, so a model
-        // reading the view and a model reading the contract are never told two
-        // different things about the same field.
         "note": "Return `speakers` for every `dialogue_events` and `thought_events` id, except any you also list in `not_speech` — a span that is not somebody talking or thinking: a quoted title or term, or an unquoted narrator aside — judged from the context around it. A `thought_events` entry is an unquoted passage in the first or second person: answer with the character thinking it, never Narrator and never the addressee. Context events are evidence for resolving an id; all context and every id in `narration_ids` are spoken by Narrator and are not yours to answer. Each entry's first field, `decided_by`, names the context that holds that quote's own tag: `previous_context`, `following_context`, or null when neither side tags it. Read it before anything else in the entry.",
     });
     serde_json::to_string_pretty(&view).unwrap_or_else(|_| "[]".into())
 }
 
 /// Replace one bounded prompt section when the live template still has it.
-///
-/// Profiles may be older than the binary, so an absent section marker is not a
-/// hard error: the appended contract remains authoritative and placeholder
-/// substitution still works for fixture/custom templates. It is, however,
-/// never silent — the miss is returned so the caller can name it. A template
-/// reword that quietly disabled a replacement is exactly how the code-side and
-/// file-side prompts drift apart, with no error anywhere to say so.
 pub(crate) fn replace_prompt_section(
     body: &mut String,
     start_marker: &str,
@@ -147,12 +97,6 @@ pub(crate) fn replace_prompt_section(
 }
 
 /// Replace `needle` and record it when it was absent.
-///
-/// The prose overrides below are authored in this file and matched against the
-/// profile's template by exact text. `String::replace` is silent when the text
-/// has been reworded, which is the failure this wrapper exists to expose: the
-/// digest still runs on the profile's own (older) wording, but the miss lands in
-/// the build warning instead of nowhere.
 pub(crate) fn replace_or_miss(
     body: &mut String,
     needle: &str,
@@ -167,9 +111,6 @@ pub(crate) fn replace_or_miss(
 }
 
 /// Warn, once, about every section a prompt build expected to rewrite but did
-/// not find. Loud, not fatal: a profile predating the binary still digests on
-/// its own wording, and killing it would strand old workspaces over a cosmetic
-/// mismatch. Making these fatal is a one-line change if the noise is wanted.
 pub(crate) fn warn_missing_sections(which: &str, missed: &[String]) {
     if missed.is_empty() {
         return;
@@ -183,10 +124,6 @@ pub(crate) fn warn_missing_sections(which: &str, missed: &[String]) {
 }
 
 /// Which of the two rounds a continuity block is written for.
-///
-/// The part is the same fact told twice, because the two rounds answer different
-/// questions about it — and the one that only matters for staging is that a
-/// looping bed may be left open for the part after this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pass {
     Attribution,
@@ -194,26 +131,11 @@ pub(crate) enum Pass {
 }
 
 /// The part a prompt is being built for, when a chapter is staged in windows.
-///
-/// **A one-window chapter passes `None` everywhere this appears, and that is a
-/// guarantee rather than a convenience.** With no continuity block the two
-/// prompts are byte-for-byte the ones the pre-window digest built, so a chapter
-/// under the budget cannot digest differently because windows exist — not
-/// "usually produces the same answer", the same prompt. Everything the feature
-/// adds to a prompt is therefore here, in one block, appended after the output
-/// contract: no adapter template had to change, and a workspace whose profile
-/// predates this feature still gets the part note and the plot.
-///
-/// The block, not a placeholder, for the same reason the contracts are built in
-/// code: a feature that needed a prompt template re-release would be one a pack
-/// could not ship, and the templates are the adapter's, shared by every
-/// workspace on that language.
 pub(crate) struct Continuity<'a> {
     /// 0-based window index.
     pub(crate) index: usize,
     pub(crate) total: usize,
     /// Every earlier part's summary, oldest first. Empty for the first part,
-    /// which is the only part with nothing behind it.
     pub(crate) plot: &'a [String],
 }
 
@@ -273,26 +195,14 @@ impl Continuity<'_> {
 }
 
 /// Append the continuity block to a finished prompt body, or nothing when the
-/// chapter was not split.
 pub(crate) fn apply_continuity(body: &mut String, continuity: Option<&Continuity>, pass: Pass) {
     // A one-window chapter adds nothing, and has nothing to remove either: a part
-    // note only ever arrives with a `Continuity`.
     if let Some(c) = continuity {
         body.push_str(&c.block(pass));
     }
 }
 
 /// Build the constrained attribution pass.
-///
-/// Dialogue detection is not a model decision: `prepare_chapter` has already
-/// marked every event, and narration is attached to `Narrator` by code. The
-/// chapter is therefore shown as answerable `dialogue_events`, each beside its
-/// nearest source narration, plus `narration_ids` the model must not answer. The
-/// answer map stays small while the tags that actually identify speakers remain
-/// visible. The remaining identity fields are the chapter's own.
-///
-/// `continuity` is the part this prompt is for when the chapter was split, and
-/// `None` for a chapter that fits one call — see [`Continuity`].
 pub(crate) fn build_attribution_prompt(
     layout: &Layout,
     bible: &Value,
@@ -510,12 +420,6 @@ no narration ids, no invented ids, no dropped line.
         .replace("{excerpt}", &excerpt_rule(&content_language));
     apply_continuity(&mut body, continuity, Pass::Attribution);
     // The one cross-chapter memory the attribution pass gets. Identity is the
-    // bible's business (names, aliases), but the bible holds no *events*: a
-    // stranger the prose has not named yet, a reveal, a disguise still on —
-    // that is what the previous excerpt carries, and what an analyzer
-    // without it resolves by guessing. Absent means the block is not
-    // appended at all, so a first chapter or an out-of-order one is the
-    // pre-excerpt prompt byte for byte.
     if let Some(previously) = previously {
         body.push_str(&format!(
             "\n---PREVIOUSLY--- (the chapter before this one; identity context only — resolve \
@@ -524,16 +428,6 @@ no narration ids, no invented ids, no dropped line.
         ));
     }
     // **The rules go above the data, not below it.** The contract used to be
-    // appended after the chapter — which on this book is tens of thousands of
-    // characters of events and context — so the model had answered before it
-    // ever read what it was asked for. Orders of magnitude, measured on ch51's
-    // elder line with everything else held byte-for-byte identical: contract
-    // last, 3 in 12; contract first, 40 in 40. It is the same text in the same
-    // prompt, and the only difference is which end the reader reaches first.
-    //
-    // Placed immediately before `---CHAPTER---` rather than at the very top, so
-    // the contract still follows the prompt it modifies and the bible it is
-    // resolved against, and `---PREVIOUSLY---` keeps its place at the end.
     Ok(match body.find("---CHAPTER---") {
         Some(at) => format!("{}{}\n{}", &body[..at], contract, &body[at..]),
         None => format!("{body}\n{contract}"),

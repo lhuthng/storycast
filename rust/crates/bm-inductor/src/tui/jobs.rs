@@ -51,10 +51,6 @@ pub(crate) struct BackgroundJob {
 }
 
 /// Something only one job at a time may hold.
-///
-/// Ordered so a job that names several can take them in a stable order, two
-/// jobs with overlapping sets then queue rather than deadlock. See
-/// [`Job::resources`] for which job names what.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Res {
     /// The default lane: every job with no real conflict with anything.
@@ -95,24 +91,14 @@ pub(crate) async fn run_jobs_with<F, Fut>(
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     // A job is queued only behind another job that holds something it needs.
-    //
-    // `pending` is scanned in arrival order, so the queue is still FIFO among
-    // jobs that *do* contend, the change is only that a job with nothing in
-    // common with what is running never waits at all. `busy` is the set of
-    // resources held right now; `done_rx` is how a running job gives them back.
     let mut pending: VecDeque<(Job, Vec<Res>)> = VecDeque::new();
     let mut busy: BTreeSet<Res> = BTreeSet::new();
     // Held by the scheduler as well, so a `recv` here never returns `None`
-    // while jobs are still running, the `None` case is unreachable, and the
-    // loop below never has to distinguish "no completions" from "all done".
     let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Res>>();
     let mut accepting = true;
 
     loop {
         // Start everything that can start, in arrival order. Re-scan from the
-        // head after each launch: a later job may fit where an earlier one did
-        // not, and skipping it would be exactly the unnecessary queueing this
-        // exists to remove.
         let mut i = 0;
         while i < pending.len() {
             if pending[i].1.iter().any(|r| busy.contains(r)) {
@@ -159,8 +145,6 @@ fn release(busy: &mut BTreeSet<Res>, res: &[Res]) {
 }
 
 /// Run one job to completion on its own task: announce it, forward its events
-/// (tagging log lines as this job's activity), and guarantee exactly one
-/// `Done` and one `JobFinished` whatever the job does.
 async fn run_one<F, Fut>(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>, runner: F)
 where
     F: Fn(Job, tokio::sync::mpsc::UnboundedSender<Ev>) -> Fut + Send + 'static,
@@ -218,12 +202,6 @@ where
 }
 
 /// Refuse to move what the cluster is reading, or `None` when it is quiet.
-///
-/// Two locks, the same two the offline voice swap takes: a running inductor
-/// owns the ledger and settings the switch would move out from under it, and a
-/// live local worker is mid-render against the `assets/` + `prompts/` a profile
-/// load would replace. Remote strays are the operator's responsibility, the
-/// supported flow is `X` (which sweeps them) and then the switch.
 async fn cluster_busy(api: &str) -> Option<String> {
     if crate::backend::inductor_up(api).await {
         return Some(
@@ -237,12 +215,6 @@ async fn cluster_busy(api: &str) -> Option<String> {
 }
 
 /// The operator's advertised address for this cluster, if they set one.
-///
-/// From the *workspace's* settings, and read at the point of use because the
-/// launcher runs in a blocking task with no access to them. Unset is the normal
-/// case: the launcher then asks the routing table which address reaches each
-/// box, which is right on a LAN. Set it when the workers are somewhere the
-/// routing table cannot describe, anything behind NAT, including a cloud box.
 fn advertised_host(layout: &bm_core::Layout) -> Option<String> {
     bm_core::config::Settings::load(&layout.settings())
         .advertised_host()

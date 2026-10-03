@@ -1,25 +1,14 @@
 //! Segment inventory: which audio files a box holds.
-//!
-//! The inductor-owned-segments migration needs one machine-readable answer per
-//! box — "what do you have?" — diffed against `expected_wavs`, the single
-//! namer the renderer, the completeness check and the merger share. Both the
-//! agent (`bm-agent segments --json`) and the inductor's `segments` report use
-//! this, so two implementations can never disagree about the shape.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Where segments live, behind one seam. Today the inductor's own
-/// `data/audio/` is the only store; the roadmap's S3 backend becomes a second
-/// implementation instead of a rewrite of every module that resolves a seg
-/// dir today. Same directory, resolved once, never independently in five
-/// modules.
 pub trait SegmentStore {
     /// Where a chapter's units live.
     fn dir(&self, engine: &str, chapter: u32) -> PathBuf;
     /// Store one file, atomically (tmp + rename — a killed write never leaves
-    /// a half-file `expected_wavs` can see).
     fn put(&self, engine: &str, chapter: u32, name: &str, bytes: &[u8]) -> anyhow::Result<()>;
     /// Fetch one file.
     fn get(&self, engine: &str, chapter: u32, name: &str) -> anyhow::Result<Vec<u8>>;
@@ -73,7 +62,6 @@ impl SegmentStore for LocalStore {
 }
 
 /// One file in a box's segment store: which chapter, which engine, which name,
-/// how big, and what it hashes to.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SegmentEntry {
     pub chapter: u32,
@@ -84,9 +72,6 @@ pub struct SegmentEntry {
 }
 
 /// Walk an `audio/` directory, grouping `segments-<engine>-NN` directories.
-/// Anything else (previews, strays) is not inventory. Sorts by
-/// (chapter, engine, name) so two runs diff cleanly. A missing directory reads
-/// as empty, not an error.
 pub fn manifest(audio_dir: &Path) -> Vec<SegmentEntry> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(audio_dir) else {

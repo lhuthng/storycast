@@ -1,9 +1,6 @@
 use super::prompts::PreparedChapter;
 use super::*;
 /// Write a chapter's script where every consumer reads it.
-///
-/// One write site, so the worker's path and the operator's cannot land the same
-/// artifact differently.
 pub(crate) fn expand_sound_fields(segments: &[Value]) -> Result<Vec<Value>> {
     let mut out = Vec::with_capacity(segments.len());
     for (i, s) in segments.iter().enumerate() {
@@ -19,8 +16,6 @@ pub(crate) fn expand_sound_fields(segments: &[Value]) -> Result<Vec<Value>> {
         ];
         for (key, v) in &fields {
             // An empty string is what a line looks like when nobody decided.
-            // `none` is the token the prompt asks for; a blank is refused, so
-            // the choice is made per line instead of defaulted away.
             if v.as_deref() == Some("") {
                 anyhow::bail!(
                     "segment {i}: `{key}` is empty — write \"none\" when nothing fires at this \
@@ -30,7 +25,6 @@ pub(crate) fn expand_sound_fields(segments: &[Value]) -> Result<Vec<Value>> {
         }
         out.push(line);
         // A sound and then its stop, in that order: the pair brackets the line
-        // the model marked, and a stop can never precede its own start.
         for (key, v) in &fields {
             let Some(v) = v.as_deref().filter(|v| !v.eq_ignore_ascii_case("none")) else {
                 continue;
@@ -46,14 +40,6 @@ pub(crate) fn expand_sound_fields(segments: &[Value]) -> Result<Vec<Value>> {
 }
 
 /// Fill fields the staging answer carried forward by omission.
-///
-/// The prompt asks for `mood`/`scene`/`music` only where they change and for
-/// `text` only where it changes, so a segment that omits one inherits the
-/// previous segment's value. `text` falls back to the prepared event's own text
-/// by `source_id` — the split/fix cases must still emit it, which the contract
-/// says outright. This runs before the validators, so they see the same fully
-/// populated segments an older, verboser answer would have produced and nothing
-/// downstream has to know the model-facing shape got smaller.
 pub(crate) fn carry_forward_fields(data: &mut Value, prepared: &PreparedChapter) {
     let source_text: std::collections::HashMap<&str, &str> = prepared
         .events
@@ -92,16 +78,6 @@ pub(crate) fn carry_forward_fields(data: &mut Value, prepared: &PreparedChapter)
     }
 
     // The *head* of the chapter, which has nothing to inherit. The prompt asks
-    // for `music` where it changes, so a chapter whose first bed arrives at line
-    // 12 legitimately omits the field at lines 1-11 — and the validator refuses
-    // any blank once a single segment declares one, which is what `segment 0:
-    // missing music` was: 2 of ch386's 15 attempts. An empty value already means
-    // "no bed" to the mixer (`resolve_music`), so filling the blanks before the
-    // first declaration only says out loud what the mix does anyway.
-    //
-    // Only when something *is* declared: a script with no `music` at all
-    // predates the field and has to keep taking the legacy merge path rather
-    // than become a chapter of explicit silence.
     let first_declared = segments.iter().position(|s| {
         !crate::util::is_sound_item(s)
             && !field_is_blank(s.as_object().unwrap_or(&serde_json::Map::new()), "music")
@@ -121,8 +97,6 @@ pub(crate) fn carry_forward_fields(data: &mut Value, prepared: &PreparedChapter)
 }
 
 /// Whether a carried field is absent or empty, the two ways a model declines to
-/// state it. An empty array counts, so a deliberate `["rain"]` is a value and a
-/// bare `[]` is not mistaken for one.
 pub(crate) fn field_is_blank(obj: &serde_json::Map<String, Value>, key: &str) -> bool {
     match obj.get(key) {
         None | Some(Value::Null) => true,
@@ -133,13 +107,6 @@ pub(crate) fn field_is_blank(obj: &serde_json::Map<String, Value>, key: &str) ->
 }
 
 /// Phrases from rule 10's own sweep that are literal on the page in this genre.
-///
-/// Narrow on purpose: a hit here can fail a chapter, so a word that is usually a
-/// metaphor does not belong on the list. `dao` alone is out for that reason
-/// `dao phay` is in. Bare `chém` is out for the same reason: ch262's only hit
-/// was the idiom "muốn chém muốn giết" (kill me if you want), no slash staged,
-/// and the gate refused every correct answer. The compounds (`rút kiếm`,
-/// `vung kiếm`) stay; they name an action, not a figure of speech.
 const SOUND_CUES: [&str; 20] = [
     "phun ra",
     "máu tươi",
@@ -164,26 +131,13 @@ const SOUND_CUES: [&str; 20] = [
 ];
 
 /// Block probability after `failures` consecutive same-gap failures: 90%,
-/// then -25% each time (0.90, 0.68, 0.51, 0.38...). Pure so the curve is
-/// pinned without spending LLM calls; the caller accepts below a coin flip.
 pub(crate) fn gap_block_p(failures: u32) -> f64 {
     0.9 * 0.75f64.powi(failures as i32)
 }
 
 /// Two sound-design answers that cannot be right, checked in that order.
-///
-/// Both are things the prompt says in as many words and the model does anyway,
-/// and both are silent failures: the chapter merges, sounds fine at a glance,
-/// and has no sound design where the prose staged one. Neither is a judgment
-/// call, which is why they can be gated at all, a chapter that places three
-/// sounds and misses a fourth is the model's business, and no word list can
-/// second-guess it.
-///
 /// 1. A `loop`ed bed started and never stopped. The prompt calls this "the one
 ///    way to get a bed wrong": the clip plays once and stops dead. Measured on
-///    ch9, a 25 s bed opened into a 130 s kitchen, then digital silence.
-/// 2. A chapter that stages a sound and places none at all, the cue list from
-///    rule 10's own last check, matched against the chapter text.
 pub(crate) fn sound_design_gap(
     script: &Value,
     chapter_text: &str,
@@ -193,15 +147,6 @@ pub(crate) fn sound_design_gap(
 }
 
 /// Rule 1 alone: looping beds a script opened and never stopped, **in the order
-/// they opened**.
-///
-/// Split out of [`sound_design_gap`] for the windowed digest, and the split is
-/// load-bearing rather than tidiness. This rule is a fact about the *whole
-/// chapter*: a bed started at the end of one part and stopped at the start of
-/// the next is closed, and a check that ran per part would refuse a chapter
-/// whose long scene is simply wider than one prompt. The repair it asks for goes
-/// to the part that placed the surviving `sound` — the only repair that does not
-/// re-stage prose nobody complained about.
 pub(crate) fn unclosed_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> Option<String> {
     let open = open_beds(script, pool);
     if open.is_empty() {
@@ -215,11 +160,6 @@ pub(crate) fn unclosed_beds(script: &Value, pool: &crate::audio_pool::ClipPool) 
 }
 
 /// Rule 1's finding on its own: the looping beds still open when the script
-/// ends, in the order they opened.
-///
-/// Separated from the sentence it becomes because a windowed digest needs the
-/// **name**, not the complaint: the part to re-ask is the part that placed the
-/// surviving `sound`, and only the name finds it.
 pub(crate) fn open_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> Vec<String> {
     let Some(segments) = script.get("segments").and_then(|s| s.as_array()) else {
         return Vec::new();
@@ -241,13 +181,6 @@ pub(crate) fn open_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> V
 }
 
 /// Rule 2 alone: the text stages sounds and this script places none.
-///
-/// A fact about one **part** of a chapter, which is why it is the half a
-/// windowed digest checks window by window: `chapter_text` here is the text that
-/// window's staging answer was actually answering, so the complaint it produces
-/// is about prose the model saw rather than prose it was never shown. `what`
-/// names the subject in the message — `chapter`, or `part` for a window — the
-/// same way `classify_fetch` is told the noun it is describing.
 pub(crate) fn silent_design(script: &Value, chapter_text: &str, what: &str) -> Option<String> {
     let segments = script.get("segments").and_then(|s| s.as_array())?;
     let placed = segments

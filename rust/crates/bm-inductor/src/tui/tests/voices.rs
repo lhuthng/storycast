@@ -13,12 +13,10 @@ fn the_voice_list_groups_pool_samples_by_tag_least_used_first_and_the_rest_by_na
         order,
         vec![
             // Group 1, `female + old` before `male + young` — the groups are
-            // alphabetical by tag set, whichever order the registry wrote them.
             "—",
             "old-female-2",
             "—",
             // …and inside a group the emptiest voice leads, so the pool is spent
-            // from the outside in.
             "young-male-3",
             "young-male-10",
             // Group 2: unique voices, by name, diacritics folded.
@@ -55,7 +53,6 @@ fn a_voice_the_filter_drops_takes_its_whole_group_with_it() {
     assert!(text > 2, "the unfiltered list is longer");
     assert!(matches!(filtered[0], VoiceRow::Group { .. }));
     // A filter that matches nothing leaves no heading behind: a heading for a
-    // group with nothing in it is an empty row the cursor can land on.
     assert!(filtered_voices(&app, "zzz").is_empty());
 }
 
@@ -113,8 +110,6 @@ fn a_pool_samples_gender_comes_from_its_tag_when_the_roster_does_not_know() {
 #[test]
 fn the_picker_step_two_keeps_its_columns_aligned_however_long_a_voice_is() {
     // The row used to be `format!`-padded to guessed widths with no truncation,
-    // so one long voice name or one long user list pushed every cell after it
-    // out of column. Fixed widths, and a cut cell says it was cut.
     let mut roster = pooled_roster();
     roster.voices.push(VoiceInfo {
         key: String::new(),
@@ -132,7 +127,6 @@ fn the_picker_step_two_keeps_its_columns_aligned_however_long_a_voice_is() {
     let mut app = voice_app(roster);
     let text = render_text(&mut app, 140, 44);
     // The gender column starts at the same offset on every voice row, which is
-    // the whole claim: one long cell, no shifted column.
     let mut offsets = Vec::new();
     for line in text.lines() {
         for name in ["Adam", "Bắc Kỳ", "Võ Tắc Thiên", "young-male-10"] {
@@ -170,9 +164,6 @@ fn the_picker_step_two_keeps_its_columns_aligned_however_long_a_voice_is() {
 #[test]
 fn step_one_shows_the_incumbent_voice_and_its_gender_and_no_column_that_repeats_itself() {
     // The character list answers "who do I swap?", so the only thing worth
-    // saying about the voice a character already has is what tells it apart.
-    // Accent and language were the two columns that never could: on the
-    // offline roster they read `unknown` and `vi-VN` on every single row.
     let mut roster = roster_fixture();
     roster.voices.push(VoiceInfo {
         key: String::new(),
@@ -198,8 +189,6 @@ fn step_one_shows_the_incumbent_voice_and_its_gender_and_no_column_that_repeats_
             .find(|l| l.contains(voice))
             .unwrap_or_else(|| panic!("{voice} must be on screen:\n{text}"))
             // `render_text` returns the whole row: the overlay's own border
-            // and the padding out to the terminal's edge come after the last
-            // cell, and neither is part of it.
             .trim_end_matches([' ', '│'])
             .to_string()
     };
@@ -209,7 +198,6 @@ fn step_one_shows_the_incumbent_voice_and_its_gender_and_no_column_that_repeats_
         row("Đức Trí")
     );
     // A pooled sample carries no roster gender — its tag is what it plainly
-    // says, read exactly as step 2 reads it.
     assert!(
         row("young-female-9").ends_with("female"),
         "a pooled sample's gender comes from its tag:\n{}",
@@ -254,12 +242,6 @@ async fn a_group_heading_is_a_label_and_never_the_thing_a_key_acts_on() {
         other => panic!("{other:?}"),
     }
     // Down steps *over* a heading, and Up steps *back* over one. Up is the
-    // direction that regressed: the forward-only settle sent it onto the
-    // heading and straight back to the voice it came from, so from the first
-    // voice of a group Up did nothing at all.
-    //
-    // Rows: `Group(female+old)`, `old-female-2`, `Group(male+young)`,
-    // `young-male-3`, `young-male-10`, `Group(Unique)`, `Bắc Kỳ`, `Võ Tắc Thiên`.
     let mut app = voice_app(pooled_roster());
     if let Screen::Pick(p) = &mut app.screen {
         p.cursor = 3; // the first voice of the second group
@@ -277,8 +259,6 @@ async fn a_group_heading_is_a_label_and_never_the_thing_a_key_acts_on() {
         other => panic!("{other:?}"),
     }
     // At the very top there is nothing above: Up settles onto the first voice
-    // rather than parking the cursor on the heading, which would draw a list
-    // with no marker on it.
     handle_key(&mut app, key(KeyCode::Up), &http, &job_tx).await;
     match &app.screen {
         Screen::Pick(p) => assert_eq!(
@@ -309,8 +289,6 @@ async fn a_group_heading_is_a_label_and_never_the_thing_a_key_acts_on() {
 #[test]
 fn the_cast_table_names_only_what_it_shows() {
     // `gender` and `accent` read `unknown` on most rows and the language is
-    // `vi-VN` on all of them, so the table said nothing in five columns. The
-    // verdict survives where a screen-wide number belongs: the summary.
     let mut app = App::new("http://127.0.0.1:8901");
     app.roster = Some(roster_fixture());
     app.screen = Screen::Cast(CastView::new());

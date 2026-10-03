@@ -29,7 +29,6 @@ pub(crate) fn draw_workspace_new(f: &mut ratatui::Frame, app: &App, ws: &Workspa
         WsStep::Name => 0,
         WsStep::Profile => 1,
         // The EPUB path and the custom URL are the crawler step's follow-ups:
-        // the crumb stays on `crawler` while either is being answered.
         WsStep::Crawler | WsStep::Epub | WsStep::CustomUrl => 2,
     };
     let mut crumb: Vec<Span> = Vec::new();

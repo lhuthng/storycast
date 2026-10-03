@@ -45,19 +45,11 @@ use ratatui::{
 };
 
 /// The stock pane frame: rounded corners and the theme's accent border.
-/// The old square `Block::default()` read as five identical boxes; the
-/// rounded outline plus one hue separates chrome from data, which is what
-/// makes a five-pane dashboard scannable.
 pub(crate) fn pane_block(app: &App, title: impl Into<Line<'static>>) -> Block<'static> {
     pane_block_for(app, None, title)
 }
 
 /// A dashboard pane border. The focused pane gets a brighter border so mouse
-/// focus is visible without hiding a row behind a synthetic status message.
-/// Draw a deliberately fixed one-cell scroll thumb. Ratatui's stock
-/// scrollbar makes the thumb length proportional to the viewport, which makes
-/// a large list look like it has a large handle. The cross is always one cell;
-/// only its vertical position changes.
 pub(crate) fn draw_fixed_scrollbar(
     f: &mut ratatui::Frame,
     app: &App,
@@ -109,11 +101,8 @@ pub(crate) fn pane_block_for(
 }
 
 /// The size guard: the only thing on screen when the terminal cannot hold the
-/// dashboard. It names the requirement, the current size, and the way out.
 pub(crate) fn draw_too_small(f: &mut ratatui::Frame, app: &App, area: Rect) {
     // On a sliver there is no room for a bordered box, and a blank screen would
-    // be indistinguishable from a hang. One clipped line still says what is
-    // wrong, which is the whole point of the guard.
     if area.width < 30 || area.height < 5 {
         f.render_widget(
             Paragraph::new(format!(
@@ -145,7 +134,6 @@ pub(crate) fn draw_too_small(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Line::from(Span::styled("q quits", dim)),
     ];
     // Say when a dialog is still open underneath: its keys stay live, so an
-    // operator who shrank the terminal mid-prompt is not stranded.
     if app.dialog_open() {
         lines.push(Line::from(Span::styled(
             "a dialog is still open — Esc cancels it",
@@ -169,11 +157,6 @@ pub(crate) fn draw_too_small(f: &mut ratatui::Frame, app: &App, area: Rect) {
 }
 
 /// The one-line identity strip above the panes, full tier only.
-///
-/// The footer used to carry the workspace, profile, engine, analyzer and
-/// chapter range after the status — the eye had to wade past constants to
-/// find what just happened. Here the identity lives top-left where a title
-/// would be, and the theme chip sits right so `C` is discoverable.
 fn draw_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let dim = Style::default().fg(Color::DarkGray);
     let mut left = vec![Span::styled(
@@ -181,7 +164,6 @@ fn draw_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
         app.style_bold(crate::tui::style::theme_accent()),
     )];
     // A missing profile is not decoration: every runner refuses to start
-    // without one, so it reads as the problem it is (yellow, not dim).
     left.push(Span::styled(
         format!(
             "  profile: {}",
@@ -227,68 +209,28 @@ fn draw_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
 }
 
 /// The border, and the chrome inside it, that every pane spends before its
-/// first row of content.
-///
-/// **These are the numbers the panes themselves subtract**, so a change to a
-/// pane's header has to change this or the pane is sized against a fiction.
-/// Machines spends 3 (border + table header), the others 2 (border only).
 const MACHINES_CHROME: u16 = 3;
 
 const PANE_CHROME: u16 = 2;
 
 /// Column floors for the Tasks/Stats row.
-///
-/// `STATS_MIN_W` is not a guess: it is the sum of that table's own column
-/// widths (10+5+6+6+5+6) plus the two border columns, which is the point at
-/// which its stage columns start clipping into each other. Tasks is a text
-/// list, so it only needs enough for a stage name and a count.
 const STATS_MIN_W: u16 = 40;
 
 const TASKS_MIN_W: u16 = 24;
 
 /// The ceiling a pane gets at a given terminal height.
-///
-/// **The ceilings scale, and that is the point.** A fixed cap means a pane is
-/// the same size on a 32-row terminal and a 60-row one, so the extra rows go
-/// to Logs while a pane that genuinely has ten workers still shows five. A
-/// tall terminal should be able to show the cluster it has.
-///
-/// The fraction is a share of the *whole* frame, so a busy pane cannot take
-/// the screen: at any height the other panes' floors plus the log's floor are
-/// still reserved, and the `*_MAX_H` constants are the floor of this ceiling
-/// for the smallest terminal of the tier — which is what the compile-time
-/// guard proves.
 fn soft_ceiling(base: u16, share: u16, frame_h: u16) -> u16 {
     base.max(frame_h * share / 4)
 }
 
 /// Rows the Machines pane wants: one per machine, plus its chrome, clamped to
-/// the tier's floor and the scaled ceiling — or, in the graph, a chassis plus
-/// whole rows of servers it can afford.
-///
-/// The ceiling is the point of the ceiling. A cluster with thirty machines
-/// should scroll, not push Logs and the footer off the screen — and the pane
-/// already clamps its scroll to the rows it can show.
 fn machines_height(app: &App, compact: bool, frame_h: u16, frame_w: u16, others: u16) -> u16 {
     // The graph is the one pane that cannot be sized from its content alone: the
-    // picture is a fixed chassis plus whole rows of servers, however many boxes
-    // there are, and what it must fit *inside* is the width. So it is budgeted
-    // against the frame instead — everything else, minus this — and a frame too
-    // short even for the lean form falls back to the table, which says so in its
-    // title rather than drawing a rack with the legs cut off.
-    //
-    // `others` is what the other panes will *actually* take, not their floors.
-    // A cluster with eight live workers wants a nine-row Workers pane, and
-    // budgeting against the floor instead over-promised by six rows: the solver
-    // then gave every pane less than it was told, and the rack came out clipped
-    // on its last row with blank space under it — a picture that lies about how
-    // much it showed.
     if !app.machines.is_empty() && app.machines_graph {
         let budget = frame_h.saturating_sub(others);
         if let Some(hub_art) = graph::form_for(budget.saturating_sub(PANE_CHROME)) {
             let w = frame_w.saturating_sub(2);
             // The plan's own arithmetic, at the window's first page, so the pane
-            // is exactly the rows the drawer will fill.
             let rows = graph::plan(
                 budget.saturating_sub(PANE_CHROME),
                 w,
@@ -316,11 +258,6 @@ fn machines_height(app: &App, compact: bool, frame_h: u16, frame_w: u16, others:
 }
 
 /// Rows the Workers pane wants: one per live worker, plus a table header.
-///
-/// Stale and ghost beats are filtered out of the pane by the renderer, so the
-/// count is taken the same way here — sizing the pane from the raw heartbeat
-/// list would reserve rows for rows that are never drawn, which is the exact
-/// "too tall" this replaces.
 fn workers_height(app: &App, compact: bool, frame_h: u16) -> u16 {
     let (min, base) = if compact {
         (COMPACT_WORKERS_MIN_H, COMPACT_WORKERS_MAX_H)
@@ -334,16 +271,10 @@ fn workers_height(app: &App, compact: bool, frame_h: u16) -> u16 {
         PANE_CHROME + 1 + live as u16
     };
     // Half the frame's worth of ceiling: workers are the pane that grows with
-    // the cluster, so they get the larger share. Still bounded, because the
-    // other panes' floors and the log's floor are reserved first.
     want.clamp(min, soft_ceiling(base, 2, frame_h))
 }
 
 /// Rows the Tasks/Stats row wants: one line per stage, plus the border.
-///
-/// Stats draws a header and one row per worker next to it, so the taller of the
-/// two decides. An empty cluster still gets the floor, because both panes say
-/// something useful when there is nothing running.
 fn tasks_height(app: &App, compact: bool, frame_h: u16) -> u16 {
     let (min, base) = if compact {
         (COMPACT_TASKS_MIN_H, COMPACT_TASKS_MAX_H)
@@ -351,8 +282,6 @@ fn tasks_height(app: &App, compact: bool, frame_h: u16) -> u16 {
         (FULL_TASKS_MIN_H, FULL_TASKS_MAX_H)
     };
     // The pane always draws the four pipeline stages, so the count is fixed —
-    // the ledger's row totals used to size this and clipped a stage whenever
-    // a stage had no rows yet.
     let stages: u16 = if app.counts.as_object().is_none() {
         1
     } else if app.tasks.is_empty() {
@@ -379,21 +308,6 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let compact = size == Size::Compact;
 
     // Every pane but Logs is sized to its content; **Logs takes the slack**.
-    //
-    // That is the whole change. The old layout handed each pane a fixed row
-    // count, so a one-box cluster got an eight-row Machines pane that was
-    // mostly border, a nine-box cluster had machines clipped with nothing
-    // saying so, Tasks and Stats were dropped outright in the compact tier,
-    // and terminal height beyond the fixed set was spent on empty borders
-    // rather than on the log — the one pane where a message is the point.
-    // The Machines pane is sized last, and from what the others *will* take
-    // rather than from their floors — see `machines_height`.
-    //
-    // **The Workers pane does not exist in rack mode.** The rack draws every box
-    // with the worker standing on it — the same animal name, the same task, the
-    // same chapter — so a second list of the same facts underneath is the pane
-    // arguing with itself, and it costs the rows the rack wanted most. Its rows
-    // go to the rack and the log, not to a gap.
     let rack = app.machines_graph;
     let workers_h = if rack {
         0
@@ -428,7 +342,6 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
             Constraint::Length(workers_h),
             Constraint::Length(tasks_h),
             // The only flexible row. Everything above is its content's height,
-            // so whatever the terminal has spare is spent here.
             Constraint::Min(FULL_EVENTS_MIN_H),
             Constraint::Length(FULL_FOOTER_H),
         ]
@@ -439,10 +352,6 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         .split(area);
 
     // Tasks and Stats sit side by side. Both are `Min`, not `Length`, because a
-    // fixed 46 columns for Stats meant a 200-column terminal gave it 46 and
-    // handed the other 154 to a text list — and a 76-column terminal landed
-    // exactly on the edge, where the stage columns in Stats clipped. Stats
-    // needs 38 columns of table before its border, so that is its floor.
     let task_row = RLayout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(TASKS_MIN_W), Constraint::Min(STATS_MIN_W)])
@@ -458,9 +367,6 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
         events::draw_events(f, app, root[3]);
         footer::draw_footer(f, app, root[4], true);
         // A rack is a picture, not a list: there is no row index to map a click
-        // onto, and mapping one anyway would select whichever box happened to be
-        // that many rows down. So the pane takes no hit region in that mode and a
-        // click on it does nothing — which is the truth about a picture.
         if !app.machines_graph {
             app.add_hit_region(
                 root[0],
@@ -524,7 +430,6 @@ pub(crate) fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     // Overlays paint last and cover everything beneath them. They are rendered
-    // even in the compact tier: a confirmation must stay answerable.
     match app.screen.clone() {
         Screen::Help { scroll } => help::draw_help(f, app, scroll),
         Screen::Text(p) => prompt::draw_text_prompt(f, app, &p),

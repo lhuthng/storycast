@@ -9,12 +9,6 @@ pub fn load_map(path: &Path) -> Result<SceneMap> {
 }
 
 /// First matching rule wins (ordered specific -> general).
-///
-/// Substring matching, not token matching, and on purpose: `market-stall-morning`
-/// has to reach the `market` rule. The cost is that a keyword can fire on a word
-/// that is only part of a compound label, which is why the rules are ordered
-/// most-specific-first and why the generic place nouns that used to sit in a
-/// catch-all (`shop`, `room`) are no longer keywords here.
 pub fn match_scene(scene: &str, cfg: &SceneMap) -> SceneRule {
     let s = scene.to_lowercase();
     for rule in &cfg.rules {
@@ -31,9 +25,6 @@ pub fn match_scene(scene: &str, cfg: &SceneMap) -> SceneRule {
 }
 
 /// The majority value of a field across a run, ties to the last seen.
-///
-/// Shared by the scene and the music summary so a run cannot end up summarised
-/// two different ways, and so "which line wins a tie" is decided once.
 fn majority(vals: impl Iterator<Item = String>) -> String {
     let mut counts: Vec<(String, usize)> = Vec::new();
     for v in vals {
@@ -70,12 +61,6 @@ pub fn run_scenes(segments: &[Value], runs: &[Run]) -> Vec<String> {
 }
 
 /// Majority `music` value per run, falling back to the legacy keyword lookup.
-///
-/// A run that declares no value anywhere is a run from a script written before
-/// the field existed, so it is scored by `legacy_scene_music` off its scene
-/// label, the shim that keeps chapters already on disk mergeable. Mixed runs
-/// resolve the same way per run, which is the graceful reading: a hand-edited
-/// old script still merges rather than losing its music entirely.
 pub fn run_music(segments: &[Value], runs: &[Run], cfg: &SceneMap) -> Vec<String> {
     let mut musics = run_scenes(segments, runs);
     for (run, scene) in runs.iter().zip(musics.iter_mut()) {
@@ -90,8 +75,6 @@ pub fn run_music(segments: &[Value], runs: &[Run], cfg: &SceneMap) -> Vec<String
 }
 
 /// One segment's mood: its declared `music` value, else the legacy lookup over
-/// its scene label. The single-segment form of [`run_music`], for the cloud
-/// engine path where one turn *is* one segment.
 pub fn resolve_music(scene: &str, declared: Option<&str>, cfg: &SceneMap) -> String {
     match declared.map(str::trim).filter(|m| !m.is_empty()) {
         Some(m) => m.to_string(),
@@ -110,6 +93,4 @@ pub fn legacy_music(scene: &str, cfg: &SceneMap) -> String {
     cfg.legacy_scene_music.default.music.clone()
 }
 
-// ---------------------------------------------------------------------------
-// the timeline
 // ---------------------------------------------------------------------------

@@ -2,14 +2,6 @@ use super::*;
 
 impl Inner {
     /// Rewrite written-out non-verbal sounds into engine tags across every
-    /// script (`Ha ha ha!` → `[cười]`), and requeue the chapters it touches.
-    /// Deterministic — no LLM, same mapping as the prompt's rule 9 — so a
-    /// re-run is a no-op once every script is clean.
-    ///
-    /// The live API only ever calls this with `dry_run = true` (a read-only
-    /// report of what would change), and queues
-    /// [`bm_proto::ExclusiveOp::Retag`] for the write, so the cluster-wide
-    /// guard stands only for a direct caller: a test, or the offline path.
     pub fn op_retag(&mut self, dry_run: bool) -> anyhow::Result<String> {
         if !dry_run {
             self.ensure_idle()?;
@@ -18,9 +10,6 @@ impl Inner {
     }
 
     /// The queued retag: the same rewrite, gated by the queue instead of
-    /// `ensure_idle` — it runs only once the digests (and renders) it could
-    /// disturb have gone quiet. `chapters` is the ask-time scope; the
-    /// per-chapter plan diff at write time still decides what actually moves.
     pub(crate) fn op_retag_queued(&mut self, chapters: Vec<u32>) -> anyhow::Result<String> {
         let scope = if chapters.is_empty() {
             None
@@ -31,9 +20,6 @@ impl Inner {
     }
 
     /// The retag body, shared by the direct op (which gates on
-    /// `ensure_idle`) and the queued one (which the exclusive gate has
-    /// already cleared). `scope` = `None` for every script, or exactly the
-    /// ask-time chapters.
     fn retag_chapters(&mut self, scope: Option<Vec<u32>>, dry_run: bool) -> anyhow::Result<String> {
         let mut chapters: Vec<u32> = Vec::new();
         let mut edits = 0u32;
@@ -55,7 +41,6 @@ impl Inner {
                 continue;
             }
             // Headline segments never render (the title file speaks instead),
-            // so editing them is churn: skip exactly what `drop_headline` drops.
             let skip = owned.len() - bm_core::assemble::drop_headline(&owned).len();
             let mut touched: Vec<usize> = Vec::new();
             if let Some(segments) = data.get_mut("segments").and_then(|s| s.as_array_mut()) {
@@ -75,7 +60,6 @@ impl Inner {
                         touched.push(i);
                         edits += 1;
                         // Capped so one pathological chapter cannot flood the op
-                        // message; 200 entries is the whole book in practice.
                         if detail.len() < 200 {
                             detail.push(format!(
                                 "ch{n}#{i}: {} → {}",
@@ -94,12 +78,6 @@ impl Inner {
                 continue;
             }
             // Write the edited script, then let the plan's diff say what the
-            // edit reached: a retagged run has a new content-addressed name, so
-            // its old file is superseded and its take is work again, while
-            // every run the edit did not touch keeps its audio. This replaced a
-            // hand-rolled "delete the runs holding edited segments" that had to
-            // reconstruct `expected_wavs` positions and the title offset to
-            // find them — the plan already knows, exactly.
             let _ = bm_core::atomic_write(
                 &sp,
                 &serde_json::to_string_pretty(&data).unwrap_or_default(),
@@ -125,46 +103,8 @@ impl Inner {
     }
 
     /// Re-attribute speakers on one chapter's script, then requeue exactly
-    /// what the edit reached.
-    ///
-    /// The digest's recurring misattribution, confirmed against chapter text:
     /// third-person narration given to the character it describes ("Nàng lập
     /// tức nhíu mày…" spoken by Lạc Lan Tuyết), and a quote with no dialogue
-    /// tag defaulted to Narrator instead of whoever the surrounding action
-    /// introduces. The prompt's rule 3 already forbids the first half word
-    /// for word — the small model disobeyed it — so re-digesting rolls the
-    /// same dice; the correction is surgical.
-    ///
-    /// Chapter-scoped busy guard rather than the cluster-global `ensure_idle`:
-    /// every file this touches belongs to the chapter (its script, its plan,
-    /// its segments, its mp3), so unrelated chapters rendering alongside are
-    /// unaffected. See [`Self::ensure_chapter_idle`].
-    ///
-    /// A new speaker must already hold a voice (`Narrator` always does), or
-    /// the chapter would requeue into a row no box can speak. The plan's diff
-    /// decides the blast radius for free: a re-voiced run has a new
-    /// content-addressed name, so its old file is superseded and its take is
-    /// work again, while untouched runs keep their audio.
-    /// Point one segment at another speaker, having first checked that the
-    /// segment says who the caller thought it said.
-    ///
-    /// `segment` is 1-based, the way a person counts lines in the file, and
-    /// `expect` is the guard: a mistyped number lands on a line that is not
-    /// the one meant, and re-attributing it would be a silent, permanent edit
-    /// to a chapter already rendered. So the mismatch refuses, and the refusal
-    /// names what is actually there and where the expected speaker *is*, which
-    /// is the answer to "I miscounted".
-    ///
-    /// The invalidation is [`invalidate_render`]'s, which is the plan's diff:
-    /// only the takes whose voice or text moved become work, and the rest of
-    /// the chapter keeps the audio it has. One caveat worth knowing, because it
-    /// is the difference between one take and several: the local engine groups
-    /// consecutive same-speaker segments into a single take, so re-pointing the
-    /// middle of a run splits that run and re-speaks the two halves.
-    ///
-    /// The live API queues this ([`bm_proto::ExclusiveOp::FixSpeaker`]) and
-    /// runs [`Self::fix_speaker_apply`], so this guarded entry is compiled for
-    /// the tests that cover the refusal itself.
     #[cfg(test)]
     pub fn op_fix_speaker(
         &mut self,
@@ -178,9 +118,6 @@ impl Inner {
     }
 
     /// The fix-speaker body, guardless — see [`Self::swap_apply`]. The
-    /// exclusive gate already held this chapter still, and its scope is every
-    /// stage of it, so the chapter guard must not re-run here and refuse a
-    /// write the gate picked the moment for.
     pub(crate) fn fix_speaker_apply(
         &mut self,
         chapter: u32,
@@ -199,8 +136,6 @@ impl Inner {
         let engine = self.settings.engine.clone();
         let cast = bm_core::cast::read_cast(&engine, &self.layout.cast(&engine));
         // Checked before the edit, not after: a speaker with no voice is a hard
-        // planning error, so writing the script first would leave the chapter
-        // unplannable and the requeue with nowhere to go.
         if to != "Narrator" && cast.get(to).is_none() {
             anyhow::bail!(
                 "{to:?} holds no voice in the {engine} cast — enrol it (:voices, or roster add-sample) and :prov, or this chapter requeues into a row no box can speak"
@@ -231,7 +166,6 @@ impl Inner {
             .to_string();
         if here != expect.trim() {
             // Name the neighbours, because "wrong number" is the likeliest
-            // cause and the fix is one of the numbers printed here.
             let mut where_: Vec<String> = segments
                 .iter()
                 .enumerate()
@@ -269,10 +203,6 @@ impl Inner {
         }
         item["speaker"] = serde_json::Value::String(to.to_string());
         // The roster names who's in the chapter: drop speakers no segment
-        // uses anymore, append the new one in segment order. Render and cast
-        // assignment read segments too, so a stale roster never broke
-        // anything — but the file should not lie about its own contents.
-        // Order is preserved: only membership changes.
         {
             let speakers: Vec<String> = segments
                 .iter()
@@ -296,10 +226,6 @@ impl Inner {
             &serde_json::to_string_pretty(&data).unwrap_or_default(),
         );
         // The count is the plan's diff, taken around the invalidation, because
-        // that is the number the operator watches drain. The chapter's take
-        // count is not it: a three-take chapter with one segment re-pointed has
-        // one take to speak, and reporting three would be a promise the
-        // scheduler does not keep.
         let before = self.take_keys(chapter);
         self.invalidate_render(chapter);
         let after = self.take_keys(chapter);
@@ -313,8 +239,6 @@ impl Inner {
     }
 
     /// The chapter's take keys, which is what a re-plan diffs. Empty when the
-    /// chapter has no plan yet, which makes every take after an edit look new,
-    /// and is the honest answer: nothing was recorded to compare against.
     fn take_keys(&self, chapter: u32) -> Vec<String> {
         bm_core::assemble::RenderPlan::load(&self.layout.plan(chapter))
             .map(|p| p.takes.into_iter().map(|t| t.take_key).collect())
@@ -345,18 +269,6 @@ impl Inner {
     }
 
     /// Re-attribute speakers on one chapter's script, then requeue exactly
-    /// what the edit reached.
-    ///
-    /// The digest's recurring misattribution, confirmed against chapter text:
-    /// third-person narration given to the character it describes, and a quote
-    /// with no dialogue tag defaulted to Narrator instead of whoever the
-    /// surrounding action introduces. The prompt's rule 3 already forbids the
-    /// first half word for word — the small model disobeyed it — so
-    /// re-digesting rolls the same dice; the correction is surgical.
-    ///
-    /// The live API queues this ([`bm_proto::ExclusiveOp::Recast`]) and runs
-    /// [`Self::recast_apply`], so this guarded entry is compiled for the tests
-    /// that cover the refusal itself.
     #[cfg(test)]
     pub fn op_recast(
         &mut self,
@@ -422,8 +334,6 @@ impl Inner {
             done.push(format!("#{} {old}→{new}", f.index));
         }
         // Deletions run after re-attribution and in descending index order,
-        // so earlier indexes stay valid while later items leave. Only lines
-        // go: sounds hold the mix together and are never the duplication.
         let mut removed: Vec<usize> = Vec::new();
         if !remove.is_empty() {
             let mut order: Vec<usize> = remove.to_vec();

@@ -1,32 +1,4 @@
 //! Auditioning a voice: play it, never commit to it.
-//!
-//! Three auditions — current, pointed, another — answering three questions,
-//! run from `t` / `T` / `^T` or from the `:current` / `:try` / `:another`
-//! words (same callees below, so keys and words can never disagree).
-//!
-//! * **current** plays an already-rendered segment (`Op::Segment`): the
-//!   held line with the current voice, zero synthesis. In the picker the
-//!   character is fixed so the line never rolls; in the cast overview it
-//!   follows the highlighted speaker.
-//! * **try** renders the held line with the pointed voice
-//!   (`Op::PreviewVoice` with text): the one deliberate generation, and the
-//!   only way to hear two voices on the same sentence before either is
-//!   assigned. With the inductor down it synthesizes on this machine
-//!   instead — no worker needs to be on.
-//! * **another** renders another line with the pointed voice: one random
-//!   pick may be a poor representative.
-//!
-//! Keys or filter, never both: picker step 2 and the cast overview open in
-//! audition focus, where `t`/`T`/`^T` play and any other letter focuses the
-//! filter instead. While the filter is focused every letter types (t/T
-//! included) and the keys go quiet — the words still audition from the
-//! command line. `Esc` blurs back to audition focus; `^R` focuses explicitly.
-//!
-//! The held line lives on the screen; `Enter` on a voice additionally locks it
-//! per character (`App::locked_lines`), so reopening the picker resumes on the
-//! sentence the voice was picked on instead of another random pick.
-//!
-//! `Enter` is the only key that changes the cast.
 
 use crate::tui::{
     app::App,
@@ -38,14 +10,6 @@ use crate::tui::{
 use bm_proto::{Op, OpRequest};
 
 /// Render and play `voice` speaking the held line — or a fresh line for
-/// `character` when nothing fitting is held.
-///
-/// Returns the line the caller should hold afterwards, so a second audition of
-/// the same character speaks the same sentence. Returns `held` unchanged when
-/// nothing was dispatched — a refusal must not silently drop the A/B.
-///
-/// There is deliberately no fixed-sample fallback: without a real line there
-/// is nothing honest to say, and the sample was synthesis wearing a lab coat.
 #[allow(clippy::too_many_arguments)] // each is a distinct decision input; bundling them would be a redesign
 pub(crate) fn audition(
     app: &mut App,
@@ -64,7 +28,6 @@ pub(crate) fn audition(
         return held.cloned();
     }
     // One render at a time: the sidecar is a single model on one machine, and two
-    // samples at once would also talk over each other.
     if let Some(v) = app.audition.clone() {
         app.set_status(
             Level::Warn,
@@ -84,8 +47,6 @@ pub(crate) fn audition(
         Some(l) => l,
         None => {
             // No lines for this character yet — a newcomer the digest has not
-            // reached. Say so rather than rendering nothing or quietly playing
-            // something else.
             let why = if app.lines.is_none() {
                 "lines are still loading"
             } else {
@@ -100,8 +61,6 @@ pub(crate) fn audition(
     };
 
     // No backend, no worker, no sidecar: synthesize on this machine instead.
-    // Same engine call the sidecar makes, so a fresh voice auditions with
-    // nothing on — at the cost of loading the model here.
     if !matches!(app.conn, Conn::Up) {
         if app.layout.root.as_os_str().is_empty() {
             app.set_status(
@@ -144,7 +103,6 @@ pub(crate) fn audition(
     );
     if !dispatched {
         // The refusal already set a status. Clear the marker we just claimed, or
-        // the screen would be wedged behind a render that never started.
         app.audition = None;
         return held.cloned();
     }
@@ -159,9 +117,6 @@ pub(crate) fn audition(
 }
 
 /// The sentence `t` tests: the locked one when this character has one, else
-/// the held one when it is already theirs, else a fresh pick from the index.
-/// `None` means there is nothing honest to play — the caller says so rather
-/// than dispatching.
 pub(crate) fn shown_line(
     app: &App,
     character: &str,
@@ -180,12 +135,6 @@ pub(crate) fn shown_line(
 }
 
 /// Play one already-rendered segment for `voice` speaking exactly `text`: no
-/// synthesis, just bytes.
-///
-/// Connected, those come from the inductor (`Op::Segment`); disconnected,
-/// the same lookup runs against this checkout's files as a `Job::Segment` —
-/// listening needs no backend. Either way a miss plays nothing and names the
-/// render key instead — that is the whole point of the key.
 pub(crate) fn segment(
     app: &mut App,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
@@ -217,7 +166,6 @@ pub(crate) fn segment(
             return;
         }
         // Same duplicate suppression the API path gets: one fetch at a time,
-        // and the Done handler frees exactly this key.
         let key = op_key(&OpRequest {
             op: Op::Segment,
             ..Default::default()
@@ -278,16 +226,12 @@ pub(crate) fn current_voice(app: &App, character: &str) -> Option<String> {
 }
 
 /// Which `:…` audition word is running: the held line on the current voice
-/// (cache only), or on the pointed voice — the held line, or another one.
 pub(crate) enum AuditionKind {
     Current,
     Pointed { reroll: bool },
 }
 
 /// Run a `:current` / `:try` / `:another` word from the command line: the
-/// same three auditions the old `t` / `T` / `^T` keys ran, before those
-/// letters were given back to the filter. Needs the voice list (picker
-/// step 2) or the cast overview — anywhere else names the way there.
 pub(crate) fn audition_word(
     app: &mut App,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
@@ -323,12 +267,6 @@ pub(crate) fn audition_word(
 }
 
 /// `:current` on the picker: the current voice on the shown line, from
-/// cache only — what the operator is about to replace, on the sentence in
-/// front of them. The pointed voice is for `:try` (render) and Enter
-/// (pick) — `:current` never follows the cursor. A miss names the render
-/// word.
-/// Shared with [`audition_word`]: the `:current` / `:try` / `:another`
-/// words dispatch here too, so keys and words can never disagree.
 pub(crate) fn pick_current(
     app: &mut App,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
@@ -354,11 +292,6 @@ pub(crate) fn pick_current(
 }
 
 /// `:try` / `:another` on the picker: the held line — or another one —
-/// rendered with the voice under the cursor. The one deliberate
-/// generation: the only way to hear two voices on the same sentence
-/// before either is assigned.
-/// Shared with [`audition_word`]: the `:current` / `:try` / `:another`
-/// words dispatch here too, so keys and words can never disagree.
 pub(crate) fn pick_pointed(
     app: &mut App,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
@@ -368,7 +301,6 @@ pub(crate) fn pick_pointed(
 ) {
     let list = crate::tui::model::filtered_voices(app, &p.filter);
     // Settled, because a group heading is a row and this is the one read of
-    // "the pointed voice" that a stale cursor could still reach.
     let pointed = crate::tui::model::settle_cursor(&list, p.cursor);
     p.cursor = pointed;
     match list.get(pointed).and_then(|r| r.voice()) {
@@ -389,10 +321,6 @@ pub(crate) fn pick_pointed(
 }
 
 /// `:current` on the cast overview: the speaker's current voice on the
-/// shown line, from cache only — never synthesis. A miss names the render
-/// word instead of playing something nearby.
-/// Shared with [`audition_word`]: the `:current` / `:try` / `:another`
-/// words dispatch here too, so keys and words can never disagree.
 pub(crate) fn cast_current(
     app: &mut App,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
@@ -418,9 +346,6 @@ pub(crate) fn cast_current(
 }
 
 /// `:try` / `:another` on the cast overview: the held line — or another
-/// one — rendered with the highlighted speaker's voice.
-/// Shared with [`audition_word`]: the `:current` / `:try` / `:another`
-/// words dispatch here too, so keys and words can never disagree.
 pub(crate) fn cast_pointed(
     app: &mut App,
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,

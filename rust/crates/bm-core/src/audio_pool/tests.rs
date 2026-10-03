@@ -6,7 +6,6 @@ fn tags(t: &[&str]) -> Vec<String> {
 }
 
 /// Two sounds, one of them with three takes — the shape the real registries
-/// have, where `day-1/2/3` is one sound.
 fn pool() -> ClipPool {
     let mut p = ClipPool::new();
     p.insert(
@@ -65,7 +64,6 @@ fn pool() -> ClipPool {
 }
 
 /// The whole point of the shape: a scene asks for a *sound*, and the number
-/// on the file never becomes part of the answer.
 #[test]
 fn a_pick_names_the_sound_never_a_numbered_file() {
     let p = pool();
@@ -85,8 +83,6 @@ fn a_pick_names_the_sound_never_a_numbered_file() {
 }
 
 /// Every take in a family has to be reachable, or the extra ones are dead
-/// weight nobody notices. This is what a one-file-per-entry registry could
-/// not express and what made the numbering look like identity.
 #[test]
 fn every_take_of_a_sound_is_reachable() {
     let p = pool();
@@ -102,7 +98,6 @@ fn the_best_overlap_wins_over_mere_intersection() {
     assert_eq!(pick(&p, &tags(&["day", "calm"]), 0).unwrap().sound, "day");
     assert_eq!(pick(&p, &tags(&["day", "calm"]), 9).unwrap().sound, "day");
     // `[night, dark]` shares only `night`, so it still finds the night sound
-    // rather than nothing.
     assert_eq!(
         pick(&p, &tags(&["night", "dark"]), 7).unwrap().sound,
         "night"
@@ -112,9 +107,6 @@ fn the_best_overlap_wins_over_mere_intersection() {
 #[test]
 fn a_weaker_overlap_never_reaches_the_candidate_set() {
     // The winner must be decided by overlap, never by where its name sorts.
-    // `zz-weak` sorts *after* `mm-strong`, so a candidate set that only
-    // cleared on a strict improvement would offer both and let the seed roll
-    // the loser.
     let mut p = ClipPool::new();
     for (name, t) in [
         ("aa-weak", &["night"][..]),
@@ -146,7 +138,6 @@ fn a_weaker_overlap_never_reaches_the_candidate_set() {
 #[test]
 fn a_sound_with_no_files_is_not_a_candidate() {
     // A registry left in the old one-file-per-entry shape resolves to
-    // silence, not to a guess. Pinned because the failure is quiet.
     let mut p = ClipPool::new();
     p.insert(
         "day".into(),
@@ -164,9 +155,6 @@ fn a_sound_with_no_files_is_not_a_candidate() {
 }
 
 /// Every one of these used to *panic*, not return `None`: the index was
-/// built as `seed % cands.len()`, and `% 0` traps before the `?` can see an
-/// empty vector. A scene naming tags nothing answers is ordinary, so this is
-/// the difference between a silent stretch and a dead merge.
 #[test]
 fn no_suitable_track_is_none_not_a_silent_file() {
     let p = pool();
@@ -198,7 +186,6 @@ fn one_shots_are_marked_by_the_registry_not_the_filename() {
     assert!(!p["sword-fight"].looped);
     assert!(p["day"].looped, "a bed loops by default");
     // The flag rides along on the pick, so the caller never has to look the
-    // sound up a second time to learn how it plays.
     assert!(!pick(&p, &tags(&["battle", "sword"]), 0).unwrap().looped);
 }
 
@@ -238,12 +225,8 @@ fn filename_tags_come_from_the_one_shared_parser() {
 }
 
 // -----------------------------------------------------------------------
-// writing a registry
-// -----------------------------------------------------------------------
 
 /// A scratch copy of the fixture registry. Never write to the live tree
-/// from a test: it is ignored and may be absent, and the writer's whole
-/// promise is that it leaves its input alone.
 fn shipped_copy(kind: PoolKind, tag: &str) -> (std::path::PathBuf, String) {
     let dir = std::env::temp_dir().join(format!("bm-pool-write-{tag}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -254,9 +237,6 @@ fn shipped_copy(kind: PoolKind, tag: &str) -> (std::path::PathBuf, String) {
 }
 
 /// The property the whole writer exists for: an edit must cost the diff of
-/// an edit, not the diff of a re-serialise. Every shipped registry is
-/// hand-formatted — some arrays inline, some expanded, and a `_note` in
-/// prose — so a round trip through the writer has to return the same bytes.
 #[test]
 fn saving_an_untouched_registry_rewrites_nothing() {
     for kind in PoolKind::ALL {
@@ -278,7 +258,6 @@ fn saving_an_untouched_registry_rewrites_nothing() {
 }
 
 /// Removal is surgical: the entry goes, everything around it — including
-/// the notes and the neighbours' own spacing — is untouched.
 #[test]
 fn removing_an_entry_leaves_the_rest_byte_identical() {
     let (path, original) = shipped_copy(PoolKind::Music, "remove");
@@ -298,7 +277,6 @@ fn removing_an_entry_leaves_the_rest_byte_identical() {
 }
 
 /// A new entry is rendered in its layer's field order and lands in name
-/// order, so the file stays diffable against the ones around it.
 #[test]
 fn a_new_entry_is_written_in_its_layers_field_order() {
     let (path, _) = shipped_copy(PoolKind::Inject, "add");
@@ -318,7 +296,6 @@ fn a_new_entry_is_written_in_its_layers_field_order() {
     save_pool(&path, PoolKind::Inject, &pool).unwrap();
     let after = std::fs::read_to_string(&path).unwrap();
     // In name order, and in the file's field order: tags, files, mode,
-    // level, looped, dur_s. Both lists are short enough to stay inline.
     assert!(
         after.contains(
             "  \"kettle\": {\n    \"tags\": [\"kettle\", \"whistle\"],\n    \"files\": [\"injects/kettle-1.mp3\"],\n    \"mode\": \"hit\",\n    \"level\": 0.8,\n    \"looped\": false,\n    \"dur_s\": 2.5\n  },\n"
@@ -354,7 +331,6 @@ fn an_edited_entry_keeps_the_shape_it_had() {
 }
 
 /// A short list stays on one line when the entry is new — the same habit
-/// the hand-written effect and music registries have.
 #[test]
 fn a_short_list_stays_inline_but_a_long_one_does_not() {
     let (path, _) = shipped_copy(PoolKind::Effect, "inline");
@@ -397,8 +373,6 @@ fn a_short_list_stays_inline_but_a_long_one_does_not() {
 }
 
 /// The `_note` is prose an author wrote, and it is the only written record
-/// of why the pool is shaped the way it is. It must survive verbatim —
-/// including its own line, not re-encoded.
 #[test]
 fn the_note_survives_verbatim() {
     let (path, original) = shipped_copy(PoolKind::Effect, "note");
@@ -419,7 +393,6 @@ fn the_note_survives_verbatim() {
 }
 
 /// A registry the scanner cannot read is refused, never replaced. Losing a
-/// pool to a stray bracket would be silent and total.
 #[test]
 fn a_registry_this_writer_cannot_read_is_refused_not_replaced() {
     let dir = std::env::temp_dir().join("bm-pool-write-bad");
@@ -440,10 +413,6 @@ fn a_registry_this_writer_cannot_read_is_refused_not_replaced() {
 }
 
 /// A readable file whose members are not sounds: the `_`-prefixed ones are
-/// notes and are kept, the rest *are* the pool — a key that will not parse
-/// as a `Sound` is already invisible to `load_pool`, so writing drops it and
-/// the file and the pool agree again. That is the one case where a save
-/// removes something the operator did not name, so it is pinned here.
 #[test]
 fn a_member_that_is_not_a_sound_is_dropped_and_the_notes_are_kept() {
     let dir = std::env::temp_dir().join("bm-pool-write-junk");
@@ -466,7 +435,6 @@ fn a_member_that_is_not_a_sound_is_dropped_and_the_notes_are_kept() {
 }
 
 /// A registry that does not exist yet is created rather than refused: an
-/// operator adding the first sound to an empty layer is ordinary.
 #[test]
 fn a_missing_registry_is_created() {
     let dir = std::env::temp_dir().join("bm-pool-write-fresh");
@@ -491,8 +459,6 @@ fn a_missing_registry_is_created() {
 }
 
 /// The ladder: a sound's own trim is a plain multiplier, and an absent one
-/// is 1.0 — so a registry written before the field existed mixes exactly as
-/// it did.
 #[test]
 fn an_absent_level_is_one_and_a_level_rides_on_the_pick() {
     let mut p = ClipPool::new();
@@ -515,7 +481,6 @@ fn an_absent_level_is_one_and_a_level_rides_on_the_pick() {
     assert_eq!(pick(&p, &tags(&["day"]), 0).unwrap().level, 0.25);
 
     // Zero and negatives read as "unset", never as a mute: a pool cannot
-    // silence a layer by arithmetic accident.
     s.level = Some(0.0);
     assert_eq!(sound_level(&s), 1.0);
     s.level = Some(-2.0);
@@ -523,7 +488,6 @@ fn an_absent_level_is_one_and_a_level_rides_on_the_pick() {
 }
 
 /// Every shipped sound resolves to 1.0 today. If that ever stops being
-/// true the mix has changed, and it should be a decision, not a surprise.
 #[test]
 fn the_shipped_registries_are_all_at_unity_today() {
     let dir = std::env::temp_dir().join("bm-pool-unity");

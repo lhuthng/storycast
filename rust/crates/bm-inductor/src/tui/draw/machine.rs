@@ -31,7 +31,6 @@ pub(crate) fn draw_machine_info(f: &mut ratatui::Frame, app: &App, addr: &str) {
     };
     let mut lines = vec![kv("addr", m.addr.clone())];
     // The registry handle the provision log uses — without it the detail
-    // screen cannot answer "is this the box `[hawk]` was about".
     if !m.name.is_empty() {
         lines.push(kv("name", m.name.clone()));
     }
@@ -54,7 +53,6 @@ pub(crate) fn draw_machine_info(f: &mut ratatui::Frame, app: &App, addr: &str) {
         kv("state", m.state.as_str().to_string()),
         // How long it has been that way: "initializing 0:12" and "initializing
         // 0:20" want opposite reactions, and the state alone cannot tell them
-        // apart.
         kv("state age", state_age_label(m)),
         kv("ssh", m.ssh_target()),
         kv("ssh port", m.ssh_port.to_string()),

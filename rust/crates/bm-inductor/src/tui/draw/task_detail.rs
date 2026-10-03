@@ -94,10 +94,6 @@ pub(crate) fn draw_task_detail(f: &mut ratatui::Frame, app: &mut App, view: &Tas
         kv("updated", format!("{}s ago", age_secs(t.updated))),
     ];
     // A batched render, read off the one row that knows: the offer names a
-    // head and records the rest on it (`Task::batch`), so this is the only row
-    // that can answer "why are ten rows assigned to one box". Showing it on a
-    // member would need the same fact stored twice, which is how the two copies
-    // come to disagree.
     if !t.batch.is_empty() {
         lines.push(kv(
             "batch",
@@ -143,7 +139,6 @@ pub(crate) fn draw_task_detail(f: &mut ratatui::Frame, app: &mut App, view: &Tas
     )));
 
     // Wrapped, and scrollable: a worker's reason can be a stack trace, and a
-    // detail clipped at the pane edge is the bug this screen exists to fix.
     f.render_widget(
         Paragraph::new(lines)
             .scroll((view.scroll as u16, 0))

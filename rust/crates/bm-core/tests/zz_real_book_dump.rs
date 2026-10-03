@@ -1,8 +1,4 @@
 // Runs the *shipped* sample crawler over a real book through the real Lua
-// engine, and prints the chapters it hands back, so a human can read the
-// result instead of a test's name.
-//
-//   BM_BOOK=tmp/epub/some.epub cargo test -p bm-core --test zz_real_book_dump -- --nocapture
 use bm_core::crawl::{CrawlOutcome, Provider};
 use std::path::PathBuf;
 
@@ -13,7 +9,6 @@ fn crawl_a_real_book() {
     };
     let book = PathBuf::from(p);
     // The book is named relative to the workspace root, which is the root the
-    // crawl is confined to — the same arrangement an operator gets.
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
@@ -71,8 +66,6 @@ fn crawl_a_real_book() {
                     url
                 );
                 // What the digest's own preparer makes of it — the split report
-                // `analyze_chapter` prints before it spends an LLM call, so the
-                // segment count is visible without a model.
                 println!("{}", bm_core::digest::preview_split(&text));
                 for p in paras.iter().take(8) {
                     println!("  {}", &p[..p.chars().take(150).count()]);

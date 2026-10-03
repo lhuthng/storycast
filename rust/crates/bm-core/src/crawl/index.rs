@@ -1,24 +1,4 @@
 //! The chapter index: the frozen `n -> url` mapping a crawl run works from.
-//!
-//! It exists because the mapping is genuinely site-specific — `chapter-001`, a
-//! slug, `v2c15` — and because **deriving it per chapter is unsafe on a
-//! paginated listing**. A site that appends a chapter repaginates, and every
-//! `n` after the insertion point then maps to its neighbour; per-chapter
-//! discovery would silently crawl the wrong chapter for half a book, while a
-//! frozen index turns that shift into a `--refresh` decision instead of a
-//! corruption.
-//!
-//! Three ways the same file gets filled, all of them the same shape:
-//!
-//! | source     | filled by                                             |
-//! |------------|-------------------------------------------------------|
-//! | `template` | the built-in `{n}` / `{n:03}` expansion                 |
-//! | `script`   | the crawler script's optional `discover()`              |
-//! | `hand`     | an operator, by editing `data/crawl-index.json`         |
-//!
-//! `hand` is the escape hatch for a book whose URLs are arbitrary words: the
-//! mapping is not computable, so generating it once (scrape, spreadsheet, an
-//! LLM, a human reading the index) and keeping it beats re-deriving it.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -29,7 +9,6 @@ use super::contract::Discovered;
 use crate::Layout;
 
 /// Source tags, spelled once so a hand-written file and a generated one can be
-/// told apart by eye as well as by code.
 pub const SOURCE_HAND: &str = "hand";
 pub const SOURCE_TEMPLATE: &str = "template";
 pub const SOURCE_SCRIPT: &str = "script";
@@ -38,17 +17,12 @@ pub const SOURCE_SCRIPT: &str = "script";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Chapter {
     /// `None` means "the script builds its own URL" — a slug site whose
-    /// mapping names the chapter but not its link.
     #[serde(default)]
     pub url: Option<String>,
     /// Display only: it is written here so the file reads like the site's own
-    /// listing, and it is never a chapter's title — that stays the first line
-    /// of the chapter text, or the digest's own `title`.
     #[serde(default)]
     pub title: String,
     /// The site has no chapter here. Terminal non-failure: the crawl task is
-    /// recorded done-with-a-reason instead of being offered to a worker that
-    /// would 404 three times and shelve.
     #[serde(default)]
     pub absent: bool,
 }
@@ -60,12 +34,9 @@ pub struct CrawlIndex {
     #[serde(default)]
     pub source: String,
     /// Fingerprint of what produced it (engine + script + params + template).
-    /// Only consulted for the generated sources: a hand-authored index is the
-    /// operator's own work and is never rebuilt behind their back.
     #[serde(default)]
     pub hash: String,
     /// The range this index was built for. A run that asks outside it
-    /// rebuilds rather than guesses.
     #[serde(default)]
     pub start: u32,
     #[serde(default)]
@@ -93,18 +64,11 @@ impl CrawlIndex {
     }
 
     /// A chapter that is neither absent nor nameless: what the crawl stage
-    /// should be asked for.
     pub fn is_wanted(&self, n: u32) -> bool {
         !self.is_absent(n)
     }
 
     /// Whether this index can serve a run of `count` chapters from `start`.
-    ///
-    /// A hand-authored index is usable whenever it covers the range at all —
-    /// its `hash` is empty by construction, and an operator who edits it means
-    /// the edit to take effect. A generated one must also match the machinery
-    /// that produced it, or a changed script would keep serving the old
-    /// mapping.
     pub fn usable(&self, hash: &str, start: u32, count: u32) -> bool {
         let empty = self.chapters.is_empty();
         if empty {
@@ -139,8 +103,6 @@ impl CrawlIndex {
     }
 
     /// Build the mapping for `start..start+count` from a URL template — the
-    /// built-in `discover`, and the reason an existing workspace needs no
-    /// script to keep working.
     pub fn from_template(template: &str, start: u32, count: u32, hash: &str) -> CrawlIndex {
         let mut chapters = BTreeMap::new();
         for n in start..start.saturating_add(count) {
@@ -180,16 +142,10 @@ impl CrawlIndex {
             })
             .collect();
         // A listing that skips a number says nothing about it, and silence is
-        // **not** absence: only an explicit `absent` marks a gap. Treating a
-        // missing entry as absent would silently drop a real chapter whose
-        // mapping the script merely failed to mention.
         for n in start..start.saturating_add(count) {
             chapters.entry(n).or_default();
         }
         // A listing that reports how long the book is turns the tail of an
-        // over-long range into twenty *absent* rows instead of twenty crawl
-        // tasks that 404 three times each and shelve. This is the whole reason
-        // `total` is in the discover contract.
         if let Some(total) = d.total {
             for (n, c) in chapters.iter_mut() {
                 if *n > total {
@@ -213,15 +169,6 @@ impl CrawlIndex {
 }
 
 /// Fingerprint of everything that decides the mapping, so a changed script,
-/// engine, param, template **or book** invalidates a generated index and
-/// nothing else.
-///
-/// `books` is the digest [`books_fingerprint`] produced for the local files the
-/// crawl reads, or the empty string when it reads none. It is a separate input
-/// rather than a param because the params are configuration the operator wrote
-/// and this is the disk those params point at: a site listing lives on the
-/// server, but a local book's chapter tree lives on this machine and changes
-/// with no setting to show for it.
 pub fn fingerprint(
     engine: &str,
     script: &str,
@@ -249,23 +196,6 @@ pub fn fingerprint(
 }
 
 /// A digest of the local book files a crawl reads, for [`fingerprint`].
-///
-/// **Why this exists.** A scripted `discover()` is cached in
-/// `data/crawl-index.json` and reused while its fingerprint matches. For a site
-/// that fingerprint is configuration alone — the listing lives on the server.
-/// For a **local book** the listing lives on this disk, and swapping
-/// `book.epub` for a different file (or adding a volume to `books/`) changes
-/// every chapter's place without changing a single setting. The bytes are part
-/// of what decides the mapping, so they are part of the fingerprint.
-///
-/// **Why the rule is over-inclusive.** The host cannot know which param a
-/// script treats as a book the way the script does. So every string param that
-/// resolves to a readable `.epub` inside the read root — as a file, or as a
-/// directory holding them — is included; anything that does not resolve, or is
-/// not an EPUB, contributes nothing. Being slow to invalidate a cache costs a
-/// rebuild; failing to invalidate one serves a stale chapter tree.
-///
-/// The empty string means "no local book", and is what a site crawler gets.
 pub fn books_fingerprint(
     read_root: &std::path::Path,
     params: &serde_json::Map<String, serde_json::Value>,
@@ -287,7 +217,6 @@ pub fn books_fingerprint(
             read_root.join(named)
         };
         // The same containment a crawl read gets: only a file inside the
-        // workspace can be what the mapping is derived from.
         let Ok(real) = candidate.canonicalize() else {
             continue;
         };
@@ -310,7 +239,6 @@ pub fn books_fingerprint(
     let mut h = Sha256::new();
     for path in &books {
         // The name decides the **order** of the volumes, so it is part of the
-        // mapping; the bytes decide the chapters.
         h.update(path.to_string_lossy().as_bytes());
         h.update([0]);
         let bytes = std::fs::read(path).unwrap_or_default();
@@ -328,20 +256,12 @@ fn is_epub(path: &std::path::Path) -> bool {
 }
 
 /// Expand `{n}` / `{n:03}` in a chapter URL template.
-///
-/// `{n}` **everywhere**, not just the first: `…/chuong-{n}?page={n}` is a real
-/// template shape and an existing test asserts it. The padded form is the
-/// degenerate end of `n -> f(n)` — `chapter-{n:03}` is 80% of the cases that
-/// would otherwise need a script — and keeping it in the one place that already
-/// owns the substitution means the mapping function subsumes it if a site ever
-/// needs more.
 pub fn expand_template(template: &str, n: u32) -> String {
     let bytes = template.as_bytes();
     let mut out = String::with_capacity(template.len() + 4);
     let mut i = 0usize;
     while i < bytes.len() {
         // A placeholder is `{n}` or `{n:0<W>}`; anything else is literal text,
-        // including a stray `{`.
         if bytes[i] == b'{' {
             if let Some(close) = template[i..].find('}').map(|p| i + p) {
                 let body = &template[i + 1..close];
@@ -375,9 +295,6 @@ fn pad_width(body: &str) -> Option<usize> {
 }
 
 /// The host's built-in `discover`: a template is a mapping that needs no I/O.
-///
-/// Returning `None` when there is no template is deliberate — it is what makes
-/// "a slug site needs a `discover`" a first-class state rather than a 404 storm.
 pub fn template_mapping(template: &str, start: u32, count: u32, hash: &str) -> Option<CrawlIndex> {
     let t = template.trim();
     if t.is_empty() || !t.contains("{n") {
@@ -387,13 +304,6 @@ pub fn template_mapping(template: &str, start: u32, count: u32, hash: &str) -> O
 }
 
 /// Load the index for a range, rebuilding it from `build` when the stored one
-/// cannot serve the request.
-///
-/// `force` skips the reuse check entirely: a repaginated listing that the
-/// fingerprint cannot see, because nothing about the configuration changed.
-/// Nothing in the TUI passes it today — deleting `data/crawl-index.json` is the
-/// equivalent, and the fingerprint already rebuilds on every change that
-/// *could* be visible here.
 pub fn resolve(
     layout: &Layout,
     hash: &str,
@@ -488,7 +398,6 @@ mod tests {
         assert_eq!(idx.url(1), Some("https://x/1"));
         assert_eq!(idx.url(2), None);
         // A number with no entry at all is simply not stopped: silence is not
-        // absence, and the crawl still gets a chance to fetch it.
         assert!(idx.is_wanted(99));
     }
 
@@ -528,7 +437,6 @@ mod tests {
             fingerprint("lua", "src", &p2, "https://x/{n}", 1, 5, "")
         );
         // The book digest is its own input: a swapped volume moves the mapping
-        // with no configuration change to see it in.
         assert_ne!(
             base,
             fingerprint("lua", "src", &params, "https://x/{n}", 1, 5, "deadbeef")
@@ -536,8 +444,6 @@ mod tests {
     }
 
     /// A local book's **bytes** are part of what decides the chapter tree, so
-    /// they are part of the fingerprint. This is the stale-index gap: replacing
-    /// a volume in place changed nothing an operator could point at.
     #[test]
     fn a_local_books_bytes_decide_the_fingerprint() {
         let dir = std::env::temp_dir().join("bm-booksfp");
@@ -564,7 +470,6 @@ mod tests {
         assert_ne!(two, books_fingerprint(&dir, &params));
 
         // A param that names no file, or a non-book file, contributes nothing —
-        // so a site crawler's fingerprint is unchanged by this machinery.
         let mut site = serde_json::Map::new();
         site.insert("url_template".into(), serde_json::json!("https://x/{n}"));
         site.insert("novel".into(), serde_json::json!("apothecary"));

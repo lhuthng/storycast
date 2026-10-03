@@ -1,27 +1,4 @@
 //! Render text to wav, the way the server will.
-//!
-//!     bm-tts-render <models-dir> [--codec <dir>] [--dict <bin>] --voices <json>
-//!                   --voice <name> [--temp 0] [--seed N] [--wav <prefix>]
-//!                   [--raw <prefix>] < text.txt
-//!
-//! One output per input line: the chunk count, the total samples, and — with
-//! `--raw` — the waveform as raw f32 for `tools/render-parity.py` to diff against
-//! the reference engine's own output for the same text and voice.
-//!
-//! **The engine is decided by the models directory, not by this binary.** A
-//! `bundle.json` there is the pocket bundle's contract, which is exactly the
-//! rule `bm-tts` itself uses to pick a backend — so one command renders either
-//! tree, and the flags an engine does not use (`--codec`, `--dict`) are
-//! optional rather than required. This used to hardcode VieNeu and refuse a
-//! pocket bundle outright, which made a pocket box impossible to render or
-//! diagnose from a terminal: the one tool meant to say "is this text audible?"
-//! could only answer for half the engines in the product.
-//!
-//! This is the whole pipeline in one place: text → sentences → chunks → phonemes
-//! → codes → audio → joined with the pauses each boundary asks for. For pocket
-//! the phoneme stage does not exist — it tokenizes subwords and carries a voice
-//! state — so its line reports samples rather than chunks, which is the one
-//! number both engines share.
 
 use anyhow::{Context, Result};
 use bm_tts::codec::to_wav_bytes;
@@ -33,14 +10,12 @@ use bm_tts::voice::Roster;
 use std::io::BufRead;
 
 /// Where a render's files go. One argument rather than two, so `emit` stays
-/// under the arity a reader holds in their head.
 struct Out<'a> {
     wav: &'a Option<String>,
     raw: &'a Option<String>,
 }
 
 /// Write one render's artefacts and print its line, in the shape every engine's
-/// caller — including `tools/render-parity.py` — already parses.
 fn emit(
     n: usize,
     pcm: &[f32],
@@ -51,8 +26,6 @@ fn emit(
     out: Out<'_>,
 ) -> Result<()> {
     // Independent on purpose: the raw f32 is what the parity check diffs, and
-    // requiring `--wav` as well made a run that asked only for raw silently
-    // write nothing.
     if let Some(prefix) = out.wav {
         std::fs::write(format!("{prefix}.{n}.wav"), to_wav_bytes(pcm, rate))?;
     }
@@ -100,7 +73,6 @@ fn main() -> Result<()> {
     let mut texts_file: Option<String> = None;
     let mut anchor_file: Option<String> = None;
     // Print where the time went. The counters are always on; this only decides
-    // whether to report them.
     let mut timing = false;
 
     let mut i = 0;
@@ -121,7 +93,6 @@ fn main() -> Result<()> {
             "--temp" => temp = next(&mut i)?.parse()?,
             "--seed" => seed = next(&mut i)?.parse()?,
             // Kept accepted for old command lines; sentence-level chunking is
-            // now unconditional, so these packing controls no longer apply.
             "--max-chars" | "--min-chunk-chars" => {
                 let _ = next(&mut i)?;
             }
@@ -142,7 +113,6 @@ fn main() -> Result<()> {
     let voices = voices.context("--voices is required")?;
 
     // The inputs, read before the model loads: a run asked for zero texts
-    // should not pay two seconds of weight loading to say so.
     let inputs: Vec<String> = match &texts_file {
         Some(p) => serde_json::from_str(
             &std::fs::read_to_string(p).with_context(|| format!("reading {p}"))?,
@@ -165,10 +135,6 @@ fn main() -> Result<()> {
     }
 
     // **Same rule as `bm-tts` itself:** a `pocket.safetensors` checkpoint in
-    // the models directory is what makes it a Pocket TTS tree. Deciding it here
-    // rather than with a flag is what makes one command render either tree —
-    // and it is what stops the two binaries from disagreeing about which engine
-    // a directory is.
     let is_pocket = std::path::Path::new(&models)
         .join("pocket.safetensors")
         .is_file();
@@ -278,13 +244,6 @@ fn main() -> Result<()> {
 }
 
 /// The pocket bundle's path: one `generate` per text, no phoneme stage.
-///
-/// **No `--dict`, no `--codec`, no chunk loop** — a pocket bundle carries its
-/// codec and its tokenizer inside the models directory and has no lexicon,
-/// which is exactly why `bm-tts` makes those two flags optional. The chunk
-/// count is absent from the emitted line for the same reason: pocket splits
-/// and re-joins internally, and a number the caller cannot act on is worse
-/// than no number.
 #[cfg(feature = "pocket")]
 #[allow(clippy::too_many_arguments)]
 fn render_pocket(
@@ -311,8 +270,6 @@ fn render_pocket(
         started_load.elapsed()
     );
     // Resolved once and the name cloned: `generate` needs `&mut self` for its
-    // ONNX sessions, so holding the `&PocketVoice` it hands back would borrow
-    // the engine for the whole loop.
     let chosen = engine.resolve(voice)?.name.clone();
     eprintln!("voice: {chosen}");
 

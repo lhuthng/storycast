@@ -11,8 +11,6 @@ use ratatui::{
 };
 
 /// System overview: backend, config, voices, tasks — everything one launch
-/// needs, on one screen. Modelled on the cast overview: read here, act with
-/// `Enter` (launch) or `e` (edit the config it shows).
 pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
     let area = centered_padded(f.area(), 76, 30, 1);
     f.render_widget(Clear, area);
@@ -99,7 +97,6 @@ pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
         }
         None => {
             // The Run screen itself has no reload key — say the truth (Esc,
-            // then R on the dashboard) rather than a key this screen eats.
             lines.push(kv(
                 "voices",
                 "roster not loaded — Esc, then R on the dashboard".to_string(),
@@ -125,8 +122,6 @@ pub(crate) fn draw_run(f: &mut ratatui::Frame, app: &App) {
     lines.push(Line::from(""));
     lines.push(task_rollup(&app.counts, app.colour()));
     // The work split: each box's stage order, so what runs where is visible
-    // before Enter launches anything. `M>R>D>C` is most-preferred first, and a
-    // lower-case letter is a stage switched off for that box.
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "  work split (P on the dashboard edits it)",

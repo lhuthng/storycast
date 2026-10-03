@@ -1,7 +1,6 @@
 use super::*;
 
 /// Kill the child however this test leaves, including on a panic. A model
-/// left behind is 2.85 GB held by a box nobody is driving.
 struct Kill(std::process::Child);
 impl Drop for Kill {
     fn drop(&mut self) {
@@ -25,7 +24,6 @@ fn the_census_finds_a_real_bm_tts_and_reads_its_rss() {
     let layout = Layout::new(repo_root());
     let (bin, args) = layout.sidecar_command(SIDECAR_PORT, 0);
     // Fail loudly rather than skipping: a check that quietly does nothing
-    // when it cannot run is worse than no check.
     assert!(
         bin.is_file(),
         "no sidecar at {} — build it first (`make build`)",
@@ -42,8 +40,6 @@ fn the_census_finds_a_real_bm_tts_and_reads_its_rss() {
     let _kill = Kill(child);
 
     // Sample while it loads: the process exists immediately and its RSS
-    // climbs, so the first non-zero reading is the answer and there is no
-    // need to wait for `/health`.
     let mut sys = sysinfo::System::new();
     let mut seen = (0u32, 0u64);
     for _ in 0..20 {
