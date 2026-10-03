@@ -1137,7 +1137,7 @@ tui/input/    one file per modal block; `audition.rs` is the shared
 tui/draw.rs   the tier dispatch and the overlay match
 tui/draw/     one file per pane or overlay: `cloud.rs` is the pool view,
               `policy.rs` the IAM policy view
-tui/tests.rs  every test
+tui/tests.rs  the shared fixtures and one child per area under tests/
 ```
 
 Outside the TUI, the modules the cloud work added:
