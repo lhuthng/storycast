@@ -1141,7 +1141,7 @@ pub(crate) fn do_command(
             };
             app.set_status(
                 Level::Info,
-                format!("script window — {n} chapter(s) · Enter open · s re-point a speaker · Esc close"),
+                format!("script window — {n} chapter(s) · Enter open · s re-point · e excerpt · Esc close"),
             );
         }
         Command::ShutdownWhenIdle => {

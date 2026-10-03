@@ -501,6 +501,19 @@ pub(crate) struct ScriptView {
     pub(crate) pick: Option<ScriptPick>,
     /// Filter text over the chapter list.
     pub(crate) filter: String,
+    /// The excerpt panel (`e` at the segment depth) is up over the segments.
+    pub(crate) excerpt_open: bool,
+    /// The open chapter's own excerpt — the state its end leaves for the
+    /// *next* chapter. Read when `e` opened the panel, so a digest finishing
+    /// behind the panel is picked up on the next open, never mid-view.
+    pub(crate) excerpt_own: String,
+    /// The chain this chapter was fed: the previous chapters' excerpts, newest
+    /// first, from `bm_core::digest::excerpt_chain` — the same window and skip
+    /// rules the prompt was built with.
+    pub(crate) excerpt_fed: Vec<(u32, String)>,
+    /// Scroll offset into the excerpt panel (rows). Clamped in the draw, where
+    /// the wrapped height is known.
+    pub(crate) excerpt_scroll: usize,
 }
 
 /// A speaker being picked for one segment.
@@ -529,6 +542,14 @@ impl ScriptPick {
 }
 
 impl ScriptView {
+    /// Chapters per row in the chapter list.
+    ///
+    /// **One constant, because the draw and the keys must agree.** The list
+    /// draws twelve across, and `↑`/`↓` walk rows while `←`/`→` walk columns:
+    /// they used to both move the cursor by one, so on a twelve-wide grid `↓`
+    /// stepped sideways and the horizontal arrows did nothing at all.
+    pub(crate) const PER_ROW: usize = 12;
+
     /// Open on the chapters that have scripts — `Layout::script_chapters`,
     /// the same scan the audition index and the reconcile pass use.
     pub(crate) fn new(layout: &bm_core::Layout) -> Self {
@@ -540,7 +561,40 @@ impl ScriptView {
             seg_cursor: 0,
             pick: None,
             filter: String::new(),
+            excerpt_open: false,
+            excerpt_own: String::new(),
+            excerpt_fed: Vec::new(),
+            excerpt_scroll: 0,
         }
+    }
+
+    /// Read the excerpt panel's two halves for `chapter` and raise it: the
+    /// chapter's own excerpt (what the next chapter is fed) from its script,
+    /// and the chain it was fed, from the same `digest::excerpt_chain` the
+    /// prompt uses. Reads once, like the segments: a re-open picks up a digest
+    /// that landed behind the panel.
+    pub(crate) fn open_excerpts(&mut self, layout: &bm_core::Layout, chapter: u32) {
+        self.excerpt_own = bm_core::read_json::<serde_json::Value>(&layout.script(chapter))
+            .ok()
+            .and_then(|d| {
+                d.get("excerpt")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        self.excerpt_fed = bm_core::digest::excerpt_chain(layout, chapter);
+        self.excerpt_open = true;
+        self.excerpt_scroll = 0;
+    }
+
+    /// Drop the excerpt panel's state — for the moves that leave the chapter
+    /// (Esc back to the list, opening another one), so a stale excerpt can
+    /// never be drawn against a different chapter.
+    pub(crate) fn close_excerpts(&mut self) {
+        self.excerpt_open = false;
+        self.excerpt_own.clear();
+        self.excerpt_fed.clear();
+        self.excerpt_scroll = 0;
     }
 
     /// The chapter rows actually drawn: the filter applies here, and the
@@ -560,6 +614,37 @@ impl ScriptView {
     /// The chapter under the list cursor.
     pub(crate) fn selected(&self) -> Option<u32> {
         self.rows().get(self.cursor).copied()
+    }
+
+    /// Move the list cursor by whole rows and columns, the way the grid is
+    /// drawn.
+    ///
+    /// A vertical step is clamped to the list and a horizontal one wraps to the
+    /// neighbouring row — so `→` off the last column steps to the first of the
+    /// next row, which is what a grid does and what a plain `±1` never could.
+    /// The column is clamped rather than wrapped for `↑`/`↓`: stepping off the
+    /// end of a short row keeps the chapter, and only the row changes.
+    pub(crate) fn move_cursor(&mut self, d_row: isize, d_col: isize) {
+        let total = self.rows().len();
+        if total == 0 {
+            self.cursor = 0;
+            return;
+        }
+        let last = total - 1;
+        let (row, col) = (
+            (self.cursor / Self::PER_ROW) as isize,
+            (self.cursor % Self::PER_ROW) as isize,
+        );
+        let (row, col) = if d_row != 0 {
+            (row + d_row, col)
+        } else {
+            // Horizontal: walk the row's own extent, then wrap.
+            let flat = row * Self::PER_ROW as isize + col + d_col;
+            let n = Self::PER_ROW as isize;
+            ((flat.div_euclid(n)), flat.rem_euclid(n))
+        };
+        let idx = (row * Self::PER_ROW as isize + col).clamp(0, last as isize);
+        self.cursor = idx as usize;
     }
 
     /// Read one chapter's segments off disk, newest file wins. Sound items

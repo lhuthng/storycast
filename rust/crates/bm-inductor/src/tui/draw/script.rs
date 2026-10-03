@@ -29,6 +29,8 @@ pub(crate) fn draw_script(f: &mut ratatui::Frame, app: &mut App, v: &ScriptView)
 
     let title = if v.pick.is_some() {
         " script · picking a speaker "
+    } else if v.excerpt_open {
+        " script · excerpt "
     } else if v.open.is_some() {
         " script · segments "
     } else {
@@ -46,9 +48,24 @@ pub(crate) fn draw_script(f: &mut ratatui::Frame, app: &mut App, v: &ScriptView)
     }
     let dim = Style::default().fg(Color::DarkGray);
 
+    // Rows the excerpt's *body* may use. The paragraph below eats one for its top
+    // border, and `draw_excerpt` spends four more on its own chrome — the hint
+    // line, the blank under it, the blank above the footer, and the footer.
+    // Allotting every row to the body pushed the footer off the bottom, which
+    // is where the scroll position is reported.
+    let visible = inner.height.saturating_sub(5) as usize;
+
     let mut lines: Vec<Line> = Vec::new();
     if let Some(pick) = &v.pick {
         draw_pick(&mut lines, app, v, pick, dim);
+    } else if v.excerpt_open {
+        // The one depth tall enough to scroll, and it windows **itself** the
+        // way `draw_segments` does. It used to hand `excerpt_scroll` to
+        // `Paragraph::scroll` instead, which is wrong here: with wrapping on,
+        // that offset is applied horizontally, so ↑↓ slid the text sideways
+        // instead of moving down the chain. Slicing the rows here makes the
+        // arrows mean rows, with no dependence on how the widget wraps.
+        draw_excerpt(&mut lines, v, dim, inner.width as usize, visible);
     } else if v.open.is_some() {
         draw_segments(&mut lines, v, dim);
     } else {
@@ -63,12 +80,120 @@ pub(crate) fn draw_script(f: &mut ratatui::Frame, app: &mut App, v: &ScriptView)
     );
 }
 
+/// Depth 2b: the open chapter's excerpt chain. The top half is this chapter's
+/// own excerpt — the state its end leaves for the chapter after it; the bottom
+/// half is what this chapter was *fed*, the previous chapters' excerpts the
+/// digest window pulled in, newest first. The window and the skip rules come
+/// from `digest::excerpt_chain`, the same call the prompt makes, so the screen
+/// shows exactly the memory the model was handed.
+fn draw_excerpt(
+    lines: &mut Vec<Line>,
+    v: &ScriptView,
+    dim: Style,
+    width: usize,
+    visible: usize,
+) {
+    let ch = v.open.unwrap_or(0);
+
+    // The body first, so the window is a slice of it and the header and the
+    // position footer stay pinned — the same shape `draw_segments` has.
+    let mut body: Vec<Line> = Vec::new();
+    body.push(Line::from(Span::styled(
+        "  ── this chapter (the next chapter is fed this) ──",
+        dim,
+    )));
+    if v.excerpt_own.trim().is_empty() {
+        body.push(Line::from(Span::styled(
+            "  (none — digested before the field existed, or the model returned nothing)",
+            dim,
+        )));
+    } else {
+        push_wrapped(&mut body, &v.excerpt_own, "  ", width);
+    }
+    body.push(Line::from(""));
+    body.push(Line::from(Span::styled(
+        "  ── fed to this chapter's attribution ──",
+        dim,
+    )));
+    if v.excerpt_fed.is_empty() {
+        body.push(Line::from(Span::styled(
+            "  (none — excerpt_window is 0, or no earlier chapter has an excerpt)",
+            dim,
+        )));
+    } else {
+        for (m, text) in &v.excerpt_fed {
+            body.push(Line::from(Span::styled(format!("  CH {m}:"), dim)));
+            push_wrapped(&mut body, text, "    ", width);
+        }
+    }
+
+    let total = body.len();
+    // Clamped so the last page shows the end rather than blank rows. `visible`
+    // is zero on a very short terminal; the slice is then empty and the panel
+    // degrades to its chrome rather than panicking on a bad range.
+    let first = v.excerpt_scroll.min(total.saturating_sub(visible));
+    let last = (first + visible).min(total);
+
+    lines.push(Line::from(Span::styled(
+        format!("  ch{ch} · excerpt · ↑↓ scroll · e or Esc back to segments"),
+        dim,
+    )));
+    lines.push(Line::from(""));
+    lines.extend(body[first..last].iter().cloned());
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  rows {}-{last} of {total} · ↑↓ PgUp PgDn Home scroll",
+            first + 1
+        ),
+        dim,
+    )));
+}
+
+/// Append `text` wrapped to `width` columns, every line carrying `indent`.
+fn push_wrapped(lines: &mut Vec<Line>, text: &str, indent: &str, width: usize) {
+    let cols = width.saturating_sub(indent.chars().count()).max(16);
+    for l in wrap_text(text, cols) {
+        lines.push(Line::from(format!("{indent}{l}")));
+    }
+}
+
+/// Wrap `s` to at most `width` columns, breaking on whitespace and
+/// hard-splitting any single run longer than the width so one unbroken token
+/// cannot overflow the box.
+fn wrap_text(s: &str, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in s.split_whitespace() {
+        if line.is_empty() {
+            line.push_str(word);
+        } else if line.chars().count() + 1 + word.chars().count() <= width {
+            line.push(' ');
+            line.push_str(word);
+        } else {
+            out.push(std::mem::take(&mut line));
+            line.push_str(word);
+        }
+        while line.chars().count() > width {
+            let head: String = line.chars().take(width).collect();
+            let rest: String = line.chars().skip(width).collect();
+            out.push(head);
+            line = rest;
+        }
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
 /// Depth 1: the chapter grid-as-list. A book is numbers, so the rows are
 /// dense — several chapters a line, the highlight bracketed, dimmed when
 /// the chapter's script is somehow absent (a hand-deleted file).
 fn draw_list(lines: &mut Vec<Line>, v: &ScriptView, dim: Style) {
     lines.push(Line::from(Span::styled(
-        "  type to filter (digits) · ↑↓ move · Enter open · Esc close",
+        "  type to filter (digits) · ↑↓←→ move · Enter open · Esc close",
         dim,
     )));
     lines.push(Line::from(""));
@@ -83,8 +208,9 @@ fn draw_list(lines: &mut Vec<Line>, v: &ScriptView, dim: Style) {
         return;
     }
     // A window derived from the cursor, never remembered: the highlight is
-    // visible by construction, the same rule the digest grid uses.
-    let per_row = 12usize;
+    // visible by construction, the same rule the digest grid uses. The width
+    // is the view's own constant — the same one the arrow keys step by.
+    let per_row = ScriptView::PER_ROW;
     let total_rows = rows.len().div_ceil(per_row);
     let here_row = v.cursor / per_row;
     let first = here_row.saturating_sub(3);

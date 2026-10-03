@@ -409,9 +409,16 @@ impl Layout {
     /// reconciler — and because they cannot be allowed to disagree. A `read_dir`
     /// order is arbitrary, so an unsorted answer makes a "random" pick differ
     /// between two runs of the same session for no reason anyone could see.
+    ///
+    /// **Sorted by chapter number, not by path.** `PathBuf`'s own `Ord` is
+    /// lexical over the file name, and `NN.json` is only zero-padded to two
+    /// digits — so chapter 100 sorted between 10 and 11, and a book past 99 came
+    /// out as `1 … 10, 100 … 109, 11, 110 …`. Every consumer walked chapters
+    /// backwards and the script window listed them that way. Comparing the
+    /// parsed number is the only order that means "chapter order" past 99.
     pub fn scripts(&self) -> Vec<PathBuf> {
         let mut out = chapter_files(&self.script_dir());
-        out.sort();
+        out.sort_by_key(|p| chapter_of(p).unwrap_or(u32::MAX));
         out
     }
 
@@ -2133,6 +2140,30 @@ mod tests {
         std::fs::write(dir.join(".bm/active-workspace"), "gone\n").unwrap();
         let err = Layout::resolve(&dir).unwrap_err();
         assert!(err.to_string().contains("gone"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Scripts come back in chapter order, and **chapter order is the number**,
+    /// not the file name.
+    ///
+    /// `NN.json` is padded to two digits, so a lexical sort of the paths put
+    /// chapter 100 between 10 and 11 — and past 99 the script window, the
+    /// audition index and the reconciler all walked the book backwards. This is
+    /// the one place the order is defined, so this is where it is pinned.
+    #[test]
+    fn scripts_come_back_in_chapter_order_past_ninety_nine() {
+        let dir = std::env::temp_dir().join(format!("bm-script-order{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = Layout::new(&dir);
+        std::fs::create_dir_all(layout.script_dir()).unwrap();
+        for n in [1u32, 2, 9, 10, 11, 99, 100, 101, 132] {
+            std::fs::write(layout.script(n), "{}").unwrap();
+        }
+        assert_eq!(
+            layout.script_chapters(),
+            vec![1, 2, 9, 10, 11, 99, 100, 101, 132],
+            "100 must sit after 99, not between 10 and 11"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

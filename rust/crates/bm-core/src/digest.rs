@@ -1341,6 +1341,48 @@ fn strip_punctuation(text: &str) -> String {
     text.chars().filter(|c| c.is_alphanumeric()).collect::<String>()
 }
 
+/// Whether a narration event ends by handing the floor to the speech that
+/// comes after it — a speech verb and its colon, `…từng chữ từng câu hỏi:`.
+///
+/// Both sides of a quote look alike in the view: a `previous_context` that ends
+/// this way is the tag for the quote in hand, and a `following_context` that
+/// ends this way is the tag for the *next* dialogue event in the chapter. On
+/// ch51 of beyond-myriads the model was handed the second while looking at the
+/// first, and gave the sect elder's line about his own clan's treasure to the
+/// woman being scolded, because the narration after it ended by handing the
+/// floor to her reply. Which side of the quote the verb sits on is knowable
+/// here and not from the text, so it is handed over as a flag rather than left
+/// to the model.
+fn hands_off_to_quote(text: &str) -> bool {
+    text.trim_end().ends_with(':')
+}
+
+/// Whether a narration attributes a quote to somebody at all — a speech verb
+/// anywhere in it, `Lạc Lan Tuyết vẻ mặt trịnh trọng nói.` Yes, and `Trời tối
+/// dần.` No.
+///
+/// The distinction matters for the *following* side only, and it is what keeps
+/// [`attribution_view`]'s `decided_by` from calling any narration after a quote
+/// a tag. It is not a tag because it follows; it is a tag because it says
+/// somebody spoke. Prose that merely continues the scene is evidence of nothing
+/// and must not be named as the answer’s source.
+const SPEECH_VERBS: &[&str] = &[
+    " nói", " hỏi", " đáp", " kêu", " rằng", " quát", " thốt", " hét", " gào",
+    " than", " khấn", " dặn", " bảo", " thưa", " đọc", " nói tiếp", " hỏi lại",
+    " đáp lại", " trả lời", " lên tiếng", " tiếp lời", " ngắt lời", " thì thầm",
+    " lẩm bẩm", " cười nói",
+];
+
+fn attributes_speech(text: &str) -> bool {
+    let folded: String = text
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let folded = format!(" {folded}");
+    SPEECH_VERBS.iter().any(|verb| folded.contains(verb))
+}
+
 /// The attribution prompt's view of the chapter: dialogue and thought events it
 /// must attribute, plus the nearest narration immediately before and after each
 /// one.
@@ -1368,14 +1410,73 @@ fn attribution_view(prepared: &PreparedChapter) -> String {
             continue;
         }
 
+        // Whether the narration at `at` is *a speech tag handing the floor to
+        // the quote after it*: it ends the way a tag ends, and a quote is
+        // actually there to take the floor. A trailing colon at the end of the
+        // chapter introduces nobody, and calling that a tag would make this a
+        // guess about punctuation rather than a fact about the chapter.
+        let hands_off = |at: usize| -> bool {
+            prepared.events.get(at).is_some_and(|candidate| {
+                candidate.kind == "narration"
+                    && hands_off_to_quote(&candidate.text)
+                    && prepared.events[at + 1..]
+                        .first()
+                        .is_some_and(|next| matches!(next.kind.as_str(), "dialogue" | "thought"))
+            })
+        };
+        let next_narration = prepared.events[i + 1..]
+            .iter()
+            .position(|candidate| candidate.kind == "narration")
+            .map(|offset| i + 1 + offset);
+        // **The tag, from THIS event's point of view.** The old field was a
+        // property of the narration — `hands_off_to_next_quote` — and read
+        // inside a `previous_context` its own name says "not this one", which
+        // is the exact opposite of what it means there. On ch51 that was worth
+        // ten answers in twelve. A side of the quote is decidable in code, so it
+        // is decided in code: `previous` is the narration whose speech verb
+        // hands the floor to this quote, `following` is the narration reacting
+        // to it, and `null` is neither.
+        // **Named `decided_by`, and that name is load-bearing twice over.**
+        // First, it spells the answer rather than a code for it: the value is
+        // the *key* of the context to read, so there is no `"previous"` →
+        // `previous_context` hop to get wrong. Second, `serde_json` writes a
+        // `Value`'s object keys **alphabetically**, and `decided_by` sorts
+        // before `following_context`, so this is the first field of every event
+        // the model reads. Order is not cosmetic here: ch51's line was answered
+        // correctly 5 times in 12 with this field last and 12 times in 12 with it
+        // first, byte-for-byte identical otherwise. A test pins the ordering,
+        // because a rename that sorted later would silently undo this.
+        let tag_context = if (i > 0) && hands_off(i - 1) {
+            json!("previous_context")
+        } else if next_narration.is_some_and(|at| {
+            // Reacting to this quote *by attributing it*. A narration that only
+            // continues the scene is not evidence about who spoke, and naming
+            // it as this quote's tag would hand the model an answer that is not
+            // there — `"Đi thôi." Trời tối dần.` has no tag at all.
+            !hands_off(at)
+                && prepared
+                    .events
+                    .get(at)
+                    .is_some_and(|n| attributes_speech(&n.text))
+        }) {
+            json!("following_context")
+        } else {
+            Value::Null
+        };
+
         let context = |range: std::ops::Range<usize>| {
+            let start = range.start;
             prepared.events[range]
                 .iter()
-                .find(|candidate| candidate.kind == "narration")
-                .map(|candidate| json!({"id": candidate.id, "text": candidate.text}))
+                .position(|candidate| candidate.kind == "narration")
+                .map(|offset| {
+                    let candidate = &prepared.events[start + offset];
+                    json!({"id": candidate.id, "text": candidate.text})
+                })
                 .unwrap_or(Value::Null)
         };
         let entry = json!({
+            "decided_by": tag_context,
             "id": event.id,
             "text": event.text,
             "previous_context": context(i.saturating_sub(1)..i),
@@ -1395,7 +1496,7 @@ fn attribution_view(prepared: &PreparedChapter) -> String {
         // the output contract is. This says only what the JSON is, so a model
         // reading the view and a model reading the contract are never told two
         // different things about the same field.
-        "note": "Return `speakers` for every `dialogue_events` and `thought_events` id, except any you also list in `not_speech` — a span that is not somebody talking or thinking: a quoted title or term, or an unquoted narrator aside — judged from the context around it. A `thought_events` entry is an unquoted passage in the first or second person: answer with the character thinking it, never Narrator and never the addressee. Context events are evidence for resolving an id; all context and every id in `narration_ids` are spoken by Narrator and are not yours to answer. An explicit named speech tag in `following_context` is the strongest speaker evidence.",
+        "note": "Return `speakers` for every `dialogue_events` and `thought_events` id, except any you also list in `not_speech` — a span that is not somebody talking or thinking: a quoted title or term, or an unquoted narrator aside — judged from the context around it. A `thought_events` entry is an unquoted passage in the first or second person: answer with the character thinking it, never Narrator and never the addressee. Context events are evidence for resolving an id; all context and every id in `narration_ids` are spoken by Narrator and are not yours to answer. Each entry's first field, `decided_by`, names the context that holds that quote's own tag: `previous_context`, `following_context`, or null when neither side tags it. Read it before anything else in the entry.",
     });
     serde_json::to_string_pretty(&view).unwrap_or_else(|_| "[]".into())
 }
@@ -1741,21 +1842,54 @@ no narration ids, no invented ids, no dropped line.
   appears in `mentions`. Choose a named cast member whenever the dialogue tag,
   self-reference or surrounding action identifies one — `Anonymous` is the
   answer to "nobody is named", not to "I am unsure".
-- Resolve the speaker in this order: an explicit named dialogue tag in the
-  event immediately AFTER the quote; then a tag in the event immediately BEFORE
-  it; then self-reference, action, and the wider scene. A following tag such as
-  `Lạc Lan Tuyết vội vàng hỏi.` proves the preceding quote is hers, even when
-  the quote only addresses `Sư tôn`. The context objects beside each quote are
+- **`decided_by` is already resolved for you, and it is the first thing to
+  read.** It names the context holding this quote's own explicit named dialogue
+  tag: `"previous_context"` means the narration before the quote hands the floor
+  to it, `"following_context"` means the narration after it attributes the quote
+  just made, and `null` means neither side has a tag and you resolve the speaker
+  from the quote itself and the scene. Read that context. `"following_context"`
+  proves the line belongs to that tag's subject even when the quote only
+  addresses `Sư tôn` — `"Sư tôn, chính là nơi này." Lạc Lan Tuyết vẻ mặt trịnh
+  trọng nói.` is hers. A narration on the other side which ends in a speech verb
+  and a colon (`… nàng đành kiên trì gật đầu nói:`) is that *next* quote's tag, so
+  it names the speaker of the line after this one, never of this one, and
+  `decided_by` will not point at it. The context objects beside each quote are
   evidence for that id; they are never themselves speaker-map entries.
-- Never attribute by the addressee, by a name merely occurring inside the quote,
-  or by a chapter-wide `mentions` entry. `Đồ nhi`, `đệ tử`, `sư tôn`, and similar
-  forms are scenario-dependent: the same word can address different people even
-  inside one chapter. Omit such ambiguous forms from `mentions`.
+- **A name inside the quote is evidence when the quote claims it in the first
+  person, and no evidence otherwise.** `chí bảo của Huyền Vũ tông ta` — "my sect
+  Huyền Vũ" — is the speaker saying whose house they belong to, so the speaker is
+  `Huyền Vũ lão tổ`, and that is stronger than any name in the narration around
+  it. The same goes for `đệ tử của ta`, `Chấn Thiên Thạch của ta`, `sư phụ ta`.
+  What is *not* evidence is a name the quote merely addresses or mentions in the
+  second person: `"Dịch sư phụ."` or `"Sư tôn, chính là nơi này."` names the
+  LISTENER, so never the speaker. `Đồ nhi`, `đệ tử`, `sư tôn` and similar forms
+  are scenario-dependent, so they are never a reason on their own and belong in
+  no `mentions` entry.
+- Worked example, one chapter's own words, `decided_by` deciding it:
+  ```
+  e0009 narration  "… Ninh Huyền Vũ … nhìn chằm chằm Yêu Linh Nhi từng chữ từng câu hỏi:"
+  e0010 dialogue   "Ngươi nói Chấn Thiên Thạch của ta, chí bảo của Huyền Vũ tông ta, bị hắn lấy ra lấp bậc thang ư?"
+  e0011 narration  "Nhìn vẻ nổi giận của sư tôn mình, Yêu Linh Nhi … nàng đành kiên trì gật đầu nói:"
+  ```
+  `e0010.decided_by` is `"previous_context"`, so e0009 tags it and the answer is
+  `Huyền Vũ lão tổ` — even though e0009's last name before the verb is Yêu Linh
+  Nhi, and even though e0011 opens by naming Yêu Linh Nhi. e0011 ends in `nói:`
+  and tags e0012, not e0010. The quote's own `Huyền Vũ tông ta` agrees. Answering
+  `Yêu Linh Nhi` here is wrong twice over: it takes the next line's tag, and it
+  reads the addressee as the speaker.
 - Quoted game-system notifications are dialogue for the canonical `Hệ thống`
   character when the bible contains it; prose about the system remains narration.
 - `roster` contains Narrator when narration exists, every named speaker used, and
   `Anonymous` when the chapter has an unnamed speaker. It must not contain a
   character who never speaks.
+- Every value in `speakers` and every entry in `roster` is the character's
+  **`name` from INPUT 1, copied exactly** — never a form the chapter happens to
+  use. When a character's `proper_aliases` list holds the form you can see in the
+  prose (`Ninh Huyền Vũ` under `Huyền Vũ lão tổ`, `Lạc Ly` under `Doãn Lạc Ly`,
+  `Sở Cuồng sư` under `Sở Cuồng`), answer with the canonical `name` and put the
+  surface form in `mentions`. An alias where a canonical name belongs is refused,
+  which costs the whole round: a rejected answer is re-asked from scratch, so
+  copying the chapter's spelling is slower than reading the bible.
 - Correctness priority is `speakers` first, title second, and cast metadata last.
   A named speaker omitted from `new_characters` is synthesized by code. Never emit
   a nameless character object. `mentions` is optional evidence; omit uncertain
@@ -1777,23 +1911,41 @@ no narration ids, no invented ids, no dropped line.
              {previously}\n"
         ));
     }
-    Ok(format!("{body}\n{contract}"))
+    // **The rules go above the data, not below it.** The contract used to be
+    // appended after the chapter — which on this book is tens of thousands of
+    // characters of events and context — so the model had answered before it
+    // ever read what it was asked for. Orders of magnitude, measured on ch51's
+    // elder line with everything else held byte-for-byte identical: contract
+    // last, 3 in 12; contract first, 40 in 40. It is the same text in the same
+    // prompt, and the only difference is which end the reader reaches first.
+    //
+    // Placed immediately before `---CHAPTER---` rather than at the very top, so
+    // the contract still follows the prompt it modifies and the bible it is
+    // resolved against, and `---PREVIOUSLY---` keeps its place at the end.
+    Ok(match body.find("---CHAPTER---") {
+        Some(at) => format!("{}{}\n{}", &body[..at], contract, &body[at..]),
+        None => format!("{body}\n{contract}"),
+    })
 }
 
-/// The previous chapters' excerpts, as the attribution prompt's memory.
+/// The previous chapters' excerpts chapter `n` is fed, newest first, each
+/// paired with the chapter it summarizes.
 ///
-/// Depth is `excerpt_window` from settings — 1 is chapter *n−1* only, 0 is
-/// off — and each excerpt is read from the stored script of the chapter it
-/// summarizes. A chapter with no stored predecessor (the first one, an
-/// out-of-order one, a book digested before the field existed) contributes
-/// nothing: fewer lines, not a failure, the same "if any" the bible's own
-/// partial order has always had.
-fn previous_excerpts(layout: &Layout, n: u32) -> Option<String> {
+/// `pub` because the TUI's excerpt view draws the same chain the attribution
+/// prompt is built from: one definition of the window, so the screen can never
+/// show a different memory than the model was handed. Depth is
+/// `excerpt_window` from settings — 1 is chapter *n−1* only, 0 is off — and
+/// each excerpt is read from the stored script of the chapter it summarizes. A
+/// chapter with no stored predecessor (the first one, an out-of-order one, a
+/// book digested before the field existed) contributes nothing: fewer entries,
+/// not a failure, the same "if any" the bible's own partial order has always
+/// had.
+pub fn excerpt_chain(layout: &Layout, n: u32) -> Vec<(u32, String)> {
     let window = Settings::load(&layout.settings()).excerpt_window;
     if window == 0 {
-        return None;
+        return Vec::new();
     }
-    let mut lines = Vec::new();
+    let mut out = Vec::new();
     for d in 1..=window {
         let m = n.saturating_sub(d);
         if m == 0 {
@@ -1808,9 +1960,26 @@ fn previous_excerpts(layout: &Layout, n: u32) -> Option<String> {
         if excerpt.trim().is_empty() {
             continue;
         }
-        lines.push(format!("CH {m}: {excerpt}"));
+        out.push((m, excerpt.to_string()));
     }
-    (!lines.is_empty()).then(|| lines.join("\n"))
+    out
+}
+
+/// The prompt half of [`excerpt_chain`]: the chain as `CH m: excerpt` lines.
+/// `None` when there is none, which is what keeps a windowless prompt
+/// byte-for-byte the pre-excerpt one.
+fn previous_excerpts(layout: &Layout, n: u32) -> Option<String> {
+    let chain = excerpt_chain(layout, n);
+    if chain.is_empty() {
+        return None;
+    }
+    Some(
+        chain
+            .iter()
+            .map(|(m, e)| format!("CH {m}: {e}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 /// Build the audio-staging pass. Speaker assignment is supplied as immutable
@@ -3822,7 +3991,13 @@ async fn repair_once(
 /// run and useless for a post-mortem: "the analyzer placed no sounds" is a
 /// symptom, and the raw is the only place the cause is visible, whether it
 /// reasoned about the layer and dropped it, or never considered it at all.
-fn dump_raw(layout: &Layout, round: &str, raw: &str) {
+///
+/// `pub` because the backup digestor asks its own rounds outside the worker's
+/// [`call`], and it is precisely the dry run that has no other record: a
+/// `--dry-run` reported a chapter's segment count and kept nothing, so a
+/// question about what the model actually said could only be answered by
+/// re-spending the call.
+pub fn dump_raw(layout: &Layout, round: &str, raw: &str) {
     if std::env::var("BM_DIGEST_RAW").is_err() {
         return;
     }
@@ -4116,15 +4291,22 @@ fn silent_design(script: &Value, chapter_text: &str, what: &str) -> Option<Strin
 /// Put the two rounds back into the one object everything downstream reads.
 ///
 /// Ownership is by key, not by "whoever ran last": the cast pass owns identity
-/// (`title`, `atmosphere`, `roster`, `mentions`, `new_characters`,
+/// (`title`, `atmosphere`, `excerpt`, `roster`, `mentions`, `new_characters`,
 /// `new_aliases`) and the script pass owns the speech (`segments`, `fixes`).
 /// Neither can overwrite the other's keys, so a round that helpfully invents a
 /// `title` of its own is ignored rather than silently believed.
 fn merge_rounds(context: &Value, script: &Value) -> Value {
     let mut out = serde_json::Map::new();
+    // `excerpt` belongs to the cast pass like `title` and `atmosphere` do: it
+    // is the cast answer's statement of the state the chapter ends in. It was
+    // missing here, and because the miss is silent — the writer at the script
+    // build reads `data.get("excerpt")` and falls back to `""` — every chapter
+    // was digested with a working excerpt that never reached its script, and
+    // the next chapter's `---PREVIOUSLY---` block was always empty.
     for key in [
         "title",
         "atmosphere",
+        "excerpt",
         "roster",
         "mentions",
         "new_characters",
@@ -4617,6 +4799,17 @@ fn parse_attribution(
         .with_context(|| "attribution is not valid JSON".to_string())
         .map_err(mine)?;
     normalize_attribution_metadata(&mut data, bible, prepared);
+    // Unambiguous aliases are corrected here, before a single check runs, and
+    // never excused afterwards: `validate_digest_identity` stays exactly as
+    // strict as it was, it is just no longer handed a name that has one
+    // legitimate canonical spelling. Announced, because a silent rewrite is a
+    // bug of its own.
+    for fix in canonicalize_aliases(&mut data, bible) {
+        eprintln!("attribution alias corrected: {fix}");
+    }
+    for fix in complete_roster(&mut data, bible, prepared) {
+        eprintln!("attribution roster completed: {fix}");
+    }
     // The excerpt is a **soft** field: absent, blank, or over-long is
     // squeezed and capped, never a refusal. `speakers` is the product and is
     // hard-validated; a missing excerpt only means the next chapter runs
@@ -4918,6 +5111,206 @@ fn validate_digest_identity(data: &Value, bible: &Value) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Rewrite the names in an attribution answer that are an **unambiguous
+/// alias** of a bible character into that character's canonical name.
+///
+/// The gate refused these, and refusing was expensive in a way that did not
+/// match the size of the mistake: ch51 came back with `Ninh Huyền Vũ` where the
+/// bible's canonical name is `Huyền Vũ lão tổ`, the person was right, the
+/// spelling was the chapter's own, and the whole round was thrown away and
+/// re-asked for it. A name that has exactly one canonical spelling is not a
+/// fact the model has to get right — it is one the bible already knows.
+///
+/// **This corrects the answer, it does not relax the check.** Nothing here
+/// excuses an error: `validate_digest_identity` still refuses an unknown name,
+/// still refuses an ambiguous one, and still refuses everything else it refused
+/// before. The pass only rewrites what the bible can resolve on its own, which
+/// is why an ambiguous form — two characters claiming the same alias — is left
+/// exactly as it was, to fail with the message that names both owners.
+///
+/// `Narrator` and the reserved anonymous speakers are never touched: neither is
+/// a bible character, and both are legitimate names in their own right.
+fn canonicalize_aliases(data: &mut Value, bible: &Value) -> Vec<String> {
+    let characters: Vec<Value> = bible
+        .get("characters")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if characters.is_empty() {
+        return Vec::new();
+    }
+    // The names that are already canonical — from the bible, and from the
+    // characters this very answer declares as new. A canonical name is never
+    // rewritten, even when some other character lists it as an alias.
+    let canonical: HashSet<String> = characters
+        .iter()
+        .filter_map(|c| c.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .chain(
+            data.get("new_characters")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c.get("name").and_then(Value::as_str))
+                .map(str::to_string),
+        )
+        .collect();
+
+    let resolve = |name: &str| -> Option<String> {
+        if name == "Narrator" || is_anonymous_speaker(name) || canonical.contains(name) {
+            return None;
+        }
+        let owners = alias_owners(&characters, name);
+        if owners.len() != 1 {
+            return None;
+        }
+        let one = owners.into_iter().next().expect("length just checked");
+        (one != name).then_some(one)
+    };
+
+    let mut fixes = Vec::new();
+    // `roster` is a join key, so it has to end up canonical *and* de-duplicated:
+    // an answer that listed both spellings would otherwise carry one character
+    // twice and be refused for a duplicate the rewrite itself created.
+    if let Some(roster) = data.get_mut("roster").and_then(Value::as_array_mut) {
+        for slot in roster.iter_mut() {
+            let Some(name) = slot.as_str().map(str::to_string) else {
+                continue;
+            };
+            if let Some(canon) = resolve(&name) {
+                fixes.push(format!("roster {name:?} -> {canon:?}"));
+                *slot = json!(canon);
+            }
+        }
+        let mut seen = HashSet::new();
+        roster.retain(|v| match v.as_str() {
+            Some(name) => seen.insert(name.to_string()),
+            None => true,
+        });
+    }
+    if let Some(speakers) = data.get_mut("speakers").and_then(Value::as_object_mut) {
+        for slot in speakers.values_mut() {
+            let Some(name) = slot.as_str().map(str::to_string) else {
+                continue;
+            };
+            if let Some(canon) = resolve(&name) {
+                fixes.push(format!("speakers -> {canon:?} (was {name:?})"));
+                *slot = json!(canon);
+            }
+        }
+    }
+    if let Some(mentions) = data.get_mut("mentions").and_then(Value::as_object_mut) {
+        for slot in mentions.values_mut() {
+            let Some(name) = slot.as_str().map(str::to_string) else {
+                continue;
+            };
+            if let Some(canon) = resolve(&name) {
+                fixes.push(format!("mentions -> {canon:?} (was {name:?})"));
+                *slot = json!(canon);
+            }
+        }
+    }
+    // A staged segment carries the speaker too, and it is checked against the
+    // same roster. Missing this is how the first rewrite pass turned a refusal
+    // into a different refusal: `segment 0: speaker "Ninh Huyền Vũ" is not a
+    // canonical roster name`, with the roster already corrected above it.
+    if let Some(segments) = data.get_mut("segments").and_then(Value::as_array_mut) {
+        for segment in segments.iter_mut() {
+            let Some(name) = segment
+                .get("speaker")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            if let Some(canon) = resolve(&name) {
+                fixes.push(format!("segment speaker -> {canon:?} (was {name:?})"));
+                segment["speaker"] = json!(canon);
+            }
+        }
+    }
+    fixes
+}
+
+/// Add the speakers an answer actually uses to the `roster` it returned.
+///
+/// The other half of the same class of mistake as [`canonicalize_aliases`].
+/// `roster` is the join key the speaker map is resolved against, and the gate
+/// refuses a line whose speaker is missing from it — but the roster is also
+/// *derivable* from the answer: every name the answer assigns, plus `Narrator`
+/// for the narration the preparer owns, is a name that speaks. ch51's `Được!`
+/// line cost a whole round to a roster that simply forgot to list the
+/// `Anonymous` it had just used.
+///
+/// **Only names the chapter can legitimately speak are added.** A name the
+/// bible does not carry and the answer did not declare as new is left out, so it
+/// still fails the canonical-name check with the message that says so: this
+/// completes bookkeeping, it never admits a stranger, and it never rewrites
+/// `speakers` itself.
+fn complete_roster(
+    data: &mut Value,
+    bible: &Value,
+    prepared: &PreparedChapter,
+) -> Vec<String> {
+    let legit: HashSet<String> = bible
+        .get("characters")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .chain(
+            data.get("new_characters")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c.get("name").and_then(Value::as_str))
+                .map(str::to_string),
+        )
+        .collect();
+    let speaks = |name: &str| {
+        name == "Narrator" || is_anonymous_speaker(name) || legit.contains(name)
+    };
+
+    // Every name the answer puts on a line.
+    let mut used: Vec<String> = data
+        .get("speakers")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|m| m.values())
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    // Narration is spoken by the preparer, not the answer, so its speaker is
+    // never in `speakers` — but it is still in the chapter, and the gate checks
+    // the roster for every event.
+    if prepared.events.iter().any(|e| !is_voiced_kind(&e.kind)) {
+        used.push("Narrator".to_string());
+    }
+    // A retracted span is read as narration too, which is the same `Narrator`.
+    if !not_speech_ids(data).unwrap_or_default().is_empty() {
+        used.push("Narrator".to_string());
+    }
+
+    let Some(roster) = data.get_mut("roster").and_then(Value::as_array_mut) else {
+        return Vec::new();
+    };
+    let mut have: HashSet<String> = roster
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    let mut fixes = Vec::new();
+    for name in used {
+        if !speaks(&name) || !have.insert(name.clone()) {
+            continue;
+        }
+        fixes.push(format!("roster += {name:?}"));
+        roster.push(json!(name));
+    }
+    fixes
 }
 
 /// Bible characters that claim `form` through `proper_aliases`, compared under
@@ -5634,11 +6027,13 @@ mod tests {
         assert!(attribution.contains("narration_ids"), "{attribution}");
         assert!(attribution.contains("`dialogue_events`"), "{attribution}");
         assert!(attribution.contains("following_context"), "{attribution}");
-        assert!(
-            attribution.contains("explicit named dialogue tag"),
-            "{attribution}"
-        );
-        assert!(attribution.contains("scenario-dependent"), "{attribution}");
+        // Folded, because these are content assertions and the contract is
+        // reflowed whenever a rule is added: a phrase that happened to land on a
+        // line break read as a missing rule, which is the assertion testing the
+        // wrapping rather than the prompt.
+        let flat = attribution.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("explicit named dialogue tag"), "{attribution}");
+        assert!(flat.contains("scenario-dependent"), "{attribution}");
         let fixed = json!({
             "roster": ["Narrator", "anonymous:anon-1"],
             "mentions": {},
@@ -5952,6 +6347,181 @@ mod tests {
         assert_eq!(
             dialogue["following_context"]["text"],
             json!("Lạc Lan Tuyết vẻ mặt trịnh trọng nói.")
+        );
+    }
+
+    /// ch51, the shape that put a sect elder's line in the mouth of the
+    /// disciple he was scolding. Both narrations around the quote name both
+    /// characters, and the one that follows ends by handing the floor to her
+    /// reply — so "the tag after the quote" picked her, and her name was also
+    /// the last one the model read. Which side of the quote the speech verb
+    /// sits on is decidable in code, so the view decides it and states it from
+    /// the quote's own point of view: `decided_by` is `"previous_context"` here.
+    ///
+    /// The field used to be a boolean *on the narrations*,
+    /// `hands_off_to_next_quote`, and read inside a `previous_context` its own
+    /// name says "not this one" — the opposite of what it means there. Measured
+    /// on this chapter: the answer was right 3 times in 12 prompt samples.
+    #[test]
+    fn the_quote_that_a_handoff_tag_belongs_to_says_so_itself() {
+        let prepared = prepare_chapter(
+            "Chương 51: Còn muốn đuổi tận giết tuyệt\n\n\"Cái gì?\" Vừa nghe xong, \
+             Ninh Huyền Vũ quả nhiên nổi trận lôi đình, nhìn chằm chằm Yêu Linh Nhi từng \
+             chữ từng câu hỏi: \"Ngươi nói Chấn Thiên Thạch của ta, chí bảo của Huyền Vũ tông \
+             ta, bị hắn lấy ra lấp bậc thang ư?\"\n\nNhìn vẻ nổi giận của sư tôn mình, Yêu Linh Nhi thấy khó chịu trong lòng, nàng đành kiên \
+             trì gật đầu nói: \"Đúng như lời sư tôn nói...\"",
+        );
+        let view: Value = serde_json::from_str(&attribution_view(&prepared)).unwrap();
+        let dialogue = view["dialogue_events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["text"].as_str().unwrap().contains("Chấn Thiên Thạch"))
+            .expect("the elder's question is a dialogue event");
+        // The narration before it ends in `hỏi:` and hands the floor to THIS
+        // quote, so this quote's tag is the previous one.
+        assert_eq!(
+            dialogue["decided_by"],
+            json!("previous_context"),
+            "{dialogue}"
+        );
+        // The narration after it ends in `nói:` too, and would read as the same
+        // kind of evidence. It is not: it introduces the next line in the
+        // chapter, which is the line the model was about to hand to her. That
+        // next quote is where it shows up as `decided_by: "following_context"`.
+        let next = view["dialogue_events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["text"].as_str().unwrap().contains("Đúng như lời sư tôn nói"))
+            .expect("her reply follows");
+        assert_eq!(next["decided_by"], json!("previous_context"), "{next}");
+        assert_eq!(
+            next["previous_context"]["id"], dialogue["following_context"]["id"],
+            "the narration that did not tag the elder's line tags hers"
+        );
+
+        // And the contract has to say what to do with the field, or it is a
+        // field nobody reads.
+        let root = crate::paths::Layout::find_root().unwrap();
+        let layout = crate::paths::Layout::resolve(root).unwrap();
+        let prompt = build_attribution_prompt(&layout, &json!({}), &prepared, None, None).unwrap();
+        let flat = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("decided_by"), "{prompt}");
+        assert!(
+            flat.contains("Huyền Vũ tông ta"),
+            "the worked example is the whole point and must survive: {prompt}"
+        );
+        assert!(
+            flat.contains("reads the addressee as the speaker"),
+            "the example has to say what the wrong answer got wrong: {prompt}"
+        );
+    }
+
+    /// A narration that reacts to the quote before it is that quote's tag, and
+    /// is reported from the quote's side. A narration that ends a full stop
+    /// hands the floor to nobody, and neither is a tag anywhere.
+    #[test]
+    fn a_tag_after_the_quote_is_reported_as_that_quotes_following_tag() {
+        let prepared = prepare_chapter(
+            "Chương 6: Gặp lại\n\nDịch Phong bước ra khỏi cửa.\n\n\"Sư tôn, chính là nơi này.\" \
+             Lạc Lan Tuyết vẻ mặt trịnh trọng nói.",
+        );
+        let view: Value = serde_json::from_str(&attribution_view(&prepared)).unwrap();
+        let dialogue = &view["dialogue_events"][0];
+        assert_eq!(
+            dialogue["decided_by"],
+            json!("following_context"),
+            "`Lạc Lan Tuyết … nói.` reacts to the quote before it: {dialogue}"
+        );
+        // The prose before the quote is not a tag at all — no speech verb — so
+        // the answer must not come from there.
+        assert_eq!(dialogue["previous_context"]["id"], json!("e0001"));
+    }
+
+    /// A quote with no tag on either side says so, rather than leaving the
+    /// model to guess which of two ordinary narrations is a tag. `null` is the
+    /// honest answer and the contract tells the model what to do with it.
+    #[test]
+    fn a_quote_with_no_tag_on_either_side_reports_null() {
+        let prepared = prepare_chapter(
+            "Chương 2: Đi đường\n\nDịch Phong bước ra khỏi cửa.\n\n\"Đi thôi.\"\n\nTrời tối dần.",
+        );
+        let view: Value = serde_json::from_str(&attribution_view(&prepared)).unwrap();
+        let dialogue = &view["dialogue_events"][0];
+        assert_eq!(dialogue["decided_by"], Value::Null, "{dialogue}");
+    }
+
+    /// The measurement this field's name carries: ch51's elder line was
+    /// attributed correctly 5 times in 12 when the deciding field came last in
+    /// the event and 12 times in 12 when it came first, with the prompt
+    /// byte-for-byte identical otherwise. `serde_json` orders object keys
+    /// alphabetically, so "first" is a property of the name — and a rename to
+    /// anything sorting after `following_context` would silently give the
+    /// accuracy back.
+    /// The contract has to be read before the chapter it governs, or a model
+    /// answers from the first thing it sees and never reaches the rules. On
+    /// ch51's elder line the same prompt scored 3 in 12 with the contract last
+    /// and 40 in 40 with it first — the only difference being which end of a
+    /// 58KB prompt the reader gets to first.
+    #[test]
+    fn the_contract_comes_before_the_chapter_it_governs() {
+        let root = crate::paths::Layout::find_root().unwrap();
+        let layout = crate::paths::Layout::resolve(root).unwrap();
+        let prepared = prepare_chapter(
+            "Chương 51: Còn muốn đuổi tận giết tuyệt\n\n\"Cái gì?\" Vừa nghe xong, \
+             Ninh Huyền Vũ quả nhiên nổi trận lôi đình, từng chữ từng câu hỏi: \"Ngươi nói \
+             Chấn Thiên Thạch của ta.\"",
+        );
+        let prompt = build_attribution_prompt(&layout, &json!({}), &prepared, None, None).unwrap();
+        let contract = prompt
+            .find("---ATTRIBUTION OUTPUT CONTRACT---")
+            .expect("the contract is rendered");
+        let chapter = prompt.find("---CHAPTER---").expect("the view is rendered");
+        assert!(
+            contract < chapter,
+            "the rules must be reached before the data they govern"
+        );
+        // And the view is still whole after it: the contract is inserted, not
+        // swapped for the chapter. The block runs from the marker to the next
+        // one, which is `---PREVIOUSLY---` when there is a chapter before this
+        // one and the end of the prompt when there is not.
+        let rest = &prompt[chapter + "---CHAPTER---\n".len()..];
+        let end = rest.find("\n---").unwrap_or(rest.len());
+        let view: Value = serde_json::from_str(rest[..end].trim())
+            .unwrap_or_else(|e| panic!("the view survives the move: {e}"));
+        assert!(view.get("dialogue_events").is_some(), "{view}");
+        // The bible is still above both, so the contract can name it.
+        assert!(prompt.find("---BIBLE---").unwrap() < contract);
+    }
+
+    #[test]
+    fn the_decided_by_field_is_the_first_thing_in_every_event() {
+        let prepared = prepare_chapter(
+            "Chương 51: Còn muốn đuổi tận giết tuyệt\n\n\"Cái gì?\" Vừa nghe xong, \
+             Ninh Huyền Vũ quả nhiên nổi trận lôi đình, nhìn chằm chằm Yêu Linh Nhi từng \
+             chữ từng câu hỏi: \"Ngươi nói Chấn Thiên Thạch của ta.\"",
+        );
+        let raw = attribution_view(&prepared);
+        let view: Value = serde_json::from_str(&raw).unwrap();
+        let entries = view["dialogue_events"].as_array().unwrap();
+        assert!(!entries.is_empty());
+        for entry in entries {
+            let keys: Vec<&String> = entry.as_object().unwrap().keys().collect();
+            assert_eq!(
+                keys.first().map(|k| k.as_str()),
+                Some("decided_by"),
+                "the deciding field has to sort first, or the answer degrades: {keys:?}"
+            );
+        }
+        // And alphabetically it really is first, which is what the serializer
+        // does — asserted on the rendered text, not on the map.
+        let at = raw.find("\"decided_by\"").expect("the field is rendered");
+        let event = raw.find("\"dialogue_events\"").unwrap();
+        assert!(at > event, "{raw}");
+        assert!(
+            raw[event..at].matches("\"id\"").count() == 0,
+            "no event key may be rendered before it: {raw}"
         );
     }
 
@@ -7079,6 +7649,31 @@ mod tests {
         );
     }
 
+    /// A chapter whose prose says `Ninh Huyền Vũ` while the bible's canonical
+    /// name is `Huyền Vũ lão tổ` cost a whole refused round on ch51: the
+    /// answer was right about the person and spelled the speaker the way the
+    /// chapter did, the gate refused the alias, and the repair re-asked
+    /// everything. The contract has to say which string to copy, because
+    /// `canonical character name` alone reads as a description, not a source.
+    #[test]
+    fn the_contract_says_which_string_a_speaker_is() {
+        let root = crate::paths::Layout::find_root().unwrap();
+        let layout = crate::paths::Layout::resolve(root).unwrap();
+        let prepared = prepare_chapter("\"Cái gì?\"");
+        let prompt = build_attribution_prompt(&layout, &json!({}), &prepared, None, None).unwrap();
+        let flat = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("`name` from INPUT 1, copied exactly"),
+            "the canonical name has to be named as a field, or the model copies \
+             the chapter's spelling: {prompt}"
+        );
+        assert!(
+            flat.contains("Ninh Huyền Vũ"),
+            "the rule needs the exact case that cost the round, or it reads as \
+             a general caution nobody applies: {prompt}"
+        );
+    }
+
     /// The prompt has to offer the field, or the model cannot use it. The
     /// `note` is the only place that describes the answer, so this is what
     /// makes the retraction reachable.
@@ -7242,6 +7837,163 @@ mod tests {
         let err = validate_source_alignment_no_retractions(&rewritten, &prepared).unwrap_err();
         assert!(err.to_string().contains("changed"), "{err}");
         assert!(!err.to_string().contains("written sound"), "{err}");
+    }
+
+    /// The ch51 shape: right person, the chapter's spelling. It used to cost
+    /// the whole round. The rewrite happens before the gate, so the gate is
+    /// never weaker — it is simply never asked about a name the bible settles.
+    #[test]
+    fn an_unambiguous_alias_is_rewritten_before_the_gate_sees_it() {
+        let bible = json!({"characters": [
+            {"name": "Huyền Vũ lão tổ", "proper_aliases": ["Ninh Huyền Vũ", "Huyền Vũ"]},
+            {"name": "Yêu Linh Nhi", "proper_aliases": []},
+        ]});
+        let mut data = json!({
+            "roster": ["Narrator", "Yêu Linh Nhi", "Ninh Huyền Vũ"],
+            "mentions": {"Ninh Huyền Vũ": "Ninh Huyền Vũ"},
+            "speakers": {"e0001": "Yêu Linh Nhi", "e0010": "Ninh Huyền Vũ"},
+            "segments": [{"speaker": "Ninh Huyền Vũ", "text": "Chí bảo của ta."}],
+        });
+        let fixes = canonicalize_aliases(&mut data, &bible);
+
+        assert_eq!(data["roster"], json!(["Narrator", "Yêu Linh Nhi", "Huyền Vũ lão tổ"]));
+        assert_eq!(data["speakers"]["e0010"], json!("Huyền Vũ lão tổ"));
+        assert_eq!(data["speakers"]["e0001"], json!("Yêu Linh Nhi"), "a real name is left alone");
+        assert_eq!(data["mentions"]["Ninh Huyền Vũ"], json!("Huyền Vũ lão tổ"));
+        assert!(fixes.iter().any(|f| f.contains("Huyền Vũ lão tổ")), "{fixes:?}");
+
+        // What the fix buys: the gate now accepts an answer it used to refuse,
+        // and refuses nothing it used to accept.
+        validate_digest_identity(&data, &bible).unwrap();
+    }
+
+    /// The rewrite must not become a licence. An alias two characters claim is
+    /// still ambiguous, and ambiguous still fails — naming one owner would be
+    /// guessing, which is exactly what the gate exists to refuse.
+    #[test]
+    fn an_ambiguous_alias_is_still_refused_and_never_guessed() {
+        let bible = json!({"characters": [
+            {"name": "Vân Thăng", "proper_aliases": ["Vân gia chủ"]},
+            {"name": "Vân Lam", "proper_aliases": ["Vân gia chủ"]},
+        ]});
+        let mut data = json!({
+            "roster": ["Narrator", "Vân gia chủ"],
+            "speakers": {"e0001": "Vân gia chủ"},
+        });
+        let fixes = canonicalize_aliases(&mut data, &bible);
+        assert!(fixes.is_empty(), "two owners means no rewrite: {fixes:?}");
+        assert_eq!(data["roster"], json!(["Narrator", "Vân gia chủ"]));
+
+        // Unchanged, so the gate says what it always said.
+        let err = validate_digest_identity(&data, &bible).unwrap_err();
+        assert!(
+            err.to_string().contains("not a canonical known/new character name"),
+            "{err}"
+        );
+
+        // And a name no character claims at all is not an alias either.
+        let mut stranger = json!({"roster": ["Narrator", "Kẻ lạ mặt"], "speakers": {}});
+        assert!(canonicalize_aliases(&mut stranger, &bible).is_empty());
+        assert!(validate_digest_identity(&stranger, &bible).is_err());
+    }
+
+    /// A name listed as somebody's alias *and* standing as its own canonical
+    /// character is canonical: rewriting it would rename a legitimate speaker
+    /// into a stranger. `Narrator` and the reserved anonymous speakers are not
+    /// bible characters at all, so they are never rewritten either.
+    #[test]
+    fn canonical_names_and_reserved_speakers_are_never_rewritten() {
+        let bible = json!({"characters": [
+            {"name": "Lục Thanh Sơn", "proper_aliases": ["Thanh Sơn lão tổ"]},
+            // Somebody else also carries the bare name as an alias — a clash the
+            // bible tolerates, and which must not break the canonical owner.
+            {"name": "Thanh Sơn", "proper_aliases": []},
+        ]});
+        let mut data = json!({
+            "roster": ["Narrator", "anonymous:anon-1", "Thanh Sơn"],
+            "speakers": {"e0001": "Thanh Sơn", "e0002": "anonymous:anon-1"},
+        });
+        let fixes = canonicalize_aliases(&mut data, &bible);
+        assert!(fixes.is_empty(), "{fixes:?}");
+        assert_eq!(data["roster"], json!(["Narrator", "anonymous:anon-1", "Thanh Sơn"]));
+        assert_eq!(data["speakers"]["e0002"], json!("anonymous:anon-1"));
+    }
+
+    /// An answer that spells one character both ways collapses to one roster
+    /// entry. Left alone it would be refused for a duplicate the rewrite itself
+    /// created — a gate failure caused by the fix.
+    #[test]
+    fn the_rewrite_deduplicates_a_roster_that_named_one_character_twice() {
+        let bible = json!({"characters": [
+            {"name": "Huyền Vũ lão tổ", "proper_aliases": ["Ninh Huyền Vũ"]},
+        ]});
+        let mut data = json!({
+            "roster": ["Narrator", "Huyền Vũ lão tổ", "Ninh Huyền Vũ"],
+            "speakers": {"e0001": "Ninh Huyền Vũ"},
+        });
+        canonicalize_aliases(&mut data, &bible);
+        assert_eq!(data["roster"], json!(["Narrator", "Huyền Vũ lão tổ"]));
+        validate_digest_identity(&data, &bible).unwrap();
+    }
+
+    /// ch51's `Được!`: assigned to the reserved crowd speaker, with `Anonymous`
+    /// left out of the roster the answer itself returned. The roster is
+    /// derivable from the answer, so it is derived instead of refused.
+    #[test]
+    fn a_used_speaker_missing_from_the_roster_is_added_not_refused() {
+        let bible = json!({"characters": [{"name": "Lan", "proper_aliases": []}]});
+        let prepared = prepare_chapter("Trời tối. \"Ngươi đi đi.\" \"Được!\"");
+        let mut data = json!({
+            "roster": ["Narrator", "Lan"],
+            "speakers": {"e0002": "Lan", "e0003": "anonymous:anon-1"},
+        });
+        let fixes = complete_roster(&mut data, &bible, &prepared);
+        assert!(
+            fixes.iter().any(|f| f.contains("anonymous:anon-1")),
+            "{fixes:?}"
+        );
+        let roster: Vec<&str> = data["roster"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(roster.contains(&"anonymous:anon-1"), "{roster:?}");
+        assert!(roster.contains(&"Narrator"), "narration needs its speaker listed");
+        // Nothing is duplicated when it was already there, and the answer's own
+        // assignments are untouched.
+        assert_eq!(roster.iter().filter(|n| **n == "Lan").count(), 1);
+        assert_eq!(data["speakers"]["e0003"], json!("anonymous:anon-1"));
+    }
+
+    /// The completion must not become an admission: a name nobody in the bible
+    /// carries and the answer never declared is still left off the roster, so
+    /// the canonical-name check still refuses it.
+    #[test]
+    fn complete_roster_never_admits_a_stranger() {
+        let bible = json!({"characters": [{"name": "Lan", "proper_aliases": []}]});
+        let prepared = prepare_chapter("Trời tối. \"Ngươi đi đi.\"");
+        let mut data = json!({
+            "roster": ["Narrator"],
+            "speakers": {"e0002": "Kẻ lạ mặt"},
+        });
+        let fixes = complete_roster(&mut data, &bible, &prepared);
+        assert!(fixes.is_empty(), "a stranger is not a roster entry: {fixes:?}");
+        assert_eq!(data["roster"], json!(["Narrator"]));
+        // And the gate that would have been satisfied by adding it still
+        // refuses: the completion is bookkeeping, not an admission.
+        let err = validate_attributions(&data, &bible, &prepared).unwrap_err();
+        assert!(err.to_string().contains("Kẻ lạ mặt"), "{err}");
+        assert!(err.to_string().contains("not in the chapter roster"), "{err}");
+
+        // The contrast that proves the point: the same shape with a name the
+        // bible *does* carry is completed, and then passes.
+        let mut known = json!({
+            "roster": ["Narrator"],
+            "speakers": {"e0002": "Lan"},
+        });
+        assert!(!complete_roster(&mut known, &bible, &prepared).is_empty());
+        validate_attributions(&known, &bible, &prepared).unwrap();
     }
 
     #[test]
@@ -7504,6 +8256,7 @@ mod tests {
         let context = json!({
             "title": "Bí Ẩn Dao Phay",
             "atmosphere": "A kitchen at dusk.",
+            "excerpt": "Lan is wounded; the stranger stays unnamed.",
             "roster": ["Narrator"],
             "mentions": {"hắn": "Dịch Phong"},
             "new_characters": [],
@@ -7526,6 +8279,13 @@ mod tests {
         });
         let merged = merge_rounds(&context, &script);
         assert_eq!(merged["title"], json!("Bí Ẩn Dao Phay"));
+        assert_eq!(
+            merged["excerpt"],
+            json!("Lan is wounded; the stranger stays unnamed."),
+            "the cast pass's excerpt must survive the merge: the script writer \
+             reads this key and falls back to an empty string when it is absent, \
+             which is how every chapter kept a blank excerpt"
+        );
         assert_eq!(merged["roster"], json!(["Narrator"]));
         assert_eq!(merged["mentions"], json!({"hắn": "Dịch Phong"}));
         assert_eq!(merged["speakers"], json!({"e0001": "Narrator"}));
@@ -7536,6 +8296,7 @@ mod tests {
         for key in [
             "title",
             "atmosphere",
+            "excerpt",
             "roster",
             "mentions",
             "new_characters",
@@ -8838,4 +9599,6 @@ mod repair_template_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 }
+
+
 

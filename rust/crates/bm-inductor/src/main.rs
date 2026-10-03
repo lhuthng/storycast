@@ -3463,9 +3463,12 @@ async fn cmd_backup(
             // four parts asks four round 1s, and the log has to say which one is
             // waiting — otherwise a backup run through a long chapter reads like
             // the same prompt four times.
-            let part = match next.part() {
-                Some(part) if part.total > 1 => format!(" (part {}/{})", part.index, part.total),
-                _ => String::new(),
+            let (part, part_slug) = match next.part() {
+                Some(part) if part.total > 1 => (
+                    format!(" (part {}/{})", part.index, part.total),
+                    format!("-part{}", part.index),
+                ),
+                _ => (String::new(), String::new()),
             };
             eprintln!(
                 "ch{n}: {}{part} prompt ready ({} bytes) via {analyzer}",
@@ -3492,6 +3495,31 @@ async fn cmd_backup(
                 let answer = manual::ask(&asked, &analyzer, &settings)
                     .await
                     .map_err(|e| anyhow::anyhow!("ch{n} round {}: {e}", round.as_str()))?;
+                // Kept, not just parsed. `manual::ask` is outside the worker's
+                // `call`, so the automatic path's own `dump_raw` never sees this
+                // answer — and a `--dry-run` has nothing else to inspect: it
+                // reports a segment count and exits. Without this, asking what
+                // the model actually said about a chapter means paying for the
+                // round again. Keyed by the repair attempt too, because the
+                // answer that was accepted is not the answer that was refused,
+                // and it is the refused one that explains the refusal.
+                let tag = if attempt == 0 {
+                    format!("backup-{}-{}", round.as_str(), part_slug)
+                } else {
+                    format!("backup-{}{}-{}-repair{}", round.as_str(), part_slug, n, attempt)
+                };
+                bm_core::digest::dump_raw(layout, &tag, &answer);
+                // The prompt beside the answer. An answer on disk answers "what
+                // did it say"; a wrong answer can only be argued with once the
+                // exact bytes it was given are next to it, and rebuilding that
+                // prompt means rebuilding the bible and the view by hand.
+                if std::env::var("BM_DIGEST_RAW").is_ok() {
+                    let path = layout
+                        .data()
+                        .join(format!(".last-{tag}-prompt.txt"));
+                    let _ = bm_core::atomic_write(&path, &asked);
+                    eprintln!("prompt -> {}", path.display());
+                }
                 match manual::advance(layout, &settings.engine, n, round, &answer, cast.as_ref()) {
                     Ok(step) => {
                         accepted = Some(step);
