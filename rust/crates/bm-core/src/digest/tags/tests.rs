@@ -1,3 +1,4 @@
+use super::validate::inline_tags;
 use super::*;
 use serde_json::json;
 

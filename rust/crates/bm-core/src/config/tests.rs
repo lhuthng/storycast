@@ -1,4 +1,5 @@
 use super::*;
+use crate::util::read_json;
 
 #[test]
 fn only_default_opts_out_of_the_digest_title() {
