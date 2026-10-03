@@ -1,0 +1,19 @@
+# Mechanical refactors: blame skips these commits
+# Each commit moved code between files without changing behavior.
+8b362b3
+6ead8c2
+df81ea5
+5690cce
+8ea4f41
+6cea9ab
+c11f7e6
+406aa54
+48ef2e0
+abe55bc
+7e47742
+84dc043
+bf2695b
+7593b77
+c6a33f3
+363971f
+1bae6fa
