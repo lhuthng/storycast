@@ -1,5 +1,13 @@
 # Authoring a pack
 
+**In one line:** making a new set of sounds for a genre, as something other
+people can install.
+
+**You want this file** if you are creating a pack. You want
+[ASSETS.md](ASSETS.md) if you want to understand *why* packs are a dependency
+tree. You want [SOUND.md](SOUND.md) if you want to know what a clip must sound
+like. This file is the recipe, in the order you do the steps.
+
 [ASSETS.md](ASSETS.md) explains the model: what a dependency is, what merges
 into what, how resolution remembers what it filled in, and what a release is.
 [SOUND.md](SOUND.md) is the studio reference for the art itself. This file is the

@@ -1,5 +1,14 @@
 # Architecture: how Storycast works under the hood
 
+**You do not need this file to run Storycast.** The [README](../README.md) is
+that guide, and it is ordered the way you would actually do the job. This one
+answers a different question: *why is it built this way*, for someone about to
+change it. It is 1,600 lines because the honest answer to "why" is long.
+
+It is written in two halves. **The next section is for anyone** — it explains
+what the program does in four steps and stops there. Everything after it is for
+people changing the machine, and assumes you can read Rust.
+
 ## In plain words
 
 *You can stop reading after this section.*
@@ -53,10 +62,23 @@ early instead of burning an afternoon on it. Everything else is plumbing.
 
 ## For people changing the machine
 
-Companion to the [README](../README.md), which is the "how do I run it" guide.
-This one is the "why is it built this way" guide. Everything here describes
-code that exists in this repo: five Rust crates plus a Python enrollment tool,
-not aspirations.
+Everything below describes code that exists in this repo: five Rust crates plus
+a Python enrollment tool, not aspirations.
+
+**Where to start, by what you are about to do:**
+
+| You are… | Read |
+| --- | --- |
+| Deciding where a change goes | [The map](#the-map-the-book-the-machine-and-what-each-one-borrows) first — it says what belongs to the book, what belongs to the machine, and what each borrows |
+| Touching the pipeline | [1. One idea](#1-one-idea-work-is-a-list-of-tasks-not-a-loop) (the ledger), then [2. The stages](#2-the-stages-bm-core) |
+| Touching the dashboard or the API | [3. The control API](#3-the-control-api-bm-inductor-axum-default-8901), then [6. The TUI](#6-the-tui-bm-inductorsrctui) |
+| Adding a machine | [4. Provisioning](#4-provisioning-and-why-second-runs-are-fast) and [7. The transport](#7-the-transport-the-inductor-drives-nothing-dials-it) |
+| Working on voices | [5. Voices](#5-voices-three-layers) |
+| Working on EC2 | [8. The cloud plane](#8-the-cloud-plane-ec2-boxes-as-ordinary-machines) |
+
+**The one idea underneath all of it**: work is a list of tasks in a file, not a
+loop in memory. Every section below is a consequence of that, and if you
+remember one thing from this file, make it that one.
 
 ```mermaid
 flowchart TB

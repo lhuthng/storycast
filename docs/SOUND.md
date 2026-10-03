@@ -1,14 +1,17 @@
 # Sound: the three layers, and how to author them
 
+**In one line:** how to make the music and effects, and what a clip has to sound
+like before it is allowed in.
+
+*You can stop reading after §1.* Sections 3 and 4 are the studio reference, and
+are written to be usable by someone holding a microphone, or a Suno prompt box,
+with no access to this repository's history. Nothing here needs you to read
+Rust.
+
 How to make the art. [ASSETS.md](ASSETS.md) is how *composition* works — what
 merges into what and why; [ASSET-PACKS.md](ASSET-PACKS.md) is the recipe for
-building one. This file is the studio reference: what the three layers are, what
-every knob does, the house spec a clip must meet, how to record one, how to
-generate one, and the two vocabularies whose confusion is the most expensive
-mistake in the system.
-
-It is written to be usable by someone holding a microphone, or a Suno prompt
-box, with no access to this repository's history.
+building one; [AUDIO-NEEDS.md](AUDIO-NEEDS.md) says which sounds are still
+missing.
 
 ## 1. The three layers
 

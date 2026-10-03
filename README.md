@@ -1,28 +1,59 @@
 # Storycast
 
-Storycast turns a web novel into a multi-voice audiobook. It crawls the
-chapters, works out who is speaking, keeps a character bible, gives each
-character a voice that stays the same across the whole book, writes a
-performance for each line, and mixes in music and sound effects. It runs on one
-laptop or on a cluster of rented machines, and every step can be resumed.
+**A web novel in, a multi-voice audiobook out.**
 
-It was built for Vietnamese web novels, but nothing in the code is tied to one
-site or to one language.
+Give Storycast a book — a website, or text files you already have — and it
+produces one MP3 per chapter, with a different voice for every character, music
+under the quiet parts and sound effects on the beats. It runs on one laptop or
+on a cluster of rented machines, and every step can be resumed.
+
+Built for Vietnamese web novels, but nothing in the code is tied to one site or
+one language.
 
 **It has been run end to end already: 223 chapters, 18 hours 5 minutes of
-audio, for** [Người Trên Vạn Người](https://huuthangle.site/audiobooks/beyond-myriads-people).
+audio, for [Người Trên Vạn Người](https://huuthangle.site/audiobooks/beyond-myriads-people).**
 
 **[Listen to the result](https://huuthangle.site/audiobooks/beyond-myriads-people)**
 
 ---
 
-## If you just want your book as audio
+## Which part are you here for?
+
+| You want to | Start at | Needs |
+| --- | --- | --- |
+| **An audiobook, nothing else** | [Just want your book as audio](#just-want-your-book-as-audio) | An LLM key, the voices, your text. Read nothing else. |
+| **It running, and running well** | [2. Install](#2-install) → [3. Start it](#3-start-it-easiest-first) | The above, plus patience with a terminal |
+| **It running faster** | [3C](#c-lan-cluster) / [3D](#d-aws-workers) | The above, plus machines |
+| **Something broke** | [5. When something fails](#5-when-something-fails) | Nothing — start here |
+| **To change how it works** | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/PROFILES.md](docs/PROFILES.md) | Comfort reading Rust |
+| **To change how it sounds** | [docs/SOUND.md](docs/SOUND.md) | A microphone, or a music generator |
+| **To get chapters off a site** | [docs/CRAWLING.md](docs/CRAWLING.md) | An LLM chat and one saved HTML page |
+
+Every guide in [docs/](docs/README.md) opens with a plain-words section and says
+where you may stop reading. **The rest of this README assumes you want to run
+the thing**, and is ordered the way you would actually do it.
+
+---
+
+## Just want your book as audio
 
 *You can stop reading after this section. Everything below is for people
 changing the machine itself.*
 
 You need three things: an LLM API key, the `bm-tts` voices (downloaded once),
 and your book's text, either files you already have or a website it is on.
+
+**0. Get it onto your machine.** Rust, ffmpeg, and Python 3; then two commands.
+The full dependency list and what each one is for is in
+[2. Install](#2-install), and it is two minutes of reading.
+
+```bash
+git clone lhuthng/storycast.git && cd storycast
+make build && make tui
+```
+
+Then press **`L`** in the dashboard and paste an LLM provider key. Nothing is
+fetched and no worker is started until you ask, so you can do that later.
 
 **1. Tell it where the book is.** If you have the text, drop files in and import
 them. If it is a website, check the site first. One command tells you whether
@@ -37,7 +68,7 @@ failed. If the site is one Storycast already has a crawler for, the command
 prints the settings to paste. If the site is blocked, it says so in a sentence
 rather than leaving you to guess.
 
-**2. Start the book.** `bm-inductor tui` opens the dashboard, then:
+**2. Start the book.** In the dashboard from step 0:
 
 ```
 :t 1 50          # chapters 1..50: fetch, cast, speak, merge
@@ -48,6 +79,9 @@ That is the whole run. Four stages keep themselves going: each chapter is
 fetched, someone is assigned to each line, the audio is generated, the chapter
 is saved. You can watch it, and you can fix by hand anything it got wrong, but
 for a book of any length you will not be watching it.
+
+If you would rather have no dashboard at all, two terminals and no configuration
+does the same job: [3A. Solo, headless](#a-solo-headless).
 
 **3. Take the files.** Finished chapters land in `output/`, named
 `Ch.N - Title.mp3`. That is the deliverable. Everything else is machinery.
@@ -74,6 +108,9 @@ pointing it at a site that serves a bot check instead of a chapter. Run
 `bm-inductor check` on one real chapter URL first. It costs a second.
 
 ## Clone vs. bring
+
+*Reference. Skip it if you are following the quickstart above — nothing in it is
+needed to get a book out.*
 
 The repo holds the program. The book itself is not in it.
 
@@ -108,6 +145,9 @@ segment, join the audio.
 
 ## 1. The pipeline (60 seconds)
 
+*Background. You do not need this to run the thing; read it if you want to know
+why the four stages are what they are.*
+
 Four stages per chapter:
 
 ```mermaid
@@ -124,6 +164,25 @@ flowchart TB
 
 **The bible is both digest input and output**; the cast is derived from the
 digest. Chapter 40 keeps chapter 1's voice for a character with no hand config.
+
+- **crawl** is **manual by default**. A new workspace fetches nothing, and
+  chapters come from files (`:import 34 ch34.txt`). Set `"mode": "script"` with
+  a crawler and it turns `n` into a chapter: expand `{n}`, or read the site's
+  index and follow links, then pick the body off the page. Which element that
+  is, and where it starts and stops, live in the script's own table, not in
+  Rust. See [docs/CRAWLING.md](docs/CRAWLING.md).
+- **digest**: the chapter is split deterministically into `narration` /
+  `dialogue` events with stable ids, then one LLM call answers cast and script
+  together in strict JSON, into `data/script/NN.json`. A gate rejects the
+  answer unless every event was spoken exactly once, in source order, with
+  narration on `Narrator` and no quote delimiter inside a segment.
+- **render**: speak each segment with its speaker's voice. Every segment is
+  cached, so a crash costs seconds, not a chapter.
+- **merge**: segments + gaps + optional effects, music and scene beats, into
+  `output/Ch.N - Title.mp3`.
+
+The **inductor** owns this state (the task ledger) and hands chapters to
+**agent** workers on this machine and any boxes you add over SSH.
 
 ### The digest invents people: audit the bible early
 
@@ -142,14 +201,11 @@ each digest's bible delta while the book is small. Merge duplicates, fix
 `voice_hint` gender, drop ambiguous aliases. The same audit at chapter
 200 costs a full re-speak instead of a five-minute edit.
 
-### The crawler is the first three stages' input
+### The crawler decides what the model is asked to do
 
-Worth understanding before you write one, because it explains most of the rules
-in the [crawling guide](docs/CRAWLING.md): the crawler decides what the model
-is asked to do, so a clean chapter is what makes the rest of the program work
-rather than merely sound nicer.
-
-Three links, each of which fails quietly:
+Worth knowing before you write one, because it explains most of the rules in
+the [crawling guide](docs/CRAWLING.md). Three links, each of which fails
+quietly:
 
 - **Quote marks decide who speaks.** Before any AI is involved, the chapter is
   cut into pieces and each is labelled narration or dialogue, decided by `"`,
@@ -171,26 +227,10 @@ Three links, each of which fails quietly:
 The payoff works both ways: the cleaner the input, the more a digest refusal
 means the model got this chapter wrong rather than that the input was junk.
 
-- **crawl** is **manual by default**. A new workspace fetches nothing, and
-  chapters come from files (`:import 34 ch34.txt`). Set `"mode": "script"` with
-  a crawler and it turns `n` into a chapter: expand `{n}`, or read the site's
-  index and follow links, then pick the body off the page. Which element that
-  is, and where it starts and stops, live in the script's own table, not in
-  Rust. See [docs/CRAWLING.md](docs/CRAWLING.md).
-- **digest**: the chapter is split deterministically into `narration` /
-  `dialogue` events with stable ids, then one LLM call answers cast and script
-  together in strict JSON, into `data/script/NN.json`. A gate rejects the
-  answer unless every event was spoken exactly once, in source order, with
-  narration on `Narrator` and no quote delimiter inside a segment.
-- **render**: speak each segment with its speaker's voice. Every segment is
-  cached, so a crash costs seconds, not a chapter.
-- **merge**: segments + gaps + optional effects, music and scene beats, into
-  `output/Ch.N - Title.mp3`.
-
-The **inductor** owns this state (the task ledger) and hands chapters to
-**agent** workers on this machine and any boxes you add over SSH.
-
 ## 2. Install
+
+Rust and ffmpeg are the only two you may have to install. Everything else is
+already on the machine or is something you choose later.
 
 You need these before anything runs:
 
@@ -311,15 +351,9 @@ Write one without reading much of anything:
    [docs/CRAWLING.md](docs/CRAWLING.md)**, a self-contained brief (the
    contract, the host functions, the refusal classes) written exactly for this.
    Ask for a Lua script; the chat investigates the selectors and hands back a
-   working crawler. Start from a template if you would rather not begin from
-   nothing: `crawlers/known/truyencom.lua` is the easy shape (the chapter URL is
-   a function of `n`), `crawlers/known/madara.lua` a paginated listing,
-   `crawlers/known/readnovelfull.lua` a site whose URLs carry a title slug and
-   whose book index stops at 30 chapters, `crawlers/known/webnovel.lua` the hard
-   one (slug URLs, a container one level deeper than the obvious one, a
-   paid-chapter flag). `crawlers/known/storya.lua` is the crawler the pipeline
-   shipped with, kept for workspaces whose settings predate the `crawl` block; a
-   new workspace names no crawler at all.
+   working crawler. If you would rather start from a template, five ship in
+   `crawlers/known/`, from the easy shape to the hard one; they are catalogued
+   in [docs/CRAWLING.md §5](docs/CRAWLING.md#5-the-global-crawlers).
 3. Put it at `workspaces/<name>/crawl/mysite.lua` (per book, synced to every
    worker by the next provision), point `crawl.script` at it, and probe with
    `c` in the TUI. The probe runs the real crawler over a real chapter and
@@ -328,17 +362,14 @@ Write one without reading much of anything:
 **If a site refuses you.** `bm-inductor check` names a Cloudflare challenge as
 one rather than calling it a 403. There is no bypass here and there is not
 going to be: no TLS-fingerprint spoofing, no browser engine, no challenge
-solver. The crawler speaks HTTP/1.1 with rustls and a header-shaped request,
-and some sites refuse that on the fingerprint alone. What is left is a real
-browser user agent in `crawl.user_agent` (the default `Mozilla/5.0` is thin)
-and, for the rest, a `cf_clearance` cookie you solve in a browser and paste
-into `crawl.headers`. Both are one-line changes, and `check` tells you whether
+solver. What is left is a real browser user agent in `crawl.user_agent` and,
+for the rest, a `cf_clearance` cookie you solve in a browser and paste into
+`crawl.headers`. Both are one-line changes, and `check` tells you whether
 either worked.
 
 The chapter text must be prose with paragraph breaks: no navigation, no comment
-sections, no repeated headline. The length guard refuses under 200 bytes and
-the size guard refuses a whole-page scrape. Everything else about the format is
-[docs/CRAWLING.md §4](docs/CRAWLING.md).
+sections, no repeated headline. Everything else about the format, and why each
+of those rules exists, is [docs/CRAWLING.md](docs/CRAWLING.md).
 
 ### Cloned voices (optional)
 
@@ -359,29 +390,15 @@ The checkout root carries no `voices.json`, and one book never reads another's.
 The prompt tags each segment three ways; merge turns them into layers under
 the voice:
 
-- **`scene` is place**, into **effects** (sparse). Consecutive same-speaker
-  lines form a run; the run's majority scene matches ordered keyword rules in
-  `assets/scene-map.json` (first wins). Rules name tags, never files. A window
-  opens only when the scene names tags, lasts at least `min_span_s`, waits
-  `cooldown_s` after the last, and the chapter spends at most `max_coverage`
-  on the layer. A bed marks the scene, it does not run under everything.
-- **`music` is mood**, into **background music**. Closed palette in
-  `scene-map.json` (`quiet`, `warm`, `busy`, `battle`, `grand`, `none`);
-  consecutive same-value segments are one cue, so music changes as often as
-  feeling does (crossfade on change). Quiet by design (`level: 0.06` versus
-  effects' `0.08` to `0.22`). `none` (or a mood the pool cannot answer) plays
-  no music, validated at digest time. The chapter's **first cue is pulled back
-  to the head of the timeline**, so the music comes up under the title rather
-  than hitting on the first line that names a mood, and the layer's head and
-  tail fade over `layers.music.fade_s` (3 s): an opening and a closing, not the
-  0.3 s edge the sparse layers use.
-- **Place and mood are separate on purpose.** One string doing both once put a
-  hearth under a dawn shop: keyword `shop` hit a fire rule before the daylight
-  rule.
-- **`sound` is a spot effect between lines.** `segments` holds **lines**
-  (`speaker` + `text`) and **sounds** (`{"sound": "page-turn", "mode":
-  "overlap"}` or `{"stop": "…"}`). The script splits the sentence so the sound
-  sits where prose stages it:
+- **`scene` is place**, into **effects**: a bed that runs under a whole scene.
+  It opens only where the scene names its tags, so a bed marks the scene rather
+  than running under everything.
+- **`music` is mood**, into **background music**: one cue per stretch of
+  constant feeling, crossfaded on change, and deliberately quiet. Place and mood
+  are separate on purpose — one string doing both once put a hearth under a
+  dawn shop.
+- **`sound` is a spot effect between lines**, sitting exactly where prose stages
+  it. The script splits the sentence around it:
 
   ```json
   {"speaker": "Narrator", "text": "Nàng lau mồ hôi trên trán, siết chặt cuốn võ thư trong tay"},
@@ -392,37 +409,24 @@ the voice:
   Sound items have no `text` or `speaker`: no TTS call ever sees the syntax.
   Modes: `hit` (wait out the clip), `overlap` (zero timeline, runs under the
   next speech), `trail` (hold, then tail ducks); `stop` fades, never cuts.
-  Names and `dur_s` come from `assets/inject-pool.json`. A `hit` on a 51 s clip
-  is refused at digest (51 s of dead air). Rides the `effects` switch and
-  `inject_volume` in settings.
+  Names and lengths come from `assets/inject-pool.json`, and a `hit` on a 51 s
+  clip is refused at digest — 51 s of dead air is not a sound effect.
+- **Both layers duck together**, keyed on the whole voice track: they drop
+  whenever anyone speaks, as a property of the signal path. Scene-change beats
+  lift the music back for a moment, but only where narrated.
 - **`bm-inductor digest <n>`** prints one chapter's answer and does nothing
-  else, the same `analyze_chapter` the worker runs, no files unless `--write`.
-- **Scene-change beats**: at most `pause.max_per_chapter`, only where narrated;
-  music lifts to `pause_level` (sidechain release; shorter than `duck.release`
-  never lifts).
-- **One sidechain on both layers**, keyed on the whole voice track: layers drop
-  whenever anyone speaks, as a property of the signal path. Rules may attach
-  reverb.
-- **Customize**: clips in `assets/effects|music/`, registered in
-  `effect-pool.json` / `music-pool.json` (registry is truth; `tags` matched by
-  hand, not filename; `looped: false` means one-shot). Retune a mood in
-  `music_palette` (the prompt is rendered from it) or reorder place rules.
-  Layers off via `"ambience": false` / `"music": false` in settings (merge
-  time; the TUI run screen does not expose them yet). Normalize with
-  `tools/normalize-audio.sh` first; `level` is gain over **−26 LUFS** for a bed
-  and **−20** for a foreground inject. The two **vocabularies** are different
-  lists — a `scene` label is matched against the scene map's *place* words and a
-  rule's effect *tags* are matched against the pool's *bed* words — and both are
-  injected into the prompt, because a rule whose match words the analyzer has
-  never seen is a rule that never fires. The whole layer, with the eight knobs,
-  the house spec and how to record or generate a clip, is
-  [docs/SOUND.md](docs/SOUND.md); building the art as a pack is
-  [docs/ASSET-PACKS.md](docs/ASSET-PACKS.md). **What a book needs from the
-  packs, which pack holds which kind of sound, and what is still missing, is
-  [docs/AUDIO-NEEDS.md](docs/AUDIO-NEEDS.md)** — places, moments and background
-  music, with the two rules that decide whether a sound is ever heard.
-- **Legacy**: scripts without `music` still merge via `legacy_scene_music` in
-  `scene-map.json` (migration shim; delete once every script has the field).
+  else, the same analysis the worker runs, no files unless `--write`.
+- **Nothing above is yours to tune on day one.** The shipped packs already
+  score a chapter; every clip is registered in `effect-pool.json` /
+  `music-pool.json` and levels itself under the voice. Turning a layer off is
+  `"ambience": false` or `"music": false` in settings.
+
+To actually author sound, read **[docs/SOUND.md](docs/SOUND.md)** — the studio
+reference, with the house audio spec and how to record or generate a clip.
+**[docs/ASSET-PACKS.md](docs/ASSET-PACKS.md)** is the recipe for building one as
+a pack, **[docs/COMPLETING-A-PACK.md](docs/COMPLETING-A-PACK.md)** the runbook
+for the two in progress, and **[docs/AUDIO-NEEDS.md](docs/AUDIO-NEEDS.md)** says
+which sounds a pack still lacks.
 
 ## 3. Start it, easiest first
 
@@ -680,27 +684,20 @@ struck and nothing is shelved — so an idle cluster beside a stalled chapter is
 what a language mismatch looks like. `serve` warns about it once, in the Events
 pane, when it starts.
 
-**A sound went missing after a resolve, or `asset resolve` refuses.** The pack is
-an asset *composition*: `assets/pack.json` names what it is built on — the live
-checkout is a preset over `common`, `weapons` and `magic`, in that order — each
-dependency sits unpacked under `assets/_extends/<name>/`, and `bm-inductor asset
-resolve` folds them into the live tree — the pools and the scene map's rules
-included. A dependency that is not unpacked is named along with the path it was
-looked for in, and a parent that has since moved makes this asset **stale** until
-it is resolved again. `asset resolve --dry-run` reports what a resolve would
-change and writes nothing; running it twice says `up to date` the second time.
-See [the assets guide](docs/ASSETS.md), and [the sound guide](docs/SOUND.md) for
-the three layers under the voice.
+**A sound went missing, or an asset command refuses.** The sound packs are a
+dependency tree rather than one flat folder, so a pack is built *on* other packs
+and `bm-inductor asset resolve` folds them into the live tree. Two commands
+cover almost all of it, and both are safe to try blind:
 
-**A dependency has been re-cut and this checkout is behind it.** `bm-inductor
-profile update` pulls the newest release of every dependency the live
-`assets/pack.json` names — and of everything *those* name, so a parent of a
-parent is not missed — then folds the result and records what arrived.
-`--dry-run` prints the plan and downloads nothing. A dependency already at the
-newest release is not re-fetched, and one you have edited under
-`assets/_extends/` is refused until you pass `--force`. Nothing is replaced until
-every fetch has verified, so a corrupt release leaves the tree exactly as it was.
-See [the assets guide](docs/ASSETS.md#updating-the-closure-not-the-list).
+- `bm-inductor asset resolve --dry-run` — what a resolve *would* change, and it
+  writes nothing. Running it twice says `up to date` the second time.
+- `bm-inductor profile update` — pull the newest release of every dependency,
+  and of everything those depend on. `--dry-run` prints the plan. A corrupt
+  release leaves your tree untouched, because nothing is replaced until every
+  fetch has verified.
+
+Both are explained in full in [the assets guide](docs/ASSETS.md). You only need
+this section if you are changing the shipped sound.
 
 **The book comes out in one voice.** The chapter had no quote marks in it, so
 there was nothing for the program to tell narration from dialogue. The digest
@@ -829,40 +826,33 @@ Local-only design notes (`.docs/` is git-ignored): `TUI_UX_AUDIT.md`,
 
 ## 8. Honest limitations
 
-The things that will cost you time, in the order they are likely to.
+The things that will cost you time, in the order they are likely to. The two
+that stop people cold — Windows, and a site that refuses a program — are in
+[What it will not do](#what-it-will-not-do), because they are worth knowing
+before you start rather than after.
 
-- **Windows is not a platform this runs on.** Linux and macOS are, and nothing
-  is built or published for Windows: provisioning needs `rsync` and `sh` and the
-  speech sidecar is a Linux build, so there is no version of this that runs
-  there. WSL is the answer today.
-
-- **The built-in voices are Vietnamese.** Vieneu is local and free, but it is
+- **The built-in voices are Vietnamese.** Vieneu is local and free, but it was
   built for Vietnamese and it is what this project grew up on. In another
-  language it will not error; it will just pronounce your book against
-  Vietnamese syllable rules and sound wrong, which is worse. Three ways out:
-  `TTS_ENGINE=gemini` for a cloud engine, adapt `python/tts_router.py` for
-  another, or **clone a voice from your own recording** (`refs/`), which works
-  in any language and is the one most people are happy with. `bm-inductor
-  check` prints a warning when a site's text is not Vietnamese.
+  language it will not error; it will pronounce your book against Vietnamese
+  syllable rules and sound wrong, which is worse. Three ways out: `TTS_ENGINE=
+  gemini` for a cloud engine, adapt `python/tts_router.py` for another, or
+  **clone a voice from your own recording** (`refs/`), which works in any
+  language and is the one most people are happy with. `bm-inductor check`
+  prints a warning when a site's text is not Vietnamese.
 - **Vieneu is heavy**: about 1.7 GB of model files and roughly 2.9 GB of memory
-  while running. A small cloud instance will not hold it; the README's sizing
-  notes say which instance types do.
-- **Gemini's free tier is about 10 calls a day**, and paying for the app does
-  not raise that. On their pay-as-you-go API it is pennies per chapter.
-- **Each chapter costs about two AI calls** (one to work out who is speaking,
-  one to write the performance) plus one more each time the program asks for a
-  correction. Free tiers rate-limit, so the analyzer falls through a list of
-  models automatically rather than stopping.
+  while running. A small cloud instance will not hold it; the sizing notes
+  above and in [docs/AWS-WORKERS.md](docs/AWS-WORKERS.md) say which do.
+- **A free LLM tier will not carry a whole book.** Gemini's free tier is about
+  10 calls a day, and paying for the app does not raise that — on the
+  pay-as-you-go API it is pennies per chapter. The analyzer falls through a list
+  of models automatically rather than stopping, but you are still at the mercy
+  of whichever quota is left.
 - **The program refuses rather than guesses.** A chapter that fails a check is
   retried, not shipped, so a bad performance cannot slip into your library.
   Dialogue from a character it has not met gets a stable unnamed voice instead
   of being dumped on the Narrator or written into the cast. One honest gap: the
   by-hand digest (press `D`) still uses the older prompts and does not yet
   enforce the same checks as the automatic route.
-- **A site you cannot fetch, you cannot use.** There is no browser here and no
-  attempt to get around a refusal, so a site that blocks programs needs either
-  text files or a different source. This is a deliberate line: the program
-  would rather tell you a site said no than spend your afternoon retrying it.
 - **Nothing is fetched until you say so.** You have to name a crawler. The
   upside is that a fresh install never starts hammering a website it was never
   pointed at.

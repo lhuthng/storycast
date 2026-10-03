@@ -1,8 +1,16 @@
 # Troubleshooting: when a chapter will not come out
 
-Quick symptom → fix list, ordered the way you will actually hit them. The TUI
-(`make tui`) is the fastest diagnostic: the **Events** pane records every
-failure with the worker's own error text, and **K** shows it per task.
+**In one line:** symptom in, fix out, in the order you will actually meet them.
+Start here for anything broken; nothing below assumes you know why.
+
+Before anything else, **run `bm-inductor check <a real chapter url>`**. It is
+one request and one answer, and a site that has started refusing you is the
+single most common cause by a long way. It is also the one problem a group of
+machines cannot tell you about on their own.
+
+The TUI (`make tui`) is the fastest diagnostic from there: the **Events** pane
+records every failure with the worker's own error text, and **K** shows it per
+task.
 
 ## Nothing is happening at all
 

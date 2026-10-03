@@ -1,6 +1,10 @@
 # Roadmap
 
-Plans in your author's words, restated in mine. If I misread anything, correct
+**In one line:** what is being built next, and why. Nothing here is required to
+run Storycast; if you came here to make audio, the [README](../README.md) is
+where you want to be.
+
+Plans in their author's words, restated in mine. If I misread anything, correct
 the wording here. This file is the contract the work gets built against.
 
 Status legend: `planned` (written down, not started), `in progress`, `done`.

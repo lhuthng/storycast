@@ -1,5 +1,12 @@
 # Creating the IAM user this app runs as
 
+**In one line:** the AWS account setup, once per account, by someone with admin
+rights. Steps 1–6 are console clicks and nothing else.
+
+*You can stop reading if your account is already set up.* This file is the only
+part of getting to EC2 that needs something from you that the tool cannot do
+itself.
+
 The app talks to AWS as **one IAM user that exists for it alone**, not as you,
 not as your machine's `AWS_PROFILE`, and not as a role borrowed from SSO.
 

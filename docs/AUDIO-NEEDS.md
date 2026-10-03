@@ -1,5 +1,15 @@
 # What a pack needs
 
+**In one line:** the shopping list. Every sound each pack is supposed to have,
+and which of them are still missing.
+
+*You can stop reading after §The two rules. The rest is a per-pack inventory.*
+
+Read this when you want to know **what a pack should contain**, not how to
+record it — that is [SOUND.md](SOUND.md) — and not how packs compose, which is
+[ASSETS.md](ASSETS.md). To finish one that is already half-built, follow
+[COMPLETING-A-PACK.md](COMPLETING-A-PACK.md).
+
 Two kinds of pack, and each holds one kind of thing:
 
 * **an sfx pack** — **places** (a bed that runs under a whole scene) and

@@ -1,5 +1,13 @@
 # Assets: a genre's art, composed, and released
 
+**In one line:** why the sound is organised as packs that build on other packs
+rather than one folder, and how a new pack gets released.
+
+*You can stop reading after the plain-words section.* This file is for changing
+how sound is packaged and shipped. To *use* the shipped sound, none of it
+applies. To record a clip, it is [SOUND.md](SOUND.md); to build a pack, it is
+[ASSET-PACKS.md](ASSET-PACKS.md).
+
 > **Status: built.** `pack.json`, the `_extends/`
 > fold-in, the `_extends.json` record and the `asset resolve` verb all exist —
 > `bm_core::compose` is the one entry point, and `asset resolve --dry-run`

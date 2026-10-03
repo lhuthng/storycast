@@ -1,5 +1,9 @@
 # Completing a pack
 
+**In one line:** the runbook for the two packs that are half-built. Not a
+general guide — just the order, the check after each step, and the failures
+nobody notices.
+
 A pack's registries are authored before its audio. That is deliberate — the
 sound is *designed* on paper, then recorded or generated, then normalized into
 place — and it means a pack under construction is a normal state rather than a

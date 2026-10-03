@@ -1,5 +1,13 @@
 # AWS workers: the guide
 
+**In one line:** renting machines to render faster. You need this only once a
+book is already rendering fine on your own machine.
+
+**Read this before you spend anything.** `:up` is the one command that costs
+money, and the instance type is a RAM question, not a CPU one — the local speech
+engine needs about 2.9 GB to run at all. The traps are in *Things that will
+bite*, at the end.
+
 The whole path from an empty AWS account to workers rendering chapters: the
 order to do it in, what to expect at each step, and what is deliberately not
 built yet.
