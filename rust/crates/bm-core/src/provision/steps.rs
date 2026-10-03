@@ -642,6 +642,3 @@ impl LiveLog {
 
 #[cfg(test)]
 mod tests;
-
-
-

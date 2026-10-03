@@ -1,5 +1,5 @@
-use anyhow::Result;
 use super::*;
+use anyhow::Result;
 
 impl Ssh {
     /// Get the profile pack onto the box: from its release, or over the push.
@@ -289,6 +289,3 @@ impl Ssh {
         )
     }
 }
-
-
-

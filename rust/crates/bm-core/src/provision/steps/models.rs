@@ -1,7 +1,7 @@
-use anyhow::Result;
 use super::super::{REMOTE_DIR, TTS_PORT};
 use super::*;
 use anyhow::Context;
+use anyhow::Result;
 
 impl Ssh {
     /// Push the TTS sidecar binary and the shared ONNX Runtime it links.
@@ -401,6 +401,3 @@ echo stopped"#,
         Ok(())
     }
 }
-
-
-

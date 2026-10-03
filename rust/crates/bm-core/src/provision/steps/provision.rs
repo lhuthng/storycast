@@ -536,6 +536,3 @@ pub fn provision(
     }
     (after, log.lines)
 }
-
-
-

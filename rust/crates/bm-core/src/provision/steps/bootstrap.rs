@@ -1,8 +1,8 @@
-use anyhow::Result;
 use super::super::stamp::parse_stamp;
 use super::super::{REMOTE_DIR, TTS_PORT};
 use super::*;
 use anyhow::Context;
+use anyhow::Result;
 
 impl Ssh {
     /// Ask a machine what it already has.
@@ -303,6 +303,3 @@ echo "probe=done"
         Ok(lines)
     }
 }
-
-
-
