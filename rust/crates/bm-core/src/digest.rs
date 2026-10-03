@@ -1740,23 +1740,7 @@ fn build_attribution_prompt(
     }
     warn_missing_sections("attribution prompt", &missed);
 
-    // The contract's language is the ADAPTER's, not a constant: `atmosphere`
-    // and `excerpt` used to say "English sentences" for every book on every
-    // checkout, which was true exactly once and silently wrong for every
-    // other adapter — and a Vietnamese title instruction shipped beside them
-    // for a while, which is how an English book ended up titled in Vietnamese
-    // even after its prompts were. What is declared in `adapter.json` is the
-    // one fact the fork line rests on ("an adapter has one language, and it is
-    // both the source's and the target's"), so that is what the wording
-    // follows; an adapter that claims nothing falls back to the chapter's own
-    // language, which is the same fact said per chapter instead of per
-    // manifest.
-    let content_language = crate::adapter::in_force(layout)
-        .ok()
-        .flatten()
-        .map(|m| m.language.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "the chapter's own language".into());
+    let content_language = content_language(layout);
 
     let contract = r#"
 ---ATTRIBUTION OUTPUT CONTRACT---
@@ -1764,7 +1748,7 @@ Return ONE strict JSON object, never markdown or commentary:
 {
   "title": "3-8 word chapter title in {content_language}, as rule 3 of this prompt defines it; do not start it with the source's chapter-heading word (`Chương`, `Chapter`)",
   "atmosphere": "1-2 sentences in {content_language}",
-  "excerpt": "2-4 sentences in {content_language} on the state this chapter ENDS in: who is present, identity reveals (X is Y), disguises, deaths, and any stranger the prose still has not named — written for the NEXT chapter's analyzer, who has not seen this chapter and resolves its cast against it. State, not plot.",
+  "excerpt": "{excerpt}",
   "roster": ["Narrator", "canonical character name", "Anonymous"],
   "mentions": {"exact name-bearing source form": "canonical character name"},
   "new_characters": [{
@@ -1895,7 +1879,9 @@ no narration ids, no invented ids, no dropped line.
   a nameless character object. `mentions` is optional evidence; omit uncertain
   rows rather than inventing an owner. Free-form `voice_hint` text is accepted.
 "#;
-    let contract = contract.replace("{content_language}", &content_language);
+    let contract = contract
+        .replace("{content_language}", &content_language)
+        .replace("{excerpt}", &excerpt_rule(&content_language));
     apply_continuity(&mut body, continuity, Pass::Attribution);
     // The one cross-chapter memory the attribution pass gets. Identity is the
     // bible's business (names, aliases), but the bible holds no *events*: a
@@ -1980,6 +1966,127 @@ fn previous_excerpts(layout: &Layout, n: u32) -> Option<String> {
             .collect::<Vec<_>>()
             .join("\n"),
     )
+}
+
+/// The language the digest's prose fields are written in.
+///
+/// The contract's language is the ADAPTER's, not a constant: `atmosphere` and
+/// `excerpt` used to say "English sentences" for every book on every checkout,
+/// which was true exactly once and silently wrong for every other adapter — and
+/// a Vietnamese title instruction shipped beside them for a while, which is how
+/// an English book ended up titled in Vietnamese even after its prompts were.
+/// What is declared in `adapter.json` is the one fact the fork line rests on
+/// ("an adapter has one language, and it is both the source's and the
+/// target's"), so that is what the wording follows; an adapter that claims
+/// nothing falls back to the chapter's own language, the same fact said per
+/// chapter instead of per manifest.
+fn content_language(layout: &Layout) -> String {
+    crate::adapter::in_force(layout)
+        .ok()
+        .flatten()
+        .map(|m| m.language.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "the chapter's own language".into())
+}
+
+/// The excerpt instruction, verbatim.
+///
+/// One wording, two callers: the attribution contract embeds it as one field of
+/// the strict JSON it asks for, and [`build_excerpt_prompt`] asks for it alone.
+/// Keeping it a single string is what makes a backfilled excerpt the same field
+/// the digest would have written instead of a second, drifted definition.
+fn excerpt_rule(content_language: &str) -> String {
+    format!(
+        "2-4 sentences in {content_language} on the state this chapter ENDS in: who is \
+         present, identity reveals (X is Y), disguises, deaths, and any stranger the prose \
+         still has not named — written for the NEXT chapter's analyzer, who has not seen \
+         this chapter and resolves its cast against it. State, not plot."
+    )
+}
+
+/// The **excerpt-only** prompt: the attribution pass's excerpt, asked for on its
+/// own.
+///
+/// [`build_attribution_prompt`] asks for the excerpt as one field of a cast
+/// answer and pays for the whole attribution gate to get it. A book digested
+/// before the field existed has scripts but no excerpts, and re-digesting it to
+/// recover a two-sentence memory would re-decide every speaker, invalidate
+/// segments and land a second bible delta. This asks the same question against
+/// the same bible and the same `---PREVIOUSLY---` chain and nothing else, so the
+/// answer is the field the digest would have kept — same instruction, same
+/// window — without touching the cast.
+///
+/// `text` is the raw chapter, the same chapter the attribution pass is handed.
+/// The block order mirrors the pipeline's: context and rules first, the chapter
+/// last, because a model that reads the data before the question has already
+/// answered.
+pub fn build_excerpt_prompt(layout: &Layout, n: u32, text: &str) -> Result<String> {
+    let bible = load_bible(&layout.bible());
+    let language = content_language(layout);
+    let mut prompt = format!(
+        "You are completing ONE field of the story digest for chapter {n} of a serialized \
+         novel. Read the chapter below and write only its excerpt — the state it ends in, \
+         for the next chapter's analyzer.\n\n{}\n\nINPUT 1 — the story so far (identity only):\n{}\n",
+        excerpt_rule(&language),
+        bible_context(&bible),
+    );
+    if let Some(previously) = previous_excerpts(layout, n) {
+        prompt.push_str(&format!(
+            "\n---PREVIOUSLY--- (the chapter before this one; identity context only — \
+             resolve names and strangers against it, but write only this chapter's \
+             excerpt)\n{previously}\n"
+        ));
+    }
+    prompt.push_str(&format!(
+        "\n---CHAPTER---\n{text}\n\nReturn ONE strict JSON object, never markdown or \
+         commentary:\n{{\"excerpt\": \"...\"}}\n"
+    ));
+    Ok(prompt)
+}
+
+/// Read an excerpt answer, tolerantly.
+///
+/// The strict `{"excerpt": "..."}` object is what the prompt asks for, but a
+/// model sometimes returns the prose alone. The field is soft in the digest
+/// (blank or over-long is squeezed and capped, never refused) and it is soft
+/// here for the same reason, so the only failure is an answer with nothing in
+/// it — and that is what `None` says, which is what the caller repairs.
+///
+/// White space is squeezed to single spaces so an excerpt read back from disk
+/// is byte-identical to the one the digest would have stored.
+pub fn parse_excerpt(raw: &str) -> Option<String> {
+    let cleaned = strip_fences(raw);
+    // `strip_fences` knows ```` ```json ```` and a trailing fence; a bare
+    // opener with no language tag is common enough in a model answer that the
+    // excerpt reader undoes it too, rather than reading the fence as prose.
+    let unfenced = match cleaned.strip_prefix("```") {
+        Some(rest) => rest.split_once('\n').map(|(_, body)| body).unwrap_or(rest),
+        None => cleaned,
+    };
+    let cleaned = unfenced.strip_suffix("```").unwrap_or(unfenced).trim();
+    let from_json = parse_json_repaired(cleaned)
+        .ok()
+        .and_then(|v| v.get("excerpt").and_then(Value::as_str).map(str::to_string));
+    let text = head_chars(&squeeze_ws(from_json.as_deref().unwrap_or(cleaned)), EXCERPT_CHARS);
+    (!text.is_empty()).then_some(text)
+}
+
+/// Write one chapter's excerpt back into its stored script, and nothing else.
+///
+/// The script holds the segment plan, the cast and the speakers the render
+/// reads; recovering a missing memory must not rewrite any of them. Only the
+/// `excerpt` key is touched, and the write goes through [`write_script`] like
+/// every other script write, so the artifact on disk cannot land differently
+/// from one a digest wrote.
+pub fn write_excerpt(layout: &Layout, n: u32, excerpt: &str) -> Result<()> {
+    let path = layout.script(n);
+    let mut script = crate::read_json::<Value>(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    script
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} is not a JSON object", path.display()))?
+        .insert("excerpt".to_string(), json!(excerpt));
+    write_script(layout, n, &script)
 }
 
 /// Build the audio-staging pass. Speaker assignment is supplied as immutable
@@ -8768,6 +8875,94 @@ mod tests {
             previous_excerpts(&layout, 41).is_none(),
             "the first chapter has no predecessor by definition"
         );
+    }
+
+    /// The excerpt-only prompt asks the digest's own question: the same rule
+    /// text the attribution contract carries, the chapter, and — when one
+    /// exists — the predecessor's `---PREVIOUSLY---` block, so a backfill feeds
+    /// forward exactly as a digest does. Without a predecessor the block is
+    /// absent, so nothing is invented for the first chapter.
+    #[test]
+    fn the_excerpt_only_prompt_asks_the_digests_own_excerpt_rule() {
+        let (_dir, layout, text) = long_layout("excerpt-only-prompt", 3);
+
+        let bare = build_excerpt_prompt(&layout, 51, &text).unwrap();
+        assert!(
+            bare.contains("written for the NEXT chapter's analyzer"),
+            "the shared rule text: {}",
+            head_chars(&bare, 40)
+        );
+        assert!(bare.contains("Đoạn 0 kể rằng"), "the chapter itself is the input");
+        assert!(
+            !bare.contains("PREVIOUSLY"),
+            "no predecessor in the fixture, so no memory to feed"
+        );
+
+        // Store a predecessor excerpt and the chain appears, named as context.
+        std::fs::create_dir_all(layout.script(50).parent().unwrap()).unwrap();
+        std::fs::write(layout.script(50), r#"{"excerpt": "She is still unnamed."}"#).unwrap();
+        let fed = build_excerpt_prompt(&layout, 51, &text).unwrap();
+        assert!(fed.contains("---PREVIOUSLY---"), "{}", head_chars(&fed, 40));
+        assert!(fed.contains("She is still unnamed."), "the memory itself");
+        assert!(
+            fed.contains("write only this chapter's excerpt"),
+            "the block says it is for resolving, not for answering"
+        );
+    }
+
+    /// One rule, two askers: the attribution contract and the excerpt prompt
+    /// must render the same instruction, or a backfilled excerpt would drift
+    /// from the one a digest writes.
+    #[test]
+    fn the_attribution_contract_and_the_excerpt_prompt_share_one_rule() {
+        let (_dir, layout, text) = long_layout("excerpt-rule-parity", 3);
+        let prepared = prepare_chapter(&text);
+        let bible = json!({"characters": []});
+        let attribution = build_attribution_prompt(&layout, &bible, &prepared, None, None).unwrap();
+        let excerpt_only = build_excerpt_prompt(&layout, 51, &text).unwrap();
+        let rule = excerpt_rule(&content_language(&layout));
+        assert!(rule.contains("State, not plot."));
+        assert!(attribution.contains(&rule), "the contract carries the shared rule");
+        assert!(
+            excerpt_only.contains(&rule),
+            "the excerpt prompt carries the same shared rule"
+        );
+    }
+
+    /// The answer is read softly: the strict object, the prose a model returns
+    /// instead, and nothing for an empty answer. Whitespace is squeezed so a
+    /// recovered excerpt matches what the digest would have stored.
+    #[test]
+    fn an_excerpt_answer_is_read_softly() {
+        assert_eq!(
+            parse_excerpt(r#"{"excerpt": "  She  leaves  unnamed. "}"#).as_deref(),
+            Some("She leaves unnamed.")
+        );
+        assert_eq!(
+            parse_excerpt("```\nShe leaves unnamed.\n```").as_deref(),
+            Some("She leaves unnamed.")
+        );
+        assert_eq!(parse_excerpt("   \n").as_deref(), None);
+        assert_eq!(parse_excerpt(r#"{"excerpt": ""}"#).as_deref(), None);
+    }
+
+    /// Recovering an excerpt must not disturb the script it lands in: the
+    /// segments and the cast the render reads stay byte-identical, and only
+    /// the one key is set.
+    #[test]
+    fn write_excerpt_touches_only_the_excerpt() {
+        let (_dir, layout, _text) = long_layout("excerpt-write", 3);
+        std::fs::create_dir_all(layout.script(7).parent().unwrap()).unwrap();
+        std::fs::write(
+            layout.script(7),
+            r#"{"segments": [{"id": "s1", "text": "quiet"}], "cast": {"n": 1}, "excerpt": ""}"#,
+        )
+        .unwrap();
+        write_excerpt(&layout, 7, "The hall empties; the stranger stays unnamed.").unwrap();
+        let stored: Value = crate::read_json::<Value>(&layout.script(7)).unwrap();
+        assert_eq!(stored["excerpt"], json!("The hall empties; the stranger stays unnamed."));
+        assert_eq!(stored["segments"][0]["id"], json!("s1"));
+        assert_eq!(stored["cast"]["n"], json!(1));
     }
 
     /// A part has to say what happened in it, because that summary is the whole

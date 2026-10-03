@@ -230,6 +230,50 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Recover the missing chapter excerpts, without re-digesting a chapter.
+    ///
+    /// A book digested before the excerpt field existed has scripts but no
+    /// excerpts, and every chapter after it loses the one cross-chapter memory
+    /// the analyzer gets. This asks the model the digest's own excerpt question
+    /// — the same rule text, the same bible, the same `---PREVIOUSLY---` chain —
+    /// and writes the answer back into each stored script as one field, leaving
+    /// the segments, the cast and the speakers untouched.
+    ///
+    /// Chapters are filled **in order**, so each recovered excerpt feeds the
+    /// next chapter's `---PREVIOUSLY---` block: the run repairs the chain and
+    /// the backfill, not only the field. Nothing is reported to an inductor and
+    /// no worker is touched, so it runs with the cluster down.
+    Excerpts {
+        /// First chapter.
+        #[arg(long, default_value_t = 1)]
+        start: u32,
+        /// Last chapter, inclusive. Default: the highest chapter text on disk.
+        #[arg(long)]
+        through: Option<u32>,
+        /// Which service to call. Default: the active provider in
+        /// `.bm/llm.json` (TUI: `L`), else read off `--api`.
+        #[arg(long)]
+        analyzer: Option<String>,
+        /// The model service's base URL. Omitting it uses the chosen provider's
+        /// own endpoint from `.bm/llm.json`.
+        #[arg(long)]
+        api: Option<String>,
+        /// The model to answer with, on whichever service the key names.
+        #[arg(long)]
+        model: Option<String>,
+        /// Re-ask a chapter whose answer came back empty, with a complaint
+        /// attached. Only an empty answer is repaired; a short or long one is
+        /// squeezed into the field, as the digest does.
+        #[arg(long, default_value_t = 1)]
+        retries: u32,
+        /// Re-ask every chapter in the range, including the ones that already
+        /// hold an excerpt.
+        #[arg(long)]
+        force: bool,
+        /// Ask and print, but write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Check a link before you build a workspace around it: one request, and a
     /// verdict on whether a crawl of that page would produce a chapter.
     ///
@@ -2645,6 +2689,7 @@ async fn main() -> anyhow::Result<()> {
             | Cmd::Digest { .. }
             | Cmd::Crawl { .. }
             | Cmd::Backup { .. }
+            | Cmd::Excerpts { .. }
             | Cmd::Workspace { .. }
             | Cmd::Aws { .. }
             | Cmd::Asset { .. }
@@ -2761,6 +2806,32 @@ async fn main() -> anyhow::Result<()> {
                     model_api: api,
                     inductor,
                     retries,
+                    dry_run,
+                },
+            )
+            .await
+        }
+        Cmd::Excerpts {
+            start,
+            through,
+            analyzer,
+            api,
+            model,
+            retries,
+            force,
+            dry_run,
+        } => {
+            cmd_excerpts(
+                &layout,
+                settings,
+                ExcerptOpts {
+                    start,
+                    through,
+                    analyzer,
+                    model,
+                    model_api: api,
+                    retries,
+                    force,
                     dry_run,
                 },
             )
@@ -3259,6 +3330,66 @@ struct BackupOpts {
     dry_run: bool,
 }
 
+/// Resolve the analyzer, model and endpoint a headless run will use.
+///
+/// Shared by `backup` and `excerpts`, so the two headless callers cannot
+/// disagree about which provider answered or which endpoint it reached. The
+/// flag wins; otherwise the active provider in `.bm/llm.json`; the `--api`
+/// address only decides when neither says (a gateway at a name of its own).
+/// The overlay then carries the active model, endpoint AND backend slot, so
+/// `generate` routes by slot while progress lines name the provider id, and the
+/// flag overrides land after it — `--model`/`--api` win.
+fn resolve_analyzer(
+    layout: &Layout,
+    mut settings: Settings,
+    analyzer: Option<String>,
+    model: Option<String>,
+    model_api: Option<&str>,
+) -> anyhow::Result<(String, Settings)> {
+    let llm = bm_core::config::LlmConfig::load_or_seed(&layout.root, &settings);
+    let api_hint = model_api.unwrap_or_default();
+    let (active, _) = llm.offer_analyzer(&settings);
+    let analyzer = match analyzer {
+        Some(a) => a.to_string(),
+        None if !active.is_empty() => active,
+        None if api_hint.contains("openrouter") => "openrouter".to_string(),
+        None if api_hint.contains("googleapis") => "gemini".to_string(),
+        None => settings.analyzer.clone(),
+    };
+    if llm.backend_for(&analyzer).is_none() {
+        anyhow::bail!("unknown analyzer {analyzer:?} — pick one with `tui` (L)");
+    }
+    if analyzer.is_empty() {
+        anyhow::bail!("no LLM provider is active — add a key with `tui` (L), then retry");
+    }
+    let backend = llm
+        .backend_for(&analyzer)
+        .expect("validated above: the analyzer names a provider or legacy slot");
+    settings = settings.with_analyzer_settings(&llm.offer_analyzer(&settings).1);
+    settings.analyzer_backend = backend.clone();
+    // The model and the endpoint land on whichever fields the chosen service
+    // reads, so one `--model` and one `--api` cover every backend.
+    if let Some(model) = model.filter(|m| !m.trim().is_empty()) {
+        match backend.as_str() {
+            "openai" => settings.openrouter_model = model,
+            "gemini" => settings.analyze_models = vec![model],
+            _ => settings.local_model = model,
+        }
+    }
+    // `--api` lands on the endpoint field the chosen slot actually reads — both
+    // wires append their own path to it — so one flag covers every backend.
+    // Leaving the Gemini slot out meant `--analyzer gemini --api
+    // https://gateway.example` quietly called Google instead.
+    if let Some(url) = model_api {
+        match backend.as_str() {
+            "openai" => settings.openrouter_url = url.to_string(),
+            "gemini" => settings.gemini_url = url.to_string(),
+            _ => {}
+        }
+    }
+    Ok((analyzer, settings))
+}
+
 /// `backup`, be the digestor while the cluster's analyzer has no quota.
 ///
 /// Chapters are digested **in order**, and the run stops at the first failure:
@@ -3268,7 +3399,7 @@ struct BackupOpts {
 /// when the report lands.
 async fn cmd_backup(
     layout: &Layout,
-    mut settings: Settings,
+    settings: Settings,
     opts: BackupOpts,
 ) -> anyhow::Result<()> {
     let BackupOpts {
@@ -3288,56 +3419,9 @@ async fn cmd_backup(
     // live, exactly as it is for `make tui`.
     let api = inductor.unwrap_or_else(|| format!("http://127.0.0.1:{}", settings.control_port));
     let model_api = model_api.map(|a| a.trim_end_matches('/').to_string());
-    let api_hint = model_api.as_deref().unwrap_or_default();
-    // The flag wins; otherwise the active provider in `.bm/llm.json`. The
-    // address only decides when neither says (a gateway at a name of its
-    // own): the operator passes an API, a key and a model, never a transport.
-    let llm = bm_core::config::LlmConfig::load_or_seed(&layout.root, &settings);
-    let (active, _) = llm.offer_analyzer(&settings);
-    let analyzer = match analyzer {
-        Some(a) => a.to_string(),
-        None if !active.is_empty() => active,
-        None if api_hint.contains("openrouter") => "openrouter".to_string(),
-        None if api_hint.contains("googleapis") => "gemini".to_string(),
-        None => settings.analyzer.clone(),
-    };
-    {
-        if llm.backend_for(&analyzer).is_none() {
-            anyhow::bail!("unknown analyzer {analyzer:?} — pick one with `tui` (L)");
-        }
-    }
-    if analyzer.is_empty() {
-        anyhow::bail!("no LLM provider is active — add a key with `tui` (L), then retry");
-    }
-    // The model and the endpoint land on whichever fields the chosen service
-    // reads, so one `--model` and one `--api` cover every backend. `analyzer`
-    // is the provider id; the slot decides the fields.
-    let backend = llm
-        .backend_for(&analyzer)
-        .expect("validated above: the analyzer names a provider or legacy slot");
-    // The overlay carries the active model, endpoint AND backend slot, so
-    // `generate` routes by slot while progress lines name the provider id.
-    // Flag overrides land after it, so `--model`/`--api` win.
-    settings = settings.with_analyzer_settings(&llm.offer_analyzer(&settings).1);
-    settings.analyzer_backend = backend.clone();
-    if let Some(model) = model.filter(|m| !m.trim().is_empty()) {
-        match backend.as_str() {
-            "openai" => settings.openrouter_model = model,
-            "gemini" => settings.analyze_models = vec![model],
-            _ => settings.local_model = model,
-        }
-    }
-    // `--api` lands on the endpoint field the chosen slot actually reads —
-    // both wires append their own path to it — so one flag covers every
-    // backend. Leaving the Gemini slot out meant `--analyzer gemini --api
-    // https://gateway.example` quietly called Google instead.
-    if let Some(url) = model_api.as_deref() {
-        match backend.as_str() {
-            "openai" => settings.openrouter_url = url.to_string(),
-            "gemini" => settings.gemini_url = url.to_string(),
-            _ => {}
-        }
-    }
+    let (analyzer, settings) =
+        resolve_analyzer(layout, settings, analyzer, model, model_api.as_deref())?;
+    let backend = settings.analyzer_backend.clone();
     // Where a digest may begin is not a free choice: the deltas have to land in
     // chapter order, so the only legal start is the chapter after the last one
     // with a script on disk. Asking for anything else would merge this book's
@@ -3548,6 +3632,142 @@ async fn cmd_backup(
     Ok(())
 }
 
+/// What `excerpts` was asked to do, gathered so the front end's flags do not
+/// have to be threaded one by one.
+struct ExcerptOpts {
+    start: u32,
+    through: Option<u32>,
+    analyzer: Option<String>,
+    model: Option<String>,
+    model_api: Option<String>,
+    retries: u32,
+    force: bool,
+    dry_run: bool,
+}
+
+/// Backfill the chapter excerpts the digest's cast pass would have written.
+///
+/// The field is the one cross-chapter memory the analyzer gets: chapter `n+1`
+/// is handed chapter `n`'s excerpt under `---PREVIOUSLY---`, so a book whose
+/// early chapters were digested before the field existed resolves every late
+/// chapter against silence. Re-digesting to recover it would re-decide every
+/// speaker and invalidate segments, so this asks only the excerpt question —
+/// the digest's own rule, bible and window — and writes the answer as one field
+/// of the existing script.
+///
+/// **Chapters run in ascending order and each write is visible to the next
+/// prompt**, so the run repairs the chain, not just the field: chapter `n`'s
+/// fresh excerpt is what chapter `n+1` is asked against. A chapter that fails
+/// is named and skipped rather than stopping the sweep — an excerpt is a soft
+/// field, and a missing one costs one chapter's memory, never the run.
+async fn cmd_excerpts(
+    layout: &Layout,
+    settings: Settings,
+    opts: ExcerptOpts,
+) -> anyhow::Result<()> {
+    let ExcerptOpts {
+        start,
+        through,
+        analyzer,
+        model,
+        model_api,
+        retries,
+        force,
+        dry_run,
+    } = opts;
+    let model_api = model_api.map(|a| a.trim_end_matches('/').to_string());
+    let (analyzer, settings) =
+        resolve_analyzer(layout, settings, analyzer, model, model_api.as_deref())?;
+    let endpoint = match settings.analyzer_backend.as_str() {
+        "openai" => settings.openrouter_url.clone(),
+        "ollama" => settings.ollama_url.clone(),
+        _ => settings.gemini_url.clone(),
+    };
+    // To the end of the book on disk, the same way `crawl` counts a range: the
+    // excerpts are keyed to chapter files, and a chapter text is what the prompt
+    // reads, so a chapter with no text is nothing to ask about.
+    let last = match through {
+        Some(t) => t,
+        None => {
+            let mut n = start;
+            while layout.chapter_txt(n + 1).is_file() {
+                n += 1;
+            }
+            n
+        }
+    };
+    if last < start {
+        anyhow::bail!("--through {last} is before ch{start}");
+    }
+    eprintln!(
+        "excerpt backfill: ch{start}..ch{last} via {analyzer} at {endpoint}{}",
+        if dry_run { " (dry run)" } else { "" }
+    );
+
+    let mut written = 0u32;
+    let mut skipped = 0u32;
+    let mut failed = 0u32;
+    for n in start..=last {
+        let chapter = layout.chapter_txt(n);
+        if !chapter.is_file() {
+            eprintln!("ch{n}: no chapter text at {} — skipped", chapter.display());
+            skipped += 1;
+            continue;
+        }
+        let current = bm_core::read_json::<serde_json::Value>(&layout.script(n))
+            .ok()
+            .and_then(|s| s.get("excerpt").and_then(|e| e.as_str()).map(str::to_string))
+            .unwrap_or_default();
+        if !force && !current.trim().is_empty() {
+            eprintln!("ch{n}: excerpt already present — skipped ({})", current.chars().count());
+            skipped += 1;
+            continue;
+        }
+        let text = std::fs::read_to_string(&chapter)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", chapter.display()))?;
+        let prompt = bm_core::digest::build_excerpt_prompt(layout, n, &text)
+            .map_err(|e| anyhow::anyhow!("ch{n}: {e:#}"))?;
+
+        let mut excerpt: Option<String> = None;
+        let mut complaint = "the answer contained no excerpt".to_string();
+        for attempt in 0..=retries {
+            let asked = if attempt == 0 {
+                prompt.clone()
+            } else {
+                manual::repair_prompt(&prompt, &complaint)
+            };
+            let answer = manual::ask(&asked, &analyzer, &settings).await.map_err(|e| {
+                anyhow::anyhow!("ch{n}: {e}")
+            })?;
+            bm_core::digest::dump_raw(layout, &format!("excerpt-{n}"), &answer);
+            match bm_core::digest::parse_excerpt(&answer) {
+                Some(found) => {
+                    excerpt = Some(found);
+                    break;
+                }
+                None => complaint = "the answer contained no excerpt".to_string(),
+            }
+        }
+        let Some(excerpt) = excerpt else {
+            eprintln!("ch{n}: no excerpt after {} ask(s) — skipped", retries + 1);
+            failed += 1;
+            continue;
+        };
+        if dry_run {
+            println!("ch{n}: {} chars (dry run, not written)\n  {excerpt}", excerpt.chars().count());
+        } else {
+            bm_core::digest::write_excerpt(layout, n, &excerpt)
+                .map_err(|e| anyhow::anyhow!("ch{n}: {e:#}"))?;
+            println!("ch{n}: {} chars written", excerpt.chars().count());
+        }
+        written += 1;
+    }
+    println!(
+        "excerpt backfill done: {written} filled, {skipped} already present, {failed} failed"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3628,6 +3848,32 @@ mod tests {
             panic!("parsed as another subcommand");
         };
         assert_eq!(api.as_deref(), Some("https://gw.example/v1"));
+    }
+
+    #[test]
+    fn excerpts_defaults_to_chapter_one_and_no_forced_rewrite() {
+        // The start of the book is a sane default: a backfill is a recovery
+        // run, and the missing excerpts are at the front. `--force` and an
+        // endpoint are opt-ins, so a bare command re-asks nothing it already
+        // has and reaches the provider `L` configured.
+        let cli = Cli::try_parse_from(["bm-inductor", "excerpts"])
+            .expect("`excerpts` needs no required flags");
+        let Cmd::Excerpts {
+            start,
+            through,
+            api,
+            force,
+            retries,
+            ..
+        } = cli.cmd
+        else {
+            panic!("parsed as another subcommand");
+        };
+        assert_eq!(start, 1);
+        assert_eq!(through, None, "unset means the end of the book on disk");
+        assert_eq!(api, None, "an unsaid `--api` must not become a URL");
+        assert!(!force, "an existing excerpt is kept unless asked again");
+        assert_eq!(retries, 1, "the digest's own one-repair budget");
     }
 
     #[test]
