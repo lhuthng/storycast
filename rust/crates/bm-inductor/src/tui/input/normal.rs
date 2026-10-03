@@ -1,4 +1,5 @@
 //! Normal mode: operator keys. Destructive actions live behind `:`.
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     input::{dispatch, runconfig::run_preview},
@@ -6,7 +7,6 @@ use crate::tui::{
     screen::{Confirm, ConfirmAction, Screen, TasksView, TextKind, TextPrompt},
     style::{theme_next, Conn, Level, Theme},
 };
-use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 use std::sync::{atomic::AtomicBool, Arc};
 

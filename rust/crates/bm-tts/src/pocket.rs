@@ -307,8 +307,11 @@ fn load_model(models_dir: &Path) -> Result<TTSModel> {
     let stage = tempfile::tempdir().context("creating a directory to stage the config in")?;
     std::fs::create_dir(stage.path().join("config"))
         .context("creating the staged config directory")?;
-    std::fs::write(stage.path().join("config").join(format!("{VARIANT}.yaml")), config)
-        .context("writing the staged config")?;
+    std::fs::write(
+        stage.path().join("config").join(format!("{VARIANT}.yaml")),
+        config,
+    )
+    .context("writing the staged config")?;
 
     // The crate looks for `config/<variant>.yaml` under the process working
     // directory. This is a process-global change, so it is scoped as tightly as
@@ -532,7 +535,8 @@ mod tests {
     fn a_store_needs_at_least_one_preset() {
         let s = store(r#"{"default_voice":"A","presets":{}}"#).unwrap();
         assert!(s.presets.is_empty());
-        let s = store(r#"{"default_voice":"A","presets":{"A":{"file":"v/a.safetensors"}}}"#).unwrap();
+        let s =
+            store(r#"{"default_voice":"A","presets":{"A":{"file":"v/a.safetensors"}}}"#).unwrap();
         assert_eq!(s.presets.len(), 1);
         // `description` is optional metadata, not a required field.
         assert_eq!(s.presets["A"].description, "");
@@ -582,8 +586,14 @@ mod tests {
             })
             .collect();
         let bands = |v: &[f32]| {
-            let loud: Vec<f32> = (0..n).filter(|i| (i / block) % 2 == 0).map(|i| v[i]).collect();
-            let quiet: Vec<f32> = (0..n).filter(|i| (i / block) % 2 == 1).map(|i| v[i]).collect();
+            let loud: Vec<f32> = (0..n)
+                .filter(|i| (i / block) % 2 == 0)
+                .map(|i| v[i])
+                .collect();
+            let quiet: Vec<f32> = (0..n)
+                .filter(|i| (i / block) % 2 == 1)
+                .map(|i| v[i])
+                .collect();
             (rms(&loud), rms(&quiet))
         };
         let (loud_in, quiet_in) = bands(&x);
@@ -684,9 +694,7 @@ mod tests {
     #[test]
     fn a_quiet_segment_is_brought_up_to_the_target() {
         // The actual failure: a segment some 20 dB below where it should be.
-        let mut pcm: Vec<f32> = (0..1000)
-            .map(|i| 0.02 * (i as f32 * 0.05).sin())
-            .collect();
+        let mut pcm: Vec<f32> = (0..1000).map(|i| 0.02 * (i as f32 * 0.05).sin()).collect();
         assert!(
             dbfs(&pcm) < TARGET_RMS_DBFS - 10.0,
             "starts well under the target, at {} dBFS",
@@ -704,7 +712,9 @@ mod tests {
     fn normalization_never_clips() {
         // A signal whose RMS is low but whose peaks are already near full scale:
         // raising it to the target on RMS alone would wrap.
-        let mut pcm: Vec<f32> = (0..1000).map(|i| if i % 100 == 0 { 0.95 } else { 0.001 }).collect();
+        let mut pcm: Vec<f32> = (0..1000)
+            .map(|i| if i % 100 == 0 { 0.95 } else { 0.001 })
+            .collect();
         normalize(&mut pcm);
         let peak = pcm.iter().fold(0f32, |m, s| m.max(s.abs()));
         assert!(peak <= 0.99, "peak {peak} stayed under full scale");
@@ -723,7 +733,9 @@ mod tests {
     fn a_nearly_dead_segment_is_bounded_rather_than_amplified() {
         // 60 dB below target: the cap must stop short, so an actually broken
         // render stays visibly broken instead of being masked by the fix.
-        let mut pcm: Vec<f32> = (0..1000).map(|i| 0.0005 * (i as f32 * 0.05).sin()).collect();
+        let mut pcm: Vec<f32> = (0..1000)
+            .map(|i| 0.0005 * (i as f32 * 0.05).sin())
+            .collect();
         let before = dbfs(&pcm);
         normalize(&mut pcm);
         let gained = dbfs(&pcm) - before;

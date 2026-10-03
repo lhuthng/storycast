@@ -1156,10 +1156,15 @@ mod tests {
         // `auto` is the default, so every workspace written before this field
         // existed keeps the digest's title.
         let v: Settings = serde_json::from_str(r#"{"engine":"pocket"}"#).unwrap();
-        assert!(v.auto_title(), "a settings file without the field reads as auto");
+        assert!(
+            v.auto_title(),
+            "a settings file without the field reads as auto"
+        );
         assert!(Settings::default().auto_title());
-        let mut s = Settings::default();
-        s.title_mode = "default".into();
+        let mut s = Settings {
+            title_mode: "default".into(),
+            ..Settings::default()
+        };
         assert!(!s.auto_title());
         s.title_mode = "  DEFAULT  ".into();
         assert!(!s.auto_title(), "case and padding are not a different mode");

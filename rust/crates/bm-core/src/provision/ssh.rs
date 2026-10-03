@@ -466,8 +466,9 @@ impl Ssh {
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                std::fs::copy(root.join(f), &dst)
-                    .with_context(|| format!("copying {} -> {}", root.join(f).display(), dst.display()))?;
+                std::fs::copy(root.join(f), &dst).with_context(|| {
+                    format!("copying {} -> {}", root.join(f).display(), dst.display())
+                })?;
             }
             return Ok(());
         }

@@ -140,8 +140,7 @@ fn gates(name: &str, assets: &Path, map: &SceneMap, pools: &BTreeMapOfPools) {
             continue;
         }
         assert!(
-            audio_pool::pick(effects, &rule.effect, audio_pool::seed(1, 0, &rule.effect))
-                .is_some(),
+            audio_pool::pick(effects, &rule.effect, audio_pool::seed(1, 0, &rule.effect)).is_some(),
             "{name}: rule {:?} names effect tags [{}] that no pooled bed \
              answers, so the tags are silently dropped and the scene is dry",
             rule.matches,

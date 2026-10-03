@@ -74,7 +74,11 @@ struct Inner {
 /// and nothing outside it branches on which engine is in force.
 #[allow(clippy::large_enum_variant)] // one Backend per process, behind a OnceLock
 pub enum Backend {
-    Vieneu { front: FrontEnd, roster: Roster, synth: Mutex<Synth> },
+    Vieneu {
+        front: FrontEnd,
+        roster: Roster,
+        synth: Mutex<Synth>,
+    },
     // Absent entirely without the `pocket` feature, so a VieNeu-only build
     // never mentions the type. Every arm below is gated to match.
     #[cfg(feature = "pocket")]
@@ -135,7 +139,11 @@ impl Inner {
         seed: u64,
     ) -> anyhow::Result<(Vec<f32>, usize)> {
         match &self.backend {
-            Backend::Vieneu { front, roster, synth } => {
+            Backend::Vieneu {
+                front,
+                roster,
+                synth,
+            } => {
                 let voice = roster.resolve(voice)?;
                 let chunks = front.chunks_sentence_level(text);
                 if chunks.chunks.is_empty() {
@@ -158,11 +166,7 @@ impl Inner {
                     wavs.push(synth.chunk(&req, &mut rng)?.pcm);
                 }
                 Ok((
-                    join_with_pauses(
-                        &wavs,
-                        &gaps_to_silence(&chunks.gaps),
-                        SAMPLE_RATE,
-                    ),
+                    join_with_pauses(&wavs, &gaps_to_silence(&chunks.gaps), SAMPLE_RATE),
                     SAMPLE_RATE,
                 ))
             }
@@ -344,7 +348,11 @@ async fn policy(State(s): State<Arc<Server>>) -> Response {
         return loading();
     };
     let (name, rate, pools) = match &i.backend {
-        Backend::Vieneu { .. } => ("vieneu", SAMPLE_RATE as u32, bm_core::voices::vieneu_policy()),
+        Backend::Vieneu { .. } => (
+            "vieneu",
+            SAMPLE_RATE as u32,
+            bm_core::voices::vieneu_policy(),
+        ),
         #[cfg(feature = "pocket")]
         Backend::Pocket { .. } => ("pocket", 24_000, bm_core::voices::pocket_policy()),
     };

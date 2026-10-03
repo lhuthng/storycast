@@ -863,11 +863,7 @@ mod tests {
         let mut l = crate::Layout::new(&d);
         l.adapter = "jnovel-en-US".into();
         std::fs::create_dir_all(l.chapters()).unwrap();
-        std::fs::write(
-            l.chapter_txt(7),
-            "Chapter 7: Kiếm khí xung thiên\n\nbody\n",
-        )
-        .unwrap();
+        std::fs::write(l.chapter_txt(7), "Chapter 7: Kiếm khí xung thiên\n\nbody\n").unwrap();
         let mut cast = Cast::new();
         cast.insert("Narrator".into(), "your-narrator".into());
         cast.insert("A".into(), "Adam".into());

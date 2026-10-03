@@ -147,10 +147,9 @@ pub fn presets_path(root: &Path) -> std::path::PathBuf {
 /// Every preset the checkout ships, keyed by name.
 pub fn read_presets(root: &Path) -> Result<BTreeMap<String, Preset>> {
     let path = presets_path(root);
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let presets = read_presets_str(&text)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let presets = read_presets_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     Ok(presets)
 }
 
@@ -180,11 +179,7 @@ fn read_presets_str(text: &str) -> Result<BTreeMap<String, Preset>> {
 /// An existing `pack.json` is left alone: creating a workspace twice is
 /// refused before this runs, so the file can only be one this call wrote —
 /// or one an operator replaced, which is theirs to keep.
-pub fn compose_workspace_pack(
-    work: &Path,
-    root_extends: &Path,
-    deps: &[String],
-) -> Result<()> {
+pub fn compose_workspace_pack(work: &Path, root_extends: &Path, deps: &[String]) -> Result<()> {
     let assets = work.join("assets");
     std::fs::create_dir_all(&assets)?;
     let pack_path = assets.join(crate::compose::PACK_FILE);
@@ -229,9 +224,9 @@ pub fn workspace_pack_hash(work: &Path) -> Result<String> {
         "the workspace pack is empty: {} holds nothing",
         work.join("assets").display()
     );
-    Ok(crate::profile::manifest_hash(
-        &crate::profile::hash_files(work, files)?,
-    ))
+    Ok(crate::profile::manifest_hash(&crate::profile::hash_files(
+        work, files,
+    )?))
 }
 
 #[cfg(test)]
@@ -286,7 +281,11 @@ mod tests {
         let root = dir("compose");
         let extends = root.join("assets/_extends/common");
         std::fs::create_dir_all(extends.join("effects")).unwrap();
-        std::fs::write(extends.join("effect-pool.json"), r#"{ "wind": { "tags": ["wind"], "files": ["effects/wind-1.mp3"] } }"#).unwrap();
+        std::fs::write(
+            extends.join("effect-pool.json"),
+            r#"{ "wind": { "tags": ["wind"], "files": ["effects/wind-1.mp3"] } }"#,
+        )
+        .unwrap();
         std::fs::write(extends.join("effects/wind-1.mp3"), b"clip").unwrap();
 
         let work = root.join("workspaces/book");
@@ -324,7 +323,8 @@ mod tests {
         std::fs::write(
             root.join("assets/_extends/weapons/effect-pool.json"),
             r#"{ "clash": { "tags": ["clash"], "files": ["effects/clash-1.mp3"] } }"#,
-        ).unwrap();
+        )
+        .unwrap();
         let work = root.join("workspaces/book");
         compose_workspace_pack(&work, &root.join("assets/_extends"), &["weapons".into()])
             .expect("an unpacked dep composes");

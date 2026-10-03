@@ -900,7 +900,11 @@ echo "probe=done"
                 let _ = l.send(format!("[{}] {m}", self.target));
             }
         };
-        let receipt_path = format!("$HOME/{}/{}", super::REMOTE_DIR, crate::artifact::PACK_RECEIPT);
+        let receipt_path = format!(
+            "$HOME/{}/{}",
+            super::REMOTE_DIR,
+            crate::artifact::PACK_RECEIPT
+        );
         let (code, stdout, _) = self.run(&format!("cat {receipt_path}"), 10)?;
         if code != 0 {
             return Ok(None);
@@ -918,8 +922,7 @@ echo "probe=done"
             &release.name,
             &release.version,
         )?;
-        let delta =
-            crate::artifact::diff_manifests(&receipt.files, &live_manifest.files);
+        let delta = crate::artifact::diff_manifests(&receipt.files, &live_manifest.files);
         if delta.changed.is_empty() && delta.removed.is_empty() {
             return Ok(Some(format!(
                 "pack {} v{} already exact (receipt match, {} files)",
@@ -944,10 +947,17 @@ echo "probe=done"
         let bytes: u64 = delta
             .changed
             .iter()
-            .map(|p| std::fs::metadata(base.join(p)).map(|m| m.len()).unwrap_or(0))
+            .map(|p| {
+                std::fs::metadata(base.join(p))
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            })
             .sum();
         if let Err(e) = self.apply_pack_delta(layout, &delta) {
-            say(format!("pack {} delta failed ({e:#}) — taking the whole tree instead", release.name));
+            say(format!(
+                "pack {} delta failed ({e:#}) — taking the whole tree instead",
+                release.name
+            ));
             return Ok(None);
         }
         let text = crate::artifact::receipt_text(&live_manifest)?;
@@ -964,7 +974,10 @@ echo "probe=done"
                 .unwrap_or_default()
                 == crate::profile::manifest_hash(&live_manifest.files);
         if !verified {
-            say(format!("pack {} delta landed but did not verify — taking the whole tree instead", release.name));
+            say(format!(
+                "pack {} delta landed but did not verify — taking the whole tree instead",
+                release.name
+            ));
             return Ok(None);
         }
         Ok(Some(format!(
@@ -997,7 +1010,11 @@ echo "probe=done"
             }
             let (code, _, stderr) = self.run(&script, 60)?;
             if code != 0 {
-                anyhow::bail!("removing {} stale path(s): {}", delta.removed.len(), stderr.trim());
+                anyhow::bail!(
+                    "removing {} stale path(s): {}",
+                    delta.removed.len(),
+                    stderr.trim()
+                );
             }
         }
         Ok(())
@@ -1750,9 +1767,13 @@ pub fn provision(
     // box with no stored policy enables all four, so the ordinary case is the
     // full set and only an explicitly narrowed panel goes lean.
     let stages = super::sources::stages_of(&m.effective_task_policy());
-    let local_stamp =
-        match compute_provision_stamp(layout, &stages, agent_version, agent_binary, pack.as_ref())
-        {
+    let local_stamp = match compute_provision_stamp(
+        layout,
+        &stages,
+        agent_version,
+        agent_binary,
+        pack.as_ref(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             probe.note = format!("cannot read the sources it would push: {e:#}");
@@ -2292,7 +2313,11 @@ mod tests {
         // including the ones whose answer was not going to change. A catch-up
         // on a working cluster is a verification, so the install half is
         // reserved for a fresh or forced provision.
-        for script in [opencode_script(false), ffmpeg_script(false), sox_script(false)] {
+        for script in [
+            opencode_script(false),
+            ffmpeg_script(false),
+            sox_script(false),
+        ] {
             assert!(
                 script.contains("command -v"),
                 "the check must survive: {script}"
@@ -2347,7 +2372,13 @@ mod tests {
     #[test]
     fn a_fetch_exit_code_says_whether_the_push_may_try_again() {
         let tag = "models-vdda4efee13df";
-        let ok = classify_fetch(EXIT_LANDED, "FETCH-OK (16 files, 667 MiB)", "", tag, "models");
+        let ok = classify_fetch(
+            EXIT_LANDED,
+            "FETCH-OK (16 files, 667 MiB)",
+            "",
+            tag,
+            "models",
+        );
         assert!(ok.unwrap().contains("models-vdda4efee13df"));
 
         // Absence: the artifact is not published, the network is down, the URL
@@ -2418,7 +2449,10 @@ mod tests {
             "pack",
         );
         let line = ok.unwrap();
-        assert!(line.starts_with("pack from the release xianxia-pack-v0.1.0"), "{line}");
+        assert!(
+            line.starts_with("pack from the release xianxia-pack-v0.1.0"),
+            "{line}"
+        );
 
         // A pack that does not verify still classifies as corrupt — the caller
         // answers it with the push, which carries the very tree it checked.
@@ -2491,7 +2525,12 @@ mod tests {
 
         // The name and the version go into a URL and a git tag, so they are
         // validated like the repo is.
-        for (name, version) in [("", "0.1.0"), ("xianxia", ""), ("../etc", "0.1.0"), ("a/b", "0.1.0")] {
+        for (name, version) in [
+            ("", "0.1.0"),
+            ("xianxia", ""),
+            ("../etc", "0.1.0"),
+            ("a/b", "0.1.0"),
+        ] {
             assert!(
                 crate::artifact::PackRelease::for_repo("o/n", name, version, "aa").is_err(),
                 "`{name}`/`{version}` was accepted"
@@ -2672,11 +2711,7 @@ mod tests {
             sox_present: false,
             ..present.clone()
         };
-        assert!(
-            no_sox.summary().contains("NO SOX"),
-            "{}",
-            no_sox.summary()
-        );
+        assert!(no_sox.summary().contains("NO SOX"), "{}", no_sox.summary());
         let neither = Probe {
             ffmpeg_present: false,
             sox_present: false,

@@ -1,4 +1,5 @@
 //! Text prompt: the single-line editor plus the `:` command recursion.
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     input::{
@@ -13,7 +14,6 @@ use crate::tui::{
     screen::{Screen, TextKind, TextPrompt},
     style::Level,
 };
-use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub(crate) async fn key_text(
@@ -237,9 +237,9 @@ pub(crate) async fn key_text(
                 match guided {
                     Some(name) => {
                         let profiles = super::workspace_new::preset_items(&app.layout.root);
-                        app.screen = Screen::WorkspaceNew(
-                            crate::tui::screen::WorkspaceNew::new(name, profiles),
-                        );
+                        app.screen = Screen::WorkspaceNew(crate::tui::screen::WorkspaceNew::new(
+                            name, profiles,
+                        ));
                         app.set_status(Level::Info, "workspace: pick a name, then a profile");
                     }
                     None => match submit_text(app, &p) {

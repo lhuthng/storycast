@@ -15,6 +15,7 @@
 //! would have refused.
 use crate::manual::Next;
 use crate::tui::input::command::Command;
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     clipboard,
@@ -23,7 +24,6 @@ use crate::tui::{
     screen::{DigestChapter, DigestView, Screen, DIGEST_COLS as COLS},
     style::Level,
 };
-use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) async fn key_digest(

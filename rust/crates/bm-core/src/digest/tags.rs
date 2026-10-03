@@ -1084,8 +1084,13 @@ mod tests {
             }
             line
         };
-        validate_script(&json!({"segments": [line(Some("thought"))]}), &bible, &context, &pal())
-            .unwrap();
+        validate_script(
+            &json!({"segments": [line(Some("thought"))]}),
+            &bible,
+            &context,
+            &pal(),
+        )
+        .unwrap();
         validate_script(&json!({"segments": [line(None)]}), &bible, &context, &pal()).unwrap();
 
         for bogus in ["dialogue", "narration", "spoken"] {

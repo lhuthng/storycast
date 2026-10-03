@@ -523,7 +523,10 @@ mod tests {
         );
         let mut p2 = serde_json::Map::new();
         p2.insert("per_page".into(), serde_json::json!(50));
-        assert_ne!(base, fingerprint("lua", "src", &p2, "https://x/{n}", 1, 5, ""));
+        assert_ne!(
+            base,
+            fingerprint("lua", "src", &p2, "https://x/{n}", 1, 5, "")
+        );
         // The book digest is its own input: a swapped volume moves the mapping
         // with no configuration change to see it in.
         assert_ne!(

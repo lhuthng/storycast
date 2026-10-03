@@ -433,13 +433,11 @@ pub(crate) fn save_app_setting(
                         "boxes will fetch the profile pack {} v{} from {repo} releases",
                         p.name, p.version
                     ),
-                    None => {
-                        String::from(
-                            "saved — but the loaded profile names no version, so nothing is \
+                    None => String::from(
+                        "saved — but the loaded profile names no version, so nothing is \
                              fetched yet: re-publish it with `tools/profile.sh pack <name> \
                              --version <v>`",
-                        )
-                    }
+                    ),
                 }
             }
         }

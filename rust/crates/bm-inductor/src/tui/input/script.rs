@@ -19,6 +19,7 @@
 //! not bound here: the list owns every letter, and the window closes with
 //! `Esc`, the key its title line advertises.
 
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     input::{dispatch_op, op_key},
@@ -26,7 +27,6 @@ use crate::tui::{
     screen::{Screen, ScriptPick, ScriptView},
     style::Level,
 };
-use crate::tui::input::Flow;
 use bm_proto::{Op, OpRequest};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -162,7 +162,9 @@ pub(crate) async fn key_script(
                 // `saturating_*` throughout, because `End` parks the offset at
                 // `usize::MAX` as a "past the end" marker for the draw's
                 // clamp — a plain `+=` off that would overflow.
-                KeyCode::Down | KeyCode::Char('j') => v.excerpt_scroll = v.excerpt_scroll.saturating_add(1),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    v.excerpt_scroll = v.excerpt_scroll.saturating_add(1)
+                }
                 KeyCode::Up | KeyCode::Char('k') => {
                     v.excerpt_scroll = v.excerpt_scroll.saturating_sub(1)
                 }
@@ -186,7 +188,10 @@ pub(crate) async fn key_script(
                 v.segments.clear();
                 v.seg_cursor = 0;
                 app.screen = Screen::Script(v);
-                app.set_status(Level::Info, format!("back to the chapter list (ch{ch} left as read)"));
+                app.set_status(
+                    Level::Info,
+                    format!("back to the chapter list (ch{ch} left as read)"),
+                );
                 return Flow::KeepRunning;
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -224,7 +229,8 @@ pub(crate) async fn key_script(
                     // The chapter's own roster, read once at pick-open: it is
                     // the suggestion list's prefix and the rows' "(this
                     // chapter)" tag, from the one file both describe.
-                    let roster_cache = v.open
+                    let roster_cache = v
+                        .open
                         .map(|ch| {
                             bm_core::read_json::<serde_json::Value>(&app.layout.script(ch))
                                 .ok()
@@ -255,7 +261,10 @@ pub(crate) async fn key_script(
                 Some(seg) => {
                     app.set_status(
                         Level::Warn,
-                        format!("segment {} is a sound, not a line — nothing to re-point", seg.n),
+                        format!(
+                            "segment {} is a sound, not a line — nothing to re-point",
+                            seg.n
+                        ),
                     );
                 }
                 None => app.set_status(Level::Warn, "no segment selected"),
@@ -302,14 +311,20 @@ pub(crate) async fn key_script(
             Some(ch) => {
                 let segments = v.read_segments(&app.layout, ch);
                 if segments.is_empty() {
-                    app.set_status(Level::Error, format!("ch{ch}: script exists but holds no segments"));
+                    app.set_status(
+                        Level::Error,
+                        format!("ch{ch}: script exists but holds no segments"),
+                    );
                 } else {
                     v.open = Some(ch);
                     v.segments = segments;
                     v.seg_cursor = 0;
                     app.set_status(
                         Level::Info,
-                        format!("ch{ch}: {} segments · s re-point a speaker · Esc back", v.segments.len()),
+                        format!(
+                            "ch{ch}: {} segments · s re-point a speaker · Esc back",
+                            v.segments.len()
+                        ),
                     );
                 }
             }

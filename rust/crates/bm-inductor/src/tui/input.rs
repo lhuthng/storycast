@@ -232,7 +232,10 @@ fn is_layer(screen: &Screen) -> bool {
 /// [`is_layer`] on purpose: they are not drawn over another screen, and the
 /// `:`-return logic would double-unwrap them.
 fn is_place_with_exit(screen: &Screen) -> bool {
-    matches!(screen, Screen::Script(_) | Screen::Sound(_) | Screen::Digest(_))
+    matches!(
+        screen,
+        Screen::Script(_) | Screen::Sound(_) | Screen::Digest(_)
+    )
 }
 
 /// Remember where a layer was opened over, once the key that opened it has run.
@@ -263,10 +266,7 @@ fn note_layer(app: &mut App, before: Screen, code: KeyCode) {
         }
         return;
     }
-    if matches!(
-        code,
-        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N')
-    ) {
+    if matches!(code, KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N')) {
         return;
     }
     if is_layer(&after) {

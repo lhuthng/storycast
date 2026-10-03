@@ -1228,7 +1228,10 @@ mod tests {
         // A path under neither is another machine's and is left alone. (The
         // test avoids `$HOME` on purpose: rewriting it is the same branch and
         // asserting on an env-derived string is not worth the flake.)
-        assert_eq!(shorten_paths(Path::new("/repo"), "/elsewhere/x"), "/elsewhere/x");
+        assert_eq!(
+            shorten_paths(Path::new("/repo"), "/elsewhere/x"),
+            "/elsewhere/x"
+        );
         // A bare `/` root must not turn every path into `.`.
         assert_eq!(shorten_paths(Path::new("/"), "/a/b"), "/a/b");
     }

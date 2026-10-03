@@ -6,6 +6,7 @@
 //! the same model the next task offer carries. The offer is the whole sync:
 //! the active key+model travel per task, and switching takes effect on the
 //! next offer with no restart and no second file to keep in step.
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     input::dispatch,
@@ -13,7 +14,6 @@ use crate::tui::{
     screen::{LlmView, Screen, TextKind, TextPrompt},
     style::Level,
 };
-use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// Open the screen, remembering where the cursor was.

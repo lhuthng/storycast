@@ -58,14 +58,18 @@ impl Inner {
         // chapter the write cannot reach.
         let mut scope: Vec<u32> = Vec::new();
         match &op {
-            ExclusiveOp::SwapVoice { character, voice, .. } => {
+            ExclusiveOp::SwapVoice {
+                character, voice, ..
+            } => {
                 if character.trim().is_empty() || voice.trim().is_empty() {
                     anyhow::bail!("swap needs a character and a voice");
                 }
                 self.validate_swap(character, voice)?;
                 scope = self.chapters_hearing_speaker(character);
             }
-            ExclusiveOp::Merge { survivor, absorbed, .. } => {
+            ExclusiveOp::Merge {
+                survivor, absorbed, ..
+            } => {
                 if survivor.trim().is_empty() || absorbed.is_empty() {
                     anyhow::bail!("merge requires a survivor and at least one absorbed name");
                 }
@@ -161,7 +165,8 @@ impl Inner {
         }
         // Carry the scope on the arms that use one.
         if let Some(chapters) = match &mut op {
-            ExclusiveOp::SwapVoice { chapters, .. }                | ExclusiveOp::Merge { chapters, .. }
+            ExclusiveOp::SwapVoice { chapters, .. }
+            | ExclusiveOp::Merge { chapters, .. }
             | ExclusiveOp::Reconcile { chapters, .. }
             | ExclusiveOp::Retag { chapters } => Some(chapters),
             _ => None,
@@ -236,8 +241,7 @@ impl Inner {
                     .holders()
                     .iter()
                     .any(|w| self.beats.get(*w).map(|b| fresh(b.ts)).unwrap_or(false))
-                    || (matches!(t.stage, Stage::Digest)
-                        && now.saturating_sub(t.updated) < 120))
+                    || (matches!(t.stage, Stage::Digest) && now.saturating_sub(t.updated) < 120))
         });
         let beat_in_the_way = self.beats.values().any(|b| {
             fresh(b.ts)
@@ -322,9 +326,7 @@ impl Inner {
     fn apply_exclusive(&mut self, op: ExclusiveOp) -> anyhow::Result<String> {
         match op {
             ExclusiveOp::SwapVoice {
-                character,
-                voice,
-                ..
+                character, voice, ..
             } => self.swap_apply(&character, &voice),
             ExclusiveOp::Remix {
                 speed,
@@ -352,9 +354,7 @@ impl Inner {
                 speaker,
             } => self.fix_speaker_apply(chapter, segment, &expect, &speaker),
             ExclusiveOp::Merge {
-                survivor,
-                absorbed,
-                ..
+                survivor, absorbed, ..
             } => self.reconcile_apply(&[(survivor, absorbed)], true),
             ExclusiveOp::Reconcile { merges, .. } => self.reconcile_apply(&merges, false),
         }
@@ -398,8 +398,7 @@ impl Inner {
             .chain(&policy.neutral)
             .any(|n| n == &voice);
         let in_use = cast.values().any(|v| v == &voice);
-        let pooled =
-            bm_core::pool::load_pool(&self.layout.voice_pool()).contains_key(&voice);
+        let pooled = bm_core::pool::load_pool(&self.layout.voice_pool()).contains_key(&voice);
         let manifested =
             bm_core::pool::load_manifest(&self.layout.voices_manifest()).contains_key(&voice);
         if !(declared || in_use || pooled || manifested) {
@@ -423,7 +422,8 @@ impl Inner {
             .into_iter()
             .flatten()
             .find(|c| {
-                c.get("name").and_then(|n| n.as_str())
+                c.get("name")
+                    .and_then(|n| n.as_str())
                     .map(|n| bm_core::util::fold(n) == bm_core::util::fold(&survivor))
                     .unwrap_or(false)
             });

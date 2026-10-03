@@ -1,6 +1,6 @@
 //! Help: scroll only, any dismiss key closes.
-use crate::tui::{app::App, screen::Screen};
 use crate::tui::input::Flow;
+use crate::tui::{app::App, screen::Screen};
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) async fn key_help(app: &mut App, scroll: usize, key: KeyEvent) -> Flow {

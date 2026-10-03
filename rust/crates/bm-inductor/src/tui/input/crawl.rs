@@ -1,8 +1,8 @@
 //! The crawl view: scroll, expand, dismiss. Nothing here edits a setting — the
 //! view answers "what will this crawl, and is anything wrong with it", and a
 //! settings file is still a file.
-use crate::tui::{app::App, screen::Screen};
 use crate::tui::input::Flow;
+use crate::tui::{app::App, screen::Screen};
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) async fn key_crawl(app: &mut App, scroll: usize, expanded: bool, key: KeyEvent) -> Flow {

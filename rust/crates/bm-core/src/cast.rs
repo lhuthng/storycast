@@ -835,7 +835,11 @@ mod tests {
 
         let policy = policy_for_bible("vieneu", &layout);
         let installed = crate::pool::installed_voices(&layout).expect("the store is readable");
-        assert_eq!(installed.len(), 3, "the store is the authority, not the catalogue");
+        assert_eq!(
+            installed.len(),
+            3,
+            "the store is the authority, not the catalogue"
+        );
         for pool in [&policy.female, &policy.male, &policy.neutral] {
             for voice in pool {
                 assert!(
@@ -856,15 +860,8 @@ mod tests {
         // And a cast already on disk naming a voice the store lacks is re-rolled
         // rather than kept: it is a promise the sidecar will refuse.
         std::fs::write(&cast_path, r#"{"A":"marius","B":"alba"}"#).unwrap();
-        let healed = load_cast(
-            &script,
-            &cast_path,
-            &bible,
-            &policy,
-            Some(&installed),
-            true,
-        )
-        .unwrap();
+        let healed =
+            load_cast(&script, &cast_path, &bible, &policy, Some(&installed), true).unwrap();
         assert!(
             !healed.values().any(|v| v == "marius"),
             "a voice the store cannot speak must not survive into the cast"

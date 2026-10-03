@@ -3,9 +3,7 @@ use crate::tui::style::Level;
 use crate::tui::{
     app::{App, Panel},
     model::{reported_alias, task_event, TaskEvent},
-    style::{
-        empty_body, log_head, stage_color, style_bold_of, style_of, wall_hms, worker_alias,
-    },
+    style::{empty_body, log_head, stage_color, style_bold_of, style_of, wall_hms, worker_alias},
 };
 use ratatui::{
     layout::Rect,
@@ -55,10 +53,7 @@ fn push_task_event(
             }
         }
         TaskEvent::Failed { note, reason, .. } => {
-            spans.push(Span::styled(
-                "Failed",
-                style_bold_of(colour, Color::Red),
-            ));
+            spans.push(Span::styled("Failed", style_bold_of(colour, Color::Red)));
             if let Some(n) = note {
                 spans.push(Span::styled(format!(" ({n})"), dim));
             }
@@ -68,10 +63,7 @@ fn push_task_event(
             }
         }
         TaskEvent::Shelved { reason, .. } => {
-            spans.push(Span::styled(
-                "Shelved",
-                style_bold_of(colour, Color::Red),
-            ));
+            spans.push(Span::styled("Shelved", style_bold_of(colour, Color::Red)));
             spans.push(Span::styled(" (press u)".to_string(), dim));
             if !reason.is_empty() {
                 spans.push(Span::raw(": ".to_string()));

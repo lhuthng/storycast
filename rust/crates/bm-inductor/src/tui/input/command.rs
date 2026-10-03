@@ -86,7 +86,9 @@ pub(crate) enum Command {
     RenderBatch,
     /// The selected box's TTS sidecar thread count (`None` opens the prompt,
     /// `Some` is `:threads <n>` dispatched directly).
-    TtsThreads { threads: Option<Option<u16>> },
+    TtsThreads {
+        threads: Option<Option<u16>>,
+    },
     Mix,
     Sound,
     Rerender,
@@ -96,11 +98,15 @@ pub(crate) enum Command {
     /// Going also enqueues the remainder of the authored range, so the answer
     /// to "where was I" does not have to come from counting rows in the task
     /// table: a book 3 chapters in distributes 4..N.
-    Dispatch { go: bool },
+    Dispatch {
+        go: bool,
+    },
     ShutdownWhenIdle,
     /// Drop the queued exclusive write (`:xdrop`), or the whole line with
     /// a route name.
-    ExclusiveCancel { route: Option<String> },
+    ExclusiveCancel {
+        route: Option<String>,
+    },
     /// Open the script inspection window (`:script`).
     Script,
     /// The workspace prompt, opened by `:ws <name>` with the line already in it.
@@ -108,7 +114,9 @@ pub(crate) enum Command {
     /// Bare `:ws` is [`Command::WorkspacePick`] and never comes here: the word
     /// table carries the same answer, so the two cannot disagree about what the
     /// word with no argument does. `prefill` is everything after `ws`, verbatim.
-    Workspace { prefill: String },
+    Workspace {
+        prefill: String,
+    },
     /// `:ws` with nothing after it: the books, with arrows. The prompt it used
     /// to open answers the same question by asking for a name, and the name is
     /// the one thing an operator switching books should not have to remember.
@@ -723,7 +731,12 @@ pub(crate) fn do_command(
             // loaded profile — not a field the operator could get wrong here.
             let which = match bm_core::profile::in_force(&app.layout).map(|b| b.pack) {
                 Ok(p) if !p.version.is_empty() => {
-                    format!("The loaded profile is {} v{}, so boxes ask for {}.", p.name, p.version, bm_core::artifact::pack_tag_for(&p.name, &p.version))
+                    format!(
+                        "The loaded profile is {} v{}, so boxes ask for {}.",
+                        p.name,
+                        p.version,
+                        bm_core::artifact::pack_tag_for(&p.name, &p.version)
+                    )
                 }
                 Ok(p) => format!(
                     "The loaded profile '{}' names no version, so nothing would be fetched yet — \
@@ -838,7 +851,10 @@ pub(crate) fn do_command(
             // same inventory `workspace list` prints, so a name offered here is
             // a name that list would call a workspace.
             app.screen = Screen::WorkspaceList(crate::tui::screen::WsList::read(&app.layout.root));
-            app.set_status(Level::Info, "workspace: ↑↓ to move, Enter to switch, Esc to close");
+            app.set_status(
+                Level::Info,
+                "workspace: ↑↓ to move, Enter to switch, Esc to close",
+            );
         }
         Command::Workspace { prefill } => {
             // Prefilled with what was typed after `:ws`, not with the workspace
@@ -1172,9 +1188,7 @@ pub(crate) fn do_command(
                 OpRequest {
                     op: Op::ExclusiveCancel,
                     exclusive: route.map(|r| {
-                        bm_proto::ExclusiveOp::parse(&r).unwrap_or(
-                            bm_proto::ExclusiveOp::Remerge,
-                        )
+                        bm_proto::ExclusiveOp::parse(&r).unwrap_or(bm_proto::ExclusiveOp::Remerge)
                     }),
                     ..Default::default()
                 },

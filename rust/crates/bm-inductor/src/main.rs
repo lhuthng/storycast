@@ -692,7 +692,7 @@ pub fn provision_machine(
     // pack travels in the bundle, and this is the line that has to agree with
     // the pointer `provision` writes to the worker. An unset binding is the
     // no-profile refusal, exactly as a missing pointer was.
-    let binding = match bm_core::profile::in_force(&layout)
+    let binding = match bm_core::profile::in_force(layout)
         .ok()
         .filter(|b| !b.is_unset())
     {
@@ -1164,9 +1164,9 @@ fn build_tts_binary(cand: &std::path::Path, layout: &Layout) -> anyhow::Result<(
         .arg(rust_dir.join("Cargo.toml"))
         .env("ORT_LIB_LOCATION", &runtime)
         .env("ORT_PREFER_DYNAMIC_LINK", "1")
-    // A GUI launch (or a desktop shortcut) inherits a PATH without
-    // `~/.cargo/bin`, and the linker is looked up by name from there.
-    .env("PATH", path_with_shim(shim_dir));
+        // A GUI launch (or a desktop shortcut) inherits a PATH without
+        // `~/.cargo/bin`, and the linker is looked up by name from there.
+        .env("PATH", path_with_shim(shim_dir));
     let out = cmd
         .output()
         .map_err(|e| anyhow::anyhow!("running cargo-zigbuild: {e}"))?;
@@ -1616,9 +1616,7 @@ fn apply_preset(
     // source starts in `manual`.
     let crawler: Option<bm_core::preset::CrawlerSetup> = match crawler {
         Some(c) => Some(c.clone()),
-        None if !preset.crawler.is_none() => {
-            Some(crawler_from_preset(work, &preset.crawler)?)
-        }
+        None if !preset.crawler.is_none() => Some(crawler_from_preset(work, &preset.crawler)?),
         None => None,
     };
     if let Some(c) = &crawler {
@@ -1642,7 +1640,10 @@ fn apply_preset(
         } else if !c.script.trim().is_empty() {
             settings.crawl.mode = "script".into();
             settings.crawl.script = c.script.clone();
-            out.push(format!("crawler  {} — global, shared by every book", c.script));
+            out.push(format!(
+                "crawler  {} — global, shared by every book",
+                c.script
+            ));
         }
         // The guided "Local file (EPUB)" choice: the operator named a book and
         // it is copied into the workspace's own `tmp/book.epub`, which is what
@@ -1678,8 +1679,13 @@ fn apply_preset(
                     continue;
                 }
                 let name = path.file_name().expect("an .epub has a file name");
-                std::fs::copy(&path, dest.join(name))
-                    .with_context(|| format!("copying {} -> books/{}", path.display(), name.to_string_lossy()))?;
+                std::fs::copy(&path, dest.join(name)).with_context(|| {
+                    format!(
+                        "copying {} -> books/{}",
+                        path.display(),
+                        name.to_string_lossy()
+                    )
+                })?;
                 copied += 1;
             }
             anyhow::ensure!(
@@ -1745,7 +1751,10 @@ fn crawler_from_preset(
             );
             let mut params = serde_json::Map::new();
             for (k, v) in site.params {
-                params.insert((*k).to_string(), serde_json::Value::String((*v).to_string()));
+                params.insert(
+                    (*k).to_string(),
+                    serde_json::Value::String((*v).to_string()),
+                );
             }
             Ok(bm_core::preset::CrawlerSetup {
                 script: site.script.to_string(),
@@ -3397,11 +3406,7 @@ fn resolve_analyzer(
 /// ahead would merge deltas out of order. Nothing is written here, the
 /// inductor is the single writer of the bible and the script, and it does that
 /// when the report lands.
-async fn cmd_backup(
-    layout: &Layout,
-    settings: Settings,
-    opts: BackupOpts,
-) -> anyhow::Result<()> {
+async fn cmd_backup(layout: &Layout, settings: Settings, opts: BackupOpts) -> anyhow::Result<()> {
     let BackupOpts {
         start,
         through,
@@ -3590,7 +3595,13 @@ async fn cmd_backup(
                 let tag = if attempt == 0 {
                     format!("backup-{}-{}", round.as_str(), part_slug)
                 } else {
-                    format!("backup-{}{}-{}-repair{}", round.as_str(), part_slug, n, attempt)
+                    format!(
+                        "backup-{}{}-{}-repair{}",
+                        round.as_str(),
+                        part_slug,
+                        n,
+                        attempt
+                    )
                 };
                 bm_core::digest::dump_raw(layout, &tag, &answer);
                 // The prompt beside the answer. An answer on disk answers "what
@@ -3598,9 +3609,7 @@ async fn cmd_backup(
                 // exact bytes it was given are next to it, and rebuilding that
                 // prompt means rebuilding the bible and the view by hand.
                 if std::env::var("BM_DIGEST_RAW").is_ok() {
-                    let path = layout
-                        .data()
-                        .join(format!(".last-{tag}-prompt.txt"));
+                    let path = layout.data().join(format!(".last-{tag}-prompt.txt"));
                     let _ = bm_core::atomic_write(&path, &asked);
                     eprintln!("prompt -> {}", path.display());
                 }
@@ -3716,10 +3725,17 @@ async fn cmd_excerpts(
         }
         let current = bm_core::read_json::<serde_json::Value>(&layout.script(n))
             .ok()
-            .and_then(|s| s.get("excerpt").and_then(|e| e.as_str()).map(str::to_string))
+            .and_then(|s| {
+                s.get("excerpt")
+                    .and_then(|e| e.as_str())
+                    .map(str::to_string)
+            })
             .unwrap_or_default();
         if !force && !current.trim().is_empty() {
-            eprintln!("ch{n}: excerpt already present — skipped ({})", current.chars().count());
+            eprintln!(
+                "ch{n}: excerpt already present — skipped ({})",
+                current.chars().count()
+            );
             skipped += 1;
             continue;
         }
@@ -3736,9 +3752,9 @@ async fn cmd_excerpts(
             } else {
                 manual::repair_prompt(&prompt, &complaint)
             };
-            let answer = manual::ask(&asked, &analyzer, &settings).await.map_err(|e| {
-                anyhow::anyhow!("ch{n}: {e}")
-            })?;
+            let answer = manual::ask(&asked, &analyzer, &settings)
+                .await
+                .map_err(|e| anyhow::anyhow!("ch{n}: {e}"))?;
             bm_core::digest::dump_raw(layout, &format!("excerpt-{n}"), &answer);
             match bm_core::digest::parse_excerpt(&answer) {
                 Some(found) => {
@@ -3754,7 +3770,10 @@ async fn cmd_excerpts(
             continue;
         };
         if dry_run {
-            println!("ch{n}: {} chars (dry run, not written)\n  {excerpt}", excerpt.chars().count());
+            println!(
+                "ch{n}: {} chars (dry run, not written)\n  {excerpt}",
+                excerpt.chars().count()
+            );
         } else {
             bm_core::digest::write_excerpt(layout, n, &excerpt)
                 .map_err(|e| anyhow::anyhow!("ch{n}: {e:#}"))?;
@@ -3762,9 +3781,7 @@ async fn cmd_excerpts(
         }
         written += 1;
     }
-    println!(
-        "excerpt backfill done: {written} filled, {skipped} already present, {failed} failed"
-    );
+    println!("excerpt backfill done: {written} filled, {skipped} already present, {failed} failed");
     Ok(())
 }
 

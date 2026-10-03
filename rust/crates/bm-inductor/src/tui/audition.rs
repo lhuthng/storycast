@@ -312,11 +312,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(layout.script(2), "{ this is not json").unwrap();
-        std::fs::write(
-            layout.script_dir().join("notes.json"),
-            r#"{"segments":[]}"#,
-        )
-        .unwrap();
+        std::fs::write(layout.script_dir().join("notes.json"), r#"{"segments":[]}"#).unwrap();
 
         let idx = index_lines(&layout).unwrap();
         // Deduplicated, and the corrupt script did not take the rest down.

@@ -42,12 +42,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-pub(crate) fn draw_crawl(
-    f: &mut ratatui::Frame,
-    app: &mut App,
-    scroll: usize,
-    expanded: bool,
-) {
+pub(crate) fn draw_crawl(f: &mut ratatui::Frame, app: &mut App, scroll: usize, expanded: bool) {
     let area = centered_padded(f.area(), 96, 34, 1);
     f.render_widget(Clear, area);
     app.add_hit_region(

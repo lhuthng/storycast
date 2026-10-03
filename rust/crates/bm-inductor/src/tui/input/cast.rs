@@ -8,6 +8,7 @@
 //! the audition keys go quiet. `Esc` blurs back, `^R` focuses explicitly.
 //! (`q` is deliberately *not* bound either way, so it filters like any
 //! other letter.)
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     input::audition::{cast_current, cast_pointed},
@@ -16,7 +17,6 @@ use crate::tui::{
     screen::{CastView, Screen, TextKind, TextPrompt},
     style::Level,
 };
-use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub(crate) async fn key_cast(

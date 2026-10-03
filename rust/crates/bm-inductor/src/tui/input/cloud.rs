@@ -1,5 +1,6 @@
 //! Cloud view keys: navigate, re-read, close. Nothing destructive here —
 //! `:up`/`:down` stay on the command line, like every other gated action.
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     input::dispatch,
@@ -7,7 +8,6 @@ use crate::tui::{
     screen::{CloudView, Screen},
     style::Level,
 };
-use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) async fn key_cloud(

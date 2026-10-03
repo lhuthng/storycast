@@ -23,7 +23,12 @@ use ratatui::{
 const SEG_VISIBLE: usize = 12;
 
 pub(crate) fn draw_script(f: &mut ratatui::Frame, app: &mut App, v: &ScriptView) {
-    let height = f.area().height.saturating_sub(2).clamp(10, 34).min(f.area().height);
+    let height = f
+        .area()
+        .height
+        .saturating_sub(2)
+        .clamp(10, 34)
+        .min(f.area().height);
     let area = centered(f.area(), 86, height);
     f.render_widget(Clear, area);
 
@@ -86,13 +91,7 @@ pub(crate) fn draw_script(f: &mut ratatui::Frame, app: &mut App, v: &ScriptView)
 /// digest window pulled in, newest first. The window and the skip rules come
 /// from `digest::excerpt_chain`, the same call the prompt makes, so the screen
 /// shows exactly the memory the model was handed.
-fn draw_excerpt(
-    lines: &mut Vec<Line>,
-    v: &ScriptView,
-    dim: Style,
-    width: usize,
-    visible: usize,
-) {
+fn draw_excerpt(lines: &mut Vec<Line>, v: &ScriptView, dim: Style, width: usize, visible: usize) {
     let ch = v.open.unwrap_or(0);
 
     // The body first, so the window is a slice of it and the header and the
@@ -319,10 +318,7 @@ fn draw_pick(lines: &mut Vec<Line>, app: &App, v: &ScriptView, pick: &ScriptPick
             format!("  segment {} ", pick.segment),
             Style::default().add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("now: {:?} — pick who speaks it", pick.expect),
-            dim,
-        ),
+        Span::styled(format!("now: {:?} — pick who speaks it", pick.expect), dim),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  filter: ", dim),
@@ -361,7 +357,11 @@ fn draw_pick(lines: &mut Vec<Line>, app: &App, v: &ScriptView, pick: &ScriptPick
             Style::default()
         };
         let marker = if i == cursor { "▸" } else { " " };
-        let tag = if is_roster(name) { "  (this chapter)" } else { "" };
+        let tag = if is_roster(name) {
+            "  (this chapter)"
+        } else {
+            ""
+        };
         lines.push(Line::from(vec![
             Span::raw(format!("   {marker} ")),
             Span::styled(name.clone(), style),

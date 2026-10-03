@@ -103,8 +103,9 @@ impl Inner {
         let title = bm_core::assemble::title_speech_for_script(&script_path, &cast, segments);
         let seg_dir = self.layout.seg_dir(&engine, chapter);
         let planned = bm_core::assemble::Planned::plan(segments);
-        let mut units = bm_core::assemble::plan_render(&planned, &cast, &seg_dir, local, title.as_ref())
-            .with_context(|| format!("planning chapter {chapter}"))?;
+        let mut units =
+            bm_core::assemble::plan_render(&planned, &cast, &seg_dir, local, title.as_ref())
+                .with_context(|| format!("planning chapter {chapter}"))?;
         // **The engine's ceiling, applied here and not inside the planner.**
         // `plan_render` picks a temperature from the acting mood, and that table
         // (0.70–0.92) is tuned for VieNeu's flow model — handed to pocket's, a
@@ -150,8 +151,7 @@ impl Inner {
         // The tier is the plan's business because the extension is part of
         // the take name: a tier change re-plans, names new files, and the
         // reconcile names the old ones stale.
-        let quality =
-            bm_core::assemble::TakeQuality::parse(&self.settings.take_quality);
+        let quality = bm_core::assemble::TakeQuality::parse(&self.settings.take_quality);
         let new = RenderPlan::build(chapter, &engine, &units, quality);
         let path = self.layout.plan(chapter);
         let stored = RenderPlan::load(&path);

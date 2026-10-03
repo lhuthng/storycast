@@ -247,10 +247,7 @@ pub(crate) fn draw_tasks_screen(f: &mut ratatui::Frame, app: &mut App, view: &Ta
         } else {
             format!("{} ", view.facet.label())
         };
-        let mut why = vec![format!(
-            "no {which}task matches “{}”",
-            view.filter.trim()
-        )];
+        let mut why = vec![format!("no {which}task matches “{}”", view.filter.trim())];
         // Both halves of the narrowing are named, because either one alone can
         // be the reason the list is empty and the operator is looking at the
         // one they set three keypresses ago.

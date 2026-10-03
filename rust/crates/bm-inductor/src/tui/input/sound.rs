@@ -9,6 +9,7 @@
 //! that has to be submitted, and `d` opens a confirmation. The prompt is
 //! prefilled with the values actually in force, so a mistake is visible before
 //! it is saved rather than after.
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     jobs::Job,
@@ -16,7 +17,6 @@ use crate::tui::{
     sound::{self, SoundView},
     style::Level,
 };
-use crate::tui::input::Flow;
 use bm_core::audio_pool::PoolKind;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

@@ -530,7 +530,11 @@ impl Facet {
     pub(crate) fn step(self, forward: bool) -> Facet {
         let n = Self::ALL.len();
         let i = self as usize;
-        Self::ALL[if forward { (i + 1) % n } else { (i + n - 1) % n }]
+        Self::ALL[if forward {
+            (i + 1) % n
+        } else {
+            (i + n - 1) % n
+        }]
     }
 
     pub(crate) fn matches(self, t: &Task, live: &BTreeSet<String>) -> bool {
@@ -867,7 +871,11 @@ impl LogFilter {
     pub(crate) fn step(self, forward: bool) -> LogFilter {
         let n = Self::ALL.len();
         let i = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
-        Self::ALL[if forward { (i + 1) % n } else { (i + n - 1) % n }]
+        Self::ALL[if forward {
+            (i + 1) % n
+        } else {
+            (i + n - 1) % n
+        }]
     }
 
     pub(crate) fn matches(self, l: &LogLine) -> bool {
@@ -942,15 +950,14 @@ pub(crate) fn task_event(text: &str) -> Option<TaskEvent<'_>> {
         }
         if let Some((task, tail)) = rest.split_once(" FAILED") {
             let stage = task_stage(task)?;
-            let (note, reason) = if let Some(after) = tail.strip_prefix(' ') {
+            let (note, reason) = {
+                let after = tail.strip_prefix(' ')?;
                 if let Some(n) = after.strip_prefix('(') {
                     let (note, reason) = n.split_once("): ")?;
                     (Some(note), reason)
                 } else {
                     (None, after.strip_prefix(": ")?)
                 }
-            } else {
-                return None;
             };
             return Some(TaskEvent::Failed {
                 stage,

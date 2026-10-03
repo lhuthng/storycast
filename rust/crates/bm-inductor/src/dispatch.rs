@@ -460,10 +460,7 @@ async fn converge_sidecar_policy(
     let threads = book.desired_threads;
     match tell_sidecar_policy(http, peer, keep, threads).await {
         Ok(()) => {
-            if book.delivered != Some(keep)
-                || book.delivered_threads != threads
-                || book.logged
-            {
+            if book.delivered != Some(keep) || book.delivered_threads != threads || book.logged {
                 println!(
                     "dispatch: {} told to {} its TTS sidecar{}{}",
                     peer.addr,

@@ -1034,7 +1034,10 @@ fn epub_fixture(path: &std::path::Path) {
         path,
         &[
             ("mot-chuong", "Một câu trong chương đầu tiên của cuốn sách."),
-            ("hai-chuong", "Câu thứ hai nằm ở chương thứ hai của cuốn sách."),
+            (
+                "hai-chuong",
+                "Câu thứ hai nằm ở chương thứ hai của cuốn sách.",
+            ),
         ],
     );
 }
@@ -1120,7 +1123,10 @@ fn the_epub_template_reads_a_local_book_and_stops_at_its_end() {
     assert!(text.contains("Chương mot-chuong"), "{text}");
     assert!(text.contains("chương đầu tiên"), "{text}");
     assert!(!text.contains("<h1>"), "markup leaked: {text}");
-    assert!(!text.contains("<title>"), "the book's title is not prose: {text}");
+    assert!(
+        !text.contains("<title>"),
+        "the book's title is not prose: {text}"
+    );
 
     // The second chapter is the second spine item, not the second file on
     // disk — the test book writes them in order, so this also pins that the
@@ -1131,20 +1137,29 @@ fn the_epub_template_reads_a_local_book_and_stops_at_its_end() {
     // Past the end: **absent, not a failure.** This is the assertion the whole
     // template exists to get right — an error here would cost three strikes
     // and shelve a row for a book that simply ended.
-    match Provider::new(&s).crawl(3, None, 1).expect("ch 3 is not a crash").outcome {
+    match Provider::new(&s)
+        .crawl(3, None, 1)
+        .expect("ch 3 is not a crash")
+        .outcome
+    {
         CrawlOutcome::Absent { reason } => assert!(!reason.is_empty(), "{reason}"),
         other => panic!("a chapter past the end must be absent, not {other:?}"),
     }
 
     // `discover` knows the book's own length, so a range can be trimmed before
     // its tasks are enqueued.
-    let found = Provider::new(&s).discover(1, 5).expect("discover").expect("has one");
+    let found = Provider::new(&s)
+        .discover(1, 5)
+        .expect("discover")
+        .expect("has one");
     assert_eq!(found.total, Some(2));
     assert_eq!(found.chapters.len(), 2, "the range is trimmed to the book");
 
     // No book at all is a refusal by name, not an empty chapter.
     let mut missing = epub_spec(&dir, "epub.lua");
-    missing.params.insert("epub".into(), serde_json::json!("nope.epub"));
+    missing
+        .params
+        .insert("epub".into(), serde_json::json!("nope.epub"));
     let err = Provider::new(&missing)
         .crawl(1, None, 1)
         .expect_err("a book that is not there")
@@ -1192,7 +1207,11 @@ fn volumes_are_numbered_as_one_book_and_carry_their_own_locator() {
         .expect("has chapters");
     assert_eq!(found.total, Some(4), "two volumes of two chapters");
     let ns: Vec<u32> = found.chapters.iter().map(|c| c.n).collect();
-    assert_eq!(ns, vec![1, 2, 3, 4], "the numbering is dense across volumes");
+    assert_eq!(
+        ns,
+        vec![1, 2, 3, 4],
+        "the numbering is dense across volumes"
+    );
 
     // Every chapter names its volume and spine range, and volume 1's chapters
     // come first whatever order the fixture wrote the files in.
@@ -1395,8 +1414,9 @@ fn a_settings_file_naming_the_pre_move_path_still_finds_its_crawler() {
         "assets/crawl/templates/storya.lua",
         "crawl/templates/storya.lua",
     ] {
-        let picked = resolve_script(&layout, old)
-            .unwrap_or_else(|| panic!("the pre-move path {old} must still find the bundled crawler"));
+        let picked = resolve_script(&layout, old).unwrap_or_else(|| {
+            panic!("the pre-move path {old} must still find the bundled crawler")
+        });
         assert_eq!(picked, dir.join("crawlers/known/storya.lua"), "{old}");
     }
     // A basename alone is still not a lookup: it must not silently become a

@@ -486,12 +486,13 @@ fn one_book_rows(layout: &Layout, key: &str, named: &str) -> Vec<Row> {
     if path.is_dir() {
         return vec![
             Row::warn(key, format!("{named}  — that is a folder")),
-            Row::Note(
-                "      name a folder under crawl.params.books, not crawl.params.epub".into(),
-            ),
+            Row::Note("      name a folder under crawl.params.books, not crawl.params.epub".into()),
         ];
     }
-    let mb = path.metadata().map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
+    let mb = path
+        .metadata()
+        .map(|m| m.len() / (1024 * 1024))
+        .unwrap_or(0);
     vec![Row::field(key, format!("{named} ({mb} MB)"))]
 }
 
@@ -570,10 +571,7 @@ fn link_rows(index: Option<&CrawlIndex>) -> Vec<Row> {
             )));
         }
         if volumes.len() > 8 {
-            out.push(Row::Note(format!(
-                "      … and {} more",
-                volumes.len() - 8
-            )));
+            out.push(Row::Note(format!("      … and {} more", volumes.len() - 8)));
         }
     }
     // Two links, not the whole book: enough to see the site's shape without
@@ -581,12 +579,10 @@ fn link_rows(index: Option<&CrawlIndex>) -> Vec<Row> {
     for n in [start, start.saturating_add(1)] {
         let Some(url) = idx.url(n) else { continue };
         let shown = match locator(url) {
-            Some((path, from, to)) => {
-                match volumes.iter().position(|v| v.path == path) {
-                    Some(i) => format!("volume {} · spine {from}-{to}", i + 1),
-                    None => format!("{path} · spine {from}-{to}"),
-                }
-            }
+            Some((path, from, to)) => match volumes.iter().position(|v| v.path == path) {
+                Some(i) => format!("volume {} · spine {from}-{to}", i + 1),
+                None => format!("{path} · spine {from}-{to}"),
+            },
             None => url.to_string(),
         };
         out.push(Row::Note(format!("      ch {n}  {shown}")));
@@ -968,11 +964,17 @@ mod tests {
         std::fs::write(shelf.join("vol-02.epub"), b"two").unwrap();
         let settings = bm_core::read_json::<serde_json::Value>(&layout.settings()).unwrap();
         let rows = detail(&layout, &settings);
-        assert!(!is_warn(&rows, "books"), "a full shelf is not a fault: {rows:#?}");
+        assert!(
+            !is_warn(&rows, "books"),
+            "a full shelf is not a fault: {rows:#?}"
+        );
         let v = value_of(&rows, "books");
         assert!(v.contains("2 volumes"), "{v}");
         let said = said(&rows);
-        assert!(said.contains("vol-01.epub") && said.contains("vol-02.epub"), "{said}");
+        assert!(
+            said.contains("vol-01.epub") && said.contains("vol-02.epub"),
+            "{said}"
+        );
     }
 
     #[test]
@@ -985,7 +987,10 @@ mod tests {
         let settings = bm_core::read_json::<serde_json::Value>(&layout.settings()).unwrap();
         let missing = rows(&layout, &settings);
         assert!(is_warn(&missing, "books"), "{missing:#?}");
-        assert!(value_of(&missing, "books").contains("NOT FOUND"), "{missing:#?}");
+        assert!(
+            value_of(&missing, "books").contains("NOT FOUND"),
+            "{missing:#?}"
+        );
 
         // And one that exists but holds nothing, which looks even more like a
         // working configuration.
@@ -993,7 +998,10 @@ mod tests {
         let empty = rows(&layout, &settings);
         assert!(is_warn(&empty, "books"), "{empty:#?}");
         assert!(value_of(&empty, "books").contains("no .epub"), "{empty:#?}");
-        assert!(said(&empty).contains("vol-01.epub"), "and how to fix it: {empty:#?}");
+        assert!(
+            said(&empty).contains("vol-01.epub"),
+            "and how to fix it: {empty:#?}"
+        );
     }
 
     #[test]
@@ -1009,7 +1017,10 @@ mod tests {
         std::fs::write(layout.work.join("tmp/book.epub"), b"PK\x03\x04 x").unwrap();
         let found = detail(&layout, &settings);
         assert!(!is_warn(&found, "epub"), "{found:#?}");
-        assert!(value_of(&found, "epub").contains("tmp/book.epub"), "{found:#?}");
+        assert!(
+            value_of(&found, "epub").contains("tmp/book.epub"),
+            "{found:#?}"
+        );
     }
 
     #[test]
@@ -1046,11 +1057,15 @@ mod tests {
         let said = said(&rows);
         // A book has no links, and saying so in the heading is half the point.
         assert!(
-            rows.iter().any(|r| matches!(r, Row::Section(s) if s == "Chapters")),
+            rows.iter()
+                .any(|r| matches!(r, Row::Section(s) if s == "Chapters")),
             "{said}"
         );
         // The book's own length, not a site's: a book has no site to ask.
-        assert!(value_of(&rows, "chapters").contains("the book has 4"), "{said}");
+        assert!(
+            value_of(&rows, "chapters").contains("the book has 4"),
+            "{said}"
+        );
         // The breakdown, and where each volume starts.
         assert!(value_of(&rows, "volumes").contains("2 volumes"), "{said}");
         // The chapter numbers, which are what a run is ranged by — the spine
@@ -1061,7 +1076,10 @@ mod tests {
         // And the locator decoded: an encoding nobody typed should not be the
         // thing the view prints.
         assert!(said.contains("ch 1  volume 1 · spine 1-16"), "{said}");
-        assert!(!said.contains("epub:books/"), "the raw locator is internal: {said}");
+        assert!(
+            !said.contains("epub:books/"),
+            "the raw locator is internal: {said}"
+        );
     }
 
     #[test]
@@ -1074,15 +1092,21 @@ mod tests {
         let rows = detail(&layout, &settings);
         let said = said(&rows);
         assert!(
-            rows.iter().any(|r| matches!(r, Row::Section(s) if s == "Chapter links")),
+            rows.iter()
+                .any(|r| matches!(r, Row::Section(s) if s == "Chapter links")),
             "a site is still a site: {said}"
         );
-        assert!(value_of(&rows, "chapters").contains("site says 1200"), "{said}");
+        assert!(
+            value_of(&rows, "chapters").contains("site says 1200"),
+            "{said}"
+        );
         assert!(value_of(&rows, "index").contains("template"), "{said}");
         // No volume block for a site, and the URL is still the thing to print.
         assert!(said.contains("ch 1  https://s/chuong-1"), "{said}");
         assert!(
-            !rows.iter().any(|r| matches!(r, Row::Field { key, .. } if key == "volumes")),
+            !rows
+                .iter()
+                .any(|r| matches!(r, Row::Field { key, .. } if key == "volumes")),
             "{said}"
         );
     }
@@ -1091,7 +1115,10 @@ mod tests {
     fn a_locator_that_is_not_one_is_not_a_crash() {
         // A hand-edited index can hold anything. The decoder is the only place
         // that could refuse, and refusing is what it must not do.
-        assert_eq!(locator("epub:books/vol-01.epub#1-1"), Some(("books/vol-01.epub", 1, 1)));
+        assert_eq!(
+            locator("epub:books/vol-01.epub#1-1"),
+            Some(("books/vol-01.epub", 1, 1))
+        );
         assert_eq!(locator("https://s/1"), None);
         assert_eq!(locator("epub:books/vol-01.epub"), None);
         assert_eq!(locator("epub:books/a#1-x"), None);
@@ -1104,7 +1131,10 @@ mod tests {
         // The concise view leads with it, because nothing else can be counted
         // until the index exists.
         let concise = rows(&layout, &settings);
-        assert!(value_of(&concise, "reading").contains(":crawl"), "{concise:#?}");
+        assert!(
+            value_of(&concise, "reading").contains(":crawl"),
+            "{concise:#?}"
+        );
         // And the detail still names the absent file and the command that
         // makes it.
         let rows = detail(&layout, &settings);
@@ -1146,7 +1176,10 @@ mod tests {
             .iter()
             .filter(|r| matches!(r, Row::Field { .. }))
             .count();
-        assert_eq!(facts, 3, "a verdict is three facts, not a screen: {concise:#?}");
+        assert_eq!(
+            facts, 3,
+            "a verdict is three facts, not a screen: {concise:#?}"
+        );
     }
 
     #[test]
@@ -1158,11 +1191,7 @@ mod tests {
             "params": { "books": "books" },
         }));
         std::fs::create_dir_all(layout.crawlers_dir().join("examples")).unwrap();
-        std::fs::write(
-            layout.crawlers_dir().join("examples/epub.lua"),
-            "-- crawl",
-        )
-        .unwrap();
+        std::fs::write(layout.crawlers_dir().join("examples/epub.lua"), "-- crawl").unwrap();
         let shelf = layout.work.join("books");
         std::fs::create_dir_all(&shelf).unwrap();
         std::fs::write(shelf.join("vol-01.epub"), b"one").unwrap();
@@ -1196,15 +1225,20 @@ mod tests {
         let mut idx = CrawlIndex::from_template("x", 1, 9, "hash");
         idx.total = Some(9);
         for n in 1..=9u32 {
-            idx.chapters.get_mut(&n).unwrap().url =
-                Some(format!("epub:books/vol-{n:02}.epub#1-2"));
+            idx.chapters.get_mut(&n).unwrap().url = Some(format!("epub:books/vol-{n:02}.epub#1-2"));
         }
         idx.save(&layout).unwrap();
         let settings = bm_core::read_json::<serde_json::Value>(&layout.settings()).unwrap();
         let said = said(&rows(&layout, &settings));
-        assert!(said.contains("…5 more"), "nine volumes are not one line: {said}");
+        assert!(
+            said.contains("…5 more"),
+            "nine volumes are not one line: {said}"
+        );
         assert!(said.contains("vol-01.epub"), "{said}");
-        assert!(!said.contains("vol-09.epub"), "and the tail is a count: {said}");
+        assert!(
+            !said.contains("vol-09.epub"),
+            "and the tail is a count: {said}"
+        );
     }
 
     #[test]
@@ -1220,11 +1254,7 @@ mod tests {
         // The example crawler is present; the site tree is not, and cannot be
         // reached from a book that reads no website.
         std::fs::create_dir_all(layout.crawlers_dir().join("examples")).unwrap();
-        std::fs::write(
-            layout.crawlers_dir().join("examples/epub.lua"),
-            "-- crawl",
-        )
-        .unwrap();
+        std::fs::write(layout.crawlers_dir().join("examples/epub.lua"), "-- crawl").unwrap();
         let settings = bm_core::read_json::<serde_json::Value>(&layout.settings()).unwrap();
         let said = said(&rows(&layout, &settings));
         assert!(

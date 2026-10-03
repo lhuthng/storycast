@@ -2964,7 +2964,10 @@ mod tests {
         let before = std::fs::read_to_string(layout.tts_voices()).unwrap();
         std::fs::write(layout.cast("pocket"), r#"{"A":"alba"}"#).unwrap();
         assert!(inner.op_swap_voice("A", "Maomao").is_ok());
-        assert_eq!(std::fs::read_to_string(layout.tts_voices()).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(layout.tts_voices()).unwrap(),
+            before
+        );
     }
 
     fn busy_inner() -> (tempfile::TempDir, Inner) {
@@ -3121,9 +3124,13 @@ mod tests {
             merge.assigned_to = Some("w2".into());
             merge.lease_until = Some(now_secs() + 600);
             inner.tasks.insert("merge:2".into(), merge);
-            inner
-                .beats
-                .insert("w2".into(), bm_proto::Heartbeat { worker_id: "w2".into(), ..beat });
+            inner.beats.insert(
+                "w2".into(),
+                bm_proto::Heartbeat {
+                    worker_id: "w2".into(),
+                    ..beat
+                },
+            );
             // …and a script, so a chapter-scoped write (swap, retag) has a
             // scope at all: without one, chapter 1 hears nobody and the write
             // correctly finds nothing to wait for.
@@ -3149,12 +3156,11 @@ mod tests {
             let msg = inner
                 .exclusive_request(op)
                 .unwrap_or_else(|e| panic!("{name} refused a busy cluster: {e:#}"));
+            assert_eq!(inner.exclusive.len(), 1, "{name} did not park: {msg}");
             assert_eq!(
-                inner.exclusive.len(),
-                1,
-                "{name} did not park: {msg}"
+                inner.exclusive[0].label, name,
+                "{name} under the wrong label"
             );
-            assert_eq!(inner.exclusive[0].label, name, "{name} under the wrong label");
         }
     }
 
@@ -3181,7 +3187,10 @@ mod tests {
             op.blocks(Stage::Render, 12),
             "chapter 12 is render:12:35 — the row in the operator's log"
         );
-        assert!(op.blocks(Stage::Merge, 12), "a re-speak invalidates its merge too");
+        assert!(
+            op.blocks(Stage::Merge, 12),
+            "a re-speak invalidates its merge too"
+        );
         // …and the scope is bounded by *what it blocks*, not by the cluster: a
         // swap is chapter-scoped, so unrelated work keeps flowing.
         let swap = ExclusiveOp::SwapVoice {
@@ -3190,7 +3199,10 @@ mod tests {
             chapters: vec![12],
         };
         assert!(swap.blocks(Stage::Render, 12));
-        assert!(!swap.blocks(Stage::Render, 13), "chapter 13 keeps rendering");
+        assert!(
+            !swap.blocks(Stage::Render, 13),
+            "chapter 13 keeps rendering"
+        );
     }
 
     /// **The gate must never be weaker than the surgery's own last line**, or a
@@ -3210,11 +3222,7 @@ mod tests {
             r#"{"characters":[{"name":"A"},{"name":"B"}]}"#,
         )
         .unwrap();
-        std::fs::write(
-            layout.cast("vieneu"),
-            r#"{"A":"Đức Trí","B":"Quang Sơn"}"#,
-        )
-        .unwrap();
+        std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Quang Sơn"}"#).unwrap();
         std::fs::create_dir_all(layout.chapters()).unwrap();
         // Chapter 3's *text* still says B, and it has no script: the
         // "chapters hearing the name" half of the scope is empty, so the text
@@ -3319,7 +3327,10 @@ mod tests {
         t.state = TaskState::Done;
         t.clear_holders();
         inner.run_exclusive();
-        assert!(inner.exclusive.is_empty(), "the fold ran once the way cleared");
+        assert!(
+            inner.exclusive.is_empty(),
+            "the fold ran once the way cleared"
+        );
 
         // …and it really folded: B is gone from the cast of characters and
         // lives on as one of A's aliases, which is what makes a future digest
@@ -3461,7 +3472,12 @@ mod tests {
         // Upstreams Done, so *only* the write gate can explain a non-offer:
         // without this, an absent crawl:7/digest:7 would refuse render:7
         // anyway and the test would prove nothing.
-        for (n, stage) in [(1, Stage::Crawl), (1, Stage::Digest), (7, Stage::Crawl), (7, Stage::Digest)] {
+        for (n, stage) in [
+            (1, Stage::Crawl),
+            (1, Stage::Digest),
+            (7, Stage::Crawl),
+            (7, Stage::Digest),
+        ] {
             let mut t = Task::new(n, stage);
             t.state = TaskState::Done;
             inner.tasks.insert(format!("{}:{n}", stage.as_str()), t);
@@ -3485,7 +3501,10 @@ mod tests {
         // w2 has no beats at all (fresh box): the gates that need facts pass,
         // which is exactly what lets this test isolate the write gate.
         let offer = inner.offer("w2").expect("an out-of-scope row is offered");
-        assert_eq!(offer.task_id, "render:7", "chapter 7 renders under the swap");
+        assert_eq!(
+            offer.task_id, "render:7",
+            "chapter 7 renders under the swap"
+        );
         // And chapter 1's merge is not the offer, whatever the policy said.
         assert_ne!(offer.task_id, "merge:1");
     }
@@ -3508,8 +3527,14 @@ mod tests {
             chapters: vec![41, 90],
         };
         assert!(swap.blocks(Stage::Render, 41));
-        assert!(!swap.blocks(Stage::Render, 42), "chapter 42 keeps rendering");
-        assert!(!swap.blocks(Stage::Crawl, 41), "crawl never pauses for a swap");
+        assert!(
+            !swap.blocks(Stage::Render, 42),
+            "chapter 42 keeps rendering"
+        );
+        assert!(
+            !swap.blocks(Stage::Crawl, 41),
+            "crawl never pauses for a swap"
+        );
     }
 
     #[test]
@@ -3524,10 +3549,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("neither a preset nor an enrolled"), "{err}");
-        assert!(
-            inner.exclusive.is_empty(),
-            "a refused write must not park"
-        );
+        assert!(inner.exclusive.is_empty(), "a refused write must not park");
     }
 
     #[test]
@@ -4030,7 +4052,10 @@ mod tests {
             TaskState::Running,
             "a refusal must not half-apply"
         );
-        assert_eq!(inner.tasks["merge:7"].assigned_to.as_deref(), Some("w-live"));
+        assert_eq!(
+            inner.tasks["merge:7"].assigned_to.as_deref(),
+            Some("w-live")
+        );
 
         let msg = inner.op_release_task(Stage::Merge, 7, true);
         assert!(msg.contains("1 row(s)"), "{msg}");
@@ -4115,7 +4140,10 @@ mod tests {
         let msg = inner.op_release_worker("w-gone", false);
         assert!(msg.contains("3 row(s)"), "every row it holds: {msg}");
         assert_eq!(inner.tasks["merge:2"].state, TaskState::Pending);
-        assert_eq!(inner.tasks["merge:2"].attempts, 4, "a release is not a retry");
+        assert_eq!(
+            inner.tasks["merge:2"].attempts, 4,
+            "a release is not a retry"
+        );
         assert_eq!(inner.tasks["render:3"].state, TaskState::Pending);
         assert_eq!(
             inner.tasks["merge:5"].state,

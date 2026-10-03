@@ -1700,9 +1700,7 @@ pub enum ExclusiveOp {
     Rerender,
     /// Sound-tag rewrite: waits on digests (the scripts are being
     /// rewritten under them), then renders and merges.
-    Retag {
-        chapters: Vec<u32>,
-    },
+    Retag { chapters: Vec<u32> },
     /// Re-attribute one chapter's speakers: waits on every row of that
     /// chapter — a recast rewrites the script a digest is about to read.
     Recast {
@@ -1788,11 +1786,9 @@ impl ExclusiveOp {
                 ExclusiveOp::SwapVoice { chapters, .. }
                 | ExclusiveOp::Merge { chapters, .. }
                 | ExclusiveOp::Reconcile { chapters, .. }
-                | ExclusiveOp::Retag { chapters }
-                    => chapters.contains(&chapter),
+                | ExclusiveOp::Retag { chapters } => chapters.contains(&chapter),
                 ExclusiveOp::Recast { chapter: c, .. }
-                | ExclusiveOp::FixSpeaker { chapter: c, .. }
-                    => *c == chapter,
+                | ExclusiveOp::FixSpeaker { chapter: c, .. } => *c == chapter,
                 _ => true,
             }
     }
@@ -1800,7 +1796,9 @@ impl ExclusiveOp {
     /// The one-line description the status line and the ledger show.
     pub fn describe(&self) -> String {
         match self {
-            ExclusiveOp::SwapVoice { character, voice, .. } => {
+            ExclusiveOp::SwapVoice {
+                character, voice, ..
+            } => {
                 format!("swap {character} → {voice}")
             }
             ExclusiveOp::Remix { speed, .. } => format!("remix at speed {speed}"),
@@ -1809,9 +1807,14 @@ impl ExclusiveOp {
             ExclusiveOp::Retag { .. } => "sound-tag rewrite".into(),
             ExclusiveOp::Recast { chapter, .. } => format!("recast ch{chapter}"),
             ExclusiveOp::FixSpeaker {
-                chapter, segment, speaker, ..
+                chapter,
+                segment,
+                speaker,
+                ..
             } => format!("ch{chapter} seg{segment} → {speaker}"),
-            ExclusiveOp::Merge { survivor, absorbed, .. } => {
+            ExclusiveOp::Merge {
+                survivor, absorbed, ..
+            } => {
                 format!("merge {} into {survivor}", absorbed.join(", "))
             }
             ExclusiveOp::Reconcile { merges, .. } => {
@@ -1840,7 +1843,9 @@ impl ExclusiveOp {
             }),
             "remerge" => Some(ExclusiveOp::Remerge),
             "rerender" => Some(ExclusiveOp::Rerender),
-            "retag" => Some(ExclusiveOp::Retag { chapters: Vec::new() }),
+            "retag" => Some(ExclusiveOp::Retag {
+                chapters: Vec::new(),
+            }),
             "recast" => Some(ExclusiveOp::Recast {
                 chapter: 0,
                 fixes: Vec::new(),

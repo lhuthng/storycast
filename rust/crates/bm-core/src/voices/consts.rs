@@ -266,7 +266,9 @@ pub fn store_kind(engine: &str) -> VoiceStore {
 /// no ceiling**, matching the rule the rest of this module follows: an engine we
 /// know nothing about is not the broken one.
 pub fn max_temperature(engine: &str) -> f64 {
-    declaration(engine).map(|d| d.max_temperature).unwrap_or(1.0)
+    declaration(engine)
+        .map(|d| d.max_temperature)
+        .unwrap_or(1.0)
 }
 
 /// `wanted`, capped at what `engine` can actually speak.
@@ -458,10 +460,7 @@ impl VoicePolicy {
     ///
     /// Clones are untouched: they live in the sample pool and the store, not in
     /// these tables, so a curated `refs/` voice is never narrowed away.
-    pub fn restricted_to(
-        &self,
-        installed: &std::collections::BTreeSet<String>,
-    ) -> VoicePolicy {
+    pub fn restricted_to(&self, installed: &std::collections::BTreeSet<String>) -> VoicePolicy {
         let keep = |pool: &[String]| -> Vec<String> {
             pool.iter()
                 .filter(|v| installed.contains(*v))

@@ -8,7 +8,9 @@ use std::path::PathBuf;
 
 #[test]
 fn crawl_a_real_book() {
-    let Some(p) = std::env::var_os("BM_BOOK") else { return };
+    let Some(p) = std::env::var_os("BM_BOOK") else {
+        return;
+    };
     let book = PathBuf::from(p);
     // The book is named relative to the workspace root, which is the root the
     // crawl is confined to — the same arrangement an operator gets.
@@ -21,7 +23,11 @@ fn crawl_a_real_book() {
         .strip_prefix(&root)
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|_| {
-            println!("note: {} is not under {}, naming it absolutely", book.display(), root.display());
+            println!(
+                "note: {} is not under {}, naming it absolutely",
+                book.display(),
+                root.display()
+            );
             book.clone()
         });
 

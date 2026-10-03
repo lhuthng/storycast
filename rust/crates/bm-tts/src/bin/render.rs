@@ -54,10 +54,7 @@ fn emit(
     // requiring `--wav` as well made a run that asked only for raw silently
     // write nothing.
     if let Some(prefix) = out.wav {
-        std::fs::write(
-            format!("{prefix}.{n}.wav"),
-            to_wav_bytes(pcm, rate),
-        )?;
+        std::fs::write(format!("{prefix}.{n}.wav"), to_wav_bytes(pcm, rate))?;
     }
     if let Some(prefix) = out.raw {
         let mut b = Vec::with_capacity(pcm.len() * 4);
@@ -74,7 +71,10 @@ fn emit(
         line.insert("gaps".into(), serde_json::json!(g));
     }
     line.insert("samples".into(), serde_json::json!(pcm.len()));
-    line.insert("seconds".into(), serde_json::json!(pcm.len() as f64 / rate as f64));
+    line.insert(
+        "seconds".into(),
+        serde_json::json!(pcm.len() as f64 / rate as f64),
+    );
     println!("{}", serde_json::Value::Object(line));
     eprintln!(
         "  line {n}: {} samples ({:.2}s) in {:.2?}",
@@ -169,7 +169,9 @@ fn main() -> Result<()> {
     // rather than with a flag is what makes one command render either tree —
     // and it is what stops the two binaries from disagreeing about which engine
     // a directory is.
-    let is_pocket = std::path::Path::new(&models).join("pocket.safetensors").is_file();
+    let is_pocket = std::path::Path::new(&models)
+        .join("pocket.safetensors")
+        .is_file();
     #[cfg(feature = "pocket")]
     if is_pocket {
         return render_pocket(
@@ -317,15 +319,7 @@ fn render_pocket(
     for (n, text) in inputs.iter().enumerate() {
         let started = std::time::Instant::now();
         let (pcm, rate) = engine.generate(text, &chosen, temp, seed)?;
-        emit(
-            n,
-            &pcm,
-            rate as u32,
-            None,
-            None,
-            started,
-            Out { wav, raw },
-        )?;
+        emit(n, &pcm, rate as u32, None, None, started, Out { wav, raw })?;
     }
     Ok(())
 }

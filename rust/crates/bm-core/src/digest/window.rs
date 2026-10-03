@@ -399,7 +399,16 @@ mod tests {
         // One, not zero: the two rounds still run and still report, which is
         // what the pre-window digest did with an empty chapter.
         assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0], Window { from: 0, to: 0, events: 0, chars: 0, sentences: 0 });
+        assert_eq!(
+            windows[0],
+            Window {
+                from: 0,
+                to: 0,
+                events: 0,
+                chars: 0,
+                sentences: 0
+            }
+        );
     }
 
     #[test]
@@ -409,7 +418,11 @@ mod tests {
         // still digests in one call, exactly as before.
         let c = prose(75);
         assert!(
-            c.events.iter().map(|e| e.text.chars().count()).sum::<usize>() > 13_600,
+            c.events
+                .iter()
+                .map(|e| e.text.chars().count())
+                .sum::<usize>()
+                > 13_600,
             "the fixture has to be longer than the corpus's longest chapter"
         );
         let windows = plan_windows(&c, &DigestSettings::default());
@@ -490,7 +503,11 @@ mod tests {
         assert_eq!(c.events.len(), 2);
         let windows = plan_windows(&c, &settings(0, 0, 100));
         assert_partitions(&c, &windows);
-        assert_eq!(windows.len(), 2, "the giant is a window of its own: {windows:?}");
+        assert_eq!(
+            windows.len(),
+            2,
+            "the giant is a window of its own: {windows:?}"
+        );
         assert_eq!(windows[0].events, 1);
         assert!(windows[0].chars > 100 * CHARS_PER_TOKEN / 2);
     }
@@ -521,7 +538,9 @@ mod tests {
                 assert_eq!(e.text, c.events[w.from + j].text);
             }
             // The prompt sees the same JSON the whole-chapter path renders.
-            assert!(slice.prompt_json.contains(&format!("\"{}\"", slice.events[0].id)));
+            assert!(slice
+                .prompt_json
+                .contains(&format!("\"{}\"", slice.events[0].id)));
             seen.extend(slice.events.iter().map(|e| e.id.clone()));
         }
         let all: Vec<String> = c.events.iter().map(|e| e.id.clone()).collect();
@@ -580,8 +599,8 @@ mod tests {
         use std::io::Write;
         let file = std::fs::File::create(path).unwrap();
         let mut w = zip::ZipWriter::new(file);
-        let o: zip::write::FileOptions<()> = zip::write::FileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let o: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         w.start_file("mimetype", o).unwrap();
         w.write_all(b"application/epub+zip").unwrap();
         w.start_file("META-INF/container.xml", o).unwrap();
@@ -623,7 +642,10 @@ mod tests {
             .map(|l| {
                 // Ampersand first, or the ampersands this introduces are
                 // escaped a second time.
-                format!("<p>{}</p>", l.trim().replace('&', "&amp;").replace('<', "&lt;"))
+                format!(
+                    "<p>{}</p>",
+                    l.trim().replace('&', "&amp;").replace('<', "&lt;")
+                )
             })
             .collect()
     }
@@ -743,7 +765,11 @@ mod tests {
         // windows a seam between two sentences rather than mid-clause.
         for (n, long, windows) in &plans[1..] {
             assert!(windows.len() > 1, "chapter {n} should need a cut");
-            println!("\n  chapter {n}: {} events, {} windows", long.events.len(), windows.len());
+            println!(
+                "\n  chapter {n}: {} events, {} windows",
+                long.events.len(),
+                windows.len()
+            );
             println!("  window  events  weight  tokens    first    last  it ends on");
             for (i, w) in windows.iter().enumerate() {
                 let first = &long.events[w.from];
@@ -818,10 +844,8 @@ mod tests {
             ..Default::default()
         };
         spec.read_root = root.clone();
-        spec.params.insert(
-            "epub".into(),
-            serde_json::json!(book.to_string_lossy()),
-        );
+        spec.params
+            .insert("epub".into(), serde_json::json!(book.to_string_lossy()));
         let provider = Provider::new(&spec);
         let total = provider
             .discover(1, 999)
@@ -836,7 +860,8 @@ mod tests {
             if n > total {
                 break;
             }
-            let CrawlOutcome::Text { text, .. } = provider.crawl(n, None, 1).unwrap().outcome else {
+            let CrawlOutcome::Text { text, .. } = provider.crawl(n, None, 1).unwrap().outcome
+            else {
                 continue;
             };
             let prepared = super::super::prepare_chapter(&text);
@@ -921,7 +946,10 @@ mod tests {
                 "\n  all {total} chapters: {chars} chars, {dirty} still carrying the scan watermark, \
                  {split} with the heading split off"
             );
-            assert_eq!(dirty, 0, "{dirty} chapters still narrate the scanner's watermark");
+            assert_eq!(
+                dirty, 0,
+                "{dirty} chapters still narrate the scanner's watermark"
+            );
         }
     }
 

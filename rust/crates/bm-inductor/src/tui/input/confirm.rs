@@ -1,4 +1,5 @@
 //! Confirm: swallow everything but Enter/y and Esc/n.
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     input::{dispatch, dispatch_op},
@@ -6,7 +7,6 @@ use crate::tui::{
     screen::{Confirm, ConfirmAction, Screen},
     style::Level,
 };
-use crate::tui::input::Flow;
 use bm_proto::{Op, OpRequest};
 use crossterm::event::{KeyCode, KeyEvent};
 use std::sync::atomic::Ordering;

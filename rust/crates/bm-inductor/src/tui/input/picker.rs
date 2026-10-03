@@ -7,6 +7,7 @@
 //! and the audition keys go quiet. `Esc` blurs back, `^R` focuses
 //! explicitly, and the `:current` / `:try` / `:another` words audition
 //! from the command line in either focus.
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     input::audition::{pick_current, pick_pointed},
@@ -15,7 +16,6 @@ use crate::tui::{
     screen::{Confirm, ConfirmAction, PickStage, Picker, Screen, TextKind, TextPrompt},
     style::Level,
 };
-use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Last valid cursor for the rows on screen right now, per stage.

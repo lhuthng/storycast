@@ -1,12 +1,12 @@
 //! Keys for the guided `workspace new`: name → profile → crawler → create.
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     input::dispatch,
     jobs::{Job, WorkspaceReq},
-    screen::{Screen, WsItem, WsStep, WorkspaceNew},
+    screen::{Screen, WorkspaceNew, WsItem, WsStep},
     style::Level,
 };
-use crate::tui::input::Flow;
 use bm_core::preset::{read_presets, CrawlerSetup};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
@@ -180,8 +180,16 @@ fn build_crawler(
             Some(CrawlerSetup {
                 script: "crawlers/examples/epub.lua".into(),
                 params,
-                book: if dir { PathBuf::new() } else { PathBuf::from(named) },
-                books: if dir { PathBuf::from(named) } else { PathBuf::new() },
+                book: if dir {
+                    PathBuf::new()
+                } else {
+                    PathBuf::from(named)
+                },
+                books: if dir {
+                    PathBuf::from(named)
+                } else {
+                    PathBuf::new()
+                },
                 ..Default::default()
             })
         }
@@ -203,7 +211,10 @@ fn build_crawler(
                 .find(|s| s.host == host)?;
             let mut params = serde_json::Map::new();
             for (k, v) in site.params {
-                params.insert((*k).to_string(), serde_json::Value::String((*v).to_string()));
+                params.insert(
+                    (*k).to_string(),
+                    serde_json::Value::String((*v).to_string()),
+                );
             }
             // Global reference: the resolved path is checked by
             // `crawler_items`, and `apply_preset` writes the shared spelling.

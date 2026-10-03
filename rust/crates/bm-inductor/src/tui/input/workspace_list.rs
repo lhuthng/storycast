@@ -2,6 +2,7 @@
 //!
 //! The rows are built by [`crate::tui::screen::book_items`], next to the screen
 //! they fill, so `:ws` and a test read the same tree the same way.
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     input::dispatch,
@@ -9,7 +10,6 @@ use crate::tui::{
     screen::{Screen, WsList},
     style::Level,
 };
-use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) async fn key_workspace_list(

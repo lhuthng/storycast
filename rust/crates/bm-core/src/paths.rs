@@ -424,7 +424,10 @@ impl Layout {
 
     /// Chapter numbers that have a script, ascending.
     pub fn script_chapters(&self) -> Vec<u32> {
-        self.scripts().iter().filter_map(|p| chapter_of(p)).collect()
+        self.scripts()
+            .iter()
+            .filter_map(|p| chapter_of(p))
+            .collect()
     }
 
     /// The scripts, one directory: `data/script/`.
@@ -495,7 +498,10 @@ impl Layout {
             return None;
         }
         let root = script_dir.parent()?.parent()?;
-        Some((Self::resolve(root).unwrap_or_else(|_| Self::new(root)), chapter))
+        Some((
+            Self::resolve(root).unwrap_or_else(|_| Self::new(root)),
+            chapter,
+        ))
     }
 
     pub fn bible(&self) -> PathBuf {
@@ -1419,8 +1425,14 @@ pub fn workspaces(root: &Path) -> Vec<WorkspaceEntry> {
                     WorkspaceEntry {
                         active: name == active,
                         config: workspace_config(&e.path()),
-                        chapters: files_with_extension(&e.path().join("data").join("chapters"), "txt"),
-                        scripts: files_with_extension(&e.path().join("data").join("script"), "json"),
+                        chapters: files_with_extension(
+                            &e.path().join("data").join("chapters"),
+                            "txt",
+                        ),
+                        scripts: files_with_extension(
+                            &e.path().join("data").join("script"),
+                            "json",
+                        ),
                         name,
                     }
                 })
@@ -2405,14 +2417,19 @@ mod tests {
         std::fs::write(l.chapter_txt(9), "Chương 9: Tiêu đề\n\nbody\n").unwrap();
         std::fs::write(l.script(9), r#"{"segments":[]}"#).unwrap();
 
-        let (back, chapter) = Layout::of_script(&l.script(9)).expect("the script is in a script dir");
+        let (back, chapter) =
+            Layout::of_script(&l.script(9)).expect("the script is in a script dir");
         assert_eq!(chapter, 9, "the chapter is the file's own name");
         assert_eq!(
             back.chapter_txt(9),
             l.chapter_txt(9),
             "and the layout is rooted at the workspace, not at data/"
         );
-        assert_eq!(back.script(9), l.script(9), "so it also agrees about the script");
+        assert_eq!(
+            back.script(9),
+            l.script(9),
+            "so it also agrees about the script"
+        );
 
         // A path that is not in a script folder is refused rather than guessed
         // at: a wrong guess is a layout that resolves to nothing and says so
@@ -2447,7 +2464,10 @@ mod tests {
 
         let (from_book, chapter) = Layout::of_script(&book.script(3)).expect("a script resolves");
         assert_eq!(chapter, 3);
-        assert_eq!(from_book.adapter, "en-US", "the book's own settings name it");
+        assert_eq!(
+            from_book.adapter, "en-US",
+            "the book's own settings name it"
+        );
         assert_eq!(
             crate::adapter::in_force(&from_book)
                 .expect("readable")

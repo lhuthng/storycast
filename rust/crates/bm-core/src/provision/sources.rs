@@ -1138,7 +1138,12 @@ mod tests {
         // than a panic inside a provision task.
         let s = Sources::plan(&l, &[Stage::Merge]).unwrap();
         for m in &s.members {
-            assert_eq!(m.base.join(&m.to), m.from, "member {} addressed against its base", m.to);
+            assert_eq!(
+                m.base.join(&m.to),
+                m.from,
+                "member {} addressed against its base",
+                m.to
+            );
         }
         let clip = s
             .members
@@ -1151,8 +1156,7 @@ mod tests {
             "the clip comes from the workspace's own tree"
         );
         assert_eq!(
-            clip.base,
-            work,
+            clip.base, work,
             "and is addressed relative to the workspace, not the checkout root"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1253,7 +1257,8 @@ mod tests {
         let l = fixture("pack-split");
         let stages = [Stage::Digest, Stage::Merge, Stage::Crawl];
         let pushed = Sources::plan(&l, &stages).unwrap();
-        let release = crate::artifact::PackRelease::for_repo("o/n", "xianxia", "0.1.0", "aa").unwrap();
+        let release =
+            crate::artifact::PackRelease::for_repo("o/n", "xianxia", "0.1.0", "aa").unwrap();
         let fetched = Sources::plan_for(&l, &stages, Some(&release)).unwrap();
 
         let under = |s: &Sources, prefix: &str| {
@@ -1296,7 +1301,8 @@ mod tests {
     fn a_pack_digest_moves_only_the_pack() {
         let l = fixture("pack-digest");
         let stages = [Stage::Digest, Stage::Merge];
-        let release = crate::artifact::PackRelease::for_repo("o/n", "xianxia", "0.1.0", "aa").unwrap();
+        let release =
+            crate::artifact::PackRelease::for_repo("o/n", "xianxia", "0.1.0", "aa").unwrap();
         let a = Sources::plan_for(&l, &stages, Some(&release)).unwrap();
         let b = Sources::plan_for(&l, &stages, Some(&release)).unwrap();
         assert_eq!(

@@ -338,7 +338,8 @@ pub fn compute_manifest(
             dirs.join(" + "),
             base.display()
         );
-    }        Ok(Manifest {
+    }
+    Ok(Manifest {
         name: name.to_string(),
         version: version.to_string(),
         piece: piece.noun().to_string(),
@@ -962,8 +963,8 @@ mod tests {
             &Pointer {
                 name: "fixture".into(),
                 hash,
-    version: String::new(),
-},
+                version: String::new(),
+            },
         )
         .unwrap();
         assert_eq!(verify(&dir).unwrap().name, "fixture");
@@ -1052,19 +1053,21 @@ mod tests {
         // the checkout.
         let work = dir.join("workspaces/book");
         std::fs::create_dir_all(&work).unwrap();
-        let mut settings = crate::config::Settings::default();
-        settings.profile = Binding {
-            pack: Pointer {
-                name: "apothecary".into(),
-                hash: "w".into(),
-                version: String::new(),
+        let settings = crate::config::Settings {
+            profile: Binding {
+                pack: Pointer {
+                    name: "apothecary".into(),
+                    hash: "w".into(),
+                    version: String::new(),
+                },
+                adapter: Pointer::default(),
+                engine: Pointer {
+                    name: "pocket".into(),
+                    hash: String::new(),
+                    version: String::new(),
+                },
             },
-            adapter: Pointer::default(),
-            engine: Pointer {
-                name: "pocket".into(),
-                hash: String::new(),
-                version: String::new(),
-            },
+            ..crate::config::Settings::default()
         };
         settings.save(&work.join("settings.json")).unwrap();
         let layout = crate::paths::Layout {
@@ -1074,7 +1077,10 @@ mod tests {
         };
         let b = in_force(&layout).unwrap();
         assert_eq!(b.pack.name, "apothecary");
-        assert_eq!(b.adapter.name, "vi-VN", "the checkout's language fills the gap");
+        assert_eq!(
+            b.adapter.name, "vi-VN",
+            "the checkout's language fills the gap"
+        );
         assert_eq!(b.engine.name, "pocket");
         // The implicit root workspace still reads the pointer alone.
         let root_layout = crate::paths::Layout::new(dir.clone());
@@ -1107,19 +1113,21 @@ mod tests {
         let work = dir.join("workspaces/book");
         std::fs::create_dir_all(work.join("assets")).unwrap();
         std::fs::write(work.join("assets/world.json"), "{}").unwrap();
-        let mut settings = crate::config::Settings::default();
-        settings.profile = Binding {
-            pack: Pointer {
-                name: "book".into(),
-                hash: String::new(),
-                version: String::new(),
+        let settings = crate::config::Settings {
+            profile: Binding {
+                pack: Pointer {
+                    name: "book".into(),
+                    hash: String::new(),
+                    version: String::new(),
+                },
+                adapter: Pointer::default(),
+                engine: Pointer {
+                    name: "pocket".into(),
+                    hash: String::new(),
+                    version: String::new(),
+                },
             },
-            adapter: Pointer::default(),
-            engine: Pointer {
-                name: "pocket".into(),
-                hash: String::new(),
-                version: String::new(),
-            },
+            ..crate::config::Settings::default()
         };
         settings.save(&work.join("settings.json")).unwrap();
 
@@ -1130,10 +1138,16 @@ mod tests {
         };
         let b = verify_layout(&layout, Some("pocket")).unwrap();
         assert_eq!(b.pack.name, "book");
-        assert_eq!(b.adapter.name, "vi-VN", "the checkout's language fills the gap");
+        assert_eq!(
+            b.adapter.name, "vi-VN",
+            "the checkout's language fills the gap"
+        );
         assert_eq!(b.engine.name, "pocket", "named from settings");
         let stamped = crate::config::Settings::load(&work.join("settings.json")).profile;
-        assert_eq!(stamped.pack.hash, "", "the workspace binding was not re-stamped");
+        assert_eq!(
+            stamped.pack.hash, "",
+            "the workspace binding was not re-stamped"
+        );
         assert_eq!(
             read_binding(&dir).unwrap(),
             before,
@@ -1149,18 +1163,18 @@ mod tests {
             pack: Pointer {
                 name: "xianxia".into(),
                 hash: "p".into(),
-    version: String::new(),
-},
+                version: String::new(),
+            },
             adapter: Pointer {
                 name: "vi-VN".into(),
                 hash: "a".into(),
-    version: String::new(),
-},
+                version: String::new(),
+            },
             engine: Pointer {
                 name: "vieneu".into(),
                 hash: "e".into(),
-    version: String::new(),
-},
+                version: String::new(),
+            },
         };
         write_binding(&dir, &b).unwrap();
         assert_eq!(read_binding(&dir).unwrap(), b);
@@ -1172,8 +1186,8 @@ mod tests {
             &Pointer {
                 name: "xianxia".into(),
                 hash: "p2".into(),
-    version: String::new(),
-},
+                version: String::new(),
+            },
         )
         .unwrap();
         let after = read_binding(&dir).unwrap();
@@ -1192,13 +1206,13 @@ mod tests {
                 pack: Pointer {
                     name: "xianxia".into(),
                     hash: String::new(),
-    version: String::new(),
-},
+                    version: String::new(),
+                },
                 adapter: Pointer {
                     name: "vi-VN".into(),
                     hash: String::new(),
-    version: String::new(),
-},
+                    version: String::new(),
+                },
                 engine: Pointer::default(),
             },
         )
@@ -1233,13 +1247,13 @@ mod tests {
                 pack: Pointer {
                     name: "xianxia".into(),
                     hash: String::new(),
-    version: String::new(),
-},
+                    version: String::new(),
+                },
                 adapter: Pointer {
                     name: "vi-VN".into(),
                     hash: String::new(),
-    version: String::new(),
-},
+                    version: String::new(),
+                },
                 engine: Pointer::default(),
             },
         )
@@ -1283,11 +1297,7 @@ mod tests {
         // still buildable — the assertion is that the workspace's is not it.
         let workspace = root.join("workspaces/book");
         std::fs::create_dir_all(workspace.join("assets")).unwrap();
-        std::fs::write(
-            workspace.join("assets/scene-map.json"),
-            r#"{"scenes":[]}"#,
-        )
-        .unwrap();
+        std::fs::write(workspace.join("assets/scene-map.json"), r#"{"scenes":[]}"#).unwrap();
         std::fs::write(workspace.join("assets/only-here.json"), "{}").unwrap();
         let layout = crate::paths::Layout {
             root: root.clone(),

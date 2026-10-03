@@ -11,6 +11,7 @@
 //! not, will be offered merge work with no clips on it. That does not fail:
 //! the merge degrades a missing clip to one warning and mixes silence. So the
 //! key that widens a policy says so, in the panel, at the moment it happens.
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     input::dispatch,
@@ -18,7 +19,6 @@ use crate::tui::{
     screen::{PolicyView, Screen},
     style::Level,
 };
-use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) async fn key_policy(

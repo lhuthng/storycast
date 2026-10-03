@@ -1145,7 +1145,10 @@ pub fn resolve(assets: &Path, dry_run: bool) -> Result<Report> {
         };
         // Every pack in the closure is compared, so a parent that moved under a
         // dependency the child never named directly is caught here too.
-        if previous.get(dep.as_str()).is_some_and(|was| *was != record.hash) {
+        if previous
+            .get(dep.as_str())
+            .is_some_and(|was| *was != record.hash)
+        {
             report.stale.push(dep.clone());
         }
         // Only the direct ones are "the dependencies" — what a release of this
@@ -1468,7 +1471,11 @@ mod tests {
         let shared = tree.iter().find(|n| n.name == "E").unwrap();
         assert!(!shared.direct, "E is reached through its children");
         assert_eq!(shared.via, ["B", "C"], "and the map remembers both paths");
-        assert_eq!(shared.hash.len(), 64, "a node carries the hash it folded at");
+        assert_eq!(
+            shared.hash.len(),
+            64,
+            "a node carries the hash it folded at"
+        );
         let direct = tree.iter().find(|n| n.name == "B").unwrap();
         assert!(direct.direct && direct.via.is_empty(), "B is named here");
 
@@ -1495,13 +1502,20 @@ mod tests {
         assert_eq!(pool["rain"].tags, vec!["C-rain"], "C beats B and E");
         assert_eq!(pool["night"].tags, vec!["B-night"]);
         assert_eq!(pool["snow"].tags, vec!["G-snow"]);
-        assert!(marker.keys["effect-pool.json"].contains_key("snow"), "G's own key is recorded as inherited");
+        assert!(
+            marker.keys["effect-pool.json"].contains_key("snow"),
+            "G's own key is recorded as inherited"
+        );
 
         // A second resolve reaches the same answer, E still once.
         let again = resolve(&assets, false).unwrap();
         assert!(!again.changed(), "{again:?}");
         assert_eq!(
-            read_marker(&assets).tree.iter().filter(|n| n.name == "E").count(),
+            read_marker(&assets)
+                .tree
+                .iter()
+                .filter(|n| n.name == "E")
+                .count(),
             1
         );
     }

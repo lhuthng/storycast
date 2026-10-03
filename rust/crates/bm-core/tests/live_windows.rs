@@ -96,9 +96,8 @@ fn long_chapter(layout: &Layout) -> anyhow::Result<String> {
 }
 
 fn inputs(layout: &Layout) -> anyhow::Result<(Settings, Value, String)> {
-    let settings: Settings = serde_json::from_str(&std::fs::read_to_string(
-        layout.work.join("settings.json"),
-    )?)?;
+    let settings: Settings =
+        serde_json::from_str(&std::fs::read_to_string(layout.work.join("settings.json"))?)?;
     let bible = bm_core::digest::load_bible(&layout.bible());
     let text = long_chapter(layout)?;
     println!(
@@ -154,7 +153,11 @@ async fn a_real_model_stages_a_long_chapter_in_parts() -> anyhow::Result<()> {
     println!(
         "--- split: budget {} tokens of answer, checkpoint {} ---",
         settings.digest.answer_tokens,
-        if resumed { "resumed, then cleared" } else { "none" },
+        if resumed {
+            "resumed, then cleared"
+        } else {
+            "none"
+        },
     );
 
     let mut progress = |f: f32, s: String| println!("  [{:.0}%] {s}", f * 100.0);

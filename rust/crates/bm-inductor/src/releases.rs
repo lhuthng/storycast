@@ -295,7 +295,7 @@ pub fn cmd_update(
         return Ok(());
     }
     println!("  replaced: {}", update.replaced.join(", "));
-    if let Ok(pointer) = bm_core::profile::in_force(&layout).map(|b| b.pack) {
+    if let Ok(pointer) = bm_core::profile::in_force(layout).map(|b| b.pack) {
         println!(
             "  the composition changed — `tools/profile.sh pack {} --version V` to publish it \
              under a new version",

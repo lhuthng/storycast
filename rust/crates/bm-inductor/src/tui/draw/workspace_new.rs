@@ -1,7 +1,7 @@
 //! The guided `workspace new` overlay: name → profile → crawler.
 use crate::tui::{
     app::App,
-    screen::{WsStep, WorkspaceNew},
+    screen::{WorkspaceNew, WsStep},
     style::{centered, style_of},
 };
 use ratatui::{
@@ -44,7 +44,10 @@ pub(crate) fn draw_workspace_new(f: &mut ratatui::Frame, app: &App, ws: &Workspa
         } else {
             ("○ ", Color::DarkGray)
         };
-        crumb.push(Span::styled(format!("{mark}{step}"), style_of(app.colour(), colour)));
+        crumb.push(Span::styled(
+            format!("{mark}{step}"),
+            style_of(app.colour(), colour),
+        ));
     }
 
     let mut body: Vec<Line> = vec![Line::from(crumb), Line::from("")];
@@ -81,7 +84,10 @@ pub(crate) fn draw_workspace_new(f: &mut ratatui::Frame, app: &App, ws: &Workspa
                 let mut spans = vec![
                     Span::styled(
                         marker,
-                        style_of(app.colour(), if selected { Color::Cyan } else { Color::Reset }),
+                        style_of(
+                            app.colour(),
+                            if selected { Color::Cyan } else { Color::Reset },
+                        ),
                     ),
                     Span::styled(
                         item.label.clone(),

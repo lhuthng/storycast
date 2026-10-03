@@ -480,8 +480,14 @@ mod tests {
     }
 
     fn stamp_for(root: &std::path::Path, stages: &[bm_proto::Stage]) -> ProvisionStamp {
-        compute_provision_stamp(&crate::Layout::new(root), stages, "0.2.0", &agent_bin(root), None)
-            .expect("the fixture plan must build")
+        compute_provision_stamp(
+            &crate::Layout::new(root),
+            stages,
+            "0.2.0",
+            &agent_bin(root),
+            None,
+        )
+        .expect("the fixture plan must build")
     }
 
     /// The layout a real provision uses on a machine with a workspace selected:
@@ -1002,7 +1008,10 @@ mod tests {
         };
 
         let pushed = at(None);
-        assert_eq!(pushed.pack_release, "", "no release means the pack is in the push");
+        assert_eq!(
+            pushed.pack_release, "",
+            "no release means the pack is in the push"
+        );
         let first = at(Some(&release("a".repeat(64).as_str())));
         let other = at(Some(&release("b".repeat(64).as_str())));
 

@@ -1,6 +1,6 @@
 //! The jobs overlay: what the background lanes are actually doing, scroll only.
-use crate::tui::{app::App, screen::Screen};
 use crate::tui::input::Flow;
+use crate::tui::{app::App, screen::Screen};
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) async fn key_jobs(

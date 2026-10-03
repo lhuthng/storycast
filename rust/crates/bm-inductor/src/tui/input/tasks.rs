@@ -1,4 +1,5 @@
 //! Task ledger: filterable list plus the detail page. `retry_task` lives here.
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     input::{dispatch_op, op_key},
@@ -7,7 +8,6 @@ use crate::tui::{
     screen::{Confirm, Screen, TaskDetail, TasksView, TextKind, TextPrompt},
     style::Level,
 };
-use crate::tui::input::Flow;
 use bm_proto::{Op, OpRequest, Task, TaskState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeSet;

@@ -177,8 +177,10 @@ impl Push {
     /// Record the inductor's thread instruction. `None` clears it, restoring
     /// the sidecar's own default.
     pub(crate) fn set_tts_threads(&self, threads: Option<u32>) {
-        self.tts_threads
-            .store(threads.map(u64::from).unwrap_or(THREADS_UNSET), Ordering::SeqCst);
+        self.tts_threads.store(
+            threads.map(u64::from).unwrap_or(THREADS_UNSET),
+            Ordering::SeqCst,
+        );
     }
 
     pub(crate) fn is_busy(&self) -> bool {
@@ -226,11 +228,7 @@ async fn status(
     // thread count is the second half of the sidecar instruction.
     let threads = push.tts_threads_desired();
     Ok(Json(heartbeat_now(
-        &p,
-        &push.who,
-        &mut probe,
-        keep,
-        threads,
+        &p, &push.who, &mut probe, keep, threads,
     )))
 }
 

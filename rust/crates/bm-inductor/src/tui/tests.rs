@@ -2591,16 +2591,29 @@ fn task_lines_render_compact_with_their_own_colors() {
         Some(super::model::TaskEvent::Done { task, secs, .. })
             if task == "merge:23" && secs == "14.6s"
     ));
-    assert!(task_event("[w1] render:24 done").is_none(), "no duration, no shape");
-    assert!(task_event("reconcile done in 2s").is_none(), "no head, no shape");
+    assert!(
+        task_event("[w1] render:24 done").is_none(),
+        "no duration, no shape"
+    );
+    assert!(
+        task_event("reconcile done in 2s").is_none(),
+        "no head, no shape"
+    );
     // Failures keep the note and the reason.
     assert!(matches!(
         task_event("[w1] render:7 FAILED (will retry): boom"),
-        Some(super::model::TaskEvent::Failed { note: Some("will retry"), reason: "boom", .. })
+        Some(super::model::TaskEvent::Failed {
+            note: Some("will retry"),
+            reason: "boom",
+            ..
+        })
     ));
     assert!(matches!(
         task_event("render:5 SHELVED without retry: kaput (press u to requeue)"),
-        Some(super::model::TaskEvent::Shelved { reason: "kaput", .. })
+        Some(super::model::TaskEvent::Shelved {
+            reason: "kaput",
+            ..
+        })
     ));
 
     let mut app = App::new("http://127.0.0.1:8901");
@@ -2609,7 +2622,10 @@ fn task_lines_render_compact_with_their_own_colors() {
     app.beats = vec![remote, beat("w-local", "127.0.0.1", 2, "")];
     app.log_at(Level::Ok, "[thang-29486] render:23 done in 255.3s");
     app.log_at(Level::Ok, "[w-local] crawl:4 done in 1.2s");
-    app.log_at(Level::Warn, "[thang-29486] render:7 FAILED (will retry): boom");
+    app.log_at(
+        Level::Warn,
+        "[thang-29486] render:7 FAILED (will retry): boom",
+    );
     let text = render_text(&mut app, 140, 44);
     assert!(text.contains("[T:render:23]"), "task tag:\n{text}");
     assert!(text.contains("Complete in"), "outcome:\n{text}");
@@ -2626,7 +2642,10 @@ fn task_lines_render_compact_with_their_own_colors() {
     assert!(text.contains("[T:crawl:4]"), "local tag too:\n{text}");
     assert!(text.contains("[T:render:7]"), "failure tag:\n{text}");
     assert!(text.contains("Failed"), "failure outcome:\n{text}");
-    assert!(text.contains("(will retry): boom"), "note and reason kept:\n{text}");
+    assert!(
+        text.contains("(will retry): boom"),
+        "note and reason kept:\n{text}"
+    );
 }
 
 #[test]
@@ -3007,7 +3026,11 @@ fn workers_activity_drops_the_stage_and_chapter_the_columns_already_say() {
     b.stage = None;
     b.chapter = None;
     b.activity = "idle".into();
-    assert_eq!(short_activity(&b), "idle", "no columns to repeat, keep it whole");
+    assert_eq!(
+        short_activity(&b),
+        "idle",
+        "no columns to repeat, keep it whole"
+    );
 }
 
 #[test]
@@ -3030,7 +3053,10 @@ fn tasks_pane_counts_chapters_against_the_pipeline_that_feeds_them() {
     let mut app = tasks_app();
     app.counts = serde_json::json!({});
     let text = render_text(&mut app, 140, 44);
-    assert!(text.contains("1/2 done"), "crawl over every chapter:\n{text}");
+    assert!(
+        text.contains("1/2 done"),
+        "crawl over every chapter:\n{text}"
+    );
     assert!(
         text.contains("0/1 done"),
         "digest over crawled chapters:\n{text}"
@@ -3058,7 +3084,10 @@ fn logs_filter_steps_through_stages_and_severities() {
     assert!(LogFilter::All.matches(last));
     assert!(LogFilter::Render.matches(last));
     assert!(!LogFilter::Digest.matches(last));
-    assert!(!LogFilter::Warn.matches(last), "severity is the level, not the text");
+    assert!(
+        !LogFilter::Warn.matches(last),
+        "severity is the level, not the text"
+    );
     assert!(LogFilter::Error.matches(last));
     app.log_filter = LogFilter::Digest;
     let text = render_text(&mut app, 140, 44);
@@ -3234,7 +3263,10 @@ fn ledger_with_a_silent_box() -> (App, std::collections::BTreeSet<String>) {
 fn a_row_is_abandoned_only_when_every_box_holding_it_has_gone_quiet() {
     let (app, live) = ledger_with_a_silent_box();
     let by_id = |id: &str| app.tasks.iter().find(|t| t.id() == id).unwrap().clone();
-    assert!(abandoned(&by_id("merge:7"), &live), "that box is not beating");
+    assert!(
+        abandoned(&by_id("merge:7"), &live),
+        "that box is not beating"
+    );
     assert!(
         !abandoned(&by_id("render:8"), &live),
         "that box is answering"
@@ -3335,7 +3367,10 @@ async fn the_arrow_keys_step_the_facet_and_the_bar_shows_where_it_is() {
         app.status
     );
     let text = render_text(&mut app, 140, 44);
-    assert!(text.contains("[crawl]"), "the active chip is bracketed:\n{text}");
+    assert!(
+        text.contains("[crawl]"),
+        "the active chip is bracketed:\n{text}"
+    );
     assert!(text.contains("render"), "the other chips are still listed");
 
     handle_key(&mut app, key(KeyCode::Left), &http, &job_tx).await;
@@ -3372,7 +3407,12 @@ async fn the_arrow_keys_step_the_facet_and_the_bar_shows_where_it_is() {
 }
 
 /// A `:` line, one keypress at a time, then Enter on it.
-async fn type_command(app: &mut App, http: &reqwest::Client, job_tx: &tokio::sync::mpsc::UnboundedSender<Job>, word: &str) {
+async fn type_command(
+    app: &mut App,
+    http: &reqwest::Client,
+    job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
+    word: &str,
+) {
     handle_key(app, key(KeyCode::Char(':')), http, job_tx).await;
     for c in word.chars() {
         handle_key(app, key(KeyCode::Char(c)), http, job_tx).await;
@@ -3549,7 +3589,11 @@ async fn tab_opens_jobs_from_places_but_never_from_a_dialog() {
     // On a place it is the footer's key again, from anywhere.
     app.screen = Screen::Digest(DigestView::new(vec![1, 2, 3]));
     handle_key(&mut app, key(KeyCode::Tab), &http, &job_tx).await;
-    assert!(matches!(app.screen, Screen::Jobs { .. }), "{:?}", app.screen);
+    assert!(
+        matches!(app.screen, Screen::Jobs { .. }),
+        "{:?}",
+        app.screen
+    );
     handle_key(&mut app, key(KeyCode::Tab), &http, &job_tx).await;
     assert!(
         matches!(app.screen, Screen::Digest(_)),
@@ -3627,7 +3671,10 @@ async fn x_releases_the_highlighted_row_and_capital_x_overrides_a_live_holder() 
     // than round-tripping a release whose only possible answer is "holds
     // nothing".
     handle_key(&mut app, key(KeyCode::Char('x')), &http, &job_tx).await;
-    assert!(job_rx.try_recv().is_err(), "nothing to release, nothing sent");
+    assert!(
+        job_rx.try_recv().is_err(),
+        "nothing to release, nothing sent"
+    );
     assert!(
         app.status.text.contains("nothing to release"),
         "{:?}",
@@ -3644,7 +3691,10 @@ async fn x_releases_the_highlighted_row_and_capital_x_overrides_a_live_holder() 
     assert_eq!(req.chapter, Some(3));
     assert_eq!(req.force, Some(false));
     assert_eq!(req.worker, None, "one row, not one box");
-    assert!(matches!(app.screen, Screen::Tasks(_)), "the ledger stays open");
+    assert!(
+        matches!(app.screen, Screen::Tasks(_)),
+        "the ledger stays open"
+    );
 
     // `X` on the same row is the same call with the live-holder guard off — a
     // different op instance, not a duplicate of the one still in flight.
@@ -3726,11 +3776,7 @@ async fn a_requeues_every_assignment_whose_worker_went_quiet() {
     assert_eq!(req.stage, None, "the whole ledger, not a chapter");
     assert_eq!(req.worker, None);
     assert!(matches!(app.screen, Screen::Tasks(_)));
-    assert!(
-        app.status.text.contains("went quiet"),
-        "{:?}",
-        app.status
-    );
+    assert!(app.status.text.contains("went quiet"), "{:?}", app.status);
 }
 
 #[test]
@@ -4204,7 +4250,11 @@ fn two_retries_of_different_chapters_do_not_suppress_each_other() {
             ..Default::default()
         })
     };
-    assert_ne!(dispatch(true), dispatch(false), "a hold is not a duplicate go");
+    assert_ne!(
+        dispatch(true),
+        dispatch(false),
+        "a hold is not a duplicate go"
+    );
 }
 
 #[tokio::test]
@@ -5368,7 +5418,11 @@ fn the_pack_release_setting_takes_a_repo_and_reads_the_tag_from_the_pointer() {
         let err = save_app_setting(&app, TextKind::PacksRelease, bad).unwrap_err();
         assert!(err.contains("owner/name"), "`{bad}`: {err}");
     }
-    assert_eq!(load().packs_release, "lhuthng/storycast", "a refused value never lands");
+    assert_eq!(
+        load().packs_release,
+        "lhuthng/storycast",
+        "a refused value never lands"
+    );
 
     // Empty is the push, which is what every box did before the setting.
     let msg = save_app_setting(&app, TextKind::PacksRelease, "  ").unwrap();
@@ -5520,7 +5574,11 @@ async fn threads_word_edits_the_selected_boxs_sidecar_threads() {
             threads: Some(None)
         })
     );
-    assert_eq!(command_key("threads 0"), None, "0 is not a count — clear instead");
+    assert_eq!(
+        command_key("threads 0"),
+        None,
+        "0 is not a count — clear instead"
+    );
     assert_eq!(command_key("threads 99"), None, "over the 64 cap");
     assert_eq!(command_key("threads abc"), None);
 
@@ -5686,7 +5744,11 @@ async fn quit_word_quits_from_the_picker_command_line() {
     app.command_return = Some(pick);
     app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "quit"));
     let quit = handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
-    assert_eq!(quit, super::input::Flow::Quit, ":quit from the picker must quit");
+    assert_eq!(
+        quit,
+        super::input::Flow::Quit,
+        ":quit from the picker must quit"
+    );
 }
 
 #[tokio::test]
@@ -6967,7 +7029,10 @@ async fn the_crawl_key_answers_what_is_in_force() {
             "{noise} is not an answer, and the default screen must not be one:\n{text}"
         );
     }
-    assert!(text.contains("Enter detail"), "and the way to it is named: {text}");
+    assert!(
+        text.contains("Enter detail"),
+        "and the way to it is named: {text}"
+    );
 
     // Enter opens the whole configuration, which is what the key is for.
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
@@ -6984,7 +7049,14 @@ async fn the_crawl_key_answers_what_is_in_force() {
     // Enter again returns to the verdict, from the top.
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
     assert!(
-        matches!(app.screen, Screen::Crawl { expanded: false, scroll: 0, .. }),
+        matches!(
+            app.screen,
+            Screen::Crawl {
+                expanded: false,
+                scroll: 0,
+                ..
+            }
+        ),
         "Enter collapses: {:?}",
         app.screen
     );
@@ -9036,7 +9108,11 @@ async fn the_script_chapter_list_walks_rows_and_columns_like_it_is_drawn() {
     // 25 chapters, so the last row is short — the case a naive `± PER_ROW`
     // walks off the end of.
     for n in 1..=25u32 {
-        std::fs::write(app.layout.script(n), r#"{"segments":[{"speaker":"Narrator","text":"x"}]}"#).unwrap();
+        std::fs::write(
+            app.layout.script(n),
+            r#"{"segments":[{"speaker":"Narrator","text":"x"}]}"#,
+        )
+        .unwrap();
     }
 
     handle_key(&mut app, key(KeyCode::Char(':')), &http, &job_tx).await;
@@ -9178,7 +9254,10 @@ async fn esc_closes_the_excerpt_panel_and_the_next_esc_leaves_the_chapter() {
     let Screen::Script(v) = app.screen.clone() else {
         panic!("expected the script view, got {:?}", app.screen)
     };
-    assert_eq!(v.open, None, "the second Esc steps back to the chapter list");
+    assert_eq!(
+        v.open, None,
+        "the second Esc steps back to the chapter list"
+    );
 }
 
 #[tokio::test]
@@ -9286,7 +9365,11 @@ async fn the_excerpt_panel_scrolls_vertically_and_says_when_there_is_nothing_to_
     // And the case the operator actually met: an excerpt that fits on one screen
     // has nothing to scroll. Close and reopen so the panel re-reads the shorter
     // script — `e` while it is up would toggle it shut.
-    std::fs::write(app.layout.script(12), r#"{"excerpt":"Short.","segments":[{"speaker":"Narrator","text":"Trời hôm nay đẹp."}]}"#).unwrap();
+    std::fs::write(
+        app.layout.script(12),
+        r#"{"excerpt":"Short.","segments":[{"speaker":"Narrator","text":"Trời hôm nay đẹp."}]}"#,
+    )
+    .unwrap();
     handle_key(&mut app, key(KeyCode::Char('e')), &http, &job_tx).await;
     handle_key(&mut app, key(KeyCode::Char('e')), &http, &job_tx).await;
     let short = render(&mut app, 24);
@@ -9378,9 +9461,15 @@ async fn the_workspace_job_without_its_cluster_guard(
             let cmd = match req {
                 WorkspaceReq::List => crate::WorkspaceCmd::List,
                 WorkspaceReq::Use(name) => crate::WorkspaceCmd::Use { name },
-                WorkspaceReq::New { name, profile, crawler } => {
-                    crate::WorkspaceCmd::New { name, profile, crawler }
-                }
+                WorkspaceReq::New {
+                    name,
+                    profile,
+                    crawler,
+                } => crate::WorkspaceCmd::New {
+                    name,
+                    profile,
+                    crawler,
+                },
             };
             let out = tokio::task::spawn_blocking(move || crate::workspace_cmd(&root, cmd))
                 .await
@@ -9531,11 +9620,7 @@ fn two_workspaces_one_bad(name: &str) -> std::path::PathBuf {
     // A directory somebody left under workspaces/, with no settings at all.
     std::fs::create_dir_all(root.join("workspaces/scratch")).unwrap();
     std::fs::create_dir_all(root.join(".bm")).unwrap();
-    std::fs::write(
-        bm_core::Layout::active_workspace_file(&root),
-        "book-a\n",
-    )
-    .unwrap();
+    std::fs::write(bm_core::Layout::active_workspace_file(&root), "book-a\n").unwrap();
     root
 }
 
@@ -9555,7 +9640,10 @@ async fn a_workspace_prompt_lists_the_books_instead_of_demanding_a_name() {
         panic!(":ws lists the books, got {:?}", app.screen);
     };
     assert_eq!(
-        ws.list().iter().map(|i| i.label.as_str()).collect::<Vec<_>>(),
+        ws.list()
+            .iter()
+            .map(|i| i.label.as_str())
+            .collect::<Vec<_>>(),
         vec!["book-a", "scratch"],
     );
     assert!(
@@ -9606,7 +9694,10 @@ async fn choosing_a_book_switches_it_and_a_directory_that_is_not_one_is_refused(
         panic!("the refusal stays on the list, got {:?}", app.screen);
     };
     assert!(
-        ws.error.as_deref().unwrap_or_default().contains("no settings.json"),
+        ws.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no settings.json"),
         "{:?}",
         ws.error
     );
@@ -9660,7 +9751,11 @@ async fn no_key_on_the_workspace_picker_asks_the_app_to_quit() {
         Flow::KeepRunning,
         "opening the list must not exit"
     );
-    assert!(matches!(app.screen, Screen::WorkspaceList(_)), "{:?}", app.screen);
+    assert!(
+        matches!(app.screen, Screen::WorkspaceList(_)),
+        "{:?}",
+        app.screen
+    );
 
     for k in [
         KeyCode::Down,
@@ -9697,7 +9792,10 @@ async fn no_key_on_the_workspace_picker_asks_the_app_to_quit() {
         panic!("the refusal stays up, got {:?}", app.screen);
     };
     assert!(
-        ws.error.as_deref().unwrap_or_default().contains("no settings.json"),
+        ws.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no settings.json"),
         "{:?}",
         ws.error
     );
@@ -9753,7 +9851,13 @@ async fn only_the_dashboards_q_ends_the_app() {
             },
         ),
         ("help", Screen::Help { scroll: 0 }),
-        ("crawl", Screen::Crawl { scroll: 0, expanded: false }),
+        (
+            "crawl",
+            Screen::Crawl {
+                scroll: 0,
+                expanded: false,
+            },
+        ),
         ("run", Screen::Run),
         (
             "command prompt",
@@ -9808,12 +9912,14 @@ async fn only_the_dashboards_q_ends_the_app() {
 
     // The second: the dialog `q` grows when work is in flight, which reaches
     // the loop only once the operator says yes — and stays put when they do not.
-    let quitting = || Screen::Confirm(Confirm {
-        title: "Quit with work in flight?".into(),
-        danger: true,
-        body: vec!["1 background job(s) are still running.".into()],
-        action: ConfirmAction::Quit,
-    });
+    let quitting = || {
+        Screen::Confirm(Confirm {
+            title: "Quit with work in flight?".into(),
+            danger: true,
+            body: vec!["1 background job(s) are still running.".into()],
+            action: ConfirmAction::Quit,
+        })
+    };
     app.screen = quitting();
     assert_eq!(
         handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await,
@@ -9836,9 +9942,8 @@ fn the_workspace_picker_renders_the_books_and_why_one_is_not_one() {
     let root = two_workspaces_one_bad("draw");
     let mut app = App::new("http://127.0.0.1:8901");
     app.layout = bm_core::Layout::new(&root);
-    app.screen = super::screen::Screen::WorkspaceList(super::screen::WsList::read(
-        &app.layout.root,
-    ));
+    app.screen =
+        super::screen::Screen::WorkspaceList(super::screen::WsList::read(&app.layout.root));
 
     let text = render_text(&mut app, 90, 24);
     assert!(text.contains("Workspace — switch"), "no title:\n{text}");
@@ -9887,7 +9992,10 @@ fn the_dashboard_reads_the_workspace_binding_not_the_checkout_pointer() {
 
     let binding = app.profile.as_ref().expect("a binding in force");
     assert_eq!(binding.pack.name, "apothecary");
-    assert_eq!(binding.adapter.name, "vi-VN", "the checkout's language fills the gap");
+    assert_eq!(
+        binding.adapter.name, "vi-VN",
+        "the checkout's language fills the gap"
+    );
     assert_eq!(binding.engine.name, "pocket");
     assert_eq!(
         super::model::profile_label(app.profile.as_ref()),
@@ -10172,7 +10280,10 @@ fn the_guided_create_overlay_draws_the_step_and_the_presets() {
     ));
     let name_step = render_text(&mut app, 100, 44);
     assert!(name_step.contains("Workspace — new"), "{name_step}");
-    assert!(name_step.contains("book"), "the typed name is echoed: {name_step}");
+    assert!(
+        name_step.contains("book"),
+        "the typed name is echoed: {name_step}"
+    );
 
     if let super::screen::Screen::WorkspaceNew(mut ws) = app.screen.clone() {
         ws.step = super::screen::WsStep::Profile;

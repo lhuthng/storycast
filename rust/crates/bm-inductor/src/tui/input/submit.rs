@@ -311,7 +311,9 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                     Some((name, id)) => {
                         let id = id.trim();
                         if id.is_empty() {
-                            return Err("--profile needs a preset id — see profiles/presets.json".into());
+                            return Err(
+                                "--profile needs a preset id — see profiles/presets.json".into()
+                            );
                         }
                         let presets = bm_core::preset::read_presets(&app.layout.root)
                             .map_err(|e| format!("presets: {e:#}"))?;

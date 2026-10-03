@@ -260,9 +260,7 @@ impl Epub {
                 out.push_str(t);
             } else if page_continues(&out, t) {
                 // ponytail: hyphen word-split across pages rejoins without a space; upgrade if a book hyphenates compounds at page ends
-                if out.ends_with('-')
-                    && t.chars().next().is_some_and(|c| c.is_lowercase())
-                {
+                if out.ends_with('-') && t.chars().next().is_some_and(|c| c.is_lowercase()) {
                     out.pop();
                     out.push_str(t);
                 } else {
@@ -299,10 +297,7 @@ fn page_continues(prev: &str, next: &str) -> bool {
     let stripped = prev
         .trim_end_matches(['"', '”', '’', '\'', ')', ']', '»'])
         .trim_end();
-    if !matches!(
-        stripped.chars().last(),
-        Some('.' | '!' | '?' | '…')
-    ) {
+    if !matches!(stripped.chars().last(), Some('.' | '!' | '?' | '…')) {
         return true;
     }
     // A terminal followed by a lowercase start is an abbreviation ("Mr. /
@@ -316,9 +311,8 @@ fn page_continues(prev: &str, next: &str) -> bool {
 /// the archive may name it anything, and the container is the only thing that
 /// says where it is.
 fn opf_path(zip: &mut zip::ZipArchive<std::fs::File>) -> Result<String> {
-    let xml = read_entry(zip, "META-INF/container.xml").with_context(|| {
-        "META-INF/container.xml is missing — this is a ZIP that is not an EPUB"
-    })?;
+    let xml = read_entry(zip, "META-INF/container.xml")
+        .with_context(|| "META-INF/container.xml is missing — this is a ZIP that is not an EPUB")?;
     let path = first_attr(&xml, "rootfile", "full-path")
         .ok_or_else(|| anyhow!("container.xml names no rootfile — there is no package document"))?;
     if path.trim().is_empty() {
@@ -468,9 +462,7 @@ fn join_relative(base: &Path, href: &str) -> String {
     } else {
         base.join(rel)
     };
-    normalise(&joined)
-        .to_string_lossy()
-        .into_owned()
+    normalise(&joined).to_string_lossy().into_owned()
 }
 
 /// Collapse `.` and `..` textually, refusing to climb out of the archive root.
@@ -916,7 +908,10 @@ mod tests {
         let p = book_dir.join("secret.epub");
         // Inside: fine.
         let inside = confined(&dir, p.to_str().unwrap());
-        assert!(inside.is_err(), "an absolute path outside the root is refused");
+        assert!(
+            inside.is_err(),
+            "an absolute path outside the root is refused"
+        );
         // A name that climbs out is refused after canonicalising, so a symlink
         // cannot be what decides where a file is read from.
         let climb = confined(&dir, "../bm-epub-outside/secret.epub");

@@ -655,14 +655,14 @@ fn land_pack_with(
         // A box that cannot record what it holds is a box the next provision
         // must treat as unknown — but landing verified bytes is never refused
         // over bookkeeping, so this stays a warning-shaped failure.
-        let receipt = dest
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join(PACK_RECEIPT);
+        let receipt = dest.parent().unwrap_or(Path::new(".")).join(PACK_RECEIPT);
         match crate::profile::read_manifest_at(&stage.join(PACK_MANIFEST)) {
             Ok(m) => {
                 if let Err(e) = write_receipt(&receipt, &m) {
-                    eprintln!("warning: pack landed but the receipt was not written ({}: {e:#})", receipt.display());
+                    eprintln!(
+                        "warning: pack landed but the receipt was not written ({}: {e:#})",
+                        receipt.display()
+                    );
                 }
             }
             Err(e) => eprintln!(
@@ -1290,13 +1290,20 @@ mod tests {
         let dest = root.join("assets");
         std::fs::create_dir_all(dest.join("effects")).unwrap();
         std::fs::write(dest.join("effect-pool.json"), b"the old one").unwrap();
-        std::fs::write(dest.join("effects/gone-1.mp3"), b"a clip the new pack drops").unwrap();
+        std::fs::write(
+            dest.join("effects/gone-1.mp3"),
+            b"a clip the new pack drops",
+        )
+        .unwrap();
 
         let landed = land_pack(&bundle, &dest, &expect, "xianxia-pack-v0.1.0").unwrap();
         assert_eq!(landed.files, 2);
         assert_eq!(landed.tag, "xianxia-pack-v0.1.0");
         assert_eq!(std::fs::read(dest.join("effect-pool.json")).unwrap(), b"{}");
-        assert_eq!(std::fs::read(dest.join("effects/wind-1.mp3")).unwrap(), b"a clip");
+        assert_eq!(
+            std::fs::read(dest.join("effects/wind-1.mp3")).unwrap(),
+            b"a clip"
+        );
         // **Replaced, not merged**: the clip the new pack does not carry is
         // gone. A half-old profile is the failure a box cannot report, because
         // every file it does hold is one a registry still names.
@@ -1421,8 +1428,13 @@ mod tests {
         std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(dest.join("effect-pool.json"), b"the install already here").unwrap();
 
-        let err = land_pack(&bundle, &dest, &sha_of(b"another profile"), "xianxia-pack-v0.1.0")
-            .unwrap_err();
+        let err = land_pack(
+            &bundle,
+            &dest,
+            &sha_of(b"another profile"),
+            "xianxia-pack-v0.1.0",
+        )
+        .unwrap_err();
         assert!(matches!(err, FetchError::Corrupt(_)), "{err:?}");
         assert!(err.to_string().contains("a different pack"), "{err}");
         assert_eq!(
@@ -1442,12 +1454,14 @@ mod tests {
     fn a_member_outside_the_pack_directory_is_refused_by_name() {
         let root = tstdir("pack-stray");
         std::fs::create_dir_all(&root).unwrap();
-        let (stage, mut files) =
-            pack_stage(&root, &[("assets/effect-pool.json", &b"{}"[..])]);
+        let (stage, mut files) = pack_stage(&root, &[("assets/effect-pool.json", &b"{}"[..])]);
         // A prompt smuggled in beside the profile, and a Finder sidecar for it.
         std::fs::write(stage.join("prompts.txt"), b"not part of the pack").unwrap();
         std::fs::write(stage.join("._effect-pool.json"), b"\x00\x05\x16\x07").unwrap();
-        files.insert("assets/._effect-pool.json".to_string(), sha_of(b"\x00\x05\x16\x07"));
+        files.insert(
+            "assets/._effect-pool.json".to_string(),
+            sha_of(b"\x00\x05\x16\x07"),
+        );
         write_pack_manifest(&stage, &pack_manifest("xianxia", "0.1.0", &files));
         let expect = crate::profile::manifest_hash(&files);
         let bundle = root.join("xianxia.tar.zst");
@@ -1487,7 +1501,6 @@ mod tests {
         );
         assert!(err.is_err(), "a language is not a profile");
     }
-
 
     /// The pack half of `tools/models.sh`, through the same two binaries the
     /// script uses — `ruzstd` decodes but does not encode, and a hand-rolled

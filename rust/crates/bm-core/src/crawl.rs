@@ -344,7 +344,11 @@ fn is_end_mark(c: char) -> bool {
 /// idempotent: `sanitize` twice lands where `sanitize` once did.
 fn fold_end_mark_runs(line: &str) -> String {
     fn kind(c: char) -> char {
-        if c == '.' { '…' } else { c }
+        if c == '.' {
+            '…'
+        } else {
+            c
+        }
     }
     let chars: Vec<char> = line.chars().collect();
     let n = chars.len();

@@ -1,4 +1,5 @@
 //! Run screen: preview, launch, edit config.
+use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
     input::{dispatch, runconfig::run_preview},
@@ -6,7 +7,6 @@ use crate::tui::{
     screen::{Screen, TextKind, TextPrompt},
     style::{Conn, Level},
 };
-use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent};
 use std::sync::{atomic::AtomicBool, Arc};
 

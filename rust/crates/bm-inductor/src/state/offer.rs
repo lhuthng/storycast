@@ -778,9 +778,9 @@ impl Inner {
                 // Closing a chapter may have drained the queue, trip the
                 // armed latch, exactly as a completion does.
                 self.maybe_auto_shutdown();
-        // And: did a queued exclusive write just become runnable? Same
-        // moment, same question shape — work landed, ask what is left.
-        self.run_exclusive();
+                // And: did a queued exclusive write just become runnable? Same
+                // moment, same question shape — work landed, ask what is left.
+                self.run_exclusive();
                 return format!("ch{chapter} absent: {reason}");
             }
             Outcome::Shelved { task_id, detail } => {

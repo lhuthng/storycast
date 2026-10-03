@@ -655,7 +655,12 @@ pub fn palette_prompt(map: &SceneMap) -> String {
 pub fn scene_prompt(map: &SceneMap) -> String {
     let mut words: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for rule in &map.rules {
-        words.extend(rule.matches.iter().filter(|w| !w.trim().is_empty()).cloned());
+        words.extend(
+            rule.matches
+                .iter()
+                .filter(|w| !w.trim().is_empty())
+                .cloned(),
+        );
     }
     words.into_iter().collect::<Vec<String>>().join(", ")
 }
@@ -2664,7 +2669,8 @@ pub fn apply_layers(
         let copies = loop_copies(dur, mu_durs.get(&run.file).copied().unwrap_or(0.0), 2.0);
         match copies {
             Some(k) => {
-                let graph = loop_filter_with_tail(k, 2.0, &format!("volume=volume='{expr}':eval=frame"));
+                let graph =
+                    loop_filter_with_tail(k, 2.0, &format!("volume=volume='{expr}':eval=frame"));
                 ffmpeg(&[
                     "-y".into(),
                     "-loglevel".into(),
@@ -3631,7 +3637,10 @@ mod tests {
         let (char_fx, char_narr) = slot_effect(&slots[1], &spans, &presets).unwrap();
         assert!(narr && !char_narr, "only the Narrator slot is marked");
         assert_eq!(narr_fx, char_fx, "one preset, two depths");
-        assert_eq!(narr_fx.engine_and_chain(), (FxEngine::Sox, "reverb 45 45 80"));
+        assert_eq!(
+            narr_fx.engine_and_chain(),
+            (FxEngine::Sox, "reverb 45 45 80")
+        );
         assert_eq!(narr_fx.tail_s(), 1.2);
         assert_eq!(NARRATOR_DEPTH, 0.1);
 
@@ -4205,7 +4214,11 @@ mod tests {
         );
         // `default` has no match set, so it contributes nothing: it is what a
         // label matches when nothing else did, not a word to write.
-        assert!(!scene_prompt(&cfg).contains("night"), "{:?}", scene_prompt(&cfg));
+        assert!(
+            !scene_prompt(&cfg).contains("night"),
+            "{:?}",
+            scene_prompt(&cfg)
+        );
     }
 
     /// The conflation itself, stated as a test: the place words and the bed
@@ -4219,8 +4232,7 @@ mod tests {
         let places: std::collections::BTreeSet<String> =
             scene_prompt(&map).split(", ").map(str::to_string).collect();
         let pool = audio_pool::load_pool(&fixture_live("vocab").join("assets/effect-pool.json"));
-        let beds: std::collections::BTreeSet<String> =
-            effect_tags(&pool).into_iter().collect();
+        let beds: std::collections::BTreeSet<String> = effect_tags(&pool).into_iter().collect();
 
         let place_only: Vec<&String> = places.difference(&beds).collect();
         assert!(
@@ -5010,7 +5022,10 @@ mod tests {
             )),
             "the lift must be the last filter before aformat: {g}"
         );
-        assert!(!g.contains("stream_loop"), "the loop is a filter, not a flag: {g}");
+        assert!(
+            !g.contains("stream_loop"),
+            "the loop is a filter, not a flag: {g}"
+        );
     }
 
     /// The inject pool must state `looped` on every entry.

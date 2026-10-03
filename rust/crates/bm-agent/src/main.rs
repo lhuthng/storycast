@@ -200,12 +200,7 @@ mod fetch_exit {
 /// `Content-Length` is used when the host sends one and nothing is invented
 /// when it does not: a progress line that guesses its denominator is worse than
 /// one that admits it has none.
-fn fetch_artifact(
-    url: &str,
-    dest: &Path,
-    expect: Option<&str>,
-    strip_prefix: Option<&str>,
-) -> i32 {
+fn fetch_artifact(url: &str, dest: &Path, expect: Option<&str>, strip_prefix: Option<&str>) -> i32 {
     use std::time::Instant;
     let started = Instant::now();
     let mut last = Instant::now();
@@ -241,9 +236,7 @@ fn fetch_artifact(
     // unprefixed destination with no hash keeps the older, weaker contract
     // rather than inventing a second one.
     let r = match (strip_prefix, expect) {
-        (Some(_), Some(hash)) => {
-            bm_core::artifact::fetch_pack(url, dest, hash, "", &mut say)
-        }
+        (Some(_), Some(hash)) => bm_core::artifact::fetch_pack(url, dest, hash, "", &mut say),
         (Some(dir), None) => {
             eprintln!("FETCH-CORRUPT (--strip-prefix {dir} needs --expect: a pack release is only accepted against the profile hash it is replacing)");
             return fetch_exit::CORRUPT;
@@ -1004,8 +997,8 @@ async fn run_render(
         .and_then(|s| s.as_array())
         .cloned()
         .unwrap_or_default();
-    let policy = bm_core::cast::policy_for_bible(engine, &layout);
-    let installed = bm_core::pool::installed_voices(&layout);
+    let policy = bm_core::cast::policy_for_bible(engine, layout);
+    let installed = bm_core::pool::installed_voices(layout);
     let cast = bm_core::cast::load_cast(
         &script_path,
         &cast_path,
@@ -1036,9 +1029,8 @@ async fn run_render(
     // The same setting the inductor plans from, read here because this path
     // owns the plan on this box: the tier decides the extension the take
     // names carry.
-    let quality = bm_core::assemble::TakeQuality::parse(
-        &Settings::load(&layout.settings()).take_quality,
-    );
+    let quality =
+        bm_core::assemble::TakeQuality::parse(&Settings::load(&layout.settings()).take_quality);
     let up = bm_core::assemble::reconcile(
         stored.as_ref(),
         bm_core::assemble::RenderPlan::build(n, engine, &units, quality),
@@ -1448,7 +1440,9 @@ fn heartbeat_now(
         sources_stages: bundle_slots(&who.root),
         sidecar_keep: Some(sidecar_keep),
         tts_threads,
-        cores: std::thread::available_parallelism().ok().map(|n| n.get() as u32),
+        cores: std::thread::available_parallelism()
+            .ok()
+            .map(|n| n.get() as u32),
     }
 }
 
@@ -1647,6 +1641,7 @@ fn install_credentials(creds: &bm_proto::Credentials) -> Vec<&'static str> {
 /// from the inductor (see `run_merge`), exactly as a render pushes its units
 /// there. `fetch` carries the client and base URL for that pull; tests pass
 /// `None`.
+#[allow(clippy::too_many_arguments)]
 async fn run_offer(
     layout: &Layout,
     settings: &Settings,

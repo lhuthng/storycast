@@ -365,7 +365,11 @@ impl Inner {
         let msg = format!(
             "released {} row(s) from {worker}{}",
             ids.len(),
-            if beating { ", which is still beating" } else { "" }
+            if beating {
+                ", which is still beating"
+            } else {
+                ""
+            }
         );
         self.push_event("ok", msg.clone());
         msg
@@ -385,7 +389,10 @@ impl Inner {
                 "released {} row(s) of {what} from {w}, which is still beating",
                 ids.len()
             ),
-            None => format!("released {} row(s) of {what} — their worker is gone", ids.len()),
+            None => format!(
+                "released {} row(s) of {what} — their worker is gone",
+                ids.len()
+            ),
         };
         self.push_event("ok", msg.clone());
         msg
@@ -715,8 +722,7 @@ impl Inner {
         // the same trust clones get at enrolment — so a fresh sample is
         // assignable before anything speaks with it. Without this a new sample
         // could be rolled automatically but never picked by hand.
-        let pooled =
-            bm_core::pool::load_pool(&self.layout.voice_pool()).contains_key(&voice);
+        let pooled = bm_core::pool::load_pool(&self.layout.voice_pool()).contains_key(&voice);
         let manifested =
             bm_core::pool::load_manifest(&self.layout.voices_manifest()).contains_key(&voice);
         let admitted = declared || in_use || pooled || manifested;
@@ -1113,7 +1119,11 @@ impl Inner {
     /// disturb have gone quiet. `chapters` is the ask-time scope; the
     /// per-chapter plan diff at write time still decides what actually moves.
     pub(crate) fn op_retag_queued(&mut self, chapters: Vec<u32>) -> anyhow::Result<String> {
-        let scope = if chapters.is_empty() { None } else { Some(chapters) };
+        let scope = if chapters.is_empty() {
+            None
+        } else {
+            Some(chapters)
+        };
         self.retag_chapters(scope, true)
     }
 
@@ -1121,11 +1131,7 @@ impl Inner {
     /// `ensure_idle`) and the queued one (which the exclusive gate has
     /// already cleared). `scope` = `None` for every script, or exactly the
     /// ask-time chapters.
-    fn retag_chapters(
-        &mut self,
-        scope: Option<Vec<u32>>,
-        dry_run: bool,
-    ) -> anyhow::Result<String> {
+    fn retag_chapters(&mut self, scope: Option<Vec<u32>>, dry_run: bool) -> anyhow::Result<String> {
         let mut chapters: Vec<u32> = Vec::new();
         let mut edits = 0u32;
         let mut files = 0u32;

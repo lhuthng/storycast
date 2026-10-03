@@ -123,7 +123,9 @@ async fn main() -> Result<()> {
             let voices = engine.voices.len();
             let default = engine.default_voice.clone().unwrap_or_else(|| "?".into());
             return Ok((
-                Backend::Pocket { engine: Box::new(Mutex::new(engine)) },
+                Backend::Pocket {
+                    engine: Box::new(Mutex::new(engine)),
+                },
                 voices,
                 default,
             ));

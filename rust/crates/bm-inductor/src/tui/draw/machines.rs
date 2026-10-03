@@ -112,14 +112,7 @@ pub(crate) fn draw_machines(f: &mut ratatui::Frame, app: &mut App, area: Rect, c
 
     // The cursor column: cells carry `▸ name`, so the header is indented to
     // match the rows and `machine` no longer sits a column left of its data.
-    let mut header = vec![
-        " machine",
-        "kind",
-        "ip",
-        "tts-threads",
-        "policy",
-        "state",
-    ];
+    let mut header = vec![" machine", "kind", "ip", "tts-threads", "policy", "state"];
     let mut widths: Vec<Constraint> = if compact {
         // Taken from the constant the compile-time guard checks.
         COMPACT_MACHINE_COLS[..6]

@@ -894,11 +894,17 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                 return Json(OpResult::fail("exclusive requires a write to queue"));
             };
             match &mut op {
-                bm_proto::ExclusiveOp::SwapVoice { character, voice, .. } => {
+                bm_proto::ExclusiveOp::SwapVoice {
+                    character, voice, ..
+                } => {
                     *character = req.character.clone().unwrap_or_default();
                     *voice = req.voice.clone().unwrap_or_default();
                 }
-                bm_proto::ExclusiveOp::Recast { chapter, fixes, remove } => {
+                bm_proto::ExclusiveOp::Recast {
+                    chapter,
+                    fixes,
+                    remove,
+                } => {
                     *chapter = req.chapter.unwrap_or(0);
                     *fixes = req.fixes.clone();
                     *remove = req.remove.clone();
@@ -914,7 +920,9 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
                     *expect = req.expect.clone().unwrap_or_default();
                     *speaker = req.speaker.clone().unwrap_or_default();
                 }
-                bm_proto::ExclusiveOp::Merge { survivor, absorbed, .. } => {
+                bm_proto::ExclusiveOp::Merge {
+                    survivor, absorbed, ..
+                } => {
                     *survivor = req.survivor.clone().unwrap_or_default();
                     *absorbed = req.absorbed.clone();
                 }
@@ -931,9 +939,7 @@ async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> Json<OpResu
             let mut inner = st.lock().await;
             let n = inner.exclusive_cancel(route.as_deref());
             if n == 0 {
-                Json(OpResult::fail(
-                    "nothing queued to drop".to_string(),
-                ))
+                Json(OpResult::fail("nothing queued to drop".to_string()))
             } else {
                 Json(OpResult::ok(format!(
                     "dropped {n} queued write(s) — the stages it held open take work again"
@@ -1868,10 +1874,9 @@ mod tests {
     async fn a_policy_edit_persists_and_leaves_delivery_to_the_dispatcher() {
         let d = scratch();
         let layout = bm_core::Layout::new(d.path());
-        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::distributing(
-            layout,
-            bm_core::config::Settings::default(),
-        )));
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::state::Inner::distributing(layout, bm_core::config::Settings::default()),
+        ));
         {
             let mut inner = st.lock().await;
             let m = Machine::new("192.168.2.2", "thang", 22, None, "worker");
@@ -1995,10 +2000,9 @@ mod tests {
     async fn register_and_heartbeat_flip_a_machine_online() {
         let d = scratch();
         let layout = bm_core::Layout::new(d.path());
-        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::distributing(
-            layout,
-            bm_core::config::Settings::default(),
-        )));
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::state::Inner::distributing(layout, bm_core::config::Settings::default()),
+        ));
         register(
             State(st.clone()),
             Json(Register {
@@ -2073,10 +2077,9 @@ mod tests {
             },
         )
         .unwrap();
-        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::distributing(
-            layout,
-            bm_core::config::Settings::default(),
-        )));
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::state::Inner::distributing(layout, bm_core::config::Settings::default()),
+        ));
         register(
             State(st.clone()),
             Json(Register {
@@ -2107,10 +2110,9 @@ mod tests {
         // live note is left alone.
         let d = scratch();
         let layout = bm_core::Layout::new(d.path());
-        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::distributing(
-            layout,
-            bm_core::config::Settings::default(),
-        )));
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::state::Inner::distributing(layout, bm_core::config::Settings::default()),
+        ));
         {
             let mut inner = st.lock().await;
             let mut m = Machine::new("192.168.2.2", "thang", 22, None, "worker");
@@ -2180,10 +2182,9 @@ mod tests {
         let d = scratch();
         let layout = bm_core::Layout::new(d.path());
         let machines_path = layout.machines();
-        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::distributing(
-            layout,
-            bm_core::config::Settings::default(),
-        )));
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::state::Inner::distributing(layout, bm_core::config::Settings::default()),
+        ));
         {
             let mut inner = st.lock().await;
             let mut m = Machine::new("192.168.2.2", "thang", 22, None, "worker");
@@ -2239,10 +2240,9 @@ mod tests {
     async fn machine_state_route_updates_known_boxes_only() {
         let d = scratch();
         let layout = bm_core::Layout::new(d.path());
-        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::Inner::distributing(
-            layout,
-            bm_core::config::Settings::default(),
-        )));
+        let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::state::Inner::distributing(layout, bm_core::config::Settings::default()),
+        ));
         {
             let mut inner = st.lock().await;
             inner.machines.insert(
@@ -2655,11 +2655,7 @@ mod tests {
             "{}",
             res.message
         );
-        assert!(
-            res.message.contains("queued for ch4..6"),
-            "{}",
-            res.message
-        );
+        assert!(res.message.contains("queued for ch4..6"), "{}", res.message);
         let inner = st.lock().await;
         assert!(!inner.dispatch_held);
         assert!(

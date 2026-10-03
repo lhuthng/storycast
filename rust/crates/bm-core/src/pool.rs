@@ -862,8 +862,13 @@ mod tests {
         assert_eq!(got, root.join("in/young-male-9.mp3"));
 
         // End to end through add_sample with a root-relative path.
-        let log = add_sample(&crate::Layout::new(&root), Path::new("in/young-male-9.mp3"), None, None)
-            .unwrap();
+        let log = add_sample(
+            &crate::Layout::new(&root),
+            Path::new("in/young-male-9.mp3"),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(log.iter().any(|l| l.contains("young-male-9")), "{log:?}");
         assert!(root.join("refs/young-male-9.mp3").is_file());
 
@@ -1280,7 +1285,10 @@ mod tests {
         // existing entry is never replaced by another book's clip.
         let before = std::fs::read_to_string(layout.tts_voices()).unwrap();
         assert!(bake_missing_voices(&layout).is_empty());
-        assert_eq!(std::fs::read_to_string(layout.tts_voices()).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(layout.tts_voices()).unwrap(),
+            before
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

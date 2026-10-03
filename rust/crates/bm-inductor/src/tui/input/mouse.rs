@@ -2,6 +2,7 @@
 //! visible rows and panes to the same actions without duplicating key parsing.
 
 use super::handle_key;
+use crate::tui::input::Flow;
 use crate::tui::{
     app::{App, HitTarget, ListTarget, Panel},
     jobs::Job,
@@ -9,7 +10,6 @@ use crate::tui::{
     screen::{PickStage, Screen},
     style::Level,
 };
-use crate::tui::input::Flow;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::time::{Duration, Instant};
 

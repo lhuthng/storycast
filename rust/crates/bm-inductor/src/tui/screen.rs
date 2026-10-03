@@ -604,10 +604,7 @@ impl ScriptView {
         self.chapters
             .iter()
             .copied()
-            .filter(|n| {
-                self.filter.is_empty()
-                    || format!("{n}").contains(&self.filter)
-            })
+            .filter(|n| self.filter.is_empty() || format!("{n}").contains(&self.filter))
             .collect()
     }
 
@@ -652,7 +649,11 @@ impl ScriptView {
     /// on screen stay the numbers the op takes — hiding them would renumber
     /// every row below a sound, and a re-point aimed from this window must
     /// never be off by the number of sound items above it.
-    pub(crate) fn read_segments(&self, layout: &bm_core::Layout, chapter: u32) -> Vec<ScriptSegment> {
+    pub(crate) fn read_segments(
+        &self,
+        layout: &bm_core::Layout,
+        chapter: u32,
+    ) -> Vec<ScriptSegment> {
         let Ok(data) = bm_core::read_json::<serde_json::Value>(&layout.script(chapter)) else {
             return Vec::new();
         };
@@ -926,7 +927,6 @@ impl WorkspaceNew {
             self.cursor.saturating_sub(1)
         };
     }
-
 }
 
 /// `:ws` with no name: every book this checkout holds, chosen with arrows

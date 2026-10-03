@@ -496,12 +496,7 @@ mod tests {
     }
 
     fn plan_of(segs: &[serde_json::Value], cast: &Cast, seg_dir: &Path) -> RenderPlan {
-        RenderPlan::build(
-            1,
-            "vieneu",
-            &units(segs, cast, seg_dir),
-            TakeQuality::Raw,
-        )
+        RenderPlan::build(1, "vieneu", &units(segs, cast, seg_dir), TakeQuality::Raw)
     }
 
     fn write_take(seg_dir: &Path, name: &str) {

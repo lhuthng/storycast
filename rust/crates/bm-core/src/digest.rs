@@ -564,7 +564,13 @@ impl PreparedChapter {
     }
 }
 
-fn prepared_event(id: usize, kind: &str, text: &str, at: usize, end: usize) -> Option<PreparedEvent> {
+fn prepared_event(
+    id: usize,
+    kind: &str,
+    text: &str,
+    at: usize,
+    end: usize,
+) -> Option<PreparedEvent> {
     let text = text.trim();
     if text.is_empty() || !crate::util::has_speakable_content(text) {
         return None;
@@ -643,7 +649,11 @@ fn embedded_in_prose(text: &str, opener_at: usize, after_closer: usize) -> bool 
     {
         return false;
     }
-    if !before.chars().next_back().is_some_and(|c| c.is_alphanumeric()) {
+    if !before
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric())
+    {
         return false;
     }
     !text[after_closer..line_end].trim().is_empty()
@@ -655,9 +665,28 @@ fn embedded_in_prose(text: &str, opener_at: usize, after_closer: usize) -> bool 
 /// ngươi` (pupil) — both would carve constantly, and constant false carves
 /// are quota the model spends retracting.
 const THOUGHT_MARKERS: &[&str] = &[
-    "i", "i'd", "i'll", "i'm", "i've", "my", "me", "mine", "myself", "we",
-    "us", "our", "ours", "let's", "you", "your", "yours", "yourself",
-    "yourselves", "tôi", "tao", "tớ",
+    "i",
+    "i'd",
+    "i'll",
+    "i'm",
+    "i've",
+    "my",
+    "me",
+    "mine",
+    "myself",
+    "we",
+    "us",
+    "our",
+    "ours",
+    "let's",
+    "you",
+    "your",
+    "yours",
+    "yourself",
+    "yourselves",
+    "tôi",
+    "tao",
+    "tớ",
 ];
 
 /// The markers that make a thought the thinker's own voice: first person
@@ -722,12 +751,21 @@ fn narration_sentences(text: &str) -> Vec<(usize, usize)> {
         let (at, ch) = chars[i];
         if matches!(ch, '.' | '!' | '?' | '…') {
             let mut end = at + ch.len_utf8();
-            while text[end..].chars().next().is_some_and(|c| matches!(c, '.' | '!' | '?' | '…')) {
+            while text[end..]
+                .chars()
+                .next()
+                .is_some_and(|c| matches!(c, '.' | '!' | '?' | '…'))
+            {
                 end += text[end..].chars().next().unwrap().len_utf8();
             }
             // Only a boundary when whitespace or the end follows, so `3.5`
             // stays whole — same rule the TTS splitter uses.
-            if end >= text.len() || text[end..].chars().next().is_some_and(|c| c.is_whitespace()) {
+            if end >= text.len()
+                || text[end..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_whitespace())
+            {
                 out.push((start, end));
                 start = end;
             }
@@ -786,15 +824,23 @@ fn carve_thoughts(events: Vec<PreparedEvent>) -> Vec<PreparedEvent> {
         for (from, to) in narration_sentences(&event.text) {
             if is_thought_sentence(&event.text[from..to]) {
                 if let Some(rs) = run_from.take() {
-                    if let Some(nar) =
-                        prepared_event(out.len() + 1, "narration", &event.text[rs..from], event.at + rs, event.at + from)
-                    {
+                    if let Some(nar) = prepared_event(
+                        out.len() + 1,
+                        "narration",
+                        &event.text[rs..from],
+                        event.at + rs,
+                        event.at + from,
+                    ) {
                         out.push(nar);
                     }
                 }
-                if let Some(thought) =
-                    prepared_event(out.len() + 1, "thought", &event.text[from..to], event.at + from, event.at + to)
-                {
+                if let Some(thought) = prepared_event(
+                    out.len() + 1,
+                    "thought",
+                    &event.text[from..to],
+                    event.at + from,
+                    event.at + to,
+                ) {
                     out.push(thought);
                 }
             } else if run_from.is_none() {
@@ -802,9 +848,13 @@ fn carve_thoughts(events: Vec<PreparedEvent>) -> Vec<PreparedEvent> {
             }
         }
         if let Some(rs) = run_from {
-            if let Some(nar) =
-                prepared_event(out.len() + 1, "narration", &event.text[rs..], event.at + rs, event.end)
-            {
+            if let Some(nar) = prepared_event(
+                out.len() + 1,
+                "narration",
+                &event.text[rs..],
+                event.at + rs,
+                event.end,
+            ) {
                 out.push(nar);
             }
         }
@@ -1193,7 +1243,11 @@ async fn repair_quotes(
         let Some(parsed) = parse_json_repaired(raw).ok() else {
             return Verdict::Reject("no usable JSON".to_string());
         };
-        let Some(fixed) = parsed.get("text").and_then(Value::as_str).map(str::to_string) else {
+        let Some(fixed) = parsed
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
             return Verdict::Reject("no text field".to_string());
         };
         if strip_punctuation(&fixed) != strip_punctuation(text) {
@@ -1219,8 +1273,11 @@ async fn repair_quotes(
         }
         Verdict::Fixed(fixed, changes)
     };
-    let keep = |verdict: Verdict, note: &str, progress_at: f32,
-                progress: &mut (dyn FnMut(f32, String) + Send)| -> Option<String> {
+    let keep = |verdict: Verdict,
+                note: &str,
+                progress_at: f32,
+                progress: &mut (dyn FnMut(f32, String) + Send)|
+     -> Option<String> {
         match verdict {
             Verdict::Fixed(fixed, changes) => {
                 // The sidecar is the audit trail: the repaired text an
@@ -1265,9 +1322,12 @@ async fn repair_quotes(
     };
     // 2. light gate — most answers clear it and the ladder ends here.
     match judge(&raw) {
-        v @ Verdict::Fixed(..) => {
-            Ok(keep(v, "quotes repaired, proofreading it kept punctuation only", 0.03, progress))
-        }
+        v @ Verdict::Fixed(..) => Ok(keep(
+            v,
+            "quotes repaired, proofreading it kept punctuation only",
+            0.03,
+            progress,
+        )),
         Verdict::Reject(why) => {
             eprintln!("ch{n} proofread {why}; digesting the original");
             Ok(None)
@@ -1289,9 +1349,12 @@ async fn repair_quotes(
                 return Ok(None);
             };
             match judge(&raw2) {
-                v @ Verdict::Fixed(..) => {
-                    Ok(keep(v, "quotes repaired on the second ask, punctuation only", 0.04, progress))
-                }
+                v @ Verdict::Fixed(..) => Ok(keep(
+                    v,
+                    "quotes repaired on the second ask, punctuation only",
+                    0.04,
+                    progress,
+                )),
                 Verdict::Reject(why) => {
                     eprintln!("ch{n} second proofread {why}; digesting the original");
                     Ok(None)
@@ -1300,7 +1363,9 @@ async fn repair_quotes(
                     // 4. LLM + Gate 2 — the last ask.
                     progress(
                         0.04,
-                        format!("ch{n} still failing after the second ask ({complaint2}); last attempt"),
+                        format!(
+                            "ch{n} still failing after the second ask ({complaint2}); last attempt"
+                        ),
                     );
                     let prompt = ask(format!(
                         "Your last answer was rejected: {complaint2}. Fix exactly that and \
@@ -1338,7 +1403,9 @@ async fn repair_quotes(
 /// if this is equal, nothing was rewritten; if it is not, the answer is a
 /// rewrite wearing a proofread's clothes.
 fn strip_punctuation(text: &str) -> String {
-    text.chars().filter(|c| c.is_alphanumeric()).collect::<String>()
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>()
 }
 
 /// Whether a narration event ends by handing the floor to the speech that
@@ -1367,10 +1434,31 @@ fn hands_off_to_quote(text: &str) -> bool {
 /// somebody spoke. Prose that merely continues the scene is evidence of nothing
 /// and must not be named as the answer’s source.
 const SPEECH_VERBS: &[&str] = &[
-    " nói", " hỏi", " đáp", " kêu", " rằng", " quát", " thốt", " hét", " gào",
-    " than", " khấn", " dặn", " bảo", " thưa", " đọc", " nói tiếp", " hỏi lại",
-    " đáp lại", " trả lời", " lên tiếng", " tiếp lời", " ngắt lời", " thì thầm",
-    " lẩm bẩm", " cười nói",
+    " nói",
+    " hỏi",
+    " đáp",
+    " kêu",
+    " rằng",
+    " quát",
+    " thốt",
+    " hét",
+    " gào",
+    " than",
+    " khấn",
+    " dặn",
+    " bảo",
+    " thưa",
+    " đọc",
+    " nói tiếp",
+    " hỏi lại",
+    " đáp lại",
+    " trả lời",
+    " lên tiếng",
+    " tiếp lời",
+    " ngắt lời",
+    " thì thầm",
+    " lẩm bẩm",
+    " cười nói",
 ];
 
 fn attributes_speech(text: &str) -> bool {
@@ -2067,7 +2155,10 @@ pub fn parse_excerpt(raw: &str) -> Option<String> {
     let from_json = parse_json_repaired(cleaned)
         .ok()
         .and_then(|v| v.get("excerpt").and_then(Value::as_str).map(str::to_string));
-    let text = head_chars(&squeeze_ws(from_json.as_deref().unwrap_or(cleaned)), EXCERPT_CHARS);
+    let text = head_chars(
+        &squeeze_ws(from_json.as_deref().unwrap_or(cleaned)),
+        EXCERPT_CHARS,
+    );
     (!text.is_empty()).then_some(text)
 }
 
@@ -2080,8 +2171,8 @@ pub fn parse_excerpt(raw: &str) -> Option<String> {
 /// from one a digest wrote.
 pub fn write_excerpt(layout: &Layout, n: u32, excerpt: &str) -> Result<()> {
     let path = layout.script(n);
-    let mut script = crate::read_json::<Value>(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let mut script =
+        crate::read_json::<Value>(&path).with_context(|| format!("reading {}", path.display()))?;
     script
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("{} is not a JSON object", path.display()))?
@@ -2393,7 +2484,9 @@ fn parts_key(text: &str, bible: &Value, windows: &[Window], settings: &Settings)
     h.update(
         format!(
             "{}-{}-{}",
-            settings.digest.chunk_sentences, settings.digest.chunk_chars, settings.digest.answer_tokens
+            settings.digest.chunk_sentences,
+            settings.digest.chunk_chars,
+            settings.digest.answer_tokens
         )
         .as_bytes(),
     );
@@ -3033,11 +3126,7 @@ async fn reask_staging(
     complaint: &str,
     calls: &mut GCalls,
 ) -> Result<Value> {
-    let continuity = (total > 1).then_some(Continuity {
-        index,
-        total,
-        plot,
-    });
+    let continuity = (total > 1).then_some(Continuity { index, total, plot });
     let prompt = build_staging_prompt(
         layout,
         &settings.engine,
@@ -3056,7 +3145,11 @@ async fn reask_staging(
         settings,
     )
     .await?;
-    dump_raw(layout, &format!("digest-staging-retry{}", part_suffix(part)), &again);
+    dump_raw(
+        layout,
+        &format!("digest-staging-retry{}", part_suffix(part)),
+        &again,
+    );
     parse_staged_script(&again, bible, context, slice, vocab).map_err(|e| {
         let dump = layout.data().join(".last-analyze-raw.json");
         let _ = atomic_write(&dump, &again);
@@ -3128,10 +3221,7 @@ pub async fn analyze_chapter(
         // Before any call, because the number of calls is the operator's
         // business: a 40 KB chapter is sixteen of them, not two, and a digest
         // that looks stuck is only diagnosable once the plan said so.
-        progress(
-            0.05,
-            plan_line(n, analyzer, &windows, &prepared, settings),
-        );
+        progress(0.05, plan_line(n, analyzer, &windows, &prepared, settings));
         progress(0.06, plan_detail(&windows, &prepared));
         if parts.len() > 0 {
             progress(
@@ -3931,7 +4021,11 @@ pub fn manual_accept(
                     .map(|w| window_text(&session.prepared, w))
                     .collect()
             };
-            let what = if session.total() == 1 { "chapter" } else { "part" };
+            let what = if session.total() == 1 {
+                "chapter"
+            } else {
+                "part"
+            };
             // The gates run **before** the part is stored, with the pasted answer
             // standing in as a part of its own. That ordering is the whole reason
             // the operator can act on a refusal: the checkpoint has not moved on,
@@ -3966,9 +4060,9 @@ pub fn manual_accept(
             })?;
             if session.parts.len() < session.total() {
                 let next = session.parts.len();
-                let next_slice = session.slice(next).ok_or_else(|| {
-                    anyhow::anyhow!("ch{n} has no part {}", next + 1)
-                })?;
+                let next_slice = session
+                    .slice(next)
+                    .ok_or_else(|| anyhow::anyhow!("ch{n} has no part {}", next + 1))?;
                 let next_summaries = session.parts.summaries();
                 let next_continuity = session.continuity(next, &next_summaries);
                 return Ok(ManualAnswer {
@@ -5356,11 +5450,7 @@ fn canonicalize_aliases(data: &mut Value, bible: &Value) -> Vec<String> {
 /// still fails the canonical-name check with the message that says so: this
 /// completes bookkeeping, it never admits a stranger, and it never rewrites
 /// `speakers` itself.
-fn complete_roster(
-    data: &mut Value,
-    bible: &Value,
-    prepared: &PreparedChapter,
-) -> Vec<String> {
+fn complete_roster(data: &mut Value, bible: &Value, prepared: &PreparedChapter) -> Vec<String> {
     let legit: HashSet<String> = bible
         .get("characters")
         .and_then(Value::as_array)
@@ -5377,9 +5467,8 @@ fn complete_roster(
                 .map(str::to_string),
         )
         .collect();
-    let speaks = |name: &str| {
-        name == "Narrator" || is_anonymous_speaker(name) || legit.contains(name)
-    };
+    let speaks =
+        |name: &str| name == "Narrator" || is_anonymous_speaker(name) || legit.contains(name);
 
     // Every name the answer puts on a line.
     let mut used: Vec<String> = data
@@ -6139,7 +6228,10 @@ mod tests {
         // line break read as a missing rule, which is the assertion testing the
         // wrapping rather than the prompt.
         let flat = attribution.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(flat.contains("explicit named dialogue tag"), "{attribution}");
+        assert!(
+            flat.contains("explicit named dialogue tag"),
+            "{attribution}"
+        );
         assert!(flat.contains("scenario-dependent"), "{attribution}");
         let fixed = json!({
             "roster": ["Narrator", "anonymous:anon-1"],
@@ -6311,9 +6403,13 @@ mod tests {
             "roster": ["Narrator", "Dịch Phong"],
             "speakers": {"e0001": "Narrator", "e0002": "Dịch Phong"}
         });
-        let data =
-            parse_attribution(&raw.to_string(), &json!({"characters": []}), &prepared, false)
-                .unwrap();
+        let data = parse_attribution(
+            &raw.to_string(),
+            &json!({"characters": []}),
+            &prepared,
+            false,
+        )
+        .unwrap();
         let excerpt = data["excerpt"].as_str().unwrap();
         assert!(excerpt.starts_with("The chapter ends"), "{excerpt}");
         assert!(!excerpt.contains('\n'), "squeezed: {excerpt}");
@@ -6321,9 +6417,13 @@ mod tests {
 
         // A runaway answer is capped, not chattered at.
         raw["excerpt"] = json!("dạ ".repeat(EXCERPT_CHARS));
-        let data =
-            parse_attribution(&raw.to_string(), &json!({"characters": []}), &prepared, false)
-                .unwrap();
+        let data = parse_attribution(
+            &raw.to_string(),
+            &json!({"characters": []}),
+            &prepared,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             data["excerpt"].as_str().unwrap().chars().count(),
             EXCERPT_CHARS
@@ -6331,9 +6431,13 @@ mod tests {
 
         // Absent is as good as blank: the field simply comes back empty.
         raw.as_object_mut().unwrap().remove("excerpt");
-        let data =
-            parse_attribution(&raw.to_string(), &json!({"characters": []}), &prepared, false)
-                .unwrap();
+        let data = parse_attribution(
+            &raw.to_string(),
+            &json!({"characters": []}),
+            &prepared,
+            false,
+        )
+        .unwrap();
         assert_eq!(data["excerpt"], json!(""));
 
         // Last non-empty wins, and an empty tail part does not erase it.
@@ -6500,7 +6604,12 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|d| d["text"].as_str().unwrap().contains("Đúng như lời sư tôn nói"))
+            .find(|d| {
+                d["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Đúng như lời sư tôn nói")
+            })
             .expect("her reply follows");
         assert_eq!(next["decided_by"], json!("previous_context"), "{next}");
         assert_eq!(
@@ -6673,9 +6782,17 @@ mod tests {
         lift_thought_stingers(&mut data, Some("thought-chime"));
         let segs = data["segments"].as_array().unwrap();
         assert_eq!(segs[2]["text"], json!(" and quickly."));
-        assert_eq!(segs[3]["sound"], json!("thought-chime"), "after the last half");
+        assert_eq!(
+            segs[3]["sound"],
+            json!("thought-chime"),
+            "after the last half"
+        );
         assert_eq!(segs[4]["text"], json!("I really do."));
-        assert_eq!(segs[5]["sound"], json!("page-turn"), "the answer's own sting is not doubled");
+        assert_eq!(
+            segs[5]["sound"],
+            json!("page-turn"),
+            "the answer's own sting is not doubled"
+        );
         assert_eq!(segs[6]["text"], json!("Done."));
         assert_eq!(segs.len(), 7);
     }
@@ -6869,7 +6986,10 @@ mod tests {
         };
         std::fs::write(dir.join("assets/scene-map.json"), map("coin")).unwrap();
         let layout = Layout::new(&dir);
-        assert_eq!(vocabulary(&layout).unwrap().thought_stinger.as_deref(), Some("coin"));
+        assert_eq!(
+            vocabulary(&layout).unwrap().thought_stinger.as_deref(),
+            Some("coin")
+        );
 
         std::fs::write(dir.join("assets/scene-map.json"), map("thought-chime")).unwrap();
         let err = match vocabulary(&layout) {
@@ -6933,14 +7053,9 @@ mod tests {
 
         let vocab = vocabulary(&layout).expect("the fixture vocabulary");
         assert_eq!(vocab.thought_stinger.as_deref(), Some("coin"));
-        let script = parse_staged_script(
-            &script_answer(&prepared),
-            &bible,
-            &cast,
-            &prepared,
-            &vocab,
-        )
-        .expect("the staging answer is aligned");
+        let script =
+            parse_staged_script(&script_answer(&prepared), &bible, &cast, &prepared, &vocab)
+                .expect("the staging answer is aligned");
 
         let segments = script["segments"].as_array().unwrap();
         let line = segments
@@ -6951,7 +7066,11 @@ mod tests {
         assert_eq!(segments[line + 1]["sound"], json!("coin"), "{segments:?}");
         // The narration on either side carries no marker and no sting.
         assert!(segments[0].get("kind").is_none(), "{:?}", segments[0]);
-        assert!(segments[line + 2].get("kind").is_none(), "{:?}", segments[line + 2]);
+        assert!(
+            segments[line + 2].get("kind").is_none(),
+            "{:?}",
+            segments[line + 2]
+        );
     }
 
     #[test]
@@ -7007,8 +7126,7 @@ mod tests {
         assert_eq!(prepared.events[1].kind, "narration");
         assert_eq!(prepared.events[2].kind, "narration");
         assert_eq!(prepared.events[3].kind, "dialogue");
-        let line =
-            |id: &str, speaker: &str, text: &str| json!({"source_id": id, "speaker": speaker, "text": text});
+        let line = |id: &str, speaker: &str, text: &str| json!({"source_id": id, "speaker": speaker, "text": text});
         // The rotation, verbatim in shape: dialogue on Narrator, narration on
         // a character, dialogue on Narrator again.
         let rotated = json!({"segments": [
@@ -7234,9 +7352,8 @@ mod tests {
     /// half-second word between pauses that listens like a dropout.
     #[test]
     fn a_short_quoted_term_embedded_in_prose_stays_narration() {
-        let prepared = prepare_chapter(
-            "the hougong, the “rear palace”: the residence of the Imperial women.",
-        );
+        let prepared =
+            prepare_chapter("the hougong, the “rear palace”: the residence of the Imperial women.");
         assert_eq!(prepared.events.len(), 1, "{:?}", prepared.events);
         assert_eq!(prepared.events[0].kind, "narration");
         assert_eq!(prepared.dialogue_count(), 0);
@@ -7261,7 +7378,12 @@ mod tests {
             "She lived in a cage. I need to just get this job done. Maomao picked up the basket.",
         );
         let kinds: Vec<&str> = prepared.events.iter().map(|e| e.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["narration", "thought", "narration"], "{:?}", prepared.events);
+        assert_eq!(
+            kinds,
+            vec!["narration", "thought", "narration"],
+            "{:?}",
+            prepared.events
+        );
         assert_eq!(prepared.events[1].text, "I need to just get this job done.");
     }
 
@@ -7322,7 +7444,12 @@ mod tests {
             "The room was empty. You know no one is going to come visit you in your own room, right? Maomao traded the basket.",
         );
         let kinds: Vec<&str> = prepared.events.iter().map(|e| e.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["narration", "thought", "narration"], "{:?}", prepared.events);
+        assert_eq!(
+            kinds,
+            vec!["narration", "thought", "narration"],
+            "{:?}",
+            prepared.events
+        );
         assert!(prepared.events[1].text.starts_with("You know no one"));
     }
 
@@ -7335,7 +7462,12 @@ mod tests {
             "Hắn gặp một người bạn cũ của hắn.",
         ] {
             let prepared = prepare_chapter(text);
-            assert_eq!(prepared.dialogue_count(), 0, "{text:?}: {:?}", prepared.events);
+            assert_eq!(
+                prepared.dialogue_count(),
+                0,
+                "{text:?}: {:?}",
+                prepared.events
+            );
         }
     }
 
@@ -7370,7 +7502,12 @@ mod tests {
     fn vietnamese_first_person_carves() {
         let prepared = prepare_chapter("Hắn lật trang sách. Tôi cần phải đi. Hắn gật đầu.");
         let kinds: Vec<&str> = prepared.events.iter().map(|e| e.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["narration", "thought", "narration"], "{:?}", prepared.events);
+        assert_eq!(
+            kinds,
+            vec!["narration", "thought", "narration"],
+            "{:?}",
+            prepared.events
+        );
         assert_eq!(prepared.events[1].text, "Tôi cần phải đi.");
     }
 
@@ -7380,7 +7517,12 @@ mod tests {
     fn a_thought_beside_a_quoted_term_carves_only_the_thought() {
         let prepared = prepare_chapter("the hougong, the “rear palace”: the residence. I need to just get this job done. Maomao picked up the basket.");
         let kinds: Vec<&str> = prepared.events.iter().map(|e| e.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["narration", "thought", "narration"], "{:?}", prepared.events);
+        assert_eq!(
+            kinds,
+            vec!["narration", "thought", "narration"],
+            "{:?}",
+            prepared.events
+        );
         assert_eq!(prepared.events[1].text, "I need to just get this job done.");
     }
 
@@ -7390,15 +7532,25 @@ mod tests {
     #[test]
     fn a_long_thought_after_prose_trips_no_gate() {
         let thought = "I need to just get this job done as quickly as I possibly can without dropping anything on the flagstones today, she told herself.";
-        assert!(thought.chars().count() > 120, "the fixture must clear the gate's length guard");
+        assert!(
+            thought.chars().count() > 120,
+            "the fixture must clear the gate's length guard"
+        );
         let text = format!("Maomao walked through the vast eastern quarter with her heavy basket. {thought} She hurried on.");
         let prepared = prepare_chapter(&text);
         assert!(
-            prepared.events.iter().any(|e| e.kind == "thought" && e.text == thought),
+            prepared
+                .events
+                .iter()
+                .any(|e| e.kind == "thought" && e.text == thought),
             "{:?}",
             prepared.events
         );
-        assert!(quote_findings(&text).is_empty(), "{:?}", quote_findings(&text));
+        assert!(
+            quote_findings(&text).is_empty(),
+            "{:?}",
+            quote_findings(&text)
+        );
     }
 
     /// A short quote handed over from running prose is still speech: the
@@ -7424,7 +7576,11 @@ mod tests {
         // Nothing before the opener on the line: a speech opening its paragraph.
         let opening = prepare_chapter("\"Just leave it there.\" Within, a consort sipped.");
         assert_eq!(
-            opening.events.iter().filter(|e| e.kind == "dialogue").count(),
+            opening
+                .events
+                .iter()
+                .filter(|e| e.kind == "dialogue")
+                .count(),
             1,
             "{:?}",
             opening.events
@@ -7436,9 +7592,8 @@ mod tests {
     /// the headline filter would drop the dialogue with it.
     #[test]
     fn a_headline_glued_to_a_quote_does_not_swallow_the_line() {
-        let prepared = prepare_chapter(
-            "Chapter 25: Wine \"What terrible news,\" Consort Gyokuyou said.",
-        );
+        let prepared =
+            prepare_chapter("Chapter 25: Wine \"What terrible news,\" Consort Gyokuyou said.");
         let speech = prepared
             .events
             .iter()
@@ -7446,7 +7601,10 @@ mod tests {
             .expect("the line stays dialogue");
         assert_eq!(speech.text, "What terrible news,");
         assert!(
-            !prepared.events.iter().any(|e| e.text.contains("Chapter 25")),
+            !prepared
+                .events
+                .iter()
+                .any(|e| e.text.contains("Chapter 25")),
             "the headline is filtered, not narrated: {:?}",
             prepared.events
         );
@@ -7518,7 +7676,8 @@ mod tests {
     /// The listing wins instead, so the worst case is one narrated span.
     #[test]
     fn a_retraction_wins_over_a_disagreeing_speaker() {
-        let prepared = prepare_chapter("Hắn lật ra cuốn sách \"Khải hoàn ca của vương triều\" bên trong.");
+        let prepared =
+            prepare_chapter("Hắn lật ra cuốn sách \"Khải hoàn ca của vương triều\" bên trong.");
         let contradiction = json!({
             "roster": ["Narrator", "Dịch Phong"],
             "not_speech": ["e0002"],
@@ -7963,11 +8122,21 @@ mod tests {
         });
         let fixes = canonicalize_aliases(&mut data, &bible);
 
-        assert_eq!(data["roster"], json!(["Narrator", "Yêu Linh Nhi", "Huyền Vũ lão tổ"]));
+        assert_eq!(
+            data["roster"],
+            json!(["Narrator", "Yêu Linh Nhi", "Huyền Vũ lão tổ"])
+        );
         assert_eq!(data["speakers"]["e0010"], json!("Huyền Vũ lão tổ"));
-        assert_eq!(data["speakers"]["e0001"], json!("Yêu Linh Nhi"), "a real name is left alone");
+        assert_eq!(
+            data["speakers"]["e0001"],
+            json!("Yêu Linh Nhi"),
+            "a real name is left alone"
+        );
         assert_eq!(data["mentions"]["Ninh Huyền Vũ"], json!("Huyền Vũ lão tổ"));
-        assert!(fixes.iter().any(|f| f.contains("Huyền Vũ lão tổ")), "{fixes:?}");
+        assert!(
+            fixes.iter().any(|f| f.contains("Huyền Vũ lão tổ")),
+            "{fixes:?}"
+        );
 
         // What the fix buys: the gate now accepts an answer it used to refuse,
         // and refuses nothing it used to accept.
@@ -7994,7 +8163,8 @@ mod tests {
         // Unchanged, so the gate says what it always said.
         let err = validate_digest_identity(&data, &bible).unwrap_err();
         assert!(
-            err.to_string().contains("not a canonical known/new character name"),
+            err.to_string()
+                .contains("not a canonical known/new character name"),
             "{err}"
         );
 
@@ -8022,7 +8192,10 @@ mod tests {
         });
         let fixes = canonicalize_aliases(&mut data, &bible);
         assert!(fixes.is_empty(), "{fixes:?}");
-        assert_eq!(data["roster"], json!(["Narrator", "anonymous:anon-1", "Thanh Sơn"]));
+        assert_eq!(
+            data["roster"],
+            json!(["Narrator", "anonymous:anon-1", "Thanh Sơn"])
+        );
         assert_eq!(data["speakers"]["e0002"], json!("anonymous:anon-1"));
     }
 
@@ -8066,7 +8239,10 @@ mod tests {
             .filter_map(Value::as_str)
             .collect();
         assert!(roster.contains(&"anonymous:anon-1"), "{roster:?}");
-        assert!(roster.contains(&"Narrator"), "narration needs its speaker listed");
+        assert!(
+            roster.contains(&"Narrator"),
+            "narration needs its speaker listed"
+        );
         // Nothing is duplicated when it was already there, and the answer's own
         // assignments are untouched.
         assert_eq!(roster.iter().filter(|n| **n == "Lan").count(), 1);
@@ -8085,13 +8261,19 @@ mod tests {
             "speakers": {"e0002": "Kẻ lạ mặt"},
         });
         let fixes = complete_roster(&mut data, &bible, &prepared);
-        assert!(fixes.is_empty(), "a stranger is not a roster entry: {fixes:?}");
+        assert!(
+            fixes.is_empty(),
+            "a stranger is not a roster entry: {fixes:?}"
+        );
         assert_eq!(data["roster"], json!(["Narrator"]));
         // And the gate that would have been satisfied by adding it still
         // refuses: the completion is bookkeeping, not an admission.
         let err = validate_attributions(&data, &bible, &prepared).unwrap_err();
         assert!(err.to_string().contains("Kẻ lạ mặt"), "{err}");
-        assert!(err.to_string().contains("not in the chapter roster"), "{err}");
+        assert!(
+            err.to_string().contains("not in the chapter roster"),
+            "{err}"
+        );
 
         // The contrast that proves the point: the same shape with a name the
         // bible *does* carry is completed, and then passes.
@@ -8524,8 +8706,8 @@ mod tests {
 
         // A garbage paste fails the *worker's* validator, the same one, and
         // says so in words the operator can paste back into their model.
-        let err =
-            manual_accept(&layout, 51, Round::Attribution, "not json at all", None).expect_err("not JSON");
+        let err = manual_accept(&layout, 51, Round::Attribution, "not json at all", None)
+            .expect_err("not JSON");
         assert!(err.to_string().contains("not valid JSON"), "{err:#}");
 
         // With a cast in hand, round 2 renders the *staging* prompt against it.
@@ -8775,9 +8957,17 @@ mod tests {
             total: 2,
             plot: &[],
         };
-        let part_one = build_attribution_prompt(&layout, &bible, &prepared, Some(&first), None).unwrap();
-        assert!(part_one.contains("PART 1 OF 2"), "{}", head_chars(&part_one, 40));
-        assert!(part_one.contains("\"summary\""), "the field a part must return");
+        let part_one =
+            build_attribution_prompt(&layout, &bible, &prepared, Some(&first), None).unwrap();
+        assert!(
+            part_one.contains("PART 1 OF 2"),
+            "{}",
+            head_chars(&part_one, 40)
+        );
+        assert!(
+            part_one.contains("\"summary\""),
+            "the field a part must return"
+        );
         assert!(
             !part_one.contains("PLOT SO FAR"),
             "the first part has nothing behind it"
@@ -8789,7 +8979,8 @@ mod tests {
             total: 2,
             plot: &plot,
         };
-        let part_two = build_attribution_prompt(&layout, &bible, &prepared, Some(&second), None).unwrap();
+        let part_two =
+            build_attribution_prompt(&layout, &bible, &prepared, Some(&second), None).unwrap();
         assert!(part_two.contains("PART 2 OF 2"));
         assert!(
             part_two.contains("They reach the courtyard"),
@@ -8799,17 +8990,15 @@ mod tests {
         // Staging has its own note, and the rule that matters for it is the bed
         // that may be closed by the part after this one.
         let cast = json!({"roster": ["Narrator"], "speakers": {"e0001": "Narrator"}});
-        let quiet = build_staging_prompt(&layout, "vieneu", &bible, &cast, &prepared, None).unwrap();
-        assert!(!quiet.contains("PART 1 OF"), "no part note when there is one part");
-        let split = build_staging_prompt(
-            &layout,
-            "vieneu",
-            &bible,
-            &cast,
-            &prepared,
-            Some(&second),
-        )
-        .unwrap();
+        let quiet =
+            build_staging_prompt(&layout, "vieneu", &bible, &cast, &prepared, None).unwrap();
+        assert!(
+            !quiet.contains("PART 1 OF"),
+            "no part note when there is one part"
+        );
+        let split =
+            build_staging_prompt(&layout, "vieneu", &bible, &cast, &prepared, Some(&second))
+                .unwrap();
         assert!(split.contains("PART 2 OF 2"));
         assert!(
             split.contains("`loop`ed bed may run past the end of your part"),
@@ -8843,7 +9032,11 @@ mod tests {
             Some("CH 41: The white-robed swordswoman is still unnamed; she left with the party."),
         )
         .unwrap();
-        assert!(with.contains("---PREVIOUSLY---"), "{}", head_chars(&with, 40));
+        assert!(
+            with.contains("---PREVIOUSLY---"),
+            "{}",
+            head_chars(&with, 40)
+        );
         assert!(with.contains("still unnamed"), "the memory itself");
         assert!(
             with.contains("identity context only"),
@@ -8892,7 +9085,10 @@ mod tests {
             "the shared rule text: {}",
             head_chars(&bare, 40)
         );
-        assert!(bare.contains("Đoạn 0 kể rằng"), "the chapter itself is the input");
+        assert!(
+            bare.contains("Đoạn 0 kể rằng"),
+            "the chapter itself is the input"
+        );
         assert!(
             !bare.contains("PREVIOUSLY"),
             "no predecessor in the fixture, so no memory to feed"
@@ -8922,7 +9118,10 @@ mod tests {
         let excerpt_only = build_excerpt_prompt(&layout, 51, &text).unwrap();
         let rule = excerpt_rule(&content_language(&layout));
         assert!(rule.contains("State, not plot."));
-        assert!(attribution.contains(&rule), "the contract carries the shared rule");
+        assert!(
+            attribution.contains(&rule),
+            "the contract carries the shared rule"
+        );
         assert!(
             excerpt_only.contains(&rule),
             "the excerpt prompt carries the same shared rule"
@@ -8960,7 +9159,10 @@ mod tests {
         .unwrap();
         write_excerpt(&layout, 7, "The hall empties; the stranger stays unnamed.").unwrap();
         let stored: Value = crate::read_json::<Value>(&layout.script(7)).unwrap();
-        assert_eq!(stored["excerpt"], json!("The hall empties; the stranger stays unnamed."));
+        assert_eq!(
+            stored["excerpt"],
+            json!("The hall empties; the stranger stays unnamed.")
+        );
         assert_eq!(stored["segments"][0]["id"], json!("s1"));
         assert_eq!(stored["cast"]["n"], json!(1));
     }
@@ -9103,7 +9305,11 @@ mod tests {
         assert!(!parts.path.exists() || parts.path.metadata().is_ok());
 
         let reopened = Parts::open(&layout, 51, &text, &bible, &windows, &settings);
-        assert_eq!(reopened.len(), 1, "the finished part is resumed, not re-asked");
+        assert_eq!(
+            reopened.len(),
+            1,
+            "the finished part is resumed, not re-asked"
+        );
         assert_eq!(reopened.summaries().len(), 1);
 
         // A different plan is a different chapter's work: the stored parts are
@@ -9121,7 +9327,15 @@ mod tests {
         );
         // As is an edited chapter, even under the same plan.
         assert_eq!(
-            Parts::open(&layout, 51, &format!("{text} x"), &bible, &windows, &settings).len(),
+            Parts::open(
+                &layout,
+                51,
+                &format!("{text} x"),
+                &bible,
+                &windows,
+                &settings
+            )
+            .len(),
             0
         );
         // As is another bible, which is what makes later parts' casts safe.
@@ -9181,10 +9395,13 @@ mod tests {
         let quiet = json!({"segments": [line("Trời tối."), {"sound": "coin"}]});
         let opens = json!({"segments": [line("Hai người đến phòng bếp."), {"sound": "food-prep"}, line("Rồi đi ra.")]});
         let scripts = [&quiet, &opens];
-        let (gap, owner) = sound_gap(&scripts, &["Trời tối.", "Hai người."], &pool, "part")
-            .expect("an open bed");
+        let (gap, owner) =
+            sound_gap(&scripts, &["Trời tối.", "Hai người."], &pool, "part").expect("an open bed");
         assert_eq!(owner, 1, "the part that opened it");
-        assert!(gap.contains("food-prep") && gap.contains("stops dead"), "{gap}");
+        assert!(
+            gap.contains("food-prep") && gap.contains("stops dead"),
+            "{gap}"
+        );
 
         // Rule 2 is per part, and this is why: part 1's prose stages a kitchen
         // and part 1's segments place nothing, while part 2 did place a sound.
@@ -9262,7 +9479,8 @@ mod tests {
         // prevented on the *input* side as well — one backend shares the context
         // between prompt and answer.
         let bible = load_bible(&layout.bible());
-        let whole_prompt = build_attribution_prompt(&layout, &bible, &prepared, None, None).unwrap();
+        let whole_prompt =
+            build_attribution_prompt(&layout, &bible, &prepared, None, None).unwrap();
         let checkpoint = layout.data().join(".digest-parts-ch51.json");
 
         // (3) The flow, part by part, exactly as the TUI and the backup runner
@@ -9275,7 +9493,11 @@ mod tests {
             let slice = windows[i].prepared(&prepared);
 
             let step = manual_prompt(&layout, "vieneu", 51, cast.as_ref()).unwrap();
-            assert_eq!(step.round, Round::Attribution, "every part opens on its cast");
+            assert_eq!(
+                step.round,
+                Round::Attribution,
+                "every part opens on its cast"
+            );
             let part = ManualPart {
                 index: i + 1,
                 total: windows.len(),
@@ -9286,7 +9508,10 @@ mod tests {
 
             let accepted =
                 manual_accept(&layout, 51, Round::Attribution, &cast_answer(&slice), None).unwrap();
-            assert!(accepted.prompt.is_none(), "round 2 is asked for by the caller");
+            assert!(
+                accepted.prompt.is_none(),
+                "round 2 is asked for by the caller"
+            );
             cast = accepted.cast;
             assert!(cast.is_some(), "a part's cast is validated and handed back");
 
@@ -9326,7 +9551,10 @@ mod tests {
                         total: windows.len()
                     })
                 );
-                assert!(accepted.outcome.is_none(), "the chapter is not finished yet");
+                assert!(
+                    accepted.outcome.is_none(),
+                    "the chapter is not finished yet"
+                );
             } else {
                 assert!(accepted.prompt.is_none());
                 outcome = accepted.outcome;
@@ -9371,7 +9599,11 @@ mod tests {
             outcome.log
         );
         assert_eq!(
-            outcome.log.iter().filter(|l| l.contains("   part ")).count(),
+            outcome
+                .log
+                .iter()
+                .filter(|l| l.contains("   part "))
+                .count(),
             windows.len()
         );
     }
@@ -9520,7 +9752,8 @@ mod quote_gate_tests {
 
     /// The reported failure, verbatim in shape: an opener on line 3 that never
     /// closes, so the narration after it is read as speech.
-    const BROKEN: &str = "Chương 77: Cô đơn\nHắn nhìn ra cửa sổ.\n\"Ta sẽ đi.\nHắn quay lưng bước đi.";
+    const BROKEN: &str =
+        "Chương 77: Cô đơn\nHắn nhìn ra cửa sổ.\n\"Ta sẽ đi.\nHắn quay lưng bước đi.";
 
     #[test]
     fn the_gate_names_the_paragraph_the_unpaired_quote_opened_on() {
@@ -9624,7 +9857,11 @@ Cả thảm cỏ đã cháy đen, khói vẫn còn tỉ tít bay lên sau đám 
 Lạc Lan Tuyết hỏi. \"Ngươi không biết gì sao?\" — nàng quay sang hắn, mắt rưng rưng.
 
 Hắn lắc đầu: \"Ta cũng không rõ nữa. Tràng \"cuồng phong bạo vũ\" của hắn lại hiện ra trong đầu.\"";
-        assert!(quote_findings(healthy).is_empty(), "{:?}", quote_findings(healthy));
+        assert!(
+            quote_findings(healthy).is_empty(),
+            "{:?}",
+            quote_findings(healthy)
+        );
     }
 
     #[test]
@@ -9691,7 +9928,8 @@ mod repair_template_tests {
     use super::*;
     use crate::paths::Layout;
 
-    const BROKEN: &str = "Chương 77: Cô đơn\nHắn nhìn ra cửa sổ.\n\"Ta sẽ đi.\nHắn quay lưng bước đi.";
+    const BROKEN: &str =
+        "Chương 77: Cô đơn\nHắn nhìn ra cửa sổ.\n\"Ta sẽ đi.\nHắn quay lưng bước đi.";
 
     /// A layout whose `prompts/` tree resolves to the shipped adapter templates,
     /// which is what a real workspace gets.
@@ -9734,12 +9972,24 @@ mod repair_template_tests {
                 "{prompt}"
             );
             assert!(prompt.contains("unclosed quote"), "{prompt}");
-            assert!(!prompt.contains("{fault_line}"), "an unrendered placeholder");
-            assert!(!prompt.contains("{chapter_text}"), "an unrendered placeholder");
-            assert!(prompt.contains(BROKEN), "the whole chapter is proofread, not a window");
+            assert!(
+                !prompt.contains("{fault_line}"),
+                "an unrendered placeholder"
+            );
+            assert!(
+                !prompt.contains("{chapter_text}"),
+                "an unrendered placeholder"
+            );
+            assert!(
+                prompt.contains(BROKEN),
+                "the whole chapter is proofread, not a window"
+            );
             // What the file cannot be allowed to talk its way out of.
             assert!(prompt.contains("---REPAIR OUTPUT CONTRACT---"), "{prompt}");
-            assert!(prompt.contains("REJECTED"), "the verifier's rule must be stated");
+            assert!(
+                prompt.contains("REJECTED"),
+                "the verifier's rule must be stated"
+            );
             std::fs::remove_dir_all(&root).ok();
         }
     }
@@ -9777,7 +10027,10 @@ mod repair_template_tests {
             !prompt.contains("the chapter's own language"),
             "a declared language answers, it does not fall back: {prompt}"
         );
-        assert!(!prompt.contains("{content_language}"), "unrendered placeholder");
+        assert!(
+            !prompt.contains("{content_language}"),
+            "unrendered placeholder"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -9794,6 +10047,3 @@ mod repair_template_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 }
-
-
-
