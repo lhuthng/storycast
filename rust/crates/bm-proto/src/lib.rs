@@ -143,12 +143,10 @@ pub struct Task {
     /// `Merge` only: the sound design this chapter's artifact was mixed under
     /// a `bm_core::design` fingerprint over the registries and knobs that
     /// chapter's own script reaches.
-    ///
     /// The mix reads a scene map, three clip pools and seven settings, all
     /// editable after a chapter is published. Without this, a retuned effect
     /// left every mp3 that used it looking current. A merge whose stamp no
     /// longer matches the design on disk is not done.
-    ///
     /// **`None` means the task predates this field**, and is adopted rather
     /// than invalidated: the first pass writes the current stamp without
     /// touching the task, so a library merged before the field existed is not
@@ -160,7 +158,6 @@ pub struct Task {
     pub design: Option<String>,
     /// `Render` only: the take's position in the chapter's recorded render
     /// plan (`data/render-NN.json`).
-    ///
     /// A render is **one task per take**, not one per chapter: the offer then
     /// carries exactly the segment being spoken plus its `take_key`, so a
     /// local edit re-speaks one segment instead of shipping a chapter. The
@@ -172,7 +169,6 @@ pub struct Task {
     pub take: Option<usize>,
     /// `Render` only: the **other** ledger rows one offer assigned along with
     /// this one.
-    ///
     /// A take is still scheduled, gated and settled on its own row, but the
     /// *assignment* can cover several takes at once (`Settings::render_batch`),
     /// because a worker pays a round trip, a heartbeat and a report per offer.
@@ -181,7 +177,6 @@ pub struct Task {
     /// the wire. The row that owns the batch is the one the offer's `task_id`
     /// names; its own id is deliberately **not** repeated here. Empty is the
     /// ordinary single-take offer.
-    ///
     /// Cleared when the batch settles, and rewritten by the next offer that
     /// names this row, so it is never read stale: the reads are gated on the
     /// reporting worker still owning the row, and only an offer grants that.
@@ -189,7 +184,6 @@ pub struct Task {
     pub batch: Vec<String>,
     /// How many times the lease reaper has returned this row to the pool
     /// **silently**, no strike, because silence is not failure.
-    ///
     /// The count exists because that rule has a blind spot, and on 2026-09-22
     /// it cost about eighty minutes. A worker that died deserves nothing; a
     /// worker that is **alive and stuck** looks identical from here (fresh
@@ -309,20 +303,16 @@ pub enum MachineState {
     #[default]
     Unknown,
     /// **Created, and the account has not given it an address yet.**
-    ///
     /// The first thing a launched EC2 instance is: `RunInstances` returns a
     /// pending instance whose `public_ip` field is empty, and the address shows
     /// up seconds later. Such a box is registered by its *instance id*, stable
     /// for its whole life, so there is an entry to repair rather than none.
-    ///
     /// The address column stays blank while this is the state, because an
     /// attempt to dial here is guaranteed to fail and an address that looks
     /// reachable while nothing can reach it is the confusion this state exists
     /// to end. [`Self::dialable`] is the one place that verdict lives.
-    ///
     /// Like `Initializing`, it carries a deadline: a box the account never
     /// handed an address to is not coming, and waiting for ever would be a lie.
-    ///
     /// Spelled `awaiting-ip` rather than `awaiting-address` because it is
     /// rendered in a fixed-width column beside thirteen other state words, and
     /// a word the pane truncates to `awaiting-a…` hides the one noun that
@@ -331,7 +321,6 @@ pub enum MachineState {
     /// **Created, not yet answering.** A launched EC2 instance spends its first
     /// half-minute here: the account has the box, the box is booting, and
     /// nothing can be pushed to it yet.
-    ///
     /// Deliberately *not* `Offline`. Offline is a verdict about a box that was
     /// answering and went quiet; reading a boot as death is how a freshly
     /// launched pool looks broken. It is also the one state with a deadline
@@ -340,7 +329,6 @@ pub enum MachineState {
     /// An ssh probe is in flight.
     Probing,
     /// The box has everything it needs; no worker is beating yet.
-    ///
     /// Reached two ways, and they mean the same thing: the probe found the box
     /// already provisioned and there was nothing to distribute, or a push
     /// finished and the worker was launched. Either way the next event is the
@@ -373,12 +361,10 @@ impl MachineState {
     }
 
     /// May this machine be handed a task?
-    ///
     /// One state works: `Online`, which means a worker is answering. Every
     /// other state is a deliberate "not yet", booting, being pushed to,
     /// provisioned but never started, silent, or broken, and offering work
     /// into any of them is how a task lands on a box that cannot run it.
-    ///
     /// The caller decides what to do about `Unknown`: it means no opinion was
     /// ever formed, so it is neither a yes nor a no.
     pub fn accepts_work(self) -> bool {
@@ -386,7 +372,6 @@ impl MachineState {
     }
 
     /// On its way up: wait for it, and never read it as dead.
-    ///
     /// The dispatcher asks every registered box `/status` every couple of
     /// seconds. A box that is still booting, or being pushed to, or
     /// provisioned with no worker started yet, cannot answer, and stamping
@@ -404,12 +389,10 @@ impl MachineState {
     }
 
     /// Is there an address to dial for this box?
-    ///
     /// The scheduler asks every registered box `/status` every couple of
     /// seconds, and a box the account has not given an address yet has nothing
     /// to ask. It is keyed by its instance id, which is a *handle*, a name to
     /// repair the record by, not something ssh can answer on.
-    ///
     /// `Unknown` deliberately passes: a hand-added machine has never been
     /// probed, and probing it is the only way to find out.
     pub fn dialable(self) -> bool {
@@ -441,7 +424,6 @@ fn default_true() -> bool {
 pub const DEFAULT_HOOK_PORT: u16 = 18901;
 
 /// One stage's place in a machine's own work policy.
-///
 /// The scheduler walks the list in order and takes the first stage that has an
 /// assignable task; a disabled entry is skipped. Storing the full list (not just
 /// the enabled ones) keeps the operator's chosen order stable while they toggle
@@ -466,7 +448,6 @@ impl TaskPref {
 
     /// Every stage listed, none enabled: a box that is configured to run
     /// nothing.
-    ///
     /// Deliberately **not** an empty `Vec`. [`Machine::effective_task_policy`]
     /// reads an empty list as "no policy stored" and hands back the full
     /// default, which is the opposite of what this means — a box the book
@@ -506,7 +487,6 @@ pub struct Machine {
     /// When `state` last changed, unix seconds. `0` means "never stamped"
     /// a record written before this field, which is adopted rather than
     /// expired on the strength of a missing timestamp.
-    ///
     /// This is what lets a deadline tell "launched 20 s ago, still booting"
     /// from "has been `Initializing` since this morning, and is not coming".
     #[serde(default)]
@@ -517,7 +497,6 @@ pub struct Machine {
     #[serde(default)]
     pub tts_url: Option<String>,
     /// Port this box answers the inverted protocol on.
-    ///
     /// Defaulted rather than optional, so a box is driven because it is a
     /// worker, not because some other record remembers how it was started.
     /// An explicit `null` is the way to say "do not drive this one", which is
@@ -532,7 +511,6 @@ pub struct Machine {
     /// May the scheduler hand this box new work? `false` is **relaxed**: the
     /// operator has parked the box, and it takes nothing new until it is
     /// switched back on.
-    ///
     /// **Operator intent, deliberately not a [`MachineState`].** The state
     /// machine answers *how is this box doing*, a fact about the box, while
     /// this answers *should it be working*, a decision by the operator. Folding
@@ -541,11 +519,9 @@ pub struct Machine {
     /// `Offline` for going quiet, must not inherit the boot deadline, and must
     /// not report itself as broken in a pane. It is the same reason
     /// [`Self::task_policy`] is a field and not a state.
-    ///
     /// It lives beside `task_policy` in `machines.json` for the same reason
     /// too: a scheduling decision the operator made, which must survive the
     /// ledger being cleared and the inductor being restarted.
-    ///
     /// Positive polarity with a `true` default on purpose: a `machines.json`
     /// written before this field existed is a set of boxes that were all taking
     /// work, and `#[serde(default)]` on an inverted flag (`paused: bool`) would
@@ -553,13 +529,11 @@ pub struct Machine {
     #[serde(default = "default_true")]
     pub accepting_work: bool,
     /// ONNX intra-op threads this box's TTS sidecar should open with.
-    ///
     /// **Operator intent, per box**, persisted in `machines.json` beside
     /// `task_policy` for the same reason: it is a decision about how the box
     /// should work, not a fact about it, and it must survive a ledger clear and
     /// an inductor restart. `None` (the default) is "no opinion" and the
     /// sidecar's own heuristic stands (half the cores, capped at 8).
-    ///
     /// It travels to the worker over the same convergent sidecar-policy
     /// channel as `keep`, so a box that is down at edit time still converges
     /// when it comes back.
@@ -599,7 +573,6 @@ impl Machine {
     }
 
     /// Is this box parked by the operator?
-    ///
     /// Named as a *question about intent* rather than a read of the field, so
     /// the one rule lives in one place: a relaxed box is withheld work whatever
     /// its state, and unparking it restores it without anything else having to
@@ -619,12 +592,10 @@ impl Machine {
     }
 
     /// Move this machine to `state`, stamping when it happened.
-    ///
     /// The one transition point, because a state change is a *decision* and the
     /// timestamp is half of it. The note is the caller's business: several of
     /// them fold theirs in through `preserve_ec2_id`, and doing it here would
     /// mean this crate knowing the note format.
-    ///
     /// Re-stating the current state does **not** move the stamp, that is what
     /// keeps "online since 14:02" and "initializing for 4 minutes" meaningful
     /// while a poll re-states the same verdict every two seconds.
@@ -694,7 +665,6 @@ pub struct Heartbeat {
     #[serde(default)]
     pub mem_gb: Option<f32>,
     /// How many TTS sidecar processes are alive on the box.
-    ///
     /// The quantity that actually kills these boxes, and until now nothing in
     /// the cluster could see it: one sidecar is ~2.85 GB resident the moment the
     /// weights load, and an 8 GiB box cannot hold two. `Some(n)` with `n > 1` is
@@ -721,18 +691,15 @@ pub struct Heartbeat {
     /// The `(stage, adapter)` slots the sources bundle on this box actually
     /// covers, read from the `sources-manifest.json` a provision left at its
     /// root — `digest@vi-VN`, spelled by `bm_core::provision::sources::slot`.
-    ///
     /// The box's **policy** says what the operator wants it to run; this says
     /// what it was handed the files for, and the difference between the two is
     /// a stage that fails on every retry until somebody re-provisions. The
     /// scheduler offers a stage only when this list names the stage **for the
     /// adapter the offer is for** — a box may hold several languages, so the
     /// pair is the unit and the adapter alone is not.
-    ///
     /// A bare stage name (an agent from before the second dimension) covers it
     /// for every adapter, which is exactly what it meant when a box held one
     /// language and could not say which.
-    ///
     /// Empty from an agent with no bundle, or one that predates the field, and
     /// empty is "no opinion": the box is offered work as before rather than
     /// starved by a fact the inductor has not got.
@@ -741,7 +708,6 @@ pub struct Heartbeat {
     /// Whether this worker keeps a TTS sidecar, as it currently believes.
     /// `None` from an older agent, read as "keeps one", which is both the
     /// default and the safe read (the old behaviour, never a stuck refusal).
-    ///
     /// The dispatcher's sidecar-policy convergence reads this: it knows what
     /// the box's policy says (render on/off) and what it last **told** the
     /// worker, but neither survives the box rebooting back to its default
@@ -751,7 +717,6 @@ pub struct Heartbeat {
     pub sidecar_keep: Option<bool>,
     /// The ONNX intra-op thread count this worker's sidecar is asked to open
     /// with, as the worker currently believes it.
-    ///
     /// `None` from an older agent, and `None`/`0` from a current one means
     /// "the sidecar's own default" (half the cores, capped at 8). The
     /// dispatcher's sidecar-policy convergence reads this back the same way it
@@ -767,7 +732,6 @@ pub struct Heartbeat {
 }
 
 /// The heartbeat's answer: the only inductor→worker command channel.
-///
 /// `shutdown` defaults off so a new agent against an old inductor (whose
 /// answer is just `{"ok": true}`) keeps working, and an old agent against a
 /// new inductor ignores the answer entirely and is swept the old way.
@@ -804,7 +768,6 @@ pub struct Complete {
     #[serde(default)]
     pub units: u64,
     /// The cast that decided this chapter's segment **filenames**.
-    ///
     /// Shipped for the same reason as the script, and it has to be: a
     /// provisioned worker has no `data/cast-*.json` (provisioning copies the
     /// sources bundle, never `data/`), so a merge that
@@ -815,7 +778,6 @@ pub struct Complete {
     #[serde(default)]
     pub script: Option<serde_json::Value>,
     /// The cast that decided this chapter's segment **filenames**.
-    ///
     /// Shipped for the same reason as the script, and it has to be: a
     /// provisioned worker has no `data/cast-*.json`, provisioning copies the
     /// sources bundle, never `data/`, so a merge that
@@ -842,28 +804,24 @@ pub struct Complete {
 }
 
 /// The `worker_id` an operator's own digest reports under.
-///
 /// A manual digest is a *report*, not a special case: it goes to `/api/complete`
 /// with the same body a worker sends, so it flows through the same bible merge,
 /// the same row transition, the same script write and the same
 /// invalidate-on-changed-script rule. The one thing that has to differ is
 /// ownership, the operator is not the worker holding the row, and this id is
 /// how `complete` knows to accept it anyway.
-///
 /// **No `redigest` flag, deliberately.** A manual digest of a chapter the library
 /// already has needs its segments and mp3 invalidated, and `complete` already
 /// decides that by comparing the new script with the one on disk, so a
 /// re-digest that changes nothing invalidates nothing, and one that changes a
 /// line keeps every take whose inputs did not change. A flag would be the same
 /// fact stored twice, and the copy that could go stale.
-///
 /// It is deliberately **not** a legal worker id: worker ids come from the host
 /// (`localhost-caracal`, `marmot`), so a box cannot claim it by accident.
 pub const MANUAL_WORKER: &str = "operator";
 
 /// Provider credentials the offered stage will read, sourced from the
 /// inductor's `.bm/llm.json` (the TUI's `L` screen).
-///
 /// Workers are provisioned by *copying files* — the sources bundle: prompts,
 /// the registries, the crawlers, the clips a merge box plays — and `.bm/` is
 /// deliberately not among them: it is the
@@ -871,13 +829,11 @@ pub const MANUAL_WORKER: &str = "operator";
 /// with the task instead — narrowed by [`Credentials::for_stage`] to what
 /// the offered stage actually reads, so switching the model on the inductor
 /// takes effect on the next offer with no other sync.
-///
 /// The field names are the environment variables the generation backends
 /// already read (`bm-core/src/digest/llm.rs`, and `python/tts_router.py` for
 /// the TTS sidecar). That is the whole point: installing them on the worker is
 /// a loop over [`Credentials::pairs`], not a mapping table that can drift from
 /// the code that consumes them.
-///
 /// An empty string means "not configured on the inductor" and is never
 /// installed; an offer from an inductor that predates this field carries
 /// nothing at all and behaves exactly as before.
@@ -918,7 +874,6 @@ impl Credentials {
     }
 
     /// Narrow to the keys this stage will actually read.
-    ///
     /// A crawl offer carries no secret at all; a digest carries the analyzer's
     /// key and nothing else. Sending the whole set on every offer would hand
     /// every worker every credential on the cluster for no reason, the point
@@ -980,33 +935,28 @@ impl Credentials {
 }
 
 /// The analyzer's model configuration, exactly as the inductor holds it.
-///
 /// [`TaskOffer::analyzer`] names the *backend*; this names what that backend
 /// runs. Both have to travel, because the worker's copy of `Settings` is not
 /// the operator's: provisioning copies the sources bundle and never `.bm/`
 /// (that is the inductor's state), so a remote box has
 /// **no `.bm/settings.json` at all** and `Settings::load` silently returns
 /// `Settings::default()`.
-///
 /// That default is compiled in and names `gemini-3.5-flash`. A box the
 /// operator had configured for `gemini-3.5-flash-lite` therefore ran
 /// `gemini-3.5-flash` instead, and the only evidence was the model name inside
 /// a 503, which is exactly the outage this block closes.
-///
 /// An absent `analyze_models` means "the inductor said nothing" and leaves the
 /// worker's own value alone, so an older inductor's offer still behaves as
 /// before.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalyzerSettings {
     /// The fallback chain, tried in order.
-    ///
     /// `None` means "the inductor said nothing" (an older inductor); `Some([])`
     /// means "explicitly no Gemini models".
     #[serde(default)]
     pub analyze_models: Option<Vec<String>>,
     /// The Gemini slot's endpoint root, the way [`Self::openrouter_url`] is the
     /// OpenAI-compatible slot's.
-    ///
     /// Carried for the same reason the model is: the host is a deployment fact
     /// the operator set on the inductor (a gateway, a proxy, a compatible
     /// service), and a box that hardcoded Google's while the inductor listed
@@ -1035,13 +985,11 @@ pub struct AnalyzerSettings {
 }
 
 /// Everything one crawl needs that the worker cannot derive locally.
-///
 /// The **script travels with the offer** rather than being read on the worker.
 /// A box that has not been re-provisioned then still runs the crawler the
 /// operator edited, a worker needs no profile tree at all to crawl, and the
 /// inductor stays the single source of truth for what a run does, the same
 /// argument the analyzer block above is built on.
-///
 /// An empty `engine` is the built-in path: GET `url` and run the crate's own
 /// extractor. That is what an old inductor's offer means too (the field is
 /// simply absent), so either side may be upgraded first.
@@ -1080,7 +1028,6 @@ pub struct CrawlSpec {
     #[serde(default)]
     pub max_fetches: u32,
     /// The directory a script may read a local book from, and the only one.
-    ///
     /// Set from the **local** layout wherever the spec is built — which is
     /// where the crawl runs, so a path is never carried from another machine.
     /// Empty means no local reading at all, so a spec that crossed a wire
@@ -1185,7 +1132,6 @@ pub struct TaskOffer {
     #[serde(default)]
     pub tts_url: Option<String>,
     /// The adapter (language) this task's bytes are made for.
-    ///
     /// With `pack` below and `engine` beside it, this is the **binding** the
     /// offer is made under — and it travels because a worker's root is a flat
     /// mirror with no pointer of its own, so the two ends would otherwise key
@@ -1195,14 +1141,12 @@ pub struct TaskOffer {
     /// re-render nobody asked for rather than wrong audio — until a stage reads
     /// a cast on the box, and then it is a chapter spoken from the wrong
     /// roster.
-    ///
     /// Empty from an inductor that predates the field, which reads as "no
     /// opinion": the box keeps what it resolved for itself (see
     /// `Layout::rebind`).
     #[serde(default)]
     pub adapter: String,
     /// The pack this task's assets came from — the third leg of the binding.
-    ///
     /// The one leg a box can disagree about *silently*: the adapter and the
     /// engine are in every cache path it writes, so a mismatch there shows up
     /// in the filenames, while the pack is a property of the `assets/` a
@@ -1218,7 +1162,6 @@ pub struct TaskOffer {
     /// binding, and the one that was always on the wire.
     pub engine: String,
     /// Gemini TTS fallback chain, newest first.
-    ///
     /// **Written but not yet read.** The inductor fills it from
     /// `Settings::model_order` and no worker consumes it: the sidecar an agent
     /// spawns is `python/tts_server.py`, which is VieNeu-only and ignores
@@ -1246,7 +1189,6 @@ pub struct TaskOffer {
     /// `.bm/llm.json` (the TUI's `L` screen), narrowed to what this stage
     /// actually needs — so switching the model takes effect on the next
     /// offer with no other sync.
-    ///
     /// Empty when the inductor has nothing configured, the worker then refuses
     /// with "press L" instead of failing on a missing key. An old inductor
     /// sends nothing and an old worker ignores it, so either side may be
@@ -1263,7 +1205,6 @@ pub struct TaskOffer {
     #[serde(default)]
     pub script: Option<serde_json::Value>,
     /// The cast that decided this chapter's segment **filenames**.
-    ///
     /// Shipped for the same reason as the script, and it has to be: a
     /// provisioned worker has no `data/cast-*.json`, provisioning copies the
     /// sources bundle, never `data/`, so a merge that
@@ -1299,12 +1240,10 @@ pub struct TaskOffer {
     /// (voice, text, parameters), so the worker needs neither the script nor
     /// the cast to speak it, and a local edit costs one segment rather than a
     /// whole chapter.
-    ///
     /// `None` (old inductor) means "plan from your own script as before";
     /// `Some([])` means the chapter has no units at all, so report `ok` with
     /// `units: 0` at once. The Option (not a bare Vec) is what keeps those two
     /// apart.
-    ///
     /// Skipping is by **file presence under a content-addressed name**: a take
     /// the box already holds is by construction the right bytes, so nothing
     /// needs forcing. An adopted (pre-plan) take keeps its legacy name and is
@@ -1329,7 +1268,6 @@ pub struct TaskOffer {
     pub cast_hash: String,
     /// Merge stage: the chapter's take files **in mix order**, straight out of
     /// the recorded render plan.
-    ///
     /// The mixer must read the names the renderer wrote. It used to re-derive
     /// them from the script and the cast, which was safe only while a filename
     /// was a pure function of those two; a content-addressed take name is a
@@ -1388,7 +1326,6 @@ fn default_analyzer() -> String {
 }
 
 /// One selectable voice plus the metadata an operator needs to choose it.
-///
 /// `gender`/`accent`/`style` come from the sidecar's SDK labels when it
 /// answers; `bm-core::voices` carries a smaller offline table for when it does
 /// not. `language` is the language the pipeline *speaks*, which is the novel's
@@ -1413,7 +1350,6 @@ pub struct VoiceInfo {
     pub style: String,
     /// Sample-pool tags (`young`, `female`) when this voice is a pooled
     /// sample the cast rolls from; empty for a unique voice.
-    ///
     /// The pool registry is the truth about what is *auto-assignable*, and
     /// the picker groups on it. It travels here rather than being re-read
     /// from `voice-pool.json` per frame, so the live roster and the offline
@@ -1449,18 +1385,15 @@ pub enum Op {
     /// Enqueue crawl + digest tasks for a chapter range.
     Translate,
     /// Start or stop **distributing** work, and the only switch that does.
-    ///
     /// A process starts held: it loads its ledger, answers `/api/state`, takes
     /// registrations and offers nothing, so a restart — an unattended one
     /// especially — never resumes handing tasks to a fleet because an earlier
     /// process was once told to go. Held is in memory and nowhere else, which is
     /// what makes that true rather than aspirational.
-    ///
     /// Going also enqueues the **remainder** of the authored range: the first
     /// chapter of it whose merge is not `Done`, through the last. A book that is
     /// 3 of 100 chapters in therefore distributes 4..100, and the operator does
     /// not have to work that out from the task table.
-    ///
     /// Only *offers* are gated. A one-off op, a hand-driven digest, audition,
     /// provisioning and every screen keep working while held, because those are
     /// the operator's own hands rather than distribution.
@@ -1469,7 +1402,6 @@ pub enum Op {
     CrawlSetup,
     /// Adopt operator-supplied chapter text: the manual half of crawling, and
     /// the escape hatch for a single page a script cannot fetch.
-    ///
     /// Carries the chapter number and the files (or literal text) to adopt.
     /// The text goes through the *same* boundary the crawler uses, site
     /// metadata out, entities decoded, a body too short to be a chapter
@@ -1501,7 +1433,6 @@ pub enum Op {
     /// Retry an individual task by stage/chapter, optionally forcing re-run.
     RetryTask,
     /// Take work back off the worker holding it, without a strike.
-    ///
     /// The operator's answer to a box that took a task and never came back.
     /// Distinct from `Requeue`, which is the same idea **timed**: that one
     /// releases only what has no live beat, so it cannot help against a box
@@ -1509,7 +1440,6 @@ pub enum Op {
     /// has no opinion about and a person does. Nothing is deleted and attempts
     /// are kept, so a released task is offered again exactly as it was; what
     /// changes is only who may take it.
-    ///
     /// `stage` + `chapter` names one row (every take of it, for `render`);
     /// `worker` names every row that worker holds. One or the other, and
     /// `force` is the difference between releasing a silent holder and
@@ -1532,13 +1462,11 @@ pub enum Op {
     Recast,
     /// Change one segment's speaker on one chapter, checking who is speaking
     /// there first, then invalidating exactly what the edit reached.
-    ///
     /// `Recast` is the blunt version: it re-attributes whatever sits at the
     /// indexes it is given. This one names the speaker it expects to find, so a
     /// mistyped segment number refuses instead of re-attributing the wrong
     /// line, which is the failure a hand edit cannot see and a re-render makes
     /// permanent.
-    ///
     /// The invalidation is the plan's diff, so it is the takes whose voice or
     /// text moved and nothing else — and the merge, because the mp3 on disk was
     /// mixed from the old ones.
@@ -1557,7 +1485,6 @@ pub enum Op {
     /// pool registries itself, from the TUI. This is the inductor being *told*
     /// to look, not the inductor having acted: it re-reads the registries and
     /// requeues every merge whose fingerprint the edit reached.
-    ///
     /// A separate op from `Remix` because the two say different things. `Remix`
     /// carries the new knobs and saves them; this carries nothing and only
     /// asks "is what is on disk still what is published?". Collapsing them
@@ -1666,7 +1593,6 @@ pub struct SpeakerFix {
 
 /// The writes that wait for the work they would disturb, instead of
 /// refusing.
-///
 /// Each arm carries exactly the arguments its surgery needs — the same
 /// fields the request already carries, plus the **chapter scope** the
 /// enqueue computed: the gate pauses delivery only inside the scope, and
@@ -1758,7 +1684,6 @@ impl ExclusiveOp {
     /// exactly those stages pauses. A swap touches audio only: crawl and
     /// digest keep flowing while it waits — a crawl finishing under a
     /// parked swap is work the swap cannot reach.
-    ///
     /// The chapter-scoped surgeries take **every** stage of their chapter.
     /// Their own guard refuses while anything at all is in flight there — a
     /// recast rewrites the script a digest is about to read, a merge
@@ -1968,7 +1893,6 @@ pub struct OpResult {
     pub ok: bool,
     pub message: String,
     /// The wav this op rendered, base64-encoded, when it rendered one.
-    ///
     /// **Bytes, not a path**, and that is the whole point. The inductor renders
     /// and the client plays, and those are different machines: a path is only
     /// meaningful to a client that happens to share the inductor's filesystem,
@@ -1977,7 +1901,6 @@ pub struct OpResult {
     /// the file where the *speaker* is, and leaves the inductor's disk
     /// untouched, an audition is not a pipeline artifact and has no business
     /// accumulating in `data/`.
-    ///
     /// Base64 for the same reason merge reports carry base64 mp3s: this is
     /// JSON. A voice sample is ~240 KB, so ~320 KB on the wire, nothing on a
     /// LAN, and bounded by one sample in flight at a time.

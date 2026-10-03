@@ -1,6 +1,5 @@
 use super::*;
 
-///
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum LogFilter {
     #[default]
@@ -55,7 +54,6 @@ impl LogFilter {
         }
     }
 }
-///
 pub(crate) enum TaskEvent<'a> {
     Done {
         worker: &'a str,

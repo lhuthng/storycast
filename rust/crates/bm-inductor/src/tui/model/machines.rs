@@ -1,6 +1,5 @@
 use super::*;
 
-///
 pub(crate) fn addr_label(m: &Machine) -> String {
     if m.state.dialable() {
         m.addr.clone()
