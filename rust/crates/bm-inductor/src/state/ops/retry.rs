@@ -18,7 +18,6 @@ impl Inner {
             .collect()
     }
 
-
     /// Take one row back off whoever holds it, by hand.
     ///
     /// `stage` + `chapter` names a row, and for `render` that is every take of
@@ -67,7 +66,6 @@ impl Inner {
         }
         self.finish_release(&ids, &format!("{stage}:{chapter}"), Some(&beating))
     }
-
 
     /// The wider question the same primitive answers: not "this row", but
     /// "what is this box sitting on".
@@ -118,7 +116,6 @@ impl Inner {
         msg
     }
 
-
     /// The shared tail of both scopes: release the rows, save, say so.
     fn finish_release(&mut self, ids: &[String], what: &str, beating: Option<&str>) -> String {
         let now = now_secs();
@@ -142,7 +139,6 @@ impl Inner {
         msg
     }
 
-
     /// Manual retry for every shelved task after fixing the cause.
     ///
     /// Strikes reset — unlike `release`, which keeps them — so the next failure
@@ -155,14 +151,12 @@ impl Inner {
         self.requeue_shelved(None)
     }
 
-
     /// The same, narrowed to one chapter — every stage of it that is shelved.
     /// This is what `:retry 24` means, and it is the useful scope after a
     /// failure that named a chapter without naming a stage.
     pub fn op_retry_chapter(&mut self, chapter: u32) -> String {
         self.requeue_shelved(Some(chapter))
     }
-
 
     /// The one implementation behind both scopes: `chapter` of `None` is the
     /// whole ledger.
@@ -196,7 +190,6 @@ impl Inner {
         msg
     }
 
-
     /// Remove every ledger row for one downstream stage and chapter.
     ///
     /// A forced upstream rerun invalidates the work, not just the current row.
@@ -215,7 +208,6 @@ impl Inner {
         }
         count
     }
-
 
     /// Put a chapter's merge back in the queue, creating the row if the chapter
     /// has not reached merge yet. Its old output is the caller's responsibility
@@ -240,7 +232,6 @@ impl Inner {
             }
         }
     }
-
 
     /// Retry an individual task by stage and chapter.
     ///

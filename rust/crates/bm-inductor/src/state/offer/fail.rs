@@ -50,7 +50,6 @@ impl Inner {
         healed
     }
 
-
     /// Record a failed report: a strike, Pending again (Shelved at the
     /// stage's threshold, 3 everywhere but digest, which gets 15), and an
     /// event line. Shared by worker-reported failures and the completion
@@ -105,7 +104,6 @@ impl Inner {
             bm_core::util::head_chars(detail, 120)
         )
     }
-
 
     pub(crate) fn fail_task(&mut self, task_id: &str, worker_id: &str, detail: String) -> String {
         // A digest racer failing while others still hold the row: drop just

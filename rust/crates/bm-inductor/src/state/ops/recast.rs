@@ -17,7 +17,6 @@ impl Inner {
         self.retag_chapters(None, dry_run)
     }
 
-
     /// The queued retag: the same rewrite, gated by the queue instead of
     /// `ensure_idle` — it runs only once the digests (and renders) it could
     /// disturb have gone quiet. `chapters` is the ask-time scope; the
@@ -30,7 +29,6 @@ impl Inner {
         };
         self.retag_chapters(scope, true)
     }
-
 
     /// The retag body, shared by the direct op (which gates on
     /// `ensure_idle`) and the queued one (which the exclusive gate has
@@ -126,6 +124,48 @@ impl Inner {
         ))
     }
 
+    /// Re-attribute speakers on one chapter's script, then requeue exactly
+    /// what the edit reached.
+    ///
+    /// The digest's recurring misattribution, confirmed against chapter text:
+    /// third-person narration given to the character it describes ("Nàng lập
+    /// tức nhíu mày…" spoken by Lạc Lan Tuyết), and a quote with no dialogue
+    /// tag defaulted to Narrator instead of whoever the surrounding action
+    /// introduces. The prompt's rule 3 already forbids the first half word
+    /// for word — the small model disobeyed it — so re-digesting rolls the
+    /// same dice; the correction is surgical.
+    ///
+    /// Chapter-scoped busy guard rather than the cluster-global `ensure_idle`:
+    /// every file this touches belongs to the chapter (its script, its plan,
+    /// its segments, its mp3), so unrelated chapters rendering alongside are
+    /// unaffected. See [`Self::ensure_chapter_idle`].
+    ///
+    /// A new speaker must already hold a voice (`Narrator` always does), or
+    /// the chapter would requeue into a row no box can speak. The plan's diff
+    /// decides the blast radius for free: a re-voiced run has a new
+    /// content-addressed name, so its old file is superseded and its take is
+    /// work again, while untouched runs keep their audio.
+    /// Point one segment at another speaker, having first checked that the
+    /// segment says who the caller thought it said.
+    ///
+    /// `segment` is 1-based, the way a person counts lines in the file, and
+    /// `expect` is the guard: a mistyped number lands on a line that is not
+    /// the one meant, and re-attributing it would be a silent, permanent edit
+    /// to a chapter already rendered. So the mismatch refuses, and the refusal
+    /// names what is actually there and where the expected speaker *is*, which
+    /// is the answer to "I miscounted".
+    ///
+    /// The invalidation is [`invalidate_render`]'s, which is the plan's diff:
+    /// only the takes whose voice or text moved become work, and the rest of
+    /// the chapter keeps the audio it has. One caveat worth knowing, because it
+    /// is the difference between one take and several: the local engine groups
+    /// consecutive same-speaker segments into a single take, so re-pointing the
+    /// middle of a run splits that run and re-speaks the two halves.
+    ///
+    /// The live API queues this ([`bm_proto::ExclusiveOp::FixSpeaker`]) and
+    /// runs [`Self::fix_speaker_apply`], so this guarded entry is compiled for
+    /// the tests that cover the refusal itself.
+    #[cfg(test)]
     pub fn op_fix_speaker(
         &mut self,
         chapter: u32,
@@ -136,7 +176,6 @@ impl Inner {
         self.ensure_chapter_idle(chapter, "fix the speaker")?;
         self.fix_speaker_apply(chapter, segment, expect, speaker)
     }
-
 
     /// The fix-speaker body, guardless — see [`Self::swap_apply`]. The
     /// exclusive gate already held this chapter still, and its scope is every
@@ -273,7 +312,6 @@ impl Inner {
         Ok(msg)
     }
 
-
     /// The chapter's take keys, which is what a re-plan diffs. Empty when the
     /// chapter has no plan yet, which makes every take after an edit look new,
     /// and is the honest answer: nothing was recorded to compare against.
@@ -283,6 +321,7 @@ impl Inner {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
     fn ensure_chapter_idle(&self, chapter: u32, verb: &str) -> anyhow::Result<()> {
         for t in self.tasks.values() {
             if t.chapter == chapter && matches!(t.state, TaskState::Assigned | TaskState::Running) {
@@ -328,7 +367,6 @@ impl Inner {
         self.ensure_chapter_idle(chapter, "recast")?;
         self.recast_apply(chapter, fixes, remove)
     }
-
 
     /// The recast body, guardless — see [`Self::swap_apply`].
     pub(crate) fn recast_apply(
@@ -428,5 +466,3 @@ impl Inner {
         ))
     }
 }
-
-

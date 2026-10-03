@@ -15,7 +15,6 @@ mod lifecycle;
 mod recast;
 mod retry;
 impl Inner {
-
     /// ETA for the remaining range, from measured throughput divided by
     /// live workers (heartbeat within the last 90s).
     pub fn op_eta(&self, start: u32, count: u32) -> String {

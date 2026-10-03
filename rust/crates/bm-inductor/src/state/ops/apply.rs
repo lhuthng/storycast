@@ -11,7 +11,6 @@ impl Inner {
     /// API down and no local worker alive — so the cluster-wide guard stands.
     /// Only *fresh* evidence counts (30s) — stale beats and ghost assignments
     /// are the reaper's job, and an empty ledger (offline) always passes.
-
     /// Repoint one character's voice and invalidate only its cached segments.
     /// Other characters keep their cache; affected chapters re-render + merge.
     ///
@@ -26,7 +25,6 @@ impl Inner {
         self.ensure_idle()?;
         self.swap_apply(character, voice)
     }
-
 
     /// The swap body, guardless: the exclusive queue's gate has already
     /// cleared exactly the chapters this invalidates, so the cluster-wide
@@ -125,7 +123,6 @@ impl Inner {
         ))
     }
 
-
     /// Save a new mix and requeue every merge: the finished mp3s were mixed
     /// with the old one. Render cache is kept — tempo and layer volumes apply
     /// at merge time, so no segment needs re-speaking.
@@ -143,7 +140,6 @@ impl Inner {
         self.ensure_idle()?;
         self.remix_apply(speed, effect_volume, music_volume, inject_volume)
     }
-
 
     /// The remix body, guardless — see [`Self::swap_apply`].
     pub(crate) fn remix_apply(
@@ -184,7 +180,6 @@ impl Inner {
         ))
     }
 
-
     /// A sound-design write happened outside the scheduler — `:sound` writes the
     /// pool registries itself, from the TUI, so this is the inductor being told
     /// to look rather than the inductor having done it. Same scope rule as
@@ -200,7 +195,6 @@ impl Inner {
         }
         format!("sound design changed: {n} merge(s) requeued")
     }
-
 
     /// Reset every task of one stage to pending, dropping finished mp3s for
     /// merges so the stage re-runs end-to-end. Returns tasks touched.
@@ -224,7 +218,6 @@ impl Inner {
         n
     }
 
-
     /// Requeue every merge without touching the mix or the render cache:
     /// effect clips, the scene map and the pools all apply at merge time.
     ///
@@ -237,7 +230,6 @@ impl Inner {
         self.save();
         Ok(format!("remerge: {n} merge(s) requeued, render cache kept"))
     }
-
 
     /// Requeue every render task and its merge, deleting cached segments and
     /// finished mp3s: a full re-speak.
@@ -289,7 +281,6 @@ impl Inner {
         ))
     }
 
-
     /// Record what the chapter index says about a range, before anything is
     /// queued from it.
     ///
@@ -336,7 +327,6 @@ impl Inner {
         closed
     }
 
-
     /// Close a chapter's crawl because the operator supplied its text.
     ///
     /// This is what makes manual import a *supply path* rather than a mode: the
@@ -378,7 +368,6 @@ impl Inner {
         self.save();
         true
     }
-
 
     /// Enqueue crawl+digest for chapters missing scripts (idempotent).
     ///
@@ -447,4 +436,3 @@ impl Inner {
         (crawls, digests)
     }
 }
-

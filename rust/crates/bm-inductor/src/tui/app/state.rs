@@ -1,7 +1,6 @@
 use super::*;
 
 impl App {
-
     /// The settings actually in force: the live ones while the inductor
     /// answers, else this workspace's own file, else the compiled defaults.
     ///

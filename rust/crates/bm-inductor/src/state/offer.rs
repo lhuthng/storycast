@@ -24,8 +24,6 @@ mod build;
 mod complete;
 mod fail;
 impl Inner {
-
-
     pub fn counts(&self) -> HashMap<String, HashMap<String, usize>> {
         let mut out: HashMap<String, HashMap<String, usize>> = HashMap::new();
         for t in self.tasks.values() {
@@ -36,7 +34,6 @@ impl Inner {
         out
     }
 
-
     /// The cast exactly as the cast file holds it.
     pub fn cast_snapshot(&self) -> std::collections::BTreeMap<String, String> {
         bm_core::cast::read_cast(
@@ -45,7 +42,6 @@ impl Inner {
         )
         .into_map()
     }
-
 
     /// Every speaker the inductor can name: the operator's cast, the cast file,
     /// the bible, and every script's roster and segments.
@@ -105,5 +101,3 @@ impl Inner {
         out
     }
 }
-
-

@@ -661,8 +661,6 @@ impl App {
 /// so it becomes `.`, and the home directory becomes `~` — the venv, the model
 /// caches and the HF token all live there. A path under neither is another
 /// machine's fact and is left as it was written.
-
-
 fn shorten_paths(root: &std::path::Path, text: &str) -> String {
     let mut out = text.to_string();
     let root = root.to_string_lossy();
@@ -702,5 +700,3 @@ mod tests {
         assert_eq!(shorten_paths(Path::new("/"), "/a/b"), "/a/b");
     }
 }
-
-

@@ -41,7 +41,6 @@ impl Inner {
         }
     }
 
-
     /// The binding the tasks in flight were created under, and the one an offer
     /// is made under.
     ///
@@ -56,7 +55,6 @@ impl Inner {
             .as_ref()
             .unwrap_or(&self.settings.profile)
     }
-
 
     /// The task this worker should do next.
     ///
@@ -368,7 +366,6 @@ impl Inner {
         Some(offer)
     }
 
-
     /// The ledger rows one render offer assigns: the oldest chapter's pending
     /// takes, up to [`bm_core::config::Settings::render_batch`], truncated at
     /// the first take this store cannot resolve.
@@ -407,7 +404,6 @@ impl Inner {
         out
     }
 
-
     /// Every ledger row one report settles: the row its `task_id` names, plus
     /// the rest of the batch that offer assigned.
     ///
@@ -424,7 +420,6 @@ impl Inner {
         }
         out
     }
-
 
     fn build_offer(&self, t: &Task, batch: &[String], machine: &str) -> TaskOffer {
         let n = t.chapter;
@@ -601,7 +596,6 @@ impl Inner {
             local_node: bm_core::is_local_node(machine),
         }
     }
-
 
     /// Where a chapter lives: the frozen index's answer when there is one, and
     /// the URL template otherwise.

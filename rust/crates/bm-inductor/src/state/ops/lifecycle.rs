@@ -22,7 +22,6 @@ impl Inner {
         })
     }
 
-
     /// Retire boxes that never came up.
     ///
     /// `Initializing` and `AwaitingIp` are the two machine states with a
@@ -81,7 +80,6 @@ impl Inner {
         out
     }
 
-
     /// Ask every beating worker to exit on its next heartbeat (2s). The
     /// graceful half of the cluster stop: workers die on their own, no ssh.
     /// In-flight tasks are stranded, not failed — the stop flow requeues
@@ -100,7 +98,6 @@ impl Inner {
         msg
     }
 
-
     /// Arm drain-then-exit: workers stop on their own once the queue drains.
     /// Fires at once when nothing is unfinished (all done, or an idle
     /// backend) — otherwise the arm would sit forever with no completion
@@ -115,7 +112,6 @@ impl Inner {
         self.push_event("info", msg.clone());
         msg
     }
-
 
     /// Fire the drain-then-exit latch when nothing is unfinished.
     /// One-shot: the arm disarms as it fires, so work enqueued afterwards
@@ -132,7 +128,6 @@ impl Inner {
         })
     }
 
-
     /// Work the cluster could actually start right now.
     ///
     /// Deliberately **not** `busy()`. When a chapter's crawl shelves, its
@@ -148,7 +143,6 @@ impl Inner {
         })
     }
 
-
     /// Nothing running and nothing startable — the cluster has nothing to do.
     ///
     /// This is the idle timer's predicate, and the distinction from `busy()`
@@ -161,7 +155,6 @@ impl Inner {
             .any(|t| matches!(t.state, TaskState::Assigned | TaskState::Running));
         !in_flight && !self.runnable()
     }
-
 
     /// Start or stop distribution, and report it. Returns the line to show.
     ///
@@ -190,7 +183,6 @@ impl Inner {
         line
     }
 
-
     pub(crate) fn maybe_auto_shutdown(&mut self) {
         if !self.shutdown_when_idle {
             return;
@@ -205,7 +197,6 @@ impl Inner {
             "queue drained — workers exiting on next beat".into(),
         );
     }
-
 
     /// Manual trigger for the same orphan logic `reap` runs automatically:
     /// requeue assignments with no live beat. Live workers' tasks are
