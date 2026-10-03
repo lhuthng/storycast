@@ -1,3 +1,8 @@
+use super::offline::offline_remix_apply;
+use super::offline::offline_swap_apply;
+use super::roster::local_roster;
+use super::sidecar::audio_result;
+use super::sidecar::sidecar_serving;
 use super::*;
 
 fn scratch() -> tempfile::TempDir {

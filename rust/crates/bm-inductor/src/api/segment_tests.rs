@@ -1,3 +1,4 @@
+use super::sidecar::op_segment;
 use super::*;
 
 #[test]
