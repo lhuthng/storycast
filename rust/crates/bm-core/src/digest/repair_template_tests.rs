@@ -1,3 +1,5 @@
+use super::attribution::build_attribution_prompt;
+use super::quotes::build_repair_prompt;
 use super::*;
 use crate::paths::Layout;
 

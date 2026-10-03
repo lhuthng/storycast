@@ -1,3 +1,6 @@
+use super::quotes::effective_text;
+use super::quotes::repaired_txt;
+use super::quotes::strip_punctuation;
 use super::*;
 use crate::paths::Layout;
 
