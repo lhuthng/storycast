@@ -490,28 +490,28 @@ fn swap_invalidates_only_the_characters_files() {
     .unwrap();
     let seg = layout.seg_dir("vieneu", 1);
     std::fs::create_dir_all(&seg).unwrap();
-    std::fs::write(seg.join("0000-0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+    std::fs::write(seg.join("0000_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+    std::fs::write(seg.join("0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
     std::fs::write(seg.join("0002_Adam.wav"), vec![0u8; 2000]).unwrap();
     std::fs::write(layout.final_mp3(1), vec![0u8; 2000]).unwrap();
+    // A is now two takes, B one: the swap must clear both of A's.
     // The routine pass has already recorded what these files are, which
     // is what lets the swap say "only A's take changed" instead of "I
     // cannot prove any of this".
     inner.materialize_render_takes(1);
 
     let msg = inner.op_swap_voice("A", "Minh Triết").unwrap();
-    assert!(msg.contains("Đức Trí -> Minh Triết"), "{msg}");
-    assert!(
-        !seg.join("0000-0001_Đức Trí.wav").exists(),
-        "stale run file must go"
-    );
+    assert!(msg.contains("Đức Trí -> Minh Triết"), "{msg}");assert!(!seg.join("0000_Đức Trí.wav").exists(), "stale take goes");
+    assert!(!seg.join("0001_Đức Trí.wav").exists(), "stale take goes");
     assert!(
         seg.join("0002_Adam.wav").exists(),
         "other voices keep cache"
     );
     assert!(!layout.final_mp3(1).exists(), "stale product goes away");
-    // One row per take: A's run is work again, B's is untouched.
+    // One row per take: A's two takes are work again, B's is untouched.
     assert_eq!(inner.tasks["render:1:0"].state, TaskState::Pending);
-    assert_eq!(inner.tasks["render:1:1"].state, TaskState::Done);
+    assert_eq!(inner.tasks["render:1:1"].state, TaskState::Pending);
+    assert_eq!(inner.tasks["render:1:2"].state, TaskState::Done);
     assert!(!inner.render_takes_done(1));
     assert_eq!(inner.tasks["merge:1"].state, TaskState::Pending);
     // The swap's *meaning* is checked through the reader (which resolves
@@ -1429,12 +1429,44 @@ fn reconcile_adopts_the_stamp_without_undoing_a_promotion() {
     inner.tasks.insert(t.id(), t);
     std::fs::create_dir_all(layout.output()).unwrap();
     std::fs::write(layout.final_mp3(1), b"old mix").unwrap();
+    // Ground truth now includes the captions: a merge is only done when its
+    bm_core::assemble::write_cues(
+        &bm_core::assemble::cues_path(&layout.final_mp3(1)),
+        &bm_core::assemble::Cues {
+            version: bm_core::assemble::CUES_VERSION,
+            chapter: 1,
+            duration_s: 1.0,
+            cues: Vec::new(),
+        },
+    )
+    .unwrap();
 
     inner.reconcile(1, 2);
     let m = &inner.tasks["merge:1"];
     assert_eq!(m.state, TaskState::Done, "ground truth promotes");
     assert!(m.design.is_some(), "and the pass that follows adopts");
     assert!(layout.final_mp3(1).is_file());
+}
+
+#[test]
+fn a_done_merge_without_its_sidecar_is_requeued_by_reconcile() {
+    // The remote-merge era marked merges Done from the mp3 alone, so the
+    let (_d, mut inner) = design_fixture();
+    let layout = inner.layout.clone();
+    let mut t = Task::new(1, Stage::Merge);
+    t.state = TaskState::Done;
+    inner.tasks.insert(t.id(), t);
+    std::fs::create_dir_all(layout.output()).unwrap();
+    std::fs::write(layout.final_mp3(1), b"mix with no sidecar").unwrap();
+
+    inner.reconcile(1, 2);
+    let m = &inner.tasks["merge:1"];
+    assert_eq!(m.state, TaskState::Pending, "no sidecar, not done");
+    assert!(m.detail.contains("sidecar"), "{}", m.detail);
+    assert!(
+        layout.final_mp3(1).is_file(),
+        "the mp3 stays for the re-merge to overwrite"
+    );
 }
 
 #[test]
@@ -3321,6 +3353,7 @@ fn completions_feed_the_stats_pane_ledger() {
         script: None,
         text: None,
         mp3_b64: None,
+        cues_b64: None,
         unit_files: Vec::new(),
     };
     let msg = inner.complete(&done("digest:1", "w1", true));
@@ -3875,6 +3908,7 @@ fn completion(worker: &str, task: &str, ok: bool, detail: &str) -> Complete {
         script: None,
         text: None,
         mp3_b64: None,
+        cues_b64: None,
         unit_files: Vec::new(),
     }
 }
@@ -4764,8 +4798,9 @@ fn a_render_report_with_missing_files_is_rejected_by_name() {
     std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
     let seg = layout.seg_dir("vieneu", 6);
     std::fs::create_dir_all(&seg).unwrap();
-    std::fs::write(seg.join("0000-0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+    std::fs::write(seg.join("0000_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
     std::fs::write(seg.join("0002_Adam.wav"), vec![0u8; 500]).unwrap();
+    // 0001 is deliberately absent: one wav per segment, so the gap is a take.
     // The plan is what names the file, so a report about a take whose
     let plan = inner.materialize_render_takes(6).expect("plannable");
     let missing = plan.takes[1].file.clone();
@@ -5209,7 +5244,8 @@ fn offer_skips_a_merge_whose_segments_are_missing_and_heals_its_render() {
     std::fs::write(layout.cast(&engine), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
     let seg = layout.seg_dir(&engine, 9);
     std::fs::create_dir_all(&seg).unwrap();
-    std::fs::write(seg.join("0000-0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+    std::fs::write(seg.join("0000_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+    // 0001 and 0002 are absent: the merge is starved, its render is not.
     for (stage, state) in [
         (Stage::Crawl, TaskState::Done),
         (Stage::Digest, TaskState::Done),
@@ -5256,7 +5292,8 @@ fn offer_hands_over_a_merge_whose_segments_are_home() {
     std::fs::write(layout.cast(&engine), r#"{"A":"Đức Trí","B":"Adam"}"#).unwrap();
     let seg = layout.seg_dir(&engine, 9);
     std::fs::create_dir_all(&seg).unwrap();
-    std::fs::write(seg.join("0000-0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+    std::fs::write(seg.join("0000_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
+    std::fs::write(seg.join("0001_Đức Trí.wav"), vec![0u8; 2000]).unwrap();
     std::fs::write(seg.join("0002_Adam.wav"), vec![0u8; 2000]).unwrap();
     for (stage, state) in [
         (Stage::Crawl, TaskState::Done),

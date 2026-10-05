@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 
-/// A consecutive run of lines by one speaker — one TTS call.
+/// One TTS call: the script segments it speaks.
 #[derive(Debug, Clone)]
 pub struct Run {
     pub speaker: String,
@@ -77,26 +77,27 @@ impl Planned {
         out
     }
 
-    /// Group consecutive same-speaker pieces: one TTS call per run.
+    /// One TTS call per script segment.
+    ///
+    /// A speaker's consecutive lines used to be folded into a single wav, which
+    /// saved TTS calls and cost something nobody could see: inside one wav the
+    /// segments share the span by character count, so a character who talks at
+    /// length drags the captions a second or more behind the voice, and the
+    /// error is worst exactly where the script is busiest. One wav per segment
+    /// puts every caption boundary on a real wav edge.
     pub fn runs(&self) -> Vec<Run> {
-        let mut out: Vec<Run> = Vec::new();
-        let mut prev_fires = false;
-        for (i, seg) in self.speech.iter().enumerate() {
-            let speaker = seg
-                .get("speaker")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string();
-            match out.last_mut() {
-                Some(last) if last.speaker == speaker && !prev_fires => last.idx.push(i),
-                _ => out.push(Run {
-                    speaker,
-                    idx: vec![i],
-                }),
-            }
-            prev_fires = !self.fires[i].is_empty();
-        }
-        out
+        self.speech
+            .iter()
+            .enumerate()
+            .map(|(i, seg)| Run {
+                speaker: seg
+                    .get("speaker")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                idx: vec![i],
+            })
+            .collect()
     }
 
     /// Whether any effect fires at piece `i`'s end.

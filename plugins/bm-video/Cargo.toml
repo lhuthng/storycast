@@ -1,0 +1,39 @@
+[package]
+name = "bm-video"
+version = "0.3.0"
+edition = "2021"
+# Mirrored from rust/Cargo.toml's workspace floor, on purpose: the plugin is a
+# separate build, and it should not silently need a newer compiler than the
+# pipeline does.
+rust-version = "1.88"
+license = "MIT"
+description = "Standalone video renderer for Storycast acts — an out-of-tree plugin"
+
+# Its own workspace root. This is the decoupling: `cargo build --workspace` and
+# `make test` under rust/ must not build, test or lint the plugin, so it cannot
+# be a member there and it cannot inherit that workspace's deps either.
+[workspace]
+
+[[bin]]
+name = "bm-video"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+# `image` decodes the portraits and the thumb; the PNG feature is the only
+# format the plugin ever reads or writes.
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Text is rasterised here, not by ffmpeg: this box's ffmpeg has no drawtext or
+# libass, so the three faces are drawn by us either way.
+ab_glyph = "0.2"
+rayon = "1"
+
+# A render is CPU-bound for minutes; a debug build would be an order of
+# magnitude slower per frame.
+[profile.release]
+opt-level = 3
+lto = "thin"

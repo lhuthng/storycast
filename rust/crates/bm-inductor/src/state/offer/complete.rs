@@ -14,6 +14,7 @@ impl Inner {
                 script: Option<Value>,
                 text: Option<String>,
                 mp3_b64: Option<String>,
+                cues_b64: Option<String>,
             },
             Failed,
             /// The site has no such chapter. Terminal, strike-free, and the
@@ -78,6 +79,7 @@ impl Inner {
                     script: c.script.clone(),
                     text: c.text.clone(),
                     mp3_b64: c.mp3_b64.clone(),
+                    cues_b64: c.cues_b64.clone(),
                 },
                 _ => Outcome::Failed,
             },
@@ -128,6 +130,7 @@ impl Inner {
                 script,
                 text,
                 mp3_b64,
+                cues_b64,
             } => {
                 // Completion gate (render only): the worker's word is not
                 if stage == Stage::Render {
@@ -231,6 +234,17 @@ impl Inner {
                             &c.worker_id,
                             format!("merge ch{chapter} reported done but no file"),
                         );
+                    }
+                    // The captions ride the same report and land the same way:
+                    if let Some(b64) = cues_b64 {
+                        use base64::Engine;
+                        if let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(&b64) {
+                            let side = bm_core::assemble::cues_path(&self.layout.final_mp3(chapter));
+                            let tmp = side.with_extension("json.incoming");
+                            if std::fs::write(&tmp, &raw).is_ok() {
+                                let _ = std::fs::rename(&tmp, &side);
+                            }
+                        }
                     }
                 }
                 // The design this mp3 was mixed under, read *before* the borrow

@@ -82,6 +82,7 @@ pub(crate) async fn run_offer(
                 text,
                 crawl: Some(report),
                 mp3_b64: None,
+                cues_b64: None,
                 unit_files: Vec::new(),
             })
         }
@@ -116,6 +117,7 @@ pub(crate) async fn run_offer(
                 text: None,
                 crawl: None,
                 mp3_b64: None,
+                cues_b64: None,
                 unit_files: Vec::new(),
             })
         }
@@ -170,6 +172,7 @@ pub(crate) async fn run_offer(
                 text: None,
                 crawl: None,
                 mp3_b64: None,
+                cues_b64: None,
                 unit_files,
             })
         }
@@ -201,6 +204,10 @@ pub(crate) async fn run_offer(
                 &base64::engine::general_purpose::STANDARD,
                 &std::fs::read(&path).with_context(|| format!("reading merged {path}"))?,
             ));
+            // The sidecar is half the product: captions ride the same report,
+            let cues = std::fs::read(bm_core::assemble::cues_path(std::path::Path::new(&path)))
+                .ok()
+                .map(|raw| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw));
             Ok(TaskResult {
                 ok: true,
                 detail: format!("merge ch{n} -> {path}"),
@@ -210,6 +217,7 @@ pub(crate) async fn run_offer(
                 text: None,
                 crawl: None,
                 mp3_b64: mp3,
+                cues_b64: cues,
                 unit_files: Vec::new(),
             })
         }
@@ -227,6 +235,8 @@ pub(crate) struct TaskResult {
     /// Crawl only: what happened, when "ok" alone cannot say it, an absent
     pub(crate) crawl: Option<bm_proto::CrawlReport>,
     pub(crate) mp3_b64: Option<String>,
+    /// Merge only: the cue sidecar beside the mix, base64.
+    pub(crate) cues_b64: Option<String>,
     pub(crate) unit_files: Vec<bm_proto::UnitFile>,
 }
 

@@ -44,7 +44,7 @@ fn audition_finds_takes_whatever_tier_stored_them() {
 }
 
 #[test]
-fn runs_group_consecutive_speakers() {
+fn each_segment_is_its_own_tts_call() {
     let segs = vec![
         json!({"speaker": "A", "text": "1"}),
         json!({"speaker": "A", "text": "2"}),
@@ -52,10 +52,16 @@ fn runs_group_consecutive_speakers() {
         json!({"speaker": "A", "text": "4"}),
     ];
     let r = planned(&segs).runs();
-    assert_eq!(r.len(), 3);
-    assert_eq!(r[0].idx, vec![0, 1]);
-    assert_eq!(r[1].idx, vec![2]);
-    assert_eq!(r[2].idx, vec![3]);
+    // Never merged, even for one speaker in a row: a shared wav would have to
+    // split its span between the segments by character count, and that is what
+    // drifted the captions behind a character who talks at length.
+    assert_eq!(r.len(), 4);
+    assert_eq!(r[0].idx, vec![0]);
+    assert_eq!(r[1].idx, vec![1]);
+    assert_eq!(r[2].idx, vec![2]);
+    assert_eq!(r[3].idx, vec![3]);
+    assert_eq!(r[0].speaker, "A");
+    assert_eq!(r[2].speaker, "B");
 }
 
 #[test]
@@ -77,8 +83,9 @@ fn punctuation_only_segments_are_folded_into_the_previous_line() {
 
     let cast = crate::cast::Cast::from_iter([("Anonymous".into(), "Adam".into())]);
     let local = plan_render(&p, &cast, Path::new("s"), true, None).unwrap();
-    assert_eq!(local.len(), 1, "same-speaker lines remain one render run");
-    assert_eq!(local[0].text, "First line, Second line.");
+    assert_eq!(local.len(), 2, "a wav per segment, never merged");
+    assert_eq!(local[0].text, "First line,");
+    assert_eq!(local[1].text, "Second line.");
 
     let cloud = plan_render(&p, &cast, Path::new("s"), false, None).unwrap();
     assert_eq!(cloud.len(), 2);
@@ -122,7 +129,7 @@ fn a_sound_between_two_halves_of_a_sentence_is_not_a_line() {
     assert_eq!(p.fires[0][0]["sound"], "page-turn");
     // The two halves are one place and one mood: the split is a seam, not
     assert_eq!(p.speech[1]["speaker"], p.speech[0]["speaker"]);
-    // And it is two TTS calls, so the run breaks there.
+    // Every segment is its own call, so there are exactly two either way.
     let r = p.runs();
     assert_eq!(r.len(), 2, "{r:?}");
     assert_eq!(r[0].idx, vec![0]);
@@ -229,12 +236,9 @@ fn expected_wavs_names_match_the_run_shape() {
     cast.insert("A".into(), "Đức Trí".into());
     cast.insert("B".into(), "Adam".into());
     let local = expected_wavs(&planned(&segs), &cast, Path::new("segs"), true, None).unwrap();
-    assert!(
-        local[0].ends_with("0000-0001_Đức Trí.wav"),
-        "{:?}",
-        local[0]
-    );
-    assert!(local[1].ends_with("0002_Adam.wav"), "{:?}", local[1]);
+    assert!(local[0].ends_with("0000_Đức Trí.wav"), "{:?}", local[0]);
+    assert!(local[1].ends_with("0001_Đức Trí.wav"), "{:?}", local[1]);
+    assert!(local[2].ends_with("0002_Adam.wav"), "{:?}", local[2]);
     let cloud = expected_wavs(&planned(&segs), &cast, Path::new("segs"), false, None).unwrap();
     assert!(cloud[0].ends_with("0000_Đức Trí.wav"));
     assert_eq!(cloud.len(), 3);
@@ -256,9 +260,9 @@ fn plan_render_is_per_run_locally_and_per_line_in_the_cloud() {
     let mut cast = Cast::new();
     cast.insert("A".into(), "Đức Trí".into());
     let local = plan_render(&planned(&segs), &cast, Path::new("s"), true, None).unwrap();
-    assert_eq!(local.len(), 1);
-    assert_eq!(local[0].tag, "0000-0001");
-    assert_eq!(local[0].text, "one two");
+    assert_eq!(local.len(), 2);
+    assert_eq!(local[0].tag, "0000");
+    assert_eq!(local[0].text, "one");
     assert_eq!(local[0].temperature, take_for_mood("calm").0);
 
     let cloud = plan_render(&planned(&segs), &cast, Path::new("s"), false, None).unwrap();
@@ -466,7 +470,8 @@ fn segments_complete_is_false_until_every_wav_exists() {
         &segs,
         "vieneu"
     ));
-    silent_wav(&segs.join("0000-0001_Đức Trí.wav"), 0.05, 48_000).unwrap();
+    silent_wav(&segs.join("0000_Đức Trí.wav"), 0.05, 48_000).unwrap();
+    silent_wav(&segs.join("0001_Đức Trí.wav"), 0.05, 48_000).unwrap();
     assert!(segments_complete(
         &l,
         &script,

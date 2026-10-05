@@ -176,6 +176,7 @@ pub(crate) async fn worker_loop(
                 text: None,
                 crawl: None,
                 mp3_b64: None,
+                cues_b64: None,
                 unit_files: Vec::new(),
             },
         };
@@ -195,6 +196,7 @@ pub(crate) async fn worker_loop(
             text: res.text,
             crawl: res.crawl,
             mp3_b64: res.mp3_b64,
+            cues_b64: res.cues_b64,
             unit_files: res.unit_files,
         };
         let mut reported = false;

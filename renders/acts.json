@@ -1,0 +1,9 @@
+{
+  "name": "acts-01-04",
+  "acts": [
+    { "act": 1, "title": "Lộ diện người bán sách", "chapters": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] },
+    { "act": 2, "title": "Mượn đao, hẹn tử đấu", "chapters": [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23] },
+    { "act": 3, "title": "Ông hàng xóm kết nghĩa", "chapters": [24, 25, 26, 27, 28] },
+    { "act": 4, "title": "Tử đấu Phong Vũ đài", "chapters": [29, 30] }
+  ]
+}

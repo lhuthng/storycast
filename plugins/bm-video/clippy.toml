@@ -1,0 +1,5 @@
+# The MSRV, mirrored from `rust-version` in Cargo.toml and from the pipeline's
+# `rust/clippy.toml`. Without it, clippy lints against today's stable and
+# suggests rewrites the declared floor cannot compile; with it, the lint is the
+# useful direction — it reports code that needs a *newer* Rust than 1.88.
+msrv = "1.88"

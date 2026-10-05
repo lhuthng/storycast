@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "encode": {
+    "preset": "medium",
+    "crf": 18
+  },
+  "canvas": {
+    "size": [
+      1920,
+      1080
+    ],
+    "fps": 30
+  },
+  "palette": {
+    "background": "radial-gradient(140% 140% at 50% 0%, #ffffff 0%, #fafafa 55%, #f0f0f0 100%)",
+    "ink": "#1c1b1a",
+    "seal": "#9e3b2c",
+    "act_title": "#1c1b1a",
+    "act_label": "#9e3b2c",
+    "timeline_track": "rgba(28,27,26,.12)",
+    "timeline_segment": "#a8a294",
+    "timeline_segment_active": "#9e3b2c",
+    "thumb": "#1c1b1a",
+    "thumb_ring": "#f4efe3",
+    "subtitle": "#1c1b1a",
+    "subtitle_plate": "rgba(250,247,240,.62)",
+    "guide": "rgba(28,27,26,.38)"
+  },
+  "zones": {
+    "illustration": {
+      "anchor": "top-left",
+      "at": [
+        0.05,
+        0.11
+      ],
+      "size": [
+        0.26,
+        0.46
+      ],
+      "aspect": 1
+    },
+    "act_title": {
+      "anchor": "left-center",
+      "at": [
+        0.33,
+        0.28
+      ],
+      "size": [
+        0.58,
+        0.34
+      ],
+      "align_top": "illustration"
+    },
+    "timeline": {
+      "anchor": "left-center",
+      "at": [
+        0.33,
+        0.5
+      ],
+      "size": [
+        0.58,
+        0.12
+      ],
+      "align_bottom": "illustration"
+    },
+    "subtitle": {
+      "anchor": "left-center",
+      "at": [
+        0.02,
+        0.82
+      ],
+      "size": [
+        0.96,
+        0.16
+      ]
+    }
+  },
+  "fonts": {
+    "act_label": "SVN-Hottroof Semhesta",
+    "act_title": "FC Opulent Brush",
+    "subtitle": "UVN Gia Dinh Hep"
+  },
+  "font_files": {
+    "act_label": "tmp/SVN-Hottroof Semhesta.otf",
+    "act_title": "tmp/FC-Opulent-Brush.otf",
+    "subtitle": "tmp/UVNGiaDinhHep_R.TTF"
+  },
+  "type": {
+    "unit": 1.25,
+    "act_label": 2.5,
+    "act_title": 6,
+    "subtitle": 2
+  },
+  "act_title": {
+    "show": "current",
+    "label": "Hồi #"
+  },
+  "timeline": {
+    "track": {
+      "thickness": 14,
+      "radius": 0
+    },
+    "thumb": {
+      "shape": "circle",
+      "radius": 13,
+      "scale": 2,
+      "direction": "ccw",
+      "single": "tmp/thumb-single.png",
+      "spin_s": 1.2
+    }
+  },
+  "subtitle": {
+    "anchor": "center-center",
+    "chars_per_line": 74,
+    "min_s": 1.0,
+    "max_s": 7.0,
+    "language": "vie",
+    "fade_s": 0.3
+  },
+  "speaker_sticker": {
+    "fallback": "tmp/characters/anonymous.png",
+    "speakers": {
+      "Bành Anh": "tmp/characters/Bành Anh.png",
+      "Chu Vân": "tmp/characters/Chu Vân.png",
+      "Chung Thanh": "tmp/characters/Chung Thanh.png",
+      "Dịch Phong": "tmp/characters/Dịch Phong.png",
+      "Doãn Lạc Ly": "tmp/characters/Doãn Lạc Ly.png",
+      "Hệ thống": "tmp/characters/Hệ Thống.png",
+      "Huyền Vũ lão tổ": "tmp/characters/Huyền Vũ lão tổ.png",
+      "Lạc Lan Tuyết": "tmp/characters/Lạc Lan Tuyết.png",
+      "Lục Thanh Sơn": "tmp/characters/Lục Thanh Sơn.png",
+      "Mao Doãn Nhi": "tmp/characters/Mao Doãn Nhi.png",
+      "Mao Lâm": "tmp/characters/Mao Lâm.png",
+      "Ngao Khánh": "tmp/characters/Ngao Khánh.png",
+      "Ngô Vĩnh Hồng": "tmp/characters/Ngô Vĩnh Hồng.png",
+      "Vu Vũ Kiệt": "tmp/characters/Vu Vũ Kiệt.png"
+    },
+    "at": [
+      0.5,
+      0.6852
+    ],
+    "zoom": 1.0,
+    "react": {
+      "scale_x": 0.07,
+      "scale_y": 0.11,
+      "release": 0.14,
+      "floor_pct": 25,
+      "ceil_pct": 95
+    }
+  },
+  "layers": [
+    {
+      "kind": "paper"
+    },
+    {
+      "kind": "act_plate",
+      "zone": "act_title"
+    },
+    {
+      "kind": "bar",
+      "zone": "timeline"
+    },
+    {
+      "kind": "thumb"
+    },
+    {
+      "kind": "captions",
+      "zone": "subtitle"
+    },
+    {
+      "kind": "portraits"
+    }
+  ]
+}

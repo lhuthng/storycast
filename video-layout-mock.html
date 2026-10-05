@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storycast video layout — mock</title>
+<style>
+  /* the three faces dropped in ./tmp — the template names them by family */
+  @font-face { font-family: "SVN-Hottroof Semhesta"; src: url("tmp/SVN-Hottroof%20Semhesta.otf"); }
+  @font-face { font-family: "FC Opulent Brush";      src: url("tmp/FC-Opulent-Brush.otf"); }
+  @font-face { font-family: "UVN Gia Dinh Hep";       src: url("tmp/UVNGiaDinhHep_R.TTF"); }
+
+  :root {
+    /* paper and ink: xuan-paper ground, ink black, cinnabar seal as the single accent */
+    --canvas-bg: radial-gradient(130% 120% at 18% 0%, #f8f4ea 0%, #efe9db 42%, #e2dccb 100%);
+    --ink: #1c1b1a;
+    --seal: #9e3b2c;
+    --act-label: #9e3b2c;
+    --act-title: #1c1b1a;
+    --track: rgba(28,27,26,.12);
+    --seg: #a8a294;
+    --seg-on: #9e3b2c;
+    --thumb: #1c1b1a;
+    --thumb-ring: #f4efe3;
+    --plate: rgba(250,247,240,.62);
+    --guide: rgba(28, 27, 26, .38);
+
+    --page-bg: #141311;
+    --page-ink: #dedad1;
+    --muted: #8d877c;
+    --rule: #272420;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page-bg);
+    color: var(--page-ink);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    padding: 26px 18px 48px;
+  }
+  .wrap { width: min(1100px, 96vw); }
+
+  header h1 {
+    font: 600 15px/1.3 ui-rounded, "SF Pro Rounded", -apple-system, sans-serif;
+    margin: 0 0 4px;
+    letter-spacing: .1px;
+  }
+  header p { margin: 0 0 14px; color: var(--muted); font-size: 12.5px; max-width: 74ch; }
+  header kbd { background: #201e19; border: 1px solid var(--rule); border-radius: 4px; padding: 1px 5px; font-size: 11px; }
+
+  /* ---------- the video frame ---------- */
+  #canvas {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: var(--canvas-bg);
+    overflow: hidden;
+    border-radius: 10px;
+    border: 1px solid rgba(28, 27, 26, .16);
+    box-shadow: 0 22px 54px rgba(0,0,0,.55), inset 0 0 160px rgba(122,110,86,.20);
+    container-type: size;
+  }
+
+  .zone { position: absolute; border: 1px dashed; }
+  .zone .tag {
+    position: absolute;
+    top: -1px; left: -1px;
+    transform: translateY(-100%);
+    font-size: var(--fs-tag);
+    color: var(--guide);
+    padding: 2px 6px 3px;
+    border: 1px dashed;
+    border-bottom: none;
+    border-radius: 5px 5px 0 0;
+    white-space: nowrap;
+    letter-spacing: .01em;
+  }
+  /* guides are a verification aid, not part of the frame */
+  #canvas.no-guides .zone { border-color: transparent; }
+  #canvas.no-guides .zone .tag { display: none; }
+
+  .zone-illustration {
+    border-color: var(--guide);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(28,27,26,.035);
+    backdrop-filter: blur(1px);
+  }
+  .zone-illustration .inner { text-align: center; color: rgba(28,27,26,.42); font-size: var(--fs-illus); line-height: 1.4; }
+  .zone-illustration .glyph {
+    width: var(--glyph); height: var(--glyph); margin: 0 auto calc(var(--glyph) * .45);
+    border: 2px dashed rgba(28,27,26,.28); border-radius: 3px;
+  }
+
+  /* the act title is the one loud thing on the frame */
+  .zone-act-title {
+    border-color: var(--guide);
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    padding: 0 var(--pad);
+  }
+  .zone-act-title .label {
+    font-family: var(--font-act-label);
+    font-size: var(--fs-act-label);
+    line-height: 1.15;
+    color: var(--act-label);
+    opacity: .9;
+    margin-bottom: .1em;
+  }
+  .zone-act-title .title {
+    font-family: var(--font-act);
+    font-size: var(--fs-act);
+    line-height: 1.06;
+    font-weight: 300;
+    color: var(--act-title);
+    text-shadow: 0 1px 0 rgba(255,255,255,.55);
+    opacity: 0;
+    transform: translateY(0.12em);
+    animation: rise .5s cubic-bezier(.2,.7,.2,1) forwards;
+  }
+  @keyframes rise { to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) {
+    .zone-act-title .title { animation: none; opacity: 1; transform: none; }
+  }
+
+  .zone-timeline { border-color: var(--guide); }
+  .zone-subtitle {
+    border-color: var(--guide);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .zone-subtitle .plate {
+    font-family: var(--font-sub);
+    max-width: 92%;
+    padding: calc(var(--fs-sub) * .16) calc(var(--fs-sub) * .7) calc(var(--fs-sub) * .26);
+    border-radius: 8px;
+    background: var(--plate);
+    color: var(--ink);
+    font-size: var(--fs-sub);
+    line-height: 1.3;
+    text-align: center;
+    text-wrap: balance;
+  }
+
+  /* ---------- the timeline, laid over the frame ---------- */
+  .track {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    gap: var(--seg-gap);
+    background: var(--track);
+    border-radius: 0;
+    box-shadow: inset 0 1px 2px rgba(28,27,26,.18);
+  }
+  .seg {
+    height: 100%;
+    border-radius: 0;
+    background: var(--seg);
+    transition: transform .22s cubic-bezier(.2,.7,.2,1), filter .22s ease, opacity .22s ease;
+  }
+  .seg.off { filter: opacity(.45); }
+  .seg.on  { background: var(--seg-on); box-shadow: 0 0 calc(var(--track-h) * 1.6) rgba(158,59,44,.30); transform: scaleY(var(--active-scale)); }
+  .thumb {
+    position: absolute;
+    border-radius: 50%;
+    background: var(--thumb);
+    border: calc(var(--thumb-d) * .16) solid var(--thumb-ring);
+    box-shadow: 0 0 calc(var(--thumb-d) * .5) rgba(28,27,26,.35);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    overflow: hidden;
+  }
+  /* an image thumb is just the image: no ring, no disc, no glow behind it */
+  .thumb.has-image { background: none; border: none; box-shadow: none; }
+
+  /* sheet mode: a strip N frames wide, scrolled one frame per step */
+  .thumb-strip {
+    position: absolute; top: 0; left: 0; height: 100%;
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
+  }
+  @keyframes sheet { from { transform: translateX(0); } to { transform: translateX(-100%); } }
+
+  /* single mode: one still image, rotated smoothly rather than stepped */
+  .thumb-single {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
+    animation: spin var(--spin, 1.2s) linear infinite;
+  }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+  /* ---------- controls ---------- */
+  .controls { display: flex; align-items: center; gap: 14px; width: 100%; flex-wrap: wrap; }
+  #scrub { flex: 1 1 320px; accent-color: var(--seal); }
+  .controls label input[type=range] { width: 104px; accent-color: var(--seal); }
+  .val { color: var(--page-ink); font-variant-numeric: tabular-nums; min-width: 36px; }
+  .readout { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12.5px; min-width: 150px; }
+  .controls label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; }
+  select {
+    background: #1b1916; color: var(--page-ink); border: 1px solid var(--rule);
+    border-radius: 6px; padding: 3px 6px; font: inherit; font-size: 12.5px;
+  }
+  input[type=checkbox] { accent-color: var(--seal); }
+
+  details { width: 100%; color: var(--muted); font-size: 12.5px; }
+  details summary { cursor: pointer; }
+  details pre {
+    background: #08070d; border: 1px solid var(--rule); border-radius: 8px;
+    padding: 14px; overflow: auto; color: #b9bccb; max-height: 340px;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Storycast video layout — what I understand</h1>
+      <p>
+        The frame, rendered from the template below. Drag the playhead — the act swaps where act 1 ends.
+        The three faces live in <code>tmp/</code>, and the template names which role each one plays.
+      </p>
+    </header>
+
+    <div id="canvas"></div>
+
+    <div class="controls">
+      <span class="readout" id="readout">—</span>
+      <input id="scrub" type="range" min="0" max="1000" value="120">
+      <label>act title <input id="actpct" type="range" min="1" max="12" step="0.5" value="6"><span class="val" id="actpct-v">×6</span></label>
+      <label>subtitle <input id="subpct" type="range" min="1" max="5" step="0.5" value="2"><span class="val" id="subpct-v">×2</span></label>
+      <label><input type="checkbox" id="guides" checked> guides</label>
+    </div>
+
+    <details>
+      <summary>the template this is rendered from</summary>
+      <pre id="dump"></pre>
+    </details>
+  </div>
+
+<script>
+/* ---------- the template: single source of truth for layout AND colour ---------- */
+const TEMPLATE = {
+  version: 1,
+  canvas: { size: [1920, 1080] },
+  palette: {
+    background: "radial-gradient(130% 120% at 18% 0%, #f8f4ea 0%, #efe9db 42%, #e2dccb 100%)",
+    ink: "#1c1b1a",
+    seal: "#9e3b2c",
+    act_title: "#1c1b1a",
+    act_label: "#9e3b2c",
+    timeline_track: "rgba(28,27,26,.12)",
+    timeline_segment: "#a8a294",
+    timeline_segment_active: "#9e3b2c",
+    thumb: "#1c1b1a",
+    thumb_ring: "#f4efe3",
+    subtitle: "#1c1b1a",
+    subtitle_plate: "rgba(250,247,240,.62)",
+    guide: "rgba(28,27,26,.38)"
+  },
+  zones: {
+    illustration: { anchor: "top-left",    at: [0.05, 0.11], size: [0.26, 0.46], aspect: 1 },
+    act_title:    { anchor: "left-center", at: [0.33, 0.28], size: [0.58, 0.34], align_top: "illustration" },
+    timeline:     { anchor: "left-center", at: [0.33, 0.50], size: [0.58, 0.12], align_bottom: "illustration" },
+    subtitle:     { anchor: "left-center", at: [0.05, 0.80], size: [0.86, 0.14] }
+  },
+  fonts: {
+    act_label: "SVN-Hottroof Semhesta",
+    act_title: "FC Opulent Brush",
+    subtitle:  "UVN Gia Dinh Hep"
+  },
+  type: {
+    unit: 1.25,        // one unit — % of frame width (24px at 1920)
+    act_label: 2.5,    // multipliers on the unit
+    act_title: 6,
+    subtitle:  2
+  },
+  act_title: {
+    show: "current",
+    label: "Hồi #"     // '#' is the act number; write the word in whatever language
+  },
+  timeline: {
+    track:   { thickness: 14, radius: 0 },
+    segment: { gap: 0.006, active_y_scale: 1.4, radius: 0 },
+    // three ways to draw the thumb, in priority order:
+    //   single — one still image, spun smoothly (one turn per spin_s)
+    //   sheet  — a horizontal strip of equal square frames, stepped at fps
+    //   neither — the plain disc in --thumb
+    // direction: "cw" (default) or "ccw"; for a sheet, "forward" or "reverse"
+    thumb:   { shape: "circle", radius: 13, scale: 2,
+               direction: "cw",
+               single: "tmp/thumb-single.png", spin_s: 1.2,
+               sheet: "tmp/test-sheet-reversed.png", frames: 16, fps: 15 }
+  },
+  subtitle: { anchor: "center-center", style: { max_lines: 2 } }
+};
+
+/* ---------- content: grouping, not presentation ---------- */
+const ACTS = [
+  { index: 1, title: "Lộ diện người bán sách", chapters: "1-12",  seconds: 3480 },
+  { index: 2, title: "Dao phay và tử đấu",     chapters: "13-23", seconds: 3120 }
+];
+const SAMPLE = "Nàng lau mồ hôi trên trán, siết chặt cuốn võ thư trong tay.";
+
+/* ---------- colours from the template, applied as CSS variables ---------- */
+{
+  const P = TEMPLATE.palette;
+  const set = (v, val) => document.documentElement.style.setProperty(v, val);
+  set("--canvas-bg",  P.background);
+  set("--ink",        P.ink);
+  set("--seal",       P.seal);
+  set("--act-label",  P.act_label);
+  set("--act-title",  P.act_title);
+  set("--track",      P.timeline_track);
+  set("--seg",        P.timeline_segment);
+  set("--seg-on",     P.timeline_segment_active);
+  set("--thumb",      P.thumb);
+  set("--thumb-ring", P.thumb_ring);
+  set("--plate",      P.subtitle_plate);
+  set("--guide",      P.guide);
+}
+
+const canvas = document.getElementById("canvas");
+const total = ACTS.reduce((s, a) => s + a.seconds, 0);
+const [CW, CH] = TEMPLATE.canvas.size;
+
+/* Type is a unit (a % of frame width) times a multiplier, resolved to px — so "x3" is a real number. */
+const state = { actX: TEMPLATE.type.act_title, subX: TEMPLATE.type.subtitle };
+function applySizes() {
+  const W = canvas.clientWidth || 1, H = canvas.clientHeight || 1;
+  const s = canvas.style;
+  const px = (v) => v.toFixed(2) + "px";
+  const unit = (x) => W * TEMPLATE.type.unit * x / 100;
+  s.setProperty("--fs-tag",   px(W * 0.011));
+  s.setProperty("--fs-illus", px(W * 0.017));
+  s.setProperty("--fs-act-label", px(unit(TEMPLATE.type.act_label)));
+  s.setProperty("--fs-act",   px(unit(state.actX)));
+  s.setProperty("--fs-sub",   px(unit(state.subX)));
+  s.setProperty("--font-act-label", `"${TEMPLATE.fonts.act_label}", serif`);
+  s.setProperty("--font-act",       `"${TEMPLATE.fonts.act_title}", serif`);
+  s.setProperty("--font-sub",       `"${TEMPLATE.fonts.subtitle}", sans-serif`);
+  s.setProperty("--glyph",    px(W * 0.030));
+  s.setProperty("--pad",      px(W * 0.024));
+  s.setProperty("--track-h",  px(H * TEMPLATE.timeline.track.thickness / CH));
+  s.setProperty("--thumb-d",  px(H * TEMPLATE.timeline.thumb.radius * 2 * (TEMPLATE.timeline.thumb.scale || 1) / CH));
+  s.setProperty("--seg-gap",  px(H * 0.008));
+  s.setProperty("--active-scale", String(TEMPLATE.timeline.segment.active_y_scale));
+}
+
+/* ---------- anchor: which point of a box is pinned to `at` ---------- */
+function anchorHV(a) {
+  let h = null, v = null;
+  for (const t of a.split("-")) {
+    if (t === "left") h = 0; else if (t === "right") h = 1;
+    else if (t === "top") v = 0; else if (t === "bottom") v = 1;
+  }
+  if (h === null) h = 0.5;
+  if (v === null) v = 0.5;
+  return { h, v };
+}
+function boxOf(z) {
+  const { h, v } = anchorHV(z.anchor);
+  let w = z.size[0], ht = z.size[1];
+  if (z.aspect) ht = (w * CW) / (z.aspect * CH);   // square means W/H of the canvas, not of the fraction
+  return {
+    left: z.at[0] * 100 - w * 100 * h,
+    top: z.at[1] * 100 - ht * 100 * v,
+    width: w * 100,
+    height: ht * 100
+  };
+}
+
+/* ---------- zones ---------- */
+const zones = {};
+const boxes = {};
+for (const [name, z] of Object.entries(TEMPLATE.zones)) {
+  const b = boxOf(z);
+  // edge alignment is declarative, so "same top as illustration" survives number edits
+  if (z.align_top && boxes[z.align_top]) b.top = boxes[z.align_top].top;
+  if (z.align_bottom && boxes[z.align_bottom]) {
+    const r = boxes[z.align_bottom];
+    b.top = r.top + r.height - b.height;
+  }
+  boxes[name] = b;
+  const el = document.createElement("div");
+  el.className = "zone zone-" + name.replace("_", "-");
+  el.style.left = b.left + "%";
+  el.style.top = b.top + "%";
+  el.style.width = b.width + "%";
+  el.style.height = b.height + "%";
+  const tag = document.createElement("span");
+  tag.className = "tag";
+  tag.textContent = name.replace("_", " ");
+  el.appendChild(tag);
+  canvas.appendChild(el);
+  zones[name] = { el, box: b };
+}
+
+zones.illustration.el.insertAdjacentHTML("beforeend",
+  '<div class="inner"><div class="glyph"></div>animated illustration<br>your manual zone</div>');
+zones.subtitle.el.insertAdjacentHTML("beforeend", `<div class="plate">${SAMPLE}</div>`);
+
+/* the act zone is two lines in two faces: the label, then the title */
+const actLabelEl = document.createElement("div");
+actLabelEl.className = "label";
+zones.act_title.el.appendChild(actLabelEl);
+const actTitleEl = document.createElement("div");
+actTitleEl.className = "title";
+zones.act_title.el.appendChild(actTitleEl);
+
+/* ---------- one main track, act segments, circular thumb ---------- */
+const tz = zones.timeline.box;
+
+const track = document.createElement("div");
+track.className = "track";
+track.style.left = tz.left + "%";
+track.style.width = tz.width + "%";
+track.style.height = "var(--track-h)";
+track.style.top = (tz.top + tz.height / 2) + "%";
+track.style.transform = "translateY(-50%)";
+canvas.appendChild(track);
+
+const segs = ACTS.map((a) => {
+  const s = document.createElement("div");
+  s.className = "seg";
+  s.style.flex = a.seconds;
+  track.appendChild(s);
+  return s;
+});
+
+const thumb = document.createElement("div");
+thumb.className = "thumb";
+thumb.style.width = "var(--thumb-d)";
+thumb.style.height = "var(--thumb-d)";
+canvas.appendChild(thumb);
+
+/* an image thumb comes in two kinds: one still that spins, or a sheet that steps.
+   Name neither and the plain disc stays. */
+const TH = TEMPLATE.timeline.thumb;
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// one word covers both modes: ccw for a spin, reverse for a sheet
+const REVERSE = /^(ccw|reverse|back)$/i.test(TH.direction || "");
+const dirWord = REVERSE ? "reverse" : "normal";
+
+if (TH.single) {
+  thumb.classList.add("has-image");
+  thumb.style.setProperty("--spin", (TH.spin_s || 1.2) + "s");
+  const one = document.createElement("div");
+  one.className = "thumb-single";
+  one.style.backgroundImage = `url("${TH.single}")`;
+  one.style.animationDirection = dirWord;
+  if (reducedMotion) one.style.animation = "none";   // hold a still frame instead of spinning
+  thumb.appendChild(one);
+  thumb.title = `single image · ${TH.spin_s || 1.2}s per turn · ${dirWord}`;
+} else if (TH.sheet) {
+  thumb.classList.add("has-image");
+  const strip = document.createElement("div");
+  strip.className = "thumb-strip";
+  strip.style.backgroundImage = `url("${TH.sheet}")`;
+  thumb.appendChild(strip);
+
+  const mount = (frames) => {
+    // the strip is `frames` thumb-widths wide, so translating -100% of it is exactly
+    // `frames` frames; steps(frames) then lands on one frame boundary per step
+    strip.style.width = (frames * 100) + "%";
+    const fps = TH.fps || 15;
+    if (!reducedMotion) {
+      strip.style.animation = `sheet ${(frames / fps).toFixed(4)}s steps(${frames}) infinite`;
+      strip.style.animationDirection = dirWord;   // after the shorthand, which resets it
+    }
+    thumb.title = `${frames} frames @ ${fps} fps · ${dirWord}`;
+  };
+
+  if (TH.frames) mount(TH.frames);
+  else new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(Math.max(1, Math.round(img.naturalWidth / img.naturalHeight)));
+    img.onerror = rej;
+    img.src = TH.sheet;
+  }).then(mount).catch(() => { strip.remove(); thumb.classList.remove("has-image"); });
+}
+
+/* ---------- the label is a format string: '#' becomes the act number ---------- */
+function labelFor(act) {
+  return TEMPLATE.act_title.label.replace("#", act.index);
+}
+
+/* ---------- playhead ---------- */
+const scrub = document.getElementById("scrub");
+const readout = document.getElementById("readout");
+
+function actAt(p) {
+  let acc = 0;
+  for (let i = 0; i < ACTS.length; i++) {
+    const frac = ACTS[i].seconds / total;
+    if (p < acc + frac || i === ACTS.length - 1) return i;
+    acc += frac;
+  }
+  return ACTS.length - 1;
+}
+
+function render() {
+  const p = Number(scrub.value) / 1000;
+  const i = actAt(p);
+
+  segs.forEach((s, k) => { s.classList.toggle("on", k === i); s.classList.toggle("off", k !== i); });
+
+  const label = labelFor(ACTS[i]);
+  if (label !== actLabelEl.textContent) {
+    actLabelEl.textContent = label;
+    actTitleEl.textContent = ACTS[i].title;
+    actTitleEl.style.animation = "none";
+    void actTitleEl.offsetWidth;                       // replay the entrance on an act change
+    actTitleEl.style.animation = "";
+  }
+  thumb.style.left = (tz.left + p * tz.width) + "%";
+  thumb.style.top = (tz.top + tz.height / 2) + "%";
+
+  const secs = Math.round(p * total);
+  readout.textContent = `${fmt(secs)} / ${fmt(total)}  ·  act ${ACTS[i].index}`;
+}
+
+function fmt(s) {
+  const m = Math.floor(s / 60), r = s % 60;
+  return `${String(m).padStart(2,"0")}:${String(r).padStart(2,"0")}`;
+}
+
+scrub.addEventListener("input", render);
+
+const actPct = document.getElementById("actpct");
+const subPct = document.getElementById("subpct");
+function sizesFrom() {
+  state.actX = Number(actPct.value);
+  state.subX = Number(subPct.value);
+  document.getElementById("actpct-v").textContent = "×" + state.actX;
+  document.getElementById("subpct-v").textContent = "×" + state.subX;
+  applySizes();
+}
+actPct.addEventListener("input", sizesFrom);
+subPct.addEventListener("input", sizesFrom);
+document.getElementById("guides").addEventListener("change", (e) => {
+  canvas.classList.toggle("no-guides", !e.target.checked);
+});
+
+document.getElementById("dump").textContent = JSON.stringify({ template: TEMPLATE, acts: ACTS }, null, 2);
+
+applySizes();
+window.addEventListener("resize", applySizes);
+render();
+</script>
+</body>
+</html>

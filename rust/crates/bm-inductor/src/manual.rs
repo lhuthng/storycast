@@ -189,6 +189,7 @@ pub(crate) async fn report(
         script: Some(script.clone()),
         text: None,
         mp3_b64: None,
+        cues_b64: None,
         unit_files: Vec::new(),
     };
     match http.post(&url).json(&body).send().await {

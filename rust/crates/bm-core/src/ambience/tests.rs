@@ -407,7 +407,11 @@ fn run_scenes_takes_the_majority_tag() {
         json!({"speaker": "A"}),
     ])
     .runs();
-    assert_eq!(run_scenes(&segments, &runs), vec!["market-morning"]);
+    // One scene per turn, and every segment is its own turn.
+    assert_eq!(
+        run_scenes(&segments, &runs),
+        vec!["market-morning", "market-morning", "courtyard-evening"]
+    );
 }
 
 #[test]
@@ -415,7 +419,7 @@ fn run_scenes_ignores_blank_tags() {
     let segments = vec![json!({"scene": ""}), json!({"scene": "  "})];
     let runs =
         crate::assemble::Planned::plan(&[json!({"speaker": "A"}), json!({"speaker": "A"})]).runs();
-    assert_eq!(run_scenes(&segments, &runs), vec![""]);
+    assert_eq!(run_scenes(&segments, &runs), vec!["", ""]);
 }
 
 #[test]
@@ -1024,16 +1028,16 @@ fn the_declared_mood_wins_and_the_legacy_shim_covers_scripts_without_one() {
 
     // Declared values are used as-is.
     let segs = build(&[("street-morning", "battle"), ("street-morning", "battle")]);
-    assert_eq!(run_music(&segs, &runs_of(2), &cfg), vec!["battle"]);
+    assert_eq!(run_music(&segs, &runs_of(2), &cfg), vec!["battle", "battle"]);
 
     // No value anywhere: the shim scores the scene label instead, so the
     let segs = build(&[("street-morning", ""), ("street-morning", "")]);
-    assert_eq!(run_music(&segs, &runs_of(2), &cfg), vec!["busy"]);
+    assert_eq!(run_music(&segs, &runs_of(2), &cfg), vec!["busy", "busy"]);
     let segs = build(&[("night-forest", ""), ("night-forest", "")]);
-    assert_eq!(run_music(&segs, &runs_of(2), &cfg), vec!["quiet"]);
+    assert_eq!(run_music(&segs, &runs_of(2), &cfg), vec!["quiet", "quiet"]);
     // Nothing in the shim matches: silence, exactly as the old `default`
     let segs = build(&[("somewhere-else", ""), ("somewhere-else", "")]);
-    assert_eq!(run_music(&segs, &runs_of(2), &cfg), vec!["none"]);
+    assert_eq!(run_music(&segs, &runs_of(2), &cfg), vec!["none", "none"]);
 }
 
 #[test]

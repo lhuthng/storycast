@@ -101,3 +101,13 @@ rust/dist/
 session-*.md
 
 /tmp
+
+# Rendered acts: the act manifests and `build.sh` are inputs and stay tracked;
+# the media results and the per-render working trees are large and regenerable,
+# so they do not. A `<name>.parts/` is one render's own cache — the chunk mp4s
+# and the flat sprite/frame dumps — and is never an input to anything.
+/renders/*.mp4
+/renders/*.mov
+/renders/*.srt
+/renders/*.vtt
+/renders/*.parts/

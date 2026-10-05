@@ -2,6 +2,22 @@ use super::{lease_for, Inner};
 use bm_proto::{now_secs, Machine, MachineState, Stage, Task, TaskState};
 use serde_json::{json, Value};
 
+/// A merge counts as delivered only when a cue sidecar of the current format
+/// sits beside the mp3 — the captions the video tool reads. The remote-merge
+/// era left `Done` rows whose sidecar never came home, and ground truth has
+/// to see through exactly that.
+fn cues_current(mp3: &std::path::Path) -> bool {
+    match std::fs::read_to_string(bm_core::assemble::cues_path(mp3)) {
+        Ok(text) => {
+            serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.get("version").and_then(Value::as_u64))
+                == Some(u64::from(bm_core::assemble::CUES_VERSION))
+        }
+        Err(_) => false,
+    }
+}
+
 impl Inner {
     /// Derive artifact truth from disk, then reconcile assignments a dead run
     pub fn reconcile(&mut self, start: u32, count: u32) {
@@ -18,11 +34,13 @@ impl Inner {
             let has_txt = txt.is_file();
             let has_script = script.is_file();
             let has_mp3 = mp3.is_file();
+            // The mp3 alone is not a merged chapter: the captions have to be
+            let merge_ok = has_mp3 && cues_current(&mp3);
             // Ground truth upgrades pending stages; assignments are verified below.
             for (stage, done) in [
                 (Stage::Crawl, has_txt),
                 (Stage::Digest, has_script),
-                (Stage::Merge, has_mp3),
+                (Stage::Merge, merge_ok),
             ] {
                 let t = self
                     .tasks
@@ -30,6 +48,15 @@ impl Inner {
                     .or_insert_with(|| Task::new(n, stage));
                 if done && t.state == TaskState::Pending {
                     t.state = TaskState::Done;
+                    t.updated = now_secs();
+                }
+                // Ground truth cuts both ways: a done row whose sidecar is
+                if stage == Stage::Merge && !merge_ok && t.state == TaskState::Done {
+                    t.state = TaskState::Pending;
+                    t.attempts = 0;
+                    t.clear_holders();
+                    t.lease_until = None;
+                    t.detail = "requeued: cue sidecar missing or stale".into();
                     t.updated = now_secs();
                 }
             }
@@ -43,7 +70,7 @@ impl Inner {
                 let done_now = match stage {
                     Stage::Crawl => has_txt,
                     Stage::Digest => has_script,
-                    _ => has_mp3,
+                    _ => merge_ok,
                 };
                 if let Some(t) = self.tasks.get_mut(&key) {
                     if matches!(t.state, TaskState::Assigned | TaskState::Running) {

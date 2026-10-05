@@ -246,7 +246,99 @@ here so they are not lost:
   edit the resolved tree), and this is the UI that would make the mistake
   impossible rather than merely discouraged.
 
-## 7. … (more to add)
+## 7. A chapter's timing becomes a sidecar, and an act renders to video (`in progress`)
 
-Reserved. Tell me the next item and it goes here with the same treatment:
-your words first, my reading to confirm, then the concrete steps.
+**Your words:** "could you do the actual video render now? well after editing the
+merge I guess."
+
+**My reading.** The pipeline's job is audio and it stays that way: the one
+change it makes is to *record* what it already knows. A standalone tool turns
+that record plus the mp3 into a video, and DaVinci Resolve does the finishing by
+hand. See the approved surface in `video-layout-mock.html` and the layout in
+`tools/video-template.json`.
+
+**What shipped.**
+
+- **The cue sidecar.** Merge now writes `output/Ch.N - Title.cues.json` beside
+the published mp3 — every script segment's `speaker`, `start`, `end` and `text`
+on the delivered clock (`assemble/cues.rs`, built after `retime`, moved into
+`output/` by `publish`). One cue per segment, never per TTS call, so captions do
+not merge two sentences that were spoken as one. The merge replays nothing and no
+other stage moves; the timing is captured where it is already computed.
+- **`tools/video.py`.** Reads an acts manifest
+  (`{acts: [{act, title, chapters}]}`), the chapters' sidecars and mp3s, and
+  writes **one** video for the whole run — `acts-NN-NN.{mp4,srt,vtt}`. `--preview
+  N`, `--dry-run`, `--chapter-gap`, `--no-subs` and `--template` are the knobs.
+- **The template JSON drives the render.** `tools/video-template.json` is the
+same object the mock was built from — palette, zones with the `align_top` /
+`align_bottom` edge rules, the type unit, the act-label `Hồi #` pattern, the
+timeline geometry. Colour strings stay CSS (`#hex`,
+`radial-gradient(...)`, `rgba(...)`) and the tool parses them.
+- **Captions are cut *in the tool*.** One per cue, broken on sentence ends and
+  wrapped to the frame, 1–7 s two lines, and a two-line caption is justified —
+  the rows come out flush rather than leaving one word stranded on the last.
+  Anyone but the narrator is named: `Dịch Phong: "Ừm!"`. A dash in the line —
+  `Đinh —— Quyền pháp` — is a pause the narrator takes, so it reads as
+  `Đinh; Quyền pháp`. A caption fades up over its first frames and down over its
+  last, over `subtitle.fade_s` (0.3 s, clamped to 0.1–0.5), and is on screen
+  nowhere else — fading the change itself showed the next line before its own
+  subtitle time, which read as a line appearing, vanishing in the gap between
+  speakers, and reappearing.
+- **A speaker portrait, not a speaker name.** `speaker_sticker` in the template
+  maps a speaker to an image with a `fallback` for anyone unmapped, matched
+  case-insensitively because the script and the filename disagree on `Hệ Thống`
+  vs `Hệ thống`. The narrator gets nothing, and the caption carries no name — the
+  portrait is the name. The portrait is scaled by the timeline thumb's own ratio
+  — `radius * scale * 2` over the thumb image's own width — rather than fitted to
+  a box, so it keeps its proportions. It sits **above the captions, centred on
+  the frame** at `speaker_sticker.at`, not beside them: every caption is
+  re-wrapped and re-centred, so a portrait in the gutter has to move with the
+  text, and a badge sliding between two positions reads as leaving the line it
+  belongs to. Fixed, it is simply there while its character talks.
+- **The badge lives for a run, and reacts to its own speaker only.** Consecutive
+  captions from one speaker are grouped, and the portrait fades in on the run's
+  first frame and out on its last, solid throughout — fading per caption made a
+  character who speaks three lines in a row blink twice per line. A run breaks
+  when the speaker changes or a narrator caption intervenes. The squash comes
+  from the speech envelope (`astats` RMS per video frame, instant attack and a
+  0.14 s release, windowed on this chapter's own percentiles) **gated to that
+  speaker's own cue frames**: the envelope is read off the mixed chapter, so
+  ungated it made the portrait squashed to the narrator, to other characters and
+  to the music bed. x scales by `-7%`, y by `+11%` at full loudness.
+- **Caption tiles are transparent, and the strip is frame-exact.** A tile is
+  glyphs on alpha, never a colour field, so the paper shows through; the strip is
+  qtrle, the one encoder here that keeps the alpha channel. The fades are baked
+  into blended tiles rather than left to a filter, so the composite stays one
+  overlay however many captions there are, and they stop short of a fully
+  transparent frame so no boundary flashes. Caption times are snapped to the
+  frame grid and the sidecars carry those times, because the concat demuxer
+  quantises a still's duration — a run of 0.033 s fade frames drifted the
+  captions off their own timings — so the strip is piped as an explicit frame
+  list instead. Sidecars are written beside the video as `.srt`/`.vtt`, so the
+  burned copy is for watching and the sidecars are the retimable, translatable
+  master.
+- **One segment per act, one video.** The bar carries a segment per act, the
+  current one sealed and raised; the act title and label swap at the act's
+  boundary (each act is a timed tile ffmpeg overlays). A round-clipped thumb
+  rides the whole bar, and when `timeline.thumb.single` names an image it spins
+  at `spin_s` in the direction `direction` asks for (`ccw`, or the disc when no
+  image is named). The illustration zone stays empty: it is where Resolve drops
+  art, and a placeholder only invites tidying it away.
+
+**Two constraints the plan did not anticipate.**
+
+- **This box's ffmpeg has no `drawtext`/libass.** So text, the paper ground and
+  the subtitle plates are rasterised with Pillow and composited; ffmpeg only
+  draws the act bar and muxes the audio. That is the one new Python import the
+  tool carries, and it is confined to `tools/`.
+- **A `vieneu` run can be a whole paragraph, one wav.** The local engine folds a
+  speaker's consecutive lines into one TTS call, so a turn holds several script
+  segments; the cue sheet splits that turn's span between them by length. There
+are no word timings anywhere in the pipeline, so a boundary inside a batched turn
+can drift slightly from the speech — the escape hatch is tool-side forced
+alignment, which does not change the pipeline contract.
+
+**What is left.** The act manifests are one file each today; grouping a book
+into acts from its ledger is not written. And the tool needs the three faces in
+the git-ignored `tmp/`, so a fresh clone renders no text until they are pointed
+elsewhere.

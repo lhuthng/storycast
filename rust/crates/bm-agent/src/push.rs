@@ -225,6 +225,7 @@ async fn task(
                 text,
                 crawl,
                 mp3_b64,
+                cues_b64,
                 unit_files,
             } = done;
             let report = Complete {
@@ -239,6 +240,7 @@ async fn task(
                 text,
                 crawl,
                 mp3_b64,
+                cues_b64,
                 unit_files,
             };
             // Stash before answering: if the connection below dies in flight,
@@ -260,6 +262,7 @@ async fn task(
                 // The failure path has no verdict to carry: the error text
                 crawl: None,
                 mp3_b64: None,
+                cues_b64: None,
                 unit_files: Vec::new(),
             };
             stash_outcome(&push, &report);

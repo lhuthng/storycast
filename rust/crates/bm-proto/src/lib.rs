@@ -796,6 +796,11 @@ pub struct Complete {
     /// a remote merge's product comes home without shared storage.
     #[serde(default)]
     pub mp3_b64: Option<String>,
+    /// Merge stage: the cue sidecar, base64. The captions the video tool reads
+    /// must land beside the mp3, so a remote merge ships them together; absent
+    /// on reports from a worker still running an older agent.
+    #[serde(default)]
+    pub cues_b64: Option<String>,
     /// Render stage: the takes this report produced, base64. The inductor
     /// stores them before applying the completion, so a Done take's file is
     /// always home, no matter which channel delivered the report.

@@ -1,15 +1,18 @@
 //! Stage 3/4 — segment planning, concatenation and the final mix.
 
+mod cues;
 mod mood;
 mod plan;
 mod renderplan;
 mod wav;
 
+pub use self::cues::{cues_path, write as write_cues, Cue, Cues, CUES_VERSION};
 pub use self::mood::mood_palette;
 pub use self::plan::{
     character_has_lines, drop_headline, expected_wavs, is_headline, pick_exact, pick_rendered,
     plan_render, rendered_segments, segment_miss, segments_complete, title_speech,
-    title_speech_for_script, Planned, RenderUnit, RenderedSegment, Run, MAX_SEGMENT_BYTES,
+    title_speech_for_script, Planned, RenderUnit, RenderedSegment, Run, TitleSpeech,
+    MAX_SEGMENT_BYTES,
 };
 pub use self::renderplan::{
     reconcile, reconcile_with, take_file, take_key, PlanUpdate, RenderPlan, Take, TakeQuality,
@@ -307,6 +310,32 @@ fn plan_turns(
     Ok(out)
 }
 
+/// The spoken text of every turn `plan_turns` laid out, in that same order: a
+/// caption needs the words, and only the merge holds both the plan and the run.
+/// One entry per turn, one line per script segment inside it, because a local
+/// engine speaks a whole run of one speaker's lines as a single wav.
+fn turn_texts(planned: &Planned, local: bool, title: Option<&TitleSpeech>) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
+    if let Some(t) = title {
+        out.push(vec![t.text.clone()]);
+    }
+    if local {
+        for run in planned.runs() {
+            out.push(
+                run.idx
+                    .iter()
+                    .map(|i| self::plan::seg_text(&planned.speech[*i]).to_string())
+                    .collect(),
+            );
+        }
+    } else {
+        for s in &planned.speech {
+            out.push(vec![self::plan::seg_text(s).to_string()]);
+        }
+    }
+    out
+}
+
 /// Assemble cached segments into the chapter deliverable.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble(
@@ -385,6 +414,7 @@ pub fn assemble(
     // The inject pool is read here rather than at the mix: a sound's `mode` is a
     let inj_pool = crate::audio_pool::load_pool(&assets.join("inject-pool.json"));
     let turns = plan_turns(&planned, &wavs, local, title.is_some(), &map, &inj_pool)?;
+    let texts = turn_texts(&planned, local, title.as_ref());
     // A beat is part of the sound design, so a dry chapter does not get one:
     let pauses = if on.none() {
         std::collections::BTreeMap::new()
@@ -428,7 +458,10 @@ pub fn assemble(
         )?;
     }
 
-    if ffmpeg_available() {
+    // The cue sheet is built here, on the delivered clock: `retime` has run and
+    // the layers never move a slot, so these are the seconds the mp3 will have.
+    let cues = Cues::build(chapter, &slots, &texts);
+    let delivered = if ffmpeg_available() {
         let mp3 = out_path.with_extension("mp3");
         run_ffmpeg(&[
             "-y",
@@ -438,10 +471,12 @@ pub fn assemble(
             &out_path.to_string_lossy(),
             &mp3.to_string_lossy(),
         ])?;
-        Ok(mp3)
+        mp3
     } else {
-        Ok(out_path)
-    }
+        out_path
+    };
+    cues::write(&cues::cues_path(&delivered), &cues)?;
+    Ok(delivered)
 }
 
 /// Rewrite a chapter's title into the output filename, matching the legacy
@@ -452,6 +487,13 @@ pub fn publish(assembled: &Path, layout: &crate::Layout, n: u32) -> Result<PathB
     }
     std::fs::rename(assembled, &final_path)
         .with_context(|| format!("publishing to {}", final_path.display()))?;
+    // The cue sheet was written beside the mix; it follows the mp3 into output,
+    // where the video tool expects `Ch.N - Title.cues.json` next to the audio.
+    let sidecar = cues::cues_path(assembled);
+    if sidecar.exists() {
+        std::fs::rename(&sidecar, cues::cues_path(&final_path))
+            .with_context(|| format!("publishing {}", sidecar.display()))?;
+    }
     Ok(final_path)
 }
 
