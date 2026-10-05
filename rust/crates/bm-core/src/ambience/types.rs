@@ -153,6 +153,10 @@ pub struct EffectLayer {
     /// is too hot": that is one opinion about the whole layer, and expressing
     #[serde(default = "d_effect_trim")]
     pub trim: f64,
+    /// Crossfade at each seam of a looped bed. Short on purpose, it is there
+    /// to soften a seam rather than to blend two pieces of music.
+    #[serde(default = "d_loop_xfade")]
+    pub loop_xfade_s: f64,
 }
 
 fn d_effect_trim() -> f64 {
@@ -188,6 +192,7 @@ impl Default for EffectLayer {
             fade_s: d_fade(),
             end_fade_s: d_end_fade(),
             trim: d_effect_trim(),
+            loop_xfade_s: d_loop_xfade(),
         }
     }
 }

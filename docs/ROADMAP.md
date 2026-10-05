@@ -187,7 +187,7 @@ both.
 `prompts/` already is, reading the workspace's own `pack.json` and falling back
 to the profile's.~~ Done — everything else followed from that one line.
 
-## 4. The music loop seam becomes a property, not a fix (`planned`)
+## 4. The music loop seam becomes a property, not a fix (`done`)
 
 **Your words:** part of the Apothecary sound-design plan, §8.1.
 
@@ -199,11 +199,24 @@ either side of it**, once every couple of minutes, for the length of a chapter.
 The music path now uses the same crossfade, with the pause-lift gain expression
 on the loop's tail so a looping track still lifts inside a beat.
 
-**What is left.** The *fix* is in; the **property** is not. State it — "a music
-track is always rendered as a crossfaded loop, never butt-joined" — in
-[SOUND.md](SOUND.md), and assert it with the test that already exists, so a
-future edit to the music path cannot quietly reintroduce `-stream_loop`. A
-`grep` in CI would be cruder and would rot; the test is the honest version.
+**What is left.** Nothing — the property is stated and asserted, for **both
+beds**. [SOUND.md](SOUND.md) §1 carries it as a rule (a track or a `looped` bed
+is a crossfaded loop, the take is chosen once and holds for the whole cue, and
+something that already covers its window is the only single pass). The assertion
+is the honest version rather than a `grep`: each path's filter graph is built by
+a function of its own — `music_run_graph` and `effect_bed_graph` — and
+`the_music_loop_crossfades_and_keeps_the_pause_lift` and
+`a_looped_effect_bed_crossfades_its_seams` drive those same functions over
+windows longer than the clip, shorter, and unprobeable. Reintroduce
+`-stream_loop` in either path and a test fails.
+
+**The effect layer was the same hole.** It is the layer this item did not name,
+and it was still butt-joined: `max_window_s` (75 s) outruns a 60 s bed, so any
+`looped` bed reaching its window was a hard seam. It now uses the same crossfade
+via a new `effect.loop_xfade_s` (0.25, the inject layer's number), and no
+`-stream_loop` remains anywhere in the source. No shipped effect is `looped`
+today, so no existing mix changes — the fixture's `day` bed is the one that
+exercises the path.
 
 ## 5. CI that can see a real pack (`planned`)
 

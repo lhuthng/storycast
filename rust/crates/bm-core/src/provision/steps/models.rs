@@ -198,7 +198,7 @@ fi
         }
         Ok(stdout.trim().to_string())
     }
-    /// Best-effort ffmpeg install for the merge lane.
+    /// Best-effort zstd install: the sources bundle unpacks with it.
     pub fn ensure_zstd(&self) -> Result<String> {
         let (code, stdout, stderr) = self.run(&zstd_script(), 300)?;
         if code != 0 {
@@ -210,8 +210,9 @@ fi
         Ok(stdout.trim().to_string())
     }
 
-    pub fn ensure_ffmpeg(&self, allow_install: bool) -> Result<String> {
-        let (code, stdout, stderr) = self.run(&ffmpeg_script(allow_install), 300)?;
+    /// Best-effort ffmpeg install for the merge lane.
+    pub fn ensure_ffmpeg(&self) -> Result<String> {
+        let (code, stdout, stderr) = self.run(&ffmpeg_script(), 300)?;
         if code != 0 {
             // A failure to even run the check is itself a warning, never fatal:
             return Ok(format!(
@@ -221,9 +222,9 @@ fi
         }
         Ok(stdout.trim().to_string())
     }
-    /// The merge stage's second engine, installed beside ffmpeg. A refusal is
-    pub fn ensure_sox(&self, allow_install: bool) -> Result<String> {
-        let (code, stdout, stderr) = self.run(&sox_script(allow_install), 300)?;
+    /// The merge stage's second engine, installed beside ffmpeg.
+    pub fn ensure_sox(&self) -> Result<String> {
+        let (code, stdout, stderr) = self.run(&sox_script(), 300)?;
         if code != 0 {
             return Ok(format!(
                 "SOX-SKIP (check failed: {})",

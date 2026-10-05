@@ -37,10 +37,24 @@ at least `min_span_s`, is cut to `max_window_s`, waits `cooldown_s` of silence,
 and a chapter may not spend more than `max_coverage` of its runtime on the
 layer. It is a room tone, not a soundtrack.
 
+Like a music cue, a `looped` bed that outruns its clip repeats with
+`effect.loop_xfade_s` at each seam rather than being butt-joined. This is
+reachable with the shipped knobs — `max_window_s` is 75 s and a bed is about
+60 s — so a looped bed is normally a crossfaded loop, not a single pass.
+
 A **music** cue is continuous and crossfades where the script's `music` value
 changes — which is the only place a track changes, so `xfade_s` is what makes an
 in-chapter change audible as a change rather than a cut. A mood repeated across
 twenty segments is one cue, not twenty.
+
+**A music track is always rendered as a crossfaded loop, never butt-joined.**
+A cue outlasts its track as a rule — a two-minute bed under a twenty-minute
+scene — so the track repeats with `music.xfade_s` at every seam. It does *not*
+switch to another take inside a cue: the take is chosen once, when the cue
+starts, and holds until the script changes its `music` value. A long cue is one
+track on repeat, not a rotation, and there is no length at which it stops. The
+one case that is a single pass is a track that already covers the window, which
+has no seam to soften.
 
 An **inject** is a spot effect the script places itself, at a seam: the point
 between two lines, or between the two halves of one line it split. How a clip
@@ -100,6 +114,7 @@ The measured calibrations, which are what the numbers were chosen against:
 | `effect.fade_s` | 0.3 | a bed's own edges |
 | `effect.end_fade_s` | 3.0 | a looped bed's closing edge, so it is not cut at the chapter's end |
 | `effect.trim` | 0.5 | **the effect layer's master gain** |
+| `effect.loop_xfade_s` | 0.25 | the crossfade at each seam of a `looped` bed |
 | `music.level` | 0.16 | **the music layer's master gain** |
 | `music.pause_level` | 0.20 | the same number for a planned beat; must stay **above** `level` or the beat is a hole, not a lift |
 | `music.ramp_s` | 0.6 | how long that lift takes; must stay well under the shortest pause |

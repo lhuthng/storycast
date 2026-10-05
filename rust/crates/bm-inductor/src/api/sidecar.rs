@@ -116,6 +116,9 @@ pub(crate) async fn op_preview_voice(
     if !resp.status().is_success() {
         let code = resp.status();
         let body = resp.text().await.unwrap_or_default();
+        if let Some(hint) = stale_roster_hint(layout, voice, &body) {
+            return OpResult::fail(hint);
+        }
         return OpResult::fail(format!(
             "preview {voice}: sidecar {code} — {}",
             bm_core::util::head_chars(body.trim(), 200)
@@ -130,6 +133,37 @@ pub(crate) async fn op_preview_voice(
         None => "sample",
     };
     audio_result(voice, what, &bytes)
+}
+
+/// The audition sidecar reads its roster once at startup, so a voice enrolled
+/// after it started is on disk but unknown in memory until it restarts. Name
+/// that instead of passing on the sidecar's `:prov` advice, which pushes to
+/// workers and can never fix the box serving this preview.
+pub(crate) fn stale_roster_hint(
+    layout: &bm_core::Layout,
+    voice: &str,
+    body: &str,
+) -> Option<String> {
+    if !body.contains("unknown voice") {
+        return None;
+    }
+    // Same key as the sidecar's own lookup (`bm_tts::voice::norm`): folded
+    // with separators dropped, so `phong-le-2` still finds `Phong Le 2`.
+    let norm = |s: &str| {
+        bm_core::util::fold(s)
+            .chars()
+            .filter(|c| !matches!(c, '-' | '_' | ' '))
+            .collect::<String>()
+    };
+    let want = norm(voice);
+    let on_disk = bm_core::pool::installed_voices(layout).is_some_and(|names| {
+        names.iter().any(|n| n == voice || norm(n) == want)
+    });
+    on_disk.then(|| {
+        format!(
+            "preview {voice}: the local sidecar is serving a stale roster (it started before {voice} was enrolled) — restart it (`pkill -x bm-tts`, it relaunches on the next preview) and `:prov` the workers so renders speak it too"
+        )
+    })
 }
 
 /// Turn a rendered wav into the op's answer.

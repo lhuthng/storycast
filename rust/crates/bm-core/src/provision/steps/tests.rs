@@ -113,7 +113,7 @@ fn a_matching_stamp_cannot_hide_a_missing_voice() {
 
 #[test]
 fn only_a_fresh_or_forced_provision_may_install() {
-    // The decision the two `ensure_*` call sites read. A configured box
+    // The decision the one remaining split, `ensure_opencode`, reads. A box
     assert!(may_install(false, false), "a fresh box installs");
     assert!(may_install(false, true), "force on a fresh box installs");
     assert!(may_install(true, true), "force re-installs on purpose");
@@ -124,56 +124,51 @@ fn only_a_fresh_or_forced_provision_may_install() {
 }
 
 #[test]
-fn a_configured_box_is_checked_but_never_re_installed() {
+fn a_configured_box_is_checked_but_opencode_is_never_re_installed() {
     // The waste this exists to stop: `ensure_opencode` can spend ten
-    for script in [
-        opencode_script(false),
-        ffmpeg_script(false),
-        sox_script(false),
-    ] {
-        assert!(
-            script.contains("command -v"),
-            "the check must survive: {script}"
-        );
-        assert!(
-            !script.contains("npm i"),
-            "a configured box must not re-run npm: {script}"
-        );
-        assert!(
-            !script.contains("install -y"),
-            "a configured box must not chase the package manager: {script}"
-        );
-        assert!(
-            script.contains("force a re-provision"),
-            "and it must name the way out: {script}"
-        );
-    }
+    let script = opencode_script(false);
+    assert!(
+        script.contains("command -v"),
+        "the check must survive: {script}"
+    );
+    assert!(
+        !script.contains("npm i"),
+        "a configured box must not re-run npm: {script}"
+    );
+    assert!(
+        script.contains("force a re-provision"),
+        "and it must name the way out: {script}"
+    );
     // The full path keeps both halves: a fresh box still gets them.
     assert!(opencode_script(true).contains("npm i -g"));
-    assert!(ffmpeg_script(true).contains("install -y ffmpeg"));
-    assert!(sox_script(true).contains("install -y sox"));
-
-    // zstd is the deliberate exception to that rule: one second, ~1 MB, and
-    let zstd = zstd_script();
-    assert!(
-        zstd.contains(
-            r#"command -v zstd >/dev/null 2>&1 && { echo "ZSTD-OK (present)"; exit 0; }"#
-        ),
-        "a box that has it must pay one command: {zstd}"
-    );
-    assert!(
-        zstd.contains("install -y zstd"),
-        "and one that does not must be able to get it: {zstd}"
-    );
-    assert!(
-        !zstd.contains("force a re-provision"),
-        "the exception is that this one does not wait for a forced box: {zstd}"
-    );
     // A box that already has the tool short-circuits in *both* flavours
     for script in [opencode_script(true), opencode_script(false)] {
         assert!(script.contains(
             r#"command -v opencode >/dev/null 2>&1 && { echo "OPENCODE-OK (present)"; exit 0; }"#
         ));
+    }
+}
+
+#[test]
+fn ffmpeg_sox_and_zstd_always_ensure_their_tool() {
+    // The incident this exists to stop: a box provisioned before ffmpeg was
+    for (script, tool) in [
+        (ffmpeg_script(), "ffmpeg"),
+        (sox_script(), "sox"),
+        (zstd_script(), "zstd"),
+    ] {
+        assert!(
+            script.contains("command -v"),
+            "a box that has the tool must pay one command: {script}"
+        );
+        assert!(
+            script.contains(&format!("install -y {tool}")),
+            "one that does not must be able to get it: {script}"
+        );
+        assert!(
+            !script.contains("force a re-provision"),
+            "an ensure never waits for a forced box: {script}"
+        );
     }
 }
 

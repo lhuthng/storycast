@@ -1,7 +1,9 @@
 use super::mix::clip_path;
 use super::mix::layer_graph;
 use super::mix::level_expr;
+use super::mix::effect_bed_graph;
 use super::mix::music_fades;
+use super::mix::music_run_graph;
 use super::mix::music_starts;
 use super::mix::plan_lines;
 use super::mix::slot_effect;
@@ -1764,19 +1766,43 @@ fn loop_filter_crossfades_every_seam_and_ends_on_the_volume() {
     }
 }
 
-/// The music layer loops too, and for the same reason — a 2-minute bed
+/// A looped effect bed crosses its seams too. `max_window_s` (75 s) outruns a
+/// 60 s bed, so this is reachable with the shipped knobs. It drives
+/// `effect_bed_graph`, the function the effect path itself calls, so the
+/// assertion cannot drift from the mix.
+#[test]
+fn a_looped_effect_bed_crossfades_its_seams() {
+    let cfg = shipped_map();
+    let xf = cfg.layers.effect.loop_xfade_s;
+    let copies = loop_copies(75.0, 60.0, xf).unwrap();
+    assert!(copies >= 2, "{copies} copies for a 75 s window out of a 60 s bed");
+    let g = effect_bed_graph(75.0, 60.0, xf, 0.5);
+    assert_eq!(g.matches("acrossfade=").count(), copies - 1, "{g}");
+    assert!(!g.contains("stream_loop"), "the loop is a filter: {g}");
+
+    // A window the bed already covers stays a single pass, and an unprobeable
+    // bed is one pass too rather than a hard butt-join.
+    let one = effect_bed_graph(60.0, 60.0, xf, 0.5);
+    assert_eq!(one.matches("acrossfade=").count(), 0, "{one}");
+    let blind = effect_bed_graph(75.0, 0.0, xf, 0.5);
+    assert_eq!(blind.matches("acrossfade=").count(), 0, "{blind}");
+    assert!(!blind.contains("stream_loop"), "{blind}");
+}
+
+/// A music track is always rendered as a crossfaded loop, never butt-joined.
+/// This drives `music_run_graph`, the function the music path itself calls, so
+/// a future edit that reintroduces `-stream_loop` fails here rather than
+/// shipping a seam every couple of minutes.
 #[test]
 fn the_music_loop_crossfades_and_keeps_the_pause_lift() {
-    // Under one clip length: no loop at all, which is the path that must
-    assert_eq!(loop_copies(140.0, 150.0, 2.0), None);
-    // Over it: a crossfaded loop, and the number of copies is what the
+    let expr = "0.160000 + 0.040000*clip((t-1.000)/0.600,0,1)";
+
+    // Over one clip length: a crossfaded loop, one seam per repeat.
+    let g = music_run_graph(600.0, 150.0, 2.0, expr);
     let k = loop_copies(600.0, 150.0, 2.0).unwrap();
     assert!(k >= 4, "{k} copies for 600s out of a 150s track");
-
-    // The gain rides on the loop's tail, not before the crossfades: a
-    let expr = "0.160000 + 0.040000*clip((t-1.000)/0.600,0,1)";
-    let g = loop_filter_with_tail(k, 2.0, &format!("volume=volume='{expr}':eval=frame"));
     assert_eq!(g.matches("acrossfade=").count(), k - 1, "{g}");
+    // The gain rides on the loop's tail, not before the crossfades: a
     assert!(
         g.ends_with(&format!(
             "volume=volume='{expr}':eval=frame,\
@@ -1788,6 +1814,17 @@ fn the_music_loop_crossfades_and_keeps_the_pause_lift() {
         !g.contains("stream_loop"),
         "the loop is a filter, not a flag: {g}"
     );
+
+    // Under it: one pass, no seam at all.
+    let one = music_run_graph(140.0, 150.0, 2.0, expr);
+    assert_eq!(loop_copies(140.0, 150.0, 2.0), None);
+    assert_eq!(one.matches("acrossfade=").count(), 0, "{one}");
+    assert!(!one.contains("stream_loop"), "{one}");
+
+    // An unprobeable track (`clip == 0.0`) is a single pass too, not the hard
+    let blind = music_run_graph(600.0, 0.0, 2.0, expr);
+    assert_eq!(blind.matches("acrossfade=").count(), 0, "{blind}");
+    assert!(!blind.contains("stream_loop"), "{blind}");
 }
 
 /// The inject pool must state `looped` on every entry.

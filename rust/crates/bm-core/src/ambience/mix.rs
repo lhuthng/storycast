@@ -115,6 +115,21 @@ pub(crate) fn music_starts(runs: &[MusicRun], xfade: f64) -> Vec<f64> {
     out
 }
 
+/// The filter graph for one music run: always a crossfaded loop, never a
+/// butt-join. A track that already covers the window is a single pass; a longer
+/// run repeats it with a crossfade at every seam.
+pub(crate) fn music_run_graph(dur: f64, clip: f64, xfade: f64, expr: &str) -> String {
+    let copies = loop_copies(dur, clip, xfade).unwrap_or(1);
+    loop_filter_with_tail(copies, xfade, &format!("volume=volume='{expr}':eval=frame"))
+}
+
+/// The filter graph for one looped effect bed. Same property as
+/// [`music_run_graph`]: a bed that outruns its clip repeats with a crossfade at
+/// each seam, and one that already covers its window is a single pass.
+pub(crate) fn effect_bed_graph(dur: f64, clip: f64, xfade: f64, vol: f64) -> String {
+    loop_filter(loop_copies(dur, clip, xfade).unwrap_or(1), xfade, vol)
+}
+
 /// The two edge fades of one music run: `(fade_in, fade_out)`.
 pub(crate) fn music_fades(n: usize, last: bool, cfg: &MusicLayer) -> (f64, f64) {
     (
@@ -186,6 +201,12 @@ pub fn apply_layers(
     let mut missing: Vec<String> = Vec::new();
     let mut fx_slices: Vec<Slice> = Vec::new();
     let mut fx_log: Vec<FxReport> = Vec::new();
+    // Every take in the pool, so a looped bed knows how long its clip is. The
+    let fx_durs = probe_durs(
+        &effect_pool.values().flat_map(|s| s.files.clone()).collect::<Vec<String>>(),
+        assets,
+        "effect",
+    );
     for (n, w) in windows.iter().enumerate() {
         let seed = audio_pool::seed(chapter, n, &w.tags);
         let Some(clip) = audio_pool::pick(&effect_pool, &w.tags, seed) else {
@@ -202,32 +223,42 @@ pub fn apply_layers(
         // Three rungs, multiplied: the rule's balance against other scenes, the
         let vol = w.level * clip.level;
         let p = work.join(format!("fx{n}.wav"));
-        let mut args: Vec<String> = vec!["-y".into(), "-loglevel".into(), "error".into()];
         if clip.looped {
-            args.push("-stream_loop".into());
-            args.push("-1".into());
-        }
-        args.push("-i".into());
-        args.push(s(src.display()));
-        args.push("-t".into());
-        args.push(format!("{dur:.3}"));
-        // A one-shot is faded at *its own* end, whatever that is: `areverse`
-        let af = if clip.looped {
-            format!(
-                "volume={:.4},aformat=sample_rates=48000:channel_layouts=mono",
-                vol
-            )
+            // A bed that outruns its clip repeats with a crossfade at each seam,
+            let clip_s = fx_durs.get(&clip.file).copied().unwrap_or(0.0);
+            let graph = effect_bed_graph(dur, clip_s, cfg.layers.effect.loop_xfade_s, vol);
+            ffmpeg(&[
+                "-y".into(),
+                "-loglevel".into(),
+                "error".into(),
+                "-i".into(),
+                s(src.display()),
+                "-filter_complex".into(),
+                graph,
+                "-map".into(),
+                "[out]".into(),
+                "-t".into(),
+                format!("{dur:.3}"),
+                s(p.display()),
+            ])?;
         } else {
-            format!(
-                "volume={:.4},areverse,afade=t=in:st=0:d=0.4,areverse,\
-                 aformat=sample_rates=48000:channel_layouts=mono",
-                vol
-            )
-        };
-        args.push("-af".into());
-        args.push(af);
-        args.push(s(p.display()));
-        ffmpeg(&args)?;
+            // A one-shot is faded at *its own* end, whatever that is: `areverse`
+            ffmpeg(&[
+                "-y".into(),
+                "-loglevel".into(),
+                "error".into(),
+                "-i".into(),
+                s(src.display()),
+                "-t".into(),
+                format!("{dur:.3}"),
+                "-af".into(),
+                format!(
+                    "volume={vol:.4},areverse,afade=t=in:st=0:d=0.4,areverse,\
+                     aformat=sample_rates=48000:channel_layouts=mono"
+                ),
+                s(p.display()),
+            ])?;
+        }
         // A window that reaches the end of the chapter is the last thing this
         let closing = w.end >= total - 0.05;
         fx_slices.push(Slice {
@@ -301,47 +332,26 @@ pub fn apply_layers(
             start,
             &run.pauses,
         );
-        // A run longer than its track is the common case — a 2-minute bed under
-        let copies = loop_copies(dur, mu_durs.get(&run.file).copied().unwrap_or(0.0), 2.0);
-        match copies {
-            Some(k) => {
-                let graph =
-                    loop_filter_with_tail(k, 2.0, &format!("volume=volume='{expr}':eval=frame"));
-                ffmpeg(&[
-                    "-y".into(),
-                    "-loglevel".into(),
-                    "error".into(),
-                    "-i".into(),
-                    s(src.display()),
-                    "-filter_complex".into(),
-                    graph,
-                    "-map".into(),
-                    "[out]".into(),
-                    "-t".into(),
-                    format!("{dur:.3}"),
-                    s(p.display()),
-                ])?;
-            }
-            None => {
-                ffmpeg(&[
-                    "-y".into(),
-                    "-loglevel".into(),
-                    "error".into(),
-                    "-stream_loop".into(),
-                    "-1".into(),
-                    "-i".into(),
-                    s(src.display()),
-                    "-t".into(),
-                    format!("{dur:.3}"),
-                    "-af".into(),
-                    format!(
-                        "volume=volume='{expr}':eval=frame,\
-                         aformat=sample_rates=48000:channel_layouts=mono"
-                    ),
-                    s(p.display()),
-                ])?;
-            }
-        }
+        let graph = music_run_graph(
+            dur,
+            mu_durs.get(&run.file).copied().unwrap_or(0.0),
+            cfg.layers.music.xfade_s,
+            &expr,
+        );
+        ffmpeg(&[
+            "-y".into(),
+            "-loglevel".into(),
+            "error".into(),
+            "-i".into(),
+            s(src.display()),
+            "-filter_complex".into(),
+            graph,
+            "-map".into(),
+            "[out]".into(),
+            "-t".into(),
+            format!("{dur:.3}"),
+            s(p.display()),
+        ])?;
         let (fade_in, fade_out) = music_fades(n, last, &cfg.layers.music);
         mu_slices.push(Slice {
             path: p,

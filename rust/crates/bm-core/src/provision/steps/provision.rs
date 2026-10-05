@@ -342,20 +342,20 @@ pub fn provision(
         Err(e) => log.push(format!("[{}] opencode check failed: {e}", m.id)),
     }
 
-    // The merge stage's encoder. Installed here so a fresh box can merge; a
-    match ssh.ensure_ffmpeg(installs) {
+    // The merge stage's encoder: an ensure on every provision, so a box that
+    match ssh.ensure_ffmpeg() {
         Ok(v) if v.starts_with("FFMPEG-OK") => log.push(format!("[{}] {v}", m.id)),
         Ok(v) => log.push(format!(
-            "[{}] {v}, merge stays disabled on this box until ffmpeg is present (apt/dnf install ffmpeg), then force a re-provision",
+            "[{}] {v}, merge stays disabled on this box until ffmpeg is present (apt/dnf install ffmpeg)",
             m.id
         )),        Err(e) => log.push(format!("[{}] ffmpeg install check failed: {e}", m.id)),
     }
 
     // The merge stage's second engine. The voice treatment (room, character,
-    match ssh.ensure_sox(installs) {
+    match ssh.ensure_sox() {
         Ok(v) if v.starts_with("SOX-OK") => log.push(format!("[{}] {v}", m.id)),
         Ok(v) => log.push(format!(
-            "[{}] {v}, merge stays disabled on this box until sox is present (apt/dnf install sox), then force a re-provision",
+            "[{}] {v}, merge stays disabled on this box until sox is present (apt/dnf install sox)",
             m.id
         )),        Err(e) => log.push(format!("[{}] sox install check failed: {e}", m.id)),
     }
@@ -397,14 +397,14 @@ pub fn provision(
     // Named on its own line, not just inside the summary: a merge offered to
     if !after.ffmpeg_present {
         log.push(format!(
-            "[{}] ffmpeg is not on PATH, this box can crawl/digest/render but every merge it is offered will fail; install it (apt install ffmpeg / dnf install ffmpeg) and force a re-provision",
+            "[{}] ffmpeg is not on PATH, this box can crawl/digest/render but every merge it is offered will fail; install it (apt install ffmpeg / dnf install ffmpeg), the next probe picks it up",
             m.id
         ));
     }
     // Same warning for the second engine, and here the capability gate means
     if !after.sox_present {
         log.push(format!(
-            "[{}] sox is not on PATH, this box can crawl/digest/render but advertises no merge capability; install it (apt install sox / dnf install sox) and force a re-provision",
+            "[{}] sox is not on PATH, this box can crawl/digest/render but advertises no merge capability; install it (apt install sox / dnf install sox), the next probe picks it up",
             m.id
         ));
     }

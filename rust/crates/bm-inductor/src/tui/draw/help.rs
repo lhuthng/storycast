@@ -317,8 +317,8 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         "change saves at once, so there is no unsaved state to lose on Esc.",
         "A stage is also gated by what the box can actually do: a worker without",
         "ffmpeg or sox reports no `merge` capability (the beds need ffmpeg, every",
-        "voice treatment needs sox), so merge stays off there until provisioning",
-        "installs both (or you install them and re-provision).",
+        "voice treatment needs sox), so merge stays off there until a provision",
+        "installs both (or you install them yourself).",
     ] {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
     }

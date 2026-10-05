@@ -902,3 +902,27 @@ async fn state_reports_dispatch_and_the_range() {
     assert_eq!(v["dispatch"]["span"], "ch4..100 · 3 done, 97 to go");
     assert_eq!(v["dispatch"]["remaining"], serde_json::json!([4, 100, 3]));
 }
+
+#[test]
+fn stale_sidecar_roster_names_the_restart_not_provision() {
+    let d = scratch();
+    let layout = bm_core::Layout::new(d.path());
+    let store = layout.tts_voices();
+    std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+    std::fs::write(
+        &store,
+        r#"{"presets":{"Phong Le 2":{"speaker_emb":[0.1],"codes":[]}}}"#,
+    )
+    .unwrap();
+    let body = r#"{"error":"unknown voice \"Phong Le 2\" on this box — :prov to push it (86 known)"}"#;
+    // On disk but unknown in memory: the sidecar predates the enrollment.
+    let hint = super::sidecar::stale_roster_hint(&layout, "Phong Le 2", body).unwrap();
+    assert!(hint.contains("pkill -x bm-tts"), "{hint}");
+    assert!(hint.contains(":prov"), "{hint}");
+    // Folded spelling still matches the enrolled voice.
+    assert!(super::sidecar::stale_roster_hint(&layout, "phong-le-2", body).is_some());
+    // Genuinely missing voice: no hint, the sidecar's own error stands.
+    assert!(super::sidecar::stale_roster_hint(&layout, "Nope", r#"unknown voice "Nope""#).is_none());
+    // A non-voice 500 passes through untouched.
+    assert!(super::sidecar::stale_roster_hint(&layout, "Phong Le 2", "internal error").is_none());
+}

@@ -227,7 +227,7 @@ pub fn normalize_os(raw: &str) -> String {
     }
 }
 
-/// Whether a provision may chase a missing tool with a package manager.
+/// Whether `opencode` may chase a missing tool on a configured box: the one
 fn may_install(configured: bool, force: bool) -> bool {
     force || !configured
 }
@@ -286,10 +286,9 @@ echo "OPENCODE-SKIP (already configured, not reinstalling; force a re-provision 
     }
 }
 
-/// The `ffmpeg` step. Same split as [`opencode_script`], and here the cheap
-fn ffmpeg_script(allow_install: bool) -> String {
-    if allow_install {
-        r#"export DEBIAN_FRONTEND=noninteractive
+/// The `ffmpeg` step: an ensure like [`zstd_script`], so a configured box that
+fn ffmpeg_script() -> String {
+    r#"export DEBIAN_FRONTEND=noninteractive
 if command -v ffmpeg >/dev/null 2>&1; then echo "FFMPEG-OK (present)"; exit 0; fi
 install() { $1 >/dev/null 2>&1; }
 if command -v apt-get >/dev/null 2>&1; then
@@ -303,18 +302,12 @@ else
 fi
 if command -v ffmpeg >/dev/null 2>&1; then echo "FFMPEG-OK (installed)"; else echo "FFMPEG-SKIP (install refused, needs sudo? run: sudo apt-get install -y ffmpeg)"; fi
 "#
-            .into()
-    } else {
-        r#"if command -v ffmpeg >/dev/null 2>&1; then echo "FFMPEG-OK (present)"; exit 0; fi
-echo "FFMPEG-SKIP (already configured, not reinstalling; force a re-provision to try again)""#
-            .into()
-    }
+    .into()
 }
 
-/// The `sox` step. Same shape as [`ffmpeg_script`], and the same split: a
-fn sox_script(allow_install: bool) -> String {
-    if allow_install {
-        r#"export DEBIAN_FRONTEND=noninteractive
+/// The `sox` step, [`ffmpeg_script`]'s pair: merges need both, so both are
+fn sox_script() -> String {
+    r#"export DEBIAN_FRONTEND=noninteractive
 if command -v sox >/dev/null 2>&1; then echo "SOX-OK (present)"; exit 0; fi
 install() { $1 >/dev/null 2>&1; }
 if command -v apt-get >/dev/null 2>&1; then
@@ -330,12 +323,7 @@ else
 fi
 if command -v sox >/dev/null 2>&1; then echo "SOX-OK (installed)"; else echo "SOX-SKIP (install refused, needs sudo? run: sudo apt-get install -y sox)"; fi
 "#
-            .into()
-    } else {
-        r#"if command -v sox >/dev/null 2>&1; then echo "SOX-OK (present)"; exit 0; fi
-echo "SOX-SKIP (already configured, not reinstalling; force a re-provision to try again)""#
-            .into()
-    }
+    .into()
 }
 
 /// The `zstd` step: the sources bundle is `tar` + `zstd`, so every box that
