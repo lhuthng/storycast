@@ -76,6 +76,21 @@ between two lines, or between the two halves of one line it split. How a clip
 *behaves* is a property of the clip, not a per-chapter choice, and that is what
 `mode` is for.
 
+A seam may carry **more than one** inject. `sound_after` and `stop_after` take a
+single name or a comma-separated list, and the names fire in the order written —
+so a bed can open and a hit can land on the same line, two spot sounds can be
+stacked, or two beds can close together. The mix queues the seam's directives in
+listed order: an `overlap` or a bed stays put and the next name anchors at the
+same point, while a `hit` or a `trail` advances past its own solo time. A line
+that fires nothing names neither field.
+
+A seam may also leave the choice to the pool. `tags:slash,sword` plays the clip
+that matches the most of those tags — the sword slash where the pack has one, a
+weaker slash match where it does not — and `stop_after: tags:kitchen` fades
+whatever running sound answers those tags, whichever clip the pool drew, without
+the script ever knowing its name. The tags a sound answers are its own list in
+`inject-pool.json`, the same vocabulary the beds are keyed on.
+
 ## 2. The gain chain and the eight knobs
 
 In order, once each:

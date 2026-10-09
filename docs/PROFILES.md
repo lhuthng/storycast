@@ -69,7 +69,7 @@ back to a bundle.
 | Piece | Trees | Bytes |
 | --- | --- | --- |
 | Pack | `assets/` | **58 MB** |
-| Adapter | `prompts/` | **25 KB** (`analyze.txt` 4,985 + `script.txt` 8,963 + `sound.txt` 8,703 + `sound-cues.json` 576 + `repair.txt` 1,441) |
+| Adapter | `prompts/` | **27 KB** (`analyze.txt` 4,985 + `script.txt` 8,978 + `sound.txt` 9,559 + `sound-cues.json` 576 + `repair.txt` 3,829) |
 | Engine | `engines/<name>/` — weights, binary, runtime, lexicon, voice store, clips | **1.0 GB** |
 
 What each actually holds:

@@ -663,14 +663,15 @@ of a pipeline where it is expensive to notice.
   that lands a *changed* script invalidates the chapter's render and merge
   (segments and mp3 go, both tasks requeue fresh); otherwise the kept render
   would speak the old dramatization under the new one. The "analyzer" (which AI
-  service to use) is any provider id from `llm.default.json` (picked with `L`),
-  routed by its `kind` (`gemini` | `openai` | `ollama`) with a fallback chain
-  over models.
+  service to use) is any provider id in `llm.default.json` or one you added with
+  `n` on the `L` screen (chosen with `L`), routed by its `kind` (`gemini` |
+  `openai` | `ollama`) with a fallback chain over models.
   **You can also run this stage by hand** (press `D`), which is the way out
   when every AI service is unavailable, rate-limited, returning errors, or
   simply when you would rather use a model you already have open in a browser.
-  The program puts round one's prompt on your clipboard; you paste the answer
-  back; same for round two. **The by-hand route is the same digest with a person
+  The program puts the chapter's next prompt on your clipboard — its proofread,
+  its cast, its script — and you paste each answer back. **The by-hand route is
+  the same digest with a person
   standing in for the analyzer**: the prompts come from `build_attribution_prompt`
   and `build_staging_prompt` — the functions the automatic path renders — and the
   answers are checked by `parse_attribution` and `parse_staged_script`, the same

@@ -242,7 +242,7 @@ You need these before anything runs:
 | **Python 3** | once, to prepare the voices and to record your own | `python3 --version` |
 | **ffmpeg** | merge: joins the segments and writes the mp3 | `ffmpeg -version` |
 | **sh**, **ssh**, **rsync** | provisioning, and the tunnel back from a box | `command -v sh ssh rsync` |
-| **A model**: a Gemini key, an OpenRouter key, a TokenHarbor key, or Ollama on your own machine | the two LLM calls per chapter | press `L` in the dashboard (or `:llm`) |
+| **A model**: a Gemini key, an OpenRouter key, a TokenHarbor key, a gateway you name yourself, or Ollama on your own machine | the two LLM calls per chapter | press `L` in the dashboard (or `:llm`) |
 | **zig** and `cargo-zigbuild` | only if you want the speech program built up front | `zig version` |
 
 Rust, Python 3 and `sh`/`ssh`/`rsync` are already there on both. ffmpeg is
@@ -262,6 +262,12 @@ endpoint and model — `f` lists what the API serves so the name is picked, not
 typed. No provider is active by default. The next task offer carries the
 active key + model to whichever worker digests, so switching takes effect
 immediately with nothing else to sync.
+
+`n` adds one of your own — a provider the code has never heard of: name it and
+give it a URL, `/v1` and all (`my-gateway https://tokenharbor.ai/v1`), then `k`
+its key and `a` to make it the one that digests. Its URL is what decides where
+the calls go, its key is what authorizes them, and `gemini` as a third word
+speaks the native Gemini protocol instead of the OpenAI-compatible one.
 
 Everything is driven from `make`. The ones worth knowing:
 
@@ -528,8 +534,8 @@ In `:swap` step 2 and `:cast`. `Enter` is still the only key that assigns.
 | Key | Plays |
 | --- | --- |
 | `t` | Held line, **current** voice, cache only, zero synthesis |
-| `T` | Same line, **pointed** voice (rendered) |
-| `Ctrl+T` | **Another** line, pointed voice (rendered) |
+| `T` | Same line, **pointed** voice (rendered; replayed for a minute) |
+| `Ctrl+T` | **Another** line, the speaker's **own** voice (rendered) |
 
 Words: `:current`, `:try`/`:test`, `:another`/`:change`/`:next`.
 

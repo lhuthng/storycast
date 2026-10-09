@@ -18,8 +18,9 @@ names."
 seeded once from the tracked `llm.default.json`) holds an entry per provider —
 `kind`, `base_url`, `api_key`, `model` — and `active` names the one in use. The
 `L` (`:llm`) screen edits it, `f` asks the provider what models it serves, and
-adding a gateway by hand means writing one entry and nothing else: an unknown
-`kind` rides the OpenAI-compatible path.
+`n` adds a gateway of your own to it — a name, a URL, and optionally the
+protocol as a third word. One entry is all it takes: an unknown `kind` rides
+the OpenAI-compatible path.
 
 Three `kind`s exist, and they are protocols rather than vendors:
 

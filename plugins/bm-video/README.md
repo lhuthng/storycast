@@ -113,6 +113,49 @@ this directory, plus an optional `motion`:
 to finish. A sprite with no `motion` holds still. The asset is fitted into the
 zone without distortion and centred in it.
 
+### Tracks
+
+What the three presets do not cover is written out as **tracks**: one segment per
+property, eased from one value to another over a length of time.
+
+```json
+{"kind": "sprite", "zone": "illustration", "asset": "tmp/art.png",
+ "motion": {"period_s": 2.0, "tracks": [
+   {"prop": "y", "from": -0.05, "to": 0.05, "dur_s": 1.0, "ease": "in-out-sin",
+    "repeat": 0, "pingpong": true},
+   {"prop": "rotate", "from": -8, "to": 8, "dur_s": 1.0, "ease": "in-out-sin",
+    "repeat": 0, "pingpong": true},
+   {"prop": "opacity", "from": 0, "to": 1, "dur_s": 0.5, "ease": "out"},
+   {"prop": "opacity", "from": 1, "to": 0, "dur_s": 0.5, "ease": "in", "align": "end"}
+ ]}}
+```
+
+That bobs 5% of the zone's height either way in a sine, sways 8° either way with
+it, fades in over its first half second and fades out over its last. `pingpong`
+is what makes an oscillation: each pass reverses, so a half-period segment eased
+`in-out-sin` is a whole sine, and one eased `in-sin` is a quarter of one.
+
+| key | means |
+| --- | --- |
+| `prop` | `x`, `y` (fractions of the zone's width and height), `scale` (a multiple of the fitted size), `rotate` (degrees), `opacity` (0..1) |
+| `from`, `to` | the value a pass starts and ends at |
+| `dur_s` | how long one pass takes; defaults to `period_s` |
+| `ease` | `linear`, `in` / `out` / `in-out`, `in-cubic` …, `in-sin` / `out-sin` / `in-out-sin`; `-quad` and `-squared` are the same curve |
+| `repeat` | passes: `0` runs to the end of the video, `1` is a one-shot |
+| `pingpong` | reverse on each pass, instead of starting over from `from` |
+| `align` | `start` (the default) or `end`, where a one-shot segment begins |
+
+Two tracks may name the same `prop`: they are then segments in time order, each
+taking over where the one before it ended, which is how a fade in and a fade out
+are written. The names and the segment rules are the same ones `bm-filmcraft`
+writes keyframes from.
+
+Turning and resizing are a sprite's expensive part, so they are a table of poses
+one `period_s` long: a `scale` or a `rotate` that does not come back to where it
+started a period later is refused, and told to name a `period_s` or to repeat.
+`x`, `y` and `opacity` are applied per frame and are free — a one-shot move over
+the whole video costs nothing.
+
 **A motion is a pure function of the frame index.** Nothing is carried between
 frames, so a chunk composes the same alone as it does in sequence, on any box —
 which is what lets a render be split, cached and shipped out at all. An effect
