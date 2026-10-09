@@ -493,7 +493,7 @@ It is a dependency.** What the crawler kept decides what the digest is even
 asked to do, and the link has no gap in it:
 
 ```
-script -> chapter text -> the prepared split -> attribution -> staging -> audio
+script -> chapter text -> the prepared split -> attribution -> staging -> sound -> audio
 ```
 
 The middle of that chain is where the coupling lives, and it is worth stating
@@ -577,7 +577,9 @@ of a pipeline where it is expensive to notice.
   just means somebody spends the same afternoon finding out. Nothing uses this
   list to make decisions; it only tells you things.
 * **digest** (`digest/`) decides who speaks each line and how it should be
-  performed. This is the stage that uses the AI, in two calls per chapter.
+  performed. This is the stage that uses the AI, in three passes per chapter:
+  attribution and staging run per window, and the sound pass once for the
+  whole chapter.
   The chapter is first **cut into pieces by the program, not by a model**: the
   text is split into ordered events, each with a stable id (`e0001`…) and a
   kind of `narration` or `dialogue`, decided by quote marks alone. No model, no
@@ -588,16 +590,25 @@ of a pipeline where it is expensive to notice.
   Narrator, dialogue must be a real character or a reusable anonymous voice
   slot (`anonymous:anon-N`), and dialogue may never fall back to the Narrator.
   The **second call** (staging) gets the same pieces and that now-fixed answer,
-  and chooses only presentation: where to split lines, small grammar fixes,
-  mood, scene, music, effects, sounds. **It is not allowed to name a speaker.**
-  The program attaches the validated answer after the fact, precisely so that a
-  model trying to write a better audio prompt cannot quietly turn a character's
-  line back into narration.
+  and chooses only the text and its performance: where a too-long line splits,
+  small grammar fixes, and the acting mood. **It is not allowed to name a
+  speaker.** The program attaches the validated answer after the fact, precisely
+  so that a model trying to write a better audio prompt cannot quietly turn a
+  character's line back into narration.
+  The **third call** (sound) runs once for the whole chapter, over every staged
+  line rather than window by window, and owns only what the chapter sounds like:
+  the English `scene` place label the effect layer resolves its beds from, the
+  `music` palette token, and the `sound_after`/`stop_after` spot sounds at the
+  seams. It is the adapter's fourth prompt template, `prompts/sound.txt`, so a
+  language words its own sound design; `digest/sound.rs` renders it. Sound is chapter-wide — a bed that opens in one part
+  closes in another, a mood that turns crossfades once — which is why it is its
+  own pass and not a field on the staging answer. It never changes a word; it
+  may split one line to place a sound inside it, and nothing else.
   A final check (`validate_source_alignment`) proves the finished script
   against the original text: every piece was used exactly once, in order; no
-  stray quote mark leaked into the spoken text; and a line split for a sound or
-  because it was too long for one audio request keeps the same `source_id` and
-  therefore the same fixed speaker. Each call gets **one chance to fix its own
+  stray quote mark leaked into the spoken text; and a line split because it was
+  too long for one audio request, or by the sound pass to place a seam, keeps
+  the same `source_id` and therefore the same fixed speaker. Each call gets **one chance to fix its own
   answer**. Anonymous speakers are given stable voices from the pool but never
   become part of the character bible.
 
@@ -609,8 +620,9 @@ of a pipeline where it is expensive to notice.
   longest one in the sample corpus therefore cannot be answered at all — the
   reply is cut mid-JSON, the parse fails, and the one repair call fails the same
   way. So the program cuts the chapter into **windows**: contiguous runs of the
-  same prepared events, the two rounds run on each one unchanged, and the parts
-  are merged back into one script and one bible delta.
+  same prepared events, the attribution and staging rounds run on each one
+  unchanged, the sound pass runs once over the merged lines, and the parts are
+  merged back into one script and one bible delta.
 
   Where the cuts fall is a setting (`digest` in `settings.json`), and the
   default is derived rather than fixed: `answer_tokens` (12000, deliberately
@@ -663,7 +675,10 @@ of a pipeline where it is expensive to notice.
   and `build_staging_prompt` — the functions the automatic path renders — and the
   answers are checked by `parse_attribution` and `parse_staged_script`, the same
   validators, so a chapter finished by hand cannot land in the library the
-  automatic route would have refused. A long chapter is asked **one part at a
+  automatic route would have refused. Its staging pass sounds the chapter inline,
+  rendering the sound rules (8-10) from the same adapter template the automatic
+  sound pass reads (`prompts/sound.txt`), because there is no worker to run the
+  chapter-level sound pass. A long chapter is asked **one part at a
   time** from the same plan, the note on screen says which part (`part 2/5`), and
   the parts already staged are read from the same checkpoint the worker writes —
   a chapter the cluster half-finished can be continued by hand (and the other way
@@ -1089,7 +1104,7 @@ is a way of making "two" impossible rather than survivable.
   `POST /sidecar-policy` on any disagreement. A worker told to keep none stops
   its model on the reaper's next tick and refuses stale render offers with a
   403, which the dispatcher answers by releasing the covered rows
-  **strike-free** (`release_render_rows`: a policy decision must never shelve a
+  **strike-free** (`release_offer_rows`: a policy decision must never shelve a
   chapter); rendering back on restores the normal warm lifecycle. Five
   unanswered tries per desired value and the push goes quiet until the policy
   changes, so an agent that predates the endpoint cannot flood the log.

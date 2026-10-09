@@ -11,12 +11,41 @@ pub enum VoiceStore {
     None,
 }
 
+/// Which written sound a [`Nonverbal`] stands for. Only the class is fixed
+/// here: the prose that spells the sound belongs to the source language, so the
+/// matchers live with the digest rather than with the declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonverbalKind {
+    Laugh,
+    Sigh,
+    Cough,
+}
+
+/// One non-verbal sound an engine voices: the tag a script carries, the
+/// placeholders the prompt renders it under, and the written spellings it
+/// replaces — one declaration the prompt and every gate read.
+#[derive(Debug)]
+pub struct Nonverbal {
+    /// The `{tag_<key>}` placeholder the prompt fills.
+    pub key: &'static str,
+    /// The gloss shown in the prompt's vocabulary list.
+    pub gloss: &'static str,
+    /// The tag the script carries, e.g. `[cười]`.
+    pub tag: &'static str,
+    /// The class its written forms match under.
+    pub kind: NonverbalKind,
+    /// The source-language spellings that stand for it, longest first.
+    pub written: &'static [&'static str],
+    /// Other spellings accepted inside `[...]` beside the tag.
+    pub aliases: &'static [&'static str],
+}
+
 /// What one engine declares about itself.
 pub struct EngineDecl {
     /// The `settings.engine` name, which is what every path keys on.
     pub name: &'static str,
-    /// The sounds it voices as tags, as `(placeholder, gloss, tag)`.
-    pub nonverbal: &'static [(&'static str, &'static str, &'static str)],
+    /// The sounds it voices as tags, as [`Nonverbal`] declarations.
+    pub nonverbal: &'static [Nonverbal],
     /// The languages it can voice, as BCP-47 tags (`vi-VN`, `en-US`).
     /// the question a caller asks is "can this engine speak what this adapter
     /// writes", and an over-broad list answers it "yes" when nobody checked.
@@ -48,9 +77,37 @@ pub fn tts_features(engine: &str) -> Option<&'static [&'static str]> {
 pub const VIENEU: EngineDecl = EngineDecl {
     name: "vieneu",
     nonverbal: &[
-        ("laugh", "laugh", "[cười]"),
-        ("sigh", "sigh", "[thở dài]"),
-        ("throat", "throat-clear", "[hắng giọng]"),
+        Nonverbal {
+            key: "laugh",
+            gloss: "laugh",
+            tag: "[cười]",
+            kind: NonverbalKind::Laugh,
+            written: &["ha ha ha", "ha ha", "haha", "hắc hắc", "hô hô"],
+            aliases: &["chuckle", "cuoi"],
+        },
+        Nonverbal {
+            key: "sigh",
+            gloss: "sigh",
+            tag: "[thở dài]",
+            kind: NonverbalKind::Sigh,
+            written: &[
+                "thở dài một hơi rồi",
+                "thở dài một tiếng",
+                "thở dài một hơi",
+                "thở dài",
+                "haizz",
+                "haiz",
+            ],
+            aliases: &["sigh", "tho dai"],
+        },
+        Nonverbal {
+            key: "throat",
+            gloss: "throat-clear",
+            tag: "[hắng giọng]",
+            kind: NonverbalKind::Cough,
+            written: &["khụ khụ khụ", "khụ khụ", "khụ"],
+            aliases: &["clear throat", "hang giong"],
+        },
     ],
     languages: &["vi-VN"],
     cloning: true,
@@ -100,7 +157,7 @@ pub fn declaration(engine: &str) -> Option<&'static EngineDecl> {
 }
 
 /// The non-verbal vocabulary `engine` voices — empty when it voices none, **and
-pub fn nonverbals(engine: &str) -> &'static [(&'static str, &'static str, &'static str)] {
+pub fn nonverbals(engine: &str) -> &'static [Nonverbal] {
     declaration(engine).map(|d| d.nonverbal).unwrap_or(&[])
 }
 
@@ -426,8 +483,7 @@ mod tests {
         let tags = nonverbals("vieneu");
         assert_eq!(tags.len(), 3);
         assert!(
-            tags.iter()
-                .any(|(_key, _gloss, tag)| *tag == "[hắng giọng]"),
+            tags.iter().any(|n| n.tag == "[hắng giọng]"),
             "{tags:?}"
         );
 

@@ -1,4 +1,5 @@
 use super::validate::inline_tags;
+use super::validate::validate_inline_tags;
 use super::*;
 use serde_json::json;
 
@@ -135,7 +136,7 @@ fn inline_tags_accept_the_engine_three_and_nothing_else() {
     };
     let ok = |t: &str| {
         let d = tagged(t);
-        validate_script(&d, &json!({"characters": []}), &ctx_of(&d), &pal())
+        validate_inline_tags(&d, "vieneu")
     };
     ok("Hắn [cười].").unwrap();
     ok("Nàng [CƯỜI].").unwrap();
@@ -145,6 +146,22 @@ fn inline_tags_accept_the_engine_three_and_nothing_else() {
     // Invented tags are read aloud downstream — that is why they fail here.
     let err = ok("Hắn [khóc].").unwrap_err();
     assert!(err.to_string().contains("voice tag"), "{err}");
+}
+
+/// The tag vocabulary is the engine's, not the code's: a checkpoint that
+/// voices no tags refuses one, and converts no written sound into a tag either.
+#[test]
+fn a_tagless_engine_refuses_tags_and_converts_no_written_sound() {
+    let tagged = json!({
+        "segments": [{"speaker": "Narrator", "text": "Nắng [cười] lên."}],
+        "roster": ["Narrator"]
+    });
+    validate_inline_tags(&tagged, "vieneu").unwrap();
+    let err = validate_inline_tags(&tagged, "gemini").unwrap_err();
+    assert!(err.to_string().contains("voices no tags"), "{err}");
+
+    assert_eq!(retag_text("Ha ha ha!", "vieneu"), Some("[cười]".into()));
+    assert_eq!(retag_text("Ha ha ha!", "gemini"), None);
 }
 
 #[test]
@@ -188,61 +205,61 @@ fn validate_allows_a_punctuation_line_when_the_script_has_speech() {
 fn retag_text_converts_laughs_sighs_and_coughs() {
     // Real shapes from the corpus.
     assert_eq!(
-        retag_text("Ha ha ha!"),
+        retag_text("Ha ha ha!", "vieneu"),
         Some("[cười]".into()),
         "a bare laugh becomes a bare tag"
     );
     assert_eq!(
-        retag_text("\"Ha ha, khách sáo quá.\""),
+        retag_text("\"Ha ha, khách sáo quá.\"", "vieneu"),
         Some("\"[cười] khách sáo quá.\"".into())
     );
     assert_eq!(
-        retag_text("Thật à, ta đúng là kỳ tài ngút trời ha ha..."),
+        retag_text("Thật à, ta đúng là kỳ tài ngút trời ha ha...", "vieneu"),
         Some("Thật à, ta đúng là kỳ tài ngút trời [cười]".into())
     );
     assert_eq!(
-        retag_text("\"A ha ha, đã lâu không gặp.\""),
+        retag_text("\"A ha ha, đã lâu không gặp.\"", "vieneu"),
         Some("\"[cười] đã lâu không gặp.\"".into())
     );
     assert_eq!(
-        retag_text("\"Hắc hắc, tới đây!\""),
+        retag_text("\"Hắc hắc, tới đây!\"", "vieneu"),
         Some("\"[cười] tới đây!\"".into())
     );
-    assert_eq!(retag_text("Hô hô hô hô."), Some("[cười]".into()));
+    assert_eq!(retag_text("Hô hô hô hô.", "vieneu"), Some("[cười]".into()));
     assert_eq!(
-        retag_text("Haizz, đứa trẻ này..."),
+        retag_text("Haizz, đứa trẻ này...", "vieneu"),
         Some("[thở dài] đứa trẻ này...".into())
     );
     assert_eq!(
-        retag_text("Bành Anh thở dài một tiếng, nói:"),
+        retag_text("Bành Anh thở dài một tiếng, nói:", "vieneu"),
         Some("Bành Anh [thở dài] nói:".into()),
         "the Vietnamese written form carries a quantifier that the tag replaces"
     );
     assert_eq!(
-        retag_text("Bành Anh thở dài một hơi rồi mới cất lời:"),
+        retag_text("Bành Anh thở dài một hơi rồi mới cất lời:", "vieneu"),
         Some("Bành Anh [thở dài] mới cất lời:".into()),
         "the connective belongs to the written sigh, not the spoken words"
     );
     assert_eq!(
-        retag_text("Bành Anh [thở dài] một tiếng, nói:"),
+        retag_text("Bành Anh [thở dài] một tiếng, nói:", "vieneu"),
         Some("Bành Anh [thở dài] nói:".into()),
         "a quantifier after the tag is still part of the written sound"
     );
     assert_eq!(
-        retag_text("\"Khụ khụ, thôi không được đâu.\""),
+        retag_text("\"Khụ khụ, thôi không được đâu.\"", "vieneu"),
         Some("\"[hắng giọng] thôi không được đâu.\"".into())
     );
     // Tag plus literal collapses to the tag.
     assert_eq!(
-        retag_text("[cười] Ha ha ha. Cứ kêu đi!"),
+        retag_text("[cười] Ha ha ha. Cứ kêu đi!", "vieneu"),
         Some("[cười] Cứ kêu đi!".into())
     );
     assert_eq!(
-        retag_text("[cười] \"Ha ha, khách sáo quá.\""),
+        retag_text("[cười] \"Ha ha, khách sáo quá.\"", "vieneu"),
         Some("[cười] \"khách sáo quá.\"".into())
     );
     // A tag already present blocks a second one: no change at all.
-    assert_eq!(retag_text("[cười] Haizz..."), None);
+    assert_eq!(retag_text("[cười] Haizz...", "vieneu"), None);
 }
 
 #[test]
@@ -261,15 +278,15 @@ fn retag_text_leaves_everything_else_alone() {
         "như trút được gánh nặng, thở phào nhẹ nhõm",
         "Không có gì đặc biệt.",
     ] {
-        assert_eq!(retag_text(t), None, "{t:?} must not change");
+        assert_eq!(retag_text(t, "vieneu"), None, "{t:?} must not change");
     }
     // Word-boundary discipline: `hai` (two) and `aha` (eureka) are words.
-    assert_eq!(retag_text("mang thêm hai cái ghế ra đây."), None);
-    assert_eq!(retag_text("Aha, ra vậy!"), None);
+    assert_eq!(retag_text("mang thêm hai cái ghế ra đây.", "vieneu"), None);
+    assert_eq!(retag_text("Aha, ra vậy!", "vieneu"), None);
     // A lone `hô` is the verb "to shout", not laughter — only repetition counts.
-    assert_eq!(retag_text("Mọi người hô to."), None);
-    assert_eq!(retag_text("cách xưng hô của ngươi."), None);
-    assert_eq!(retag_text("Hô hô hô hô."), Some("[cười]".into()));
+    assert_eq!(retag_text("Mọi người hô to.", "vieneu"), None);
+    assert_eq!(retag_text("cách xưng hô của ngươi.", "vieneu"), None);
+    assert_eq!(retag_text("Hô hô hô hô.", "vieneu"), Some("[cười]".into()));
 }
 
 #[test]

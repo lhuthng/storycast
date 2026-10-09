@@ -56,9 +56,39 @@ pub(crate) struct Vocabulary {
     pub(crate) aliases: TagAliases,
     /// `scene-map.json`'s `thought.sound`, when the pack declares one. Checked
     pub(crate) thought_stinger: Option<String>,
+    /// Rule 10's sweep as substrings, from the adapter's `sound-cues.json`: the
+    /// `silent_design` gate's phrase list, in the source language.
+    pub(crate) sound_cues: Vec<String>,
+    /// The engine whose non-verbal declaration the gates read: its tags are the
+    /// only ones a script may carry, and an engine that voices none refuses
+    /// every tag rather than another checkpoint's.
+    pub(crate) engine: String,
 }
 
-pub(crate) fn vocabulary(layout: &Layout) -> Result<Vocabulary> {
+/// The adapter's `sound-cues.json`, or an empty list when it ships none — which
+/// turns the gate off rather than firing on another language's words.
+fn sound_cues(layout: &Layout) -> Vec<String> {
+    let path = layout.prompts_dir().join("sound-cues.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(v) => v
+            .get("cues")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default(),
+        Err(e) => {
+            eprintln!(
+                "{}: sound-cues.json is not valid JSON ({e}); the sound gate is off",
+                path.display()
+            );
+            Vec::new()
+        }
+    }
+}
+
+pub(crate) fn vocabulary(layout: &Layout, engine: &str) -> Result<Vocabulary> {
     let effect_pool = crate::audio_pool::load_pool(&layout.assets().join("effect-pool.json"));
     let map = load_map(layout)?;
     let palette = crate::ambience::palette_names(&map);
@@ -73,6 +103,8 @@ pub(crate) fn vocabulary(layout: &Layout) -> Result<Vocabulary> {
         injects,
         aliases,
         thought_stinger,
+        sound_cues: sound_cues(layout),
+        engine: engine.to_string(),
     })
 }
 
@@ -129,6 +161,8 @@ pub fn manual_prompt(
             continuity.as_ref(),
             previous_excerpts(layout, n).as_deref(),
         )?,
+        // The manual flow stages and sounds a chapter in one pass: there is no
+        // worker to run the chapter-level sound pass, so it owns sound inline.
         Some(context) => build_staging_prompt(
             layout,
             engine,
@@ -136,6 +170,7 @@ pub fn manual_prompt(
             context,
             &slice,
             continuity.as_ref(),
+            true,
         )?,
     };
     Ok(ManualPrompt {
@@ -214,6 +249,7 @@ impl ManualSession {
 /// Check a pasted answer for one round, and assemble what it yields.
 pub fn manual_accept(
     layout: &Layout,
+    engine: &str,
     n: u32,
     round: Round,
     pasted: &str,
@@ -229,6 +265,7 @@ pub fn manual_accept(
     let summaries = session.parts.summaries();
     let continuity = session.continuity(index, &summaries);
     match round {
+        Round::Sound => unreachable!("the manual flow sounds a chapter in its staging pass"),
         Round::Attribution => Ok(ManualAnswer {
             // Round 2's prompt is **not** built here: it carries the engine's
             prompt: None,
@@ -244,7 +281,7 @@ pub fn manual_accept(
             let context = cast.ok_or_else(|| {
                 anyhow::anyhow!("round 2 needs round 1's cast — paste the cast answer first")
             })?;
-            let vocab = vocabulary(layout)?;
+            let vocab = vocabulary(layout, engine)?;
             let script = parse_staged_script(pasted, &session.bible, context, &slice, &vocab)?;
             // Every part's own prose, for rule 2 — or the chapter's own text when
             let texts: Vec<String> = if session.total() == 1 {
@@ -270,7 +307,9 @@ pub fn manual_accept(
                 .chain(std::iter::once(&script))
                 .collect();
             let scopes: Vec<&str> = texts.iter().map(String::as_str).collect();
-            if let Some((gap, owner)) = sound_gap(&scripts, &scopes, &vocab.injects, what) {
+            if let Some((gap, owner)) =
+                sound_gap(&scripts, &scopes, &vocab.injects, &vocab.sound_cues, what)
+            {
                 match session.part(owner) {
                     Some(part) => anyhow::bail!("part {}/{}: {gap}", part.index, part.total),
                     None => anyhow::bail!("{gap}"),

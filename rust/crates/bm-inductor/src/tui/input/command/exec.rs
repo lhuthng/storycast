@@ -127,9 +127,9 @@ pub(crate) fn do_command(
                     body: vec![
                         format!("Remove {} from the cluster registry.", m.addr),
                         String::new(),
-                        "This forgets the machine. It does not touch anything on the".into(),
-                        "remote box, and re-adding it by address is enough to bring it back."
-                            .into(),
+                        "Rows in flight on it return to the pool for another box,".into(),
+                        "and its worker is refused until the box is added back by".into(),
+                        "address. Nothing on the remote box itself is touched.".into(),
                     ],
                     action: ConfirmAction::DropMachine {
                         addr: m.addr.clone(),

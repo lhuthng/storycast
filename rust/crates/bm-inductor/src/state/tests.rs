@@ -6248,6 +6248,110 @@ fn relink_does_not_reonboard_a_box_that_was_already_working() {
 }
 
 #[test]
+fn dropping_a_box_forgets_it_and_gives_its_rows_back() {
+    // `:drop` end to end: the registry entry, the box's config, its runtime
+    // (beats, caps) and the rows it was holding. The release is the part that
+    // mattered: without it a row sat Assigned to a box nothing would hear from
+    // again, and the orphan pass never fired because the worker kept beating.
+    let (_d, mut inner) = fixture();
+    let mut m = Machine::new("18.1.1.1", "ubuntu", 22, None, "worker");
+    m.name = "box-1".into();
+    inner.machines.insert("18.1.1.1".into(), m);
+    inner.persist_box("18.1.1.1", "box-1");
+    inner.workers.insert("w1".into(), "18.1.1.1".into());
+    inner.caps.insert("w1".into(), vec!["render-segments".into()]);
+    inner
+        .beats
+        .insert("w1".into(), beat_with_load("w1", "18.1.1.1", None));
+    let mut t = Task::new(7, Stage::Render);
+    t.state = TaskState::Assigned;
+    t.assigned_to = Some("w1".into());
+    t.lease_until = Some(now_secs() + 600);
+    inner.tasks.insert("render:7".into(), t);
+
+    let line = inner.drop_machine("18.1.1.1");
+
+    assert!(
+        !inner.machines.contains_key("18.1.1.1"),
+        "the registry entry is gone"
+    );
+    assert!(!inner.beats.contains_key("w1"), "and the runtime with it");
+    assert!(!inner.caps.contains_key("w1"));
+    assert_eq!(
+        inner.workers.get("w1").map(String::as_str),
+        Some("18.1.1.1"),
+        "the worker mapping stays, so a poll can still be resolved and refused"
+    );
+    assert!(inner.dropped.contains("18.1.1.1"));
+    let t = &inner.tasks["render:7"];
+    assert_eq!(t.state, TaskState::Pending, "the row it held is back in the pool");
+    assert!(t.holders().is_empty());
+    assert!(t.detail.contains("machine dropped"), "{}", t.detail);
+    assert!(line.contains("1 in-flight row(s)"), "{line}");
+    // The config file went with it, not just the in-memory map.
+    let boxes = bm_core::provision::load_boxes(&inner.layout.machines());
+    assert!(!boxes.iter().any(|b| b.addr == "18.1.1.1"));
+}
+
+#[test]
+fn dropping_one_racer_keeps_the_rows_other_holder() {
+    // Digest racing: a row held by two boxes must not be handed back to the
+    // pool just because one of them was dropped.
+    let (_d, mut inner) = fixture();
+    for (addr, w) in [("18.1.1.1", "w1"), ("18.1.1.2", "w2")] {
+        let mut m = Machine::new(addr, "ubuntu", 22, None, "worker");
+        m.name = addr.into();
+        inner.machines.insert(addr.into(), m);
+        inner.workers.insert(w.into(), addr.into());
+    }
+    let mut t = Task::new(7, Stage::Digest);
+    t.state = TaskState::Running;
+    t.assigned_to = Some("w1".into());
+    t.racers = vec!["w2".into()];
+    inner.tasks.insert("digest:7".into(), t);
+
+    inner.drop_machine("18.1.1.1");
+
+    let t = &inner.tasks["digest:7"];
+    assert_eq!(t.state, TaskState::Running, "the live racer keeps it");
+    assert_eq!(t.holders(), vec!["w2"], "only the dropped holder left");
+    assert!(t.detail.contains("still racing"), "{}", t.detail);
+}
+
+#[test]
+fn a_dropped_box_cannot_walk_back_in() {
+    // The stray machine: a worker still running on a dropped box keeps
+    // beating, and `observe` used to mint it a brand-new nameless entry. The
+    // tombstone refuses it, and `offer` refuses the same box work so its polls
+    // come back empty instead of draining the queue.
+    let (_d, mut inner) = fixture();
+    let mut m = Machine::new("18.1.1.1", "ubuntu", 22, None, "worker");
+    m.name = "box-1".into();
+    inner.machines.insert("18.1.1.1".into(), m);
+    inner.workers.insert("w1".into(), "18.1.1.1".into());
+    inner.drop_machine("18.1.1.1");
+
+    // The box's beat arrives after the drop: no machine comes back.
+    assert!(!inner.observe(&beat_with_load("w1", "18.1.1.1", None)));
+    assert!(
+        !inner.machines.contains_key("18.1.1.1"),
+        "a beat must not re-mint a dropped box"
+    );
+    assert!(!inner.beats.contains_key("w1"));
+
+    // And it is offered nothing, even with a ready task waiting.
+    two_ready_stages(&mut inner);
+    assert!(inner.offer("w1").is_none(), "a dropped box gets no work");
+
+    // Binding the address again is what un-forgets it (`add_machine` clears
+    // the tombstone); then the box is a box like any other again.
+    inner.dropped.remove("18.1.1.1");
+    assert!(inner.observe(&beat_with_load("w1", "18.1.1.1", None)));
+    assert!(inner.machines.contains_key("18.1.1.1"));
+    assert!(inner.offer("w1").is_some(), "and it is served again");
+}
+
+#[test]
 fn a_waiting_box_is_what_makes_the_account_get_read() {
     // The watch's gate. It must be true only while a launch is genuinely in
     let (_d, mut inner) = fixture();

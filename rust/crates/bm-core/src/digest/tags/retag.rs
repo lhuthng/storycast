@@ -1,5 +1,6 @@
 use super::validate::has_diacritic;
 use super::*;
+use crate::voices::NonverbalKind;
 
 /// EN policy is trust-based; flag obvious violations for the review gate.
 pub fn warn_vietnamese(data: &Value, bible: &Value) -> Vec<String> {
@@ -66,10 +67,17 @@ fn needs_company(w: &str) -> bool {
     matches!(w, "hô" | "hắc" | "khà")
 }
 
-/// Rewrite written-out non-verbal sounds into the engine's three tags.
-pub fn retag_text(text: &str) -> Option<String> {
+/// Rewrite written-out non-verbal sounds into `engine`'s tags. An engine that
+/// voices none leaves the text alone: its prompt asks for no tags, and a tag
+/// written for another engine's checkpoint would only be read aloud.
+pub fn retag_text(text: &str, engine: &str) -> Option<String> {
+    let decls = crate::voices::nonverbals(engine);
+    if decls.is_empty() {
+        return None;
+    }
     // A tag already present: only trim a matching literal run immediately
-    for (tag, kind) in [("[cười]", 0u8), ("[thở dài]", 1u8), ("[hắng giọng]", 2u8)] {
+    for n in decls {
+        let tag = n.tag;
         if let Some(pos) = text.find(tag) {
             let after = pos + tag.len();
             let rest = &text[after..];
@@ -83,13 +91,13 @@ pub fn retag_text(text: &str) -> Option<String> {
                     k += 1;
                 }
             }
-            let run = match kind {
-                0 => match_sound_run(&rest[k..], Sound::Laugh),
-                1 => ["một hơi rồi", "một tiếng", "một hơi"]
+            let run = match n.kind {
+                NonverbalKind::Laugh => match_sound_run(&rest[k..], NonverbalKind::Laugh),
+                NonverbalKind::Sigh => ["một hơi rồi", "một tiếng", "một hơi"]
                     .iter()
                     .find_map(|suffix| rest[k..].strip_prefix(suffix).map(|_| k + suffix.len()))
-                    .or_else(|| match_sound_run(&rest[k..], Sound::Sigh)),
-                _ => match_sound_run(&rest[k..], Sound::Cough),
+                    .or_else(|| match_sound_run(&rest[k..], NonverbalKind::Sigh)),
+                NonverbalKind::Cough => match_sound_run(&rest[k..], NonverbalKind::Cough),
             };
             if let Some(len) = run {
                 let rs = k;
@@ -113,15 +121,11 @@ pub fn retag_text(text: &str) -> Option<String> {
         }
     }
     // No tag: convert the first literal run found, if any.
-    let mut best: Option<(usize, usize, &str)> = None;
-    for (tag, matcher) in [
-        ("[cười]", Sound::Laugh),
-        ("[thở dài]", Sound::Sigh),
-        ("[hắng giọng]", Sound::Cough),
-    ] {
-        if let Some((start, len)) = find_sound_run(text, matcher) {
+    let mut best: Option<(usize, usize, &'static str)> = None;
+    for n in decls {
+        if let Some((start, len)) = find_sound_run(text, n.kind) {
             if best.map(|(s, _, _)| start < s).unwrap_or(true) {
-                best = Some((start, len, tag));
+                best = Some((start, len, n.tag));
             }
         }
     }
@@ -160,16 +164,9 @@ pub fn retag_text(text: &str) -> Option<String> {
     Some(out)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Sound {
-    Laugh,
-    Sigh,
-    Cough,
-}
-
 /// Byte length of the sound run starting at `s` (words only, no trailing
-fn match_sound_run(s: &str, kind: Sound) -> Option<usize> {
-    if kind == Sound::Sigh {
+fn match_sound_run(s: &str, kind: NonverbalKind) -> Option<usize> {
+    if kind == NonverbalKind::Sigh {
         // The corpus spells a sigh both as the engine tag's own name and as a
         for phrase in [
             "thở dài một hơi rồi",
@@ -210,7 +207,7 @@ fn match_sound_run(s: &str, kind: Sound) -> Option<usize> {
         Some((w, chars[i].0, if j < n { chars[j].0 } else { s.len() }))
     };
     // Leading `a` only counts when a laugh word follows it.
-    if kind == Sound::Laugh {
+    if kind == NonverbalKind::Laugh {
         if let Some((w, _, wend)) = word_at(0) {
             if w == "a" {
                 let mut k = wend;
@@ -247,14 +244,14 @@ fn match_sound_run(s: &str, kind: Sound) -> Option<usize> {
             break;
         };
         let ok = match kind {
-            Sound::Laugh => is_laugh_word(&w),
-            Sound::Sigh => {
+            NonverbalKind::Laugh => is_laugh_word(&w),
+            NonverbalKind::Sigh => {
                 let mut c = w.chars();
                 matches!((c.next(), c.next()), (Some('h'), Some('a')))
                     && w[2..].chars().all(|c| c == 'i' || c == 'z')
                     && w[2..].contains('z')
             }
-            Sound::Cough => w == "khụ",
+            NonverbalKind::Cough => w == "khụ",
         };
         if !ok {
             break;
@@ -270,7 +267,7 @@ fn match_sound_run(s: &str, kind: Sound) -> Option<usize> {
         return None;
     }
     // A lone hô/hắc/khà is prose, not laughter.
-    if words == 1 && kind == Sound::Laugh && needs_company(&first) {
+    if words == 1 && kind == NonverbalKind::Laugh && needs_company(&first) {
         return None;
     }
     Some(consumed)
@@ -288,7 +285,7 @@ fn byte_idx(chars: &[(usize, char)], b: usize, len: usize) -> usize {
 }
 
 /// Earliest `(byte start, byte len)` of a sound run anywhere in `text`,
-fn find_sound_run(text: &str, kind: Sound) -> Option<(usize, usize)> {
+fn find_sound_run(text: &str, kind: NonverbalKind) -> Option<(usize, usize)> {
     let bytes = text.as_bytes();
     let mut i = 0usize;
     while i < text.len() {

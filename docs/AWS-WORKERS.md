@@ -34,7 +34,7 @@ flowchart TB
     B2 --> RUN["chapters render"]
     WATCH --> RUN
     RUN --> DOWN[":down<br/>terminate by explicit id"]
-    DOWN --> DROP[":drop<br/>clear the registry entries"]
+    DOWN --> DROP[":drop<br/>forget the box, return its rows"]
 ```
 
 Two steps in that chain are the ones people skip and regret: **`:profile load`
@@ -136,9 +136,12 @@ In the TUI, `:down` (`o`) does the same behind a `danger` confirmation and
 refuses while a render is in flight on one of the boxes (`:down force`
 overrides). **It works from the Cloud view, so run `:pool` (`l`) first**
 `:down` with no listing yet refuses and says so, rather than guessing at ids.
-The terminated boxes' registry entries stay until you `:drop` them.
-Termination is always explicit: the idle timer stops *work*, it does not destroy
-infrastructure.
+The terminated boxes' registry entries stay until you `:drop` them. A `:drop`
+forgets the box end to end: its registry entry and runtime state go, the rows it
+was holding return to the pool for another box, and its address is refused until
+it is added back — so a worker still running on a terminated box cannot
+drift back in as a stray. Termination is always explicit: the idle timer stops
+*work*, it does not destroy infrastructure.
 
 ## Where this stands
 

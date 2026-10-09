@@ -10,19 +10,6 @@ const VOICE_HEADS: [&str; 6] = [
     "elderly female",
 ];
 
-/// Inline non-verbal cues the VieNeu v3 Turbo emotion checkpoint renders as
-const ALLOWED_INLINE_TAGS: [&str; 9] = [
-    "cười",
-    "chuckle",
-    "cuoi",
-    "thở dài",
-    "sigh",
-    "tho dai",
-    "hắng giọng",
-    "clear throat",
-    "hang giong",
-];
-
 /// Bracketed spans in segment text, without the brackets.
 pub(crate) fn inline_tags(text: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -34,6 +21,40 @@ pub(crate) fn inline_tags(text: &str) -> Vec<String> {
         rest = &after[close + 1..];
     }
     out
+}
+
+/// The engine's non-verbal tags, bracketed: the declared tag and the other
+/// spellings its checkpoint accepts. An engine that voices none refuses every
+/// bracket, which is what keeps a tag out of a tagless chapter.
+pub(crate) fn validate_inline_tags(data: &Value, engine: &str) -> Result<()> {
+    let decls = crate::voices::nonverbals(engine);
+    let mut allowed: Vec<String> = Vec::new();
+    for n in decls {
+        allowed.push(n.tag.trim_matches(['[', ']']).to_lowercase());
+        allowed.extend(n.aliases.iter().map(|a| a.to_lowercase()));
+    }
+    let Some(segments) = data.get("segments").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for (i, s) in segments.iter().enumerate() {
+        if crate::util::is_sound_item(s) {
+            continue;
+        }
+        let text = s.get("text").and_then(|t| t.as_str()).unwrap_or("");
+        for tag in inline_tags(text) {
+            if allowed.contains(&tag.to_lowercase()) {
+                continue;
+            }
+            let named = decls.iter().map(|n| n.tag).collect::<Vec<_>>().join("/");
+            let only = if named.is_empty() {
+                "this engine voices no tags".to_string()
+            } else {
+                format!("{named} only")
+            };
+            anyhow::bail!("segment {i}: [{tag}] is not a voice tag ({only})");
+        }
+    }
+    Ok(())
 }
 
 fn split_voice_head(hint: &str) -> String {
@@ -149,6 +170,43 @@ pub fn validate_context(data: &Value, bible: &Value) -> Result<()> {
     Ok(())
 }
 
+/// The music field is the *only* thing that decides a track, so it is checked
+/// against the palette here rather than at merge time. Its own function because
+/// the chapter-level sound pass owns `music` now, and the staging pass does not.
+pub fn validate_music(data: &Value, palette: &[String]) -> Result<()> {
+    let Some(segments) = data.get("segments").and_then(|s| s.as_array()) else {
+        return Ok(());
+    };
+    let music: Vec<(usize, &str)> = segments
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| !crate::util::is_sound_item(s))
+        .map(|(i, s)| {
+            (
+                i,
+                s.get("music").and_then(|m| m.as_str()).unwrap_or("").trim(),
+            )
+        })
+        .collect();
+    if music.iter().any(|(_, m)| !m.is_empty()) && !palette.is_empty() {
+        for (i, m) in music.iter() {
+            if m.is_empty() {
+                anyhow::bail!(
+                    "segment {i}: missing `music` — when any segment declares one, every \
+                     segment must (use \"none\" where silence is right)"
+                );
+            }
+            if !palette.iter().any(|p| p == m) {
+                anyhow::bail!(
+                    "segment {i}: music {m:?} is not in the palette ({})",
+                    palette.join(", ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The script pass's answer: the segments, and the three layers riding on them.
 pub fn validate_script(
     data: &Value,
@@ -193,47 +251,12 @@ pub fn validate_script(
             ),
         }
         has_speakable_segment |= crate::util::has_speakable_content(text);
-        // Only the engine's three emotion cues may stand in brackets —
-        for tag in inline_tags(text) {
-            if !ALLOWED_INLINE_TAGS.contains(&tag.to_lowercase().as_str()) {
-                anyhow::bail!(
-                    "segment {i}: [{tag}] is not a voice tag ([cười]/[thở dài]/[hắng giọng] only)"
-                );
-            }
-        }
     }
     if !has_speakable_segment {
         anyhow::bail!("script has no speakable content to render");
     }
 
-    // The music field is the *only* thing that decides a track, so it is a
-    let music: Vec<(usize, &str)> = segments
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| !crate::util::is_sound_item(s))
-        .map(|(i, s)| {
-            (
-                i,
-                s.get("music").and_then(|m| m.as_str()).unwrap_or("").trim(),
-            )
-        })
-        .collect();
-    if music.iter().any(|(_, m)| !m.is_empty()) && !palette.is_empty() {
-        for (i, m) in music.iter() {
-            if m.is_empty() {
-                anyhow::bail!(
-                    "segment {i}: missing `music` — when any segment declares one, every \
-                     segment must (use \"none\" where silence is right)"
-                );
-            }
-            if !palette.iter().any(|p| p == m) {
-                anyhow::bail!(
-                    "segment {i}: music {m:?} is not in the palette ({})",
-                    palette.join(", ")
-                );
-            }
-        }
-    }
+    validate_music(data, palette)?;
 
     // Every word of the chapter is spoken exactly once. Two adjacent segments
     let mut prev: Option<(usize, String, Option<String>, String)> = None;

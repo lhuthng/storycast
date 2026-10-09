@@ -105,6 +105,16 @@ async fn drive(state: Shared, layout: Layout, peer: Peer, http: reqwest::Client)
     // What this dispatcher has told this box about its sidecar, and what the
     let mut sidecar_book = SidecarBook::default();
     loop {
+        // The registry entry is gone (an operator dropped this box). `targets`
+        // no longer starts a driver for it, but this one is already running and
+        // would otherwise keep dialing a forgotten box, so it ends here.
+        if !state.lock().await.machines.contains_key(&peer.addr) {
+            println!(
+                "dispatch: {} left the registry — its driver stops",
+                peer.addr
+            );
+            return;
+        }
         let Some(beat) = ask(&http, &base, "/status", &peer.token).await else {
             // Silent box: the ledger's machine state is the inductor's own
             state.lock().await.note_silence(&peer.addr);
@@ -388,31 +398,27 @@ async fn run_one(
     let response = match sent {
         Ok(r) => r,
         Err(e) => {
+            // Say it where the operator looks. This used to be a stdout line
+            // only, so a box that never took the offer left a row assigned with
+            // nothing in the event pane to explain it — 30 minutes of a merge
+            // lease, silent.
+            state.lock().await.push_event(
+                "warn",
+                format!("[{}] {task_id} not delivered: {e}", peer.addr),
+            );
             println!("dispatch: {} {task_id} — send failed: {e}", peer.addr);
             return;
         }
     };
     let status = response.status();
-    if status == reqwest::StatusCode::CONFLICT {
-        // Raced with the worker's own idea of busy. The offer is not lost: the
-        return;
-    }
-    if status == reqwest::StatusCode::FORBIDDEN {
-        // The worker refused a render because the operator's policy turns
-        let line = {
-            let mut inner = state.lock().await;
-            inner.release_render_rows(&task_id, "worker's policy turns render off")
-        };
-        println!(
-            "dispatch: {} {task_id} — refused (render off by policy); {line}",
-            peer.addr
-        );
-        return;
-    }
     // Read once, then decide. Decoding straight from the response would treat
     let body = match response.bytes().await {
         Ok(b) => b,
         Err(e) => {
+            state.lock().await.push_event(
+                "warn",
+                format!("[{}] {task_id} answer unreadable: {e}", peer.addr),
+            );
             println!(
                 "dispatch: {} {task_id} — could not read the answer: {e}",
                 peer.addr
@@ -420,8 +426,56 @@ async fn run_one(
             return;
         }
     };
+    let head: String = String::from_utf8_lossy(&body).chars().take(200).collect();
+    if status == reqwest::StatusCode::CONFLICT {
+        // The worker was already running something and answered "busy". If the
+        // body names *this* row, it is genuinely working on it (a race we lost)
+        // and its report is what will settle it, so it is left alone. If it
+        // names another row, our offer never ran anywhere: the row goes back to
+        // the pool strike-free instead of sitting assigned until a 30-minute
+        // lease runs out, with no event to say why.
+        if !head.contains(&task_id) {
+            let line = {
+                let mut inner = state.lock().await;
+                let line = inner.release_offer_rows(&task_id, "worker answered busy");
+                inner.push_event(
+                    "warn",
+                    format!(
+                        "[{}] {task_id} refused (busy with another task): {line}",
+                        peer.addr
+                    ),
+                );
+                line
+            };
+            println!("dispatch: {} {task_id} — worker busy; {line}", peer.addr);
+        }
+        return;
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        // The worker refused a render because the operator's policy turns
+        let line = {
+            let mut inner = state.lock().await;
+            let line = inner.release_offer_rows(&task_id, "worker's policy turns render off");
+            inner.push_event(
+                "warn",
+                format!(
+                    "[{}] {task_id} refused (render off by policy); {line}",
+                    peer.addr
+                ),
+            );
+            line
+        };
+        println!(
+            "dispatch: {} {task_id} — refused (render off by policy); {line}",
+            peer.addr
+        );
+        return;
+    }
     if !status.is_success() {
-        let head: String = String::from_utf8_lossy(&body).chars().take(200).collect();
+        state.lock().await.push_event(
+            "warn",
+            format!("[{}] {task_id} — worker answered {status}: {head}", peer.addr),
+        );
         println!(
             "dispatch: {} {task_id} — worker answered {status}: {head}",
             peer.addr
@@ -431,6 +485,10 @@ async fn run_one(
     let complete: bm_proto::Complete = match serde_json::from_slice(&body) {
         Ok(c) => c,
         Err(e) => {
+            state.lock().await.push_event(
+                "warn",
+                format!("[{}] {task_id} — unreadable answer: {e}", peer.addr),
+            );
             println!("dispatch: {} {task_id} — unreadable answer: {e}", peer.addr);
             return;
         }

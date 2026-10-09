@@ -21,6 +21,7 @@
 #   START      first chapter for serve  (default 1)
 #   COUNT      how many chapters        (default 100)
 #   GO         1 to distribute on start (default: held, `:go` in the TUI)
+#   TASK_PORT  what a local worker answers the inductor on (default 8917)
 #   BOX        linked box name for provision (default box-1 when linked)
 #   KEY        API key for `digest-assistant` (required there; never written to .env)
 #   MODEL      the model to answer with  (required there)
@@ -45,6 +46,10 @@ COUNT ?= 100
 # Deliberately empty: a process boots **held**, so a restart never resumes a run
 # nobody asked for. `make serve GO=1` is the automation escape hatch.
 GO ?=
+# Must match `bm_proto::DEFAULT_TASK_PORT`, which is the port the launcher
+# records on the machine: a worker that does not answer there is dialled, reads
+# silent, and is stamped offline — so it is offered nothing.
+TASK_PORT ?= 8917
 
 .PHONY: build build-inductor build-inductor-release tui tui-release serve agent digest-assistant provision link test
 
@@ -75,7 +80,7 @@ serve: build-inductor
 	$(BIN)/bm-inductor serve --bind 0.0.0.0 --port 8901 --start $(START) --count $(COUNT) $(if $(GO),--go,)
 
 agent: build-inductor
-	$(BIN)/bm-agent worker --inductor $(API)
+	$(BIN)/bm-agent worker --inductor $(API) --serve-tasks $(TASK_PORT)
 
 # The digest assistant: be the analyzer yourself while the cluster's has no
 # quota. It runs the worker's own two prompts (attribution, then staging), the

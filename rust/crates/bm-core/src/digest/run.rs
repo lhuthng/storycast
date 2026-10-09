@@ -15,19 +15,17 @@ use super::parts::part_suffix;
 use super::parts::plan_detail;
 use super::parts::plan_line;
 use super::parts::round_label;
-use super::parts::sound_gap;
 use super::parts::stage_part;
-use super::parts::window_text;
 use super::parts::Part;
 use super::parts::PartCtx;
 use super::parts::Parts;
 use super::prepare::prepare_chapter;
 use super::prompts::build_staging_prompt;
-use super::prompts::PreparedChapter;
 use super::quotes::effective_text;
 use super::quotes::quote_findings;
 use super::quotes::repair_quotes;
-use super::sound_fields::gap_block_p;
+use super::sound::build_sound_prompt;
+use super::sound::parse_sound_script;
 use super::*;
 /// **One G**: build the prompt, spend a call from the chapter's budget, ask,
 pub(crate) async fn run_g(
@@ -59,7 +57,9 @@ pub(crate) async fn run_g(
                 context.expect("staging is only ever run against a cast"),
                 ctx.slice,
                 ctx.continuity,
+                false,
             ),
+            Round::Sound => unreachable!("the sound pass has its own runner, not run_g"),
         };
         let prompt = match prompt {
             Ok(prompt) => prompt,
@@ -113,6 +113,7 @@ pub(crate) async fn run_g(
                 ctx.slice,
                 ctx.vocab,
             ),
+            Round::Sound => unreachable!("the sound pass has its own runner, not run_g"),
         };
         match judged {
             Ok(value) => return Ok(value),
@@ -155,54 +156,79 @@ pub(crate) async fn run_g(
     unreachable!("run_g leaves on its first or second attempt")
 }
 
-/// Re-ask one part's staging round with a gate's complaint appended.
+/// The chapter's sound pass: one G over every staged line, then one repair if a
+/// gate refuses the answer. Sound design is chapter-wide, so this runs once for
+/// the whole chapter rather than per part.
 #[allow(clippy::too_many_arguments)]
-async fn reask_staging(
+async fn run_sound(
     layout: &Layout,
+    n: u32,
     analyzer: &str,
     settings: &Settings,
-    bible: &Value,
-    vocab: &Vocabulary,
-    slice: &PreparedChapter,
     context: &Value,
-    index: usize,
-    total: usize,
-    plot: &[String],
-    part: Option<(usize, usize)>,
-    complaint: &str,
+    staged: &Value,
+    chapter_text: &str,
+    vocab: &Vocabulary,
     calls: &mut GCalls,
-) -> Result<Value> {
-    let continuity = (total > 1).then_some(Continuity { index, total, plot });
-    let prompt = build_staging_prompt(
-        layout,
-        &settings.engine,
-        bible,
-        context,
-        slice,
-        continuity.as_ref(),
-    )?;
-    // A G like any other: it spends from the same chapter budget, so a chapter
-    calls.spend(Round::Staging.as_str())?;
-    let again = repair_once(
-        &prompt,
-        &anyhow::anyhow!(complaint.to_string()),
-        analyzer,
-        settings,
-    )
-    .await?;
-    dump_raw(
-        layout,
-        &format!("digest-staging-retry{}", part_suffix(part)),
-        &again,
-    );
-    parse_staged_script(&again, bible, context, slice, vocab).map_err(|e| {
-        let dump = layout.data().join(".last-analyze-raw.json");
-        let _ = atomic_write(&dump, &again);
-        anyhow::anyhow!(
-            "digest {complaint} not fixed by one repair ({e}); raw saved to {}",
-            dump.display()
-        )
-    })
+    progress: &mut (dyn FnMut(f32, String) + Send),
+) -> Result<Vec<Value>> {
+    let mut segments = staged
+        .get("segments")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    // The sound pass owns these now: drop whatever a staging answer left on a
+    // line, so a stray field cannot survive the pass that replaces it.
+    for line in segments.iter_mut() {
+        if let Some(object) = line.as_object_mut() {
+            for key in ["scene", "music", "sound_after", "stop_after"] {
+                object.remove(key);
+            }
+        }
+    }
+    let mut complaint: Option<String> = None;
+    for attempt in 0..2 {
+        let prompt = build_sound_prompt(layout, context, &segments)?;
+        // A G like any other: it spends from the same chapter budget, so a
+        // chapter cannot buy its way past a gate with extra calls.
+        calls.spend(Round::Sound.as_str())?;
+        let raw = if attempt == 0 {
+            generate_retrying(&prompt, analyzer, settings, progress, 0.88, 0.96).await?
+        } else {
+            repair_once(
+                &prompt,
+                &anyhow::anyhow!(complaint.clone().unwrap_or_default()),
+                analyzer,
+                settings,
+            )
+            .await?
+        };
+        let dump = if attempt == 0 {
+            "digest-sound"
+        } else {
+            "digest-sound-retry"
+        };
+        dump_raw(layout, dump, &raw);
+        match parse_sound_script(&raw, &segments, chapter_text, vocab) {
+            Ok(lines) => return Ok(lines),
+            Err(why) if attempt == 0 => {
+                progress(
+                    0.96,
+                    format!("digest ch{n} sound gate said {why}, asking for one repair"),
+                );
+                complaint = Some(why);
+            }
+            Err(why) => {
+                let dump = layout.data().join(".last-analyze-raw.json");
+                let _ = atomic_write(&dump, &raw);
+                anyhow::bail!(
+                    "digest sound invalid ({why}); raw saved to {}",
+                    dump.display()
+                );
+            }
+        }
+    }
+    unreachable!("run_sound leaves on its first or second attempt")
 }
 
 /// Ask the analyzer for one chapter through two constrained passes, once per
@@ -240,7 +266,7 @@ pub async fn analyze_chapter(
         },
     };
     let prepared = prepare_chapter(&text);
-    let vocab = vocabulary(layout)?;
+    let vocab = vocabulary(layout, &settings.engine)?;
     let windows = plan_windows(&prepared, &settings.digest);
     let total = windows.len();
     // The parts are known, so the rest of the budget can be sized against them:
@@ -308,73 +334,22 @@ pub async fn analyze_chapter(
         })?;
     }
 
-    // ---- the sound-design gates, once every part is staged -----------------
-    let what = if total == 1 { "chapter" } else { "part" };
-    // Each part's own prose, for rule 2 — or the chapter's own text when it did
-    let texts: Vec<String> = if total == 1 {
-        vec![text.clone()]
-    } else {
-        windows.iter().map(|w| window_text(&prepared, w)).collect()
-    };
-    let mut soft_released: Option<String> = None;
-    let mut attempt = 0u32;
-    loop {
-        let scripts: Vec<&Value> = parts.done.iter().map(|p| &p.script).collect();
-        let scopes: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let Some((gap, owner)) = sound_gap(&scripts, &scopes, &vocab.injects, what) else {
-            break;
-        };
-        let at = part_of(owner, total);
-        progress(
-            0.88,
-            format!(
-                "{}sound design incomplete, asking for repairs: {gap}",
-                part_prefix(at)
-            ),
-        );
-        // 0.90, 0.68, 0.51, then 0.38: below a coin flip, accept.
-        if gap_block_p(attempt) < 0.5 {
-            let msg = format!(
-                "ch{n} {}sound-design gate soft-released ({gap})",
-                part_prefix(at)
-            );
-            progress(0.88, format!("WARN: {msg}"));
-            eprintln!("WARN: {msg}");
-            soft_released = Some(msg);
-            break;
-        }
-        let summaries = parts.summaries();
-        let slice = windows[owner].prepared(&prepared);
-        let script = reask_staging(
-            layout,
-            analyzer,
-            settings,
-            bible,
-            &vocab,
-            &slice,
-            &parts.done[owner].context,
-            owner,
-            total,
-            &summaries,
-            at,
-            &gap,
-            &mut calls,
-        )
-        .await?;
-        parts.done[owner].script = script;
-        attempt += 1;
-    }
-
+    // ---- the sound pass, once the whole chapter is staged ------------------
+    // Sound is chapter-wide — a bed that opens in one part closes in another, a
+    // mood that turns mid-chapter crossfades once — so it is decided here, in
+    // one call over every staged line, rather than part by part.
     let (context, conflicts) = merge_contexts(&parts.done);
-    let script = merge_scripts(parts.done.iter().map(|p| &p.script));
+    let mut script = merge_scripts(parts.done.iter().map(|p| &p.script));
+    progress(0.88, format!("digest ch{n} via {analyzer}: sound"));
+    let lines = run_sound(
+        layout, n, analyzer, settings, &context, &script, &text, &vocab, &mut calls, progress,
+    )
+    .await?;
+    script["segments"] = json!(lines);
+
     let mut outcome = assemble_outcome(bible, &context, &script, &text)?;
     // A disagreement between parts is the operator's to settle, so it is said
     for w in conflicts {
-        outcome.log.push(format!("   WARN: {w}"));
-        outcome.warnings.push(w);
-    }
-    // `warnings` is dropped by the agent today; `log` is what the worker
-    if let Some(w) = soft_released {
         outcome.log.push(format!("   WARN: {w}"));
         outcome.warnings.push(w);
     }
@@ -511,8 +486,11 @@ pub async fn digest_chapter(
 pub enum Round {
     /// Who speaks which event. Generated and validated first, and read as data
     Attribution,
-    /// Which scenes, sounds and beds the events become.
+    /// The segments, their text and their acting mood.
     Staging,
+    /// Where the chapter is set, what music plays under it, and which spot
+    /// sounds fire — decided once for the whole chapter, over every staged line.
+    Sound,
 }
 
 impl Round {
@@ -520,6 +498,7 @@ impl Round {
         match self {
             Round::Attribution => "attribution",
             Round::Staging => "staging",
+            Round::Sound => "sound",
         }
     }
 }
@@ -604,9 +583,10 @@ impl GCalls {
         }
     }
 
-    /// Add a part's worth of calls once the windows are known. Called once.
+    /// Add a part's worth of calls once the windows are known, plus the
+    /// chapter-level sound pass's own ask. Called once.
     pub(crate) fn allow_parts(&mut self, parts: usize) {
-        self.left += 4 * parts;
+        self.left += 4 * parts + 2;
     }
 
     /// Spend one call, or refuse the chapter rather than make it. The label is

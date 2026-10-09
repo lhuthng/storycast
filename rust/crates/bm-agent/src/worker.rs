@@ -57,6 +57,11 @@ pub(crate) async fn worker_loop(
             // Merge data-plane: the hook base *is* the inductor API through
             fetch_http: reqwest::Client::builder()
                 .no_proxy()
+                // Bounded like every other wav move: a half-open tunnel — the
+                // worker's local port accepts and then says nothing — would
+                // otherwise hang the merge, and with it this box's whole task
+                // slot, for ever, reporting nothing to anyone.
+                .timeout(Duration::from_secs(60))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             fetch_base: format!("http://127.0.0.1:{}", bm_proto::DEFAULT_HOOK_PORT),

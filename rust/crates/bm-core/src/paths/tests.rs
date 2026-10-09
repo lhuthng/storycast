@@ -393,6 +393,7 @@ fn prompts_come_from_the_workspace_adapter_and_fall_back_to_the_checkout() {
     assert_eq!(l.prompts_base(), book, "and the bundle is cut from there");
     assert_eq!(l.prompt(), book.join("prompts/analyze.txt"));
     assert_eq!(l.script_prompt(), book.join("prompts/script.txt"));
+    assert_eq!(l.sound_prompt(), book.join("prompts/sound.txt"));
     assert_ne!(l.prompt(), bare.prompt());
     let _ = std::fs::remove_dir_all(&root);
 }

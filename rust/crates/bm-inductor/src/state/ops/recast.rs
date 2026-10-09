@@ -21,6 +21,7 @@ impl Inner {
 
     /// The retag body, shared by the direct op (which gates on
     fn retag_chapters(&mut self, scope: Option<Vec<u32>>, dry_run: bool) -> anyhow::Result<String> {
+        let engine = self.settings.engine.clone();
         let mut chapters: Vec<u32> = Vec::new();
         let mut edits = 0u32;
         let mut files = 0u32;
@@ -53,7 +54,7 @@ impl Inner {
                         .and_then(|t| t.as_str())
                         .unwrap_or("")
                         .to_string();
-                    if let Some(new) = bm_core::digest::retag_text(&old) {
+                    if let Some(new) = bm_core::digest::retag_text(&old, &engine) {
                         if !dry_run {
                             s["text"] = serde_json::Value::String(new.clone());
                         }

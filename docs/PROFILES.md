@@ -69,7 +69,7 @@ back to a bundle.
 | Piece | Trees | Bytes |
 | --- | --- | --- |
 | Pack | `assets/` | **58 MB** |
-| Adapter | `prompts/` | **22 KB** (`analyze.txt` 4,985 + `script.txt` 15,930 + `repair.txt` 1,438) |
+| Adapter | `prompts/` | **25 KB** (`analyze.txt` 4,985 + `script.txt` 8,963 + `sound.txt` 8,703 + `sound-cues.json` 576 + `repair.txt` 1,441) |
 | Engine | `engines/<name>/` — weights, binary, runtime, lexicon, voice store, clips | **1.0 GB** |
 
 What each actually holds:
@@ -162,7 +162,7 @@ front end implements) to everything a caller otherwise hardcodes:
 
 | Field | What it answers | Who reads it |
 | --- | --- | --- |
-| `nonverbal` | sounds it voices as tags | `digest::render_nonverbal` |
+| `nonverbal` | sounds it voices as tags, and the written forms each replaces | `digest::render_nonverbal`, `validate_inline_tags`, the source gate, `retag_text` |
 | `languages` | BCP-47 tags it can voice | `voices_language` (the gate is the adapter manifest's job — see below) |
 | `cloning` | whether a reference clip means anything to it | `roster add-sample` refuses when it is `false` |
 | `dict` | its G2P lexicon, if any | `Layout::tts_dict`, `start_tts` |
@@ -527,7 +527,11 @@ to:
   text, and it cannot be a list of `if engine == …` either. `voices::ENGINES` is
   one row per engine (`EngineDecl { name, nonverbal }`); `voices::nonverbals()`
   answers for whatever name is bound, and a name nothing declares answers
-  "none". **Adding an engine is adding a row**, not editing every reader. A test
+  "none". **Adding an engine is adding a row**, not editing every reader. The
+  gates read the same row: which `[...]` tags a script may carry, which written
+  sounds a staging answer may replace with a tag, and whether the retag pass runs
+  at all are the declaration's, so a tagless engine refuses a tag and converts no
+  text rather than another checkpoint's. A test
   keeps that table equal to the catalogue's engine list, so adding one without
   the other is a build failure rather than a silent half-addition.
 

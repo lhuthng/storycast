@@ -330,11 +330,16 @@ async fn try_gemini_model(prompt: &str, key: &str, base: &str, model: &str) -> M
     ModelNext::Skip(last)
 }
 
-/// A decoder-enforced JSON Schema for the staging pass, or `None` for any
+/// A decoder-enforced JSON Schema for the pass a prompt asks for, or `None` for
+/// any prompt with no contract (an attribution ask, or an old profile).
 pub fn digest_schema(prompt: &str) -> Option<Value> {
-    prompt
-        .contains("---STAGING OUTPUT CONTRACT---")
-        .then(staging_schema)
+    if prompt.contains("---STAGING OUTPUT CONTRACT---") {
+        Some(staging_schema())
+    } else if prompt.contains("---SOUND OUTPUT CONTRACT---") {
+        Some(sound_schema())
+    } else {
+        None
+    }
 }
 
 /// The staging answer's strict schema: `segments` plus `fixes`, the fields the
@@ -355,7 +360,7 @@ fn staging_schema() -> Value {
                         "sound_after": {"type": "string"},
                         "stop_after": {"type": "string"}
                     },
-                    "required": ["source_id", "sound_after", "stop_after"]
+                    "required": ["source_id"]
                 }
             },
             "fixes": {
@@ -367,6 +372,31 @@ fn staging_schema() -> Value {
                         "after": {"type": "string"}
                     },
                     "required": ["before", "after"]
+                }
+            }
+        },
+        "required": ["segments"]
+    })
+}
+
+/// The sound answer's strict schema: `segments` keyed by the staged line id.
+fn sound_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "segments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "text": {"type": "string"},
+                        "scene": {"type": "string"},
+                        "music": {"type": "string"},
+                        "sound_after": {"type": "string"},
+                        "stop_after": {"type": "string"}
+                    },
+                    "required": ["id"]
                 }
             }
         },
@@ -684,19 +714,29 @@ mod tests {
     }
 
     #[test]
-    fn only_the_staging_prompt_gets_a_decoder_schema() {
+    fn only_the_contract_passes_get_a_decoder_schema() {
         let schema = digest_schema("text\n---STAGING OUTPUT CONTRACT---\n{}")
             .expect("the staging pass has a schema");
         assert_eq!(schema["type"], json!("object"));
         assert_eq!(schema["properties"]["segments"]["type"], json!("array"));
-        // The per-line fields the carry-forward pass fills must stay optional,
+        // The staging pass owns the text, its splits and the acting mood only:
+        // the per-line fields the carry-forward pass fills stay optional, and a
+        // sound field is not even offered (the sound pass owns those).
         let required = schema["properties"]["segments"]["items"]["required"]
             .as_array()
             .expect("items have a required list");
         assert!(required.contains(&json!("source_id")));
-        assert!(required.contains(&json!("sound_after")));
         assert!(!required.contains(&json!("text")));
         assert!(!required.contains(&json!("mood")));
+        assert!(!required.contains(&json!("sound_after")));
+
+        // The sound pass keys on the staged line id.
+        let sound =
+            digest_schema("---SOUND OUTPUT CONTRACT---").expect("the sound pass has a schema");
+        assert_eq!(
+            sound["properties"]["segments"]["items"]["properties"]["id"]["type"],
+            json!("integer")
+        );
 
         // The attribution answer carries `mentions`/`speakers` maps the OpenAPI
         assert!(digest_schema("---ATTRIBUTION OUTPUT CONTRACT---").is_none());

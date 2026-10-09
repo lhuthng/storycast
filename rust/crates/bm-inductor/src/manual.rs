@@ -85,7 +85,7 @@ pub(crate) fn advance(
     pasted: &str,
     cast: Option<&Value>,
 ) -> Result<Next, String> {
-    let answer = bm_core::digest::manual_accept(layout, n, round, pasted, cast)
+    let answer = bm_core::digest::manual_accept(layout, engine, n, round, pasted, cast)
         .map_err(|e| format!("{e:#}"))?;
 
     if let Some(context) = answer.cast {

@@ -3,7 +3,7 @@
 use bm_core::{config::Settings, Layout};
 use bm_proto::{Machine, Stage, Task};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 mod design;
 mod exclusive;
@@ -14,6 +14,7 @@ mod ops;
 mod plan;
 mod reconcile;
 mod relink;
+mod retire;
 
 const LEASE_SECS: [(Stage, u64); 4] = [
     (Stage::Crawl, 600),
@@ -74,6 +75,10 @@ pub struct Inner {
     /// Advertised capabilities per worker, refreshed at every registration.
     pub caps: HashMap<String, Vec<String>>,
     pub beats: HashMap<String, bm_proto::Heartbeat>,
+    /// Addresses an operator has `:drop`ped. A worker still running on one is
+    /// refused — its beat ignored, its polls unanswered — so a forgotten box
+    /// cannot walk back in as a nameless stray. Re-binding clears it.
+    pub(crate) dropped: BTreeSet<String>,
     /// Boot time: the orphan pass in `reap` stays quiet for the first 120s
     pub started_at: u64,
     /// Ring buffer of scheduler events surfaced to the TUI.

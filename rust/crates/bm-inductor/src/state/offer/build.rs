@@ -29,6 +29,12 @@ impl Inner {
             return None;
         }
         let machine = self.workers.get(worker_id).cloned().unwrap_or_default();
+        // A box an operator dropped is refused before anything else: its
+        // worker may keep polling, and the mapping still resolves its address,
+        // but it gets no work.
+        if self.dropped.contains(&machine) {
+            return None;
+        }
         // The readiness gate, and it is deliberately the *first* thing after
         if let Some(m) = self.machines.get(&machine) {
             if !m.state.accepts_work() && m.state != bm_proto::MachineState::Unknown {

@@ -136,9 +136,10 @@ pub fn discard_unknown_effect_tags(data: &mut Value, valid_tags: &[String]) {
 mod retag;
 pub use retag::{retag_text, warn_vietnamese};
 pub(crate) use validate::normalise_tags;
+pub(crate) use validate::validate_inline_tags;
 pub use validate::{
-    tags_of, validate_context, validate_effect_tags, validate_injects, validate_script,
-    validate_title,
+    tags_of, validate_context, validate_effect_tags, validate_injects, validate_music,
+    validate_script, validate_title,
 };
 mod validate;
 

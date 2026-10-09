@@ -303,6 +303,50 @@ async fn register_carries_the_registry_handle_to_the_panes() {
 }
 
 #[tokio::test]
+async fn dropping_a_machine_refuses_it_and_rebinding_undoes_that() {
+    // The endpoint pair `:drop` and `:add` rely on: the delete forgets the box
+    // *and* refuses its address, and only the add can lift that refusal —
+    // otherwise a dropped box could never be brought back.
+    let d = scratch();
+    let layout = bm_core::Layout::new(d.path());
+    let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::state::Inner::distributing(layout, bm_core::config::Settings::default()),
+    ));
+    {
+        let mut inner = st.lock().await;
+        let mut m = Machine::new("192.168.2.2", "thang", 22, None, "worker");
+        m.name = "hawk".into();
+        inner.machines.insert("192.168.2.2".into(), m);
+        inner.workers.insert("w1".into(), "192.168.2.2".into());
+    }
+    let _ = drop_machine(
+        State(st.clone()),
+        Query(AddrQuery {
+            addr: "192.168.2.2".into(),
+        }),
+    )
+    .await;
+    {
+        let inner = st.lock().await;
+        assert!(inner.dropped.contains("192.168.2.2"), "the address is refused");
+        assert!(!inner.machines.contains_key("192.168.2.2"));
+    }
+    let _ = add_machine(
+        State(st.clone()),
+        Json(Machine::new("192.168.2.2", "thang", 22, None, "worker")),
+    )
+    .await;
+    {
+        let inner = st.lock().await;
+        assert!(
+            !inner.dropped.contains("192.168.2.2"),
+            "binding the box again must un-forget it"
+        );
+        assert!(inner.machines.contains_key("192.168.2.2"));
+    }
+}
+
+#[tokio::test]
 async fn a_beating_worker_clears_a_stale_would_not_start_note() {
     // Provision's verdict outlives its launch: the worker did start
     let d = scratch();

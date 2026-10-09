@@ -4,6 +4,7 @@ use super::attribution::replace_prompt_section;
 use super::attribution::warn_missing_sections;
 use super::attribution::Continuity;
 use super::attribution::Pass;
+use super::sound::sound_rules;
 use super::*;
 /// Read the scene map, refusing a map that declares no music palette: without
 pub(crate) fn load_map(layout: &Layout) -> Result<crate::ambience::SceneMap> {
@@ -82,7 +83,7 @@ fn render_nonverbal(body: &mut String, engine: &str, missed: &mut Vec<String>) {
     // The declaration API, not a name test: whichever engine is bound answers
     let tags = crate::voices::nonverbals(engine);
     if tags.is_empty() {
-        if !replace_prompt_section(body, NONVERBAL_RULE, MUSIC_RULE, "") {
+        if !strip_section(body, NONVERBAL_RULE, &NONVERBAL_SECTION_ENDS) {
             missed.push("rule 7 (non-verbal)".into());
         }
         // Backstop for a template numbered differently: a placeholder that
@@ -92,24 +93,44 @@ fn render_nonverbal(body: &mut String, engine: &str, missed: &mut Vec<String>) {
         return;
     }
     *body = body.replace("{voice_tags}", &vocabulary_block(tags));
-    for (key, _gloss, tag) in tags {
-        *body = body.replace(&format!("{{tag_{key}}}"), tag);
+    for n in tags {
+        *body = body.replace(&format!("{{tag_{}}}", n.key), n.tag);
     }
 }
 
 /// The non-verbal rule's opening heading, which is also how it is found when it
 const NONVERBAL_RULE: &str = "7. NON-VERBAL SOUNDS.";
-/// The rule after it: the far bound of the section.
+/// The rule after it: the far bound of the sound section, when a template
+/// still carries one.
 const MUSIC_RULE: &str = "8. MUSIC:";
+
+/// Where the non-verbal rule ends: the input sections that follow the last
+/// numbered rule, or the next rule when a template still carries one.
+const NONVERBAL_SECTION_ENDS: [&str; 3] = ["\n---BIBLE---", "\nCHAPTER", "\n8. MUSIC:"];
+
+/// Remove a template section from `start_marker` to the earliest of `ends`.
+fn strip_section(body: &mut String, start_marker: &str, ends: &[&str]) -> bool {
+    let Some(start) = body.find(start_marker) else {
+        return false;
+    };
+    let rest = &body[start..];
+    let end = ends
+        .iter()
+        .filter_map(|e| rest.find(e))
+        .min()
+        .unwrap_or(rest.len());
+    body.replace_range(start..start + end, "");
+    true
+}
 
 /// Every placeholder the non-verbal rule uses, for the engine that has none.
 const NONVERBAL_PLACEHOLDERS: [&str; 4] =
     ["{voice_tags}", "{tag_laugh}", "{tag_sigh}", "{tag_throat}"];
 
 /// The concept/tag list the rule renders: the gloss, then the exact token.
-fn vocabulary_block(tags: &[(&str, &str, &str)]) -> String {
+fn vocabulary_block(tags: &[crate::voices::Nonverbal]) -> String {
     tags.iter()
-        .map(|(_key, gloss, tag)| format!("  {gloss:<15}{tag}"))
+        .map(|n| format!("  {:<15}{}", n.gloss, n.tag))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -239,6 +260,7 @@ pub(crate) fn build_staging_prompt(
     context: &Value,
     prepared: &PreparedChapter,
     continuity: Option<&Continuity>,
+    sound: bool,
 ) -> Result<String> {
     let path = layout.script_prompt();
     let template = std::fs::read_to_string(&path)
@@ -279,14 +301,18 @@ pub(crate) fn build_staging_prompt(
         &cast_context(context),
         &mut missed,
     );
-    replace_or_miss(&mut body, "{music_palette}", &palette, &mut missed);
+    // The sound vocabularies render only where a template still carries them:
+    // the rules that used them now live in `sound.txt`, and the automatic pass
+    // leaves sound to its own call. Silent, because a template without them is
+    // the expected shape, not a miss.
+    body = body.replace("{music_palette}", &palette);
     // `{mood_palette}` is new: profiles written before it lack the placeholder
     body = body.replace("{mood_palette}", &mood_palette);
     // `{effect_tags}` is deprecated: the effect layer reads `scene` labels, and
     body = body.replace("{effect_tags}", &effects);
     // Same for `{scene_words}`, and for the same reason plus a second: this path
     body = body.replace("{scene_words}", &scene_words);
-    replace_or_miss(&mut body, "{inject_sounds}", &injects, &mut missed);
+    body = body.replace("{inject_sounds}", &injects);
     replace_or_miss(
         &mut body,
         "{chapter_text}",
@@ -315,9 +341,24 @@ pub(crate) fn build_staging_prompt(
     ) {
         missed.push("rules 1-3 (staging)".into());
     }
+    // The sound rules (8-10) live only in the adapter's `sound.txt`. The
+    // by-hand staging pass sounds a chapter inline, so it renders them here;
+    // the automatic staging pass leaves sound to its own chapter-level call.
+    if sound {
+        body.push_str(&sound_rules(layout)?);
+    } else if let Some(at) = body.find(MUSIC_RULE) {
+        // A template still carrying rules 8-10 (one not yet re-released) is cut
+        // back to the text the automatic staging pass owns.
+        let end = body[at..]
+            .find("\n---BIBLE---")
+            .map(|n| at + n)
+            .unwrap_or(body.len());
+        body.replace_range(at..end, "");
+    }
     warn_missing_sections("staging prompt", &missed);
 
-    let contract = r#"
+    let contract = if sound {
+        r#"
 ---STAGING OUTPUT CONTRACT---
 Return ONE strict JSON object containing only `segments` and `fixes`:
 {
@@ -361,8 +402,60 @@ otherwise. Do not write a `sound_after` for a thought just to mark it: the
 pack's own thought sound, if it declares one, is attached by code.
 
 Follow every audio, grammar, TTS, music and sound rule in this prompt.
-"#;
+"#
+    } else {
+        r#"
+---STAGING OUTPUT CONTRACT---
+Return ONE strict JSON object containing only `segments` and `fixes`:
+{
+  "segments": [{
+    "source_id": "e0001",
+    "text": "exact speakable text for this source event",
+    "mood": "one token from the mood palette below"
+  }],
+  "fixes": []
+}
+
+Emit a field only where it CHANGES. `mood` is carried forward: omit the key and
+the previous segment's value is used. `text` is carried forward too — omit it
+when you neither split the source event nor fix a typo, and code fills it from
+the prepared event. A value you do emit replaces the carried one for that
+segment and every segment after it until the next.
+
+---MOOD PALETTE--- (one token, copied exactly)
+{mood_palette}
+
+Do not return `speaker`: `fixed_speakers` is authoritative and code attaches it.
+The staging pass may split a source event but may never change its identity,
+drop an event, duplicate one, or move one out of source order.
+
+A split PARTITIONS its event: the halves, in source order, concatenated, must
+spell the source text exactly. Never repeat the whole line on both halves, and
+never drop words. Two different source events may carry identical text (a
+street crowd hailing the same phrase on two lines); that is two events, not a
+duplicate — answer each, and never merge them.
+
+A source event whose `kind` is `thought` is a thought being thought, not a line
+being spoken: voice it as its speaker like any line, reproducing it exactly —
+never add quote marks around it, and never fold it into the narration. Thoughts
+read as interiority; a reflective mood suits them unless the feeling says
+otherwise.
+
+Follow every grammar and TTS rule in this prompt. Where the chapter is set,
+what music plays under it, and which spot sounds fire at its seams are decided
+by a separate sound pass over the finished chapter — you answer none of that
+here.
+"#
+    };
     let contract = contract.replace("{mood_palette}", &mood_palette);
-    apply_continuity(&mut body, continuity, Pass::Staging);
+    apply_continuity(
+        &mut body,
+        continuity,
+        if sound {
+            Pass::Staging
+        } else {
+            Pass::StagingNoSound
+        },
+    );
     Ok(format!("{body}\n{contract}"))
 }

@@ -127,7 +127,11 @@ pub(crate) fn warn_missing_sections(which: &str, missed: &[String]) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pass {
     Attribution,
+    /// Staging with sound inline: the manual flow, which sounds a chapter here.
     Staging,
+    /// Staging with no sound: the automatic flow, where a separate sound pass
+    /// owns the place, the music and the beds, so this note omits them.
+    StagingNoSound,
 }
 
 /// The part a prompt is being built for, when a chapter is staged in windows.
@@ -168,6 +172,13 @@ impl Continuity<'_> {
                  not, and the gate reads the chapter whole before it complains.\n\
                  `scene` and `music` are carried forward within this part only, so name the place \
                  and the bed again on your first event where they continue what came before.\n"
+            ),
+            Pass::StagingNoSound => format!(
+                "---PART {index} OF {total}---\n\
+                 This is part {index} of {total} of one chapter, and the events in front of you are \
+                 all you stage. One rule changes:\n\
+                 - Do not round the prose off. The story continues past your last event, so write \
+                 no ending and no closing beat.\n"
             ),
         }
     }

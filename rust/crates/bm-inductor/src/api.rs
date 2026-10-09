@@ -245,6 +245,9 @@ async fn add_machine(State(st): State<Shared>, Json(m): Json<Machine>) -> impl I
     if m.name.is_empty() {
         m.name = inner.box_name(&addr, &addr);
     }
+    // Binding the box again is what un-forgets it: a `:drop`'s refusal is
+    // cleared here, so an operator can always add a box back by address.
+    inner.dropped.remove(&addr);
     inner.machines.insert(addr.clone(), m);
     // Operator bind: config goes to machines.json, runtime stays in the ledger.
     inner.persist_box(&addr, &addr);
@@ -399,11 +402,8 @@ async fn relink(State(st): State<Shared>) -> impl IntoResponse {
 
 async fn drop_machine(State(st): State<Shared>, Query(q): Query<AddrQuery>) -> impl IntoResponse {
     let mut inner = st.lock().await;
-    inner.machines.remove(&q.addr);
-    // Config and runtime both go: a config-only box would otherwise rejoin
-    let _ = bm_core::provision::remove_box(&inner.layout.machines(), &q.addr);
-    inner.save();
-    Json(serde_json::json!({"ok": true}))
+    let line = inner.drop_machine(&q.addr);
+    Json(serde_json::json!({"ok": true, "line": line}))
 }
 
 /// `dispatch`'s enqueue: the **remainder** of the authored range, and nothing

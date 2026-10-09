@@ -406,17 +406,18 @@ pub(crate) fn parse_staged_script(
         &thoughts,
     )
     .map_err(theirs)?;
-    collapse_redundant_sounds(&mut data);
+    collapse_redundant_sounds(&mut data, &vocab.engine);
     lift_thought_stingers(&mut data, vocab.thought_stinger.as_deref());
     validate_script(&data, bible, context, &vocab.palette).map_err(mine)?;
+    validate_inline_tags(&data, &vocab.engine).map_err(mine)?;
     validate_effect_tags(&data, &vocab.effects).map_err(mine)?;
     validate_injects(&data, &vocab.injects).map_err(mine)?;
-    validate_source_alignment(&data, prepared, &not_speech).map_err(mine)?;
+    validate_source_alignment(&data, prepared, &not_speech, &vocab.engine).map_err(mine)?;
     Ok(data)
 }
 
 /// Collapse a written non-verbal sound the answer left beside its tag.
-pub(crate) fn collapse_redundant_sounds(data: &mut Value) {
+pub(crate) fn collapse_redundant_sounds(data: &mut Value, engine: &str) {
     let Some(segments) = data.get_mut("segments").and_then(Value::as_array_mut) else {
         return;
     };
@@ -427,7 +428,7 @@ pub(crate) fn collapse_redundant_sounds(data: &mut Value) {
         let Some(text) = segment.get("text").and_then(Value::as_str) else {
             continue;
         };
-        if let Some(collapsed) = retag_text(text) {
+        if let Some(collapsed) = retag_text(text, engine) {
             segment["text"] = json!(collapsed);
         }
     }

@@ -25,6 +25,21 @@ the **speech only**, so no clip is ever heard at `atempo`.
 | **music** | bed — continuous, crossfaded | the scene map's `music_palette`, from the script's `music` value | `music-pool.json` | `music/` |
 | **inject** | spot — placed at a seam | the script, which names the sound | `inject-pool.json` | `injects/` |
 
+Those three questions are answered in one place, once per chapter: the digest's
+**sound pass**. It is its own call over the finished
+chapter — every staged line at once, not window by window — because sound is a
+chapter-wide decision: a bed that opens in one part closes in another, and a
+mood that turns crossfades once. The pass writes the English `scene` label, the
+`music` token and the `sound_after`/`stop_after` seams; it never changes a word,
+and it may split a line only to place a sound inside it. Nothing downstream
+chooses a sound the pass did not name. Its rules and vocabulary live in the
+adapter's `prompts/sound.txt`, rendered by `digest/sound.rs`, so the sweep of
+staged sounds is the language's own — and the by-hand staging pass renders the
+same text inline when it sounds a chapter. A deterministic gate backs it:
+`sound-cues.json`, beside `sound.txt`, lists rule 10's cue phrases in the source
+language, and a chapter whose prose contains one while the script places no
+sound at all is refused.
+
 They are three layers rather than one "sound design" because they answer three
 different questions. *Where are we* is the effect layer. *What does this feel
 like* is the music layer. *What just happened* is the inject layer. Collapsing

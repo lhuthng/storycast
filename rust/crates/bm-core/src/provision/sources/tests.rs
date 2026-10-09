@@ -134,6 +134,8 @@ fn a_render_box_gets_its_cast_and_no_media() {
             "data/cast-default-vieneu.json".to_string(),
             "prompts/analyze.txt".to_string(),
             "prompts/script.txt".to_string(),
+            "prompts/sound-cues.json".to_string(),
+            "prompts/sound.txt".to_string(),
             "voices.json".to_string(),
         ]
     );
@@ -270,7 +272,7 @@ fn every_bundle_carries_the_prompts_whatever_the_policy() {
         Stage::ALL.to_vec(),
     ] {
         let got = paths(&l, &stages);
-        for prompt in ["prompts/analyze.txt", "prompts/script.txt"] {
+        for prompt in ["prompts/analyze.txt", "prompts/script.txt", "prompts/sound.txt"] {
             assert!(
                 got.contains(&prompt.to_string()),
                 "{prompt} missing for {stages:?}: {got:?}"

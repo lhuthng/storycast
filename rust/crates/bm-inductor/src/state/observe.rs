@@ -6,6 +6,12 @@ use bm_proto::{now_secs, Heartbeat, Machine, MachineState};
 impl Inner {
     /// Record that a worker is alive, where it is, and what it is doing.
     pub fn observe(&mut self, h: &Heartbeat) -> bool {
+        // A dropped address is refused outright. Its worker may still be
+        // running, but the operator forgot the box, so a beat must not mint it
+        // back as a nameless stray.
+        if self.dropped.contains(&h.addr) {
+            return false;
+        }
         // A worker the ledger has never seen is registering, whatever route it
         let first_sighting = !self.workers.contains_key(&h.worker_id);
         let mut persist = false;

@@ -236,6 +236,9 @@ fn accept(
                 match round {
                     bm_core::digest::Round::Staging => "cast",
                     bm_core::digest::Round::Attribution => "script",
+                    // The manual flow stages and sounds in one round, so a sound
+                    // round never reaches it; named rather than panicking.
+                    bm_core::digest::Round::Sound => "sound",
                 }
             );
             return Ok(None);

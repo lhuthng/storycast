@@ -37,9 +37,10 @@ pub use llm::{fetch_models, generate, parse_retry_delay, GenError};
 pub use reconcile::{cast_only_folds, parse_reconcile_merges, reconcile_plan, ReconcilePlan};
 pub use tags::{
     apply_tag_aliases, discard_unknown_effect_tags, retag_text, tags_of, validate_context,
-    validate_effect_tags, validate_injects, validate_script, validate_title, warn_vietnamese,
-    TagAliases,
+    validate_effect_tags, validate_injects, validate_music, validate_script, validate_title,
+    warn_vietnamese, TagAliases,
 };
+pub(crate) use tags::validate_inline_tags;
 
 #[cfg(test)]
 mod tests;
@@ -122,5 +123,6 @@ mod prepare;
 mod prompts;
 mod quotes;
 mod run;
+mod sound;
 mod sound_fields;
 mod validate;

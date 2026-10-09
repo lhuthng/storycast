@@ -107,7 +107,10 @@ pub(crate) async fn job_start_backend(
         }
     }
     send(&tx, Level::Info, "[local backend] waiting for API…".into());
-    let live = wait_api_live(&api, 30).await;
+    // The ledger is reconciled before the port binds: tens of seconds on a
+    // whole book. Giving up first would skip the worker half below, leaving a
+    // backend with nothing to drive it.
+    let live = wait_api_live(&api, 120).await;
     if start_cancelled(&tx, &cancel) {
         return;
     }
@@ -230,7 +233,15 @@ pub(crate) async fn job_drop_machine(
     let url = format!("{api}/api/machines?addr={}", urlencode(&addr));
     let (level, text) = match http.delete(&url).send().await {
         Ok(r) if r.status().is_success() => {
-            (Level::Ok, format!("dropped {addr} from the registry"))
+            // The inductor's own line is the report: it says what else went
+            // with the entry. An older backend answers `{"ok": true}` alone.
+            let line = r
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("line").and_then(|l| l.as_str()).map(str::to_string))
+                .unwrap_or_else(|| format!("dropped {addr} from the registry"));
+            (Level::Ok, line)
         }
         Ok(r) => (Level::Error, format!("drop {addr}: HTTP {}", r.status())),
         Err(e) => (Level::Error, format!("drop {addr} failed: {e}")),

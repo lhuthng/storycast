@@ -121,8 +121,10 @@ already working or optional until you need it.
 | --- | --- |
 | **`rust/`** (five crates) | Pipeline: scheduler, workers, TUI, provisioning, plus `bm-tts`, the local Vieneu TTS sidecar |
 | **`python/`** | Voice enrollment only (the old sidecar is retired; serving never needs Python) |
-| **`prompts/script.txt`** | The staging contract the automatic digest renders after speakers are fixed: text, TTS, music, effects, sounds. Your main edit for another language or genre. Ships with the profile; the tracked copy is `rust/fixtures/profile/prompts/` |
+| **`prompts/script.txt`** | The staging contract the automatic digest renders after speakers are fixed: text and TTS performance. Your main edit for another language or genre. Ships with the profile; the tracked copy is `rust/fixtures/profile/prompts/` |
 | `prompts/analyze.txt` | Chapter-attribution template used by the automatic first pass; its legacy raw-chapter rendering remains the manual digest manager (`D`) path |
+| `prompts/sound.txt` | The chapter-level sound pass — the English `scene` place, the `music` token and the `sound_after`/`stop_after` seams — rendered once over every staged line. The single home of sound rules 8–10: the by-hand staging pass renders the same text inline |
+| `prompts/sound-cues.json` | Rule 10's cue phrases, in the source language, for the deterministic gate that refuses a chapter whose prose stages a sound and whose script places none |
 | `voices.default.json` | Built-in catalogue voices |
 | `assets/`, `Makefile` | Scene maps, ambience, one-command ops |
 
@@ -628,7 +630,7 @@ at top).
 
 | Path | What it is |
 | --- | --- |
-| `prompts/script.txt`, `prompts/analyze.txt` | **Digest prompt templates.** Profile tree (git-ignored; tracked copy in `rust/fixtures/profile/prompts/`). The automatic digest renders `analyze.txt` for attribution, then `script.txt` for staging; the manual manager retains its legacy raw-chapter rendering. |
+| `prompts/script.txt`, `prompts/analyze.txt`, `prompts/sound.txt`, `prompts/sound-cues.json` | **Digest prompt templates + the sound gate's cue list.** Profile tree (git-ignored; tracked copy in `rust/fixtures/profile/prompts/`). The automatic digest renders `analyze.txt` for attribution, `script.txt` for staging, then `sound.txt` once for the whole chapter's sound; the manual manager sounds inline from the same `sound.txt`. |
 | `assets/*` | Clips, pools, scene map, licenses (tracked) |
 | `voices.default.json` | Catalogue voices (tracked) |
 | `output/Ch.N - Title.mp3` | **Finished chapters** |

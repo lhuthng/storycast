@@ -105,45 +105,16 @@ pub(crate) fn field_is_blank(obj: &serde_json::Map<String, Value>, key: &str) ->
         _ => false,
     }
 }
-
-/// Phrases from rule 10's own sweep that are literal on the page in this genre.
-const SOUND_CUES: [&str; 20] = [
-    "phun ra",
-    "máu tươi",
-    "máu văng",
-    "thổ huyết",
-    "thái thịt",
-    "phòng bếp",
-    "vào bếp",
-    "nấu đồ ăn",
-    "nấu ăn",
-    "rửa sạch",
-    "vòi nước",
-    "lật xem",
-    "lật sách",
-    "giở sách",
-    "lật đến",
-    "niệm chú",
-    "bắn tên",
-    "rút kiếm",
-    "vung kiếm",
-    "đâm",
-];
-
-/// Block probability after `failures` consecutive same-gap failures: 90%,
-pub(crate) fn gap_block_p(failures: u32) -> f64 {
-    0.9 * 0.75f64.powi(failures as i32)
-}
-
-/// Two sound-design answers that cannot be right, checked in that order.
-/// 1. A `loop`ed bed started and never stopped. The prompt calls this "the one
-///    way to get a bed wrong": the clip plays once and stops dead. Measured on
+/// Two sound-design answers that cannot be right, checked in that order: a
+/// `loop`ed bed started and never stopped, then a chapter that stages a sound
+/// and places none.
 pub(crate) fn sound_design_gap(
     script: &Value,
     chapter_text: &str,
     pool: &crate::audio_pool::ClipPool,
+    cues: &[String],
 ) -> Option<String> {
-    unclosed_beds(script, pool).or_else(|| silent_design(script, chapter_text, "chapter"))
+    unclosed_beds(script, pool).or_else(|| silent_design(script, chapter_text, "chapter", cues))
 }
 
 /// Rule 1 alone: looping beds a script opened and never stopped, **in the order
@@ -180,8 +151,16 @@ pub(crate) fn open_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> V
     open.into_iter().map(str::to_string).collect()
 }
 
-/// Rule 2 alone: the text stages sounds and this script places none.
-pub(crate) fn silent_design(script: &Value, chapter_text: &str, what: &str) -> Option<String> {
+/// Rule 2 alone: the text stages sounds and this script places none. `cues` is
+/// the language's own sweep of rule 10 (the adapter's `sound-cues.json`), so an
+/// English chapter is checked against English prose and a missing list simply
+/// turns the gate off rather than firing on the wrong words.
+pub(crate) fn silent_design(
+    script: &Value,
+    chapter_text: &str,
+    what: &str,
+    cues: &[String],
+) -> Option<String> {
     let segments = script.get("segments").and_then(|s| s.as_array())?;
     let placed = segments
         .iter()
@@ -190,9 +169,9 @@ pub(crate) fn silent_design(script: &Value, chapter_text: &str, what: &str) -> O
     if placed > 0 {
         return None;
     }
-    let hit: Vec<&str> = SOUND_CUES
+    let hit: Vec<&str> = cues
         .iter()
-        .copied()
+        .map(String::as_str)
         .filter(|c| chapter_text.contains(c))
         .collect();
     if hit.is_empty() {

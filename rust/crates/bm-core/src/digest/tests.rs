@@ -33,9 +33,9 @@ use super::run::assemble_outcome;
 use super::run::route;
 use super::run::GCalls;
 use super::run::Route;
+use super::sound::build_sound_prompt;
 use super::sound_fields::carry_forward_fields;
 use super::sound_fields::expand_sound_fields;
-use super::sound_fields::gap_block_p;
 use super::sound_fields::sound_design_gap;
 use super::validate::canonicalize_aliases;
 use super::validate::complete_roster;
@@ -56,7 +56,7 @@ fn validate_source_alignment_no_retractions(
     data: &Value,
     prepared: &PreparedChapter,
 ) -> Result<()> {
-    validate_source_alignment(data, prepared, &HashSet::new())
+    validate_source_alignment(data, prepared, &HashSet::new(), "vieneu")
 }
 
 /// The chain the whole program rests on, as one test: **a crawler's output
@@ -423,10 +423,15 @@ fn the_two_prompts_render_their_own_placeholders() {
         "mentions": {},
         "speakers": {"e0001": "anonymous:anon-1"}
     });
-    let staging = build_staging_prompt(&layout, "vieneu", &bible, &fixed, &prepared, None).unwrap();
+    let staging =
+        build_staging_prompt(&layout, "vieneu", &bible, &fixed, &prepared, None, false).unwrap();
     assert!(staging.contains("---STAGING OUTPUT CONTRACT---"));
     assert!(staging.contains("fixed_speakers"));
     assert!(staging.contains("Do not return `speaker`"));
+    assert!(
+        !staging.contains("8. MUSIC:"),
+        "the sound rules belong to the sound pass, not staging"
+    );
     // The staging path shares its template with the script path, so a
     assert!(
         !staging.contains("{scene_words}") && !staging.contains("{effect_tags}"),
@@ -1099,12 +1104,12 @@ fn a_declared_thought_sound_must_exist_in_the_inject_pool() {
     std::fs::write(dir.join("assets/scene-map.json"), map("coin")).unwrap();
     let layout = Layout::new(&dir);
     assert_eq!(
-        vocabulary(&layout).unwrap().thought_stinger.as_deref(),
+        vocabulary(&layout, "vieneu").unwrap().thought_stinger.as_deref(),
         Some("coin")
     );
 
     std::fs::write(dir.join("assets/scene-map.json"), map("thought-chime")).unwrap();
-    let err = match vocabulary(&layout) {
+    let err = match vocabulary(&layout, "vieneu") {
         Ok(_) => panic!("a thought sound with no pooled clip must be refused"),
         Err(err) => err,
     };
@@ -1117,7 +1122,7 @@ fn a_declared_thought_sound_must_exist_in_the_inject_pool() {
         r#"{"music_palette": {"quiet": {"tags": ["soft"], "note": "low"}}}"#,
     )
     .unwrap();
-    assert_eq!(vocabulary(&layout).unwrap().thought_stinger, None);
+    assert_eq!(vocabulary(&layout, "vieneu").unwrap().thought_stinger, None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1157,7 +1162,7 @@ fn a_thought_lane_marks_the_segment_and_lifts_the_pack_sound() {
     )
     .expect("the cast is valid");
 
-    let vocab = vocabulary(&layout).expect("the fixture vocabulary");
+    let vocab = vocabulary(&layout, "vieneu").expect("the fixture vocabulary");
     assert_eq!(vocab.thought_stinger.as_deref(), Some("coin"));
     let script = parse_staged_script(&script_answer(&prepared), &bible, &cast, &prepared, &vocab)
         .expect("the staging answer is aligned");
@@ -1415,7 +1420,7 @@ fn a_quoted_title_in_narration_can_be_retracted_to_the_narrator() {
         {"source_id": "e0003", "speaker": "Narrator", "text": "bất ngờ với nội dung bên trong."},
         {"source_id": "e0004", "speaker": "Narrator", "text": "Dịch Phong ngẩng đầu."}
     ], "fixes": []});
-    validate_source_alignment(&script, &prepared, &not_speech_ids(&data).unwrap()).unwrap();
+    validate_source_alignment(&script, &prepared, &not_speech_ids(&data).unwrap(), "vieneu").unwrap();
 }
 
 /// A span too short to be speech never becomes a dialogue event at all:
@@ -1945,7 +1950,7 @@ fn a_written_sound_is_collapsed_rather_than_left_beside_its_tag() {
         {"source_id": "e0002", "speaker": "Narrator", "text": "Khụ khụ khụ, ban đầu ta cầm bảo đao."},
         {"source_id": "e0003", "speaker": "Narrator", "text": "Hắn lật trang sách."},
     ]});
-    collapse_redundant_sounds(&mut data);
+    collapse_redundant_sounds(&mut data, "vieneu");
     // The tag and the words it stands for are spoken as one cough, and the
     for i in [0, 1] {
         assert_eq!(
@@ -1960,17 +1965,17 @@ fn a_written_sound_is_collapsed_rather_than_left_beside_its_tag() {
 fn written_laughter_is_recognized_wherever_it_sits_in_the_line() {
     // The engine counts `haha`, one word, and a laugh in the middle of a
     assert_eq!(
-        retag_text("Vài ngày nữa trời lạnh, haha, vừa sạch sẽ."),
+        retag_text("Vài ngày nữa trời lạnh, haha, vừa sạch sẽ.", "vieneu"),
         Some("Vài ngày nữa trời lạnh, [cười] vừa sạch sẽ.".into())
     );
     assert_eq!(
-        retag_text("Khụ khụ khụ, ban đầu ta cầm bảo đao."),
+        retag_text("Khụ khụ khụ, ban đầu ta cầm bảo đao.", "vieneu"),
         Some("[hắng giọng] ban đầu ta cầm bảo đao.".into())
     );
     // Ignoring written sound is symmetric now: the stripper runs on both
     assert_eq!(
-        source_without_written_sound("…cho mình, haha, vừa sạch sẽ."),
-        source_without_written_sound("…cho mình, [cười] vừa sạch sẽ.")
+        source_without_written_sound("…cho mình, haha, vừa sạch sẽ.", "vieneu"),
+        source_without_written_sound("…cho mình, [cười] vừa sạch sẽ.", "vieneu")
     );
 }
 
@@ -1989,10 +1994,10 @@ fn vietnamese_sigh_quantifiers_normalize_like_the_engine_tag() {
         let mut data = json!({"segments": [
             {"source_id": "e0015", "speaker": "Bành Anh", "text": written}
         ]});
-        collapse_redundant_sounds(&mut data);
+        collapse_redundant_sounds(&mut data, "vieneu");
         assert_eq!(data["segments"][0]["text"], json!(tagged));
         assert!(
-            source_text_matches(written, &[tagged.to_string()]),
+            source_text_matches(written, &[tagged.to_string()], "vieneu"),
             "source gate must accept the engine tag as the written sigh: {written}"
         );
     }
@@ -2000,7 +2005,7 @@ fn vietnamese_sigh_quantifiers_normalize_like_the_engine_tag() {
     let mut model_shape = json!({"segments": [
         {"source_id": "e0015", "speaker": "Bành Anh", "text": "Bành Anh [thở dài] một tiếng, nói:"}
     ]});
-    collapse_redundant_sounds(&mut model_shape);
+    collapse_redundant_sounds(&mut model_shape, "vieneu");
     assert_eq!(
         model_shape["segments"][0]["text"],
         json!("Bành Anh [thở dài] nói:")
@@ -2014,18 +2019,21 @@ fn a_period_beside_an_engine_tag_is_not_a_source_change() {
     assert!(
         source_text_matches(
             expected,
-            &["Cũng may, cũng may không bị trượt tay, [cười].".to_string()]
+            &["Cũng may, cũng may không bị trượt tay, [cười].".to_string()],
+            "vieneu"
         ),
         "the tag's own period must not read as a change"
     );
     assert!(source_text_matches(
         "Hắn gầm lên, [hắng giọng]",
-        &["Hắn gầm lên, [hắng giọng]!".to_string()]
+        &["Hắn gầm lên, [hắng giọng]!".to_string()],
+        "vieneu"
     ));
     // The tag *and* the words it stands for is still the error it is: only
     assert!(!source_text_matches(
         expected,
-        &["Cũng may, cũng may không bị trượt tay, [cười] ha ha.".to_string()]
+        &["Cũng may, cũng may không bị trượt tay, [cười] ha ha.".to_string()],
+        "vieneu"
     ));
 }
 
@@ -2044,7 +2052,7 @@ fn source_gate_names_a_leftover_written_sound() {
         .iter()
         .find(|e| e.kind == "narration")
         .expect("its tag is prepared");
-    assert!(corrected_source(dialogue, &[]).starts_with("[hắng giọng]"));
+    assert!(corrected_source(dialogue, &[], "vieneu").starts_with("[hắng giọng]"));
 
     let answer = |cough: &str| {
         json!({"segments": [
@@ -2060,7 +2068,7 @@ fn source_gate_names_a_leftover_written_sound() {
 
     // The same answer passes once it comes through `retag_text`, which is
     let mut collapsed = hoisted.clone();
-    collapse_redundant_sounds(&mut collapsed);
+    collapse_redundant_sounds(&mut collapsed, "vieneu");
     validate_source_alignment_no_retractions(&collapsed, &prepared).unwrap();
 
     // A genuine change keeps the honest generic message: the hint fires
@@ -2368,6 +2376,67 @@ fn expand_sound_fields_lifts_the_seam_out_of_the_line() {
     assert_eq!(got[1], json!({"sound": "thunder"}));
 }
 
+/// The fixture adapter's rule-10 cue list, read from the same file the loader
+/// reads, so the tests pin what the adapter actually ships.
+fn vi_cues() -> Vec<String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/profile/prompts/sound-cues.json");
+    let text = std::fs::read_to_string(path).expect("the fixture cue list");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+    v["cues"]
+        .as_array()
+        .expect("a cues array")
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The rules live in one place: `script.txt` no longer carries 8-10, and the
+/// by-hand staging pass renders them from `sound.txt`.
+#[test]
+fn the_by_hand_staging_pass_renders_the_sound_rules_from_sound_txt() {
+    let (_dir, layout, text) = long_layout("sound-rules", 3);
+    let prepared = prepare_chapter(&text);
+    let bible = json!({"characters": []});
+    let cast = json!({"roster": ["Narrator"], "speakers": {"e0001": "Narrator"}});
+
+    let auto =
+        build_staging_prompt(&layout, "vieneu", &bible, &cast, &prepared, None, false).unwrap();
+    assert!(
+        !auto.contains("8. MUSIC:"),
+        "the automatic pass owns sound elsewhere: {auto}"
+    );
+
+    let manual =
+        build_staging_prompt(&layout, "vieneu", &bible, &cast, &prepared, None, true).unwrap();
+    assert!(
+        manual.contains("8. MUSIC:") && manual.contains("10. INJECT:"),
+        "the by-hand pass sounds a chapter inline: {manual}"
+    );
+    assert!(
+        manual.contains("---MUSIC PALETTE---"),
+        "and it carries the adapter's sound vocabulary: {manual}"
+    );
+}
+
+/// The gate's cue list is the language's own, read from `sound-cues.json`; an
+/// adapter with none turns the gate off rather than firing on the wrong words.
+#[test]
+fn the_sound_gate_reads_its_cues_from_the_adapter() {
+    let dir = std::env::temp_dir().join("bm-sound-cues");
+    let _ = std::fs::remove_dir_all(&dir);
+    crate::profile::install_fixture(&dir).expect("fixture profile");
+    let vocab = vocabulary(&Layout::new(&dir), "vieneu").unwrap();
+    assert!(
+        vocab.sound_cues.iter().any(|c| c == "rút kiếm"),
+        "{:?}",
+        vocab.sound_cues
+    );
+    std::fs::remove_file(dir.join("prompts/sound-cues.json")).unwrap();
+    assert!(vocabulary(&Layout::new(&dir), "vieneu").unwrap().sound_cues.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Both halves of the sound-design gate, on the two answers ch9 actually
 #[test]
 fn sound_design_gap_catches_an_empty_and_an_unclosed_design() {
@@ -2393,14 +2462,14 @@ fn sound_design_gap_catches_an_empty_and_an_unclosed_design() {
         line("Sau một hồi cảm khái, hai người liền đi đến phòng bếp."),
         line("Thanh Sơn lão tổ tìm thấy chiếc dao phay."),
     ]});
-    let gap = sound_design_gap(&silent, chapter, &pool).expect("a staged chapter with none");
+    let gap = sound_design_gap(&silent, chapter, &pool, &vi_cues()).expect("a staged chapter with none");
     assert!(gap.contains("phòng bếp"), "{gap}");
 
     // ch15 names a cleaver while asking for one to be forged later; an
     let chapter15 = "Dịch Phong vươn tay lấy ra con dao phay nói: nhớ lần trước bá mẫu nói qua, nhờ ta rèn một con dao phay lúc rảnh rỗi, giúp ta mang cho họ nhé!";
     let mention_only = json!({"segments": [line(chapter15)]});
     assert!(
-        sound_design_gap(&mention_only, chapter15, &pool).is_none(),
+        sound_design_gap(&mention_only, chapter15, &pool, &vi_cues()).is_none(),
         "a mentioned cleaver must not require a chopping sound"
     );
 
@@ -2410,7 +2479,7 @@ fn sound_design_gap_catches_an_empty_and_an_unclosed_design() {
         {"sound": "food-prep"},
         line("Thanh Sơn lão tổ tìm thấy chiếc dao phay."),
     ]});
-    let gap = sound_design_gap(&unclosed, chapter, &pool).expect("an unclosed bed");
+    let gap = sound_design_gap(&unclosed, chapter, &pool, &vi_cues()).expect("an unclosed bed");
     assert!(
         gap.contains("food-prep") && gap.contains("stops dead"),
         "{gap}"
@@ -2424,7 +2493,7 @@ fn sound_design_gap_catches_an_empty_and_an_unclosed_design() {
         {"stop": "food-prep"},
     ]});
     assert!(
-        sound_design_gap(&closed, chapter, &pool).is_none(),
+        sound_design_gap(&closed, chapter, &pool, &vi_cues()).is_none(),
         "closed must pass"
     );
 
@@ -2434,19 +2503,10 @@ fn sound_design_gap_catches_an_empty_and_an_unclosed_design() {
         {"sound": "coin"},
         line("Thanh Sơn lão tổ tìm thấy chiếc dao phay."),
     ]});
-    assert!(sound_design_gap(&oneshot, chapter, &pool).is_none());
+    assert!(sound_design_gap(&oneshot, chapter, &pool, &vi_cues()).is_none());
 
     // 5. A chapter that stages nothing is allowed to place nothing.
-    assert!(sound_design_gap(&silent, "Trời hôm nay đẹp.", &pool).is_none());
-}
-
-/// The soft-release curve: three blocks, then accept. Pinned because the
-#[test]
-fn gap_block_p_releases_on_the_fourth_failure() {
-    assert!((gap_block_p(0) - 0.9).abs() < 1e-9);
-    assert!(gap_block_p(1) >= 0.5);
-    assert!(gap_block_p(2) >= 0.5);
-    assert!(gap_block_p(3) < 0.5);
+    assert!(sound_design_gap(&silent, "Trời hôm nay đẹp.", &pool, &vi_cues()).is_none());
 }
 
 /// ch262's false positive, pinned: bare `chém` is an idiom
@@ -2457,10 +2517,10 @@ fn bare_chem_is_no_sound_cue() {
     let line = |t: &str| json!({"speaker": "Narrator", "text": t});
     let chapter = "Muốn chém muốn giết, người cứ nói thẳng ra một lời.";
     let silent = json!({"segments": [line(chapter)]});
-    assert!(sound_design_gap(&silent, chapter, &pool).is_none());
+    assert!(sound_design_gap(&silent, chapter, &pool, &vi_cues()).is_none());
     let chapter2 = "Hắn rút kiếm chém xuống.";
     let silent2 = json!({"segments": [line(chapter2)]});
-    assert!(sound_design_gap(&silent2, chapter2, &pool).is_some());
+    assert!(sound_design_gap(&silent2, chapter2, &pool, &vi_cues()).is_some());
 }
 
 /// The two rounds are stitched by key, and each key has one owner.
@@ -2547,6 +2607,7 @@ fn shipped_prompts_render_every_placeholder() {
     let p = build_script_prompt(&layout, "vieneu", &bible, &context, &text).unwrap();
     for ph in [
         "{music_palette}",
+        "{scene_words}",
         "{effect_tags}",
         "{inject_sounds}",
         "{cast_json}",
@@ -2559,9 +2620,6 @@ fn shipped_prompts_render_every_placeholder() {
     ] {
         assert!(!p.contains(ph), "placeholder leaked: {ph}");
     }
-    assert!(p.contains("quiet (soft, calm;"), "{p}");
-    assert!(p.contains("battle, birds, calm"), "{p}");
-    assert!(p.contains("blood-spatter (hit; blood"), "{p}");
 
     // The non-verbal vocabulary is VieNeu's, so its tags render — and an
     assert!(p.contains("[cười] [thở dài] [hắng giọng]"), "{p}");
@@ -2572,6 +2630,24 @@ fn shipped_prompts_render_every_placeholder() {
     );
     assert!(!none.contains("[cười]"), "{none}");
     assert!(!none.contains("{tag_"), "placeholder leaked: {none}");
+
+    // The sound vocabulary moved to its own layer (`sound.txt`), so it renders
+    // there now, and the staging template no longer carries it.
+    let segments = vec![json!({"source_id": "e0001", "speaker": "Narrator", "text": text.trim()})];
+    let sound = build_sound_prompt(&layout, &context, &segments).unwrap();
+    for ph in [
+        "{atmosphere}",
+        "{music_palette}",
+        "{scene_words}",
+        "{effect_tags}",
+        "{inject_sounds}",
+        "{staged_lines}",
+    ] {
+        assert!(!sound.contains(ph), "placeholder leaked: {sound}");
+    }
+    assert!(sound.contains("quiet (soft, calm;"), "{sound}");
+    assert!(sound.contains("battle, birds, calm"), "{sound}");
+    assert!(sound.contains("blood-spatter (hit; blood"), "{sound}");
 }
 
 /// The manual path's contract, against the fixture.
@@ -2613,11 +2689,11 @@ fn the_manual_rounds_ask_for_the_right_prompt_and_refuse_a_paste_out_of_order() 
 
     // A paste for round 2 with no cast is refused by name, rather than
     let err =
-        manual_accept(&layout, 51, Round::Staging, "{}", None).expect_err("round 2 needs round 1");
+        manual_accept(&layout, "vieneu", 51, Round::Staging, "{}", None).expect_err("round 2 needs round 1");
     assert!(err.to_string().contains("round 1's cast"), "{err}");
 
     // A garbage paste fails the *worker's* validator, the same one, and
-    let err = manual_accept(&layout, 51, Round::Attribution, "not json at all", None)
+    let err = manual_accept(&layout, "vieneu", 51, Round::Attribution, "not json at all", None)
         .expect_err("not JSON");
     assert!(err.to_string().contains("not valid JSON"), "{err:#}");
 
@@ -2661,6 +2737,7 @@ fn a_valid_pair_of_pastes_finishes_the_chapter() {
     // Round 1: the attribution answer, one entry per *dialogue* event, in
     let cast = manual_accept(
         &layout,
+        "vieneu",
         51,
         Round::Attribution,
         r#"{"title": "Dao Phay Trong Bếp", "atmosphere": "A quiet kitchen at dusk.",
@@ -2679,6 +2756,7 @@ fn a_valid_pair_of_pastes_finishes_the_chapter() {
     // Round 2: staging, carrying no speaker, checked against that map.
     let done = manual_accept(
         &layout,
+        "vieneu",
         51,
         Round::Staging,
         r#"{"segments": [
@@ -2707,6 +2785,7 @@ fn a_valid_pair_of_pastes_finishes_the_chapter() {
     // **And the hand-off is real, not decorative.** A staging answer that
     let err = manual_accept(
         &layout,
+        "vieneu",
         51,
         Round::Staging,
         r#"{"segments": [{"source_id": "e0001", "text": "Hắn gật đầu."}], "fixes": []}"#,
@@ -2859,21 +2938,46 @@ fn a_chapter_that_fits_one_call_is_asked_the_prompt_it_always_was() {
         "part 2 is handed part 1's own words"
     );
 
-    // Staging has its own note, and the rule that matters for it is the bed
+    // Staging has its own note. The automatic pass leaves sound to its own
+    // pass, so it carries the no-rounding rule and NOT the bed rule.
     let cast = json!({"roster": ["Narrator"], "speakers": {"e0001": "Narrator"}});
-    let quiet = build_staging_prompt(&layout, "vieneu", &bible, &cast, &prepared, None).unwrap();
+    let quiet =
+        build_staging_prompt(&layout, "vieneu", &bible, &cast, &prepared, None, false).unwrap();
     assert!(
         !quiet.contains("PART 1 OF"),
         "no part note when there is one part"
     );
-    let split =
-        build_staging_prompt(&layout, "vieneu", &bible, &cast, &prepared, Some(&second)).unwrap();
+    let split = build_staging_prompt(
+        &layout,
+        "vieneu",
+        &bible,
+        &cast,
+        &prepared,
+        Some(&second),
+        false,
+    )
+    .unwrap();
     assert!(split.contains("PART 2 OF 2"));
+    assert!(split.contains("write no ending"), "and no rounding off");
     assert!(
-        split.contains("`loop`ed bed may run past the end of your part"),
+        !split.contains("`loop`ed bed"),
+        "the bed rule is the sound pass's, not staging's"
+    );
+    // The manual flow still sounds the chapter inline, so its note keeps it.
+    let inline = build_staging_prompt(
+        &layout,
+        "vieneu",
+        &bible,
+        &cast,
+        &prepared,
+        Some(&second),
+        true,
+    )
+    .unwrap();
+    assert!(
+        inline.contains("`loop`ed bed may run past the end of your part"),
         "the bed rule, told to the round that places beds"
     );
-    assert!(split.contains("write no ending"), "and no rounding off");
 }
 
 /// The one cross-chapter memory: a stored predecessor's excerpt rides
@@ -3234,7 +3338,7 @@ fn the_gate_names_the_part_that_owes_an_answer() {
     let opens = json!({"segments": [line("Hai người đến phòng bếp."), {"sound": "food-prep"}, line("Rồi đi ra.")]});
     let scripts = [&quiet, &opens];
     let (gap, owner) =
-        sound_gap(&scripts, &["Trời tối.", "Hai người."], &pool, "part").expect("an open bed");
+        sound_gap(&scripts, &["Trời tối.", "Hai người."], &pool, &vi_cues(), "part").expect("an open bed");
     assert_eq!(owner, 1, "the part that opened it");
     assert!(
         gap.contains("food-prep") && gap.contains("stops dead"),
@@ -3249,6 +3353,7 @@ fn the_gate_names_the_part_that_owes_an_answer() {
         &scripts,
         &["Hắn đi đến phòng bếp.", "Trời tối."],
         &pool,
+        &vi_cues(),
         "part",
     )
     .expect("a part that staged a cue and placed none");
@@ -3258,7 +3363,7 @@ fn the_gate_names_the_part_that_owes_an_answer() {
 
     // A chapter that did not split goes through `sound_design_gap` itself, so
     let scripts = [&silent];
-    let gap = sound_gap(&scripts, &["Hắn đi đến phòng bếp."], &pool, "chapter")
+    let gap = sound_gap(&scripts, &["Hắn đi đến phòng bếp."], &pool, &vi_cues(), "chapter")
         .expect("a staged chapter with none");
     assert!(gap.0.contains("chapter"), "{}", gap.0);
 }
@@ -3321,7 +3426,7 @@ fn a_long_chapter_is_staged_in_parts_and_merges_into_one_script() {
         prompts.push(step);
 
         let accepted =
-            manual_accept(&layout, 51, Round::Attribution, &cast_answer(&slice), None).unwrap();
+            manual_accept(&layout, "vieneu", 51, Round::Attribution, &cast_answer(&slice), None).unwrap();
         assert!(
             accepted.prompt.is_none(),
             "round 2 is asked for by the caller"
@@ -3343,6 +3448,7 @@ fn a_long_chapter_is_staged_in_parts_and_merges_into_one_script() {
 
         let accepted = manual_accept(
             &layout,
+            "vieneu",
             51,
             Round::Staging,
             &script_answer(&slice),
@@ -3430,7 +3536,7 @@ fn a_part_that_leaves_a_bed_open_is_refused_without_moving_on() {
     for (i, w) in windows.iter().enumerate() {
         let slice = w.prepared(&prepared);
         let accepted =
-            manual_accept(&layout, 51, Round::Attribution, &cast_answer(&slice), None).unwrap();
+            manual_accept(&layout, "vieneu", 51, Round::Attribution, &cast_answer(&slice), None).unwrap();
         let cast = accepted.cast.unwrap();
         // The last part's staging answer opens a bed and never closes it.
         let mut answer: Value = serde_json::from_str(&script_answer(&slice)).unwrap();
@@ -3439,6 +3545,7 @@ fn a_part_that_leaves_a_bed_open_is_refused_without_moving_on() {
         }
         let result = manual_accept(
             &layout,
+            "vieneu",
             51,
             Round::Staging,
             &answer.to_string(),
@@ -3475,7 +3582,7 @@ fn a_gate_says_whose_fault_it_is() {
     let (_dir, layout, text) = long_layout("blame", 3);
     let prepared = prepare_chapter(&text);
     let bible = json!({"characters": []});
-    let vocab = vocabulary(&layout).expect("the fixture vocabulary");
+    let vocab = vocabulary(&layout, "vieneu").expect("the fixture vocabulary");
     let context = parse_attribution(&cast_answer(&prepared), &bible, &prepared, false)
         .expect("the fixture cast is valid");
 
@@ -3518,10 +3625,14 @@ fn a_gate_says_whose_fault_it_is() {
 #[test]
 fn the_chapter_budget_refuses_rather_than_spending_forever() {
     let mut calls = GCalls::new(7);
-    // The phrase pass gets its own three asks; each part then gets four,
+    // The phrase pass gets its own three asks; each part then gets four, and
+    // the chapter-level sound pass adds its own two on top.
     assert_eq!(calls.left, 3, "the phrase pass alone");
     calls.allow_parts(2);
-    assert_eq!(calls.left, 11);
+    assert_eq!(
+        calls.left, 13,
+        "two parts at four apiece, plus the sound pass's two"
+    );
     let allowed = calls.left;
     for i in 0..allowed {
         calls.spend(Round::Staging.as_str()).expect("within budget");

@@ -4,7 +4,7 @@ use bm_core::provision::{join_all, load_boxes, save_box, split_machine};
 use bm_core::{config::Settings, Layout};
 use bm_proto::{now_secs, Machine, Task, TaskState};
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 impl Inner {
     pub fn new(layout: Layout, settings: Settings) -> Self {
@@ -17,6 +17,7 @@ impl Inner {
             workers: HashMap::new(),
             caps: HashMap::new(),
             beats: HashMap::new(),
+            dropped: BTreeSet::new(),
             started_at: now_secs(),
             events: VecDeque::new(),
             next_event_id: 0,
@@ -222,6 +223,7 @@ impl Inner {
                          "machine_state": state,
                          "workers": self.workers,
                          "caps": self.caps,
+                         "dropped": self.dropped,
                          "profile": self.ledger_profile,
                          "exclusive": self.exclusive});
         let _ = bm_core::write_json(&self.ledger_path(), &doc);
@@ -323,6 +325,15 @@ impl Inner {
                 }
             }
         }
+        self.dropped = doc
+            .get("dropped")
+            .and_then(|d| d.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
         if let Some(c) = doc.get("caps").and_then(|c| c.as_object()) {
             for (k, v) in c {
                 if let Some(list) = v.as_array() {
@@ -532,8 +543,10 @@ impl Inner {
         out
     }
 
-    /// Release every row a render offer covered, strike-free, because the
-    pub(crate) fn release_render_rows(&mut self, task_id: &str, why: &str) -> String {
+    /// Release every row an offer covered, strike-free, because the box
+    /// answered without running it (its policy refused, or it was busy). The
+    /// rows are not at fault, so nothing is counted against them.
+    pub(crate) fn release_offer_rows(&mut self, task_id: &str, why: &str) -> String {
         let now = now_secs();
         let rows = self.covered_rows(task_id);
         for id in &rows {

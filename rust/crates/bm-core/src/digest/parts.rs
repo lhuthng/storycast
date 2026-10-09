@@ -277,13 +277,14 @@ pub(crate) fn sound_gap(
     scripts: &[&Value],
     texts: &[&str],
     pool: &crate::audio_pool::ClipPool,
+    cues: &[String],
     what: &str,
 ) -> Option<(String, usize)> {
     // A chapter that did not split goes through [`sound_design_gap`] itself, in
     if scripts.len() <= 1 {
         let script = scripts.first().copied().unwrap_or(&Value::Null);
         let text = texts.first().copied().unwrap_or("");
-        return sound_design_gap(script, text, pool).map(|gap| (gap, 0));
+        return sound_design_gap(script, text, pool, cues).map(|gap| (gap, 0));
     }
     let merged = merge_scripts(scripts.iter().copied());
     if let Some(bed) = open_beds(&merged, pool).into_iter().next() {
@@ -292,7 +293,7 @@ pub(crate) fn sound_gap(
     }
     for (i, script) in scripts.iter().enumerate() {
         let text = texts.get(i).copied().unwrap_or("");
-        if let Some(gap) = silent_design(script, text, what) {
+        if let Some(gap) = silent_design(script, text, what, cues) {
             return Some((gap, i));
         }
     }
@@ -474,6 +475,7 @@ impl PartCtx<'_> {
         let (a, b) = match round {
             Round::Attribution => (self.from, self.mid),
             Round::Staging => (self.mid, self.to),
+            Round::Sound => unreachable!("the sound pass does not run per part"),
         };
         (a.max(self.hi), b.max(self.hi))
     }

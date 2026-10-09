@@ -100,6 +100,96 @@ async fn tracked_jobs_queue_only_behind_a_resource_they_need() {
     assert!(app.background_jobs.is_empty());
 }
 
+#[tokio::test]
+async fn same_box_jobs_queue_but_another_box_does_not() {
+    // The overlap: `:prov` holds one box for minutes, and a `:drop` (or a
+    // second `:prov`) on that box used to run straight through it — the drop
+    // tombstoned the machine and the push re-added it a moment later. A job for
+    // a *different* box must still start at once.
+    use super::super::jobs::run_jobs_with;
+    use super::input::dispatch;
+    use std::sync::Arc;
+    use std::time::Duration;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let blocked = gate.clone();
+    let worker = tokio::spawn(run_jobs_with(job_rx, tx, move |job, tx| {
+        let blocked = blocked.clone();
+        async move {
+            if matches!(&job, Job::Provision { machine, .. } if machine.addr == "10.0.0.5") {
+                blocked.notified().await;
+            }
+            let _ = tx.send(Ev::Log(LogLine {
+                level: Level::Info,
+                wall: 0,
+                text: job.label(),
+            }));
+            let _ = tx.send(Ev::Done(job.fallback_done()));
+        }
+    }));
+    let mut app = App::new("http://unused");
+    let provision = |addr: &str| Job::Provision {
+        layout: bm_core::Layout::new(""),
+        api: "unused".into(),
+        machine: Machine::new(addr, "u", 22, None, "worker"),
+        force: false,
+        settings_key: None,
+        cancel: None,
+    };
+    // 1 holds box .5; 2 wants the same box; 3 wants another.
+    assert!(dispatch(&mut app, &job_tx, provision("10.0.0.5")));
+    assert!(dispatch(
+        &mut app,
+        &job_tx,
+        Job::DropMachine {
+            api: "unused".into(),
+            http: reqwest::Client::new(),
+            addr: "10.0.0.5".into(),
+        }
+    ));
+    assert!(dispatch(&mut app, &job_tx, provision("10.0.0.6")));
+
+    let mut started = Vec::new();
+    let mut finished = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !started.contains(&1) || !started.contains(&3) {
+            let ev = rx.recv().await.unwrap();
+            if let Ev::JobStarted(id) = &ev {
+                started.push(*id);
+            }
+            if let Ev::JobFinished(id) = &ev {
+                finished.push(*id);
+            }
+            app.apply(ev);
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !started.contains(&2),
+        "the same-box drop must wait for the push: {started:?}"
+    );
+    assert_eq!(app.background_jobs[1].activity, "queued · needs box 10.0.0.5");
+
+    gate.notify_one();
+    drop(job_tx);
+    tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap();
+    while let Some(ev) = rx.recv().await {
+        if let Ev::JobFinished(id) = &ev {
+            finished.push(*id);
+        }
+        app.apply(ev);
+    }
+    finished.sort();
+    assert_eq!(finished, vec![1, 2, 3]);
+    assert_eq!(app.pending, 0);
+    assert!(app.background_jobs.is_empty());
+}
+
 #[test]
 fn a_queued_row_says_what_it_is_waiting_for() {
     // "causing every later job to be queued" is only actionable if the row
@@ -177,6 +267,27 @@ fn resources_name_what_a_job_actually_touches() {
     assert_eq!(
         box_job("10.0.0.5").resources(),
         box_job("10.0.0.5").resources()
+    );
+    // Every other writer of the same box's record takes that box's lane too, so
+    // a `:drop` cannot race the push that is about to re-add the machine.
+    assert_eq!(
+        Job::DropMachine {
+            api: "unused".into(),
+            http: reqwest::Client::new(),
+            addr: "10.0.0.5".into(),
+        }
+        .resources(),
+        vec![Res::Box("10.0.0.5".into())]
+    );
+    assert_eq!(
+        Job::SaveTaskPolicy {
+            api: "unused".into(),
+            http: reqwest::Client::new(),
+            addr: "10.0.0.5".into(),
+            task_policy: vec![],
+        }
+        .resources(),
+        vec![Res::Box("10.0.0.5".into())]
     );
     // The AWS four read-modify-write the same document.
     assert_eq!(

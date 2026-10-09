@@ -51,6 +51,12 @@ impl Layout {
         self.prompts_dir().join("repair.txt")
     }
 
+    /// The chapter-level sound template: the place, the music and the spot
+    /// sounds, rendered once over every staged line.
+    pub fn sound_prompt(&self) -> PathBuf {
+        self.prompts_dir().join("sound.txt")
+    }
+
     /// The pack tree in force: the active workspace's own `assets/` when it
     pub fn assets(&self) -> PathBuf {
         if self.owns_assets() {

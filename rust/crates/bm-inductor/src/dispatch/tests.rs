@@ -304,7 +304,7 @@ async fn a_refused_render_releases_its_rows_strike_free() {
         inner.tasks.insert(id, t);
     }
     let mut inner = st.lock().await;
-    let line = inner.release_render_rows("render:7", "worker's policy turns render off");
+    let line = inner.release_offer_rows("render:7", "worker's policy turns render off");
     assert!(line.contains("1 row"), "{line}");
     let t = inner.tasks.get("render:7").unwrap();
     assert_eq!(t.state, bm_proto::TaskState::Pending, "back to the pool");
@@ -314,5 +314,143 @@ async fn a_refused_render_releases_its_rows_strike_free() {
         t.detail.contains("policy"),
         "the ledger says why: {}",
         t.detail
+    );
+}
+
+/// A worker stub that answers every request with one canned response.
+async fn stub_answering(status: &'static str, body: &'static str) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                if s.read(&mut buf).await.is_err() {
+                    return;
+                }
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    port
+}
+
+fn merge_offer() -> TaskOffer {
+    serde_json::from_value(serde_json::json!({
+        "task_id": "merge:7",
+        "chapter": 7,
+        "stage": "merge",
+        "root": "/tmp",
+        "engine": "vieneu"
+    }))
+    .expect("a minimal offer deserialises")
+}
+
+fn assigned_merge_row(inner: &mut Inner) {
+    let mut t = bm_proto::Task::new(7, Stage::Merge);
+    t.state = bm_proto::TaskState::Assigned;
+    t.assigned_to = Some("w1".into());
+    t.lease_until = Some(bm_proto::now_secs() + 1800);
+    inner.tasks.insert(t.id(), t);
+}
+
+#[tokio::test]
+async fn a_box_busy_with_another_task_gives_the_row_back_and_says_so() {
+    // The silent strand this closes: `run_one` used to swallow a 409 and walk
+    // away. Because `offer` had already marked the row Assigned, nobody else
+    // could take it and nothing in the event pane said why — a merge lease is
+    // 30 minutes of invisible "it keeps the task".
+    let (_d, st) = state();
+    {
+        let mut inner = st.lock().await;
+        assigned_merge_row(&mut inner);
+    }
+    let port = stub_answering("409 Conflict", "already running render:3").await;
+    let peer = Peer {
+        addr: "127.0.0.1".into(),
+        port,
+        token: "t".into(),
+    };
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    run_one(&st, &Layout::new(""), &http, &peer, merge_offer()).await;
+
+    let inner = st.lock().await;
+    let t = inner.tasks.get("merge:7").expect("the row is still there");
+    assert_eq!(t.state, bm_proto::TaskState::Pending, "back in the pool");
+    assert_eq!(t.attempts, 0, "being busy is not the row's fault");
+    assert_eq!(t.assigned_to, None);
+    assert!(t.detail.contains("busy"), "{}", t.detail);
+    assert!(
+        inner
+            .recent_events(20)
+            .iter()
+            .any(|e| e.text.contains("merge:7") && e.text.contains("busy")),
+        "the refusal must be visible, not silent"
+    );
+}
+
+#[tokio::test]
+async fn a_box_busy_with_this_row_is_left_alone() {
+    // The other half: a 409 that names *this* row means the box really is
+    // running it (a race the dispatcher lost, or an inductor restart). Taking
+    // it back would double-run the chapter; its own report settles it.
+    let (_d, st) = state();
+    {
+        let mut inner = st.lock().await;
+        assigned_merge_row(&mut inner);
+    }
+    let port = stub_answering("409 Conflict", "already running merge:7").await;
+    let peer = Peer {
+        addr: "127.0.0.1".into(),
+        port,
+        token: "t".into(),
+    };
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    run_one(&st, &Layout::new(""), &http, &peer, merge_offer()).await;
+
+    let inner = st.lock().await;
+    let t = inner.tasks.get("merge:7").unwrap();
+    assert_eq!(
+        t.state,
+        bm_proto::TaskState::Assigned,
+        "still running over there"
+    );
+    assert_eq!(t.assigned_to.as_deref(), Some("w1"));
+    assert_eq!(t.attempts, 0);
+}
+
+#[tokio::test]
+async fn an_undelivered_offer_is_an_event_not_a_silence() {
+    // Port 1 answers nothing, ever: the shape of a box that died between
+    // `offer` and the POST. The lease will requeue the row, but the operator
+    // must be told now rather than half an hour later.
+    let (_d, st) = state();
+    {
+        let mut inner = st.lock().await;
+        assigned_merge_row(&mut inner);
+    }
+    let peer = Peer {
+        addr: "127.0.0.1".into(),
+        port: 1,
+        token: "t".into(),
+    };
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    run_one(&st, &Layout::new(""), &http, &peer, merge_offer()).await;
+
+    let inner = st.lock().await;
+    assert!(
+        inner
+            .recent_events(20)
+            .iter()
+            .any(|e| e.text.contains("merge:7") && e.text.contains("not delivered")),
+        "a dead box must leave a line, not silence"
     );
 }

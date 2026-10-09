@@ -71,6 +71,7 @@ fn the_fixture_resolves_from_any_crate() {
     install_fixture(&dir).unwrap();
     assert!(dir.join("assets/scene-map.json").is_file());
     assert!(dir.join("prompts/analyze.txt").is_file());
+    assert!(dir.join("prompts/sound.txt").is_file());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

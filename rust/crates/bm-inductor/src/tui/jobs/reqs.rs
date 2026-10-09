@@ -277,8 +277,19 @@ impl Job {
         match self.bare() {
             // One cluster, one lifecycle: `B` and `X` must never interleave,
             Job::StartBackend { .. } | Job::StopBackend { .. } => vec![Res::Cluster],
-            // Per box, not per fleet: two boxes provision independently, and
+            // Per box, not per fleet: two boxes provision independently, and a
+            // second push at the same box waits for the first.
             Job::Provision { machine, .. } => vec![Res::Box(machine.addr.clone())],
+            // The box's *record* has more than one writer: the push above, and
+            // binding, dropping, re-pointing or editing it. They all take the
+            // box's lane, so a `:drop` clicked mid-`:prov` waits for the push
+            // instead of racing the POST that is about to re-add the machine.
+            Job::DropMachine { addr, .. }
+            | Job::SaveTaskPolicy { addr, .. }
+            | Job::SetAccepting { addr, .. }
+            | Job::SetTtsThreads { addr, .. } => vec![Res::Box(addr.clone())],
+            Job::AddMachine { m, .. } => vec![Res::Box(m.addr.clone())],
+            Job::RelinkMachine { machine, .. } => vec![Res::Box(machine.addr.clone())],
             // These four read-modify-write `.bm/aws/` and the account it
             Job::AwsUp { .. }
             | Job::AwsDown { .. }

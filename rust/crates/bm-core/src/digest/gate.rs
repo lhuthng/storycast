@@ -3,7 +3,7 @@ use super::prompts::PreparedChapter;
 use super::prompts::PreparedEvent;
 use super::*;
 /// Apply the answer's explicitly declared grammar fixes to one source event.
-pub(crate) fn corrected_source(event: &PreparedEvent, fixes: &[Value]) -> String {
+pub(crate) fn corrected_source(event: &PreparedEvent, fixes: &[Value], engine: &str) -> String {
     let mut text = event.text.clone();
     for fix in fixes {
         let (Some(before), Some(after)) = (
@@ -16,12 +16,14 @@ pub(crate) fn corrected_source(event: &PreparedEvent, fixes: &[Value]) -> String
             text = text.replace(before, after);
         }
     }
-    // The prompt permits the three engine voice tags to replace a written
-    retag_text(&text).unwrap_or(text)
+    // The prompt permits the engine's voice tags to replace a written sound,
+    // and an engine that voices none keeps the text as it is.
+    retag_text(&text, engine).unwrap_or(text)
 }
-fn normalized_source(text: &str) -> String {
+fn normalized_source(text: &str, engine: &str) -> String {
     let mut out = text.to_string();
-    for tag in ["[cười]", "[thở dài]", "[hắng giọng]"] {
+    for n in crate::voices::nonverbals(engine) {
+        let tag = n.tag;
         // The tag, *and the punctuation it swallowed when it took the sound's
         for punct in [",", ";", ":", ".", "…", "!", "?"] {
             out = out.replace(&format!("{tag}{punct}"), " ");
@@ -33,82 +35,53 @@ fn normalized_source(text: &str) -> String {
 }
 
 /// Text with every *written* non-verbal sound, and every tag standing in for
-pub(crate) fn source_without_written_sound(text: &str) -> String {
+pub(crate) fn source_without_written_sound(text: &str, engine: &str) -> String {
     let mut out = text.to_lowercase();
-    for sound in [
-        "[cười]",
-        "[thở dài]",
-        "[hắng giọng]",
-        "thở dài một hơi rồi",
-        "thở dài một tiếng",
-        "thở dài một hơi",
-        "thở dài",
-        "ha ha ha",
-        "ha ha",
-        "haha",
-        "hắc hắc",
-        "hô hô",
-        "haizz",
-        "haiz",
-        "khụ khụ khụ",
-        "khụ khụ",
-        "khụ",
-    ] {
-        for punct in [",", ";", ":", ".", "…", "!", "?"] {
-            out = out.replace(&format!("{sound}{punct}"), " ");
+    for n in crate::voices::nonverbals(engine) {
+        // Longest spelling first, so a phrase is removed before its prefix.
+        for sound in std::iter::once(n.tag).chain(n.written.iter().copied()) {
+            for punct in [",", ";", ":", ".", "…", "!", "?"] {
+                out = out.replace(&format!("{sound}{punct}"), " ");
+            }
+            out = out.replace(sound, " ");
         }
-        out = out.replace(sound, " ");
     }
     crate::util::squeeze_ws(&out)
 }
 
-pub(crate) fn source_text_matches(expected: &str, actual: &[String]) -> bool {
-    let expected = normalized_source(expected);
+pub(crate) fn source_text_matches(expected: &str, actual: &[String], engine: &str) -> bool {
+    let expected = normalized_source(expected, engine);
     let joined = actual
         .iter()
-        .map(|s| normalized_source(s))
+        .map(|s| normalized_source(s, engine))
         .collect::<Vec<_>>();
-    normalized_source(&joined.concat()) == expected
-        || normalized_source(&joined.join(" ")) == expected
-        || source_without_written_sound(&expected)
-            == normalized_source(&joined.concat()).to_lowercase()
-        || source_without_written_sound(&expected)
-            == normalized_source(&joined.join(" ")).to_lowercase()
+    normalized_source(&joined.concat(), engine) == expected
+        || normalized_source(&joined.join(" "), engine) == expected
+        || source_without_written_sound(&expected, engine)
+            == normalized_source(&joined.concat(), engine).to_lowercase()
+        || source_without_written_sound(&expected, engine)
+            == normalized_source(&joined.join(" "), engine).to_lowercase()
 }
 
 /// The tag whose written sound is still sitting in the text, as the corpus
-fn leftover_written_sound(text: &str) -> Option<(&'static str, &'static str)> {
+fn leftover_written_sound(text: &str, engine: &str) -> Option<(&'static str, &'static str)> {
     let lower = text.to_lowercase();
-    for (tag, spellings) in [
-        ("[cười]", &["haha", "ha ha", "hắc hắc", "hô hô"][..]),
-        // Longest spelling first, for the same reason the matcher does it: the
-        (
-            "[thở dài]",
-            &[
-                "thở dài một hơi rồi",
-                "thở dài một tiếng",
-                "thở dài một hơi",
-                "thở dài",
-                "haizz",
-                "haiz",
-            ][..],
-        ),
-        ("[hắng giọng]", &["khụ khụ", "khụ"][..]),
-    ] {
-        if !lower.contains(tag) {
+    for n in crate::voices::nonverbals(engine) {
+        if !lower.contains(n.tag) {
             continue;
         }
-        if let Some(spelling) = spellings.iter().find(|spelling| lower.contains(**spelling)) {
-            return Some((tag, spelling));
+        if let Some(spelling) = n.written.iter().find(|spelling| lower.contains(**spelling)) {
+            return Some((n.tag, spelling));
         }
     }
     None
 }
 
 /// Explain a mismatch that is *only* about written non-verbal sound.
-fn written_sound_hint(expected: &str, actual: &str) -> Option<String> {
-    let (tag, literal) = leftover_written_sound(actual)?;
-    if source_without_written_sound(expected) != source_without_written_sound(actual) {
+fn written_sound_hint(expected: &str, actual: &str, engine: &str) -> Option<String> {
+    let (tag, literal) = leftover_written_sound(actual, engine)?;
+    if source_without_written_sound(expected, engine) != source_without_written_sound(actual, engine)
+    {
         return None;
     }
     Some(format!(
@@ -123,6 +96,7 @@ pub(crate) fn validate_source_alignment(
     data: &Value,
     prepared: &PreparedChapter,
     not_speech: &HashSet<String>,
+    engine: &str,
 ) -> Result<()> {
     let segments = data
         .get("segments")
@@ -217,9 +191,9 @@ pub(crate) fn validate_source_alignment(
             anyhow::bail!("source event {:?} was dropped", event.id);
         }
         let actual = by_id.get(event.id.as_str()).cloned().unwrap_or_default();
-        let expected = corrected_source(event, &fixes);
-        if !source_text_matches(&expected, &actual) {
-            if let Some(hint) = written_sound_hint(&expected, &actual.concat()) {
+        let expected = corrected_source(event, &fixes, engine);
+        if !source_text_matches(&expected, &actual, engine) {
+            if let Some(hint) = written_sound_hint(&expected, &actual.concat(), engine) {
                 anyhow::bail!("source event {:?}: {hint}", event.id);
             }
             anyhow::bail!(
