@@ -111,3 +111,6 @@ session-*.md
 /renders/*.srt
 /renders/*.vtt
 /renders/*.parts/
+/renders/*.anim.jsonl
+/renders/*.fcproj
+/renders/*.script.jsonl
