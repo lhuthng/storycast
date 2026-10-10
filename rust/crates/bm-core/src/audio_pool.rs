@@ -94,7 +94,9 @@ fn loops() -> bool {
 /// `sound -> sound`. Ordered so the file on disk diffs cleanly — and so a pick
 pub type ClipPool = BTreeMap<String, Sound>;
 
-/// A resolved pick: which sound answered, and which of its takes.
+/// A resolved pick: which sound answered, which of its takes, and how that
+/// sound plays. Who the pick is travels with it because a tag query only learns
+/// it here — an inject that names a clip reads its behaviour where the clip is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Picked {
     /// The sound's name — `day`. This is what the log reports, because it is
@@ -104,6 +106,12 @@ pub struct Picked {
     pub looped: bool,
     /// The sound's own trim, `Sound::level` with `None` already resolved to
     pub level: f64,
+    /// The entry's own tags: what a `stop` written as a tag query matches on.
+    pub tags: Vec<String>,
+    /// The entry's `mode` as written. `None` is the layer's default.
+    pub mode: Option<String>,
+    /// Solo seconds before a `trail`'s tail ducks under the speech. `None` is
+    pub hold: Option<f64>,
 }
 
 /// Read a registry. A missing or broken file is "no pool", not an error: a
@@ -465,6 +473,9 @@ pub fn pick(pool: &ClipPool, tags: &[String], seed: u64) -> Option<Picked> {
         file,
         looped: entry.looped,
         level: sound_level(entry),
+        tags: entry.tags.clone(),
+        mode: entry.mode.clone(),
+        hold: entry.hold,
     })
 }
 

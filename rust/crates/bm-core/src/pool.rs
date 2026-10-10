@@ -304,6 +304,16 @@ pub fn add_sample(
             layout.engine
         )),
     }
+
+    // A preset enroll lands in the python venv store, and both the sidecar and
+    // the workers read `models/voices.json`: without this bake the voice is
+    // enrolled, assignable, and unspeakable until the next provision.
+    if bake_missing_voices(layout).contains(&name) {
+        log.push(format!(
+            "baked {name} into {} (the sidecar speaks it; :prov pushes it to workers)",
+            layout.tts_voices().display()
+        ));
+    }
     Ok(log)
 }
 

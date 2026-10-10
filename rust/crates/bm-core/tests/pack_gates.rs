@@ -161,6 +161,41 @@ fn gates(name: &str, assets: &Path, map: &SceneMap, pools: &BTreeMapOfPools) {
             eprintln!("{name}:   pending  {p}");
         }
     }
+
+    // 4. A script names a sound, or writes `tags:` and lets the pool choose. A
+    // name starting with that prefix can never be named: the prefix wins, so the
+    // clip is unreachable except through a query that happens to draw it.
+    for sound in pools[&PoolKind::Inject].keys() {
+        assert!(
+            !sound.starts_with("tags:"),
+            "{name}: inject-pool.json names {sound:?} — a script cannot name a sound whose name \
+             starts with the `tags:` query prefix, so the prefix would win and the clip would be \
+             unreachable. Rename the clip"
+        );
+    }
+}
+
+/// The fourth gate has to *fire*, not merely exist: a name carrying the query
+/// prefix is a clip a script can never reach, so the pack is refused.
+#[test]
+#[should_panic(expected = "query prefix")]
+fn a_registry_name_carrying_the_query_prefix_is_refused() {
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/profile/assets");
+    let map: SceneMap = load_map(&assets.join("scene-map.json")).expect("the fixture map loads");
+    let mut pools = pools(&assets);
+    pools.get_mut(&PoolKind::Inject).unwrap().insert(
+        "tags:rain".to_string(),
+        audio_pool::Sound {
+            tags: vec!["rain".into()],
+            files: vec!["injects/rain-1.mp3".into()],
+            looped: false,
+            dur_s: None,
+            mode: None,
+            hold: None,
+            level: None,
+        },
+    );
+    gates("negative", &assets, &map, &pools);
 }
 
 #[test]

@@ -60,8 +60,12 @@ pub fn restrict(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The keys that make an item a sound rather than a line: a name or a tag
+/// query, to start one or to stop one.
+pub const SOUND_KEYS: [&str; 4] = ["sound", "stop", "sound_tags", "stop_tags"];
+
 pub fn is_sound_item(item: &Value) -> bool {
-    let names_a_sound = item.get("sound").is_some() || item.get("stop").is_some();
+    let names_a_sound = SOUND_KEYS.iter().any(|k| item.get(k).is_some());
     if names_a_sound && item.get("text").is_some() {
         eprintln!(
             "inject: an item carries both `text` and a sound -> speaking the text, dropping the sound"

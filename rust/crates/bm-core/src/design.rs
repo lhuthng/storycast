@@ -123,13 +123,17 @@ impl MergeDesign {
                 &self.inject_pool,
                 self.map.layers.inject.default_hold_s,
             ) {
-                let name = match &inj {
+                match &inj {
                     ambience::Inject::Start { sound, .. } | ambience::Inject::Stop { sound } => {
-                        sound.clone()
+                        if let Some(entry) = self.inject_pool.get(sound) {
+                            injects.insert(sound.clone(), entry.clone());
+                        }
                     }
-                };
-                if let Some(entry) = self.inject_pool.get(&name) {
-                    injects.insert(name, entry.clone());
+                    // A query reaches every clip that answers it, not only the
+                    // one this chapter's roll is going to land on.
+                    ambience::Inject::StartTags { tags } | ambience::Inject::StopTags { tags } => {
+                        injects.extend(named_candidates(&self.inject_pool, tags));
+                    }
                 }
             }
         }

@@ -133,6 +133,7 @@ fn a_render_box_gets_its_cast_and_no_media() {
         vec![
             "data/cast-default-vieneu.json".to_string(),
             "prompts/analyze.txt".to_string(),
+            "prompts/repair.txt".to_string(),
             "prompts/script.txt".to_string(),
             "prompts/sound-cues.json".to_string(),
             "prompts/sound.txt".to_string(),
