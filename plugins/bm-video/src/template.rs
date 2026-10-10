@@ -469,6 +469,61 @@ pub const LAYER_KINDS: &[&str] =
 /// what lets any chunk render alone, in any order, on any box.
 pub const MOTION_NAMES: &[&str] = &["spin", "travel", "bob"];
 
+/// The easing names a `MotionTrack` may use, and every renderer may evaluate.
+pub const EASE_NAMES: &[&str] = &[
+    "linear",
+    "in",
+    "out",
+    "in-out",
+    "in-quad",
+    "out-quad",
+    "in-out-quad",
+    "in-cubic",
+    "out-cubic",
+    "in-out-cubic",
+    "in-sin",
+    "out-sin",
+    "in-out-sin",
+];
+
+/// One property's animation: a segment eased `from` → `to` over `dur_s`, and
+/// optionally repeated. Several tracks may name the same `prop`; they are then
+/// segments in time order, each taking over where the one before it ended, so a
+/// fade in and a fade out at the end are two `opacity` tracks.
+#[derive(Clone, Debug, Deserialize)]
+pub struct MotionTrack {
+    /// `x`, `y`, `scale`, `rotate` or `opacity`.
+    pub prop: String,
+    #[serde(default)]
+    pub from: f64,
+    #[serde(default)]
+    pub to: f64,
+    /// One pass. Defaults to the motion's `period_s`.
+    #[serde(default)]
+    pub dur_s: Option<f64>,
+    #[serde(default = "d_linear")]
+    pub ease: String,
+    /// Passes: `0` runs to the end of the video, `1` is a one-shot.
+    #[serde(default = "d_one_pass")]
+    pub repeat: u32,
+    /// Reverse direction on each pass: an oscillation rather than a sawtooth.
+    #[serde(default)]
+    pub pingpong: bool,
+    /// Where a one-shot segment begins: `start` (the default) or `end`.
+    #[serde(default = "d_start")]
+    pub align: String,
+}
+
+fn d_linear() -> String {
+    "linear".into()
+}
+fn d_one_pass() -> u32 {
+    1
+}
+fn d_start() -> String {
+    "start".into()
+}
+
 /// One entry in the composition. `kind` names a painter; the rest is its data.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Layer {
@@ -483,8 +538,8 @@ pub struct Layer {
     pub motion: Option<Motion>,
 }
 
-/// A looping motion. `period_s` defaults to the whole video, so omitting it
-/// means one pass from start to finish.
+/// A motion: named presets, or tracks of your own. `period_s` defaults to the
+/// whole video, so omitting it means one pass from start to finish.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Motion {
     #[serde(default)]
@@ -497,6 +552,9 @@ pub struct Motion {
     /// Fraction of the zone's height, or of the rest scale for `bob`.
     #[serde(default)]
     pub amplitude: Option<f64>,
+    /// The animation itself, when it is not one of the presets.
+    #[serde(default)]
+    pub tracks: Vec<MotionTrack>,
 }
 
 /// The order the composition was drawn in before it was data, so a template

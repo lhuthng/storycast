@@ -205,8 +205,8 @@ fn compose_frame(ctx: &Ctx, frame: usize, cache: &mut ChunkCache, out: &mut Rgba
             }
             Kind::Sprite => {
                 if let Some(s) = l.sprite.and_then(|i| ctx.sprites.get(i)) {
-                    let (x, y, idx) = s.at(frame, ctx.fps);
-                    raster::blit(out, &s.frames[idx], x, y, 1.0);
+                    let (x, y, idx, alpha) = s.at(frame, ctx.fps);
+                    raster::blit(out, &s.frames[idx], x, y, alpha);
                 }
             }
         }
